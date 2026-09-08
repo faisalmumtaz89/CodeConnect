@@ -1389,7 +1389,7 @@ final class AppModel {
         guard let last = state?.timeline.last else { return "" }
         switch last.content {
         case .userMessage(let text, _): return "you: \(text.firstLine)"
-        case .agentMessage(let text): return text.firstLine
+        case .agentMessage(let text, _): return text.firstLine
         case .tool(let tool):
             return "\(tool.name) \(tool.argument?.firstLine ?? "")".trimmingCharacters(
                 in: .whitespaces)

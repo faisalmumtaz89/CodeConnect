@@ -23474,4 +23474,492 @@ mod tests {
             "answered at the keyboard, decision unknown — which is all the frame says"
         );
     }
+
+    // ------------------------------- the phone's own view of a Codex turn
+
+    /// The run the phone-turn stream is emitted for. The same uid
+    /// `fixtures/codex/minor-19-wire.json` pins, deliberately: the request id
+    /// under a command approval is derived from
+    /// `(session_uid, thread_id, item_id, generation)` and from nothing else, so
+    /// two independent drives over the same captured item must produce the same
+    /// composite id — and they do, which is a property worth being able to see by
+    /// eye across two files.
+    const PHONE_TURN_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+    /// The one clock read in the file, replaced with a fixed stamp.
+    const PHONE_TURN_AT: &str = "2026-09-07T00:00:00.000Z";
+    /// The thread the `ccd-command` leg of `fixtures/codex/approval-0.153.jsonl`
+    /// is subscribed to.
+    const PHONE_TURN_COMMAND_THREAD: &str = "01a06db1-1f8e-7db2-8fd5-10f13af55d1b";
+    /// The thread its `ccd-filechange` leg is subscribed to.
+    const PHONE_TURN_FILE_CHANGE_THREAD: &str = "01a06db1-b6a5-7500-8956-6c35b83b32d2";
+    const COMPOSE_CAPTURE: &str = include_str!("../../../fixtures/codex/compose-0.153.4.jsonl");
+    const APPROVAL_CAPTURE: &str = include_str!("../../../fixtures/codex/approval-0.153.jsonl");
+    const PHONE_TURN_STREAM: &str =
+        include_str!("../../../fixtures/codex/phone-turn-stream-0.153.4.json");
+    const PHONE_TURN_STREAM_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/codex/phone-turn-stream-0.153.4.json"
+    );
+    const REGENERATE_PHONE_TURN_STREAM: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_phone_turn_stream_fixture";
+
+    /// The lines of one capture, parsed. Each line is a `{conn, dir, frame}`
+    /// wrapper around the frame the wire actually carried.
+    fn capture_lines(capture: &str) -> Vec<Value> {
+        capture
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<Value>(line).expect("a committed capture is JSON"))
+            .collect()
+    }
+
+    /// Every frame one recorded connection received, in recorded order, unedited.
+    fn capture_leg(capture: &str, conn: &str) -> Vec<Value> {
+        let frames: Vec<Value> = capture_lines(capture)
+            .into_iter()
+            .filter(|line| line["conn"] == json!(conn) && line["dir"] == json!("s2c"))
+            .map(|line| line["frame"].clone())
+            .filter(|frame| frame.get("method").is_some())
+            .collect();
+        assert!(
+            !frames.is_empty(),
+            "the capture must carry a {conn} leg — this is the fixture's whole input"
+        );
+        frames
+    }
+
+    /// The one frame a capture recorded for `conn`/`dir` whose `type` is `kind`.
+    fn capture_control(capture: &str, conn: &str, dir: &str, kind: &str) -> Value {
+        let mut hits: Vec<Value> = capture_lines(capture)
+            .into_iter()
+            .filter(|line| line["conn"] == json!(conn) && line["dir"] == json!(dir))
+            .map(|line| line["frame"].clone())
+            .filter(|frame| frame["type"] == json!(kind))
+            .collect();
+        assert!(
+            !hits.is_empty(),
+            "the capture must carry a {kind} for {conn}"
+        );
+        hits.remove(0)
+    }
+
+    /// **The `compose_result` the phone is answered with, re-emitted by the
+    /// daemon that answers it.**
+    ///
+    /// The words, the client request id and the turn id are all read off
+    /// `fixtures/codex/compose-0.153.4.jsonl` — the daemon's part is the *framing*:
+    /// [`crate::state::Daemon::compose`] maps the link's `ComposeReport` to a
+    /// [`protocol::ws::ComposeResult`] and `ws_server` wraps it in a
+    /// `ServerMessage::ComposeResult`. The gate below then compares the `result`
+    /// object this produces against the one the capture recorded, so the mapping
+    /// and the wire cannot drift apart silently.
+    async fn phone_turn_compose(daemon: &Arc<Daemon>, session: &SessionKey) -> Value {
+        let asked = capture_control(COMPOSE_CAPTURE, "phone", "c2s", "compose");
+        let answered = capture_control(COMPOSE_CAPTURE, "phone", "s2c", "compose_result");
+        let text = asked["text"]
+            .as_str()
+            .expect("the capture carries the words");
+        let request_id = asked["request_id"]
+            .as_str()
+            .expect("the capture carries the phone's request id");
+        let turn_id = answered["result"]["turn_id"]
+            .as_str()
+            .expect("the recorded answer names the turn it started")
+            .to_string();
+
+        let mut asks = daemon
+            .install_codex_composes_for_tests(
+                &session.uid,
+                CodexAddressee::Subscribed {
+                    thread_id: PHONE_TURN_COMMAND_THREAD.into(),
+                },
+                1,
+            )
+            .await;
+        let link = tokio::spawn(async move {
+            let ask = asks.recv().await.expect("the gate must admit this compose");
+            let _ = ask.reply.send(ComposeReport::Started { turn_id });
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            daemon.compose(
+                &session.name,
+                request_id,
+                text.to_string(),
+                &protocol::hash::compose_hash(&session.name, text),
+            ),
+        )
+        .await
+        .expect("the compose must settle");
+        link.abort();
+        assert!(
+            matches!(result, protocol::ws::ComposeResult::Started { .. }),
+            "the premise: these words start a turn, as the capture recorded. Got {result:?}"
+        );
+
+        serde_json::to_value(protocol::ws::ServerMessage::ComposeResult {
+            session_id: session.name.clone(),
+            request_id: request_id.to_string(),
+            result,
+        })
+        .expect("the frame serialises")
+    }
+
+    /// Answer the one card standing on this run the way a phone answers it: the
+    /// terminal [`crate::state::Daemon::retire_codex_approval`] the ws layer's
+    /// answer path lands in, under the id the drive *derived* rather than one this
+    /// test names.
+    async fn phone_answers_the_open_card(daemon: &Arc<Daemon>, session: &SessionKey) {
+        let mut open = daemon
+            .store
+            .codex_pending_approvals(&session.uid)
+            .expect("the cards read");
+        assert_eq!(
+            open.len(),
+            1,
+            "the frame just replayed must have raised exactly one card to answer"
+        );
+        let request_id = open.remove(0).request_id;
+        assert_eq!(
+            daemon
+                .retire_codex_approval(
+                    session,
+                    &request_id,
+                    protocol::ws::CodexResolution::Answered {
+                        by: protocol::ws::ResolutionActor::Phone,
+                        decision: Some(protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into()
+                        }),
+                    },
+                )
+                .await,
+            crate::state::Retirement::Retired,
+            "the phone's answer must retire the card it was shown"
+        );
+    }
+
+    /// **One drive of the production path for a phone-started Codex turn, as the
+    /// ws layer frames it for a subscribed phone.**
+    ///
+    /// Nothing here is written by hand. Every app-server frame is a line of
+    /// `fixtures/codex/approval-0.153.jsonl`, replayed unedited and in recorded
+    /// order through [`Connection::observe_notification`] — the same single entry
+    /// point the live link feeds every frame it reads off the socket, which drives
+    /// the adapter *and* the approval seam. The events are then read back out of
+    /// the store and wrapped in `ServerMessage::Event` exactly as `ws_server`
+    /// wraps them.
+    ///
+    /// **Two legs, because no single 0.153 capture holds both shapes.** The
+    /// `ccd-command` leg is a turn that raises a `commandExecution` approval; the
+    /// `ccd-filechange` leg is a whole turn from its `userMessage` to its
+    /// `agentMessage` and terminal. One session, two threads — which is what a
+    /// `/new` in the middle of a run produces, and why every `source_event_id`
+    /// here is thread-namespaced.
+    async fn phone_turn_stream() -> Value {
+        let session = SessionKey {
+            uid: PHONE_TURN_UID.into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+
+        let compose = phone_turn_compose(&daemon, &session).await;
+
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+
+        // Leg one: the command-approval turn. The phone answers the card the
+        // instant the request frame raises it, which is why the
+        // `serverRequest/resolved` that follows retires nothing — the real
+        // ordering when an answer comes from the phone rather than the keyboard.
+        {
+            let mut conn = visiting(
+                &daemon,
+                &session,
+                &mut adapter,
+                &mut amend,
+                PHONE_TURN_COMMAND_THREAD,
+                1,
+            );
+            for frame in capture_leg(APPROVAL_CAPTURE, "ccd-command") {
+                let raises = crate::codex_approval::Family::of_method(
+                    frame["method"].as_str().unwrap_or_default(),
+                )
+                .is_some();
+                conn.observe_notification(&frame).await;
+                if raises {
+                    phone_answers_the_open_card(&daemon, &session).await;
+                }
+            }
+        }
+
+        // Leg two: a whole turn, whose file-change approval is answered at the
+        // keyboard — so the phone gets the other `by` the wire can carry.
+        {
+            let mut conn = visiting(
+                &daemon,
+                &session,
+                &mut adapter,
+                &mut amend,
+                PHONE_TURN_FILE_CHANGE_THREAD,
+                1,
+            );
+            for frame in capture_leg(APPROVAL_CAPTURE, "ccd-filechange") {
+                conn.observe_notification(&frame).await;
+            }
+        }
+
+        let events = daemon
+            .store
+            .events_after(&session.uid, 0, 10_000)
+            .expect("the event log reads");
+        assert!(
+            !events.is_empty(),
+            "the replay must have filed something, or this file says nothing"
+        );
+        let mut frames = vec![compose];
+        for event in events {
+            frames.push(
+                serde_json::to_value(protocol::ws::ServerMessage::Event { event })
+                    .expect("the frame serialises"),
+            );
+        }
+        let mut out = json!({ "frames": frames });
+
+        // **Only the clock reads are replaced, and that is checked rather than
+        // assumed** — the same rule, and the same assertion, `phase5_wire_rows`
+        // normalises the minor-19 fixture under.
+        fn normalise(value: &mut Value, at: &str) {
+            match value {
+                Value::Object(map) => {
+                    for (key, slot) in map.iter_mut() {
+                        if matches!(key.as_str(), "ts" | "created_at" | "updated_at") {
+                            let was = slot.as_str().unwrap_or_default();
+                            assert!(
+                                was.len() == 24 && was.ends_with('Z'),
+                                "{key} was expected to be an RFC3339 clock read, and is {slot}"
+                            );
+                            *slot = json!(at);
+                        } else {
+                            normalise(slot, at);
+                        }
+                    }
+                }
+                Value::Array(items) => items.iter_mut().for_each(|item| normalise(item, at)),
+                _ => {}
+            }
+        }
+        normalise(&mut out, PHONE_TURN_AT);
+        drop(db);
+        out
+    }
+
+    /// **What a subscribed phone is actually sent for a Codex turn.**
+    ///
+    /// `fixtures/codex/phone-turn-stream-0.153.4.json` exists because the phone's
+    /// own Codex fixtures were written by hand in Claude's payload shape, and so
+    /// the app rendered nothing for a Codex turn: the daemon sends a Codex
+    /// `user_message`/`agent_message` as `{"interrupted":false,"text":"…"}`, and
+    /// nothing on this side could have said so. This is the same answer P5-M gave
+    /// for the approval card and the fleet row — a file that is *emitted*, not
+    /// written, and re-derived by a gate so it cannot go stale in silence.
+    ///
+    /// Gate one asserts what the phone decodes, on the **committed** bytes: the
+    /// frame envelope, the payload of every event kind in the file, and the
+    /// resolution actor on each of the two answers. Gate two re-derives the whole
+    /// file from this build and requires it to be byte-identical.
+    ///
+    /// **Mutation:** edit one byte of any payload in the checked-in file and the
+    /// byte comparison fails, naming the file and the command that rewrites it.
+    #[tokio::test]
+    async fn the_phone_turn_stream_fixture_is_what_this_build_emits() {
+        let committed: Value =
+            serde_json::from_str(PHONE_TURN_STREAM).expect("the fixture must be JSON");
+        let frames = committed["frames"]
+            .as_array()
+            .expect("the file is a list of frames");
+
+        // Gate one: the frames the phone decodes, on the committed bytes.
+        let compose = &frames[0];
+        assert_eq!(
+            compose["type"],
+            json!("compose_result"),
+            "the phone's own compose is answered first, on its own socket"
+        );
+        assert_eq!(
+            compose["result"],
+            capture_control(COMPOSE_CAPTURE, "phone", "s2c", "compose_result")["result"],
+            "the daemon's compose result must be the one the wire recorded"
+        );
+        let _: protocol::ws::ServerMessage =
+            serde_json::from_value(compose.clone()).expect("a frame the phone decodes");
+
+        let mut by_kind: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+        let mut seqs = Vec::new();
+        for frame in &frames[1..] {
+            assert_eq!(
+                frame["type"],
+                json!("event"),
+                "every other frame is an event"
+            );
+            let event: protocol::event::Event =
+                serde_json::from_value(frame["event"].clone()).expect("an Event the phone decodes");
+            assert_eq!(event.session_uid, PHONE_TURN_UID);
+            assert!(
+                matches!(frame["event"]["source"].as_str(), Some("codex" | "daemon")),
+                "a fact read off the app-server rides as `codex`, and one the daemon \
+                 itself minted — a card, an answer — as `daemon`: {frame}"
+            );
+            seqs.push(event.seq);
+            by_kind
+                .entry(event.kind.as_str().to_string())
+                .or_default()
+                .push(frame["event"]["payload"].clone());
+        }
+        assert_eq!(
+            seqs,
+            (1..=seqs.len() as u64).collect::<Vec<_>>(),
+            "the events are the daemon's own numbering, in order, with no holes"
+        );
+
+        // **The payload shapes the phone got wrong.** A Codex message is a flat
+        // `text` beside an `interrupted` flag — not Claude's content array — and
+        // this is the assertion that says so on the committed bytes.
+        for kind in ["user_message", "agent_message"] {
+            let payloads = by_kind
+                .get(kind)
+                .unwrap_or_else(|| panic!("the file must carry a {kind}"));
+            for payload in payloads {
+                assert!(
+                    payload["text"].is_string(),
+                    "a Codex {kind} carries a flat `text`: {payload}"
+                );
+                assert!(
+                    payload["interrupted"].is_boolean(),
+                    "…beside the flag that says whether it was cut short: {payload}"
+                );
+                assert_eq!(
+                    payload.as_object().map(|o| o.len()),
+                    Some(2),
+                    "…and nothing else, so a decoder that reads more is reading a \
+                     shape this daemon does not send: {payload}"
+                );
+            }
+        }
+        for payload in by_kind
+            .get("reasoning")
+            .expect("the file must carry a reasoning")
+        {
+            assert!(
+                payload["summary"].is_array() && payload["content"].is_array(),
+                "reasoning rides as the summary and content the wire sent — empty in \
+                 every capture, and empty is not absent: {payload}"
+            );
+        }
+        for payload in by_kind
+            .get("tool_call")
+            .expect("the file must carry a tool_call")
+        {
+            assert!(
+                matches!(
+                    payload["tool"].as_str(),
+                    Some("command_execution" | "file_change")
+                ),
+                "a tool call names its family: {payload}"
+            );
+        }
+        for payload in by_kind
+            .get("tool_result")
+            .expect("the file must carry a tool_result")
+        {
+            assert!(
+                payload["status"].is_string() && payload["interrupted"].is_boolean(),
+                "a tool result carries the status and whether it was cut short: {payload}"
+            );
+        }
+        for payload in by_kind
+            .get("turn_complete")
+            .expect("the file must carry a turn_complete")
+        {
+            for key in [
+                "status",
+                "error",
+                "started_at",
+                "completed_at",
+                "duration_ms",
+            ] {
+                assert!(
+                    payload.get(key).is_some(),
+                    "a turn terminal carries `{key}`, present even when null: {payload}"
+                );
+            }
+        }
+
+        // The two answers, and the two actors the wire can carry.
+        let requests = by_kind
+            .get("approval_request")
+            .expect("the file must carry an approval_request");
+        let resolutions = by_kind
+            .get("approval_resolved")
+            .expect("the file must carry an approval_resolved");
+        assert_eq!(
+            requests.len(),
+            2,
+            "one command card and one file-change card"
+        );
+        assert_eq!(resolutions.len(), 2, "each of them answered exactly once");
+        let mut actors: Vec<&str> = resolutions
+            .iter()
+            .map(|p| p["by"].as_str().unwrap_or_default())
+            .collect();
+        actors.sort_unstable();
+        assert_eq!(
+            actors,
+            vec!["local", "phone"],
+            "the card the phone answered and the card the keyboard did"
+        );
+        for payload in resolutions {
+            let _: protocol::ws::CodexResolutionPayload =
+                serde_json::from_value(payload.clone()).expect("the minor-19 payload");
+            let _: protocol::ws::CodexResolution =
+                serde_json::from_value(payload.clone()).expect("a minor-18 decoder still reads it");
+            assert!(
+                requests
+                    .iter()
+                    .any(|r| r["card"]["request_id"] == payload["request_id"]),
+                "every resolution names a card that is in this same file: {payload}"
+            );
+        }
+
+        // Gate two: the file is what this build produces. As a value first,
+        // because that failure names the frame that moved, and then as BYTES,
+        // because the phone reads the file and not a parse of it.
+        let derived = phone_turn_stream().await;
+        assert_eq!(
+            derived, committed,
+            "the committed phone-turn stream no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_PHONE_TURN_STREAM}"
+        );
+        assert_eq!(
+            PHONE_TURN_STREAM,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&derived).expect("the fixture serialises")
+            ),
+            "the committed bytes are not this build's rendering of them (a reformat, or \
+             an edit by hand). Regenerate it: {REGENERATE_PHONE_TURN_STREAM}"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/phone-turn-stream-0.153.4.json` from this build.
+    /// Run with `cargo test -p ccd --bin ccd -- --ignored regenerate_the_phone_turn_stream_fixture`.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_phone_turn_stream_fixture() {
+        let rendered = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&phone_turn_stream().await).expect("it serialises")
+        );
+        std::fs::write(PHONE_TURN_STREAM_PATH, rendered).expect("the fixture is writable");
+        println!("wrote {PHONE_TURN_STREAM_PATH}");
+    }
 }

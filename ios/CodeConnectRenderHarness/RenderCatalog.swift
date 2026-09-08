@@ -250,6 +250,17 @@ struct RenderDriver {
         ).firstMatch
     }
 
+    /// That list's frame, resolved now and kept — the rectangle a scroll-back
+    /// aims inside for as long as it takes, after the row that named it is
+    /// gone. The screen's own frame is the fallback, and a wrong one: it is
+    /// there so a missing list fails as a subject that never came on screen
+    /// rather than as a crash.
+    func listFrame(holding fragment: String, in app: XCUIApplication) throws -> CGRect {
+        let list = list(holding: fragment, in: app)
+        guard list.waitForExistence(timeout: timeout) else { return app.frame }
+        return list.frame
+    }
+
     /// **A drag that lands inside a named element**, and therefore inside the
     /// scroll view that holds it.
     ///
@@ -264,6 +275,53 @@ struct RenderDriver {
         start.press(
             forDuration: 0.05,
             thenDragTo: start.withOffset(CGVector(dx: 0, dy: -travel)))
+    }
+
+    /// **Back up the list**, for a subject the screen has already scrolled past.
+    ///
+    /// Every other route here drags *forward*, because every other subject is
+    /// at or below the tail a timeline follows. A conversation's opening lines
+    /// are not: they are above the viewport, and in a lazy list they are not
+    /// merely off screen — they are **not in the accessibility tree at all**,
+    /// so `require` throws `unreachable` before it ever drags. Hence the
+    /// existence check inside the loop rather than a `waitForExistence` in
+    /// front of it.
+    /// - Parameter inside: the list's own frame, measured by the caller
+    ///   **before any scrolling** — see `listFrame(holding:in:)`. Screen
+    ///   fractions were tried first and are wrong here for the same reason they
+    ///   were wrong for the command palette: at AX5 a fixed 0.35 of the screen
+    ///   lands on a decision card's own controls and 0.70 on the composer, and
+    ///   sixteen drags moved the timeline by nothing
+    ///   (`codex-phone-turn-stream--ax5`, run 20260908-204539).
+    ///
+    ///   A `CGRect` rather than the element, because the query that finds the
+    ///   list names a row inside it — and by the second call that row has
+    ///   scrolled out of a lazy list, so the query resolves to nothing and the
+    ///   drags go back to guessing (run 20260908-211915, where the first
+    ///   subject was reached and the second was not).
+    @discardableResult
+    func requireEarlier(
+        _ element: XCUIElement, _ what: String, inside box: CGRect
+    ) throws -> XCUIElement {
+        for _ in 0..<16 {
+            if element.exists, Self.isPhotographed(element) { return element }
+            dragDown(inside: box)
+        }
+        guard element.exists else { throw RenderFailure.unreachable(what) }
+        throw RenderFailure.offScreen(what, frame: element.frame)
+    }
+
+    /// The mirror of `dragUp`: begun a quarter of the way into the list and
+    /// travelling **down**, which moves the content down and brings earlier
+    /// rows into view. Both ends stay inside `box`, so the gesture belongs to
+    /// the list from touch-down to lift.
+    func dragDown(inside box: CGRect) {
+        let origin = XCUIApplication().coordinate(withNormalizedOffset: .zero)
+        let start = origin.withOffset(
+            CGVector(dx: box.midX, dy: box.minY + box.height * 0.2))
+        let travel = max(box.height * 0.6, 40)
+        start.press(
+            forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: travel)))
     }
 
     /// The same gesture, begun **low enough to be inside a half-height sheet**.
@@ -949,11 +1007,16 @@ enum RenderCatalog {
         _ state: String,
         purpose: String,
         route: String = "fleet",
+        /// The session the deeplink opens, when it is not the shared `cx-1` —
+        /// the captured stream carries the identity the daemon recorded.
+        sessionKey: String? = nil,
         reach: @escaping (XCUIApplication, RenderDriver) throws -> Void
     ) -> RenderScenario {
         var arguments = ["-CC_CODEX", state]
         if route != "fleet" {
-            arguments += ["-CC_DEEPLINK", "codeconnect://session/\(codexSessionKey)"]
+            arguments += [
+                "-CC_DEEPLINK", "codeconnect://session/\(sessionKey ?? codexSessionKey)",
+            ]
         }
         return RenderScenario(
             name: "codex-\(state)", purpose: purpose, arguments: arguments, reach: reach)
@@ -1280,6 +1343,58 @@ enum RenderCatalog {
                 try driver.require(
                     driver.element(containing: "started a new turn", in: app),
                     "the started sentence")
+                // **The exchange is certified by `phone-turn-stream`, not
+                // here.** Requiring it in this scenario was tried and is not
+                // satisfiable at AX5: the compose banner wraps to five lines
+                // and takes the whole region between the tab bar and the
+                // composer, so the timeline is laid out at zero height and its
+                // rows are never realized — visible in
+                // `codex-compose-started--ax5` and `codex-compose-steered--ax5`,
+                // where the timeline is simply blank. That squeeze is a
+                // pre-existing property of the banner at accessibility sizes,
+                // not something this phase introduced, and it is reported
+                // rather than worked around with a weaker gate.
+                //
+                // The L photograph of this scenario does carry the whole
+                // exchange, which is what proves the message shape here.
+            }),
+        // **The one Codex render whose input is the daemon's own output.**
+        //
+        // Every other scenario on this list is staged from JSON written in this
+        // repo, and that is how a P0 shipped: the hand-made `user_message` wore
+        // Claude's `{"message":{"content":…}}` while the adapter sends
+        // `{"text":…}`, so the fixtures and the app agreed with each other, both
+        // renders were green, and a real phone drew a whole Codex turn as a lone
+        // "Turn complete". This one replays
+        // `fixtures/codex/phone-turn-stream-0.153.4.json` — the file ccd
+        // byte-compares against — frame for frame, and requires the words and
+        // the tool rows to be in the photograph.
+        codexScenario(
+            "phone-turn-stream",
+            purpose: "the daemon's own capture of a phone-started turn, replayed frame for frame",
+            route: "session",
+            sessionKey: "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            reach: { app, driver in
+                // The screen opens on the tail, and the subject is the head of
+                // the conversation — so these scroll *back*, which nothing in
+                // this catalogue had ever needed to do. The command row first,
+                // then the words just above it, so the photograph ends on the
+                // thing the operator could not see.
+                // Measured once, from a row that is on screen at the tail:
+                // the rectangle stays valid after that row has scrolled away.
+                let timeline = try driver.listFrame(holding: "Turn complete", in: app)
+                try driver.requireEarlier(
+                    driver.element(containing: "/bin/zsh", in: app),
+                    "the command tool row, whose argument the payload holds at its top level",
+                    inside: timeline)
+                try driver.requireEarlier(
+                    // "just run it" rather than "Do not explain": both of the
+                    // capture's user messages end with that phrase, and a
+                    // fragment two rows answer to is a fragment that certifies
+                    // whichever one the query happened to reach first.
+                    driver.element(containing: "just run it", in: app),
+                    "what the phone said, from the daemon's own bytes",
+                    inside: timeline)
             }),
         codexScenario(
             "compose-steered", purpose: "Codex was working: your words joined the running turn",

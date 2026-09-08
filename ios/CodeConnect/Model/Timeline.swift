@@ -126,7 +126,10 @@ struct NoticeItem: Sendable, Hashable {
 struct TimelineItem: Sendable, Hashable, Identifiable {
     enum Content: Sendable, Hashable {
         case userMessage(String, isCommand: Bool = false)
-        case agentMessage(String)
+        /// `isInterrupted` is the wire's own `interrupted` flag on a Codex
+        /// message item: the reply was cut short by an abort, and a row that
+        /// draws it as a finished thought is the phone contradicting the Mac.
+        case agentMessage(String, isInterrupted: Bool = false)
         case tool(ToolItem)
         case approval(ApprovalItem)
         case notice(NoticeItem)
@@ -275,7 +278,8 @@ enum TimelineBuilder {
 
             case .agentMessage:
                 if let text = event.agentText {
-                    items.append(event.item(.agentMessage(text)))
+                    items.append(
+                        event.item(.agentMessage(text, isInterrupted: event.isInterruptedItem)))
                 }
                 // Only when the PreToolUse hook missed the call entirely.
                 for use in event.agentToolUses where !hookToolCallIDs.contains(use.id) {
@@ -450,6 +454,16 @@ enum TimelineBuilder {
             let combined = [stdout, stderr].filter { !$0.isEmpty }.joined(separator: "\n")
             if !combined.isEmpty { outcome.text = combined }
             if outcome.text == nil, let plain = response.stringValue { outcome.text = plain }
+        }
+        // **The Codex adapter's own result shape**, which is not the hook's:
+        // `tool_result_payload` writes `status`, `interrupted`, `exit_code` and
+        // `aggregated_output` at the top level, and there is no `tool_response`
+        // for the block above to read. Left unread, every Codex command in the
+        // daemon's own capture rendered as "done" — including a non-zero exit,
+        // which is the outcome a reader most needs the truth about.
+        if let codex = event.codexToolOutcome {
+            outcome.status = codex.status
+            if let text = codex.output, outcome.text == nil { outcome.text = text }
         }
         if let duration = event.durationMS { outcome.durationMS = duration }
 

@@ -682,6 +682,20 @@ enum CodexFixtures {
         case composeDuplicate = "compose-duplicate"
         case composeRejected = "compose-rejected"
         case composeIndeterminate = "compose-indeterminate"
+        /// **The daemon's own capture, replayed frame for frame** —
+        /// `fixtures/codex/phone-turn-stream-0.153.4.json`, the file ccd's
+        /// tests byte-compare against. Nothing about this state is written by
+        /// hand: the events are the bytes, and the fleet row is built from the
+        /// identity and the high-water mark those bytes carry.
+        ///
+        /// It exists because every other Codex state on this list was
+        /// hand-written, and hand-written in Claude's shape: a `user_message`
+        /// as `{"message":{"content":…}}` where the adapter sends
+        /// `{"text":…}`. Fixture and reader agreed with each other, neither
+        /// agreed with the wire, and a real phone drew a turn as a lone "Turn
+        /// complete". A render whose input is the daemon's own output cannot
+        /// fail that way twice.
+        case phoneTurnStream = "phone-turn-stream"
         // Daemon age (M-series)
         case daemonMinor17 = "daemon-minor17"
         case daemonMinor16 = "daemon-minor16"
@@ -779,6 +793,10 @@ enum CodexFixtures {
             case .composeSteered, .composeDuplicate: return true
             case .composeRejected, .composeIndeterminate: return false
             case .daemonMinor16, .daemonMinor17: return false
+            // The capture stages nothing: its two turns both completed in it,
+            // and its events are the daemon's own bytes rather than anything
+            // this file decides.
+            case .phoneTurnStream: return false
             }
         }
 
@@ -802,10 +820,52 @@ enum CodexFixtures {
         var messages: [ServerMessage] = []
         if let ack = decodeOne(helloAck(state)) { messages.append(ack) }
         if let sessions = decodeOne(sessions(state, now: now)) { messages.append(sessions) }
+        if state == .phoneTurnStream {
+            // The capture's own frames, decoded through the same
+            // `ServerMessage` decoder the socket uses. Not re-serialised from
+            // anything of ours: a fixture that has been through this app's
+            // encoder proves only that the app agrees with itself.
+            return messages + capturedStream().map(\.message)
+        }
         for json in events(state, now: now) {
             if let message = decodeOne(json) { messages.append(message) }
         }
         return messages
+    }
+
+    /// **The session identity a state's fleet row carries.** Every hand-made
+    /// state is `cx-1`; the captured stream is whatever the daemon recorded,
+    /// because rewriting the ids in a capture to suit the app is the same
+    /// mistake as writing the payloads by hand.
+    static func fleetKey(for state: State) -> String {
+        guard state == .phoneTurnStream else { return sessionKey }
+        return capturedStream().compactMap(\.event).first?.sessionKey ?? sessionKey
+    }
+
+    /// The capture, parsed once: each frame as the `ServerMessage` it decodes
+    /// to, paired with its `Event` where it is one.
+    ///
+    /// A frame that fails to decode is **dropped loudly** rather than silently:
+    /// `testEveryStateProducesDecodableFrames` counts the frames and
+    /// `testTheDaemonsOwnPhoneTurnCaptureDecodesWhole` decodes every one of
+    /// them, so a shape this build cannot read fails a test rather than a
+    /// render.
+    private static let capturedStreamCache: [(message: ServerMessage, event: Event?)] = {
+        guard
+            let url = Bundle.main.url(
+                forResource: "phone-turn-stream-0.153.4", withExtension: "json"),
+            let data = try? Data(contentsOf: url),
+            let root = try? JSONDecoder().decode(JSONValue.self, from: data),
+            let frames = root["frames"]?.arrayValue
+        else { return [] }
+        return frames.compactMap { frame in
+            guard let message = decodeOne(frame.canonicalJSONString) else { return nil }
+            return (message, frame["event"]?.decoded(Event.self))
+        }
+    }()
+
+    private static func capturedStream() -> [(message: ServerMessage, event: Event?)] {
+        capturedStreamCache
     }
 
     private static func helloAck(_ state: State) -> String {
@@ -842,12 +902,21 @@ enum CodexFixtures {
         // carry. Advertised higher, `subscribeIfNeeded` keeps asking for events
         // that do not exist; advertised at all when the session has none is the
         // same lie in miniature.
-        let lastSeq = events(state, now: now).count
+        let lastSeq =
+            state == .phoneTurnStream
+            ? Int(capturedStream().compactMap { $0.event?.seq }.max() ?? 0)
+            : events(state, now: now).count
+        // The captured stream keeps the identity and the working directory the
+        // daemon recorded; every hand-made state keeps `cx-1`.
+        let key = fleetKey(for: state)
+        let tmux = capturedStream().compactMap(\.event).first?.sessionID ?? key
+        let cwd = state == .phoneTurnStream ? "/work" : "/work/p-abort-pending"
+        let label = state == .phoneTurnStream ? "work" : "p-abort-pending"
         return """
             {"type":"sessions","sessions":[\
-            {"session_uid":"\(sessionKey)","session_id":"\(sessionKey)",\
-            "tmux_session":"\(sessionKey)","cwd":"/work/p-abort-pending",\
-            "project_label":"p-abort-pending","lifecycle":"live","link":"attached",\
+            {"session_uid":"\(key)","session_id":"\(tmux)",\
+            "tmux_session":"\(tmux)","cwd":"\(cwd)",\
+            "project_label":"\(label)","lifecycle":"live","link":"attached",\
             "last_seq":\(lastSeq),"created_at":"\(stamp)","updated_at":"\(stamp)",\
             "blocked_on":[\(blocked)],"agent":"codex",\
             "codex_thread_id":"\(threadID)"\(linkClause)},\
@@ -880,7 +949,10 @@ enum CodexFixtures {
             out.append(
                 codexEvent(
                     seq: next(), kind: "tool_call", turn: turnID, now: now,
-                    payload: #"{"tool_name":"command","tool_input":{"command":"\#(escaped(longCommand))"}}"#
+                    // `tool_call_payload`: `tool`, `command`, `cwd` — the hook's
+                    // `tool_name`/`tool_input` is Claude's spelling and drew
+                    // every Codex tool row as an unnamed "tool".
+                    payload: #"{"tool":"command_execution","command":"\#(escaped(longCommand))","cwd":"/work/p-abort-pending"}"#
                 ))
         }
         if let card = cardJSON(state) {
@@ -917,7 +989,10 @@ enum CodexFixtures {
             out.append(
                 codexEvent(
                     seq: next(), kind: "turn_complete", turn: turnID, now: now,
-                    payload: #"{"status":"completed","duration_ms":4200}"#))
+                    // The adapter's own turn_complete payload, whole:
+                    // status, both timestamps, duration, and a null error.
+                    payload: #"{"completed_at":"\#(rfc3339(now))","duration_ms":6385,"error":null,"started_at":"\#(rfc3339(now.addingTimeInterval(-6.385)))","status":"completed"}"#
+                ))
         }
         // What the phone said, for the compose states — so the C-series renders
         // show a real exchange rather than an empty timeline under a banner.
@@ -928,17 +1003,26 @@ enum CodexFixtures {
             // the turn here too would preload the fact the mutation is supposed
             // to deliver, and for `started` it would contradict the arm being
             // staged: `started` means Codex was idle when the words arrived.
+            // **The daemon's real message shape, not Claude's.** These two
+            // rows were hand-written as `{"message":{"content":…}}` — the
+            // transcript shape a Claude session has — and the adapter has never
+            // sent it: `codex_adapter.rs` `message_payload` emits a flat
+            // `{"text":…, "interrupted":…}`. Every render and every test passed
+            // over the difference because the fixture and the reader agreed
+            // with each other and neither agreed with the wire, and a phone-
+            // started turn on the operator's build 73 drew a lone "Turn
+            // complete" over a conversation the daemon had logged in full.
             out.append(
                 codexEvent(
                     seq: next(), kind: "user_message", turn: nil, now: now,
                     payload:
-                        #"{"message":{"content":"Run the shell command touch /work/marker.txt now. Do not explain, just run it."}}"#
+                        #"{"interrupted":false,"text":"Run the shell command touch /work/marker.txt now. Do not explain, just run it."}"#
                 ))
             out.append(
                 codexEvent(
                     seq: next(), kind: "agent_message", turn: nil, now: now,
                     payload:
-                        #"{"message":{"content":[{"type":"text","text":"I'm creating marker.txt in the current working directory now."}]}}"#
+                        #"{"interrupted":false,"text":"I'm creating marker.txt in the current working directory now."}"#
                 ))
         }
         return out
@@ -1029,6 +1113,9 @@ enum CodexFixtures {
 
         case .composeStarted, .composeSteered, .composeDuplicate, .composeRejected,
             .composeIndeterminate, .daemonMinor17, .daemonMinor16:
+            return nil
+        // The capture carries its own two cards, in the daemon's own bytes.
+        case .phoneTurnStream:
             return nil
         }
     }

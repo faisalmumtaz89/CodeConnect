@@ -1,0 +1,481 @@
+{
+  "frames": [
+    {
+      "request_id": "say-1",
+      "result": {
+        "status": "started",
+        "turn_id": "01a07c5c-6911-7973-aafd-4d5509e27e80"
+      },
+      "session_id": "cc-1",
+      "type": "compose_result"
+    },
+    {
+      "event": {
+        "kind": "turn_complete",
+        "payload": {
+          "completed_at": 1788546725,
+          "duration_ms": 5101,
+          "error": null,
+          "started_at": 1788546720,
+          "status": "completed"
+        },
+        "seq": 1,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b:turn:01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "01a06db1-3941-7331-b22b-81d81c2814b8",
+        "kind": "user_message",
+        "payload": {
+          "interrupted": false,
+          "text": "Run the shell command `touch /work/marker.txt` now. Do not explain, just run it."
+        },
+        "seq": 2,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b:item:01a06db1-3941-7331-b22b-81d81c2814b8",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-3933-73c2-a871-bde7f1db46fc"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "rs_088d512d2335a088016a9b0ea8f13087d2af7803df3035f717",
+        "kind": "reasoning",
+        "payload": {
+          "content": [],
+          "interrupted": false,
+          "summary": []
+        },
+        "seq": 3,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b:item:rs_088d512d2335a088016a9b0ea8f13087d2af7803df3035f717",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-3933-73c2-a871-bde7f1db46fc"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+        "kind": "tool_call",
+        "payload": {
+          "command": "/bin/zsh -lc 'touch /work/marker.txt'",
+          "command_actions": [
+            {
+              "command": "touch /work/marker.txt",
+              "type": "unknown"
+            }
+          ],
+          "cwd": "/work",
+          "tool": "command_execution"
+        },
+        "seq": 4,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b:pre:exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-3933-73c2-a871-bde7f1db46fc"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "approval_request",
+        "payload": {
+          "card": {
+            "display_text": "command\n{\"command\":\"/bin/zsh -lc 'touch /work/marker.txt'\",\"cwd\":\"/work\",\"options\":[{\"id\":\"accept\",\"label\":\"Yes, proceed\"},{\"id\":\"acceptWithExecpolicyAmendment\",\"label\":\"Yes, and don't ask again for commands that start with `touch`\",\"payload\":{\"execpolicy_amendment\":[\"touch\"]}},{\"id\":\"cancel\",\"label\":\"No, and tell Codex what to do differently\"}],\"proposed_amendment\":[\"touch\"],\"reason\":\"May I create the requested probe file at /work/marker.txt?\"}",
+            "generation": 1,
+            "identity_bound": false,
+            "payload_hash": "0399b984c4a86f532e482db4778832b0a1d3952a0c4d3517d02ca827740788f9",
+            "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE",
+            "risk": {
+              "class": "medium"
+            },
+            "tool_input": {
+              "command": "/bin/zsh -lc 'touch /work/marker.txt'",
+              "cwd": "/work",
+              "options": [
+                {
+                  "id": "accept",
+                  "label": "Yes, proceed"
+                },
+                {
+                  "id": "acceptWithExecpolicyAmendment",
+                  "label": "Yes, and don't ask again for commands that start with `touch`",
+                  "payload": {
+                    "execpolicy_amendment": [
+                      "touch"
+                    ]
+                  }
+                },
+                {
+                  "id": "cancel",
+                  "label": "No, and tell Codex what to do differently"
+                }
+              ],
+              "proposed_amendment": [
+                "touch"
+              ],
+              "reason": "May I create the requested probe file at /work/marker.txt?"
+            },
+            "tool_name": "command"
+          }
+        },
+        "seq": 5,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "daemon",
+        "source_event_id": "perm:AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-3933-73c2-a871-bde7f1db46fc"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "approval_resolved",
+        "payload": {
+          "by": "phone",
+          "decision": {
+            "option_id": "accept",
+            "type": "option_id"
+          },
+          "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE",
+          "status": "answered"
+        },
+        "seq": 6,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "daemon",
+        "source_event_id": "resolved:AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE",
+        "ts": "2026-09-07T00:00:00.000Z"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+        "kind": "tool_result",
+        "payload": {
+          "aggregated_output": null,
+          "command": "/bin/zsh -lc 'touch /work/marker.txt'",
+          "duration_ms": 0,
+          "exit_code": 0,
+          "interrupted": false,
+          "status": "completed",
+          "tool": "command_execution"
+        },
+        "seq": 7,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b:post:exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-3933-73c2-a871-bde7f1db46fc"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "01a06db1-ce47-7773-b6b8-dd116d9078cf",
+        "kind": "user_message",
+        "payload": {
+          "interrupted": false,
+          "text": "Use apply_patch to edit /work/hello.txt, replacing the word hello with goodbye. Do not explain, just do it."
+        },
+        "seq": 8,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:item:01a06db1-ce47-7773-b6b8-dd116d9078cf",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "rs_0d32e6042d20bc4b016a9b0ecda9cc87d28addd38f0a994366",
+        "kind": "reasoning",
+        "payload": {
+          "content": [],
+          "interrupted": false,
+          "summary": []
+        },
+        "seq": 9,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:item:rs_0d32e6042d20bc4b016a9b0ecda9cc87d28addd38f0a994366",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "rs_0d32e6042d20bc4b016a9b0ed1631887d2aea0aff68cf34e27",
+        "kind": "reasoning",
+        "payload": {
+          "content": [],
+          "interrupted": false,
+          "summary": []
+        },
+        "seq": 10,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:item:rs_0d32e6042d20bc4b016a9b0ed1631887d2aea0aff68cf34e27",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "exec-10368345-f575-4fe5-982b-4b72ccb1e34e",
+        "kind": "tool_call",
+        "payload": {
+          "command": "/bin/zsh -lc \"sed -n '1,20p' /work/hello.txt\"",
+          "command_actions": [
+            {
+              "command": "sed -n '1,20p' /work/hello.txt",
+              "name": "cc-fc-probe.txt",
+              "path": "/work/hello.txt",
+              "type": "read"
+            }
+          ],
+          "cwd": "/work",
+          "tool": "command_execution"
+        },
+        "seq": 11,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:pre:exec-10368345-f575-4fe5-982b-4b72ccb1e34e",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "exec-10368345-f575-4fe5-982b-4b72ccb1e34e",
+        "kind": "tool_result",
+        "payload": {
+          "aggregated_output": "hello from the codex approvals probe\n",
+          "command": "/bin/zsh -lc \"sed -n '1,20p' /work/hello.txt\"",
+          "duration_ms": 0,
+          "exit_code": 0,
+          "interrupted": false,
+          "status": "completed",
+          "tool": "command_execution"
+        },
+        "seq": 12,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:post:exec-10368345-f575-4fe5-982b-4b72ccb1e34e",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "rs_0d32e6042d20bc4b016a9b0ed4370487d28ccdbf97eb9199a1",
+        "kind": "reasoning",
+        "payload": {
+          "content": [],
+          "interrupted": false,
+          "summary": []
+        },
+        "seq": 13,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:item:rs_0d32e6042d20bc4b016a9b0ed4370487d28ccdbf97eb9199a1",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "exec-68250557-5931-486f-b4c8-f812ff562162",
+        "kind": "tool_call",
+        "payload": {
+          "changes": [
+            {
+              "diff": "@@ -1 +1 @@\n-hello from the codex approvals probe\n+goodbye from the codex approvals probe\n",
+              "kind": {
+                "move_path": null,
+                "type": "update"
+              },
+              "path": "/work/hello.txt"
+            }
+          ],
+          "tool": "file_change"
+        },
+        "seq": 14,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:pre:exec-68250557-5931-486f-b4c8-f812ff562162",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "approval_request",
+        "payload": {
+          "card": {
+            "display_text": "file change\n{\"changes\":[{\"diff\":\"@@ -1 +1 @@\\n-hello from the codex approvals probe\\n+goodbye from the codex approvals probe\\n\",\"kind\":{\"move_path\":null,\"type\":\"update\"},\"path\":\"/work/hello.txt\"}],\"options\":[{\"id\":\"accept\",\"label\":\"Yes, proceed\"},{\"id\":\"acceptForSession\",\"label\":\"Yes, and don't ask again for these files\"},{\"id\":\"cancel\",\"label\":\"No, and tell Codex what to do differently\"}],\"path\":\"/work/hello.txt\"}",
+            "generation": 1,
+            "identity_bound": false,
+            "payload_hash": "a82a9da9b8609d6c6ae778ed6f73ea26f232f7357869a1386d88db4d83104f32",
+            "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLWI2YTUtNzUwMC04OTU2LTZjMzViODNiMzJkMgEAKWV4ZWMtNjgyNTA1NTctNTkzMS00ODZmLWI0YzgtZjgxMmZmNTYyMTYyAAAAAAAAAAE",
+            "risk": {
+              "class": "medium"
+            },
+            "tool_input": {
+              "changes": [
+                {
+                  "diff": "@@ -1 +1 @@\n-hello from the codex approvals probe\n+goodbye from the codex approvals probe\n",
+                  "kind": {
+                    "move_path": null,
+                    "type": "update"
+                  },
+                  "path": "/work/hello.txt"
+                }
+              ],
+              "options": [
+                {
+                  "id": "accept",
+                  "label": "Yes, proceed"
+                },
+                {
+                  "id": "acceptForSession",
+                  "label": "Yes, and don't ask again for these files"
+                },
+                {
+                  "id": "cancel",
+                  "label": "No, and tell Codex what to do differently"
+                }
+              ],
+              "path": "/work/hello.txt"
+            },
+            "tool_name": "file change"
+          }
+        },
+        "seq": 15,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "daemon",
+        "source_event_id": "perm:AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLWI2YTUtNzUwMC04OTU2LTZjMzViODNiMzJkMgEAKWV4ZWMtNjgyNTA1NTctNTkzMS00ODZmLWI0YzgtZjgxMmZmNTYyMTYyAAAAAAAAAAE",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "approval_resolved",
+        "payload": {
+          "by": "local",
+          "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLWI2YTUtNzUwMC04OTU2LTZjMzViODNiMzJkMgEAKWV4ZWMtNjgyNTA1NTctNTkzMS00ODZmLWI0YzgtZjgxMmZmNTYyMTYyAAAAAAAAAAE",
+          "status": "answered"
+        },
+        "seq": 16,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "daemon",
+        "source_event_id": "resolved:AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLWI2YTUtNzUwMC04OTU2LTZjMzViODNiMzJkMgEAKWV4ZWMtNjgyNTA1NTctNTkzMS00ODZmLWI0YzgtZjgxMmZmNTYyMTYyAAAAAAAAAAE",
+        "ts": "2026-09-07T00:00:00.000Z"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "exec-68250557-5931-486f-b4c8-f812ff562162",
+        "kind": "tool_result",
+        "payload": {
+          "changes": [
+            {
+              "diff": "@@ -1 +1 @@\n-hello from the codex approvals probe\n+goodbye from the codex approvals probe\n",
+              "kind": {
+                "move_path": null,
+                "type": "update"
+              },
+              "path": "/work/hello.txt"
+            }
+          ],
+          "interrupted": false,
+          "status": "completed",
+          "tool": "file_change"
+        },
+        "seq": 17,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:post:exec-68250557-5931-486f-b4c8-f812ff562162",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "item_id": "msg_0d32e6042d20bc4b016a9b0ed6ed5487d2a6dc10b9b3c8c6d1",
+        "kind": "agent_message",
+        "payload": {
+          "interrupted": false,
+          "text": ""
+        },
+        "seq": 18,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:item:msg_0d32e6042d20bc4b016a9b0ed6ed5487d2a6dc10b9b3c8c6d1",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "turn_complete",
+        "payload": {
+          "completed_at": 1788546774,
+          "duration_ms": 10548,
+          "error": null,
+          "started_at": 1788546764,
+          "status": "completed"
+        },
+        "seq": 19,
+        "session_id": "cc-1",
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "source": "codex",
+        "source_event_id": "01a06db1-b6a5-7500-8956-6c35b83b32d2:turn:01a06db1-ce36-79d0-a0c1-9eecc7865ac0",
+        "ts": "2026-09-07T00:00:00.000Z",
+        "turn_id": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0"
+      },
+      "type": "event"
+    }
+  ]
+}

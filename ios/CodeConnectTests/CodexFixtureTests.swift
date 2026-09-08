@@ -70,7 +70,9 @@ final class CodexFixtureTests: XCTestCase {
             guard case .sessions(let sessions) = frames[1] else {
                 return XCTFail("\(state.rawValue): the second frame is the fleet")
             }
-            let codex = sessions.first { $0.sessionKey == CodexFixtures.sessionKey }
+            // The captured stream keeps the identity the daemon recorded; every
+            // hand-made state is `cx-1`.
+            let codex = sessions.first { $0.sessionKey == CodexFixtures.fleetKey(for: state) }
             XCTAssertEqual(codex?.agent, .codex, state.rawValue)
             // Below minor 19 the field is absent and must read as `none`.
             XCTAssertEqual(
@@ -134,7 +136,9 @@ final class CodexFixtureTests: XCTestCase {
     func testAResolvedFixtureIsNotStillBlocking() {
         for state in CodexFixtures.State.allCases {
             guard case .sessions(let sessions) = CodexFixtures.frames(state: state)[1],
-                let codex = sessions.first(where: { $0.sessionKey == CodexFixtures.sessionKey })
+                let codex = sessions.first(where: {
+                    $0.sessionKey == CodexFixtures.fleetKey(for: state)
+                })
             else { return XCTFail("\(state.rawValue): no Codex session") }
             XCTAssertEqual(
                 codex.blockedOn.isEmpty, !state.stagesACard,

@@ -37,9 +37,10 @@ struct TimelineRow: View {
         switch item.content {
         case .userMessage(let text, let isCommand):
             UserMessageRow(text: text, date: item.date, isCommand: isCommand)
-        case .agentMessage(let text):
+        case .agentMessage(let text, let isInterrupted):
             AgentMessageRow(
-                text: text, onCollapse: { onCollapse?(item.id) }, onExpand: onExpand)
+                text: text, isInterrupted: isInterrupted,
+                onCollapse: { onCollapse?(item.id) }, onExpand: onExpand)
         case .tool(let tool):
             ToolRow(tool: tool)
         case .approval(let approval):
@@ -144,6 +145,10 @@ struct UserMessageRow: View {
 /// grows downward from the button, never yanking the reader upward.
 struct AgentMessageRow: View {
     let text: String
+    /// The turn was aborted while this reply was being written — the wire's
+    /// `interrupted` flag, drawn rather than dropped. Silence here would let a
+    /// half-sentence read as the whole answer.
+    var isInterrupted: Bool = false
     /// Fired **before** the collapse, on a "Show less" tap. Collapsing removes
     /// a screen or more of height in place and the scroll view keeps its
     /// offset, which lands the reader in the blank where the text used to be.
@@ -225,6 +230,21 @@ struct AgentMessageRow: View {
                     }
                 }
             }
+            }
+            // **The abort, said once, under the words it applies to.** Not a
+            // banner and not a colour: an interrupted reply is still the
+            // agent's prose, and the fact that it stops early belongs where the
+            // stopping happened.
+            if isInterrupted {
+                HStack(spacing: CC.space.xxs) {
+                    CCIcon("stop.circle", size: 12, weight: .regular, relativeTo: .caption)
+                    Text("Interrupted")
+                        .ccType(CC.type.micro)
+                }
+                .foregroundStyle(CC.text.tertiary)
+                .padding(.top, CC.space.xs)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Interrupted — this reply was cut short")
             }
             if isLong {
                 CCButton(expanded ? "Show less" : "Show more", variant: .ghost, size: .sm) {
