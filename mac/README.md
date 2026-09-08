@@ -24,6 +24,26 @@ codeconnect claude                         # in any project directory
 `codeconnect claude` passes every argument through to the real `claude`, so
 `codeconnect claude --permission-mode default --resume` works exactly as expected.
 
+## Codex sessions
+
+```sh
+codeconnect codex                 # in any project directory
+```
+
+Codex has no hooks, so a Codex session is hosted differently: the launcher puts a broker
+in front of Codex's own JSON-RPC app server, and the broker is what makes a phone answer
+safe. From the phone you can answer an approval with Codex's own options, stop a running
+turn, and say something — a new turn when the session is idle, joining the running turn
+when it is busy.
+
+Some arguments are refused rather than forwarded, because CodeConnect owns them for the
+session: the working directory, the sandbox, the approval controls, a named profile, and
+every codex subcommand (only the interactive TUI is hosted).
+
+**[`docs/codex.md`](../docs/codex.md) is the operator page** — launching, what the phone
+can and cannot do, the security boundary, what happens when Codex updates, quota, and the
+refusal sentences and log lines you will actually see.
+
 ```sh
 codeconnect ls                    # sessions, identities and link state
 codeconnect attach cc-1           # re-attach after closing the tab
