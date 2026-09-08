@@ -6,9 +6,9 @@
     "wire_code": "the app-server or the broker refused the write; the sentence carries their numeric code and never their message"
   },
   "counts": {
-    "link_state": 18,
+    "link_state": 20,
     "permanent": 43,
-    "total": 68,
+    "total": 70,
     "transient_local": 5,
     "wire_code": 2
   },
@@ -151,6 +151,20 @@
       "id": "compose_link_bound",
       "outcome": "rejected",
       "text": "this Mac is connected to the Codex session but is not yet watching its thread, so a message cannot be confirmed; nothing was sent",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_start_in_flight",
+      "outcome": "rejected",
+      "text": "the first turn on this Codex thread was just started from a phone and this Mac has not caught up with it yet, so nothing was said; try again shortly",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_no_turn_to_steer",
+      "outcome": "rejected",
+      "text": "this Codex thread has not run a turn yet, so there is nothing for that message to join; nothing was said, and it can be sent again once the thread is running",
       "verb": "compose"
     },
     {

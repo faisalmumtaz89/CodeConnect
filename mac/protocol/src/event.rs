@@ -309,8 +309,10 @@ pub enum Link {
 /// the button and let a refusal be the answer, which is the "offered and silently
 /// broken" affordance this app's rule forbids.
 ///
-/// **Only [`CodexLink::Subscribed`] is actuatable.** The other three are the
-/// daemon's honest reasons why not, and a client greys the control and says which
+/// **[`CodexLink::Subscribed`] is actuatable, and [`CodexLink::BoundNotStarted`] is
+/// actuatable for a COMPOSE alone** — a thread the daemon has proved has never run a
+/// turn can be given its first one, and has no turn to stop. The remaining three are
+/// the daemon's honest reasons why not, and a client greys the control and says which
 /// one rather than hiding it: a link that is offline now is subscribed a moment
 /// later, and four of the daemon's own refusal sentences end with "try again
 /// shortly", so a permanently hidden control would contradict the daemon.
@@ -329,7 +331,43 @@ pub enum CodexLink {
     /// knows which thread this session is on and receives none of its frames — the
     /// state a link sits in for the whole of a thread's life before its first turn.
     /// An ask handed to it would be accepted into silence, so it is refused.
+    ///
+    /// **It is not the same fact as [`CodexLink::BoundNotStarted`]**, and the
+    /// difference is what a client may act on: this word means the daemon does not
+    /// know whether a turn is running, so a `turn/start` might collide with one.
     Bound,
+    /// **Bound to a thread that has PROVABLY never run a turn**, and therefore the
+    /// one un-subscribed state a first message may still be sent into.
+    ///
+    /// The daemon publishes it only when its own `thread/resume` for this very
+    /// thread came back with the measured not-ready answer — `-32600 "no rollout
+    /// found for thread id …"`. No rollout means no turn has ever run on the thread,
+    /// which means no turn can be running now, which means a `turn/start` cannot
+    /// join or collide with one.
+    ///
+    /// **Why the word exists at all.** On a fresh `codeconnect codex` session the
+    /// thread has no rollout until its first turn, so every resume is refused and the
+    /// link stays [`CodexLink::Bound`] for ever. A phone that may only compose when
+    /// `subscribed` therefore cannot start the first turn — and only a first turn
+    /// creates the rollout. Measured on codex 0.153.4
+    /// (`fixtures/codex/first-turn-from-bound-0.153.4.jsonl`): the app-server accepts
+    /// a `turn/start` from exactly this position, the turn writes the rollout, and the
+    /// next resume succeeds.
+    ///
+    /// **Compose only.** There is nothing to stop — no turn has ever run — so a
+    /// client offers Compose here and does not offer Stop.
+    ///
+    /// **The fifth `codex_link` word, and it costs a minor: it is
+    /// [`crate::PROTOCOL_MINOR`] 20.** It was originally written into minor 19 on the
+    /// ground that 19 had never shipped, so no client could know four of the words and
+    /// not the fifth; build 72 shipped minor 19 on 2026-09-08 and that argument expired
+    /// with it. The ledger entry in `lib.rs` carries the whole reasoning.
+    ///
+    /// A minor-19 client that meets this word must treat it as not actuatable, which is
+    /// what the phone's unrecognised arm already does — the same answer it gives for
+    /// `bound`, and safe, because the only thing this word ever widens is a compose.
+    /// The daemon's refusal is still the last word either way.
+    BoundNotStarted,
     /// **A link exists and is not an addressee, and holds no binding on the
     /// connection it has.** Dialling, backing off, mid-handshake, or connected with
     /// its `thread/resume` not yet accepted.
@@ -596,20 +634,21 @@ mod tests {
         assert_eq!(codex, serde_json::from_str::<SessionSummary>(&s).unwrap());
     }
 
-    /// **The four words the phone matches on, and the one an older daemon means.**
+    /// **The five words the phone matches on, and the one an older daemon means.**
     ///
     /// `codex_link` is what a client scopes Stop and Compose by, so each of the
-    /// four is spelled by hand here rather than trusted to `rename_all`: renaming a
+    /// five is spelled by hand here rather than trusted to `rename_all`: renaming a
     /// variant would compile, pass, ship, and leave a phone greying a control on a
     /// session that could have been stopped. The default matters just as much —
     /// every summary from every daemon below this minor arrives without the field,
     /// and reading that as anything but `none` would offer an action against a link
     /// the daemon cannot even name.
     #[test]
-    fn the_codex_link_states_are_exactly_the_four_words_the_phone_matches_on() {
+    fn the_codex_link_states_are_exactly_the_five_words_the_phone_matches_on() {
         for (state, word) in [
             (CodexLink::Subscribed, "subscribed"),
             (CodexLink::Bound, "bound"),
+            (CodexLink::BoundNotStarted, "bound_not_started"),
             (CodexLink::Offline, "offline"),
             (CodexLink::None, "none"),
         ] {

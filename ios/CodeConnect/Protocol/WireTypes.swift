@@ -218,14 +218,26 @@ extension AgentKind: Codable {
 /// whether the control link is subscribed, merely bound, or reconnecting.
 ///
 /// Decision D3, and **cross-checked against the Rust that landed it**:
-/// `event.rs`'s `CodexLink` is `subscribed | bound | offline | none`, spelled by
-/// hand in its own pinning test rather than trusted to `rename_all`, and
+/// `event.rs`'s `CodexLink` is
+/// `subscribed | bound | bound_not_started | offline | none`, spelled by hand in
+/// its own pinning test rather than trusted to `rename_all`, and
 /// `#[derive(Default)] None` — so an older daemon's summary, which carries no
 /// such field, decodes as `none`. The daemon's `Unbound` deliberately folds into
 /// `offline`: what separates them is *why* there is no addressee, and the answer
-/// a client has for both is the same one. Only `subscribed` can actuate;
-/// every other state greys Stop and Compose **with the reason**, and the
-/// daemon's own refusal sentence is what the operator reads if they ask anyway.
+/// a client has for both is the same one.
+///
+/// **The whole rule, in one line: `subscribed` actuates both verbs;
+/// `bound_not_started` actuates compose only; everything else neither.** The Mac
+/// has proved a `bound_not_started` thread has never run a turn, so a first one
+/// can be started on it and there is none to stop. Every other state greys Stop
+/// and Compose **with the reason**, and the daemon's own refusal sentence is what
+/// the operator reads if they ask anyway.
+///
+/// **`bound_not_started` is protocol minor 20**; the other four words are minor
+/// 19, which build 72 shipped on 2026-09-08. So this decoder reads a strictly
+/// newer daemon than that build does, and a daemon that predates the word simply
+/// never sends it. The `unknown` arm below is what makes the reverse direction —
+/// this build meeting a word a newer daemon adds — safe rather than lucky.
 ///
 /// An unrecognised word is retained rather than read as `subscribed`: this enum
 /// gates two mutations, and the only safe direction for a value this build
@@ -235,6 +247,23 @@ enum CodexLinkState: Sendable, Hashable {
     case subscribed
     /// Connected to the session, not yet watching its thread.
     case bound
+    /// **Bound to a thread the Mac has PROVED has never run a turn** (protocol
+    /// minor 20), and therefore the one un-subscribed state a first message may
+    /// be sent into.
+    ///
+    /// The daemon publishes it only when its own `thread/resume` for this
+    /// thread was refused with the measured "no rollout" answer. No rollout
+    /// means no turn has ever run, which means none is running, which means a
+    /// first turn cannot collide with one.
+    ///
+    /// It exists because of a dead end: on a fresh Codex session the thread has
+    /// no rollout until its first turn, so the link is stuck at `bound` — and a
+    /// composer gated on `subscribed` could never send the message that would
+    /// unstick it.
+    ///
+    /// **Compose, and only compose.** There is no turn to stop, so Stop is not
+    /// offered here — see `blockedReason(for:)`.
+    case boundNotStarted
     /// The control link is down and reconnecting.
     case offline
     /// There is no Codex control link for this session — including every
@@ -247,25 +276,51 @@ enum CodexLinkState: Sendable, Hashable {
         switch self {
         case .subscribed: return "subscribed"
         case .bound: return "bound"
+        case .boundNotStarted: return "bound_not_started"
         case .offline: return "offline"
         case .none: return "none"
         case .unknown(let raw): return raw
         }
     }
 
-    /// The single gate. Nothing else in the app may re-derive it.
-    var canActuate: Bool { self == .subscribed }
+    /// **What is being asked of the link.** The two mutations this enum gates,
+    /// which stopped having one answer the moment `boundNotStarted` existed:
+    /// a first turn can be *started* on a thread that has never run one, and
+    /// there is nothing there to *stop*.
+    enum Ask: Sendable, Hashable {
+        /// Say something — the daemon decides at the write whether the words
+        /// start a turn or join one.
+        case compose
+        /// Stop the turn this session is running.
+        case stop
+    }
+
+    /// **The single gate. Nothing else in the app may re-derive it.**
+    ///
+    /// It takes the ask now, and that is the extension rather than a second
+    /// gate: the rule still lives in exactly one type, and a caller is made to
+    /// say which mutation it is asking about instead of guessing from a Bool
+    /// that no longer has one meaning.
+    func canActuate(_ ask: Ask) -> Bool { blockedReason(for: ask) == nil }
 
     /// Why not, in the phone's own words, or nil when it can.
     ///
     /// Deliberately shorter than the daemon's sentence and deliberately not a
     /// paraphrase of it: this is what a *disabled control* says before anything
-    /// has been sent, and the daemon's eleven sentences are what a *refusal*
-    /// says afterwards. Both are shown, in that order, and neither pretends to
-    /// be the other.
-    var blockedReason: String? {
+    /// has been sent, and the daemon's own sentences are what a *refusal* says
+    /// afterwards. Both are shown, in that order, and neither pretends to be
+    /// the other.
+    func blockedReason(for ask: Ask) -> String? {
         switch self {
         case .subscribed: return nil
+        // **The honest half of the new state.** It can be spoken to, and it
+        // cannot be stopped: a thread with no rollout has never run a turn, so
+        // there is no turn to name and the daemon would refuse one.
+        case .boundNotStarted:
+            switch ask {
+            case .compose: return nil
+            case .stop: return "This Codex session has not started a turn yet."
+            }
         case .bound: return "This Mac has reached the Codex session but is not yet watching it."
         case .offline: return "This Mac has lost its link to the Codex session and is reconnecting."
         case .none: return "There is no live link to this Codex session."
@@ -277,6 +332,7 @@ enum CodexLinkState: Sendable, Hashable {
         switch raw {
         case "subscribed": self = .subscribed
         case "bound": self = .bound
+        case "bound_not_started": self = .boundNotStarted
         case "offline": self = .offline
         case "none": self = .none
         case let other: self = .unknown(other)

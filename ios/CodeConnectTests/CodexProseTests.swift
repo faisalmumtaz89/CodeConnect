@@ -363,11 +363,13 @@ final class CodexProseTests: XCTestCase {
                 agent: .codex, daemonHonoursStop: true, link: .subscribed, runningTurn: nil),
             "Nothing is running to stop.")
 
-        for link in [CodexLinkState.bound, .offline, .none, .unknown("teleported")] {
+        for link in [
+            CodexLinkState.bound, .boundNotStarted, .offline, .none, .unknown("teleported"),
+        ] {
             XCTAssertNotNil(
                 CodexProse.stopUnavailable(
                     agent: .codex, daemonHonoursStop: true, link: link, runningTurn: "t-1"),
-                "\(link) cannot actuate, and the control says why")
+                "\(link) cannot be stopped, and the control says why")
         }
     }
 
@@ -384,17 +386,47 @@ final class CodexProseTests: XCTestCase {
         XCTAssertNotNil(
             CodexProse.composeUnavailable(
                 agent: .codex, daemonUnderstandsCompose: true, link: .offline))
+        // **The state that composes without being subscribed.** The Mac has proved
+        // this thread has never run a turn, so the first message can be sent.
+        XCTAssertNil(
+            CodexProse.composeUnavailable(
+                agent: .codex, daemonUnderstandsCompose: true, link: .boundNotStarted))
+        XCTAssertNotNil(
+            CodexProse.composeUnavailable(
+                agent: .codex, daemonUnderstandsCompose: true, link: .bound))
     }
 
-    /// **Only `subscribed` actuates**, and an unrecognised state is not read as
-    /// one that does. The gate lives on the enum so no surface can re-derive it.
-    func testOnlyASubscribedLinkCanActuate() {
-        XCTAssertTrue(CodexLinkState.subscribed.canActuate)
+    /// **Two states actuate, and each actuates exactly what it can.** An
+    /// unrecognised state is not read as either. The gate lives on the enum so
+    /// no surface can re-derive it.
+    ///
+    /// This is the protocol rule, as a table: **`subscribed` actuates both verbs;
+    /// `bound_not_started` actuates compose only; everything else neither.** The
+    /// fifth word is protocol minor 20 and the other four are minor 19 — which
+    /// build 72 shipped, so a daemon can legitimately speak either vocabulary at
+    /// this app. A minor-19 daemon simply never says the word, and the last loop
+    /// is what makes the reverse — a word this build has never heard — grey both
+    /// controls instead of guessing.
+    func testOnlyAProvenLinkCanActuateAndOnlyForWhatItProves() {
+        XCTAssertTrue(CodexLinkState.subscribed.canActuate(.compose))
+        XCTAssertTrue(CodexLinkState.subscribed.canActuate(.stop))
+        XCTAssertNil(CodexLinkState.subscribed.blockedReason(for: .compose))
+        XCTAssertNil(CodexLinkState.subscribed.blockedReason(for: .stop))
+
+        // **The one un-subscribed state that composes.** The Mac has proved this
+        // thread has never run a turn, so a first turn can be started on it —
+        // and for the same reason there is nothing to stop.
+        XCTAssertTrue(CodexLinkState.boundNotStarted.canActuate(.compose))
+        XCTAssertNil(CodexLinkState.boundNotStarted.blockedReason(for: .compose))
+        XCTAssertFalse(CodexLinkState.boundNotStarted.canActuate(.stop))
+        XCTAssertNotNil(CodexLinkState.boundNotStarted.blockedReason(for: .stop))
+
         for state in [CodexLinkState.bound, .offline, .none, .unknown("future")] {
-            XCTAssertFalse(state.canActuate, "\(state)")
-            XCTAssertNotNil(state.blockedReason, "\(state) must say why")
+            for ask in [CodexLinkState.Ask.compose, .stop] {
+                XCTAssertFalse(state.canActuate(ask), "\(state)/\(ask)")
+                XCTAssertNotNil(state.blockedReason(for: ask), "\(state)/\(ask) must say why")
+            }
         }
-        XCTAssertNil(CodexLinkState.subscribed.blockedReason)
     }
 
     /// **Refusals pass through untouched — proven on an arbitrary string.**

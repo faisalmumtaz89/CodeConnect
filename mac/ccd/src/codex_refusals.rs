@@ -263,6 +263,34 @@ pub(crate) const COMPOSE_THREAD_SWITCHING: &str =
     "this Codex session is moving to another thread, so nothing was said; try \
     again once it has settled";
 
+/// The one thing a link cannot do on a thread the wire says has never run a turn.
+///
+/// Reached only if the two facts behind that state contradict each other — see
+/// [`crate::codex_link::compose_route`], which is where the contradiction is refused
+/// rather than resolved.
+pub(crate) const COMPOSE_NO_TURN_TO_STEER: &str =
+    "this Codex thread has not run a turn yet, so there is nothing for that \
+    message to join; nothing was said, and it can be sent again once the thread \
+    is running";
+
+/// **The first turn is already going out, and this Mac has not caught up with it.**
+///
+/// A phone's compose was written as a `turn/start` from the one un-subscribed state that
+/// admits one ([`crate::codex_link::CodexAddressee::BoundNotStarted`]), which SPENDS the
+/// proof that admitted it. A second compose arriving before this link has caught up —
+/// before an accepted `thread/resume` subscribes it, or the turn ends — has nothing left
+/// to stand on: the connection is still handed no `turn/*` frame, so there is no running
+/// turn to join, and another `turn/start` would be a second first turn.
+///
+/// **It names the phone deliberately.** The other refusals in this family describe the
+/// link ("not yet watching its thread"); this one describes something the operator
+/// themselves just did, and saying so is what makes the wait make sense rather than look
+/// like a fault. It carries `try again shortly` because it is exactly that kind of fact —
+/// the same ask a moment later is written.
+pub(crate) const COMPOSE_START_IN_FLIGHT: &str =
+    "the first turn on this Codex thread was just started from a phone and this Mac \
+    has not caught up with it yet, so nothing was said; try again shortly";
+
 pub(crate) const COMPOSE_LAUNCH_UNREAD: &str =
     "this Mac has not yet read what this Codex thread runs under, so it \
     cannot start a turn on it; try again shortly, or say it at the Mac";
@@ -596,6 +624,20 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "rejected",
             "link_state",
             COMPOSE_LINK_BOUND.to_string(),
+        ),
+        row(
+            "compose_start_in_flight",
+            "compose",
+            "rejected",
+            "link_state",
+            COMPOSE_START_IN_FLIGHT.to_string(),
+        ),
+        row(
+            "compose_no_turn_to_steer",
+            "compose",
+            "rejected",
+            "link_state",
+            COMPOSE_NO_TURN_TO_STEER.to_string(),
         ),
         row(
             "compose_link_reconnecting",

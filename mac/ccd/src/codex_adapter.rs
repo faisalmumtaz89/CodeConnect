@@ -180,20 +180,44 @@ struct OpenItem {
 ///     the fixture). These are cloned rather than read, so there is no defaulting hazard,
 ///     but a changed type is still a shape nobody measured.
 ///
-/// **Everything else is refused**, including item types this build models perfectly well
-/// from the live wire. `commandExecution` and `fileChange` are refused earlier and by
-/// name (see the tool guard in [`CodexAdapter::plan_resume_seed`]); an item type that is
-/// simply unknown would otherwise be preserved wholesale as an `Other` fact, which sounds
-/// harmless and is not — nothing has ever compared such a fact against the one the live
-/// path produces for the same item, so there is no evidence the two would agree, and a
-/// first-wins key is the wrong place to find out. Refusing is the same re-grounding
-/// trigger the tool types get.
+///   * **`commandExecution`** — the three fields the payload is built from, each
+///     checked for the type it is read as: `command` a string, `cwd` a string,
+///     `commandActions` an array. Plus a **terminal `status`**, which is the whole of
+///     why this type is admissible at all: [`tool_result_payload`] defaults a missing
+///     one to `"completed"`, so an item that does not state its own outcome would
+///     persist a success that never happened, on a first-wins key, permanently.
+///   * **`fileChange`** — `changes` an array (cloned into the payload, not read), and
+///     the same terminal `status` on the same reasoning.
 ///
-/// The three admitted types are exactly what a resume answer has been measured to carry:
+/// All four of those field names, and `status`'s presence, are what
+/// `mac/codex-broker/schema-0.153/guarded-wire-stable.json` declares REQUIRED for the
+/// two variants (`request thread/resume` → `result.definitions` → `ThreadItem`), and
+/// the terminal set is its `CommandExecutionStatus`/`PatchApplyStatus` enums minus
+/// `inProgress`. So this is not a shape guessed from one capture; it is the guarded
+/// surface, asserted.
+///
+/// **Everything else is refused**, including item types this build models perfectly well
+/// from the live wire, and including several — `mcpToolCall`, `dynamicToolCall`,
+/// `collabAgentToolCall`, `imageGeneration` — that carry a required `status` of their
+/// own. Carrying the field is not what earns admission; having been measured is. An item
+/// type that is simply unknown would otherwise be preserved wholesale as an `Other` fact,
+/// which sounds harmless and is not — nothing has ever compared such a fact against the
+/// one the live path produces for the same item, so there is no evidence the two would
+/// agree, and a first-wins key is the wrong place to find out. Refusing is the
+/// re-grounding trigger an unmeasured turn status gets.
+///
+/// The admitted types are what a resume answer has been measured to carry:
 /// `userMessage` and `agentMessage` in the committed
-/// `fixtures/codex/resume-populated-answer.json`, and `reasoning` in the live two-session
+/// `fixtures/codex/resume-populated-answer.json`, `reasoning` in the live two-session
 /// measurement recorded in the plan's A14 (a completed turn whose live stream was
-/// userMessage → reasoning → agentMessage came back carrying all three).
+/// userMessage → reasoning → agentMessage came back carrying all three), and the two
+/// tool types in `fixtures/codex/resume-after-tool-turn-0.153.4.jsonl` — the 2026-09-08
+/// production answer, whose refusal cost 70 epochs over 18 minutes (see the tool guard in
+/// [`CodexAdapter::plan_resume_seed`]).
+///
+/// **A tool item is only ever offered to this function from a FINISHED turn**, and that
+/// separation is deliberate: whether the turn is history is the guard's question, and
+/// whether the item states its own outcome is this one's. Neither is sufficient alone.
 fn seeded_item_shape_is_measured(item: &Value, item_type: &str) -> bool {
     match item_type {
         "agentMessage" => item.get("text").is_some_and(Value::is_string),
@@ -212,8 +236,142 @@ fn seeded_item_shape_is_measured(item: &Value, item_type: &str) -> bool {
             item.get("summary").is_none_or(Value::is_array)
                 && item.get("content").is_none_or(Value::is_array)
         }
+        "commandExecution" => {
+            item.get("command").is_some_and(Value::is_string)
+                && item.get("cwd").is_some_and(Value::is_string)
+                && item.get("commandActions").is_some_and(Value::is_array)
+                && item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_terminal_tool_status)
+        }
+        "fileChange" => {
+            item.get("changes").is_some_and(Value::is_array)
+                && item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_terminal_tool_status)
+        }
         _ => false,
     }
+}
+
+/// **Is every field the tool payload READS the type it is read as?**
+///
+/// [`seeded_item_shape_is_measured`] is the admission rule — which item types may mint a
+/// fact at all, and whether each states its own outcome. This is the narrower question
+/// underneath it: of the fields [`tool_result_payload`] then *copies into the payload*,
+/// is each one a value the phone can read?
+///
+/// # Why it is a second check rather than more clauses in the first
+///
+/// The two have different verdicts, and that is the whole reason they are separate.
+/// [`seeded_item_shape_is_measured`] answers "is this answer a shape this build reads?",
+/// and a no there refuses the **whole answer** — which is the STOP-AND-AMEND verdict, and
+/// on a follow-up that is the 70-epoch loop of 2026-09-08 (`fixtures/README.md`'s row for
+/// `codex/resume-after-tool-turn-0.153.4.jsonl`). A malformed *value* inside one otherwise
+/// well-formed item is not evidence about the answer; it is evidence about that item. So a
+/// no here refuses **that item's fact and nothing else**: the rest of the turn seeds, the
+/// answer is still accepted, and the link keeps its subscription. The gap is one tool
+/// result, logged once and legible, rather than a leg.
+///
+/// # Why the values need checking at all, now
+///
+/// On the live path these fields come from a frame this build watched arrive, and a
+/// malformed one costs that one frame. Since the resume reader began admitting a FINISHED
+/// tool-bearing turn they also arrive from **history**, and there they are minted onto a
+/// first-wins dedup key — so a wrong-typed value does not cost one frame, it takes the key
+/// the real live fact would have taken and holds it for ever, uncorrectable.
+///
+/// # What each field is measured to be
+///
+///   * **`exitCode` and `durationMs` on a `completed` commandExecution — NUMBERS.**
+///     Measured on every captured completed item (`fixtures/codex/command-execution.jsonl`
+///     frame 20 and `fixtures/codex/file-change.jsonl` frames 12 and 30, all
+///     `exitCode: 0, durationMs: 0`), and in the resume answer itself. A string `"0"`
+///     where a number belongs is the shape refused here.
+///
+///     **Absent or `null` is accepted on the other two terminal statuses**, and that is a
+///     measurement rather than a softening: `failed` and `declined` items have never been
+///     captured at all, while the LIVE path already writes `null` for both fields from
+///     `tool_result_payload`'s own `unwrap_or(Value::Null)` (measured on `item/started`,
+///     where all three are null). Demanding a number from a status nobody has measured
+///     would make the seeded fact for a declined command differ from the live fact for the
+///     same item — and those two must be byte-identical or the dedup key stops collapsing
+///     them, which is the property the whole recovery path rests on.
+///   * **`aggregatedOutput` — a string, or absent/`null`.** Measured BOTH ways on a
+///     `completed` item: the string in `file-change.jsonl` frame 12, and an explicit
+///     `null` in `command-execution.jsonl` frame 20 (a command that printed nothing). So
+///     null is the wire's own spelling of "no output" here and is admitted; an object or a
+///     number is not.
+///   * **`changes[]` on a `fileChange` — every member an object carrying the measured
+///     keys.** The measured shape is `{"path": <string>, "kind": {"type": …,
+///     "move_path": …}, "diff": <string>}` (`fixtures/codex/file-change.jsonl` frames 17
+///     and 22). All three are load-bearing on the phone and each fails differently:
+///     `CodexWire.changes` DROPS a row with no string `path`, so the patch would silently
+///     lose a file; it defaults a missing `diff` to `""`, which renders as a change with
+///     no content and is indistinguishable from an empty one for ever; and it reads
+///     `kind["type"]`, defaulting to `"update"`, so a `kind` that is not an object
+///     relabels a delete as an edit. `changes` being an array at all is
+///     [`seeded_item_shape_is_measured`]'s clause; this is what is inside it.
+///
+/// Nothing here is checked for a `commandExecution`'s `command`, `cwd` or
+/// `commandActions`, or for `status` on either variant: those are the admission rule's,
+/// and duplicating them would put two verdicts on one field.
+fn seeded_tool_payload_is_readable(item: &Value, item_type: &str) -> bool {
+    let absent_null_or = |key: &str, ok: fn(&Value) -> bool| match item.get(key) {
+        None | Some(Value::Null) => true,
+        Some(value) => ok(value),
+    };
+    match item_type {
+        "commandExecution" => {
+            let completed =
+                item.get("status").and_then(Value::as_str) == Some(RESUME_TURN_COMPLETED);
+            let number = |key: &str| match item.get(key) {
+                Some(value) if value.is_number() => true,
+                // See the doc: only a `completed` item has been measured carrying these,
+                // and the live path writes null for the ones that have not.
+                None | Some(Value::Null) => !completed,
+                Some(_) => false,
+            };
+            number("exitCode")
+                && number("durationMs")
+                && absent_null_or("aggregatedOutput", Value::is_string)
+        }
+        "fileChange" => item
+            .get("changes")
+            .and_then(Value::as_array)
+            .is_some_and(|changes| {
+                changes.iter().all(|change| {
+                    change.get("path").is_some_and(Value::is_string)
+                        && change.get("diff").is_some_and(Value::is_string)
+                        && change.get("kind").is_some_and(Value::is_object)
+                })
+            }),
+        // Every other admitted type's payload is built from fields
+        // [`seeded_item_shape_is_measured`] has already checked, and none of them is a
+        // tool result. Nothing to add.
+        _ => true,
+    }
+}
+
+/// **Has this tool item's outcome been DECIDED?**
+///
+/// The three terminal members of the 0.153 `CommandExecutionStatus` and
+/// `PatchApplyStatus` enums, which are the same three
+/// (`mac/codex-broker/schema-0.153/guarded-wire-stable.json`). `inProgress` is the
+/// fourth and the one deliberately absent: an item still running has no outcome to
+/// record, and the seeding path's only reason to read a tool item is to record the
+/// outcome it states.
+///
+/// Spelled as an allowlist rather than as `!= "inProgress"` for the reason every other
+/// check in this file is: a status the guarded surface has not declared is a shape
+/// nobody has measured, and the honest response to one is to re-ground, not to assume
+/// it means "finished". A `failed` or `declined` item is recorded as exactly that —
+/// `tool_result_payload` copies the string through — so nothing here decides what an
+/// outcome MEANS, only that one was stated.
+fn is_terminal_tool_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "declined")
 }
 
 /// The `turn.status` a `thread/resume` answer uses for a turn that has **finished**.
@@ -577,6 +735,10 @@ impl CodexAdapter {
         let mut running_turns = Vec::new();
         let mut discarded_usage = Vec::new();
         let mut terminal_turns = 0;
+        // The items whose tool payload carried a value this build cannot read. They
+        // contribute no fact; the turn around them still seeds. Reported once at the
+        // bottom of this function, never per item.
+        let mut unreadable_items: Vec<String> = Vec::new();
 
         // The session's own identity, from the same Thread object `thread/started`
         // carries. This is how a link that never watched the announcement — a daemon
@@ -624,21 +786,58 @@ impl CodexAdapter {
             }) {
                 return None;
             }
-            // **A tool-bearing answer is refused outright.** No resume answer
-            // describing a `commandExecution` or a `fileChange` has ever been captured
-            // — the live gate's sandbox is read-only with approvals on-request, so a
-            // tool call needs an approval nobody answers. The live path guards these
-            // two types specially (a terminal with no `status` is dropped rather than
-            // rendered, because `tool_result_payload` would otherwise default it to
-            // "completed" and persist a success that never happened), and nothing here
-            // has measured whether an answer even carries that field. Reading one would
-            // be fabricating a tool outcome; refusing is the designed re-grounding
-            // trigger, exactly as for an unmeasured turn status.
+            // **A tool item is readable only where reading it cannot invent a RUNNING
+            // item.** This used to refuse any turn carrying a `commandExecution` or a
+            // `fileChange` outright, on the honest ground that no answer describing one
+            // had been captured. It has been now, and the refusal cost a production
+            // session: a link attached by `thread/resume` while a tool-bearing turn was
+            // running, re-asked when that turn finished — the follow-up this build owes
+            // itself, because a running turn reports placeholder ids — and the answer
+            // described the FINISHED turn including its completed `commandExecution`.
+            // `return None` here is the STOP-AND-AMEND verdict, so the leg was dropped;
+            // the reconnect asked the same durable history, which had not changed and
+            // would not, and was refused again. **70 epochs over 18 minutes on
+            // 2026-09-08, 10:04-10:22Z**, ending only when the session did, with no Stop
+            // and no compose on the phone for the whole of it.
+            //
+            // What is refused is now stated as the two things that were ever actually
+            // unsafe, and the reconstructed answer behind both is committed as
+            // `fixtures/codex/resume-after-tool-turn-0.153.4.jsonl`:
+            //
+            //   * **the turn has not finished.** A26/A29's running-turn limit, untouched
+            //     and deliberately so: an `inProgress` turn's item ids are measured
+            //     PLACEHOLDERS (`item-1`), so a fact minted from one takes a dedup key
+            //     the live wire will never produce and holds it first-wins. Written as
+            //     "not `completed`" rather than "is `inProgress`" because that is the
+            //     property actually relied on — a turn in any other state is refused by
+            //     the match below in any case, and this way the guard does not depend on
+            //     that happening.
+            //   * **the item's own outcome is not decided.** `tool_result_payload`
+            //     defaults a missing `status` to `"completed"`, so an item without one
+            //     would persist a SUCCESS THAT NEVER HAPPENED on a first-wins key and
+            //     hold it against the real terminal for ever — the same hazard
+            //     `on_item_completed` guards on the live path. `status` is REQUIRED on
+            //     both variants by `mac/codex-broker/schema-0.153/guarded-wire-stable.json`
+            //     (`request thread/resume` → `result.definitions`, `ThreadItem`), so an
+            //     answer that omits it is malformed rather than merely unmeasured, and
+            //     the reader may demand it explicitly instead of inferring it.
+            //
+            // A finished turn carrying a decided tool item is neither: it is HISTORY,
+            // its ids are the real ones (that is what `RESUME_TURN_COMPLETED` means),
+            // and every field the payload is built from is checked by
+            // [`seeded_item_shape_is_measured`] before a fact is minted. This test is
+            // the outer fence and that one the inner; they overlap on `status` on
+            // purpose, because the thing on the other side of them is a false success
+            // that can never be corrected.
             if items.iter().any(|item| {
                 matches!(
                     item.get("type").and_then(Value::as_str),
                     Some("commandExecution") | Some("fileChange")
-                )
+                ) && (status != RESUME_TURN_COMPLETED
+                    || !item
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .is_some_and(is_terminal_tool_status))
             }) {
                 return None;
             }
@@ -690,6 +889,15 @@ impl CodexAdapter {
                         if !seeded_item_shape_is_measured(item, item_type) {
                             return None;
                         }
+                        // **This item only.** A value the payload cannot read is
+                        // evidence about the item, never about the answer — see
+                        // [`seeded_tool_payload_is_readable`] for why the two verdicts
+                        // are different, and why refusing the whole answer here would be
+                        // the 70-epoch loop again for a field nobody needs.
+                        if !seeded_tool_payload_is_readable(item, item_type) {
+                            unreadable_items.push(item_id.to_string());
+                            continue;
+                        }
                         if let Some(event) = self.terminal_item_event(
                             requested_thread,
                             Some(turn_id.to_string()),
@@ -732,6 +940,20 @@ impl CodexAdapter {
             }
         }
 
+        // **Said once per answer, and only when there is something to say.** The
+        // answer is accepted either way, so this is not a loop the way a refusal was:
+        // it is one line naming what the seed is missing and why, so the gap the
+        // operator sees in the transcript has a reason attached to it.
+        if !unreadable_items.is_empty() {
+            crate::log_warn!(
+                "codex link for {}: {} item(s) of {requested_thread} carried a tool \
+                 payload this build cannot read, so their outcomes are not recorded \
+                 (the rest of the answer was seeded normally): {}",
+                self.session.name,
+                unreadable_items.len(),
+                unreadable_items.join(", ")
+            );
+        }
         Some(ResumeSeed {
             thread_id: requested_thread.to_string(),
             events,
@@ -2244,6 +2466,400 @@ mod tests {
             .collect()
     }
 
+    // -------------------- a FINISHED tool-bearing turn is history, not a running turn
+
+    /// The reconstructed answer that broke a production session on 2026-09-08. See its
+    /// row in `fixtures/README.md` for exactly which parts are captured and which are
+    /// assembled: the envelope and both item shapes are real 0.153 captures, the
+    /// arrangement into one answer is not.
+    const RESUME_AFTER_TOOL_TURN: &str =
+        include_str!("../../../fixtures/codex/resume-after-tool-turn-0.153.4.jsonl");
+    /// The thread that answer is about — the 2026-09-08 trace's.
+    const TOOL_TURN_THREAD: &str = "01a0807a-1c69-73e3-91db-a06724eeb479";
+    /// The completed `commandExecution` it carries, by id.
+    const TOOL_TURN_EXEC_ITEM: &str = "exec-cf7b67c7-3a19-4dd8-a9a6-6f243db33bd4";
+
+    /// The `result` of that answer's `s2c` response line.
+    fn tool_turn_result() -> Value {
+        let response = RESUME_AFTER_TOOL_TURN
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<Value>(line).expect("a captured frame is JSON"))
+            .find(|frame| frame["dir"] == "s2c")
+            .expect("the fixture carries the response");
+        response["frame"]["result"].clone()
+    }
+
+    /// **A FINISHED turn that ran a command is READ, and its tool outcome is minted
+    /// from the answer's own `status` rather than defaulted.**
+    ///
+    /// This is the production defect, stated as a test. The reader used to refuse any
+    /// turn carrying a `commandExecution` or a `fileChange` **outright**, running or
+    /// finished — so a link that attached mid-turn, re-asked when the turn ended, and
+    /// was told about the very tool item it had joined across could not read the reply.
+    /// The refusal is the STOP-AND-AMEND verdict, which ends the leg; the reconnect
+    /// asked the same durable history and was told the same thing. It ran 70 epochs in
+    /// 18 minutes — 2026-09-08, 10:04-10:22Z — and the phone had no Stop and no compose
+    /// for the rest of the session.
+    ///
+    /// A finished turn is **history**. Its ids are the real ones (that is what
+    /// `RESUME_TURN_COMPLETED` means), so nothing here is a guess, and it cannot change
+    /// what the link believes is running. What was genuinely unsafe — and stays
+    /// refused, in the case below — is a tool item whose own outcome is not yet decided.
+    #[test]
+    fn a_finished_turn_that_ran_a_command_is_read_and_its_outcome_is_not_defaulted() {
+        let result = tool_turn_result();
+        let seed = CodexAdapter::new(key())
+            .plan_resume_seed(&result, TOOL_TURN_THREAD)
+            .expect("a finished tool-bearing turn is history this build can read");
+
+        // **Nothing is running.** Both turns in the answer are `completed`, so the link
+        // must come out of this holding no open turn at all — the state the production
+        // link could never reach, because the answer was refused before it was read.
+        assert_eq!(
+            seed.running_turns(),
+            0,
+            "every turn the answer describes has finished; a link left holding a \
+             running turn here would show a Stop for a turn that ended"
+        );
+        assert_eq!(
+            seed.terminal_turns(),
+            2,
+            "the answer describes the whole durable history — the earlier message turn \
+             and the tool-bearing one the link attached across"
+        );
+
+        let mut seed = seed;
+        let events = seed.take_events();
+        let tool = events
+            .iter()
+            .find(|e| e.kind == EventKind::ToolResult)
+            .unwrap_or_else(|| panic!("the completed command must mint a ToolResult: {events:?}"));
+        assert_eq!(
+            tool.source_event_id.as_deref(),
+            Some(format!("{TOOL_TURN_THREAD}:post:{TOOL_TURN_EXEC_ITEM}").as_str()),
+            "keyed exactly as the LIVE path keys the same item, which is the whole \
+             reason a recovery dedups instead of doubling: {tool:?}"
+        );
+        // **Read out of the answer, never defaulted.** `tool_result_payload` falls back
+        // to `"completed"` for an item with no `status`, so a payload that merely *says*
+        // completed proves nothing on its own — the case below is what proves this one
+        // came from the wire.
+        assert_eq!(
+            tool.payload.get("status").and_then(Value::as_str),
+            Some("completed"),
+            "the status the answer stated: {tool:?}"
+        );
+        assert_eq!(
+            tool.payload.get("exit_code").and_then(Value::as_i64),
+            Some(0),
+            "and the exit code it stated with it: {tool:?}"
+        );
+        assert_eq!(
+            tool.payload.get("tool").and_then(Value::as_str),
+            Some("command_execution"),
+            "{tool:?}"
+        );
+        assert_eq!(
+            tool.payload.get("command").and_then(Value::as_str),
+            Some("/bin/zsh -lc 'touch /work/cc-e2e/marker.txt'"),
+            "{tool:?}"
+        );
+
+        // The rest of the turn is recovered too, which is what the follow-up resume
+        // exists for: these items finished before the link subscribed.
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        for expected in [
+            EventKind::UserMessage,
+            EventKind::Reasoning,
+            EventKind::AgentMessage,
+        ] {
+            assert!(
+                events.iter().any(|e| e.kind == expected),
+                "{expected:?} is part of the same finished turn: {kinds:?}"
+            );
+        }
+    }
+
+    /// **What stays refused, and why each one is different from the case above.**
+    ///
+    /// The narrowing is not "tool items are fine now". A tool item may be read only
+    /// when reading it cannot change what the link believes is RUNNING — which is two
+    /// separate conditions, and this pins both.
+    #[test]
+    fn a_tool_item_whose_outcome_is_undecided_is_still_refused() {
+        let adapter = CodexAdapter::new(key());
+        let refused = |what: &str, mutate: &dyn Fn(&mut Value)| {
+            let mut result = tool_turn_result();
+            mutate(&mut result);
+            assert!(
+                adapter
+                    .plan_resume_seed(&result, TOOL_TURN_THREAD)
+                    .is_none(),
+                "{what} must be refused, not read"
+            );
+        };
+
+        // **The turn is still going.** A29's running-turn limit is deliberately
+        // untouched: a running turn's item ids are measured placeholders, so its
+        // `commandExecution` would be minted under an id the live wire never emitted.
+        refused("a tool item inside a RUNNING turn", &|r| {
+            r["thread"]["turns"][1]["status"] = json!("inProgress");
+            r["thread"]["turns"][1]["completedAt"] = Value::Null;
+            r["thread"]["turns"][1]["durationMs"] = Value::Null;
+        });
+
+        // **The item's own outcome is not decided.** `tool_result_payload` defaults a
+        // missing `status` to `"completed"`, on a FIRST-WINS key — so an item without
+        // one would persist a success that never happened and hold the key against the
+        // real terminal for ever. `status` is required on this variant by
+        // `schema-0.153/guarded-wire-stable.json`, so an answer lacking it is malformed
+        // rather than merely unmeasured.
+        refused("a commandExecution with no status at all", &|r| {
+            r["thread"]["turns"][1]["items"][2]
+                .as_object_mut()
+                .expect("the tool item is an object")
+                .remove("status");
+        });
+        refused("a commandExecution whose status is not a string", &|r| {
+            r["thread"]["turns"][1]["items"][2]["status"] = json!(7);
+        });
+        refused("a commandExecution still in progress", &|r| {
+            r["thread"]["turns"][1]["items"][2]["status"] = json!("inProgress");
+        });
+        refused("a commandExecution whose status is not in the enum", &|r| {
+            r["thread"]["turns"][1]["items"][2]["status"] = json!("cancelled");
+        });
+
+        // The schema's other required fields for this variant. Each is copied straight
+        // into the payload by `tool_call_payload`/`tool_result_payload`, so a missing or
+        // retyped one lands as `null` on a first-wins key.
+        refused("a commandExecution with no command", &|r| {
+            r["thread"]["turns"][1]["items"][2]
+                .as_object_mut()
+                .expect("the tool item is an object")
+                .remove("command");
+        });
+        refused("a commandExecution whose cwd is not a string", &|r| {
+            r["thread"]["turns"][1]["items"][2]["cwd"] = json!({"path": "/work"});
+        });
+        refused(
+            "a commandExecution whose commandActions is not an array",
+            &|r| {
+                r["thread"]["turns"][1]["items"][2]["commandActions"] = json!("touch");
+            },
+        );
+
+        // `fileChange` is the same rule on the other variant: `changes` and a terminal
+        // `status` are what the schema requires of it.
+        refused("a fileChange with no changes", &|r| {
+            r["thread"]["turns"][1]["items"][2] = json!({
+                "type": "fileChange", "id": "patch-1", "status": "completed"
+            });
+        });
+        refused("a fileChange still in progress", &|r| {
+            r["thread"]["turns"][1]["items"][2] = json!({
+                "type": "fileChange", "id": "patch-1", "status": "inProgress", "changes": []
+            });
+        });
+
+        // And an item type nobody has measured is still refused wholesale — the
+        // narrowing named two variants and admitted only those. `mcpToolCall` requires
+        // a `status` too, which is exactly why it is worth naming here: carrying the
+        // required field is not what earns admission.
+        refused("an mcpToolCall, which nothing has measured", &|r| {
+            r["thread"]["turns"][1]["items"][2] = json!({
+                "type": "mcpToolCall", "id": "mcp-1", "status": "completed"
+            });
+        });
+    }
+
+    /// **A `fileChange` that has landed is read, on the same rule.**
+    ///
+    /// Kept as its own case rather than folded into the refusal loop above: the two
+    /// variants have different required fields, and a guard that admitted only the one
+    /// the production trace happened to carry would pass every test here but still
+    /// refuse the answer the first real patch turn produces.
+    #[test]
+    fn a_finished_turn_that_changed_a_file_is_read_too() {
+        let mut result = tool_turn_result();
+        result["thread"]["turns"][1]["items"][2] = json!({
+            "type": "fileChange",
+            "id": "patch-b2a1",
+            "status": "completed",
+            // The MEASURED member shape: `kind` is an object, not a bare word
+            // (`fixtures/codex/file-change.jsonl` frames 17 and 22). The phone reads
+            // `kind["type"]` and defaults a non-object to `"update"`, so a bare string
+            // here would relabel the change — see [`seeded_tool_payload_is_readable`].
+            "changes": [{
+                "path": "/work/cc-e2e/marker.txt",
+                "kind": {"type": "add", "move_path": null},
+                "diff": "+marker\n",
+            }],
+        });
+        let mut seed = CodexAdapter::new(key())
+            .plan_resume_seed(&result, TOOL_TURN_THREAD)
+            .expect("a finished fileChange is history this build can read");
+        assert_eq!(seed.running_turns(), 0);
+        let events = seed.take_events();
+        let tool = events
+            .iter()
+            .find(|e| e.kind == EventKind::ToolResult)
+            .unwrap_or_else(|| panic!("the applied patch must mint a ToolResult: {events:?}"));
+        assert_eq!(
+            tool.payload.get("tool").and_then(Value::as_str),
+            Some("file_change"),
+            "{tool:?}"
+        );
+        assert_eq!(
+            tool.payload.get("status").and_then(Value::as_str),
+            Some("completed"),
+            "stated by the answer, not defaulted: {tool:?}"
+        );
+    }
+
+    /// **A MALFORMED TOOL PAYLOAD COSTS THAT ITEM'S FACT AND NOTHING ELSE.**
+    ///
+    /// The pair of verdicts, asserted together, because separating them is the whole
+    /// point of [`seeded_tool_payload_is_readable`] existing beside
+    /// [`seeded_item_shape_is_measured`]:
+    ///
+    ///   * the answer is still **accepted** — every other item of that turn, and the
+    ///     turn terminal, are seeded, and the leg is kept. Refusing the whole answer
+    ///     for one bad field is the 2026-09-08 disposition that cost 70 epochs over
+    ///     18 minutes, reintroduced through a different door;
+    ///   * that item mints **no `ToolResult`**. The key is first-wins, so a payload
+    ///     built from a wrong-typed value would occupy the key the real live fact
+    ///     would have taken and hold it, uncorrectable, for ever.
+    #[test]
+    fn a_malformed_tool_payload_costs_that_item_and_not_the_answer() {
+        let adapter = CodexAdapter::new(key());
+        // Each mutation is the captured answer with ONE value retyped — the only kind
+        // of near-miss worth testing, since a reader that had quietly widened would
+        // still reject nonsense.
+        let item_refused = |what: &str, mutate: &dyn Fn(&mut Value)| {
+            let mut result = tool_turn_result();
+            mutate(&mut result);
+            let mut seed = adapter
+                .plan_resume_seed(&result, TOOL_TURN_THREAD)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{what} must cost the ITEM, not the answer — the answer is \
+                            otherwise the captured one and the leg must survive it"
+                    )
+                });
+            assert_eq!(
+                seed.terminal_turns(),
+                2,
+                "{what}: the answer is still read whole"
+            );
+            let events = seed.take_events();
+            assert!(
+                !events.iter().any(|e| e.kind == EventKind::ToolResult),
+                "{what} must mint no ToolResult: a first-wins key taken by a value the \
+                 phone cannot read is permanent: {events:?}"
+            );
+            // …and the REST of the same turn is still there, which is what makes the
+            // refusal item-scoped rather than turn-scoped.
+            for expected in [
+                EventKind::UserMessage,
+                EventKind::Reasoning,
+                EventKind::AgentMessage,
+            ] {
+                assert!(
+                    events.iter().any(|e| e.kind == expected),
+                    "{what}: {expected:?} belongs to the same turn and must still seed: \
+                     {events:?}"
+                );
+            }
+            assert!(
+                events.iter().any(|e| e.source_event_id.as_deref()
+                    == Some(
+                        turn_terminal_source_event_id(
+                            TOOL_TURN_THREAD,
+                            "01a0807a-4d63-7ae4-be16-5f3f7c4eaf32"
+                        )
+                        .as_str()
+                    )),
+                "{what}: the turn terminal is not the item's to lose: {events:?}"
+            );
+        };
+
+        // `commandExecution` — the three fields the payload copies out of it.
+        item_refused("an exitCode that is a string", &|r| {
+            r["thread"]["turns"][1]["items"][2]["exitCode"] = json!("0");
+        });
+        item_refused("an exitCode a completed item does not state", &|r| {
+            r["thread"]["turns"][1]["items"][2]["exitCode"] = Value::Null;
+        });
+        item_refused("a durationMs that is a string", &|r| {
+            r["thread"]["turns"][1]["items"][2]["durationMs"] = json!("0ms");
+        });
+        item_refused("a durationMs a completed item does not state", &|r| {
+            r["thread"]["turns"][1]["items"][2]
+                .as_object_mut()
+                .expect("the tool item is an object")
+                .remove("durationMs");
+        });
+        item_refused("an aggregatedOutput that is not text", &|r| {
+            r["thread"]["turns"][1]["items"][2]["aggregatedOutput"] = json!({"stdout": "hi"});
+        });
+
+        // `fileChange` — every member of `changes[]`, on the three keys the phone reads.
+        let patch = |change: Value| {
+            json!({
+                "type": "fileChange",
+                "id": "patch-b2a1",
+                "status": "completed",
+                "changes": [change],
+            })
+        };
+        item_refused("a change that is not an object at all", &|r| {
+            r["thread"]["turns"][1]["items"][2] = patch(json!("/work/hello.txt"));
+        });
+        item_refused("a change with no path", &|r| {
+            r["thread"]["turns"][1]["items"][2] =
+                patch(json!({"kind": {"type": "update"}, "diff": "@@\n"}));
+        });
+        item_refused("a change with no diff", &|r| {
+            r["thread"]["turns"][1]["items"][2] =
+                patch(json!({"path": "/work/hello.txt", "kind": {"type": "update"}}));
+        });
+        item_refused("a change whose kind is a bare word", &|r| {
+            r["thread"]["turns"][1]["items"][2] =
+                patch(json!({"path": "/work/hello.txt", "kind": "update", "diff": "@@\n"}));
+        });
+
+        // **And the mirror image, or the assertions above prove nothing.** The two
+        // shapes a `null` is MEASURED in are read, not refused: a completed command
+        // that printed nothing, and the two number fields on a status nobody has
+        // captured — where the live path writes null for the same item, so refusing
+        // would make the seeded fact differ from the live one under one key.
+        let read = |what: &str, mutate: &dyn Fn(&mut Value)| {
+            let mut result = tool_turn_result();
+            mutate(&mut result);
+            let mut seed = adapter
+                .plan_resume_seed(&result, TOOL_TURN_THREAD)
+                .unwrap_or_else(|| panic!("{what} is a measured shape"));
+            let events = seed.take_events();
+            assert!(
+                events.iter().any(|e| e.kind == EventKind::ToolResult),
+                "{what} must still mint its outcome: {events:?}"
+            );
+        };
+        read("a completed command that printed nothing", &|r| {
+            r["thread"]["turns"][1]["items"][2]["aggregatedOutput"] = Value::Null;
+        });
+        read("a declined command that states no exit code", &|r| {
+            let item = r["thread"]["turns"][1]["items"][2]
+                .as_object_mut()
+                .expect("the tool item is an object");
+            item.insert("status".into(), json!("declined"));
+            item.insert("exitCode".into(), Value::Null);
+            item.insert("durationMs".into(), Value::Null);
+        });
+    }
+
     /// **Every shape this build has not measured is refused**, each one the captured
     /// answer with a single thing changed — which is the only kind of near-miss worth
     /// testing, since a reader that had quietly widened would still reject nonsense.
@@ -2375,17 +2991,42 @@ mod tests {
                 .remove("startedAt");
         });
 
-        // A tool-bearing answer has never been captured, and the live path's own
-        // tool guard (a terminal with no `status` is dropped rather than rendered as a
-        // success) has no counterpart here. Refuse rather than fabricate an outcome.
+        // **A tool item is admitted only from a FINISHED turn, and only with its own
+        // outcome stated.** These two cases pin the near-misses on the 0.147 answer;
+        // `a_tool_item_whose_outcome_is_undecided_is_still_refused` pins the whole rule
+        // against the reconstructed 0.153 answer that actually carries one.
+        //
+        // The first case retypes a `userMessage` — so the item is a tool item carrying
+        // none of the four fields the variant requires, `status` included, and it is
+        // refused for that: an item that does not state its outcome would be defaulted
+        // to `"completed"` by `tool_result_payload` and persist a success that never
+        // happened, on a first-wins key. The second adds the running turn, which is
+        // refused whatever the item says, because a running turn's item ids are
+        // placeholders.
         for tool in ["commandExecution", "fileChange"] {
-            refused(&format!("an answer describing a {tool}"), &|r| {
-                r["thread"]["turns"][0]["items"][0]["type"] = json!(tool);
-            });
+            refused(
+                &format!("a {tool} that states none of its required fields"),
+                &|r| {
+                    r["thread"]["turns"][0]["items"][0]["type"] = json!(tool);
+                },
+            );
             refused(&format!("a {tool} inside a RUNNING turn"), &|r| {
                 r["thread"]["turns"][0]["status"] = json!("inProgress");
                 r["thread"]["turns"][0]["completedAt"] = Value::Null;
                 r["thread"]["turns"][0]["items"][0]["type"] = json!(tool);
+            });
+            // The same running turn, with an item that is otherwise perfectly
+            // well-formed and terminal. Without this the case above proves only that
+            // the missing fields were caught, and a guard that had dropped the
+            // turn-status half would pass it.
+            refused(&format!("a COMPLETE {tool} inside a RUNNING turn"), &|r| {
+                r["thread"]["turns"][0]["status"] = json!("inProgress");
+                r["thread"]["turns"][0]["completedAt"] = Value::Null;
+                r["thread"]["turns"][0]["items"][0] = json!({
+                    "type": tool, "id": "tool-1", "status": "completed",
+                    "command": "/bin/zsh -lc 'true'", "cwd": "/work",
+                    "commandActions": [], "changes": [],
+                });
             });
         }
 

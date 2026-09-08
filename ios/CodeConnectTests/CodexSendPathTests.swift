@@ -169,7 +169,7 @@ final class CodexSendPathTests: XCTestCase {
         guard case .notSent(let reason) = model.codexControls(for: key()).compose else {
             return XCTFail("expected a not-sent outcome")
         }
-        XCTAssertEqual(reason, CodexLinkState.offline.blockedReason)
+        XCTAssertEqual(reason, CodexLinkState.offline.blockedReason(for: .compose))
     }
 
     // MARK: F2 — an indeterminate mutation is never re-sent

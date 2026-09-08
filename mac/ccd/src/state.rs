@@ -5055,7 +5055,22 @@ impl Daemon {
         };
         let thread_id = match &addressee {
             crate::codex_link::CodexAddressee::Subscribed { thread_id } => thread_id.clone(),
-            crate::codex_link::CodexAddressee::Bound { .. } => {
+            // **Both bound states, one sentence — and here that really is one fact.**
+            // [`crate::codex_link::CodexAddressee::BoundNotStarted`] admits a compose
+            // because a thread with no rollout can accept a FIRST turn. A stop is the
+            // opposite ask: it names a turn, and it is answered by that turn's terminal,
+            // which reaches only a subscribed connection. A thread that has never run a
+            // turn has none to stop, and one that has is one this link is not watching.
+            //
+            // [`crate::codex_link::CodexAddressee::StartInFlight`] joins them for the
+            // same reason and needs no third sentence: it is `Bound` plus a fact about a
+            // compose, and a compose is not what is being asked. The turn it names is one
+            // this link has still never been shown a frame of, so the terminal an
+            // interrupt waits on could not arrive — which is precisely what
+            // `INTERRUPT_LINK_BOUND` already says.
+            crate::codex_link::CodexAddressee::Bound { .. }
+            | crate::codex_link::CodexAddressee::BoundNotStarted { .. }
+            | crate::codex_link::CodexAddressee::StartInFlight { .. } => {
                 return refuse(crate::codex_refusals::INTERRUPT_LINK_BOUND.into())
             }
             // **Three states, three sentences, because they call for three
@@ -5261,8 +5276,52 @@ impl Daemon {
         };
         let addressed = match &addressee {
             crate::codex_link::CodexAddressee::Subscribed { thread_id } => Ok(thread_id.clone()),
+            // **THE SECOND ADDRESSEE, AND IT IS NARROWER THAN IT LOOKS.**
+            //
+            // A link publishes this only when its OWN `thread/resume` for this very
+            // thread came back with the measured not-ready answer — `-32600 "no rollout
+            // found for thread id …"`. No rollout means no turn has ever run on the
+            // thread; no turn has ever run means none is running; so a `turn/start`
+            // written here cannot join or collide with a turn nobody has seen. That is
+            // the only thing being claimed, and it is the only thing this admits.
+            //
+            // **Why the gate had to move at all.** On a fresh `codeconnect codex`
+            // session the thread has no rollout until its first turn, so every resume is
+            // refused and the link never becomes `Subscribed`. A phone gated on
+            // `Subscribed` could therefore never start the first turn — and only a first
+            // turn creates the rollout. Measured on 0.153.4
+            // (`fixtures/codex/first-turn-from-bound-0.153.4.jsonl`): the app-server
+            // ACCEPTS a start from exactly this position, the turn writes the rollout,
+            // and the next resume succeeds.
+            //
+            // **The ROUTE is not decided here** — see this function's own note, and
+            // [`crate::codex_link::compose_route`], which refuses a steer in this state
+            // because there is no turn to name and an `expectedTurnId` would be a
+            // fabrication. What travels from here is the thread and the visit, exactly
+            // as for a subscribed link.
+            crate::codex_link::CodexAddressee::BoundNotStarted { thread_id } => {
+                Ok(thread_id.clone())
+            }
+            // **And nothing wider.** A bound link whose thread HAS a rollout may have a
+            // turn running that this connection has never been shown — an un-subscribed
+            // connection is handed no `turn/*` frame at all — so "this link has seen no
+            // turn" is not evidence that none is running. Admitting a start there is the
+            // collision the arm above exists to rule out.
             crate::codex_link::CodexAddressee::Bound { .. } => {
                 Err(crate::codex_refusals::COMPOSE_LINK_BOUND)
+            }
+            // **And the state the arm above turns into the moment a compose is written
+            // from it.** The proof that admitted the first turn is spent at the write —
+            // see [`crate::codex_link::CodexAddressee::StartInFlight`] — so a second ask
+            // arriving before this Mac has caught up has nothing left to stand on, and
+            // `COMPOSE_LINK_BOUND` would be true of the link while being unhelpful about
+            // the situation: what is actually going on is that a turn was just started
+            // from a phone. **This is the gate the second compose meets first**, and it
+            // is the reason both asks are not written; the link makes the same refusal
+            // from the fact itself, for the ask that was already past here when the first
+            // one went out.
+            crate::codex_link::CodexAddressee::StartInFlight { .. } => {
+                Err(crate::codex_refusals::COMPOSE_START_IN_FLIGHT)
             }
             crate::codex_link::CodexAddressee::Offline { thread_id: Some(_) } => {
                 Err(crate::codex_refusals::COMPOSE_LINK_RECONNECTING)
@@ -8619,6 +8678,43 @@ impl Daemon {
                 answers: crate::codex_link::answer_channel().0,
                 interrupts,
                 composes: crate::codex_link::compose_channel().0,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        asks
+    }
+
+    /// **The same again, for the compose control.**
+    ///
+    /// [`Daemon::install_codex_interrupts_for_tests`]'s twin, and the receiver is
+    /// returned for its reason: a test that wants to see whether the daemon's gate
+    /// ADMITTED an ask has to be the thing that receives it, because admission and
+    /// refusal are told apart by whether the ask reaches the link at all.
+    #[cfg(test)]
+    pub(crate) async fn install_codex_composes_for_tests(
+        &self,
+        session_uid: &str,
+        state: crate::codex_link::CodexAddressee,
+        generation: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::ComposeRequest> {
+        let presence = crate::codex_link::LinkPresence::new();
+        presence.publish_for_tests_on(state, generation);
+        let (composes, asks) = crate::codex_link::compose_channel();
+        let mut inner = self.inner.lock().await;
+        let epoch = inner.registration_epochs.len() as u64 + 1;
+        inner
+            .registration_epochs
+            .insert(session_uid.to_string(), epoch);
+        inner.codex_links.insert(
+            session_uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation: 1,
+                task: tokio::spawn(std::future::pending()),
+                presence,
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes,
                 carry: crate::codex_link::LinkCarry::new(),
             },
         );
@@ -15868,6 +15964,7 @@ mod tests {
             socket: std::path::PathBuf::from("/tmp/ccd-a12-2-no-such-broker.sock"),
             generation: 7,
             thread_id: Some("th-owed".to_string()),
+            launch_cwd: "/work".into(),
         };
         daemon
             .inner
@@ -15950,6 +16047,7 @@ mod tests {
             socket: std::path::PathBuf::from("/tmp/ccd-a12-2-no-such-broker.sock"),
             generation: 1,
             thread_id: None,
+            launch_cwd: "/work".into(),
         };
         daemon
             .inner
@@ -15992,6 +16090,7 @@ mod tests {
             socket: std::path::PathBuf::from("/tmp/ccd-a12-2-no-such-broker.sock"),
             generation: 1,
             thread_id: None,
+            launch_cwd: "/work".into(),
         };
 
         // The uid comes back as Claude. The registration is real, and it is the real
@@ -25388,6 +25487,202 @@ mod tests {
             empty,
             protocol::ws::ComposeResult::Rejected { .. }
         ));
+    }
+
+    /// **THE COMPOSE GATE ADMITS EXACTLY ONE UN-SUBSCRIBED STATE, AND IT IS THE
+    /// PROVABLE ONE.**
+    ///
+    /// The whole safety of breaking the first-turn dead end is this distinction:
+    ///
+    ///   * [`crate::codex_link::CodexAddressee::BoundNotStarted`] is a link whose own
+    ///     `thread/resume` came back with the MEASURED not-ready answer. No rollout
+    ///     means no turn has ever run on the thread, which means no turn is running
+    ///     now, which means a `turn/start` cannot collide with one. Admitted.
+    ///   * [`crate::codex_link::CodexAddressee::Bound`] is every other un-subscribed
+    ///     binding — a thread that may well have a rollout and a turn nobody here has
+    ///     seen, because an un-subscribed connection is handed no `turn/*` frame at all.
+    ///     Refused, exactly as before.
+    ///
+    /// **THE MUTANT THIS TEST EXISTS FOR:** widen the gate to admit any `Bound` — fold
+    /// the two arms into one `Ok(thread_id.clone())` — and the second half goes red: the
+    /// ask reaches the link instead of being refused, and the ledger is no longer empty
+    /// for it. That is the unsafe widening, and it must not compile-and-pass.
+    ///
+    /// A stop is unaffected in both states: it names a turn and is answered by that
+    /// turn's terminal, which reaches only a subscribed connection.
+    #[tokio::test]
+    async fn a_compose_is_admitted_on_the_bound_state_the_wire_has_proved_and_no_other() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let said = "Reply with the single word amber and nothing else.".to_string();
+        let hash = protocol::hash::compose_hash(uid, &said);
+
+        // ---- ADMITTED: the link has PROVED the thread has never run a turn ----------
+        let mut asks = daemon
+            .install_codex_composes_for_tests(
+                uid,
+                crate::codex_link::CodexAddressee::BoundNotStarted {
+                    thread_id: "th-fresh".into(),
+                },
+                4,
+            )
+            .await;
+        // The link's half, standing in for a connection that wrote the frame and read
+        // the answer. It has to run beside the call, because `Daemon::compose` waits on
+        // the report the link sends back.
+        let link = tokio::spawn(async move {
+            let ask = asks.recv().await.expect("the gate must admit this compose");
+            let seen = (
+                ask.thread_id.clone(),
+                ask.generation,
+                ask.claimed_hash.clone(),
+            );
+            let _ = ask.reply.send(crate::codex_link::ComposeReport::Started {
+                turn_id: "turn-first".into(),
+            });
+            seen
+        });
+        let admitted = daemon.compose(uid, "say-first", said.clone(), &hash).await;
+        let protocol::ws::ComposeResult::Started { turn_id } = &admitted else {
+            panic!("a thread with no rollout can be given its first turn: {admitted:?}")
+        };
+        assert_eq!(turn_id, "turn-first");
+        let (thread, generation, claimed) = link.await.expect("the link half");
+        assert_eq!(
+            (thread.as_str(), generation),
+            ("th-fresh", 4),
+            "the ask is addressed to the thread and the visit the addressee named"
+        );
+        assert_eq!(
+            claimed, hash,
+            "and it carries the daemon's own hash over the run and the words"
+        );
+
+        // ---- REFUSED: a binding that proves nothing about a running turn ------------
+        daemon.inner.lock().await.codex_links.remove(uid);
+        let mut asks = daemon
+            .install_codex_composes_for_tests(
+                uid,
+                crate::codex_link::CodexAddressee::Bound {
+                    thread_id: "th-unknown".into(),
+                },
+                5,
+            )
+            .await;
+        // **Bounded, because the mutant this row exists for does not fail — it
+        // HANGS.** A widened gate hands the ask to a link nothing is answering for,
+        // and `Daemon::compose` waits on that report. A test that hung would be a
+        // test nobody could read the verdict of, so the wait is given a budget and
+        // the budget expiring IS the failure.
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            daemon.compose(uid, "say-second", said.clone(), &hash),
+        )
+        .await
+        .expect(
+            "a bound link that has proved nothing must be REFUSED at the gate; a gate \
+             that admitted it would hand the ask to the link and wait for ever",
+        );
+        let protocol::ws::ComposeResult::Rejected { reason } = &refused else {
+            panic!("a bound link that has proved nothing must be refused: {refused:?}")
+        };
+        assert_eq!(reason, crate::codex_refusals::COMPOSE_LINK_BOUND);
+        assert!(
+            asks.try_recv().is_err(),
+            "a refusal taken at the gate never reaches the link"
+        );
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_COMPOSE, uid, "say-second")
+                .unwrap(),
+            None,
+            "and it leaves no durable claim behind"
+        );
+
+        // ---- REFUSED: the proof, already SPENT on a start this link wrote ----------
+        //
+        // The state the first row's link is in the moment its compose is written. The
+        // ask reaches the gate before this Mac has caught up with the turn it just
+        // started, and there is nothing left to admit it: another `turn/start` would be
+        // a second first turn, and this connection is handed no `turn/*` frame, so
+        // there is no running turn to join either.
+        //
+        // **The mutant this row exists for:** leave `not_ready_thread` standing across
+        // the write — do not spend it into
+        // [`crate::codex_link::CodexAddressee::StartInFlight`] — and this state is
+        // never published, so the second ask arrives on `BoundNotStarted`, is admitted,
+        // and is written as a second start.
+        daemon.inner.lock().await.codex_links.remove(uid);
+        let mut asks = daemon
+            .install_codex_composes_for_tests(
+                uid,
+                crate::codex_link::CodexAddressee::StartInFlight {
+                    thread_id: "th-fresh".into(),
+                },
+                5,
+            )
+            .await;
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            daemon.compose(uid, "say-third", said.clone(), &hash),
+        )
+        .await
+        .expect(
+            "a link whose proof is already spent must be REFUSED at the gate; a gate \
+             that admitted it would hand the ask to the link and wait for ever",
+        );
+        let protocol::ws::ComposeResult::Rejected { reason } = &refused else {
+            panic!("a spent proof admits nothing: {refused:?}")
+        };
+        assert_eq!(reason, crate::codex_refusals::COMPOSE_START_IN_FLIGHT);
+        assert!(
+            reason.contains("try again shortly"),
+            "it is a link-state refusal, and the phone reads that family by this \
+             clause: {reason}"
+        );
+        assert!(
+            asks.try_recv().is_err(),
+            "a refusal taken at the gate never reaches the link"
+        );
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_COMPOSE, uid, "say-third")
+                .unwrap(),
+            None,
+            "and it leaves no durable claim behind"
+        );
+
+        // ---- AND A STOP IS REFUSED IN ALL THREE, because there is no turn to name ---
+        for state in [
+            crate::codex_link::CodexAddressee::BoundNotStarted {
+                thread_id: "th-fresh".into(),
+            },
+            crate::codex_link::CodexAddressee::StartInFlight {
+                thread_id: "th-fresh".into(),
+            },
+            crate::codex_link::CodexAddressee::Bound {
+                thread_id: "th-unknown".into(),
+            },
+        ] {
+            daemon.inner.lock().await.codex_links.remove(uid);
+            let _asks = daemon
+                .install_codex_interrupts_for_tests(uid, state.clone(), 6)
+                .await;
+            let stop = daemon
+                .interrupt(
+                    "cc-1",
+                    "stop-1",
+                    "turn-1",
+                    &protocol::hash::interrupt_hash("cc-1", "turn-1"),
+                )
+                .await;
+            let protocol::ws::InterruptResult::Rejected { reason } = &stop else {
+                panic!("an un-subscribed link can never see a turn's terminal: {stop:?}")
+            };
+            assert!(reason.contains("not yet watching"), "{state:?}: {reason}");
+        }
     }
 
     /// **A finished compose is replayed while the link is gone, and the link's absence is

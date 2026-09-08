@@ -269,13 +269,13 @@ final class CodexResolutionTests: XCTestCase {
         XCTAssertEqual(sessions.count, 2, "both summaries decode")
         let codex = try XCTUnwrap(sessions.first { $0.agent == .codex })
         XCTAssertEqual(codex.codexLink, .subscribed)
-        XCTAssertTrue(codex.codexLink.canActuate)
+        XCTAssertTrue(codex.codexLink.canActuate(.compose))
         XCTAssertNotNil(codex.codexThreadID)
         let claude = try XCTUnwrap(sessions.first { $0.agent == .claude })
         XCTAssertEqual(
             claude.codexLink, CodexLinkState.none,
             "a Claude row says `none` explicitly — the field is never skipped")
-        XCTAssertFalse(claude.codexLink.canActuate)
+        XCTAssertFalse(claude.codexLink.canActuate(.compose))
 
         // ---- D2: the turn is on the approval's ENVELOPE --------------------
         let request = try XCTUnwrap(root["approval_request"]?.decoded(Event.self))

@@ -254,6 +254,14 @@ final class CodexWireDecodeTests: XCTestCase {
 
     /// D3: `codex_link` is the addressee state, defaulted so an older daemon
     /// still parses; `codex_thread_id` is opaque and only ever carried.
+    ///
+    /// **Two minors' worth of vocabulary, decoded by one code path.** Four of the
+    /// words are minor 19, which build 72 shipped; `bound_not_started` is minor
+    /// 20. That split is why the field is decoded as an opaque string with an
+    /// `unknown` arm rather than as a closed enum — a daemon older than the word
+    /// never sends it, and a daemon newer than this build may send one nobody
+    /// here has heard of. Both directions land somewhere safe, and the last row
+    /// is the proof of the second.
     func testTheSummaryCarriesTheCodexLinkAndThreadId() throws {
         func summary(_ extra: String) throws -> SessionSummary {
             try decode(
@@ -269,9 +277,11 @@ final class CodexWireDecodeTests: XCTestCase {
             "an older daemon sends no codex_link, and `none` is the safe default")
         XCTAssertNil(try summary("").codexThreadID)
 
+        // Minor 19's four words, then minor 20's fifth.
         for (wire, state) in [
             ("subscribed", CodexLinkState.subscribed), ("bound", .bound),
             ("offline", .offline), ("none", CodexLinkState.none),
+            ("bound_not_started", .boundNotStarted),
         ] {
             XCTAssertEqual(try summary(#","codex_link":"\#(wire)""#).codexLink, state, wire)
         }

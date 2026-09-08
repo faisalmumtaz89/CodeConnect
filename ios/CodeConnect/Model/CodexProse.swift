@@ -343,7 +343,7 @@ enum CodexProse {
         // **The one honest hide** is the absent turn: with nothing to name there
         // is nothing to send, so the control is absent rather than dead.
         guard runningTurn != nil else { return "Nothing is running to stop." }
-        return link.blockedReason
+        return link.blockedReason(for: .stop)
     }
 
     /// Why the composer cannot send, or nil when it can. Same shape, same order.
@@ -354,6 +354,6 @@ enum CodexProse {
         guard daemonUnderstandsCompose else {
             return "This Mac's CodeConnect is too old to carry a message to Codex. Update it."
         }
-        return link.blockedReason
+        return link.blockedReason(for: .compose)
     }
 }

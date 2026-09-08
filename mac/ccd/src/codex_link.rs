@@ -305,6 +305,25 @@ pub struct ControlLink {
     /// merely-initialized connection and carries the whole Thread (A1/D1/D2) — but
     /// a link with no id and no broadcast has nothing to resume, and says so.
     pub thread_id: Option<String>,
+    /// **The launch's CANONICAL cwd** — the `cwd` this registration carried.
+    ///
+    /// Read here and not merely stored because it is one of the three values a
+    /// `turn/start` must assert (see [`crate::codex_adapter::TurnLaunch`]), and it is
+    /// the only one of the three that varies per session.
+    ///
+    /// **Why this string is the right one.** `codex_coordinator`'s
+    /// `supervise_ready_session` registers `deps.launch_cwd`, which is
+    /// `canonical_launch_cwd(charter.cwd)` — resolved ONCE, at the authority that
+    /// owns the launch cwd, precisely so that the launcher, the broker's launch
+    /// fingerprint and the app-server's own `cwd` are the same bytes. (Measured
+    /// there: given `--cwd /tmp` the app-server reports `/private/tmp`, so a
+    /// non-canonical spelling would fail the broker's structural comparison.) So
+    /// this is not a guess at the fingerprint; it is the fingerprint's own input,
+    /// travelling by the route the coordinator built for it.
+    ///
+    /// It is carried verbatim. Anything this side did to it could only make the
+    /// broker's exact-equality comparison fail.
+    pub launch_cwd: String,
 }
 
 /// **Is this thread id real?** — the one spelling of that question.
@@ -409,6 +428,13 @@ impl ControlLink {
             socket,
             generation,
             thread_id: real_thread_id(info.codex_thread_id.as_deref()).map(str::to_string),
+            // **Not validated, and deliberately not.** An empty or wrong cwd is not
+            // something this daemon can detect and is not something it may correct: it
+            // is asserted by the broker against the launch fingerprint, so a wrong one
+            // costs a REFUSED `turn/start` and never a turn under the wrong workspace.
+            // Refusing the whole registration over it would take a session that
+            // observes perfectly well and make it unobservable.
+            launch_cwd: info.cwd.clone(),
         }))
     }
 }
@@ -799,9 +825,14 @@ fn frame_discriminator(frame: &Value) -> u64 {
 /// carrier:
 ///
 ///   * whether the answer was a `result` or an `error`;
-///   * for an error, its `code` — structural. The `message` is **not**: the
-///     measured not-ready one already embeds a thread id, and a future one could
-///     embed anything;
+///   * for an error, its `code` — structural — **and its `message`, scrubbed by
+///     [`scrub_ids`] and bounded**. This one member is a deliberate, narrow exception to
+///     the rule above, and it was bought with six live runs: an error whose only
+///     description was `code -32601` could not be told apart from any other `-32601`, so
+///     diagnosing it meant reproducing it, and it is intermittent. The scrub is what makes
+///     the exception affordable — the measured not-ready message embeds a thread id
+///     (`"no rollout found for thread id 01a…"`) and that id never reaches the log. See
+///     [`scrub_ids`] for exactly what survives and what the residual risk is;
 ///   * how many turns a result claims, which is the fact that says *why* this
 ///     branch fired;
 ///   * **yes/no for each of the top-level `result` keys named in
@@ -851,10 +882,70 @@ pub(crate) fn describe_resume_answer(frame: &Value, digest: &PublicDigest) -> St
             Some(code) => code.to_string(),
             None => "none".to_string(),
         };
-        return format!("an error (code {code}; digest {digest})");
+        let message = match error.get("message").and_then(Value::as_str) {
+            Some(message) => format!(" message {:?}", scrub_ids(message)),
+            None => String::new(),
+        };
+        return format!("an error (code {code};{message} digest {digest})");
     }
     format!("neither a result nor an error (digest {digest})")
 }
+
+/// **Neuter the identifiers in a peer-supplied error message, and bound its length.**
+///
+/// [`describe_resume_answer`] refuses to log anything a peer chose, with exactly one
+/// exception: an error's `message`. The exception is narrow and paid for — see that
+/// function — and this is the whole of what makes it safe enough to take.
+///
+/// The rule is per whitespace-separated token, and it is an ALLOW-nothing rule with two
+/// removals rather than a list of things to catch:
+///
+///   * a token containing `/` is a path and becomes `<path>`. Rollout paths, `CODEX_HOME`,
+///     the session `cwd` and workspace roots all take this shape, and every one of them
+///     names this machine;
+///   * a token of eight characters or more that contains a digit is an identifier and
+///     becomes `<id>`. Thread ids, turn ids, item ids, ULIDs and UUIDs are all caught by
+///     this, which is what keeps `"no rollout found for thread id 01a08161-45f2-…"` from
+///     putting a thread id in the log while leaving the sentence legible.
+///
+/// Then the whole thing is capped at [`SCRUBBED_MESSAGE_LIMIT`], so a message that is
+/// really a payload costs a bounded number of bytes rather than an unbounded one.
+///
+/// **The residual risk, stated rather than waved at.** What survives is short, digit-free,
+/// slash-free words. A future app-server that echoed a user's prompt back inside an error
+/// message would put some of those words in this log. That is a real exposure and it is
+/// accepted knowingly: the alternative — what this code did until now — cost six live
+/// runs and still did not identify a `-32601`, and an operator who cannot tell two errors
+/// apart cannot fix either. If a message is ever measured carrying content, the honest
+/// response is to narrow this to an allowlist of the messages actually seen, not to widen
+/// the scrub.
+fn scrub_ids(message: &str) -> String {
+    let scrubbed = message
+        .split_whitespace()
+        .map(|token| {
+            if token.contains('/') {
+                "<path>"
+            } else if token.chars().count() >= 8 && token.chars().any(|c| c.is_ascii_digit()) {
+                "<id>"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    match scrubbed.char_indices().nth(SCRUBBED_MESSAGE_LIMIT) {
+        Some((cut, _)) => format!("{}…", &scrubbed[..cut]),
+        None => scrubbed,
+    }
+}
+
+/// How much of a scrubbed error message reaches the log, in characters.
+///
+/// Long enough for every message this wire has been measured to send — the longest is
+/// `"request not serviceable through the CodeConnect broker"` at 54 — with room for one
+/// nobody has seen yet, and short enough that a message which is really a payload cannot
+/// fill the log with it.
+const SCRUBBED_MESSAGE_LIMIT: usize = 160;
 
 /// The only `result` key names that may ever be written to the log, spelled here
 /// rather than read off the frame.
@@ -962,6 +1053,103 @@ pub(crate) fn stop_and_amend_report(
     )
 }
 
+/// **The same unreadable answer, on a leg that is being KEPT.**
+///
+/// [`stop_and_amend_report`] ends "Reconnecting.", and that sentence is true of exactly
+/// one caller: the INITIAL attach, which fails closed and drops the connection. A
+/// follow-up on a connection already subscribed to the thread it asked about is the
+/// opposite disposition — the subscription was granted by an answer this link *did* read
+/// whole, and an unreadable reply is evidence about the reply — so the leg is kept, and
+/// the reconnect the other report announces never happens.
+///
+/// Reported before the caller acts on it, because that is where the throttle and the
+/// redacted shape are; so the two sentences are chosen by the same fact the caller
+/// converts on ([`Connection::subscribed_to`]), rather than by the caller re-deciding
+/// afterwards. Saying "Reconnecting." here made the daemon's log describe a leg it was
+/// about to keep, which is worse than saying nothing: an operator reading the reconnect
+/// count against it would find no reconnect and mistrust the log rather than the sentence.
+///
+/// **What it says instead is what was actually spent.** The ask was paying a debt — the
+/// items of a turn this link joined mid-flight, which the answer describing them named
+/// with placeholder ids — and nothing else can ever name them. So the gap is permanent
+/// and it belongs in the report, in place of a reconnection that is not going to happen.
+///
+/// Free, redacted and throttled exactly like its sibling; the `shape` string is the same
+/// [`describe_resume_answer`] output, so neither report can be the one that quotes a
+/// frame.
+pub(crate) fn kept_leg_amend_report(
+    session: &str,
+    requested_thread: &str,
+    shape: &str,
+    suppressed: u64,
+) -> String {
+    let repeats = match suppressed {
+        0 => String::new(),
+        n => format!(" (plus {n} suppressed since the previous report.)"),
+    };
+    format!(
+        "codex link for {session}: RECOVERY SKIPPED — a FOLLOW-UP thread/resume for \
+         {requested_thread}, on a connection already subscribed to that thread, was \
+         answered with something this build cannot read. Two answers are accepted: the \
+         not-ready error a thread with no rollout gives, and a populated result about \
+         that same thread whose every turn is one of the two states this wire was \
+         measured to report (finished, or still running). This was neither, and reading \
+         past it would be guessing, which is the one thing this link will not do. \
+         **The subscription is KEPT and this connection is NOT reconnecting** — an \
+         earlier answer proved this link can read this thread, and this reply is \
+         evidence about the reply. What is lost is only what the ask was paying for: \
+         the items of that turn which finished before this link subscribed were \
+         described with placeholder ids and can be named by nothing else, so they stay \
+         missing from this session's history. The answer, described rather than quoted: \
+         {shape}.{repeats}"
+    )
+}
+
+/// **The same unreadable answer, on a leg that is being RETRIED.**
+///
+/// The third of three sentences, and it exists for the reason the second one does: the
+/// other two both describe something this caller is not about to do.
+/// [`stop_and_amend_report`] ends "Reconnecting." and this connection is not reconnecting;
+/// [`kept_leg_amend_report`] says an earlier answer proved this link can read this thread,
+/// and on this path no answer has been accepted yet. Reusing either would put a false
+/// sentence in the log, which the kept-leg fix already established is worse than saying
+/// nothing — an operator who reads it and then counts reconnects finds none and stops
+/// trusting the log rather than the sentence.
+///
+/// What is true here instead is narrower and worth stating exactly: a `turn/start` this
+/// link wrote is outstanding on this thread, so the link has its own proof the thread is
+/// real and a turn is starting on it, and the ask will simply be made again on the
+/// ordinary attach ladder. Nothing is lost — unlike the kept-leg case, no debt was being
+/// paid — so the cost is one backoff step and the next answer is expected to settle it.
+///
+/// Free, redacted and throttled exactly like its two siblings; the `shape` string is the
+/// same [`describe_resume_answer`] output, so no report in this family can be the one that
+/// quotes a frame.
+pub(crate) fn retrying_amend_report(
+    session: &str,
+    requested_thread: &str,
+    shape: &str,
+    suppressed: u64,
+) -> String {
+    let repeats = match suppressed {
+        0 => String::new(),
+        n => format!(" (plus {n} suppressed since the previous report.)"),
+    };
+    format!(
+        "codex link for {session}: RETRYING — a thread/resume for {requested_thread}, \
+         chasing a turn/start this link itself wrote and has not yet seen land, was \
+         answered with something this build cannot read. Two answers are accepted: the \
+         not-ready error a thread with no rollout gives, and a populated result about that \
+         same thread whose every turn is one of the two states this wire was measured to \
+         report (finished, or still running). This was neither, and reading past it would \
+         be guessing, which is the one thing this link will not do. **The connection is \
+         KEPT and this link is NOT reconnecting** — it wrote the start itself, so it knows \
+         the thread is real and a turn is beginning on it, and an unreadable reply is \
+         evidence about the reply. The attach backs off and asks again. The answer, \
+         described rather than quoted: {shape}.{repeats}"
+    )
+}
+
 /// Where the attach stands on the connection now in hand.
 #[derive(Debug)]
 enum Attach {
@@ -1030,6 +1218,13 @@ enum Attach {
     /// connection ends and reconnects. The target is kept — it came from an
     /// announcement, and an answer this build cannot read is evidence about the
     /// answer, not about the thread.
+    ///
+    /// **Produced for the INITIAL attach only.** [`settle_resume`] still returns it for
+    /// any unreadable answer, but a connection that was already subscribed to the thread
+    /// it asked about converts it back to [`Attach::Attached`] at the call site — a
+    /// re-ask that cannot be read costs the recovery it was paying, not the subscription
+    /// an earlier answer already proved. The reasoning is written down there, beside the
+    /// conversion.
     Refused,
 }
 
@@ -1280,7 +1475,111 @@ pub enum CodexAddressee {
     /// this connection has not been accepted: no `turn/*` or `item/*` frame reaches
     /// it, and it is the state a link sits in for the whole of a thread's life
     /// before its first turn creates the rollout.
+    ///
+    /// **It says nothing about whether a turn is running**, and that is exactly what
+    /// separates it from [`CodexAddressee::BoundNotStarted`]. A resume can be
+    /// un-accepted for many reasons — the broker has not adopted the thread yet, the
+    /// answer was a shape this build cannot read, the ask is still in flight — and in
+    /// every one of them the thread may have a rollout and a turn nobody here has
+    /// seen. A `turn/start` written into that is a start that can collide.
     Bound { thread_id: String },
+    /// **Connected and bound to `thread_id`, and this connection's own
+    /// `thread/resume` for it was refused with the MEASURED not-ready answer.**
+    ///
+    /// The narrow, provable half of [`CodexAddressee::Bound`]. What makes it provable
+    /// is [`is_measured_not_ready`]: `-32600 "no rollout found for thread id …"`, for
+    /// the thread this connection asked about and no other. No rollout means no turn
+    /// has ever run on this thread, which means no turn is running now — so a
+    /// `turn/start` here cannot join a turn nobody has seen.
+    ///
+    /// **The dead end it exists to break.** On a fresh `codeconnect codex` session the
+    /// thread has no rollout until its first turn, so every resume is refused and the
+    /// link never becomes [`CodexAddressee::Subscribed`]; a phone gated on
+    /// `Subscribed` therefore cannot start the first turn, and only a first turn
+    /// creates the rollout. MEASURED on codex 0.153.4
+    /// (`fixtures/codex/first-turn-from-bound-0.153.4.jsonl`, and
+    /// `crate::codex_link_live`'s `a_turn_start_from_a_bound_but_unresumed_leg`): the
+    /// app-server ACCEPTS a `turn/start` from this position, the turn writes the
+    /// rollout, and the very next `thread/resume` succeeds.
+    ///
+    /// **The fact is per-CONNECTION and per-THREAD, and it is not carried.** A fresh
+    /// connection has proved nothing, so it opens on `Bound` and only becomes this
+    /// once its own resume has been refused; and the proof is compared against the
+    /// thread the connection is bound to, so a visit that moves leaves it behind.
+    ///
+    /// **What it still is not:** an addressee. No `turn/*` or `item/*` frame reaches
+    /// this connection, so nothing that needs to watch a turn — a stop above all — may
+    /// be handed to it. The one thing it admits is a compose that STARTS a turn.
+    ///
+    /// # The proof is about an instant, and what stands behind it when it goes stale
+    ///
+    /// It was true when the answer arrived. Between then and the next resume the link
+    /// is sitting out its attach backoff, and in that window somebody at the Mac can
+    /// type into the TUI and start the thread's first turn. Nothing here can see that:
+    /// the leg is handed no `turn/*` frame at all, which is the same measurement that
+    /// makes the state necessary.
+    ///
+    /// **The window costs a refusal, not a collision, and that is measured.** A ccd
+    /// `turn/start` on a thread whose turn is running is refused by the BROKER — gate G7
+    /// in `crate::codex_link_live`, which drives exactly that frame on a busy thread and
+    /// requires the refusal. So the second lock behind this state is the same one the
+    /// resume-sourced path relies on: the phone is told its message did not go, and
+    /// nothing is written over a turn nobody was looking at.
+    ///
+    /// The window is also bounded rather than open-ended: an accepted `turn/start`
+    /// re-arms the attach at once, and every refusal re-mints the proof, so the state
+    /// only ever stands for one step of the ladder at a time.
+    BoundNotStarted { thread_id: String },
+    /// **The proof has been SPENT: a `turn/start` written from
+    /// [`CodexAddressee::BoundNotStarted`] is on the wire, and this link has not caught
+    /// up with it.**
+    ///
+    /// Not a fourth kind of binding — it is [`CodexAddressee::Bound`] plus one thing this
+    /// connection knows and nothing else does: the turn that is (or is about to be) the
+    /// thread's first was started **from a phone, through this link**. It publishes
+    /// `"bound"` on the wire for exactly that reason ([`CodexAddressee::wire_link`]); the
+    /// extra fact buys one honest refusal sentence and nothing else.
+    ///
+    /// # The two defects it exists to close
+    ///
+    /// The proof used to be cleared when the `turn/start` RESPONSE arrived, which left a
+    /// window between the write and the answer in which it was still standing and still
+    /// false:
+    ///
+    ///   * **two composes could both be written.** Two asks with different request ids do
+    ///     not join each other ([`Connection::join_open_compose`] keys on the id), the
+    ///     daemon's gate reads the published state and the link's own route reads the same
+    ///     proof — so both passed, both chose START, and both went out. The broker refuses
+    ///     the second (gate G7), so nothing was written over; but a durable claim was
+    ///     taken for an actuation that was never going to happen, and the phone was told
+    ///     a turn was already running when what had actually happened is that this Mac had
+    ///     not caught up with the turn the operator had just started themselves.
+    ///   * **a not-ready answer could RE-MINT it.** The accepted start writes the rollout,
+    ///     but a resume racing that write can still be answered "no rollout" — and
+    ///     [`Connection::settle_resume`]'s not-ready arm minted the proof again from it,
+    ///     re-publishing `BoundNotStarted` while the first turn ran unseen.
+    ///
+    /// Both are the same mistake: reading a fact that was true when the wire said it as
+    /// though it were still true after this link had acted on it. So the proof is spent
+    /// **before the frame is written**, and this is what it is spent into.
+    ///
+    /// # It is bounded, and by construction rather than by a timer
+    ///
+    /// Three exits, and every one of them is an observation:
+    ///
+    ///   * an accepted `thread/resume` — the link is `Subscribed` and this is moot
+    ///     ([`Connection::attach_from_seed`] clears it);
+    ///   * the turn's own terminal ([`Connection::note_terminal`]);
+    ///   * a WIRE REFUSAL of the start, which is evidence no turn was written at all — the
+    ///     proof is restored rather than dropped, because a refusal changes nothing about
+    ///     the thread the resume answer described.
+    ///
+    /// And a fourth that is a stop rather than an exit: after [`COMPOSE_BUDGET`] the state
+    /// is dropped, logged once, and the connection falls back to plain
+    /// [`CodexAddressee::Bound`] with the ordinary attach ladder. Nothing here is
+    /// unbounded, and nothing here survives the connection — like the proof it spends, it
+    /// is per-connection and per-thread, so a visit that moves leaves it behind.
+    StartInFlight { thread_id: String },
     /// **Connected and subscribed to `thread_id`.** A `thread/resume` was accepted,
     /// its facts were recorded, and this connection receives the thread's frames.
     /// The one state that is an addressee.
@@ -1298,9 +1597,10 @@ impl CodexAddressee {
     /// to say so.
     pub fn thread_id(&self) -> Option<&str> {
         match self {
-            CodexAddressee::Bound { thread_id } | CodexAddressee::Subscribed { thread_id } => {
-                Some(thread_id)
-            }
+            CodexAddressee::Bound { thread_id }
+            | CodexAddressee::BoundNotStarted { thread_id }
+            | CodexAddressee::StartInFlight { thread_id }
+            | CodexAddressee::Subscribed { thread_id } => Some(thread_id),
             // The last adopted thread, which is where the session was and where the
             // reconnect is heading. Not a binding — nothing is connected, or nothing
             // on this connection is — but the question this answers is which thread
@@ -1313,13 +1613,14 @@ impl CodexAddressee {
         }
     }
 
-    /// **The same five states, in the four words the fleet says them in.**
+    /// **The same six states, in the five words the fleet says them in.**
     ///
     /// [`protocol::event::SessionSummary::codex_link`] is what a client scopes Stop
     /// and Compose by, and it answers one question: can an ask aimed at this session
-    /// land right now. [`CodexAddressee::Subscribed`] is the only yes; the other
-    /// three words are the honest reasons for no, and a client greys the control and
-    /// says which rather than hiding it.
+    /// land right now. [`CodexAddressee::Subscribed`] is yes to both verbs;
+    /// [`CodexAddressee::BoundNotStarted`] is yes to a compose and no to a stop; the
+    /// other three words are the honest reasons for no, and a client greys the control
+    /// and says which rather than hiding it.
     ///
     /// **`Unbound` folds into `Offline`, and that is a decision rather than an
     /// oversight.** The two are structurally the same fact — a link that is not an
@@ -1327,9 +1628,15 @@ impl CodexAddressee {
     /// only in *why*: no established connection, versus one whose `thread/resume`
     /// has not been accepted. Calling `Unbound` `"bound"` would name a binding that
     /// does not exist, which is the exact confusion [`CodexAddressee`] was written
-    /// to make unmakeable. A fifth word would be one a client had to learn and could
-    /// not use: the answer it renders for both is the same sentence, and both are
-    /// states the link is on its way out of.
+    /// to make unmakeable. A word of its own would be one a client had to learn and
+    /// could not use: the answer it renders for both is the same sentence, and both
+    /// are states the link is on its way out of.
+    ///
+    /// **`BoundNotStarted` does NOT fold, for the mirror-image reason.** It is the one
+    /// case where the answer a client renders really is different — the composer is
+    /// live — so collapsing it into `"bound"` would be exactly the "offered and
+    /// silently broken" affordance in reverse: a control greyed on a session that
+    /// could have been spoken to.
     ///
     /// **`NoLink` is `"none"`, and it is what every Claude row reports** — the
     /// resolver answers `NoLink` for a session that has no Codex link, which is the
@@ -1340,6 +1647,22 @@ impl CodexAddressee {
         match self {
             CodexAddressee::Subscribed { .. } => protocol::event::CodexLink::Subscribed,
             CodexAddressee::Bound { .. } => protocol::event::CodexLink::Bound,
+            // **A fifth word, because the fourth would be a lie by omission.** Folding
+            // this into `"bound"` would tell a phone "not now" about the one
+            // un-subscribed state in which a first turn genuinely can be started, and
+            // that is the dead end the state exists to break. Unlike `Unbound` — which
+            // folds into `Offline` because a client's answer for both is the same
+            // sentence — the answer here is different: Compose is offered.
+            CodexAddressee::BoundNotStarted { .. } => protocol::event::CodexLink::BoundNotStarted,
+            // **`"bound"`, and no sixth word.** The wire vocabulary answers one question
+            // — can an ask aimed at this session land right now — and the answer here is
+            // the same as plain `Bound`'s: no. The extra fact this state carries is *why*
+            // not, which is a refusal sentence rather than an affordance, and a phone
+            // that greyed the composer would render the identical control either way. A
+            // word of its own would be one every client had to learn in order to behave
+            // exactly as it already does — and it would cost a protocol minor to say
+            // nothing. See [`CodexAddressee::StartInFlight`].
+            CodexAddressee::StartInFlight { .. } => protocol::event::CodexLink::Bound,
             CodexAddressee::Offline { .. } | CodexAddressee::Unbound { .. } => {
                 protocol::event::CodexLink::Offline
             }
@@ -3196,6 +3519,7 @@ async fn serve_connection(
     let mut conn = Connection {
         daemon,
         session,
+        launch_cwd: &link.launch_cwd,
         adapter,
         visit: Visit {
             generation: link.generation,
@@ -3207,6 +3531,9 @@ async fn serve_connection(
         amend,
         debts: std::collections::BTreeMap::new(),
         unadopted_retries: 0,
+        not_ready_thread: None,
+        start_in_flight: None,
+        resume_due_now: false,
         fallback_due: false,
         // **Seeded from the carried candidate, and the chase depends on it.**
         // `thread/started` is broadcast once and never replayed, so a candidate whose
@@ -3333,6 +3660,17 @@ async fn serve_connection(
                     thread,
                 };
             }
+        }
+
+        // **THE LADDER IS COLLAPSED WHEN THE THING IT WAS WAITING FOR HAPPENS.**
+        //
+        // A `turn/start` accepted from [`CodexAddressee::BoundNotStarted`] created the
+        // rollout every one of those refused resumes was missing, so the next ask can be
+        // answered — see the site that sets this. Only a `Backoff` is collapsed: every
+        // other state has a request in flight or a debt to pay, and re-arming over one
+        // would pipeline a second resume against it (A2).
+        if std::mem::take(&mut conn.resume_due_now) && matches!(attach, Attach::Backoff { .. }) {
+            attach = Attach::due_now();
         }
 
         if let Attach::Backoff { until, next_delay } = &attach {
@@ -3475,6 +3813,12 @@ async fn serve_connection(
         // this iteration was going to issue has been sent; the next statement blocks
         // on the wire. A reader asking now gets a settled state rather than a
         // half-applied one — see [`LinkPresence::publish`].
+        // The same idle moment, and it belongs immediately before the publish: this is
+        // the bound on [`CodexAddressee::StartInFlight`], and expiring it is the last
+        // thing that can change what the link is about to say it is. The reads have
+        // already been honest about it ([`Connection::start_in_flight_target`]); what
+        // happens here is the log line and the drop.
+        conn.expire_start_in_flight();
         presence.publish(
             conn.addressee(),
             LinkVisit {
@@ -3630,6 +3974,46 @@ async fn serve_connection(
         // filter first would drop it while unbound — so the measured error would
         // time the attach out instead of retrying it, and an unmeasured one would
         // never reach the STOP-AND-AMEND log that exists to report it.
+        //
+        // # A FILED HAZARD: the two id spaces on this leg are one space
+        //
+        // MEASURED, 2026-09-08, from a `codex_broker::frame_tee` capture of a real
+        // session (`conn 2` is this link's own leg, `conn 1` is the TUI's):
+        //
+        // ```text
+        // conn 1 (TUI):  client ids 1..7 (account/read, model/list, skills/list,
+        //                thread/name/set) PLUS 14 uuid-ish strings;  server ids [0]
+        // conn 2 (LINK): client ids 1..7 (initialize, thread/resume, turn/start);
+        //                                                            server ids [0]
+        // ```
+        //
+        // The app-server numbers its own server requests from 0 in the same bare-integer
+        // space this connection numbers its requests from 1, and nothing separates them.
+        // So a response-shaped frame carrying a SERVER request's id is, on the wire,
+        // indistinguishable from the answer to one of ours — and the broker mints exactly
+        // such a frame: `response_capability::unanswerable_error` answers an unadmitted
+        // server request with `-32601`.
+        //
+        // **It is not reachable today, and the arithmetic is why.** The guard below
+        // requires `FrameKind::Response`, which means "no `method` member", so a server
+        // REQUEST can never be mistaken for our answer whatever its id — only a
+        // response-shaped frame can, and that needs the server's counter to reach a value
+        // this connection has outstanding. The server had issued ONE request (id 0) while
+        // our ids start at 1, so it would take eight or more server requests on one leg
+        // before the spaces even touch.
+        //
+        // **And the TUI carries the same overlap without harm**, which is the strongest
+        // evidence that this is a latent hazard rather than the cause of anything observed:
+        // its integer ids run over exactly the same range against the same server counter.
+        // A string-id scheme for this link was considered and REJECTED on that measurement
+        // — its whole justification was that the TUI avoided the overlap, and the capture
+        // shows it does not.
+        //
+        // Filed, not fixed. [`Connection::note_server_request`] already half-records this
+        // ("The id space is the server's, not `Connection::next_id`'s"); the two comments
+        // are each other's other half. If the server's request count on a leg is ever seen
+        // approaching this link's outstanding ids, this is the note that says what to do
+        // about it.
         let kind = frame_kind(&frame);
         let is_our_response = kind == FrameKind::Response
             && matches!(&attach, Attach::Awaiting { id, .. } | Attach::Recovering { id, .. }
@@ -3821,11 +4205,67 @@ async fn serve_connection(
                         .expect("the carried link state")
                         .fallback
                         .is_some();
+                    // **Was this connection ALREADY subscribed to the thread it just
+                    // asked about?** Read before the answer is settled, because
+                    // `attach_from_seed` is what would change it.
+                    //
+                    // That is the whole difference between an initial attach and a
+                    // re-ask, and it is derived rather than tracked: `adopted_thread`
+                    // has exactly one writer — an accepted `thread/resume` — so the two
+                    // agreeing means this link has already proved it can read this
+                    // thread on this connection, and is subscribed to it now.
+                    let already_subscribed = conn.subscribed_to(&target);
                     let settled = conn
                         .settle_resume(&frame, &target, next_delay, has_fallback)
                         .await?;
+                    // **AN UNREADABLE RE-ASK COSTS THE RECOVERY, NEVER THE CONNECTION.**
+                    //
+                    // The initial attach fails closed and always will: nothing is proved
+                    // at that point, so an answer this build cannot read is the only
+                    // evidence there is, and re-grounding on a fresh connection is the
+                    // honest response. A FOLLOW-UP is the opposite situation. The link
+                    // asked because it owed itself one more question about a turn it
+                    // joined mid-flight; the subscription it is asking from was granted
+                    // by an answer it *did* read whole, and this reply is evidence about
+                    // the reply.
+                    //
+                    // Ending the leg here is what makes an unreadable answer
+                    // self-perpetuating rather than merely disappointing: the reconnect
+                    // asks the same question of the same durable history and is told the
+                    // same thing. Measured in production on 2026-09-08 — a follow-up
+                    // after a tool-bearing turn — **70 epochs over 18 minutes,
+                    // 10:04-10:22Z**, ending only when the session did, with the phone
+                    // showing "lost its link" and offering neither Stop nor compose for
+                    // the whole of it. The tool
+                    // guard that produced *that* verdict has since been narrowed
+                    // ([`CodexAdapter::plan_resume_seed`]), which makes this path rarer
+                    // and therefore more important to get right rather than less: it is
+                    // now the only way a follow-up reaches a refusal at all.
+                    //
+                    // [`Connection::recover_from`] has always had this disposition for
+                    // the on-demand recovery — "recording nothing", debts settled, link
+                    // kept — and the reasoning transfers exactly. The report is already
+                    // said once and no more ([`AmendThrottle`]), so the operator still
+                    // learns of it.
+                    let settled = if already_subscribed && matches!(settled, Attach::Refused) {
+                        Attach::Attached
+                    } else {
+                        settled
+                    };
                     // An answer that did not ATTACH recovered nothing, so any debt this
                     // request was paying is owed again.
+                    //
+                    // **Which is precisely why the line above may not fall through to
+                    // here.** `launch_follow_up` settled these debts at the send site;
+                    // rolling them back would leave `follow_up_owed()` true, and the
+                    // bottom of this loop re-arms the attach from `Attached` — so the
+                    // link would ask again, be answered by the same unreadable reply,
+                    // and loop *inside* one connection. That is the reconnect storm with
+                    // the reconnect taken out, and it would be worse: no backoff bounds
+                    // it. Nor is there anything to recover — the turn has finished and
+                    // the answer describing it is the one thing that could have named
+                    // its items. The gap is legible and permanent, which is the same
+                    // trade `recover_from` documents.
                     if !matches!(settled, Attach::Attached) {
                         conn.unsettle_debts(&target);
                     }
@@ -3916,11 +4356,33 @@ async fn serve_connection(
     }
 }
 
+/// **One `turn/start` written from the not-ready proof, and the budget it holds.**
+///
+/// Held rather than inferred because the two things a reader needs are exactly these two:
+/// WHICH thread the start was written for — a proof about one thread is no fact about
+/// another, the same rule `not_ready_thread` is compared under — and WHEN it stops being
+/// the answer.
+///
+/// The deadline is [`COMPOSE_BUDGET`] from the write, which is the same budget the compose
+/// itself is waiting under, and deliberately so: this state exists to describe a compose
+/// that is in flight, so it may not outlive the thing it describes. What it does outlive
+/// is the compose's own ANSWER — an accepted start leaves the turn running and this link
+/// still not subscribed, which is the window a second compose must be refused in.
+#[derive(Debug)]
+struct StartInFlight {
+    thread_id: String,
+    deadline: Instant,
+}
+
 /// Everything scoped to one connection: who to record for, what has been admitted,
 /// and the ids this link has issued.
 struct Connection<'a> {
     daemon: &'a Arc<Daemon>,
     session: &'a SessionKey,
+    /// **[`ControlLink::launch_cwd`]** — the canonical launch cwd this registration
+    /// carried, borrowed for the connection's life. One of the three values
+    /// [`launch_of_record`] needs, and the only one that is per-session.
+    launch_cwd: &'a str,
     adapter: &'a mut CodexAdapter,
     visit: Visit,
     /// Frames dropped because they named a thread this connection is not bound to.
@@ -3960,6 +4422,37 @@ struct Connection<'a> {
     /// How many times a resume of a followed-to thread has been refused as
     /// not-yet-adopted. Reset when an attach is accepted or a fresh candidate is applied.
     unadopted_retries: u32,
+    /// **The thread THIS connection asked about and was told has no rollout** — the
+    /// measured `-32600 "no rollout found for thread id …"`, and nothing else.
+    ///
+    /// The one fact behind [`CodexAddressee::BoundNotStarted`], which is what admits a
+    /// phone's FIRST turn on a thread this link can never subscribe to until that turn
+    /// exists. Written only by [`Connection::settle_resume`]'s not-ready arm, cleared
+    /// by an accepted attach, and compared against the binding by [`addressee_of`] —
+    /// so a proof about one thread can never be read as a proof about another.
+    ///
+    /// **Not carried across a reconnect, deliberately.** A new connection has proved
+    /// nothing; it publishes the wider `Bound` until its own resume is refused, which
+    /// is one round trip away. Fail-closed costs a moment; fail-open would let a
+    /// connection that has watched nothing claim a thread has never run a turn.
+    not_ready_thread: Option<String>,
+    /// **The not-ready proof, SPENT: a `turn/start` written from it is on the wire.**
+    ///
+    /// Set at the write and not at the answer, which is the whole of the fix — see
+    /// [`CodexAddressee::StartInFlight`] for the two defects that ordering closes and for
+    /// the three observations that end it. `not_ready_thread` is cleared in the same
+    /// statement, so the two are exclusive by construction rather than by ordering.
+    start_in_flight: Option<StartInFlight>,
+    /// **A `turn/start` this connection wrote from the not-ready state was accepted**,
+    /// so the rollout it was blocked on now exists.
+    ///
+    /// Set where the answer is read and consumed by the loop's one attach site, for
+    /// [`Connection::fallback_due`]'s reason: the attach ladder is a local of
+    /// `serve_connection` and this is the connection's way of reaching it. Re-arming
+    /// matters because the ladder's ceiling is [`ATTACH_BACKOFF_MAX`] — the link would
+    /// otherwise sit out up to thirty seconds before asking the one question that can
+    /// now be answered, and the phone would watch its own turn run in silence.
+    resume_due_now: bool,
     /// Set when the adoption budget is spent and a fallback target exists; read by the loop
     /// at its one send site.
     fallback_due: bool,
@@ -4359,10 +4852,23 @@ fn interrupt_refusal(
 /// **The order is the interrupt's**, and for the same reasons: the connection first,
 /// because an ask aimed at a socket that is gone is not a question about this one; then the
 /// thread, then the visit, then the moment.
+///
+/// **`not_started` is the connection's own not-ready proof**, and it does one thing
+/// here: it makes the START route *provable* rather than merely inferred. Without it a
+/// start on an un-subscribed connection is chosen because this link has seen no turn
+/// begin — and an un-subscribed connection sees no `turn/*` frame at all, so "seen
+/// none" is not evidence of "none running". With it, the answer rests on the wire's
+/// own statement that the thread has no rollout.
 fn compose_route(
     visit: &Visit,
     running_turn: Option<&RunningTurn>,
     switch_pending: bool,
+    // **What the link is, read ONCE by the caller and passed whole.** Two of its arms
+    // decide something here — `BoundNotStarted` is the proof that admits a first turn,
+    // `StartInFlight` is that proof already spent — and they are the same fact a moment
+    // apart. Taking the value rather than two booleans is what makes "read once" a
+    // property of the signature instead of a discipline the caller has to keep.
+    addressee: &CodexAddressee,
     thread_id: &str,
     generation: u64,
     upstream_epoch: u64,
@@ -4384,6 +4890,18 @@ fn compose_route(
     if switch_pending {
         return Err(crate::codex_refusals::COMPOSE_THREAD_SWITCHING);
     }
+    // **A start written from the proof is already on the wire, so the proof is gone and
+    // this ask has nothing to stand on.** Refused for BOTH routes and refused here, ahead
+    // of the route decision, because the route is not the problem: this connection is not
+    // subscribed, so there is no running turn to steer to, and a second START is the
+    // thing the spent proof exists to stop. The daemon's own gate refuses this too, from
+    // the published state — this is the same verdict read from the fact itself, for the
+    // ask that was already past that gate when the first one was written. See
+    // [`CodexAddressee::StartInFlight`].
+    if matches!(addressee, CodexAddressee::StartInFlight { .. }) {
+        return Err(crate::codex_refusals::COMPOSE_START_IN_FLIGHT);
+    }
+    let not_started = matches!(addressee, CodexAddressee::BoundNotStarted { .. });
     // **The route, decided by the same read that gates it.**
     //
     // A running turn this connection watched start, on this thread, in this visit, means
@@ -4396,6 +4914,22 @@ fn compose_route(
     // here through the fields rather than through a claim that does not exist yet.
     match running_turn {
         Some(running) if running.thread_id == thread_id && running.generation == generation => {
+            // **A CONTRADICTION IS REFUSED, NOT RESOLVED.** The wire said this thread
+            // has no rollout, so no turn has ever run on it; a running turn here would
+            // mean one of those two facts is false, and there is no way to tell which.
+            // Steering would put the words into a turn under an `expectedTurnId` this
+            // connection cannot vouch for, and starting would write over a turn that
+            // may be real. Neither is a thing to guess at with somebody's words.
+            //
+            // **Unreachable on the measured wire, and that is why it is a refusal
+            // rather than a branch that does something.** Zero `turn/*` frames reach an
+            // un-subscribed leg (barrier-probed, 0.153.4), and the only other source of
+            // `running_turn` is an accepted resume answer — which clears the proof.
+            // The check states the invariant so that a future seeding path cannot
+            // quietly break it.
+            if not_started {
+                return Err(crate::codex_refusals::COMPOSE_NO_TURN_TO_STEER);
+            }
             Ok(crate::store::COMPOSE_ROUTE_STEER)
         }
         _ => Ok(crate::store::COMPOSE_ROUTE_START),
@@ -4424,6 +4958,82 @@ fn compose_material(
         route: route.to_string(),
         target_turn_id: composed_against.map(str::to_string),
         claimed_hash: claimed_hash.to_string(),
+    }
+}
+
+/// **The approval policy every `codeconnect codex` session is launched under.**
+///
+/// A restatement of `codeconnect::codex::LAUNCH_APPROVAL_POLICY`, and the daemon may
+/// legitimately hold it: CodeConnect OWNS approval policy for a Codex launch. The
+/// launcher writes both flags into the coordinator's argv from these two constants and
+/// from nowhere else; `validate_codex_argv` refuses a caller's own
+/// `--approval-policy`/`--approvals-reviewer`, and `path_is_owned` refuses the
+/// equivalent `-c approval_policy=…` and `-c approvals_reviewer=…`. There is no
+/// supported way to start a session this daemon watches under a different pair.
+///
+/// **Why it is restated rather than imported.** `ccd` does not depend on the
+/// `codeconnect` crate, and the two ship together from one workspace. A `use` would
+/// be an inversion of the dependency graph for two string literals; a copy that can
+/// drift is the cost, and the cost is bounded by the paragraph below.
+///
+/// # What a wrong value costs: a refusal, never a widening
+///
+/// These are two of the three fields the broker asserts against the launch
+/// fingerprint it holds (`codex_broker::fingerprint::LaunchFingerprint`). A
+/// `turn/start` whose `approvalPolicy` or `approvalsReviewer` disagrees is REFUSED —
+/// measured, and the refusal text names the disagreement:
+/// `params.approvalPolicy: "on-request" but fingerprint is …`. So the failure mode of
+/// this pin is a compose the phone is told did not happen, never a turn that runs
+/// under a policy nobody chose. It is exactly the property the resume-sourced path
+/// already relies on ([`Connection::attach_from_seed`]).
+///
+/// **The operator this costs.** Someone who starts the coordinator directly —
+/// `codeconnect codex-coordinator --approval-policy untrusted …`, which is an internal
+/// entry point the live harnesses use — gets a broker refusal on the FIRST turn a
+/// phone tries to start from the not-ready state, with the wire's own code in the
+/// sentence. Nothing else about that session is affected: once its first turn has run
+/// from the Mac, the resume is accepted and the launch is read from the answer, which
+/// is authoritative for any policy at all.
+const LAUNCH_APPROVAL_POLICY: &str = "on-request";
+/// See [`LAUNCH_APPROVAL_POLICY`]. Mirrors `codeconnect::codex::LAUNCH_APPROVALS_REVIEWER`.
+const LAUNCH_APPROVALS_REVIEWER: &str = "user";
+
+/// **The three ownership values for a turn on a thread that has never run one.**
+///
+/// The honest answer to a question with no better source. A `turn/start` needs
+/// `approvalPolicy`, `approvalsReviewer` and `cwd`, and the authoritative source for
+/// all three — the accepted `thread/resume` answer — is precisely what cannot exist
+/// here: the thread has no rollout, so no resume can be accepted until a turn has run.
+///
+/// So each of the three is taken from the nearest thing to the launch itself:
+///
+///   * `cwd` — [`ControlLink::launch_cwd`], the canonical cwd the coordinator
+///     registered *because* it is the string the broker fingerprints. Told to this
+///     daemon; not inferred.
+///   * `approvalPolicy` / `approvalsReviewer` — [`LAUNCH_APPROVAL_POLICY`] and
+///     [`LAUNCH_APPROVALS_REVIEWER`], which CodeConnect owns for every launch and
+///     which no supported invocation can move.
+///
+/// **`thread/started` was the other candidate and cannot do it.** The announced Thread
+/// object carries `cwd` — and neither `approvalPolicy` nor `approvalsReviewer`
+/// (verified against `fixtures/codex/approval-0.153.jsonl` and
+/// `fixtures/codex/first-turn-from-bound-0.153.4.jsonl`). Two of three is worse than
+/// none: [`crate::codex_adapter::read_turn_launch`] takes all three or nothing for the
+/// reason its doc gives — a frame assembled from two measured values and a guess is
+/// refused with a refusal that reads as a bug in the guess.
+///
+/// **Used in exactly one state**, and never as a fallback for the resume-sourced
+/// value: [`Connection::compose_turn`] reaches for it only when the connection is
+/// [`CodexAddressee::BoundNotStarted`] — the one position in which no accepted answer
+/// can exist. Everywhere else a missing launch is still
+/// [`crate::codex_refusals::COMPOSE_LAUNCH_UNREAD`].
+pub(crate) fn launch_of_record(launch_cwd: &str) -> crate::codex_adapter::TurnLaunch {
+    crate::codex_adapter::TurnLaunch {
+        approval_policy: LAUNCH_APPROVAL_POLICY.to_string(),
+        approvals_reviewer: LAUNCH_APPROVALS_REVIEWER.to_string(),
+        // A JSON string, as the broker compares it — see
+        // [`crate::codex_adapter::TurnLaunch`].
+        cwd: Value::String(launch_cwd.to_string()),
     }
 }
 
@@ -4536,13 +5146,35 @@ pub(crate) fn compose_frame(
 /// adoption compared against this connection's binding would report `Subscribed` for
 /// a resume this connection has not had accepted, which is the one thing the
 /// bound/subscribed split exists to prevent.
+///
+/// `not_ready` is the thread THIS connection's own `thread/resume` was refused
+/// not-ready for, and it is compared against the binding rather than trusted on its
+/// own. That comparison is the whole safety of the split: a proof about thread A is
+/// no proof about thread B, so a visit that moves leaves the narrower answer behind
+/// automatically instead of relying on somebody remembering to clear a flag.
 fn addressee_of(
     bound: Option<&str>,
     adopted: Option<&str>,
     carried: Option<&str>,
+    not_ready: Option<&str>,
+    start_in_flight: Option<&str>,
 ) -> CodexAddressee {
     match (bound, adopted) {
         (Some(bound), Some(adopted)) if bound == adopted => CodexAddressee::Subscribed {
+            thread_id: bound.to_string(),
+        },
+        // **The provable half of `Bound`, and only when the proof is about THIS
+        // thread.** See [`CodexAddressee::BoundNotStarted`] for what it licenses and
+        // why nothing wider may.
+        (Some(bound), _) if not_ready == Some(bound) => CodexAddressee::BoundNotStarted {
+            thread_id: bound.to_string(),
+        },
+        // **The proof, spent.** Ordered after the arm above and compared against the
+        // same binding, so the two can never both answer: the write that sets this one
+        // clears that one, and a not-ready answer arriving afterwards is refused the
+        // re-mint precisely so the pair stays exclusive rather than relying on this
+        // order. See [`CodexAddressee::StartInFlight`].
+        (Some(bound), _) if start_in_flight == Some(bound) => CodexAddressee::StartInFlight {
             thread_id: bound.to_string(),
         },
         (Some(bound), _) => CodexAddressee::Bound {
@@ -4735,6 +5367,33 @@ impl Connection<'_> {
         has_fallback: bool,
     ) -> Result<Attach> {
         if is_measured_not_ready(frame, requested_thread) {
+            // **The one place the not-ready PROOF is minted.** The answer says this
+            // thread has no rollout, which says no turn has ever run on it, which is
+            // what lets a phone's first `turn/start` be admitted here and nowhere
+            // wider — see [`CodexAddressee::BoundNotStarted`].
+            //
+            // **Except over a proof this link has already SPENT.** A `turn/start` written
+            // from that proof is on the wire, or has been accepted and is running; a
+            // resume racing it can still be answered "no rollout", because the rollout is
+            // written by the turn and not by the request that started it. Believing that
+            // answer would re-publish `BoundNotStarted` — and admit a second first-turn
+            // compose — while the first turn runs unseen. The answer is stale about the
+            // one thing this connection knows better than it does, so the state stays
+            // where it is and only the ATTACH backs off, which is what a not-ready answer
+            // is otherwise for. See [`CodexAddressee::StartInFlight`].
+            if self.start_in_flight_target() == Some(requested_thread) {
+                crate::log_debug!(
+                    "codex link for {}: {requested_thread} still answers no-rollout, but a \
+                     turn/start written from this link is outstanding on it; keeping the \
+                     spent proof and backing the attach off in {next_delay:?}",
+                    self.session.name
+                );
+                return Ok(Attach::Backoff {
+                    until: Instant::now() + next_delay,
+                    next_delay: (next_delay * 2).min(ATTACH_BACKOFF_MAX),
+                });
+            }
+            self.not_ready_thread = Some(requested_thread.to_string());
             crate::log_debug!(
                 "codex link for {}: {requested_thread} has no rollout yet; retrying the \
                  attach in {next_delay:?}",
@@ -4807,16 +5466,51 @@ impl Connection<'_> {
         // keyed digest: two values, because one of them must never be logged and
         // the other must never be the reason the throttle stops working.
         let answer = frame_discriminator(frame);
+        // **THE THIRD DISPOSITION: a start this connection itself wrote is in flight.**
+        //
+        // The mirror of the not-ready arm at the top of this function, and it rests on the
+        // same proof for the same reason. A `turn/start` written from
+        // [`CodexAddressee::BoundNotStarted`] is outstanding on THIS thread, so this link
+        // knows two things the answer does not disprove: the thread exists, and a turn is
+        // being started on it. An unreadable reply to the resume that chases that start is
+        // evidence about the REPLY — exactly the reading [`kept_leg_amend_report`] already
+        // takes wherever the link has proved something — so it costs the RECOVERY, not the
+        // CONNECTION.
+        //
+        // MEASURED, 2026-09-08: this is the position the live gate caught twice, where the
+        // re-armed resume was answered `-32601` twelve milliseconds after the start was
+        // accepted. `bail!` ended the leg, the link re-dialled, and the attach that would
+        // have taken ~202 ms took ~610 ms with a reconnect in the middle. Nothing about
+        // that answer needed a new connection: the very next resume, on the very next
+        // connection, was accepted.
+        //
+        // The ordinary bounded ladder, not a free retry: the same `Backoff` the not-ready
+        // arm returns, doubling to [`ATTACH_BACKOFF_MAX`], so an answer that keeps coming
+        // back cannot spin.
+        let start_in_flight_here = self.start_in_flight_target() == Some(requested_thread);
         if let Some(suppressed) = self.amend.admit(Instant::now(), requested_thread, answer) {
-            crate::log_error!(
-                "{}",
-                stop_and_amend_report(
-                    &self.session.name,
-                    requested_thread,
-                    &describe_resume_answer(frame, &frame_digest(frame)),
-                    suppressed,
-                )
-            );
+            // **The report says what is about to happen, and the three callers do
+            // different things.** Read from the same facts the disposition below is
+            // chosen by — a subscribed connection keeps its leg, a connection with its
+            // own start in flight retries on the ladder, and anything else reconnects —
+            // so the sentence cannot disagree with what follows. See
+            // [`kept_leg_amend_report`] for why "Reconnecting." was a lie on this path,
+            // and why saying it here would be the same lie a second time.
+            let shape = describe_resume_answer(frame, &frame_digest(frame));
+            let report = if self.subscribed_to(requested_thread) {
+                kept_leg_amend_report(&self.session.name, requested_thread, &shape, suppressed)
+            } else if start_in_flight_here {
+                retrying_amend_report(&self.session.name, requested_thread, &shape, suppressed)
+            } else {
+                stop_and_amend_report(&self.session.name, requested_thread, &shape, suppressed)
+            };
+            crate::log_error!("{report}");
+        }
+        if start_in_flight_here {
+            return Ok(Attach::Backoff {
+                until: Instant::now() + next_delay,
+                next_delay: (next_delay * 2).min(ATTACH_BACKOFF_MAX),
+            });
         }
         Ok(Attach::Refused)
     }
@@ -5028,6 +5722,17 @@ impl Connection<'_> {
         // before the writes, and deliberately not undone if they fail — the visit is
         // per-connection, and a failed attach ends the connection anyway.
         self.visit.thread_id = Some(thread.to_string());
+        // **The not-ready proof is spent.** An accepted answer says this thread HAS a
+        // rollout, so the fact that mints [`CodexAddressee::BoundNotStarted`] is no
+        // longer true of it and must not outlive the answer that disproved it.
+        // Cleared unconditionally rather than only when it names `thread`: the
+        // connection is subscribed from here, and `Subscribed` outranks it anyway.
+        self.not_ready_thread = None;
+        // **And so is what was spent from it.** An accepted answer is the first of the
+        // three observations that end [`CodexAddressee::StartInFlight`]: this link has
+        // caught up, it is subscribed, and both verbs are live again. Cleared on the same
+        // reasoning and in the same breath, so the pair can never be left half-applied.
+        self.start_in_flight = None;
         // **What this thread runs under, taken from the answer that resumed it.** The
         // three values a `turn/start` must carry — see
         // [`crate::codex_adapter::TurnLaunch`]. They are not a grant: the broker asserts
@@ -5568,7 +6273,13 @@ impl Connection<'_> {
     /// it, and a connection that holds no live id for the card says so rather than
     /// guessing at one.
     ///
-    /// **The id space is the server's, not [`Connection::next_id`]'s.** A response
+    /// **The id space is the server's, not [`Connection::next_id`]'s.** The two are
+    /// nevertheless the same bare-integer space on one connection, which is a measured and
+    /// deliberately unfixed hazard: the filed note lives at the correlation guard in
+    /// [`Connection::serve`], beside `is_our_response`, and carries the capture and the
+    /// arithmetic. This comment is that one's other half.
+    ///
+    /// A response
     /// echoes the id of the request it answers. Drawing one from the counter this
     /// link numbers its own requests with would collide the two spaces on the very
     /// first approval.
@@ -5947,10 +6658,16 @@ impl Connection<'_> {
             let _ = ask.reply.send(recorded);
             return Ok(());
         }
+        // **The connection's own not-ready proof, read once** and used twice below: it
+        // decides that the START route is provable, and it is the only thing that
+        // licenses a launch this link did not read off an accepted answer.
+        let addressee = self.addressee();
+        let not_started = matches!(addressee, CodexAddressee::BoundNotStarted { .. });
         let route = match compose_route(
             &self.visit,
             self.running_turn.as_ref(),
             self.switch_candidate.is_some(),
+            &addressee,
             &ask.thread_id,
             ask.generation,
             ask.upstream_epoch,
@@ -5967,7 +6684,17 @@ impl Connection<'_> {
         // and will assert again now. So getting one wrong costs a refusal, never a
         // widening; not having them at all costs this sentence, which names the missing
         // fact rather than sending a frame that cannot be admitted.
+        //
+        // **The one exception, and it is the whole of option B.** A thread whose resume
+        // the wire has refused not-ready can never produce that answer — no rollout, no
+        // accepted resume; no accepted resume, no launch — and only a turn creates the
+        // rollout. Refusing here would be refusing for ever. So in exactly that state
+        // the three values come from [`launch_of_record`], whose doc carries the
+        // argument for each of them and for why a wrong one is still a refusal.
         let launch = match (route, self.launch.clone()) {
+            (crate::store::COMPOSE_ROUTE_START, None) if not_started => {
+                Some(launch_of_record(self.launch_cwd))
+            }
             (crate::store::COMPOSE_ROUTE_START, None) => {
                 refuse(ask, crate::codex_refusals::COMPOSE_LAUNCH_UNREAD);
                 return Ok(());
@@ -6054,6 +6781,9 @@ impl Connection<'_> {
 
         let wire_id = self.next_id;
         self.next_id += 1;
+        // Taken before the ask is broken up into the pending entry below, so the fact the
+        // proof is spent ON names the same thread the frame names.
+        let start_thread = ask.thread_id.clone();
         let frame = compose_frame(
             wire_id,
             route,
@@ -6079,6 +6809,29 @@ impl Connection<'_> {
                 told: None,
             },
         );
+        // **THE PROOF IS SPENT HERE — BEFORE THE BYTES, NOT WHEN THE ANSWER ARRIVES.**
+        //
+        // This is the whole of the fix, and the placement is the fix rather than an
+        // implementation detail of it. The old code cleared `not_ready_thread` where the
+        // `turn/start` RESPONSE was read, which left the fact standing across the round
+        // trip — and in that window it is already false in the one direction that
+        // matters: this link has ACTED on it, so "no start has been made on this thread"
+        // is no longer something it can say. Two composes with different request ids both
+        // passed on it and both were written; a resume answered "no rollout" in the same
+        // window put it back. See [`CodexAddressee::StartInFlight`] for both, and for the
+        // three observations that end the state it moves into.
+        //
+        // Ordered after the pending entry and before `send`, so there is no arrangement
+        // of `?` in which the frame reaches the wire with the proof still standing. A
+        // failed `send` ends the connection, which discards this along with everything
+        // else it is scoped to.
+        if route == crate::store::COMPOSE_ROUTE_START && not_started {
+            self.not_ready_thread = None;
+            self.start_in_flight = Some(StartInFlight {
+                thread_id: start_thread,
+                deadline: Instant::now() + COMPOSE_BUDGET,
+            });
+        }
         self.send(ws, frame).await
     }
 
@@ -6169,6 +6922,25 @@ impl Connection<'_> {
                 self.session.name,
                 held.thread_id
             );
+            // **A REFUSED START GIVES THE PROOF BACK.**
+            //
+            // The write created nothing — that is what a refusal is — so the fact the
+            // resume answer established about this thread is untouched by it, and the
+            // connection is in exactly the position it was in before the compose was
+            // attempted. Dropping the state instead would leave the phone looking at a
+            // plain `bound` session, and being told "the first turn was just started"
+            // about a turn that was refused, for the rest of the budget: two sentences,
+            // both false, for a compose the operator can simply send again.
+            //
+            // Restored only for the route and the thread it was spent on, and only while
+            // it is still this connection's — the same comparison every other reader of
+            // this pair makes. See [`CodexAddressee::StartInFlight`].
+            if held.route == crate::store::COMPOSE_ROUTE_START
+                && self.start_in_flight_target() == Some(held.thread_id.as_str())
+            {
+                self.start_in_flight = None;
+                self.not_ready_thread = Some(held.thread_id.clone());
+            }
             let settlement = self
                 .settle_compose_claim(&held, crate::store::COMPOSE_REFUSED)
                 .await;
@@ -6218,6 +6990,50 @@ impl Connection<'_> {
             return true;
         };
         let turn = turn.to_string();
+        // **THE ROLLOUT EXISTS NOW — ASK AGAIN AT ONCE.**
+        //
+        // This start was written from [`CodexAddressee::BoundNotStarted`]: the wire had
+        // just told this connection the thread had no rollout, which is why the resume
+        // is sitting out a backoff whose ceiling is [`ATTACH_BACKOFF_MAX`]. The
+        // app-server has now accepted a turn on that thread, and a turn writes the
+        // rollout (MEASURED, 0.153.4: the resume immediately after this answer succeeds
+        // with a full populated result). So the very thing the ladder is waiting for has
+        // happened, and waiting out the rest of it would leave the phone watching its
+        // own turn in silence for up to thirty seconds.
+        //
+        // Read here, where the proof is still standing — nothing between the write and
+        // this answer could have cleared it — and compared by thread, so an answer about
+        // some other thread cannot re-arm an attach that is not about it.
+        //
+        // # The proof was already spent, and this answer does NOT end what it was spent
+        // into
+        //
+        // MEASURED on 0.153.4 (`fixtures/codex/first-turn-from-bound-0.153.4.jsonl`, and
+        // the probe's own `ROLLOUTS BEFORE -> []` / `ROLLOUTS AFTER ->
+        // [rollout-….jsonl]`): the accepted turn writes the rollout, so from here "this
+        // thread has never run a turn" is false of it.
+        //
+        // The proof stopped being cleared here, and moved to the write
+        // ([`Connection::compose_turn`]) — the response is far too late, because the
+        // window between the two is exactly where a second compose was admitted and where
+        // a not-ready answer put the proof back. What this arm reads now is
+        // [`CodexAddressee::StartInFlight`], which is what the write spent it into, and it
+        // does **not** clear that: the turn this answer just confirmed is now RUNNING, on
+        // a thread this link is still not subscribed to, which is precisely the position
+        // a second `turn/start` must keep being refused from. It ends on one of the three
+        // observations named there — the attach being accepted, the turn's terminal, or
+        // its own budget — and all this arm does is make the first of them arrive sooner.
+        if held.route == crate::store::COMPOSE_ROUTE_START
+            && self.start_in_flight_target() == Some(held.thread_id.as_str())
+        {
+            crate::log_info!(
+                "codex link for {}: turn {turn} was started on {} from a thread with no \
+                 rollout; the rollout exists now, so the attach is due immediately",
+                self.session.name,
+                held.thread_id
+            );
+            self.resume_due_now = true;
+        }
         let settlement = self
             .settle_compose_claim(&held, &crate::store::compose_outcome(held.route, &turn))
             .await;
@@ -7515,6 +8331,18 @@ impl Connection<'_> {
         let Some(thread) = self.bound().map(str::to_string) else {
             return;
         };
+        // **The second observation that ends [`CodexAddressee::StartInFlight`].** The turn
+        // a phone started from the spent proof has finished, so there is nothing left for
+        // a second compose to collide with and no reason to keep refusing one.
+        //
+        // Reachable only once this link is subscribed — an un-subscribed leg is handed no
+        // `turn/*` frame at all, which is the measurement the whole state rests on — so in
+        // practice `attach_from_seed` has usually cleared it already. Stated anyway,
+        // because "usually" is not an invariant and this is the exit that does not depend
+        // on the attach ever being accepted.
+        if self.start_in_flight_target() == Some(thread.as_str()) {
+            self.start_in_flight = None;
+        }
         let key = (thread.clone(), turn.to_string());
         // Only a turn still awaiting its terminal transitions. A turn already owed has
         // nothing to add; one already settled has had its ask, and a replayed terminal
@@ -8026,6 +8854,71 @@ impl Connection<'_> {
     /// not have, and inventing one now would be a shape no consumer exists to read —
     /// Phase 3 answers decisions (correctly scoped to A) and Phase 4 steers, which is
     /// where the distinction first earns its keep.
+    /// **Is THIS connection already subscribed to `thread`?**
+    ///
+    /// Derived, never tracked: `adopted_thread` has exactly one writer — an accepted
+    /// `thread/resume` — so it agreeing with the binding means this link has already
+    /// proved it can read this thread **on this connection**, and receives its frames
+    /// now.
+    ///
+    /// One predicate rather than two copies of the expression, because two callers must
+    /// agree about it and they are in different functions: the loop converts an
+    /// unreadable follow-up's `Attach::Refused` back to `Attach::Attached` on it, and
+    /// [`Connection::settle_resume`] picks which of the two reports to emit on it. They
+    /// drifted once already — the report said "Reconnecting." on a leg the loop then
+    /// kept — and a shared read is what makes that unexpressible rather than merely
+    /// fixed.
+    ///
+    /// **Must be read BEFORE the answer is settled.** `attach_from_seed` is what writes
+    /// the adoption, so a read afterwards would report the subscription this very answer
+    /// just granted rather than the one it was asked from.
+    /// **The thread a `turn/start` is in flight for**, or `None` once the budget is
+    /// spent.
+    ///
+    /// The expiry is applied HERE, at the read, and not only in the sweep that logs it:
+    /// the sweep runs at the loop's idle moment, which is after a compose taken from the
+    /// channel has already been routed, so a read that trusted the field would answer
+    /// from a state the sweep was about to drop. Making the accessor the only way in
+    /// means "expired" and "gone" are the same answer everywhere.
+    fn start_in_flight_target(&self) -> Option<&str> {
+        self.start_in_flight
+            .as_ref()
+            .filter(|held| Instant::now() < held.deadline)
+            .map(|held| held.thread_id.as_str())
+    }
+
+    /// **The bound, said out loud once and then dropped.**
+    ///
+    /// Every ordinary exit from this state is an observation
+    /// ([`CodexAddressee::StartInFlight`]); this is what happens when none of them
+    /// arrives. The connection falls back to plain [`CodexAddressee::Bound`] and the
+    /// ordinary attach ladder, which is where it would have been had the compose never
+    /// been written — so nothing is stuck, and the log says why the phone's answer
+    /// changed.
+    ///
+    /// Said **once** because the state is taken rather than marked: there is nothing left
+    /// to report a second time.
+    fn expire_start_in_flight(&mut self) {
+        let Some(held) = self.start_in_flight.as_ref() else {
+            return;
+        };
+        if Instant::now() < held.deadline {
+            return;
+        }
+        crate::log_info!(
+            "codex link for {}: the turn started on {} from a phone has neither been \
+             resumed into nor finished within {COMPOSE_BUDGET:?}; this link goes back to \
+             reporting the thread as merely bound and keeps retrying the attach",
+            self.session.name,
+            held.thread_id
+        );
+        self.start_in_flight = None;
+    }
+
+    fn subscribed_to(&self, thread: &str) -> bool {
+        self.adopted_thread.as_deref() == Some(thread) && self.bound() == Some(thread)
+    }
+
     fn addressee(&self) -> CodexAddressee {
         addressee_of(
             self.visit.thread_id.as_deref(),
@@ -8037,6 +8930,14 @@ impl Connection<'_> {
             // adopted-only slot: a merely-pending candidate is not something this link
             // has verified, and must not be named.
             self.carried_target.as_deref(),
+            // **What THIS connection proved about THIS thread**, and nothing carried:
+            // a fresh connection has proved nothing and opens on `Bound`.
+            self.not_ready_thread.as_deref(),
+            // And what it SPENT that proof on. Read through the accessor rather than off
+            // the field, so a state whose budget has run out is already gone from every
+            // read — the sweep that logs it and drops it runs at the loop's idle moment,
+            // which is later. See [`Connection::start_in_flight_target`].
+            self.start_in_flight_target(),
         )
     }
 
@@ -8686,6 +9587,73 @@ mod tests {
         assert!(line.contains(&format!("digest {hex}")), "{line}");
     }
 
+    /// **The kept-leg report is the same redaction and the opposite disposition.**
+    ///
+    /// Two claims, and the second is the defect: the sentence a follow-up gets must say
+    /// the subscription is kept and must NOT say "Reconnecting.", because the caller is
+    /// about to convert the refusal back to `Attach::Attached` and no reconnect happens.
+    /// The first claim is the one that would be easy to lose while fixing the second —
+    /// a second report is a second place a frame could be quoted, and the whole point of
+    /// [`describe_resume_answer`] is that neither of them can.
+    #[test]
+    fn the_kept_leg_report_says_the_leg_is_kept_and_never_says_reconnecting() {
+        let frame = populated_answer();
+        let salt = a_salt();
+        for (mode, salt) in both_modes(&salt) {
+            let line = kept_leg_amend_report(
+                "cc-live",
+                POPULATED_THREAD,
+                &describe_resume_answer(&frame, &frame_digest_salted(salt, &frame)),
+                0,
+            );
+            // The whole of the defect, in two assertions.
+            assert!(
+                !line.contains("Reconnecting."),
+                "the report ({mode}) announced a reconnect on a leg that is kept:\n{line}"
+            );
+            assert!(
+                line.contains("The subscription is KEPT and this connection is NOT reconnecting"),
+                "the report ({mode}) does not say what happened to the leg:\n{line}"
+            );
+            assert!(
+                line.contains("stay missing from this session's history"),
+                "the report ({mode}) does not say what was actually lost:\n{line}"
+            );
+            // And it is not the other report wearing a different hat.
+            assert!(
+                !line.contains("STOP-AND-AMEND"),
+                "the two dispositions must be distinguishable in the log ({mode}):\n{line}"
+            );
+
+            // Same redaction, asserted on the same content as its sibling: a second
+            // report is a second place the frame could leak.
+            for leaked in [
+                "Reply with the single word ok",
+                "rollout-2026-08-25T03-30-00",
+                "/work/proj",
+                "gpt-5.6-luna",
+                "itemsBackwardsCursor",
+                "runtimeWorkspaceRoots",
+            ] {
+                assert!(
+                    !line.contains(leaked),
+                    "the kept-leg report ({mode}) leaked {leaked:?}:\n{line}"
+                );
+            }
+            assert!(
+                line.contains(POPULATED_THREAD),
+                "no thread id ({mode}):\n{line}"
+            );
+            assert!(line.contains("turns=1"), "no turn count ({mode}):\n{line}");
+        }
+        // The throttle's swallowed count rides it too, or a permanent condition would
+        // be reported once and then look like it had stopped happening.
+        assert!(
+            kept_leg_amend_report("cc-live", POPULATED_THREAD, "a shape", 4)
+                .contains("(plus 4 suppressed since the previous report.)")
+        );
+    }
+
     #[test]
     fn a_csprng_failure_omits_the_digest_rather_than_substituting_a_searchable_one() {
         let frame = populated_answer();
@@ -8743,10 +9711,38 @@ mod tests {
         assert!(line.contains("turns=1"), "{line}");
     }
 
+    /// **A DELIBERATELY NARROWED INVARIANT, and the narrowing is the point of the test.**
+    ///
+    /// This test was `an_error_answer_reports_its_code_and_never_its_message`, and it
+    /// asserted that no part of an error's `message` could reach the log — on the sound
+    /// reasoning that a message is peer text and the measured not-ready one already embeds
+    /// a thread id.
+    ///
+    /// It was narrowed on 2026-09-08, knowingly, and here is what bought the change: an
+    /// intermittent `-32601` cost SIX live runs to chase and was still not identified,
+    /// because `an error (code -32601; digest …)` cannot be told apart from any other
+    /// `-32601`. A report that cannot distinguish two failures is a report an operator
+    /// cannot act on, and the fix for that is the sentence the app-server actually sent.
+    ///
+    /// So the invariant is no longer "no message" but **"no identifiers"**, and this test
+    /// is what holds that line. The removals are still absolute — see [`scrub_ids`] — and
+    /// they are asserted here on the shape that carries this machine's name:
+    ///
+    ///   * a PATH never survives, in any position;
+    ///   * an ID never survives — the not-ready message's thread id is the measured case;
+    ///   * and the message is BOUNDED, so an error that is really a payload cannot fill
+    ///     the log.
+    ///
+    /// **What does survive is short, digit-free, slash-free words**, and that is a real
+    /// residual exposure rather than a proof of safety: an app-server that echoed a user's
+    /// prompt into an error message would put some of those words here. It is accepted
+    /// knowingly and written down at [`scrub_ids`]. If such a message is ever measured,
+    /// the response is to narrow this to an allowlist of the messages actually seen — not
+    /// to widen the scrub.
     #[test]
-    fn an_error_answer_reports_its_code_and_never_its_message() {
-        // A message is not structural: the measured not-ready one already embeds a
-        // thread id, so a future one could embed anything.
+    fn an_error_answer_reports_its_code_and_a_message_with_every_identifier_removed() {
+        // The old case, kept verbatim: a path may never survive, and this is the
+        // assertion that would have caught the naive "just print the message" change.
         let frame = json!({
             "id": 2,
             "error": {"code": -32000, "message": "/work/proj is not a workspace"}
@@ -8757,7 +9753,40 @@ mod tests {
             !line.contains("/work/proj"),
             "the report leaked a path:\n{line}"
         );
-        assert!(!line.contains("not a workspace"), "{line}");
+        assert!(
+            line.contains("<path> is not a workspace"),
+            "the path is replaced rather than dropped, so the sentence still reads:\n{line}"
+        );
+
+        // The measured not-ready error, which is the one that actually embeds an id.
+        let not_ready = json!({
+            "id": 2,
+            "error": {
+                "code": -32600,
+                "message": format!("no rollout found for thread id {POPULATED_THREAD}")
+            }
+        });
+        let line = report_for(&not_ready, 0);
+        assert!(
+            !line.contains(&format!("thread id {POPULATED_THREAD}")),
+            "the report leaked a thread id out of the MESSAGE:\n{line}"
+        );
+        assert!(
+            line.contains("no rollout found for thread id <id>"),
+            "and what is left has to be the sentence that names the error:\n{line}"
+        );
+
+        // And it is bounded, so a message that is really a payload cannot fill the log.
+        let flood = json!({
+            "id": 2,
+            "error": {"code": -32000, "message": "spam ".repeat(500)}
+        });
+        let line = report_for(&flood, 0);
+        assert!(
+            line.len() < 1200,
+            "an unbounded message reached the log ({} chars):\n{line}",
+            line.len()
+        );
     }
 
     #[test]
@@ -8968,8 +9997,16 @@ mod tests {
     /// bait: anything that binds to it, or records a fact under it, has routed a
     /// non-notification into the notification path.
     const NOISE_THREAD: &str = "th_NOISE_NOT_THIS_SESSION";
+    /// **The canonical launch cwd a registration carries** — sanitized to the same
+    /// `/work` every committed codex fixture uses, so a frame asserted here and a
+    /// frame read out of a capture are comparable byte for byte.
+    const LAUNCH_CWD: &str = "/work";
     /// The thread the lifecycle capture belongs to.
     const LIFECYCLE_THREAD: &str = "01a0127a-c6f4-70d1-b3a3-0742f8fd0d86";
+    /// **The turn id the app-server minted for a `turn/start` written from a
+    /// bound-but-unresumed leg**, captured verbatim in
+    /// `fixtures/codex/first-turn-from-bound-0.153.4.jsonl`.
+    const FIRST_TURN_FROM_BOUND: &str = "01a080d4-7070-7b40-8429-aaac4d736f05";
     /// The turn it runs.
     const LIFECYCLE_TURN: &str = "01a0127a-d9cd-7461-84d7-6eea6d0b98a5";
     /// The real 0.147 notification stream for one message turn.
@@ -9037,6 +10074,34 @@ mod tests {
         /// resume the link owes itself is answered with the turn FINISHED, carrying both
         /// items under their real ids, which is the only thing that can recover them.
         MidTurnThenCompleted,
+        /// **THE PRODUCTION LOOP OF 2026-09-08, SCRIPTED.**
+        ///
+        /// [`ResumeAnswer::MidTurnThenCompleted`] with the one difference that broke a
+        /// live session: the turn the link joined mid-flight had run a **command**, so
+        /// the follow-up answer describes that turn finished *carrying its completed
+        /// `commandExecution`*. The reader refused any tool-bearing turn outright — the
+        /// refusal being the STOP-AND-AMEND verdict, which ends the leg — so the
+        /// reconnect asked about the same durable history and was told the same thing.
+        /// 70 epochs in 18 minutes (2026-09-08, 10:04-10:22Z), and the phone had no
+        /// Stop and no compose for the rest of the session.
+        ///
+        /// A finished turn is history: its ids are the real ones. The answer must be
+        /// READ, on the connection the link already has.
+        MidTurnThenCompletedWithATool,
+        /// **A RE-ASK THIS BUILD GENUINELY CANNOT READ MUST NOT COST THE CONNECTION.**
+        ///
+        /// The same arc — attach mid-turn, the turn terminalizes, the link asks once
+        /// more — and this time the answer really is unreadable: the turn comes back
+        /// `interrupted`, a state no answer has been measured reporting. Narrowing the
+        /// tool guard does not make this case go away, it makes it the *only* remaining
+        /// one, so the disposition matters more rather than less.
+        ///
+        /// The link is ALREADY ATTACHED and subscribed. Nothing about an unreadable
+        /// recovery answer is evidence about the subscription it already proved, and
+        /// `Connection::recover_from` has always known that: it logs once, records
+        /// nothing, and keeps the link. The initial attach is a different question —
+        /// nothing is proved there yet — and keeps its fail-closed refusal.
+        MidTurnThenAnUnreadableReAsk,
         /// **Two debts, and the second falls due while the first is in flight.**
         ///
         /// The answer seeds TWO turns running. Turn A terminalizes, so a follow-up
@@ -9060,6 +10125,37 @@ mod tests {
         /// check. A running turn's items are never read at all, so the up-front check
         /// is the only thing standing between this answer and an attach.
         ItemWithoutType,
+        /// **THE DEAD END, AND THE WAY OUT OF IT — SCRIPTED FROM THE 0.153.4 CAPTURE.**
+        ///
+        /// `fixtures/codex/first-turn-from-bound-0.153.4.jsonl`, in four moves:
+        ///
+        ///   1. The thread is announced, so the connection BINDS without resuming.
+        ///   2. Every `thread/resume` before a turn exists is answered with the measured
+        ///      not-ready error — the thread has no rollout.
+        ///   3. A `turn/start` is ACCEPTED, and answered with the captured result: a
+        ///      turn object with an id, `items:[]`, `itemsView:"notLoaded"`,
+        ///      `status:"inProgress"`.
+        ///   4. Every `thread/resume` AFTER that is answered populated — the turn wrote
+        ///      the rollout, so the resume the link has been retrying now succeeds.
+        ///
+        /// **No `turn/*` or `item/*` frame is replayed before the accepted resume**,
+        /// which is the measurement (barrier-probed on the real wire), and it is what
+        /// makes the connection's `running_turn` provably empty for the whole of the
+        /// un-subscribed window.
+        NoRolloutUntilAFirstTurn,
+        /// **The same dead end, with the `turn/start` LEFT UNANSWERED.**
+        ///
+        /// [`ResumeAnswer::NoRolloutUntilAFirstTurn`] answers the start at once, which
+        /// closes the window this script exists to hold open: the interval between the
+        /// frame reaching the wire and anything at all coming back. That interval is
+        /// where the proof used to still be standing, and it is the only place two
+        /// composes can be judged against the same fact — so it is where a second
+        /// `turn/start` was written.
+        ///
+        /// Every `thread/resume` is answered not-ready, for ever; the `turn/start` gets
+        /// nothing. The connection therefore dies of [`COMPOSE_BUDGET`], which is the
+        /// ordinary bound on an unanswered compose and is what makes the test terminate.
+        NoRolloutAndTheStartIsNeverAnswered,
         /// A policy refusal no retry can fix.
         Refused,
         /// A `result` object with no `turns[]` anywhere — neither an error nor a
@@ -9658,6 +10754,35 @@ mod tests {
     /// finished. Read from `fixtures/codex/lifecycle.jsonl`'s own `item/completed`.
     const LIFECYCLE_USER_ITEM: &str = "01a0127a-dbdd-7d11-b925-5bb0c2dac319";
 
+    /// The real 0.147 stream for a turn that RUNS A SHELL COMMAND. Read here for one
+    /// item only — see [`completed_command_item`].
+    const COMMAND_EXECUTION: &str = include_str!("../../../fixtures/codex/command-execution.jsonl");
+
+    /// The completed `commandExecution` item, **taken out of the capture rather than
+    /// written here**.
+    ///
+    /// The item spliced into a scripted answer has to be one the live path would also
+    /// produce, or the test proves only that the reader accepts something this test
+    /// invented. `fixtures/codex/command-execution.jsonl` frame 21 is that item as an
+    /// `item/completed` really delivered it: `status:"completed"`, `exitCode:0`, and the
+    /// four fields `schema-0.153/guarded-wire-stable.json` requires of the variant.
+    fn completed_command_item() -> Value {
+        COMMAND_EXECUTION
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<Value>(line).expect("a captured frame is JSON"))
+            .find(|frame| {
+                frame["method"] == "item/completed"
+                    && frame["params"]["item"]["type"] == "commandExecution"
+                    && frame["params"]["item"]["status"] == "completed"
+            })
+            .expect("the capture completes a command")["params"]["item"]
+            .clone()
+    }
+
+    /// That item's id, so a test can name the fact it must produce.
+    const COMMAND_ITEM: &str = "exec-cf7b67c7-3a19-4dd8-a9a6-6f243db33bd4";
+
     /// A THIRD thread, for the two-switches-in-a-row case.
     const THIRD_THREAD: &str = "01a039a6-d67c-7bb1-9050-071265c77067";
 
@@ -9941,6 +11066,10 @@ mod tests {
         // connection's lifetime must be expressible without naming what the link happened
         // to ask.
         let mut frames_seen = 0usize;
+        // Has this leg accepted a `turn/start` yet? The one bit
+        // [`ResumeAnswer::NoRolloutUntilAFirstTurn`] turns on: before it, a resume is
+        // refused not-ready; after it, the rollout exists and the resume succeeds.
+        let mut first_turn_started = false;
         while let Some(Ok(msg)) = ws.next().await {
             let Message::Text(text) = msg else { continue };
             let frame: Value = serde_json::from_str(&text)?;
@@ -10151,6 +11280,32 @@ mod tests {
                                 lifecycle_answer_in_progress(id, &asked_about)
                             } else {
                                 lifecycle_answer(id, &asked_about, |_| {})
+                            }
+                        }
+                        // The same, and the finished turn ran a command. The tool item
+                        // is the real captured one, spliced into the real captured turn.
+                        ResumeAnswer::MidTurnThenCompletedWithATool => {
+                            if resumes_answered == 0 {
+                                lifecycle_answer_in_progress(id, &asked_about)
+                            } else {
+                                lifecycle_answer(id, &asked_about, |result| {
+                                    let items = result["thread"]["turns"][0]["items"]
+                                        .as_array_mut()
+                                        .expect("the captured turn has items");
+                                    // Between the userMessage and the agentMessage, which
+                                    // is where the capture itself puts it.
+                                    items.insert(1, completed_command_item());
+                                })
+                            }
+                        }
+                        // The same, and the follow-up answer is one nothing has measured.
+                        ResumeAnswer::MidTurnThenAnUnreadableReAsk => {
+                            if resumes_answered == 0 {
+                                lifecycle_answer_in_progress(id, &asked_about)
+                            } else {
+                                lifecycle_answer(id, &asked_about, |result| {
+                                    result["thread"]["turns"][0]["status"] = json!("interrupted");
+                                })
                             }
                         }
                         // Two turns running; A terminalizes, then B terminalizes while
@@ -11000,6 +12155,39 @@ mod tests {
                                 }})
                             }
                         }
+                        // Not-ready until this leg has accepted a `turn/start`, and
+                        // populated after it. See [`ResumeAnswer::NoRolloutUntilAFirstTurn`].
+                        ResumeAnswer::NoRolloutUntilAFirstTurn => {
+                            if first_turn_started {
+                                // **HELD FOR A BEAT, AND THE BEAT IS THE POINT.** Between
+                                // an accepted `turn/start` and the answer to the resume it
+                                // re-armed, the link is *catching up*: the thread has a
+                                // rollout and this connection has not read it. That window
+                                // is real on the wire and vanishingly short against a
+                                // scripted leg, so it is held open here — well inside
+                                // `RESUME_BUDGET` (1500ms under `cfg(test)`), so the link
+                                // waits rather than giving the attach up.
+                                tokio::time::sleep(Duration::from_millis(1000)).await;
+                                let answer = lifecycle_answer(id, &asked_about, |_| {});
+                                ws.send(Message::Text(answer.to_string())).await?;
+                                resumes_answered += 1;
+                                continue;
+                            }
+                            json!({"id": id, "error": {
+                                "code": -32600,
+                                "message":
+                                    format!("no rollout found for thread id {asked_about}")
+                            }})
+                        }
+                        // Not-ready for ever: the start that would create the rollout
+                        // is deliberately never answered.
+                        ResumeAnswer::NoRolloutAndTheStartIsNeverAnswered => {
+                            json!({"id": id, "error": {
+                                "code": -32600,
+                                "message":
+                                    format!("no rollout found for thread id {asked_about}")
+                            }})
+                        }
                         ResumeAnswer::UnmeasuredTurnStatus => {
                             lifecycle_answer(id, &asked_about, |result| {
                                 result["thread"]["turns"][0]["status"] = json!("interrupted");
@@ -11101,9 +12289,14 @@ mod tests {
                     // The mid-turn script replays only the TAIL, and only once: the
                     // withheld userMessage is what the follow-up has to recover, and a
                     // second replay would hand it over for free.
-                    if matches!(answer, ResumeAnswer::MidTurnThenCompleted) && resumes_answered == 1
+                    if matches!(
+                        answer,
+                        ResumeAnswer::MidTurnThenCompleted
+                            | ResumeAnswer::MidTurnThenCompletedWithATool
+                            | ResumeAnswer::MidTurnThenAnUnreadableReAsk
+                    ) && resumes_answered == 1
                     {
-                        for line in capture_tail() {
+                        for line in capture_tail_on(&asked_about) {
                             ws.send(Message::Text(line)).await?;
                         }
                     }
@@ -11129,6 +12322,26 @@ mod tests {
                         ws.close(None).await?;
                         return Ok(());
                     }
+                }
+                // **The measured `turn/start` answer, and only for the script whose
+                // subject it is.** Every other script leaves it unanswered, exactly as
+                // before: none of them writes one.
+                "turn/start" if matches!(answer, ResumeAnswer::NoRolloutUntilAFirstTurn) => {
+                    first_turn_started = true;
+                    ws.send(Message::Text(
+                        json!({"id": id, "result": {"turn": {
+                            "id": FIRST_TURN_FROM_BOUND,
+                            "items": [],
+                            "itemsView": "notLoaded",
+                            "status": "inProgress",
+                            "error": Value::Null,
+                            "startedAt": Value::Null,
+                            "completedAt": Value::Null,
+                            "durationMs": Value::Null,
+                        }}})
+                        .to_string(),
+                    ))
+                    .await?;
                 }
                 _ => {}
             }
@@ -11296,6 +12509,7 @@ mod tests {
                 socket: leg.path.clone(),
                 generation: 1,
                 thread_id: hint.map(str::to_string),
+                launch_cwd: LAUNCH_CWD.into(),
             },
             presence.clone(),
             LinkCarry::new(),
@@ -11341,6 +12555,181 @@ mod tests {
         (events, connections, resumes, frames, presence, push.last())
     }
 
+    /// **Drive a link and compose on it the moment it publishes the state under test.**
+    ///
+    /// The one thing the presence-watching drive cannot do: [`ComposeRequest`] travels
+    /// on a channel that dies with the link handle, so a test that wants the compose to
+    /// reach the connection has to hold the sender for the whole run. Everything else is
+    /// [`drive_watching_presence`], including the process-wide serialization — see the
+    /// note there for why that is not optional.
+    ///
+    /// Waits for `awaited` (compared by [`CodexAddressee::wire_link`], so a test names a
+    /// state rather than a thread id), then composes with the visit the presence
+    /// published in the same read — which is what a real `Daemon::compose` does, and the
+    /// only way the ask can pass the link's own epoch and generation checks.
+    ///
+    /// **`after_resumes` is what makes the re-arm observable at all.** The attach ladder
+    /// starts at [`ATTACH_BACKOFF_MIN`] and doubles, so a compose written after one or
+    /// two refusals is followed by the ladder's own next ask within a few hundred
+    /// milliseconds — and "asked again quickly" would be true whether or not anything
+    /// re-armed. Waiting for N refusals first puts a KNOWN, LARGE step ahead of the
+    /// link, so a small measured gap can only be the re-arm.
+    ///
+    /// **`again` is a SECOND compose, written in the catch-up window.** It goes out
+    /// after the re-armed resume has been sent and before the leg answers it — the
+    /// interval in which the thread has a rollout and this connection has not read it.
+    /// What the link does with it is the whole observable for spending the not-ready
+    /// proof at the acceptance.
+    ///
+    /// Returns `(the report the phone would be given, the second report if one was
+    /// asked for, every frame the leg saw, the distinct states published, and how long
+    /// after the compose was answered the NEXT `thread/resume` went out)`.
+    #[allow(clippy::type_complexity)]
+    async fn drive_composing(
+        answer: ResumeAnswer,
+        awaited: protocol::event::CodexLink,
+        after_resumes: usize,
+        text: &str,
+        again: Option<&str>,
+        settle: Duration,
+    ) -> (
+        ComposeReport,
+        Option<ComposeReport>,
+        Vec<Value>,
+        Vec<CodexAddressee>,
+        Option<Duration>,
+    ) {
+        let _serialized = ONE_LEG_AT_A_TIME.lock().await;
+        let leg = ScriptedLeg::start(answer, true);
+        let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
+        let (daemon, _db, _push) = linked_daemon_watching_pushes(&session);
+        let presence = LinkPresence::new();
+        let (composes, compose_rx) = crate::codex_link::compose_channel();
+        let task = tokio::spawn(run(
+            Arc::clone(&daemon),
+            session.clone(),
+            ControlLink {
+                socket: leg.path.clone(),
+                generation: 1,
+                thread_id: None,
+                launch_cwd: LAUNCH_CWD.into(),
+            },
+            presence.clone(),
+            LinkCarry::new(),
+            crate::codex_link::answer_channel().1,
+            crate::codex_link::interrupt_channel().1,
+            compose_rx,
+        ));
+        // Sampled for the same reason `drive_watching_presence` samples: the states
+        // worth asserting are ones the link passes through.
+        let published = Arc::new(std::sync::Mutex::new(Vec::<CodexAddressee>::new()));
+        let sampler = {
+            let presence = presence.clone();
+            let published = Arc::clone(&published);
+            tokio::spawn(async move {
+                loop {
+                    {
+                        let now = presence.get();
+                        let mut seen = published.lock().unwrap();
+                        if seen.last() != Some(&now) {
+                            seen.push(now);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+        };
+
+        let deadline = Instant::now() + settle;
+        let mut aimed = None;
+        while Instant::now() < deadline {
+            let (state, visit) = presence.get_with_generation();
+            if state.wire_link() == awaited && leg.requests("thread/resume").len() >= after_resumes
+            {
+                aimed = Some((state, visit));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let report = match aimed {
+            Some((state, visit)) => {
+                let thread = state.thread_id().expect("the awaited state names a thread");
+                let gate = Arc::new(tokio::sync::RwLock::new(())).read_owned().await;
+                composes
+                    .compose(
+                        "req-first-turn",
+                        thread.to_string(),
+                        visit.generation,
+                        text.to_string(),
+                        protocol::hash::compose_hash(&session.uid, text),
+                        visit.upstream_epoch,
+                        gate,
+                    )
+                    .await
+            }
+            None => ComposeReport::NotApplied(format!(
+                "the link never published {awaited:?} within {settle:?}: {:?}",
+                published.lock().unwrap()
+            )),
+        };
+        // **How long the link waited before asking again.** Measured from the moment the
+        // compose was answered, which is the moment the rollout exists — see the re-arm
+        // at the compose settle. `after_resumes` has already put a large ladder step
+        // ahead of the link, so a small number here can only be the re-arm.
+        let answered_at = Instant::now();
+        let resumes_before = leg.requests("thread/resume").len();
+        let mut re_asked = None;
+        let waiting_until = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < waiting_until {
+            if leg.requests("thread/resume").len() > resumes_before {
+                re_asked = Some(answered_at.elapsed());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // **The second compose, inside the window the leg is holding open.** Sent after
+        // the re-ask above is observed, so the resume really is outstanding, and before
+        // the leg's held answer lands — which is what makes this a question about the
+        // catch-up state rather than about a subscribed link.
+        let second = match again {
+            Some(text) => {
+                let (state, visit) = presence.get_with_generation();
+                match state.thread_id() {
+                    Some(thread) => {
+                        let gate = Arc::new(tokio::sync::RwLock::new(())).read_owned().await;
+                        Some(
+                            composes
+                                .compose(
+                                    "req-second-turn",
+                                    thread.to_string(),
+                                    visit.generation,
+                                    text.to_string(),
+                                    protocol::hash::compose_hash(&session.uid, text),
+                                    visit.upstream_epoch,
+                                    gate,
+                                )
+                                .await,
+                        )
+                    }
+                    None => Some(ComposeReport::NotApplied(format!(
+                        "the link named no thread in the catch-up window: {state:?}"
+                    ))),
+                }
+            }
+            None => None,
+        };
+
+        let frames = leg.seen.lock().unwrap().clone();
+        let states = published.lock().unwrap().clone();
+        sampler.abort();
+        task.abort();
+        let _ = task.await;
+        drop(leg);
+        drop(_serialized);
+        (report, second, frames, states, re_asked)
+    }
+
     /// **The same drive, reading the session ROW the link left behind.**
     ///
     /// Split out for the reason [`drive_holding_the_carry`] is: what a link *writes
@@ -11379,6 +12768,7 @@ mod tests {
                 socket: leg.path.clone(),
                 generation,
                 thread_id: hint.map(str::to_string),
+                launch_cwd: LAUNCH_CWD.into(),
             },
             presence.clone(),
             LinkCarry::new(),
@@ -11476,6 +12866,7 @@ mod tests {
                 socket: leg.path.clone(),
                 generation: 1,
                 thread_id: None,
+                launch_cwd: LAUNCH_CWD.into(),
             },
             presence.clone(),
             LinkCarry::new(),
@@ -11548,6 +12939,7 @@ mod tests {
                 socket: leg.path.clone(),
                 generation: 1,
                 thread_id: None,
+                launch_cwd: LAUNCH_CWD.into(),
             },
             LinkPresence::new(),
             carry.clone(),
@@ -12285,6 +13677,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -12332,6 +13728,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -13252,6 +14652,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: generation,
@@ -13466,6 +14870,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -13546,6 +14954,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14069,6 +15481,200 @@ mod tests {
         );
     }
 
+    /// **THE PRODUCTION LOOP OF 2026-09-08, AS A TEST.**
+    ///
+    /// The arc of `a_mid_turn_attach_finishes_itself_when_the_turn_terminalizes` with
+    /// the one difference that broke a live session: the turn the link joined
+    /// mid-flight had run a **command**. So the follow-up resume — the one the link
+    /// owes itself, because a running turn reports placeholder ids and recovers
+    /// nothing — is answered with that turn finished, *carrying its completed
+    /// `commandExecution`*.
+    ///
+    /// The reader refused any tool-bearing turn outright, running or finished, and
+    /// that refusal IS the STOP-AND-AMEND verdict: the leg is dropped. The reconnect
+    /// then asks about the same durable history, which has not changed and will not,
+    /// and is refused again. Measured in production: 70 epochs over 18 minutes
+    /// (2026-09-08, 10:04-10:22Z), ending only when the session did, with the phone showing "this Mac has lost its link"
+    /// and offering neither Stop nor compose for the whole of it.
+    ///
+    /// A finished turn is **history**, and the answer says so: `RESUME_TURN_COMPLETED`
+    /// is exactly the state under which the item ids are the real ones. Reading it
+    /// cannot invent a running turn and cannot fabricate an outcome — the item states
+    /// its own `status`, which the 0.153 schema makes required.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mid_turn_attach_across_a_command_finishes_itself_instead_of_looping() {
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::MidTurnThenCompletedWithATool,
+            Some(LIFECYCLE_THREAD),
+            false,
+            Duration::from_secs(4),
+        )
+        .await;
+        // **The whole defect, in one number.** In production this was 70.
+        assert_eq!(
+            connections, 1,
+            "the follow-up rides the SAME connection. More than one means the answer \
+             was REFUSED — and since the next connection asks the same question of the \
+             same durable history, a refusal here is not a retry, it is the loop: \
+             {connections} connections"
+        );
+        assert_eq!(
+            resumes.len(),
+            2,
+            "the attach and exactly ONE follow-up; the debt is settled, not chased: \
+             {resumes:?}"
+        );
+
+        let ids = fact_keys(&events);
+        // **The tool outcome is recovered**, keyed exactly as the live path keys it.
+        assert!(
+            ids.contains(&format!("{LIFECYCLE_THREAD}:post:{COMMAND_ITEM}")),
+            "the completed command is part of the turn the follow-up recovers: {ids:?}"
+        );
+        let tool = events
+            .iter()
+            .find(|e| e.kind == protocol::event::EventKind::ToolResult)
+            .unwrap_or_else(|| panic!("a ToolResult fact: {events:?}"));
+        // **Stated by the answer, not defaulted.** `tool_result_payload` falls back to
+        // "completed" for an item carrying no status, which on a first-wins key would
+        // persist a success that never happened — so what makes this assertion mean
+        // anything is the adapter suite's companion case, where an item WITHOUT a
+        // status is refused rather than defaulted.
+        assert_eq!(
+            tool.payload.get("status").and_then(Value::as_str),
+            Some("completed"),
+            "{tool:?}"
+        );
+        assert_eq!(
+            tool.payload.get("exit_code").and_then(Value::as_i64),
+            Some(0),
+            "{tool:?}"
+        );
+        // And the item the live replay WITHHELD — the thing the follow-up exists for.
+        assert!(
+            ids.contains(&format!("{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}")),
+            "the item that finished before this link subscribed is reachable from \
+             nowhere else: {ids:?}"
+        );
+        // One copy of each, across the attach boundary: the live tail and the answer
+        // describe the same items, and the dedup key is what keeps that from doubling.
+        let mut unique = std::collections::HashSet::new();
+        for id in &ids {
+            assert!(unique.insert(id.clone()), "the recovery duplicated {id}");
+        }
+    }
+
+    /// **AN UNREADABLE RE-ASK COSTS THE RECOVERY, NEVER THE CONNECTION.**
+    ///
+    /// Narrowing the tool guard does not retire the STOP-AND-AMEND path, it makes this
+    /// the only way to reach it from a follow-up — so the disposition matters more
+    /// rather than less. The turn comes back `interrupted`, a state no answer has ever
+    /// been measured reporting, and it is genuinely unreadable.
+    ///
+    /// The link is **already attached and subscribed**: an accepted resume proved that,
+    /// and this answer is evidence about the answer, not about the subscription. Ending
+    /// the leg here is what makes an unreadable answer self-perpetuating — the reconnect
+    /// asks the same question of the same history and gets the same reply. So this must
+    /// behave like [`Connection::recover_from`], which has always got it right for the
+    /// on-demand case: log once, record nothing, keep the link.
+    ///
+    /// **And it must not re-arm.** A finished turn needs no recovery, so a debt rolled
+    /// back to `Owed` here would fire another follow-up on the same connection, be
+    /// refused by the same answer, and loop *inside* one connection — the reconnect
+    /// storm with the reconnect removed. Three claims, and the third is the one that
+    /// makes the first two worth anything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_re_ask_keeps_the_link_and_is_reported_once() {
+        // Its own thread id: `log::capture` is process-global and every other test in
+        // this suite logs into it at the same time, so the lines are selected by a
+        // thread nothing else names. Same idiom as
+        // `an_ingest_failure_fails_the_attach_rather_than_attaching_anyway`.
+        const REASK_THREAD: &str = "th_UNREADABLE_REASK";
+        crate::log::capture::install();
+        let (events, connections, resumes, _) = drive(
+            ResumeAnswer::MidTurnThenAnUnreadableReAsk,
+            Some(REASK_THREAD),
+            false,
+            Duration::from_secs(4),
+        )
+        .await;
+        let captured = crate::log::capture::drain();
+        crate::log::capture::uninstall();
+
+        assert_eq!(
+            connections, 1,
+            "an unreadable answer to a re-ask must cost the RECOVERY and not the \
+             connection: the link proved this subscription with an accepted resume, and \
+             dropping it sends the reconnect to ask the same question of the same \
+             history: {connections} connections"
+        );
+        assert_eq!(
+            resumes.len(),
+            2,
+            "the attach and exactly ONE follow-up. A third would mean the debt was \
+             rolled back to `Owed` and re-armed — a resume storm inside one connection, \
+             which is the reconnect loop with the reconnect taken out: {resumes:?}"
+        );
+
+        // **The report is about THIS disposition, and the words are the assertion.**
+        // The leg is kept, so the sentence the initial attach uses — which ends
+        // "Reconnecting." — would be describing something that is not going to happen.
+        // See [`kept_leg_amend_report`].
+        let reports: Vec<&String> = captured
+            .iter()
+            .filter(|line| line.contains("RECOVERY SKIPPED") && line.contains(REASK_THREAD))
+            .collect();
+        assert_eq!(
+            reports.len(),
+            1,
+            "the operator is told once. The condition is permanent — the same history \
+             answers the same way — so a report per occurrence is a log filling up with \
+             one fact:\n{}",
+            captured.join("\n")
+        );
+        let report = reports[0];
+        assert!(
+            report.contains("The subscription is KEPT and this connection is NOT reconnecting"),
+            "the report must say what actually happened to the leg: {report}"
+        );
+        assert!(
+            report.contains("stay missing from this session's history"),
+            "and what it actually cost — the items of the turn this ask was paying \
+             for, which nothing else can name: {report}"
+        );
+        // **The reconnecting sentence is ABSENT**, on this thread and in the whole
+        // capture. Both halves matter: the wrong report must not be emitted beside the
+        // right one, and it must not be emitted instead of it.
+        let reconnecting: Vec<&String> = captured
+            .iter()
+            .filter(|line| line.contains("Reconnecting.") || line.contains("STOP-AND-AMEND"))
+            .collect();
+        assert!(
+            reconnecting.is_empty(),
+            "the daemon logged a reconnect for a leg it kept — the exact sentence this \
+             case exists to stop saying:\n{}",
+            reconnecting
+                .iter()
+                .map(|l| l.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        // **The link is still the session's, and honest about the gap.** What the
+        // attach recovered is here; the withheld item is not, because the only answer
+        // that could ever name it was the unreadable one. A legible gap, which is the
+        // whole disposition: refusing to guess costs the facts, not the link.
+        let ids = fact_keys(&events);
+        assert!(
+            ids.iter().any(|id| id.starts_with(REASK_THREAD)),
+            "the connection stayed subscribed and went on recording: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&format!("{REASK_THREAD}:item:{LIFECYCLE_USER_ITEM}")),
+            "nothing is invented from an answer this build cannot read: {ids:?}"
+        );
+    }
+
     // ------------------------------------------------ the doorbell (2e-5)
 
     /// **Only a turn this link WATCHED finish rings a phone.**
@@ -14252,6 +15858,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14391,6 +16001,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14496,6 +16110,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14617,6 +16235,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14736,6 +16358,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -14902,6 +16528,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -15087,6 +16717,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -15128,7 +16762,7 @@ mod tests {
     #[test]
     fn bound_is_not_subscribed_and_the_resolver_says_which() {
         assert_eq!(
-            addressee_of(None, None, None),
+            addressee_of(None, None, None, None, None),
             CodexAddressee::Unbound { adopted: None },
             "connected and told nothing, by a link that has never adopted anything: \
              there is not even a subject yet"
@@ -15138,29 +16772,29 @@ mod tests {
         // just sent the resume for it. A threadless answer here sent the fleet back
         // to the registration's launch claim for the length of the round trip.
         assert_eq!(
-            addressee_of(None, None, Some("th-a")),
+            addressee_of(None, None, Some("th-a"), None, None),
             CodexAddressee::Unbound {
                 adopted: Some("th-a".into())
             },
         );
         assert_eq!(
-            addressee_of(None, None, Some("th-a")).thread_id(),
+            addressee_of(None, None, Some("th-a"), None, None).thread_id(),
             Some("th-a"),
             "which thread the session is on: the one this link is coming back to"
         );
-        assert!(!addressee_of(None, None, Some("th-a")).is_subscribed());
+        assert!(!addressee_of(None, None, Some("th-a"), None, None).is_subscribed());
         // A carried adoption decides nothing once this connection is bound: it is
         // the previous connection's evidence, and reading it beside this one's
         // binding would report Subscribed for a resume nobody here has had accepted.
         assert_eq!(
-            addressee_of(Some("th-a"), None, Some("th-a")),
+            addressee_of(Some("th-a"), None, Some("th-a"), None, None),
             CodexAddressee::Bound {
                 thread_id: "th-a".into()
             },
             "bound on this connection, adopted on an earlier one — not subscribed"
         );
         assert_eq!(
-            addressee_of(Some("th-a"), None, None),
+            addressee_of(Some("th-a"), None, None, None, None),
             CodexAddressee::Bound {
                 thread_id: "th-a".into()
             },
@@ -15168,14 +16802,14 @@ mod tests {
              turn frames at all"
         );
         assert_eq!(
-            addressee_of(Some("th-a"), Some("th-a"), None),
+            addressee_of(Some("th-a"), Some("th-a"), None, None, None),
             CodexAddressee::Subscribed {
                 thread_id: "th-a".into()
             },
             "the binding and the accepted resume agree: frames flow"
         );
         assert_eq!(
-            addressee_of(Some("th-b"), Some("th-a"), None),
+            addressee_of(Some("th-b"), Some("th-a"), None, None, None),
             CodexAddressee::Bound {
                 thread_id: "th-b".into()
             },
@@ -15186,12 +16820,51 @@ mod tests {
         // The two accessors, on the same table, so a caller reaching for the weaker
         // question cannot accidentally get the stronger one's answer.
         assert_eq!(
-            addressee_of(Some("th-b"), Some("th-a"), None).thread_id(),
+            addressee_of(Some("th-b"), Some("th-a"), None, None, None).thread_id(),
             Some("th-b"),
             "which thread the session is on is the BINDING"
         );
-        assert!(!addressee_of(Some("th-b"), Some("th-a"), None).is_subscribed());
-        assert!(addressee_of(Some("th-a"), Some("th-a"), None).is_subscribed());
+        assert!(!addressee_of(Some("th-b"), Some("th-a"), None, None, None).is_subscribed());
+        assert!(addressee_of(Some("th-a"), Some("th-a"), None, None, None).is_subscribed());
+        // **The proof, and the proof SPENT.** Both are compared against the binding, and
+        // the second is what the first turns into the moment a `turn/start` written from
+        // it reaches the wire — see [`CodexAddressee::StartInFlight`].
+        assert_eq!(
+            addressee_of(Some("th-a"), None, None, Some("th-a"), None),
+            CodexAddressee::BoundNotStarted {
+                thread_id: "th-a".into()
+            },
+        );
+        assert_eq!(
+            addressee_of(Some("th-a"), None, None, None, Some("th-a")),
+            CodexAddressee::StartInFlight {
+                thread_id: "th-a".into()
+            },
+        );
+        // **It publishes `"bound"`, and that is the decision.** The fleet vocabulary
+        // answers "can an ask land now", and the answer is the same no; the extra fact
+        // buys a refusal sentence, not an affordance, so it costs no protocol word.
+        assert_eq!(
+            addressee_of(Some("th-a"), None, None, None, Some("th-a")).wire_link(),
+            protocol::event::CodexLink::Bound,
+        );
+        // A proof about ANOTHER thread is no fact about this one — the same structural
+        // property the not-ready proof has, and the reason a visit that moves leaves both
+        // behind without anyone remembering to clear a flag.
+        assert_eq!(
+            addressee_of(Some("th-b"), None, None, Some("th-a"), Some("th-a")),
+            CodexAddressee::Bound {
+                thread_id: "th-b".into()
+            },
+        );
+        assert!(!addressee_of(Some("th-a"), None, None, None, Some("th-a")).is_subscribed());
+        assert_eq!(
+            addressee_of(Some("th-a"), Some("th-a"), None, None, Some("th-a")),
+            CodexAddressee::Subscribed {
+                thread_id: "th-a".into()
+            },
+            "an accepted resume outranks it: the link has caught up"
+        );
         assert_eq!(CodexAddressee::NoLink.thread_id(), None);
         assert_eq!(
             CodexAddressee::Offline { thread_id: None }.thread_id(),
@@ -15263,6 +16936,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -15373,6 +17050,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -15694,6 +17375,7 @@ mod tests {
                 socket: leg.path.clone(),
                 generation: 1,
                 thread_id: Some(UNWRITABLE_THREAD.to_string()),
+                launch_cwd: LAUNCH_CWD.into(),
             },
             LinkPresence::new(),
             LinkCarry::new(),
@@ -16181,6 +17863,7 @@ mod tests {
                     socket: leg.path.clone(),
                     generation: 1,
                     thread_id: None,
+                    launch_cwd: LAUNCH_CWD.into(),
                 },
                 LinkPresence::new(),
                 LinkCarry::new(),
@@ -16454,6 +18137,10 @@ mod tests {
             open_interrupts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             open_composes: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             launch: None,
+            launch_cwd: LAUNCH_CWD,
+            not_ready_thread: None,
+            start_in_flight: None,
+            resume_due_now: false,
             running_turn: None,
             swept_generation: None,
             registered_generation: 1,
@@ -17808,15 +19495,36 @@ mod tests {
             generation: 4,
             turn_id: APPROVAL_TURN.to_string(),
         };
+        // The three link states this function reads, named once. It takes the addressee
+        // whole rather than two booleans because the pair is one fact — the proof, and
+        // the proof spent — and a caller that read them separately could read them a
+        // moment apart.
+        let subscribed = CodexAddressee::Subscribed {
+            thread_id: LIFECYCLE_THREAD.to_string(),
+        };
+        let not_started = CodexAddressee::BoundNotStarted {
+            thread_id: LIFECYCLE_THREAD.to_string(),
+        };
+        let start_in_flight = CodexAddressee::StartInFlight {
+            thread_id: LIFECYCLE_THREAD.to_string(),
+        };
 
         // Idle: a start.
         assert_eq!(
-            compose_route(&visit, None, false, LIFECYCLE_THREAD, 4, 9),
+            compose_route(&visit, None, false, &subscribed, LIFECYCLE_THREAD, 4, 9),
             Ok(crate::store::COMPOSE_ROUTE_START)
         );
         // Busy on this thread, in this visit: a steer.
         assert_eq!(
-            compose_route(&visit, Some(&running), false, LIFECYCLE_THREAD, 4, 9),
+            compose_route(
+                &visit,
+                Some(&running),
+                false,
+                &subscribed,
+                LIFECYCLE_THREAD,
+                4,
+                9
+            ),
             Ok(crate::store::COMPOSE_ROUTE_STEER)
         );
         // **A turn from a visit this link has left is not steerable**, and the fall-back
@@ -17827,15 +19535,828 @@ mod tests {
             ..running.clone()
         };
         assert_eq!(
-            compose_route(&visit, Some(&stale), false, LIFECYCLE_THREAD, 4, 9),
+            compose_route(
+                &visit,
+                Some(&stale),
+                false,
+                &subscribed,
+                LIFECYCLE_THREAD,
+                4,
+                9
+            ),
             Ok(crate::store::COMPOSE_ROUTE_START)
         );
         // A reconnect, a foreign thread, a moved visit and a switch in flight each refuse
         // before anything is claimed.
-        assert!(compose_route(&visit, Some(&running), false, LIFECYCLE_THREAD, 4, 8).is_err());
-        assert!(compose_route(&visit, Some(&running), false, "01a0-a-stranger", 4, 9).is_err());
-        assert!(compose_route(&visit, Some(&running), false, LIFECYCLE_THREAD, 3, 9).is_err());
-        assert!(compose_route(&visit, Some(&running), true, LIFECYCLE_THREAD, 4, 9).is_err());
+        assert!(compose_route(
+            &visit,
+            Some(&running),
+            false,
+            &subscribed,
+            LIFECYCLE_THREAD,
+            4,
+            8
+        )
+        .is_err());
+        assert!(compose_route(
+            &visit,
+            Some(&running),
+            false,
+            &subscribed,
+            "01a0-a-stranger",
+            4,
+            9
+        )
+        .is_err());
+        assert!(compose_route(
+            &visit,
+            Some(&running),
+            false,
+            &subscribed,
+            LIFECYCLE_THREAD,
+            3,
+            9
+        )
+        .is_err());
+        assert!(compose_route(
+            &visit,
+            Some(&running),
+            true,
+            &subscribed,
+            LIFECYCLE_THREAD,
+            4,
+            9
+        )
+        .is_err());
+
+        // **A STEER IS STILL REFUSED ON A THREAD THE WIRE SAYS HAS NEVER RUN A TURN.**
+        //
+        // The state that admits a first turn admits ONLY a first turn. A steer names an
+        // `expectedTurnId`, and a connection whose resume was refused not-ready has been
+        // handed no `turn/*` frame at all — so a turn id here contradicts the wire's own
+        // statement that the thread has no rollout, and there is no way to tell which of
+        // the two facts is wrong. Refused rather than resolved, and refused rather than
+        // silently re-routed to a start: a start over a turn that may be real is the
+        // collision the whole not-ready proof exists to rule out.
+        //
+        // **Mutation:** widen the not-ready state to "any compose is a start" — return
+        // `COMPOSE_ROUTE_START` instead of the refusal — and this row goes red.
+        assert_eq!(
+            compose_route(
+                &visit,
+                Some(&running),
+                false,
+                &not_started,
+                LIFECYCLE_THREAD,
+                4,
+                9
+            ),
+            Err(crate::codex_refusals::COMPOSE_NO_TURN_TO_STEER)
+        );
+        // And with nothing running it is exactly what it says: a start.
+        assert_eq!(
+            compose_route(&visit, None, false, &not_started, LIFECYCLE_THREAD, 4, 9),
+            Ok(crate::store::COMPOSE_ROUTE_START)
+        );
+
+        // **AND ONCE THAT START IS ON THE WIRE, BOTH ROUTES ARE CLOSED.**
+        //
+        // The proof is spent at the write ([`CodexAddressee::StartInFlight`]), so a
+        // second ask arriving before this link has caught up has nothing left to stand
+        // on. Refused ahead of the route decision, and for both readings of the
+        // connection: with nothing running a second START would be a second first turn,
+        // and a steer cannot be right either, because a connection that is not
+        // subscribed has been handed no `turn/*` frame to name.
+        //
+        // **Mutation:** ignore the `StartInFlight` arm here and the first row goes back to
+        // `Ok(COMPOSE_ROUTE_START)` — which is the second `turn/start` this whole state
+        // exists to stop.
+        assert_eq!(
+            compose_route(
+                &visit,
+                None,
+                false,
+                &start_in_flight,
+                LIFECYCLE_THREAD,
+                4,
+                9
+            ),
+            Err(crate::codex_refusals::COMPOSE_START_IN_FLIGHT)
+        );
+        assert_eq!(
+            compose_route(
+                &visit,
+                Some(&running),
+                false,
+                &start_in_flight,
+                LIFECYCLE_THREAD,
+                4,
+                9
+            ),
+            Err(crate::codex_refusals::COMPOSE_START_IN_FLIGHT)
+        );
+    }
+
+    /// **THE DEAD END, BROKEN — AND ONLY WHERE THE WIRE SAYS IT MAY BE.**
+    ///
+    /// A fresh `codeconnect codex` thread has no rollout until its first turn, so every
+    /// `thread/resume` is refused not-ready and the link never reaches `Subscribed`. A
+    /// phone gated on `Subscribed` therefore cannot start the first turn, and only a
+    /// first turn creates the rollout. This drives the whole way out:
+    ///
+    ///   * the link binds off `thread/started` and publishes
+    ///     [`CodexAddressee::BoundNotStarted`] once its own resume has been refused with
+    ///     the MEASURED not-ready answer — not before;
+    ///   * a compose written there goes out as a `turn/start`, never a `turn/steer`;
+    ///   * the frame carries the three ownership fields, from [`launch_of_record`];
+    ///   * the answer's turn id becomes the compose's outcome — [`ComposeReport::Started`],
+    ///     which is what the phone is told and what the ledger records;
+    ///   * and the link asks again AT ONCE rather than sitting out the ladder.
+    ///
+    /// **And the proof is spent the moment this link ACTS on it.** A SECOND compose
+    /// written in the catch-up window — after the accepted start created the rollout,
+    /// before the re-armed resume has been answered — must NOT be admitted as another
+    /// start: the thread is busy with the turn the first one began. It is refused from
+    /// [`CodexAddressee::StartInFlight`], which is what the proof was spent into and
+    /// which names what actually happened rather than describing the link.
+    ///
+    /// **Mutations:** publish `Bound` for any un-adopted connection (drop the
+    /// `not_ready` arm of [`addressee_of`]) and the compose is refused
+    /// `COMPOSE_LAUNCH_UNREAD` instead of being written; send a steer and the route
+    /// assertion goes red; drop the re-arm at the compose settle and the re-ask
+    /// assertion goes red; leave `not_ready_thread` standing past the write and the
+    /// second compose is admitted as a second `turn/start`
+    /// (`a_second_compose_while_the_first_start_is_in_flight_is_refused_not_written`
+    /// pins that one where it is deterministic).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_first_turn_is_started_on_a_thread_the_wire_says_has_no_rollout() {
+        // **Five refusals first**, so the ladder is at 8s (`ATTACH_BACKOFF_MIN` = 500ms,
+        // doubling: 0.5 + 1 + 2 + 4 spent, 8 pending) when the compose is written. That
+        // is what makes the last assertion below about the re-arm rather than about a
+        // ladder step that was about to fire anyway.
+        let (report, second, frames, states, re_asked) = drive_composing(
+            ResumeAnswer::NoRolloutUntilAFirstTurn,
+            protocol::event::CodexLink::BoundNotStarted,
+            5,
+            "Reply with the single word amber and nothing else.",
+            Some("And now say sienna."),
+            Duration::from_secs(30),
+        )
+        .await;
+
+        // **The state is published, and it is the narrow one.** A link that had merely
+        // bound would publish `Bound`; this one had its own resume refused not-ready
+        // first, which is the whole of the proof.
+        assert!(
+            states.iter().any(|state| matches!(
+                state,
+                CodexAddressee::BoundNotStarted { thread_id } if thread_id == LIFECYCLE_THREAD
+            )),
+            "the link must publish the provable state for the announced thread: {states:?}"
+        );
+
+        // **A start, and the fourteen-key frame this link really sends.**
+        let start = frames
+            .iter()
+            .find(|f| f["method"] == "turn/start")
+            .unwrap_or_else(|| panic!("no turn/start was written: {frames:?}"));
+        assert!(
+            !frames.iter().any(|f| f["method"] == "turn/steer"),
+            "there is no turn to steer on a thread that has never run one: {frames:?}"
+        );
+        assert_eq!(start["params"]["threadId"], json!(LIFECYCLE_THREAD));
+        // The three ownership values, from the launch of record rather than from an
+        // answer that cannot exist yet.
+        assert_eq!(start["params"]["approvalPolicy"], json!("on-request"));
+        assert_eq!(start["params"]["approvalsReviewer"], json!("user"));
+        assert_eq!(start["params"]["cwd"], json!(LAUNCH_CWD));
+        assert_eq!(start["params"]["sandboxPolicy"], Value::Null);
+
+        // **The answer's turn id is the outcome.** The measured `turn/start` result
+        // carries the turn under `/result/turn/id`, and that is what the phone is told.
+        assert_eq!(
+            report,
+            ComposeReport::Started {
+                turn_id: FIRST_TURN_FROM_BOUND.to_string()
+            },
+            "the compose is settled from the start answer's own turn id"
+        );
+
+        // **And the link asks again at once.** The ladder's next step after the refusals
+        // already spent is seconds away; the re-arm is what makes this small.
+        let re_asked = re_asked.unwrap_or_else(|| {
+            panic!("the link never resumed again after the turn started: {frames:?}")
+        });
+        assert!(
+            re_asked < Duration::from_secs(2),
+            "the rollout exists the moment the turn is accepted, so the attach is due \
+             immediately rather than at the ladder's next step, which is 8s away by \
+             construction: {re_asked:?}"
+        );
+
+        // ---- THE PROOF IS SPENT, AND A SECOND COMPOSE PROVES IT ---------------------
+        //
+        // In the catch-up window the thread HAS a rollout — the turn above wrote it —
+        // and this connection has not read it yet. The proof was spent at the WRITE, so
+        // what is standing here is [`CodexAddressee::StartInFlight`], and the sentence
+        // names the thing the operator actually did. Leaving the proof standing would
+        // admit a second `turn/start` into a busy thread: the broker refuses it, so
+        // nothing is written over, but the operator is told a turn is already running
+        // when what is true is that this link is catching up.
+        let second = second.expect("a second compose was asked for");
+        assert_eq!(
+            second,
+            ComposeReport::NotApplied(crate::codex_refusals::COMPOSE_START_IN_FLIGHT.to_string()),
+            "a compose in the catch-up window is refused as a second first turn, not \
+             admitted as one"
+        );
+        let starts = frames
+            .iter()
+            .filter(|f| f["method"] == "turn/start")
+            .count();
+        assert_eq!(
+            starts, 1,
+            "exactly one turn/start reaches the wire — the first one: {frames:?}"
+        );
+        assert!(
+            !states
+                .iter()
+                .skip_while(|state| !matches!(state, CodexAddressee::BoundNotStarted { .. }))
+                .skip(1)
+                .any(|state| matches!(state, CodexAddressee::BoundNotStarted { .. })),
+            "the provable state is entered once and never re-entered after the turn \
+             that disproved it: {states:?}"
+        );
+    }
+
+    /// **TWO COMPOSES, ONE PROOF: THE SECOND IS REFUSED RATHER THAN WRITTEN.**
+    ///
+    /// The defect this pins is a window, not a state, so the script is built around the
+    /// window: the leg answers every `thread/resume` not-ready and answers the
+    /// `turn/start` **never**. Both composes are therefore judged while the first frame is
+    /// on the wire with nothing back — which is exactly where the proof used to still be
+    /// standing.
+    ///
+    /// Two request ids, so they do not join each other
+    /// ([`Connection::join_open_compose`] keys on the id), fired concurrently so both are
+    /// past every caller-side check before either is routed. The connection routes them
+    /// serially, and that is what makes the verdict deterministic rather than a race: the
+    /// first spends the proof BEFORE its frame is written, so the second finds
+    /// [`CodexAddressee::StartInFlight`] whatever order they arrive in.
+    ///
+    /// **THE MUTANT:** delete the in-flight mark in [`Connection::compose_turn`] — leave
+    /// `not_ready_thread` standing until the response arrives, which is what the code did
+    /// — and the second ask is routed on `BoundNotStarted`, admitted as another first
+    /// turn, and **written**. `turn/start` reaches the wire twice and this goes red on the
+    /// count.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_compose_while_the_first_start_is_in_flight_is_refused_not_written() {
+        let _serialized = ONE_LEG_AT_A_TIME.lock().await;
+        let leg = ScriptedLeg::start(ResumeAnswer::NoRolloutAndTheStartIsNeverAnswered, true);
+        let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
+        let (daemon, _db, _push) = linked_daemon_watching_pushes(&session);
+        let presence = LinkPresence::new();
+        let (composes, compose_rx) = crate::codex_link::compose_channel();
+        let task = tokio::spawn(run(
+            Arc::clone(&daemon),
+            session.clone(),
+            ControlLink {
+                socket: leg.path.clone(),
+                generation: 1,
+                thread_id: None,
+                launch_cwd: LAUNCH_CWD.into(),
+            },
+            presence.clone(),
+            LinkCarry::new(),
+            crate::codex_link::answer_channel().1,
+            crate::codex_link::interrupt_channel().1,
+            compose_rx,
+        ));
+
+        // Wait for the provable state — the link has bound off the announcement and had
+        // its OWN resume refused not-ready, which is the whole of the proof.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut aimed = None;
+        while Instant::now() < deadline {
+            let (state, visit) = presence.get_with_generation();
+            if matches!(state, CodexAddressee::BoundNotStarted { .. }) {
+                aimed = Some((state, visit));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (state, visit) = aimed.expect("the link never published the provable state");
+        let thread = state.thread_id().expect("it names a thread").to_string();
+
+        let ask = |id: &'static str, text: &'static str| {
+            let composes = composes.clone();
+            let session = session.clone();
+            let thread = thread.clone();
+            async move {
+                let gate = Arc::new(tokio::sync::RwLock::new(())).read_owned().await;
+                composes
+                    .compose(
+                        id,
+                        thread,
+                        visit.generation,
+                        text.to_string(),
+                        protocol::hash::compose_hash(&session.uid, text),
+                        visit.upstream_epoch,
+                        gate,
+                    )
+                    .await
+            }
+        };
+        // Concurrent on purpose: both are in the daemon's hands before either is routed.
+        let (first, second) = tokio::join!(
+            ask(
+                "req-one",
+                "Reply with the single word amber and nothing else."
+            ),
+            ask("req-two", "And now say sienna."),
+        );
+
+        // **THE ASSERTION THE MUTANT BREAKS.** One frame, not two.
+        let starts = leg.requests("turn/start");
+        assert_eq!(
+            starts.len(),
+            1,
+            "the proof admits ONE first turn. A second start written into the same \
+             thread is a second first turn — refused by the broker, but claimed durably \
+             here and reported to the operator as a turn already running: {starts:?}"
+        );
+
+        // And the one that lost is told the truth about why, in the sentence written for
+        // this situation rather than in one about a link that has merely not caught up.
+        let reports = [&first, &second];
+        let refused: Vec<&ComposeReport> = reports
+            .iter()
+            .copied()
+            .filter(|report| {
+                matches!(report, ComposeReport::NotApplied(why)
+                    if why == crate::codex_refusals::COMPOSE_START_IN_FLIGHT)
+            })
+            .collect();
+        assert_eq!(
+            refused.len(),
+            1,
+            "exactly one of the two is refused as a second first turn: {first:?} / \
+             {second:?}"
+        );
+        // The other one really was WRITTEN — the leg never answers it, so it settles on
+        // its own budget as indeterminate. Asserted so "one refusal" cannot be satisfied
+        // by refusing both.
+        assert!(
+            reports.iter().any(|report| matches!(
+                report,
+                ComposeReport::Unknown(_) | ComposeReport::Started { .. }
+            )),
+            "the other ask reached the wire and is settled by its own budget: {first:?} \
+             / {second:?}"
+        );
+
+        task.abort();
+    }
+
+    /// **AN UNREADABLE ANSWER TO THE RESUME CHASING OUR OWN START COSTS THE RECOVERY,
+    /// NOT THE CONNECTION.**
+    ///
+    /// The defect the live gate caught twice on 2026-09-08 and then refused to reproduce
+    /// in six further attempts, pinned deterministically here so nobody has to catch it
+    /// again. A `turn/start` is written from [`CodexAddressee::BoundNotStarted`], the
+    /// attach is re-armed at once because the accepted start created the rollout, and the
+    /// resume that chases it comes back `-32601`. That answer used to reach
+    /// [`Attach::Refused`], which the caller turns into a `bail!` — so the leg ended, the
+    /// link re-dialled, and an attach measured at ~202ms took ~610ms with a reconnect in
+    /// the middle. The very next resume, on the very next connection, was accepted every
+    /// time: nothing about the answer needed a new connection.
+    ///
+    /// The disposition is the one [`kept_leg_amend_report`] already established for
+    /// wherever this link has proved something — an unreadable reply is evidence about the
+    /// REPLY — and the proof here is the link's own outstanding start.
+    ///
+    /// **Three cases, because two of them are what keep the rule narrow:** no proof at all
+    /// still ends the leg, and a proof about a DIFFERENT thread is no proof about this one
+    /// — the same scoping `not_ready_thread` is compared under.
+    ///
+    /// **THE MUTANT:** drop the `start_in_flight_here` guard from `settle_resume`'s
+    /// unreadable branch and the middle case returns `Refused`, which is the reconnect.
+    #[tokio::test]
+    async fn an_unreadable_answer_chasing_our_own_start_retries_instead_of_reconnecting() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A20".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        // **The measured frame.** `-32601` with the broker's own fixed sentence, which is
+        // what `response_capability::unanswerable_error` mints. Response-shaped, so it
+        // reaches the correlation guard as an answer at all.
+        let unreadable = serde_json::json!({
+            "id": 4,
+            "error": {
+                "code": -32601,
+                "message": "request not serviceable through the CodeConnect broker"
+            }
+        });
+
+        // ---- (a) NO proof: the leg still ends, which is the pre-existing rule ---------
+        let refused = conn
+            .settle_resume(&unreadable, LIFECYCLE_THREAD, ATTACH_BACKOFF_MIN, false)
+            .await
+            .expect("settling an answer is not itself an error");
+        assert!(
+            matches!(refused, Attach::Refused),
+            "with nothing proved about this thread an unreadable answer must still fail \
+             closed: {refused:?}"
+        );
+
+        // ---- (b) OUR OWN START in flight on THIS thread: the ladder, not the bail ----
+        conn.start_in_flight = Some(StartInFlight {
+            thread_id: LIFECYCLE_THREAD.to_string(),
+            deadline: Instant::now() + COMPOSE_BUDGET,
+        });
+        let retried = conn
+            .settle_resume(&unreadable, LIFECYCLE_THREAD, ATTACH_BACKOFF_MIN, false)
+            .await
+            .expect("settling an answer is not itself an error");
+        let Attach::Backoff { next_delay, .. } = retried else {
+            panic!(
+                "an unreadable answer to the resume chasing this link's own start must go \
+                 round the ordinary ladder rather than end the leg: {retried:?}"
+            )
+        };
+        assert_eq!(
+            next_delay,
+            ATTACH_BACKOFF_MIN * 2,
+            "and it must be the ORDINARY ladder — doubling, bounded — rather than a free \
+             retry that could spin on an answer that keeps coming back"
+        );
+        assert_eq!(
+            conn.start_in_flight_target(),
+            Some(LIFECYCLE_THREAD),
+            "the proof survives its own retry, or the second ask would fail closed and \
+             the reconnect would only have been postponed by one step"
+        );
+
+        // ---- (c) a start in flight on ANOTHER thread proves nothing about this one ----
+        conn.start_in_flight = Some(StartInFlight {
+            thread_id: "01a08161-0000-0000-0000-00000000beef".to_string(),
+            deadline: Instant::now() + COMPOSE_BUDGET,
+        });
+        let elsewhere = conn
+            .settle_resume(&unreadable, LIFECYCLE_THREAD, ATTACH_BACKOFF_MIN, false)
+            .await
+            .expect("settling an answer is not itself an error");
+        assert!(
+            matches!(elsewhere, Attach::Refused),
+            "a start outstanding on a DIFFERENT thread is no evidence about this one, and \
+             widening the guard to any start at all would be the same fabrication \
+             `not_ready_thread`'s scoping exists to prevent: {elsewhere:?}"
+        );
+    }
+
+    /// **THE NEXT OCCURRENCE IDENTIFIES ITSELF: the error's code AND its message.**
+    ///
+    /// Diagnosing the `-32601` above cost six live runs, and the reason is written in the
+    /// old report: `an error (code -32601; digest …)` says nothing that distinguishes one
+    /// `-32601` from another. The message is what names it — and the message is
+    /// peer-supplied text, which is why it was excluded in the first place.
+    ///
+    /// So both halves are asserted together, because either alone is the bug: the sentence
+    /// has to SURVIVE, and every identifier in it has to be GONE. The measured not-ready
+    /// message is the case that proves the second — it embeds a thread id — and the
+    /// broker's own refusal is the case that proves the first.
+    ///
+    /// **THE MUTANT:** render `error.message` without [`scrub_ids`] and the thread id
+    /// lands in the log, which is the leak `describe_resume_answer` exists to prevent.
+    #[test]
+    fn an_unreadable_error_is_described_by_its_code_and_a_scrubbed_message() {
+        let salt = a_salt();
+
+        // The broker's own refusal: a fixed sentence with nothing in it to scrub, which
+        // has to come through WHOLE or the report is no better than the code alone.
+        let broker = serde_json::json!({
+            "error": {
+                "code": -32601,
+                "message": "request not serviceable through the CodeConnect broker"
+            }
+        });
+        // The measured not-ready error, which embeds a thread id.
+        let not_ready = serde_json::json!({
+            "error": {
+                "code": -32600,
+                "message": "no rollout found for thread id 01a08161-45f2-7b00-9ce9-1f8e14f8ef00"
+            }
+        });
+
+        for (mode, salt) in both_modes(&salt) {
+            let line = describe_resume_answer(&broker, &frame_digest_salted(salt, &broker));
+            assert!(
+                line.contains("code -32601"),
+                "({mode}) the code is still structural: {line}"
+            );
+            assert!(
+                line.contains("request not serviceable through the CodeConnect broker"),
+                "({mode}) the sentence that NAMES this error must survive, or the report \
+                 is the useless one that cost six runs: {line}"
+            );
+
+            let line = describe_resume_answer(&not_ready, &frame_digest_salted(salt, &not_ready));
+            assert!(
+                line.contains("no rollout found for thread id <id>"),
+                "({mode}) the words survive and the id does not: {line}"
+            );
+            assert!(
+                !line.contains("01a08161-45f2-7b00-9ce9-1f8e14f8ef00"),
+                "({mode}) A THREAD ID REACHED THE LOG: {line}"
+            );
+        }
+    }
+
+    /// **What [`scrub_ids`] removes, and what it is honest about keeping.**
+    ///
+    /// The removals are asserted on the two shapes that actually name this machine — an
+    /// identifier and a path — and the bound is asserted because an error message is
+    /// unbounded peer text and a log line may not be.
+    #[test]
+    fn the_scrub_removes_identifiers_and_paths_and_bounds_the_rest() {
+        assert_eq!(
+            scrub_ids("no rollout found for thread id 01a08161-45f2-7b00-9ce9-1f8e14f8ef00"),
+            "no rollout found for thread id <id>"
+        );
+        assert_eq!(
+            scrub_ids("cannot open /private/tmp/ccll.123/codexhome/sessions/x.jsonl"),
+            "cannot open <path>"
+        );
+        // Short words with digits are not identifiers and stay legible.
+        assert_eq!(scrub_ids("turn 3 of 4 failed"), "turn 3 of 4 failed");
+        // A message that is really a payload costs a bounded number of bytes.
+        let long = "word ".repeat(200);
+        let scrubbed = scrub_ids(&long);
+        assert!(
+            scrubbed.chars().count() <= SCRUBBED_MESSAGE_LIMIT + 1,
+            "the scrub must bound what reaches the log, got {} chars",
+            scrubbed.chars().count()
+        );
+        assert!(
+            scrubbed.ends_with('…'),
+            "and say that it truncated: {scrubbed}"
+        );
+    }
+
+    /// **THE SPENT PROOF IS BOUNDED, AND A REFUSED START GIVES IT BACK.**
+    ///
+    /// Two things about [`CodexAddressee::StartInFlight`] that no scripted leg can show
+    /// cheaply, on the connection itself:
+    ///
+    ///   * **it expires.** Its three ordinary exits are observations — an accepted
+    ///     resume, the turn's terminal, a wire refusal — and none of them is guaranteed
+    ///     to arrive. [`COMPOSE_BUDGET`] is the bound, the read is honest about it before
+    ///     the sweep runs, and the fallback is plain [`CodexAddressee::Bound`] with the
+    ///     ordinary attach ladder. No unbounded state.
+    ///   * **a refusal restores the proof rather than dropping it.** A refused
+    ///     `turn/start` created nothing, so the resume answer's fact about the thread is
+    ///     untouched and the connection is where it was before the compose. Dropping the
+    ///     state instead would leave the operator looking at a plain `bound` session and
+    ///     being told a turn had just been started, for the rest of the budget — two
+    ///     sentences, both false, about a compose they can simply send again.
+    #[tokio::test]
+    async fn the_spent_proof_expires_on_its_own_and_a_refusal_gives_it_back() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000A19".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+
+        // The proof, as `settle_resume`'s not-ready arm mints it.
+        conn.not_ready_thread = Some(LIFECYCLE_THREAD.to_string());
+        assert!(matches!(
+            conn.addressee(),
+            CodexAddressee::BoundNotStarted { .. }
+        ));
+
+        // ---- the budget ------------------------------------------------------------
+        //
+        // Spent exactly as `compose_turn` spends it, and then genuinely waited out:
+        // `COMPOSE_BUDGET` is 750ms under `cfg(test)`, so the real bound is cheap to
+        // observe and observing the real one is worth more than mocking the clock — the
+        // claim is that THIS constant is what ends the state, not that some deadline
+        // does.
+        conn.not_ready_thread = None;
+        conn.start_in_flight = Some(StartInFlight {
+            thread_id: LIFECYCLE_THREAD.to_string(),
+            deadline: Instant::now() + COMPOSE_BUDGET,
+        });
+        assert!(matches!(
+            conn.addressee(),
+            CodexAddressee::StartInFlight { thread_id } if thread_id == LIFECYCLE_THREAD
+        ));
+        tokio::time::sleep(COMPOSE_BUDGET + Duration::from_millis(50)).await;
+        // **The READ is already honest**, before anything has swept: the sweep runs at
+        // the loop's idle moment, which is after a compose taken from the channel has
+        // been routed, so a read that trusted the field would answer from a state that
+        // was about to be dropped.
+        assert!(
+            matches!(conn.addressee(), CodexAddressee::Bound { .. }),
+            "past the budget the connection is plainly bound, which is what it is: \
+             {:?}",
+            conn.addressee()
+        );
+        conn.expire_start_in_flight();
+        assert!(
+            conn.start_in_flight.is_none(),
+            "and the sweep drops it, having said so once"
+        );
+        assert!(
+            conn.not_ready_thread.is_none(),
+            "expiry is not a restoration: nothing here is evidence about the thread"
+        );
+
+        // ---- a refused start -------------------------------------------------------
+        conn.not_ready_thread = None;
+        conn.start_in_flight = Some(StartInFlight {
+            thread_id: LIFECYCLE_THREAD.to_string(),
+            deadline: Instant::now() + COMPOSE_BUDGET,
+        });
+        claim_a_compose(
+            &daemon,
+            &session.uid,
+            "req-refused",
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            "hash-of-req-refused",
+        );
+        let gate = Arc::new(tokio::sync::RwLock::new(())).read_owned().await;
+        let outcome = insert_pending_compose_for_tests(
+            &conn.open_composes,
+            7101,
+            "req-refused",
+            LIFECYCLE_THREAD,
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            gate,
+        );
+        assert!(
+            conn.note_compose_response(&json!({
+                "id": 7101,
+                "error": {"code": -32001, "message": "turn refused: session policy"}
+            }))
+            .await,
+            "the frame is this connection's to consume"
+        );
+        assert!(
+            matches!(outcome.await, Ok(ComposeReport::NotApplied(_))),
+            "a refused write is a refusal, and the phone is told so"
+        );
+        assert_eq!(
+            conn.not_ready_thread.as_deref(),
+            Some(LIFECYCLE_THREAD),
+            "the write created nothing, so the fact the resume answer established about \
+             this thread is exactly where it was"
+        );
+        assert!(conn.start_in_flight.is_none());
+        assert!(
+            matches!(
+                conn.addressee(),
+                CodexAddressee::BoundNotStarted { thread_id } if thread_id == LIFECYCLE_THREAD
+            ),
+            "so the phone may compose again at once rather than waiting out a budget \
+             for a turn that was never started: {:?}",
+            conn.addressee()
+        );
+    }
+
+    /// **A NOT-READY ANSWER ARRIVING AFTER THE START MUST NOT RE-MINT THE PROOF.**
+    ///
+    /// The other half of the same defect, and the one that cannot be seen from the frame
+    /// count. The rollout is written by the TURN, not by the request that starts it, so a
+    /// `thread/resume` racing an accepted start is still answered "no rollout" — and the
+    /// not-ready arm minted the proof again from it. The link would then re-publish
+    /// [`CodexAddressee::BoundNotStarted`] and admit another first-turn compose while the
+    /// first turn ran unseen.
+    ///
+    /// Here the resume is answered not-ready **for ever**, so every retry after the start
+    /// is one of those answers. The claim is that the provable state is entered once and
+    /// never again on this connection.
+    ///
+    /// **THE MUTANT:** drop the `start_in_flight_target()` guard from
+    /// [`Connection::settle_resume`]'s not-ready arm and the state comes back on the next
+    /// refusal, which is one attach step away.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_not_ready_answer_after_a_start_does_not_re_mint_the_spent_proof() {
+        let _serialized = ONE_LEG_AT_A_TIME.lock().await;
+        let leg = ScriptedLeg::start(ResumeAnswer::NoRolloutAndTheStartIsNeverAnswered, true);
+        let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
+        let (daemon, _db, _push) = linked_daemon_watching_pushes(&session);
+        let presence = LinkPresence::new();
+        let (composes, compose_rx) = crate::codex_link::compose_channel();
+        let task = tokio::spawn(run(
+            Arc::clone(&daemon),
+            session.clone(),
+            ControlLink {
+                socket: leg.path.clone(),
+                generation: 1,
+                thread_id: None,
+                launch_cwd: LAUNCH_CWD.into(),
+            },
+            presence.clone(),
+            LinkCarry::new(),
+            crate::codex_link::answer_channel().1,
+            crate::codex_link::interrupt_channel().1,
+            compose_rx,
+        ));
+        // Sample every state the link publishes, so "entered once" is a claim about the
+        // sequence rather than about whatever it happened to be holding at the end.
+        let published = Arc::new(std::sync::Mutex::new(Vec::<CodexAddressee>::new()));
+        let sampler = {
+            let presence = presence.clone();
+            let published = Arc::clone(&published);
+            tokio::spawn(async move {
+                loop {
+                    {
+                        let now = presence.get();
+                        let mut seen = published.lock().unwrap();
+                        if seen.last() != Some(&now) {
+                            seen.push(now);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut aimed = None;
+        while Instant::now() < deadline {
+            let (state, visit) = presence.get_with_generation();
+            if matches!(state, CodexAddressee::BoundNotStarted { .. }) {
+                aimed = Some((state, visit));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (state, visit) = aimed.expect("the link never published the provable state");
+        let thread = state.thread_id().expect("it names a thread").to_string();
+        let text = "Reply with the single word amber and nothing else.";
+        let gate = Arc::new(tokio::sync::RwLock::new(())).read_owned().await;
+        let _written = composes
+            .compose(
+                "req-only",
+                thread,
+                visit.generation,
+                text.to_string(),
+                protocol::hash::compose_hash(&session.uid, text),
+                visit.upstream_epoch,
+                gate,
+            )
+            .await;
+
+        sampler.abort();
+        task.abort();
+        let states = published.lock().unwrap().clone();
+        // **Entered once.** The resumes after the write are all answered not-ready, and
+        // each of those answers is the one that used to put the proof back.
+        assert_eq!(
+            states
+                .iter()
+                .filter(|state| matches!(state, CodexAddressee::BoundNotStarted { .. }))
+                .count(),
+            1,
+            "a not-ready answer is stale about the one thing this connection knows \
+             better than the wire does — that it has already written a start — so it \
+             may not re-mint the proof it spent: {states:?}"
+        );
+        // And the state it spent it into really was published, or the count above would
+        // be satisfied by a link that never reached the proof twice for some other
+        // reason.
+        assert!(
+            states
+                .iter()
+                .any(|state| matches!(state, CodexAddressee::StartInFlight { .. })),
+            "the spent proof is a state of its own, and it is what the second compose is \
+             refused from: {states:?}"
+        );
     }
 
     /// **The turn's own terminal is what settles an interrupt, and its `status` is

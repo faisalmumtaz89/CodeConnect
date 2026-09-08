@@ -297,8 +297,28 @@ fn resolve_codeconnect() -> PathBuf {
 /// It inherits this process's `CARGO_TARGET_DIR`, so the binary it produces is the one
 /// [`resolve_codeconnect`] then finds beside this test binary.
 fn build_launcher() {
+    // **A capture run needs a CAPTURE BUILD, and this is the only place that can make
+    // one.** `codex_broker::frame_tee` is behind the `frame-tee` cargo feature — off by
+    // default, and deliberately so: the recorder writes a verbatim, unredacted copy of
+    // every frame, prompts included, so a shipping binary must not be able to hold one
+    // whatever its environment says. The coordinator already FORWARDS
+    // `CC_CODEX_FRAME_TEE` into the pane's tmux `-e` allowlist, and the host at the other
+    // end reads it only if it was compiled with the feature — so the variable alone got a
+    // live harness nothing at all, because this function rebuilt the launcher featureless
+    // underneath it.
+    //
+    // The rule is: **if the operator asked for a capture, build the binary that can take
+    // one.** Keyed on the tee variable itself rather than on a second switch, so the two
+    // cannot disagree — a run with the variable set and a featureless launcher is exactly
+    // the silent no-op this is here to remove.
+    let capturing =
+        std::env::var_os(codex_broker::FRAME_TEE_ENV).is_some_and(|path| !path.is_empty());
+    let mut args: Vec<&str> = vec!["build", "-p", "codeconnect"];
+    if capturing {
+        args.extend(["--features", "frame-tee"]);
+    }
     let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["build", "-p", "codeconnect"])
+        .args(&args)
         // The workspace root, derived from this crate rather than from the cwd — a test
         // binary's cwd is the crate dir, and `cargo` would find the same workspace either
         // way, but naming it makes the invocation independent of how the test was launched.
@@ -1020,6 +1040,20 @@ fn assert_private_dir(path: &Path) {
     );
 }
 
+/// **The canonical launch cwd of a [`LiveSandbox`]'s coordinator.**
+///
+/// [`LiveSandbox::spawn_coordinator`] passes `--cwd /tmp`; the coordinator resolves it
+/// once (`canonical_launch_cwd`) and that resolved string is what the broker
+/// fingerprints, what the app-server reports, and what the real supervisor registers.
+/// Derived from the launch here for the same reason it is derived from the launch
+/// there — `/tmp` is a symlink on macOS, so the two spellings are not equal.
+fn sandbox_launch_cwd() -> String {
+    std::fs::canonicalize("/tmp")
+        .expect("/tmp resolves")
+        .to_string_lossy()
+        .into_owned()
+}
+
 impl LiveSandbox {
     fn new(tag: &str) -> LiveSandbox {
         // **A unique, unguessable, atomically created private base.** A path derived
@@ -1190,7 +1224,17 @@ impl LiveSandbox {
             .env("TERM", "xterm-256color")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // **The coordinator's own stderr, on request.** Normally discarded: it is
+            // noisy and the run dir's `appserver.stderr.log` is the interesting one. But a
+            // coordinator that dies BEFORE it makes a run dir leaves that file absent and
+            // the failure unattributable — which is exactly what a bad `--codex-home`, a
+            // refused frame-tee path or a missing feature looks like from outside.
+            .stderr(match std::env::var_os("CC_CODEX_COORD_STDERR") {
+                Some(path) => std::fs::File::create(path)
+                    .map(Stdio::from)
+                    .unwrap_or_else(|e| panic!("open the coordinator stderr sink: {e}")),
+                None => Stdio::null(),
+            })
             .spawn()
             .expect("spawn the real coordinator")
     }
@@ -1991,6 +2035,20 @@ async fn run_the_warm_up_turn(sb: &LiveSandbox) {
 ///
 /// The frame is the coordinator's own: `agent: Codex`, the broker's `ccd.sock`, and
 /// generation 1 — the literal `supervise_ready_session` sends.
+///
+/// **Including its `cwd`, which is the CANONICAL launch cwd and used to be `/tmp`.**
+/// `supervise_ready_session` registers `deps.launch_cwd`, i.e.
+/// `canonical_launch_cwd(charter.cwd)` — resolved once, at the authority that owns it, so
+/// that the launcher, the broker's launch fingerprint and the app-server's own `cwd` are
+/// the same bytes. This harness passed `--cwd /tmp` to the coordinator and then registered
+/// the un-canonicalized `/tmp`, which no real supervisor ever sends. Nothing noticed while
+/// every compose gate ran a warm-up turn first, because a link with an accepted resume
+/// answer takes its launch from the ANSWER. The first gate to compose from
+/// [`crate::codex_link::CodexAddressee::BoundNotStarted`] — where
+/// [`crate::codex_link::launch_of_record`] builds the frame out of this very field — was
+/// refused by the broker with `-32001 "turn refused: it does not run in the workspace
+/// bound at its thread's creation"`, because `/tmp` is a symlink on macOS and the thread
+/// was bound at `/private/tmp`. The registration now carries what production carries.
 async fn register_the_run(
     daemon: &Arc<crate::state::Daemon>,
     session: &SessionKey,
@@ -2024,7 +2082,9 @@ async fn register_the_run_on(
                 session_uid: Some(session.uid.clone()),
                 tmux_session: session.name.clone(),
                 tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
-                cwd: "/tmp".into(),
+                // See this function's doc: the canonical spelling, because that is the
+                // one the coordinator resolves and the broker fingerprints.
+                cwd: sandbox_launch_cwd(),
                 supervisor_pid: std::process::id(),
                 claude_bin: None,
                 agent: protocol::agent::AgentKind::Codex,
@@ -3038,6 +3098,10 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
             socket: sb.ccd_sock(),
             generation: 1,
             thread_id: None,
+            // What the real supervisor registers: the coordinator's `--cwd /tmp`,
+            // canonicalized once at the authority that owns it — the same string the
+            // broker fingerprints. Derived here from the launch, never from an answer.
+            launch_cwd: sandbox_launch_cwd(),
         },
         first_presence.clone(),
         crate::codex_link::LinkCarry::new(),
@@ -4257,6 +4321,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
             socket: sb.ccd_sock(),
             generation: 1,
             thread_id: Some(thread_id.clone()),
+            launch_cwd: sandbox_launch_cwd(),
         },
         crate::codex_link::LinkPresence::new(),
         crate::codex_link::LinkCarry::new(),
@@ -11689,13 +11754,26 @@ async fn measure_what_codex_itself_says_about_an_interrupt() {
 ///
 /// The reconnect gates need this and cannot use [`a_turn_that_is_still_running`], and
 /// the reason is a measured refusal rather than a preference. A `thread/resume` answer
-/// that describes a `commandExecution` or a `fileChange` is refused outright by
-/// [`CodexAdapter::plan_resume_seed`] — no such answer has ever been captured, and
-/// reading one would mean inventing the shape of a tool outcome — so a link that drops
-/// while a shell command is running cannot resubscribe at all until that turn is over,
-/// and never reaches the point where a running turn could be seeded. That refusal is
-/// deliberate and is not this chunk's to relax; what it means for the stop control is
-/// recorded rather than worked around.
+/// that describes a `commandExecution` or a `fileChange` **inside a turn that is still
+/// running** is refused by [`CodexAdapter::plan_resume_seed`]: a running turn reports
+/// placeholder item ids, so a tool fact minted from one would take a dedup key the live
+/// wire never produces and hold it first-wins. So a link that drops while a shell
+/// command is running cannot resubscribe at all until that turn is over, and never
+/// reaches the point where a running turn could be seeded. That refusal is deliberate
+/// and is not this chunk's to relax; what it means for the stop control is recorded
+/// rather than worked around.
+///
+/// **A FINISHED tool-bearing turn is a different matter and is now read**, which is why
+/// this note is narrower than it was. It used to say any tool-bearing answer was refused
+/// outright, and that refusal cost a production session on 2026-09-08 — a link that
+/// attached mid-turn re-asked when the turn ended, could not read the reply describing
+/// the completed `commandExecution`, and reconnected into it 70 times over 18 minutes
+/// (10:04-10:22Z). The guard now
+/// names the two things that were ever unsafe (an unfinished turn, an undecided item);
+/// see the tool guard in `plan_resume_seed` and
+/// `fixtures/codex/resume-after-tool-turn-0.153.4.jsonl`. The helper below is unaffected:
+/// what it needs is a turn still RUNNING at the moment the link drops, and that is
+/// exactly the case that stays refused.
 ///
 /// So the turn here is pure generation: no approval, no tool item, and long enough to
 /// outlive a sever-and-restore.
@@ -13231,6 +13309,1238 @@ async fn a_daemon_killed_after_writing_an_interrupt_records_unknown_and_never_se
     gate.close();
     sub.handle.abort();
     let _ = std::fs::remove_file(&marker);
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+}
+
+/// **Does the app-server accept a `turn/start` on a leg that bound the thread but never
+/// resumed it — and if so, what follows?**
+///
+/// The measured dead end this exists to probe: on a fresh `codeconnect codex` session the
+/// thread has no rollout until its first turn, so every `thread/resume` is refused
+/// `-32600 "no rollout found for thread id …"` and the link stays Bound rather than
+/// Subscribed. Delivery is proven to need the resume. The phone's Compose requires
+/// Subscribed, and only a first turn creates the rollout — so the question is whether the
+/// wire will take a start from the un-resumed position and break the circle.
+///
+/// This is a MEASUREMENT, not a fix. Nothing here asserts a desired answer beyond its one
+/// premise (that the thread really has no rollout at the moment of the probe); everything
+/// after that is printed and recorded, refusal included.
+///
+/// The frame is [`crate::codex_link::compose_frame`]'s own output, so what is measured is
+/// the frame this link actually sends.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_turn_start_from_a_bound_but_unresumed_leg() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("bound");
+    let mut coord = sb.spawn_coordinator(&codex);
+
+    assert!(
+        wait_until(Duration::from_secs(60), || sb.broker_legs_bound()).await,
+        "the host must bind both broker legs. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+
+    // Connect BEFORE the TUI creates its thread. `thread/started` is broadcast once and is
+    // this leg's only way to learn the thread without a resume — which is the whole
+    // position under test.
+    let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+    assert!(
+        raw.initialize().await["result"].is_object(),
+        "the probe's initialize must be answered"
+    );
+    raw.notify("initialized", serde_json::json!({})).await;
+    let mut leg = WireTap::split(raw, "BOUND");
+
+    assert!(
+        wait_until(Duration::from_secs(90), || sb.tui_running()).await,
+        "the host must launch the real codex TUI. appserver.stderr:\n{}",
+        read_file(&sb.run_dir.join("appserver.stderr.log"))
+    );
+    assert!(
+        wait_until(Duration::from_secs(90), || sb
+            .capture_pane()
+            .contains("Ask Codex to do anything"))
+        .await,
+        "the TUI never painted a composer. pane:\n{}",
+        sb.capture_pane()
+    );
+
+    // Bind the way the link binds: from the broadcast, never from a guess. NO keys are
+    // ever sent to this TUI — a typed turn would create the rollout and destroy the
+    // premise.
+    assert!(
+        wait_until(Duration::from_secs(60), || leg
+            .first("thread/started")
+            .is_some())
+        .await,
+        "the leg was never handed a thread/started to bind from. methods: {:?}",
+        leg.methods()
+    );
+    let started = leg.first("thread/started").expect("just asserted");
+    println!("BOUND FROM thread/started {started}");
+    let thread = started["params"]["thread"]["id"]
+        .as_str()
+        .expect("thread/started names its thread")
+        .to_string();
+    println!("MEASURED thread = {thread}");
+
+    // A frame-by-id reader for the tapped leg: `WireTap::send` waits for nothing, so the
+    // answer is read out of the sink the tap is already filling.
+    async fn answer_on(leg: &WireTap, id: i64, budget: Duration) -> Value {
+        let found = wait_until(budget, || {
+            leg.seen().iter().any(|v| {
+                v.get("id").and_then(Value::as_i64) == Some(id)
+                    && v.get("method").is_none()
+                    && (v.get("result").is_some() ^ v.get("error").is_some())
+            })
+        })
+        .await;
+        if !found {
+            return Value::Null;
+        }
+        leg.seen()
+            .into_iter()
+            .find(|v| {
+                v.get("id").and_then(Value::as_i64) == Some(id)
+                    && v.get("method").is_none()
+                    && (v.get("result").is_some() ^ v.get("error").is_some())
+            })
+            .expect("just found")
+    }
+
+    let rollouts = |sb: &LiveSandbox| -> Vec<PathBuf> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&sb.codex_home.join("sessions"), &mut out);
+        out.sort();
+        out
+    };
+
+    // ---- (0) THE PREMISE: this thread has no rollout, so a resume is refused ----------
+    let before_resume_id = 900;
+    leg.send(serde_json::json!({
+        "id": before_resume_id, "method": "thread/resume", "params": {"threadId": thread}
+    }))
+    .await;
+    let resume_before = answer_on(&leg, before_resume_id, Duration::from_secs(30)).await;
+    println!("RESUME BEFORE turn/start -> {resume_before}");
+    assert!(
+        crate::codex_link::is_measured_not_ready(&resume_before, &thread),
+        "the premise of this probe is a thread with NO rollout, whose resume is refused \
+         not-ready. It answered: {resume_before}"
+    );
+    let rollouts_before = rollouts(&sb);
+    println!("ROLLOUTS BEFORE turn/start -> {rollouts_before:?}");
+    assert!(
+        rollouts_before.is_empty(),
+        "the premise is also that nothing is on disk yet: {rollouts_before:?}"
+    );
+
+    // ---- (a) the turn/start from the bound-but-unresumed leg --------------------------
+    //
+    // **The production values, through the production function.** These three used to
+    // be written out here by hand; they are now what `Connection::compose_turn` really
+    // sends from this position — the pinned launch policy CodeConnect owns for every
+    // codex session, and the canonical launch cwd the registration carries. Spelling
+    // them again here would make this measurement prove a copy rather than the frame.
+    let launch = crate::codex_link::launch_of_record(&sandbox_launch_cwd());
+    let start_id = 901;
+    let start_frame = crate::codex_link::compose_frame(
+        start_id,
+        crate::store::COMPOSE_ROUTE_START,
+        &thread,
+        None,
+        "Reply with the single word amber and nothing else.",
+        Some(&launch),
+    );
+    println!("PROBE turn/start FRAME {start_frame}");
+    leg.send(start_frame.clone()).await;
+    let start_answer = answer_on(&leg, start_id, Duration::from_secs(120)).await;
+    println!("TURN/START ANSWER (bound, not resumed) -> {start_answer}");
+
+    // ---- (d, before) what reached the leg while un-resumed ----------------------------
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert!(
+        leg.barrier(Duration::from_secs(20)).await,
+        "the leg must still answer a round trip, or a zero-count is about a corpse"
+    );
+    let methods_before_resume = leg.methods();
+    let turnish = |ms: &[String]| -> Vec<String> {
+        ms.iter()
+            .filter(|m| m.starts_with("turn/") || m.starts_with("item/"))
+            .cloned()
+            .collect()
+    };
+    let delivered_before = turnish(&methods_before_resume);
+    println!(
+        "DELIVERED BEFORE RESUME ({}) {:?}",
+        delivered_before.len(),
+        delivered_before
+    );
+
+    // ---- (b) did a rollout appear? ---------------------------------------------------
+    let rollouts_after_start = rollouts(&sb);
+    println!("ROLLOUTS AFTER turn/start -> {rollouts_after_start:?}");
+
+    // ---- (c) does a resume NOW succeed? ----------------------------------------------
+    let after_resume_id = 902;
+    leg.send(serde_json::json!({
+        "id": after_resume_id, "method": "thread/resume", "params": {"threadId": thread}
+    }))
+    .await;
+    let resume_after = answer_on(&leg, after_resume_id, Duration::from_secs(60)).await;
+    println!(
+        "RESUME AFTER turn/start -> {}",
+        frame_preview(&resume_after.to_string(), 4000)
+    );
+    println!(
+        "RESUME AFTER still-not-ready? {}",
+        crate::codex_link::is_measured_not_ready(&resume_after, &thread)
+    );
+
+    // ---- (d, after) what reaches the leg once resumed ---------------------------------
+    let _ = wait_until(Duration::from_secs(240), || {
+        leg.seen()
+            .iter()
+            .any(|v| v["method"] == "turn/completed" || v["method"] == "turn/failed")
+    })
+    .await;
+    assert!(
+        leg.barrier(Duration::from_secs(20)).await,
+        "the leg must still answer a round trip at the end"
+    );
+    let methods_all = leg.methods();
+    let delivered_all = turnish(&methods_all);
+    let delivered_after = delivered_all[delivered_before.len().min(delivered_all.len())..].to_vec();
+    println!(
+        "DELIVERED AFTER RESUME ({}) {:?}",
+        delivered_after.len(),
+        delivered_after
+    );
+    println!("ALL METHODS ON THE BOUND LEG {methods_all:?}");
+    println!("PANE:\n{}", sb.capture_pane_history());
+    println!("ROLLOUTS AT END -> {:?}", rollouts(&sb));
+
+    // ---- the capture, for the fixture -------------------------------------------------
+    println!(
+        "FIXTURE {}",
+        serde_json::json!({
+            "resume_before": {"request": {"id": before_resume_id, "method": "thread/resume", "params": {"threadId": thread}}, "answer": resume_before},
+            "turn_start": {"request": start_frame, "answer": start_answer},
+            "resume_after": {"request": {"id": after_resume_id, "method": "thread/resume", "params": {"threadId": thread}}, "answer": resume_after},
+            "delivered_before_resume": delivered_before,
+            "delivered_after_resume": delivered_after,
+            "rollouts_after_start": rollouts_after_start.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        })
+    );
+
+    leg.close();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+}
+
+/// **THE WHOLE FIRST-TURN PATH, LIVE, ON ONE THREAD: a phone starts the first turn a
+/// session ever runs, that turn calls a tool, and the link is still subscribed
+/// afterwards.**
+///
+/// Every other compose gate here begins with [`run_the_warm_up_turn`], because until
+/// 2e-7 a phone could not start the first turn at all: the link had never had a
+/// `thread/resume` accepted, so it held no launch of record and the compose gate refused.
+/// This gate deliberately runs **no** warm-up turn, which makes the whole run the
+/// position two production defects lived in and nothing here had ever exercised end to
+/// end:
+///
+///   1. **A thread with no rollout.** The link binds off `thread/started`, its resume is
+///      answered with the measured not-ready error, and it publishes
+///      [`crate::codex_link::CodexAddressee::BoundNotStarted`] — the one un-subscribed
+///      state in which a compose is admitted (`state.rs`'s compose gate), routed START
+///      only, on a launch built by [`crate::codex_link::launch_of_record`] rather than
+///      read from an answer that cannot exist yet.
+///   2. **A finished tool-bearing turn is readable.** The resume seed used to refuse any
+///      answer carrying a `commandExecution` or a `fileChange` outright. In production
+///      that refusal was the STOP-AND-AMEND verdict, which ENDS the leg — so the first
+///      turn that ran a command put the link into a reconnect loop that ran 70 epochs
+///      over 18 minutes (2026-09-08, 10:04-10:22Z) and left the session silent.
+///      `codex_adapter` now refuses only an unfinished turn or a tool item with no
+///      terminal `status`.
+///
+/// The two are one story and this is where it is told once: the phone starts the turn
+/// that creates the rollout, the link attaches to it, the next turn runs a real command
+/// the phone approves, and the link is required to be *still on the same connection*
+/// when it is over.
+///
+/// # What each step is asserted with, and why that evidence and not another
+///
+/// **Step 1** is asserted twice on purpose. The daemon's published addressee is what a
+/// phone actually scopes its composer by, and a raw `thread/resume` taken at the same
+/// moment is the wire fact underneath it — the addressee alone could be a stale cell,
+/// and the wire alone says nothing about what the fleet was told.
+///
+/// **Step 2 goes through [`PhoneOverTheWire::compose`]**, so the frame is decoded,
+/// admitted, claimed, routed and settled by [`crate::state::Daemon::compose`]. A
+/// hand-built `turn/start` on a raw leg — which is what
+/// `a_turn_start_from_a_bound_but_unresumed_leg` drives — proves the app-server accepts
+/// the frame and proves nothing at all about the gate that decides whether to send it.
+///
+/// **Step 4 is asserted against a clock, which is unusual here and deliberate.** The
+/// attach ladder's ceiling is `codex_link`'s own `ATTACH_BACKOFF_MAX`, 30 s. A link
+/// that merely *eventually* subscribes is indistinguishable from one that sat out a full
+/// backoff step while the operator watched their own turn in silence, so the fact under
+/// test is the re-arm (`codex_link.rs`'s "the rollout exists now, so the attach is due
+/// immediately"), and a re-arm is a statement about *when*.
+///
+/// **Step 6 counts epochs.** "The link is still subscribed" is not enough: a refusal
+/// ends the connection and `run` reconnects, so a link that STOP-AND-AMENDed and then
+/// came back looks subscribed a second later. The link stamps
+/// `initialized on the ccd leg (epoch N)` into every handshake it completes, so a
+/// handshake count that does not grow across the tool turn is the discriminator, with
+/// the absence of a STOP-AND-AMEND naming this thread beside it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_phone_starts_the_first_turn_and_the_link_survives_its_tool_call() {
+    let Some(codex) = live_gate() else { return };
+    crate::log::capture::install();
+    let sb = LiveSandbox::new("firstturn");
+    let mut coord = sb.spawn_coordinator(&codex);
+    // **In the CANONICAL launch cwd, spelled the way the sandbox spells it.**
+    // `runtimeWorkspaceRoots` is `["/private/tmp"]`, and codex compares paths literally:
+    // a marker at `/tmp/…` is *outside* the workspace as far as the sandbox is concerned.
+    // MEASURED, 2026-09-08: with `/tmp/…` the model sometimes takes codex's own
+    // read-only escalation path instead of raising a `commandExecution` — the pane says
+    // "Need permission to write to /tmp outside the sandbox" and then "couldn't run
+    // because the workspace is read-only" — and NO approval card ever reaches the daemon,
+    // so the gate waits out its whole budget on a turn that was never going to ask.
+    // The name carries this run's nonce so a leftover cannot pass for it.
+    let marker = format!("{}/cc-firstturn.{}.txt", sandbox_launch_cwd(), nanos());
+    let _ = std::fs::remove_file(&marker);
+
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    // **NO WARM-UP TURN.** The premise of the whole gate is a thread that has never run
+    // one, and typing into the pane here would destroy it.
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let uid = session.uid.clone();
+    let registration = register_the_run(&daemon, &session, &sb).await;
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+
+    // The daemon's own log, accumulated across the run: `drain` empties the sink, so
+    // every read has to be kept or the earlier half of the run is lost.
+    let mut daemon_log: Vec<String> = Vec::new();
+    let epochs = |log: &[String]| -> usize {
+        log.iter()
+            .filter(|l| l.contains("initialized on the ccd leg"))
+            .count()
+    };
+
+    // ================ STEP 1: the link is BOUND AND PROVABLY NOT READY ================
+    let reached = wait_for_async(Duration::from_secs(180), || async {
+        matches!(
+            daemon.resolve_codex_inbound("cc-1").await.ok().flatten(),
+            Some((_, crate::codex_link::CodexAddressee::BoundNotStarted { .. }))
+        )
+    })
+    .await;
+    daemon_log.extend(crate::log::capture::drain());
+    assert!(
+        reached,
+        "the link never published BoundNotStarted for a thread with no rollout. \
+         addressee now: {:?}\ndaemon log:\n{}",
+        daemon.resolve_codex_inbound("cc-1").await.ok().flatten(),
+        daemon_log.join("\n")
+    );
+    let (_, bound) = daemon
+        .resolve_codex_inbound("cc-1")
+        .await
+        .expect("the resolver answers")
+        .expect("the run resolves");
+    let thread = bound
+        .thread_id()
+        .expect("BoundNotStarted names its thread")
+        .to_string();
+    println!("STEP 1 ADDRESSEE = {bound:?}");
+    println!(
+        "STEP 1 WIRE WORD = {:?} (this is what a phone scopes its composer by)",
+        bound.wire_link()
+    );
+    assert_eq!(
+        bound.wire_link(),
+        protocol::event::CodexLink::BoundNotStarted,
+        "the fleet has to be told the composer is live, in the word the phone decodes"
+    );
+    assert!(
+        !bound.is_subscribed(),
+        "the premise is an UNSUBSCRIBED link: {bound:?}"
+    );
+
+    // The wire fact under that published state, taken at the only moment it exists.
+    // Kept, because it is a row of the capture this gate writes.
+    let resume_before = {
+        let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+        assert!(
+            raw.initialize().await["result"].is_object(),
+            "the probe's initialize must be answered"
+        );
+        raw.notify("initialized", serde_json::json!({})).await;
+        let resume_now = raw
+            .try_request(
+                "thread/resume",
+                serde_json::json!({"threadId": thread}),
+                Duration::from_secs(30),
+            )
+            .await;
+        println!(
+            "STEP 1 thread/resume BEFORE ANY TURN -> {}",
+            frame_preview(&resume_now.to_string(), 2000)
+        );
+        assert!(
+            crate::codex_link::is_measured_not_ready(&resume_now, &thread),
+            "the premise is a thread whose resume is refused not-ready; it answered: \
+             {resume_now}"
+        );
+        resume_now
+    };
+    println!("STEP 1 PASS — bound to {thread}, provably not ready, composer offered");
+
+    // ================ STEP 2: the phone composes the FIRST turn ======================
+    //
+    // Through the daemon's real compose path. Nothing about this frame is special: it is
+    // the ordinary `compose` a phone sends, and the whole question is whether the gate
+    // admits it from a link that has never had a resume accepted.
+    //
+    // **Two phones, and the second frame is written before the first is answered.** The
+    // whole of step 2b is a race with a window that is one round trip wide, so the second
+    // ask cannot be sent from the same connection after waiting for the first answer —
+    // that is the one arrangement guaranteed to miss it. Two connections also mean the
+    // daemon cannot serialise them behind one socket's read loop even if it wanted to.
+    let mut second_phone = PhoneOverTheWire::connect(&daemon).await;
+    let starts_in_broker_log = |sb: &LiveSandbox| -> Vec<String> {
+        // **The broker's own account of what left this link.** The daemon's log says what
+        // it decided; this says what actually crossed the socket. `redact.rs` guarantees
+        // a decision line carries the method name from a fixed vocabulary, and every
+        // `turn/start` disposition on the ccd leg — forwarded or refused — writes one. No
+        // key is ever sent to the pane in this gate, so the TUI leg starts no turn and
+        // every such line belongs to the link.
+        read_file(&sb.run_dir.join("broker.log"))
+            .lines()
+            .filter(|l| l.contains("turn/start"))
+            .map(str::to_string)
+            .collect()
+    };
+    let starts_before = starts_in_broker_log(&sb);
+    assert!(
+        starts_before.is_empty(),
+        "the premise is a session on which no turn has ever been started: {starts_before:#?}"
+    );
+
+    phone
+        .send_compose(
+            "cc-1",
+            "say-1",
+            "Reply with the single word amber and nothing else. Do not use any tool.",
+        )
+        .await;
+    // ---- STEP 2b: the SECOND compose, while the first start is in flight -------------
+    second_phone
+        .send_compose(
+            "cc-1",
+            "say-1b",
+            "Also reply with the single word cobalt and nothing else. Do not use any tool.",
+        )
+        .await;
+    let composed = phone
+        .next_compose_result("say-1", Duration::from_secs(180))
+        .await;
+    let admitted_at = Instant::now();
+    println!("STEP 2 COMPOSE (from bound_not_started) -> {composed:?}");
+    let protocol::ws::ComposeResult::Started { turn_id } = &composed else {
+        panic!(
+            "a compose from BoundNotStarted must be ADMITTED and routed START. \
+             got: {composed:?}\ndaemon log:\n{}",
+            {
+                daemon_log.extend(crate::log::capture::drain());
+                daemon_log.join("\n")
+            }
+        )
+    };
+    let first_turn = turn_id.clone();
+    daemon_log.extend(crate::log::capture::drain());
+    let ledger_after_start = compose_ledger(&daemon, &uid);
+    println!("STEP 2 COMPOSE LEDGER = {ledger_after_start:?}");
+    assert_eq!(
+        ledger_after_start,
+        vec![("say-1".to_string(), format!("turn_start {first_turn}"))],
+        "the settled row must name the route it took and the turn it began"
+    );
+    println!("STEP 2 PASS — the first turn is {first_turn}, route turn_start");
+
+    // ================ STEP 2b: a second compose while the start is IN FLIGHT =========
+    //
+    // The proof that admitted the first turn is spent at the WRITE, not when the answer
+    // arrives (`codex_link.rs`'s "THE PROOF IS SPENT HERE — BEFORE THE BYTES"), and the
+    // connection moves to `CodexAddressee::StartInFlight`. Without that, both asks stand
+    // on the same one-shot fact and both are written — two first turns on one thread.
+    //
+    // **Which refusal comes back is a measurement, not a requirement.** The window closes
+    // when the `turn/start` response lands, which was ~10 ms in the run this gate was
+    // written against. Inside it the answer is `COMPOSE_START_IN_FLIGHT`; a moment later
+    // the link is plain `Bound` and the answer is `COMPOSE_LINK_BOUND` (or
+    // `COMPOSE_LAUNCH_UNREAD` from the link's own route check). The gate prints which
+    // actually happened and asserts only what is true of both: the ask was REFUSED, and
+    // **exactly one `turn/start` left this link**. Retrying until the nicer sentence
+    // appeared would be asserting the scheduler.
+    let second = second_phone
+        .next_compose_result("say-1b", Duration::from_secs(180))
+        .await;
+    println!("STEP 2b SECOND COMPOSE (fired before the first was answered) -> {second:?}");
+    let protocol::ws::ComposeResult::Rejected { reason } = &second else {
+        panic!(
+            "a second compose racing the first start must be REFUSED — admitting it is a \
+             second first turn on one thread. got: {second:?}"
+        )
+    };
+    println!("STEP 2b LITERAL SENTENCE: {reason}");
+    let which = if reason == crate::codex_refusals::COMPOSE_START_IN_FLIGHT {
+        "COMPOSE_START_IN_FLIGHT (it landed INSIDE the in-flight window)"
+    } else if reason == crate::codex_refusals::COMPOSE_LINK_BOUND {
+        "COMPOSE_LINK_BOUND (it landed after the start was answered, on a plain Bound link)"
+    } else if reason == crate::codex_refusals::COMPOSE_LAUNCH_UNREAD {
+        "COMPOSE_LAUNCH_UNREAD (it landed after the start was answered, launch not yet read)"
+    } else {
+        "an unrecognised sentence"
+    };
+    println!("STEP 2b WHICH REFUSAL: {which}");
+    assert!(
+        reason == crate::codex_refusals::COMPOSE_START_IN_FLIGHT
+            || reason == crate::codex_refusals::COMPOSE_LINK_BOUND
+            || reason == crate::codex_refusals::COMPOSE_LAUNCH_UNREAD,
+        "the refusal must be one of the three this position can honestly give, not an \
+         accident: {reason}"
+    );
+    let ledger_after_the_race = compose_ledger(&daemon, &uid);
+    println!("STEP 2b COMPOSE LEDGER = {ledger_after_the_race:?}");
+
+    // **THE INVARIANT, and it holds whichever side of the window the second ask fell on.**
+    let starts_after = starts_in_broker_log(&sb);
+    println!(
+        "STEP 2b turn/start LINES IN broker.log ({}):",
+        starts_after.len()
+    );
+    for line in &starts_after {
+        println!("  {line}");
+    }
+    assert_eq!(
+        starts_after.len(),
+        1,
+        "exactly ONE turn/start may have left this link across the whole episode. More \
+         than one is two first turns on one thread — the defect the spend-before-the-bytes \
+         ordering exists to make impossible. lines: {starts_after:#?}"
+    );
+    println!("STEP 2b PASS — refused, and exactly one turn/start crossed the wire");
+
+    // ================ STEP 4: the link subscribes PROMPTLY ===========================
+    //
+    // Budgeted BELOW `ATTACH_BACKOFF_MAX` (30 s) on purpose — see this gate's doc. A
+    // link that only subscribes after the ladder has run out is a link the operator
+    // watched their own turn in silence behind, and the re-arm is exactly what this
+    // budget is measuring.
+    let subscribed = wait_for_async(Duration::from_secs(20), || async {
+        daemon
+            .resolve_codex_inbound("cc-1")
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|(_, a)| a.is_subscribed())
+    })
+    .await;
+    let subscribed_after = admitted_at.elapsed();
+    daemon_log.extend(crate::log::capture::drain());
+    for line in daemon_log
+        .iter()
+        .filter(|l| l.contains("the attach is due immediately") || l.contains("attached to thread"))
+    {
+        println!("STEP 4 DAEMON SAID: {line}");
+    }
+    assert!(
+        subscribed,
+        "the link did not subscribe within 20s of its own turn/start being accepted, so \
+         the accepted start did not collapse the attach ladder — which leaves the phone \
+         watching its own turn in silence for up to ATTACH_BACKOFF_MAX. addressee: \
+         {:?}\ndaemon log:\n{}",
+        daemon.resolve_codex_inbound("cc-1").await.ok().flatten(),
+        daemon_log.join("\n")
+    );
+    println!("STEP 4 PASS — subscribed {subscribed_after:?} after the start was accepted");
+    // **Printed HERE, not only at step 6, because this is where the attach happens.** A
+    // run that dies later still has to carry the broker's account of the leg lifecycle
+    // across the re-armed resume, and how many connections were resuming at the time.
+    // **A REPRODUCTION MODE THAT COSTS ONE MODEL TURN INSTEAD OF THREE.**
+    //
+    // The defect under investigation — a re-armed `thread/resume` answered `-32601`,
+    // costing a STOP-AND-AMEND and a reconnect — happens HERE, in the ~12ms after the
+    // first `turn/start` is accepted, and it is intermittent (2 runs in 3). Hunting it
+    // with the whole gate spends the command turn and the closing turn as well, for
+    // evidence that was already decided by this point. This exit reports the same two
+    // facts step 6 checks and stops, so an attempt costs exactly the first turn.
+    //
+    // Never set in an ordinary run: without it the gate proceeds and proves all 8 steps.
+    if std::env::var_os("CC_CODEX_FIRST_TURN_STOP_AFTER_ATTACH").is_some() {
+        daemon_log.extend(crate::log::capture::drain());
+        let amendments: Vec<&String> = daemon_log
+            .iter()
+            .filter(|l| l.contains("STOP-AND-AMEND"))
+            .collect();
+        let epoch_lines: Vec<&String> = daemon_log
+            .iter()
+            .filter(|l| l.contains("initialized on the ccd leg"))
+            .collect();
+        println!("REPRO EPOCHS ({}) {epoch_lines:#?}", epoch_lines.len());
+        println!(
+            "REPRO STOP-AND-AMEND ({}) {amendments:#?}",
+            amendments.len()
+        );
+        println!(
+            "REPRO VERDICT: {}",
+            if amendments.is_empty() && epoch_lines.len() == 1 {
+                "CLEAN — the re-armed resume was accepted on the first connection"
+            } else {
+                "REPRODUCED — the re-armed resume cost a reconnect"
+            }
+        );
+        phone.close();
+        second_phone.close();
+        daemon.unregister_supervisor(&registration).await;
+        crate::log::capture::uninstall();
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &coord.id().to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = coord.wait();
+        let _ = std::fs::remove_file(&marker);
+        return;
+    }
+
+    println!("STEP 4 BROKER LEG/RESUME LINES AT THE ATTACH:");
+    for line in read_file(&sb.run_dir.join("broker.log"))
+        .lines()
+        .filter(|l| {
+            l.contains("leg opened")
+                || l.contains("leg ended")
+                || l.contains("read error")
+                || l.contains("ownership request")
+                || l.contains("32601")
+                || l.contains("refuse")
+        })
+    {
+        println!("  {line}");
+    }
+
+    // ================ STEP 3: the turn really started ================================
+    //
+    // **Taken AFTER the link is subscribed, and the placement is the point.** This probe
+    // opens a SECOND ccd connection and resumes the SAME thread. Run where it reads more
+    // naturally — straight after the compose — it lands inside the ~12ms window in which
+    // the link is firing its own re-armed resume at that same thread, and the gate then
+    // cannot tell a defect in the re-arm from its own two concurrent resumes. A probe that
+    // races the code under test proves nothing either way, so it waits until the thing it
+    // would race has already happened.
+    //
+    // Read off the app-server rather than off the daemon that just told us so: a fresh
+    // `thread/resume` — the same ask that was refused not-ready thirty seconds ago — now
+    // answers with a populated thread that names this turn. That is one frame carrying
+    // two facts: the turn exists, and the rollout the whole ladder was waiting for is on
+    // disk.
+    let resume_after = {
+        let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
+        assert!(
+            raw.initialize().await["result"].is_object(),
+            "the probe's initialize must be answered"
+        );
+        raw.notify("initialized", serde_json::json!({})).await;
+        raw.try_request(
+            "thread/resume",
+            serde_json::json!({"threadId": thread}),
+            Duration::from_secs(60),
+        )
+        .await
+    };
+    println!(
+        "STEP 3 thread/resume AFTER the composed start -> {}",
+        frame_preview(&resume_after.to_string(), 3000)
+    );
+    assert!(
+        !crate::codex_link::is_measured_not_ready(&resume_after, &thread),
+        "the composed turn must have created the rollout: {resume_after}"
+    );
+    let turns_on_the_wire: Vec<String> = resume_after
+        .pointer("/result/thread/turns")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t["id"].as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    println!("STEP 3 TURNS ON THE WIRE = {turns_on_the_wire:?}");
+    assert!(
+        turns_on_the_wire.contains(&first_turn),
+        "the app-server's own answer must describe the turn this daemon says it began \
+         ({first_turn}): {turns_on_the_wire:?}"
+    );
+    println!("STEP 3 PASS — {first_turn} exists on the app-server, and the rollout does too");
+
+    // The turn the phone began has to finish before the next compose, or step 5 would be
+    // a steer and this gate would never start a second turn from an idle thread. Read as
+    // a fact this daemon recorded, which is only possible because it is subscribed.
+    let first_done = wait_until(Duration::from_secs(300), || {
+        daemon
+            .store
+            .events_after(&uid, 0, 10_000)
+            .expect("read the run's events")
+            .iter()
+            .any(|e| {
+                e.kind == protocol::event::EventKind::TurnComplete
+                    && e.turn_id.as_deref() == Some(first_turn.as_str())
+            })
+    })
+    .await;
+    daemon_log.extend(crate::log::capture::drain());
+    assert!(
+        first_done,
+        "the composed first turn never completed. pane:\n{}",
+        sb.capture_pane_history()
+    );
+    println!("STEP 4/5 BRIDGE — the link OBSERVED {first_turn} complete, live");
+
+    // ================ STEP 5: a command turn, approved, completed ====================
+    //
+    // The exact shape that cost 70 epochs over 18 minutes in production
+    // (2026-09-08, 10:04-10:22Z): a turn whose transcript carries a `commandExecution`.
+    let epochs_before_tool_turn = epochs(&daemon_log);
+    let facts_before_tool_turn = recorded(&daemon, &uid).len();
+    println!("STEP 5 EPOCHS BEFORE THE TOOL TURN = {epochs_before_tool_turn}");
+
+    let cards = || {
+        daemon
+            .store
+            .codex_pending_approvals(&uid)
+            .expect("read the run's open cards")
+    };
+    let tool_compose = phone
+        .compose(
+            "cc-1",
+            "say-2",
+            &format!("Run the shell command `touch {marker}` now. Do not explain, just run it."),
+            Duration::from_secs(180),
+        )
+        .await;
+    println!("STEP 5 COMPOSE (the command turn) -> {tool_compose:?}");
+    let protocol::ws::ComposeResult::Started { turn_id } = &tool_compose else {
+        panic!("an idle thread must begin a turn for the command: {tool_compose:?}")
+    };
+    let tool_turn = turn_id.clone();
+
+    assert!(
+        wait_until(Duration::from_secs(300), || !cards().is_empty()).await,
+        "the link never raised an approval card for the command. pane:\n{}\nbroker.log:\n{}",
+        sb.capture_pane(),
+        read_file(&sb.run_dir.join("broker.log"))
+    );
+    let held = cards().remove(0);
+    let card: protocol::ws::ApprovalCard =
+        serde_json::from_str(&held.card).expect("the stored card decodes");
+    println!(
+        "STEP 5 CARD raised: family={} thread={} turn={} item={}",
+        held.family, held.thread_id, held.turn_id, held.item_id
+    );
+    assert_eq!(
+        held.turn_id, tool_turn,
+        "the card must belong to the turn the phone just began"
+    );
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the command ran before anybody answered; this gate would prove nothing"
+    );
+
+    let answered = phone
+        .answer(&card, "accept", &uid, Duration::from_secs(120))
+        .await;
+    println!("STEP 5 ANSWER RESULT = {answered:?}");
+    match &answered {
+        protocol::ws::AnswerResult::Applied { outcome } => {
+            assert_eq!(outcome.applied_via, protocol::ws::AnswerPath::CodexResponse);
+            assert_eq!(outcome.resolved_by, protocol::ws::ResolvedBy::Phone);
+        }
+        other => panic!(
+            "the phone's approval must be applied. broker.log:\n{}\ngot: {other:?}",
+            read_file(&sb.run_dir.join("broker.log"))
+        ),
+    }
+    let actuated = wait_until(Duration::from_secs(120), || {
+        std::path::Path::new(&marker).exists()
+    })
+    .await;
+    assert!(
+        actuated,
+        "the app-server never ran the command the phone approved, so the turn under test \
+         does not carry a commandExecution at all. pane:\n{}",
+        sb.capture_pane_history()
+    );
+    let tool_done = wait_until(Duration::from_secs(300), || {
+        daemon
+            .store
+            .events_after(&uid, 0, 10_000)
+            .expect("read the run's events")
+            .iter()
+            .any(|e| {
+                e.kind == protocol::event::EventKind::TurnComplete
+                    && e.turn_id.as_deref() == Some(tool_turn.as_str())
+            })
+    })
+    .await;
+    daemon_log.extend(crate::log::capture::drain());
+    assert!(
+        tool_done,
+        "the command turn never completed. pane:\n{}\ndaemon log:\n{}",
+        sb.capture_pane_history(),
+        daemon_log.join("\n")
+    );
+    println!("STEP 5 PASS — {tool_turn} ran `touch {marker}`, the phone approved it, it completed");
+
+    // ================ STEP 6: THE LINK STAYS SUBSCRIBED ==============================
+    //
+    // The whole point. Settle first: a refusal ends the connection and `run` reconnects,
+    // so asking the instant the terminal lands could catch a link that is about to drop
+    // and read it as one that never did.
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    daemon_log.extend(crate::log::capture::drain());
+    let (_, after) = daemon
+        .resolve_codex_inbound("cc-1")
+        .await
+        .expect("the resolver answers")
+        .expect("the run resolves");
+    println!("STEP 6 ADDRESSEE AFTER THE TOOL TURN = {after:?}");
+    let epochs_after = epochs(&daemon_log);
+    let epoch_lines: Vec<&String> = daemon_log
+        .iter()
+        .filter(|l| l.contains("initialized on the ccd leg"))
+        .collect();
+    println!(
+        "STEP 6 EPOCHS: {epochs_before_tool_turn} before the tool turn, {epochs_after} after \
+         — {epoch_lines:#?}"
+    );
+    let amendments: Vec<&String> = daemon_log
+        .iter()
+        .filter(|l| l.contains("STOP-AND-AMEND"))
+        .collect();
+    println!("STEP 6 STOP-AND-AMEND LINES = {amendments:#?}");
+
+    // ---- THE TWO DIAGNOSTICS, printed before anything can panic ---------------------
+    //
+    // (1) THE BROKER'S OWN ACCOUNT. `-32601` is `E_METHOD_UNAVAILABLE` /
+    //     `response_capability::unanswerable_error` — "not serviceable through the
+    //     CodeConnect broker" — which is a strange answer to a `thread/resume` the very
+    //     same leg answered `-32600` moments earlier. The broker writes one decision line
+    //     per frame it dispositions, with the connection id, so its account is here rather
+    //     than inferred from the daemon's side of the exchange.
+    //
+    // (2) WERE TWO RESUMES IN FLIGHT AT ONCE? Every ccd-leg line that mentions a resume,
+    //     in order, with the `(conn N)` each carries. "Concurrent" is then read off the
+    //     record instead of assumed.
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    let interesting: Vec<&str> = broker_log
+        .lines()
+        .filter(|l| {
+            l.contains("thread/resume")
+                || l.contains("32601")
+                || l.contains("refuse")
+                || l.contains("leg ended")
+                || l.contains("leg opened")
+        })
+        .collect();
+    println!("DIAG-1/2 BROKER LINES ABOUT RESUMES, REFUSALS AND LEG LIFECYCLE:");
+    for line in &interesting {
+        println!("  {line}");
+    }
+    println!("DIAG-2 THE LINK'S OWN RESUME TIMELINE (daemon log):");
+    for line in daemon_log.iter().filter(|l| {
+        l.contains("initialized on the ccd leg")
+            || l.contains("attached to thread")
+            || l.contains("STOP-AND-AMEND")
+            || l.contains("attach is due immediately")
+            || l.contains("recovery skipped")
+    }) {
+        println!("  {line}");
+    }
+    println!("DIAG FULL BROKER LOG:\n{broker_log}");
+    assert!(
+        !daemon_log
+            .iter()
+            .any(|l| l.contains("STOP-AND-AMEND") && l.contains(&thread)),
+        "a thread/resume for this thread was answered with something this build could \
+         not read, so the leg was ended and re-dialled. This check spans the WHOLE run, \
+         not just the tool turn: the refusal fix #1 retires is the one on the finished \
+         tool-bearing turn, but any unreadable answer costs the same reconnect and is the \
+         same 70-epoch loop, so the honest scope is every resume this link made. Read the \
+         timestamps against the DIAG timeline above to see which resume it was. \
+         lines: {amendments:#?}\ndaemon log:\n{}",
+        daemon_log.join("\n")
+    );
+    assert_eq!(
+        epochs_after,
+        epochs_before_tool_turn,
+        "the link handshaked again across the tool turn, so its connection ENDED — which \
+         is what a refusal does and exactly what fix #1 retires. A stable epoch count is \
+         the discriminator here because a link that dropped and came back also looks \
+         subscribed. lines: {epoch_lines:#?}\ndaemon log:\n{}",
+        daemon_log.join("\n")
+    );
+    assert!(
+        after.is_subscribed(),
+        "the link must still be subscribed after a turn that ran a command: {after:?}\n\
+         daemon log:\n{}",
+        daemon_log.join("\n")
+    );
+    assert_eq!(
+        after.thread_id(),
+        Some(thread.as_str()),
+        "and on the same thread it has been on since the broadcast"
+    );
+    let facts_after_tool_turn = recorded(&daemon, &uid).len();
+    println!(
+        "STEP 6 FACTS: {facts_before_tool_turn} before the tool turn, \
+         {facts_after_tool_turn} after"
+    );
+    assert!(
+        facts_after_tool_turn > facts_before_tool_turn,
+        "a subscribed link watching a real turn has to have recorded something"
+    );
+    println!("STEP 6 PASS — same connection, same thread, no STOP-AND-AMEND, epochs stable");
+
+    // ================ STEP 7: the phone composes again ===============================
+    //
+    // Whichever the state warrants: the tool turn is over, so an idle thread should take
+    // a START — but a session that is still finishing up would take a steer, and both are
+    // the composer working. What is NOT admissible is a refusal.
+    let again = phone
+        .compose(
+            "cc-1",
+            "say-3",
+            "Reply with the single word ochre and nothing else. Do not use any tool.",
+            Duration::from_secs(180),
+        )
+        .await;
+    daemon_log.extend(crate::log::capture::drain());
+    println!("STEP 7 COMPOSE (after the tool turn) -> {again:?}");
+    match &again {
+        protocol::ws::ComposeResult::Started { turn_id } => {
+            println!("STEP 7 PASS — Started {turn_id}");
+        }
+        protocol::ws::ComposeResult::Steered { turn_id } => {
+            assert_eq!(
+                turn_id, &tool_turn,
+                "a steer joins the turn that is running, and names it"
+            );
+            println!("STEP 7 PASS — Steered into {turn_id}");
+        }
+        other => panic!(
+            "the composer must still work on a link that has watched a tool turn end: \
+             {other:?}\ndaemon log:\n{}",
+            daemon_log.join("\n")
+        ),
+    }
+
+    println!(
+        "STEP 7 COMPOSE LEDGER = {:?}",
+        compose_ledger(&daemon, &uid)
+    );
+
+    // ---- THE CAPTURE: the first-turn-from-bound episode, sanitized ------------------
+    //
+    // Written in the `{conn,dir,frame}` shape the committed codex fixtures use. Each row
+    // says where it came from, because they do not all come from the same place and
+    // pretending otherwise is what makes a fixture lie:
+    //
+    //   * `ccd-probe` rows are VERBATIM WIRE BYTES, read off a raw ccd connection this
+    //     gate owns — the not-ready refusal that establishes the premise, and the
+    //     populated answer after the composed start.
+    //   * `ccd-link` is the `turn/start` the daemon's link authors, taken from
+    //     [`crate::codex_link::compose_frame`] itself rather than copied out. It is not
+    //     teed: the link's own connection is the daemon's and its c2s reaches no tap in
+    //     this process. It is the frame that was sent, from the function that sends it,
+    //     and the broker's own log is what says exactly one of them crossed.
+    //   * `phone` rows are the ends of the two composes as the phone saw them, which is
+    //     the only place the RACE is visible at all — a refused compose writes no frame.
+    //
+    // Absolute paths are scrubbed to `/work/…`: the sandbox base and the canonical launch
+    // cwd are the only values in the file that name this machine.
+    let capture = match std::env::var("CC_CODEX_FIRST_TURN_CAPTURE") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => sb.run_dir.join("first-turn-from-bound.jsonl"),
+    };
+    let scrub = |value: &Value| -> Value {
+        let text = value
+            .to_string()
+            .replace(&sb.base.to_string_lossy().into_owned(), "/work")
+            .replace(&sandbox_launch_cwd(), "/work");
+        serde_json::from_str(&text).expect("a scrubbed frame is still JSON")
+    };
+    let authored_start = crate::codex_link::compose_frame(
+        901,
+        crate::store::COMPOSE_ROUTE_START,
+        &thread,
+        None,
+        "Reply with the single word amber and nothing else. Do not use any tool.",
+        Some(&crate::codex_link::launch_of_record(&sandbox_launch_cwd())),
+    );
+    let mut lines = String::new();
+    let mut write = |conn: &str, dir: &str, frame: &Value| {
+        lines.push_str(&serde_json::json!({"conn": conn, "dir": dir, "frame": frame}).to_string());
+        lines.push('\n');
+    };
+    write(
+        "ccd-probe",
+        "c2s",
+        &serde_json::json!({"id": 101, "method": "thread/resume", "params": {"threadId": thread}}),
+    );
+    write("ccd-probe", "s2c", &scrub(&resume_before));
+    write(
+        "phone",
+        "c2s",
+        &serde_json::json!({"type": "compose", "request_id": "say-1",
+                            "text": "<the first turn>"}),
+    );
+    write("ccd-link", "c2s", &scrub(&authored_start));
+    write(
+        "phone",
+        "s2c",
+        &serde_json::json!({"type": "compose_result", "request_id": "say-1",
+                            "result": {"status": "started", "turn_id": first_turn}}),
+    );
+    write(
+        "phone",
+        "c2s",
+        &serde_json::json!({"type": "compose", "request_id": "say-1b",
+                            "text": "<the racing second ask>"}),
+    );
+    write(
+        "phone",
+        "s2c",
+        &serde_json::json!({"type": "compose_result", "request_id": "say-1b",
+                            "result": {"status": "rejected", "reason": reason}}),
+    );
+    write(
+        "ccd-probe",
+        "c2s",
+        &serde_json::json!({"id": 101, "method": "thread/resume", "params": {"threadId": thread}}),
+    );
+    write("ccd-probe", "s2c", &scrub(&resume_after));
+    std::fs::write(&capture, &lines).expect("write the first-turn capture");
+    println!("CAPTURE WRITTEN: {}", capture.display());
+    println!("CAPTURE BODY:\n{lines}");
+    println!("PANE AT THE END:\n{}", sb.capture_pane_history());
+    print_events(&daemon, &uid, "the whole run");
+    println!(
+        "GATE PASS — a phone started the FIRST turn of a session from bound_not_started, \
+         the link attached to the rollout that turn created in {subscribed_after:?}, a \
+         command turn was approved from the phone and completed, and the link is still \
+         on the same connection"
+    );
+
+    phone.close();
+    second_phone.close();
+    daemon.unregister_supervisor(&registration).await;
+    crate::log::capture::uninstall();
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &coord.id().to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = coord.wait();
+    let _ = std::fs::remove_file(&marker);
+}
+
+/// **STEP A: does the ccd leg accept STRING request ids, end to end?**
+///
+/// The question a fix depends on, asked for **zero model turns**: `initialize` runs no
+/// model, and a `thread/resume` against a thread with no rollout is refused `-32600`
+/// without one either. So this probe stands a real session up, never types into the pane,
+/// and never composes.
+///
+/// # Why it is worth a gate of its own
+///
+/// The tee capture (`conn 2`, the link's own leg) showed the two id spaces on that
+/// connection are the SAME space:
+///
+/// ```text
+/// CLIENT request ids  1, 2, 3, 4, 5, 6, 7    <- the link's own, bare integers
+/// SERVER request ids  0                       <- item/commandExecution/requestApproval
+/// ```
+///
+/// while the TUI's leg numbers its own requests with uuid-ish STRINGS
+/// (`startup-thread-start-b07418ce-…`, `hooks-list-0508a0e5-…`) and is therefore
+/// structurally incapable of confusing a server request's id with one of its own.
+/// [`crate::codex_link`]'s correlation guard is `kind == FrameKind::Response && id
+/// matches`, and `FrameKind::Response` means "no `method` member" — so a server *request*
+/// can never be taken for our answer. The only frame that can is a **response-shaped** one
+/// carrying a server request's id, which is exactly what the broker's
+/// `response_capability::unanswerable_error` produces (`-32601`).
+///
+/// If a string id is accepted here, the whole collision class goes away: the link's ids
+/// stop sharing a space with the app-server's, and no integer-keyed frame can be read as
+/// this link's answer. That is a root fix rather than a filter for one instance, so it is
+/// worth knowing before spending a turn on anything else.
+///
+/// **This probe measures; it does not assert a preference.** Both answers are findings,
+/// and a refusal is recorded with the frame and attributed to the component that made it —
+/// the broker refuses with `-32001 "…refused by session policy"` and writes a
+/// `refuse->synthetic error` line into `broker.log`, or drops the frame with no answer at
+/// all; the app-server's own refusals look like the `-32600 "no rollout found for thread
+/// id …"` this probe already expects.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn measure_whether_the_ccd_leg_accepts_string_request_ids() {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("strid");
+    let mut coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    // **NOTHING IS EVER TYPED INTO THE PANE AND NOTHING IS EVER COMPOSED.** Both asks
+    // below are answered without the model running, which is what makes this free.
+
+    let raw = RawCcd::connect(&sb.ccd_sock()).await;
+    let mut leg = WireTap::split(raw, "STRID");
+
+    /// The answer to a frame sent under an id of any JSON shape.
+    ///
+    /// [`RawCcd::request`] matches on `as_i64`, which is precisely the assumption under
+    /// test, so it cannot be reused here: it would time out on a correctly echoed string
+    /// id and report the refusal this probe exists to distinguish from silence.
+    async fn answer_to(leg: &WireTap, id: &Value, budget: Duration) -> Option<Value> {
+        let wanted = id.clone();
+        let matches = move |v: &Value| {
+            v.get("id") == Some(&wanted)
+                && v.get("method").is_none()
+                && (v.get("result").is_some() ^ v.get("error").is_some())
+        };
+        let probe = matches.clone();
+        wait_until(budget, || leg.seen().iter().any(&probe)).await;
+        leg.seen().into_iter().find(matches)
+    }
+
+    // ---- (1) initialize, under a string id -----------------------------------------
+    let init_id = Value::String("ccd-init-8f3a".into());
+    leg.send(serde_json::json!({
+        "id": init_id, "method": "initialize",
+        "params": {"clientInfo": {"name": "cc", "title": "cc", "version": "0.0.0"}}
+    }))
+    .await;
+    let init_answer = answer_to(&leg, &init_id, Duration::from_secs(30)).await;
+    println!("STRING-ID initialize -> {init_answer:?}");
+    let init_ok = init_answer
+        .as_ref()
+        .is_some_and(|v| v.get("result").is_some());
+    println!(
+        "STRING-ID initialize ACCEPTED = {init_ok}; id echoed VERBATIM = {}",
+        init_answer
+            .as_ref()
+            .is_some_and(|v| v.get("id") == Some(&init_id))
+    );
+
+    // ---- (2) the thread, learned the way the link learns it -------------------------
+    if init_ok {
+        leg.send(serde_json::json!({"method": "initialized", "params": {}}))
+            .await;
+    }
+    let got_started = wait_until(Duration::from_secs(90), || {
+        leg.first("thread/started").is_some()
+    })
+    .await;
+    let thread = leg
+        .first("thread/started")
+        .and_then(|f| f["params"]["thread"]["id"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    println!("STRING-ID saw thread/started = {got_started}, thread = {thread:?}");
+
+    // ---- (3) thread/resume, under a string id ---------------------------------------
+    //
+    // The ownership-carrying method the link actually uses, so this exercises the
+    // broker's fingerprint path and its id ledger rather than only the census.
+    let resume_id = Value::String("ccd-resume-1".into());
+    let resume_answer = if thread.is_empty() {
+        None
+    } else {
+        leg.send(serde_json::json!({
+            "id": resume_id, "method": "thread/resume", "params": {"threadId": thread}
+        }))
+        .await;
+        answer_to(&leg, &resume_id, Duration::from_secs(30)).await
+    };
+    println!("STRING-ID thread/resume -> {resume_answer:?}");
+    println!(
+        "STRING-ID thread/resume ANSWERED = {}; id echoed VERBATIM = {}",
+        resume_answer.is_some(),
+        resume_answer
+            .as_ref()
+            .is_some_and(|v| v.get("id") == Some(&resume_id))
+    );
+    // The premise this run is taken under: no turn has run, so the honest answer is the
+    // measured not-ready error. Printed rather than asserted — what is under test is the
+    // ID, and pinning the ERROR here would make an unrelated wire change read as an id
+    // finding.
+    if let Some(answer) = &resume_answer {
+        println!(
+            "STRING-ID resume is the measured not-ready error = {}",
+            crate::codex_link::is_measured_not_ready(answer, &thread)
+        );
+    }
+
+    // ---- (4) WHICH COMPONENT SPOKE ---------------------------------------------------
+    //
+    // A broker refusal is synthetic and says so in its own log; an app-server refusal
+    // travels through a `forward` line. Silence with a `DropLogKeepOpen` note is a third
+    // answer and is the one an id ledger would give.
+    let broker_log = read_file(&sb.run_dir.join("broker.log"));
+    println!("STRID BROKER CCD LINES:");
+    for line in broker_log
+        .lines()
+        .filter(|l| l.contains("Ccd") && !l.contains("replayed"))
+    {
+        println!("  {line}");
+    }
+
+    println!(
+        "MEASURED: string ids on the ccd leg — initialize accepted = {init_ok}, \
+         resume answered = {}",
+        resume_answer.is_some()
+    );
+
+    leg.close();
     let _ = Command::new("/bin/kill")
         .args(["-KILL", &coord.id().to_string()])
         .stdout(Stdio::null())

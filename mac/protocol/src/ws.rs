@@ -1604,10 +1604,18 @@ mod tests {
              approval card's event envelope, and `SessionSummary.codex_link` — are \
              minor 19"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 20,
+            "`SessionSummary.codex_link`'s fifth word, `bound_not_started` — the one \
+             un-subscribed state a compose may be admitted in, on a thread the daemon \
+             has proved has never run a turn — is minor 20. It was written into 19 on \
+             the ground that 19 had never shipped; build 72 (`66a03a3`, 2026-09-08) \
+             shipped it, so the word costs a number of its own"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 19);
+        assert_eq!(crate::PROTOCOL_MINOR, 20);
     }
 
     /// **The tags, pinned on this side too.**

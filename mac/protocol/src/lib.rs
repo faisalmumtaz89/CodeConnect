@@ -418,20 +418,65 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         the card's own request named. Same envelope field every other Codex event
 ///         already uses.
 ///       - [`event::SessionSummary::codex_link`] — `"subscribed" | "bound" |
-///         "offline" | "none"`, resolved from the same addressee `codex_thread_id` is
-///         resolved from. This is the limit `ws::Capabilities::codex_interrupt`'s doc
-///         named: the capability is build-shaped and connection-global, and
-///         `codex_thread_id` reads the same whether the link is subscribed, bound or
-///         reconnecting, so per-session actuatability was not computable from the
-///         fleet. It is now: `agent == codex` and `codex_link == subscribed`. Absent
-///         decodes `none`, which is exactly what an older daemon's fleet is to a
-///         client that cannot address any of it. A refusal is still the last word —
-///         a link can move between the summary and the tap.
+///         "offline" | "none"`, resolved from the same addressee
+///         `codex_thread_id` is resolved from.
+///
+///         The four words minor 19 shipped are exactly those. `"bound_not_started"`
+///         is minor 20's, and the entry below says why it could not stay here.
+///
+///         This is the limit `ws::Capabilities::codex_interrupt`'s doc named: the
+///         capability is build-shaped and connection-global, and `codex_thread_id`
+///         reads the same whether the link is subscribed, bound or reconnecting, so
+///         per-session actuatability was not computable from the fleet. It is now:
+///         `agent == codex` and `codex_link` is `subscribed`. Absent decodes `none`,
+///         which is exactly what an older daemon's fleet is to a client that cannot
+///         address any of it. A refusal is still the last word — a link can move
+///         between the summary and the tap.
 ///
 ///     Nothing existing changed shape, and no message was added. `CodexResolution`'s
 ///     arms, `ApprovalCard`, and every other summary field are byte-identical to
 ///     minor 18.
-pub const PROTOCOL_MINOR: u32 = 19;
+///   * `20` — **`codex_link` gains a fifth word: `"bound_not_started"`.**
+///
+///     [`event::SessionSummary::codex_link`] is now `"subscribed" | "bound" |
+///     "bound_not_started" | "offline" | "none"`, and the rule a client scopes its two
+///     Codex controls by is, plainly:
+///
+///     > **`subscribed` actuates both verbs; `bound_not_started` actuates compose only;
+///     > everything else neither.**
+///
+///     The new word is a link bound to a thread the daemon has PROVED has never run a
+///     turn — its own `thread/resume` was refused `-32600 "no rollout found for thread
+///     id …"` — which is the one un-subscribed state a compose may be admitted in: no
+///     rollout means no turn has ever run, so a first `turn/start` cannot collide with
+///     one, and there is correspondingly no turn to stop. It exists to break a dead
+///     end: a fresh Codex thread has no rollout until its first turn, so a phone gated
+///     on `subscribed` could never send the message that would create one.
+///
+///     # Why it is a minor of its own, and why the argument that said otherwise expired
+///
+///     It was written into minor 19 on the ground that minor 19 had never shipped, so
+///     no client anywhere could know four of the words and not the fifth. **That
+///     premise died on 2026-09-08:** commit `66a03a3` "Version 1.1.0 (72): the
+///     TestFlight train for Codex support" — a descendant of `d9b719f`, the minor-19
+///     commit — put build 72 on TestFlight. Build 72 is a live consumer of minor 19, it
+///     knows exactly the four words above, and adding a fifth to a number it has
+///     already negotiated on is the one thing a minor exists to prevent. So the word
+///     takes 20, which is what an unreleased minor would have cost nothing and a
+///     released one costs by definition.
+///
+///     A minor-19 client meeting `"bound_not_started"` is not broken by it: the rule
+///     for a word a client does not know is "not actuatable", which greys both controls
+///     — the same answer it gives for `bound`, and strictly safe, because the only
+///     thing the new word ever widens is a compose. What that client loses is the
+///     affordance, not correctness. A minor-20 client gets the composer on a fresh
+///     thread; that is the whole of the difference.
+///
+///     Nothing changed shape and no message was added. Every other field of
+///     [`event::SessionSummary`] is byte-identical to minor 19, and a decoder that
+///     treats the field as an opaque string — which is what the phone's unrecognised
+///     arm does — reads both minors with one code path.
+pub const PROTOCOL_MINOR: u32 = 20;
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";
