@@ -87,17 +87,40 @@ struct RenderDriver {
         return element
     }
 
+    /// - Parameter scrollingWithin: a sibling that is **already on screen and
+    ///   inside the same scroll view as the subject**. When given, the drags
+    ///   happen inside that element rather than on the app, which is the
+    ///   difference between scrolling the list and scrolling nothing at all.
+    ///
+    ///   Needed because `dragUp` presses at fixed fractions of the *screen*,
+    ///   and at AX5 on the smaller phone the software keyboard owns everything
+    ///   below ~0.45 — so both gestures landed on the keyboard and the command
+    ///   palette's own list never moved. Measured on iPhone 17 Pro, where
+    ///   `session-palette`, `session-palette-filtered` and
+    ///   `session-snapshot-cost-is-usage` all failed while passing on the Pro
+    ///   Max, whose extra height happened to put 0.45 inside the list.
     @discardableResult
-    func require(_ element: XCUIElement, _ what: String) throws -> XCUIElement {
+    func require(
+        _ element: XCUIElement, _ what: String, scrollingWithin anchor: XCUIElement? = nil
+    ) throws -> XCUIElement {
         guard element.waitForExistence(timeout: timeout) else {
             throw RenderFailure.unreachable(what)
         }
-        guard !Self.isPhotographed(element) else { return element }
+        // When the subject lives in a list that clips its own content, the
+        // window is the wrong frame to ask about. See `isPhotographed(_:in:)`.
+        func photographed() -> Bool {
+            if let anchor { return Self.isPhotographed(element, in: anchor) }
+            return Self.isPhotographed(element)
+        }
+        guard !photographed() else { return element }
         let app = XCUIApplication()
-        for _ in 0..<12 {
+        // A drag never travels further than the viewport, so nothing can be
+        // scrolled past unseen; the list therefore needs more of them than a
+        // screen-sized fling does to reach the end of eight AX5 rows.
+        for _ in 0..<(anchor == nil ? 12 : 16) {
             let before = element.frame.minY
-            dragUp(app)
-            if Self.isPhotographed(element) { return element }
+            if let anchor { dragUp(within: anchor) } else { dragUp(app) }
+            if photographed() { return element }
             // **Nothing moved, so the press missed what scrolls.** A sheet at
             // its `.medium` detent owns the bottom half of the screen, and
             // `dragUp` starts at 0.45 — on the dimmed backdrop above it. Four
@@ -105,9 +128,9 @@ struct RenderDriver {
             // `session-effort-sheet`, `session-compact-sheet`,
             // `session-model-kept`): subject 20 to 600 points below the screen,
             // twelve drags, and not one point of movement.
-            if element.frame.minY == before {
+            if element.frame.minY == before, anchor == nil {
                 dragUpInsideSheet(app)
-                if Self.isPhotographed(element) { return element }
+                if photographed() { return element }
             }
         }
         throw RenderFailure.offScreen(what, frame: element.frame)
@@ -146,6 +169,29 @@ struct RenderDriver {
             return window.contains(CGPoint(x: frame.midX, y: frame.midY))
         }
         return isInFrame(element)
+    }
+
+    /// **Is the subject in the photograph, when the photograph is a list?**
+    ///
+    /// The window is the wrong frame to ask about whenever the subject sits in
+    /// a scroll view that clips its own content. Measured on iPhone 17 Pro at
+    /// AX5: the command palette's list is about 120pt tall and the compose bar
+    /// and keyboard own everything below it, so the discovery caption at
+    /// `y=350` is inside the *window* and behind the *composer*. Both devices
+    /// certified `session-palette--ax5` that way and neither PNG has the
+    /// caption in it — a green render of a screen nobody photographed.
+    ///
+    /// So: inside the list's own frame, and enough of it to be worth the
+    /// certificate — the whole subject when it fits, and a full viewport of it
+    /// when the subject is taller than the list (the AX5 caption is).
+    private static func isPhotographed(_ element: XCUIElement, in viewport: XCUIElement) -> Bool {
+        let frame = element.frame
+        let box = viewport.frame
+        guard !frame.isEmpty, !box.isEmpty else { return false }
+        let shown = frame.intersection(box)
+        guard !shown.isNull, !shown.isEmpty else { return false }
+        return shown.height >= min(frame.height, box.height) - 1
+            && shown.width >= min(frame.width, box.width) - 1
     }
 
     /// **Is this element in the photograph?**
@@ -188,6 +234,36 @@ struct RenderDriver {
             .press(
                 forDuration: 0.05,
                 thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)))
+    }
+
+    /// **The scroll view that holds this text**, so a drag can be aimed at the
+    /// list rather than at whatever happens to be under a screen fraction.
+    ///
+    /// Anchoring on a *row* was the first attempt and is subtly wrong: the row
+    /// scrolls away, and every drag after the first one presses where it used
+    /// to be. Measured — the palette's caption climbed 326pt over twelve drags
+    /// and then stopped, because eleven of them landed on nothing. A scroll
+    /// view stays where it is while its content moves under it.
+    func list(holding fragment: String, in app: XCUIApplication) -> XCUIElement {
+        app.scrollViews.containing(
+            NSPredicate(format: "label CONTAINS[c] %@", fragment)
+        ).firstMatch
+    }
+
+    /// **A drag that lands inside a named element**, and therefore inside the
+    /// scroll view that holds it.
+    ///
+    /// One row's worth of travel per call rather than a screen's: a command
+    /// palette shows about four rows, and a fling that overshoots the subject
+    /// is the same failure as never reaching it.
+    func dragUp(within anchor: XCUIElement) {
+        let start = anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        // Never more than the viewport, or a row can pass the shutter between
+        // two drags and the loop will keep dragging past it forever.
+        let travel = max(anchor.frame.height * 0.8, 40)
+        start.press(
+            forDuration: 0.05,
+            thenDragTo: start.withOffset(CGVector(dx: 0, dy: -travel)))
     }
 
     /// The same gesture, begun **low enough to be inside a half-height sheet**.
@@ -273,7 +349,13 @@ struct RenderDriver {
         let target = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH[c] %@", row)
         ).firstMatch
-        try require(target, "the \(row) palette row")
+        // **Scrolled within the palette's own list.** At AX5 on the smaller
+        // phone the keyboard leaves room for about one row, so the wanted row
+        // is usually below it — and a drag aimed at the screen lands on the
+        // keyboard. The palette's first row is on screen by construction (the
+        // fragment filtered to it), and it shares the list's scroll view.
+        try require(
+            target, "the \(row) palette row", scrollingWithin: list(holding: row, in: app))
         target.tap()
     }
 
@@ -494,9 +576,11 @@ enum RenderCatalog {
                 try driver.typeIntoComposer(app, "/")
                 try driver.require(
                     driver.element(containing: "/model", in: app), "the /model row")
+                // Scrolled by its own list, which stays put while its rows move.
                 try driver.require(
                     driver.text(containing: "Run other commands", in: app),
-                    "the discovery caption")
+                    "the discovery caption",
+                    scrollingWithin: driver.list(holding: "Run other commands", in: app))
             }),
         RenderScenario(
             name: "session-palette-filtered",
@@ -509,7 +593,8 @@ enum RenderCatalog {
                 try driver.require(
                     driver.element(containing: "/compact", in: app), "the /compact row")
                 try driver.require(
-                    driver.element(containing: "/cost", in: app), "the /cost row")
+                    driver.element(containing: "/cost", in: app), "the /cost row",
+                    scrollingWithin: driver.list(holding: "/cost", in: app))
             }),
         // **Opened on the session that carries the facts.** `fx-4`'s log
         // holds a SessionStart with the raw hook id `claude-opus-5[1m]` and a
