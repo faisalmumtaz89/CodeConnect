@@ -1,0 +1,80 @@
+{
+  "command": {
+    "display_text": "command\n{\"command\":\"/bin/zsh -lc 'touch marker.txt'\",\"cwd\":\"/work/p-accept\",\"options\":[{\"id\":\"accept\",\"label\":\"Yes, proceed\"},{\"id\":\"acceptWithExecpolicyAmendment\",\"label\":\"Yes, and don't ask again for commands that start with `touch marker.txt`\",\"payload\":{\"execpolicy_amendment\":[\"touch\",\"marker.txt\"]}},{\"id\":\"cancel\",\"label\":\"No, and tell Codex what to do differently\"}],\"proposed_amendment\":[\"touch\",\"marker.txt\"],\"reason\":\"the sandbox is read-only\"}",
+    "generation": 1,
+    "identity_bound": false,
+    "payload_hash": "bbe20d76f734f1833ffdf048fa5d2f2e15d3c7df06875188366e08ae23b891a3",
+    "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gAJDAxYTAxMjgyLWJhODctNzY2MC05ZjhkLTA1ZTIyMTljZDUwNQEAKWV4ZWMtY2Y3YjY3YzctM2ExOS00ZGQ4LWE5YTYtNmYyNDNkYjMzYmQ0AAAAAAAAAAE",
+    "risk": {
+      "class": "medium"
+    },
+    "tool_input": {
+      "command": "/bin/zsh -lc 'touch marker.txt'",
+      "cwd": "/work/p-accept",
+      "options": [
+        {
+          "id": "accept",
+          "label": "Yes, proceed"
+        },
+        {
+          "id": "acceptWithExecpolicyAmendment",
+          "label": "Yes, and don't ask again for commands that start with `touch marker.txt`",
+          "payload": {
+            "execpolicy_amendment": [
+              "touch",
+              "marker.txt"
+            ]
+          }
+        },
+        {
+          "id": "cancel",
+          "label": "No, and tell Codex what to do differently"
+        }
+      ],
+      "proposed_amendment": [
+        "touch",
+        "marker.txt"
+      ],
+      "reason": "the sandbox is read-only"
+    },
+    "tool_name": "command"
+  },
+  "file_change": {
+    "display_text": "file change\n{\"changes\":[{\"diff\":\"@@ -1 +1 @@\\n-hello\\n+goodbye\\n\",\"kind\":{\"move_path\":null,\"type\":\"update\"},\"path\":\"/work/hello.txt\"}],\"options\":[{\"id\":\"accept\",\"label\":\"Yes, proceed\"},{\"id\":\"acceptForSession\",\"label\":\"Yes, and don't ask again for these files\"},{\"id\":\"cancel\",\"label\":\"No, and tell Codex what to do differently\"}],\"path\":\"/work/hello.txt\"}",
+    "generation": 1,
+    "identity_bound": false,
+    "payload_hash": "99f2084e6c5d8edfca0454ce82b5f8160b464c40b1358f770961dea743af63f6",
+    "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gAJDAxYTAxMjhkLWRlMDgtNzYyMC1iZmQzLTVhZjI5NDEyOGM1NAEAKWV4ZWMtN2M1ODFhZTgtNjRhMy00OWIxLTkxNTctYTk4ZmJiMmFmM2UwAAAAAAAAAAE",
+    "risk": {
+      "class": "medium"
+    },
+    "tool_input": {
+      "changes": [
+        {
+          "diff": "@@ -1 +1 @@\n-hello\n+goodbye\n",
+          "kind": {
+            "move_path": null,
+            "type": "update"
+          },
+          "path": "/work/hello.txt"
+        }
+      ],
+      "options": [
+        {
+          "id": "accept",
+          "label": "Yes, proceed"
+        },
+        {
+          "id": "acceptForSession",
+          "label": "Yes, and don't ask again for these files"
+        },
+        {
+          "id": "cancel",
+          "label": "No, and tell Codex what to do differently"
+        }
+      ],
+      "path": "/work/hello.txt"
+    },
+    "tool_name": "file change"
+  }
+}

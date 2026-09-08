@@ -206,12 +206,18 @@ PY
     return 0
 }
 
-# The one assertion in this run, and it is here because a screenshot cannot
-# hold it: a sheet's frames at both ends of the same expand gesture. Run at `L`
-# only — the property is about presentation geometry, which no type size
-# changes. See `SheetPresentationTests`.
+# The assertions in this run that a screenshot cannot hold. Run at `L` only —
+# every property here is about behaviour or presentation geometry, and no type
+# size changes either.
+#
+#   * `SheetPresentationTests` — a sheet's frames at both ends of one expand
+#     gesture. A sheet that looks right at both detents can still rescale on the
+#     way between them, and no still frame of either end shows it.
+#   * `CodexBehaviourTests` — what a Codex card *does*: that it offers its own
+#     options and neither Allow nor Deny, that a resolved one exposes no answer
+#     surface, and that a stopped turn leaves no live card behind.
 behaviour_gate() {
-    say "── sheet presentation"
+    say "── behaviour"
     xcrun simctl ui "$SIM_ID" content_size large >/dev/null
     if xcodebuild test-without-building \
         -project CodeConnect.xcodeproj \
@@ -219,8 +225,10 @@ behaviour_gate() {
         -destination "platform=iOS Simulator,id=$SIM_ID" \
         -derivedDataPath "$DD" \
         -only-testing:"CodeConnectRenderHarness/SheetPresentationTests" \
+        -only-testing:"CodeConnectRenderHarness/CodexBehaviourTests" \
         >"$WORK/sheet-presentation.log" 2>&1; then
         say "   expanding a sheet translates it without resizing it"
+        say "   a Codex card answers by its own options, and a resolved one answers not at all"
         return 0
     fi
     say "   FAILED — see $WORK/sheet-presentation.log"

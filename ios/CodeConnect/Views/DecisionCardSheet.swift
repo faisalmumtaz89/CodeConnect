@@ -176,6 +176,10 @@ struct ResolutionBanner: View {
         switch path {
         case .sendKeys: return "typed at the TTY"
         case .hookReturn: return "returned to the hook"
+        // A real actuation, and it reads like one. Codex asked, over its own
+        // control link, and this is the answer written back to that request —
+        // no keyboard, no pane, nothing inferred from a prompt disappearing.
+        case .codexResponse: return "answered on the Codex link"
         case .unknown: return "applied in a way this app doesn’t recognise"
         }
     }
@@ -207,6 +211,21 @@ struct ResolutionBanner: View {
         case .staleCard(let reason): return reason
         case .rejected(let reason): return reason
         case .failed(let reason): return "\(reason) Answers are idempotent. Retrying is safe."
+        }
+    }
+}
+
+/// The bridge between `CodexProse`'s view-free tone and the kit's.
+///
+/// `CodexProse` is deliberately free of SwiftUI so its sentences can be
+/// asserted without a view layer; this is the one line that costs.
+extension CodexProse.CodexTone {
+    var ccTone: CCTone {
+        switch self {
+        case .info: return .info
+        case .success: return .success
+        case .warning: return .warning
+        case .danger: return .danger
         }
     }
 }

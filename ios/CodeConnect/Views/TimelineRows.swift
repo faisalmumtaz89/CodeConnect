@@ -542,6 +542,13 @@ struct ApprovalRow: View {
         if let outcome = approval.outcome {
             return AgeClock(since: outcome.resolvedDate, scale: .age)
         }
+        // A Codex resolution carries no timestamp on any arm, so a card that
+        // ended that way has no age to tick — and the coarse scale is what stops
+        // a settled row waking the screen once a second for a clock it does not
+        // draw.
+        if approval.codexResolution != nil {
+            return AgeClock(since: approval.requestedAt, scale: .age)
+        }
         return AgeClock(since: approval.requestedAt, scale: .clock)
     }
 
@@ -632,6 +639,8 @@ struct ApprovalRow: View {
     private var footer: some View {
         if let outcome = approval.outcome {
             resolvedFooter(outcome)
+        } else if let resolution = approval.codexResolution {
+            codexResolvedFooter(resolution)
         } else {
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
                 CCWaitClock(since: approval.requestedAt, now: now, prefix: "waiting")
@@ -656,14 +665,58 @@ struct ApprovalRow: View {
         }
     }
 
+    /// **What a Codex card ended as**, in its own vocabulary.
+    ///
+    /// A separate footer rather than a mapping onto `AnswerOutcome`, for the
+    /// same reason `ApprovalItem` keeps the two apart: a `cleared(turn_aborted)`
+    /// is not "Denied", an `answered(by: .local)` names no decision at all, and
+    /// `AnswerOutcome` cannot express either without claiming something.
+    ///
+    /// No timestamp. The Codex wire carries a `resolved_at` on **no arm at all**
+    /// — `AnswerOutcome`'s is what the age beside a Claude row is drawn from —
+    /// and an age computed from when this phone happened to receive the frame
+    /// would be a number about the phone dressed as a number about the Mac.
+    @ViewBuilder
+    private func codexResolvedFooter(_ resolution: CodexResolution) -> some View {
+        CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
+            Text(CodexProse.resolution(resolution).title)
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: CC.space.xs)
+            CCButton("View", variant: .ghost, size: .sm, action: onOpen)
+        }
+    }
+
     /// The persisted approval row's header word. Pending is "NEEDS YOU";
     /// otherwise the row carries a recorded outcome, and an `indeterminate` one —
     /// which the daemon could not confirm reached the agent — reads "UNCONFIRMED",
     /// never the definitive "RESOLVED". Static and pure so the string is testable
     /// off the real `ApprovalItem` the builder produces, without rendering the row.
+    ///
+    /// **A Codex ending counts.** Read against `approval.outcome` alone this row
+    /// said `NEEDS YOU` — with a live `Review` button and a ticking wait clock —
+    /// on a card that had already been answered at the Mac. Caught by looking at
+    /// `codex-resolved-at-mac--L.png`; the builder's own tests were green,
+    /// because the defect was in a second reader that had not been told.
     static func headerTitle(for approval: ApprovalItem) -> String {
-        guard let outcome = approval.outcome else { return "NEEDS YOU" }
-        return outcome.indeterminate ? "UNCONFIRMED" : "RESOLVED"
+        if let outcome = approval.outcome {
+            return outcome.indeterminate ? "UNCONFIRMED" : "RESOLVED"
+        }
+        if let resolution = approval.codexResolution { return Self.codexHeader(for: resolution) }
+        return "NEEDS YOU"
+    }
+
+    /// One word for how a Codex card ended. `RETIRED` rather than `RESOLVED` for
+    /// the endings nobody answered: a question that timed out or went away with
+    /// its turn was not resolved by anyone, and saying so would credit a
+    /// decision that was never made.
+    static func codexHeader(for resolution: CodexResolution) -> String {
+        switch resolution {
+        case .answered: return "RESOLVED"
+        case .cleared, .timeout: return "RETIRED"
+        case .unknown, .unrecognisedStatus: return "UNCONFIRMED"
+        }
     }
 
     static func resolutionText(for outcome: AnswerOutcome) -> String {
@@ -695,6 +748,10 @@ struct ApprovalRow: View {
     private var accessibilityLabel: String {
         if let outcome = approval.outcome {
             return Self.resolvedAccessibilityLabel(for: outcome, toolName: approval.card.toolName)
+        }
+        if let resolution = approval.codexResolution {
+            let banner = CodexProse.resolution(resolution)
+            return "\(banner.oneLine) \(approval.card.toolName)."
         }
         return
             "Pending approval, risk \(risk.label), \(approval.card.toolName), waiting \(Format.spokenAge(now.timeIntervalSince(approval.requestedAt)))"

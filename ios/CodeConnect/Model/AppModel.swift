@@ -154,6 +154,31 @@ final class AppModel {
     /// session when this one exits, and keying by it is what spliced two agents'
     /// timelines into one.
     private(set) var states: [String: SessionState] = [:]
+    /// One `CodexControls` per session, created on demand by `codexControls(for:)`.
+    ///
+    /// **`@ObservationIgnored`, and that is load-bearing.** Views read this
+    /// during `body` — the fleet row asks whether Stop is greyed, the session
+    /// header asks what the daemon last said — and the lookup *creates* the
+    /// controller on a miss. Observed, that insertion is a mutation during view
+    /// update: `body` reads it, the write invalidates, `body` re-runs, and the
+    /// app never reports itself idle. Measured as a render pass whose
+    /// XCUITest quiescence wait stopped settling, which is the same signature
+    /// the read gate's geometry probe produced and the same lesson —
+    /// `AppModel.state(for:)` carries the warning in its own doc comment.
+    ///
+    /// Nothing is lost by ignoring it: each `CodexControls` is itself
+    /// `@Observable`, so the *contents* — the in-flight flag, the settled
+    /// outcome, the cooldown — still drive redraws. Only the act of minting an
+    /// empty one is invisible, and an empty one has nothing to draw.
+    @ObservationIgnored private var codexControlsByKey: [String: CodexControls] = [:]
+    /// **What this phone has sent and cannot account for, across launches.**
+    /// See `CodexSpentLedger`; the per-session controllers read and write it.
+    ///
+    /// Injectable because it is genuinely durable: a test that shares the
+    /// standard defaults with the next test is a test whose second stop is
+    /// refused by the first one's uncertainty — which is the interlock working,
+    /// and useless as a fixture.
+    @ObservationIgnored let codexSpentLedger: CodexSpentLedger
     /// Age of the fleet list when it came off disk rather than the wire.
     private(set) var fleetCachedAt: Date?
     /// When *this launch* put that cached list on screen. The cached banner's
@@ -212,7 +237,8 @@ final class AppModel {
     init(
         pairing: PairingStore = PairingStore(), cache: EventCache = EventCache(),
         settings: AppSettings = AppSettings(),
-        relayEnrollment: RelayEnrollment = RelayEnrollment()
+        relayEnrollment: RelayEnrollment = RelayEnrollment(),
+        codexSpentLedger: CodexSpentLedger = CodexSpentLedger()
     ) {
         // Startup housekeeping, on the one object the app builds exactly once.
         LegacyCredentials.purge()
@@ -221,6 +247,7 @@ final class AppModel {
         self.settings = settings
         self.cache = cache
         self.relayEnrollment = relayEnrollment
+        self.codexSpentLedger = codexSpentLedger
         // Owned here, not by the Terminal tab: the terminal rides the paired
         // connection, and a view that owns it would drop the session every time
         // SwiftUI rebuilt the tab. One carrier per connection is also what makes
@@ -721,6 +748,74 @@ final class AppModel {
             _ = open(url: url)
         }
 
+        /// Test seam: `-CC_CODEX <state>` stages one Codex state end to end.
+        ///
+        /// Every frame goes through the real `ServerMessage` decoder and the
+        /// real ingest path, exactly as the Claude fixtures do — so a fixture
+        /// that stopped matching the wire fails to decode rather than quietly
+        /// diverging, and these double as a decoder test.
+        ///
+        /// The two **mutation** outcomes are stubbed differently, and they have
+        /// to be: a stop and a message are request/response, so there is no
+        /// frame to replay until something asks. The stub answers the question
+        /// the state stages, after the same capability gate a real send meets —
+        /// which is why `daemon-minor16` and `daemon-minor17` render a refusal
+        /// that never left the phone rather than one the daemon wrote.
+        private func applyCodexFixture(_ state: CodexFixtures.State) {
+            fixturesActive = true
+            connection.fixtureAnswers = true
+            connection.simulateConnectedForTesting()
+            for message in CodexFixtures.frames(state: state) {
+                connection.injectForTesting(message)
+            }
+            // The staged answer, delivered through the real waiter table by the
+            // real correlation on the phone's own `request_id`.
+            connection.sendStub = { [weak connection] message in
+                switch message {
+                case .interrupt(let session, let requestID, _, _):
+                    guard let result = CodexFixtures.interruptResult(state) else { return }
+                    connection?.injectForTesting(
+                        .interruptResult(
+                            sessionID: session, requestID: requestID, result: result))
+                case .compose(let session, let requestID, _, _):
+                    guard let result = CodexFixtures.composeResult(state) else { return }
+                    connection?.injectForTesting(
+                        .composeResult(
+                            sessionID: session, requestID: requestID, result: result))
+                default:
+                    break
+                }
+            }
+            // A staged outcome is *pressed*, not painted: the render drives the
+            // real send path, so what it photographs is what a tap produces —
+            // including the presses the gate refuses, which are the only way to
+            // photograph the gate itself.
+            if CodexFixtures.pressesStop(state) {
+                Task { await stopCodexTurn(sessionKey: CodexFixtures.sessionKey) }
+            }
+            if CodexFixtures.pressesCompose(state) {
+                Task {
+                    await composeToCodex(
+                        sessionKey: CodexFixtures.sessionKey,
+                        text: "Also say the word HELLO-STEER when you are done.")
+                }
+            }
+            keepFixtureLinkFresh()
+        }
+
+        /// Link health is measured from when a frame last *arrived*, so a
+        /// fixture run needs frames to keep arriving or the link correctly goes
+        /// stale mid-render and disables every action.
+        private func keepFixtureLinkFresh() {
+            Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(5))
+                    guard let self, self.fixturesActive else { return }
+                    self.connection.injectForTesting(.pong)
+                }
+            }
+        }
+
         /// Test seam: `-CC_FIXTURE deck` replays contract-shaped daemon frames
         /// through the real decoders and the real ingest path, so the Deck can
         /// be driven with several agents blocked at three risk classes at once —
@@ -730,6 +825,18 @@ final class AppModel {
         /// never has a socket, so nothing it shows can be confused with a live
         /// link that has gone quiet.
         private func applyFixtures() {
+            // `-CC_CODEX <state>` stages one Codex state, seeded from
+            // `fixtures/codex/*`. Its own entry point rather than a `Variant`,
+            // because a Codex state is not a *shape of fleet* — it is a shape of
+            // one session's history, its daemon's age, and what the daemon
+            // answers a mutation with, which is three axes the fleet variants
+            // do not have.
+            if let state = CodexFixtures.State(
+                UserDefaults.standard.string(forKey: "CC_CODEX"))
+            {
+                applyCodexFixture(state)
+                return
+            }
             // `-CC_FIXTURE stacked` is the same fleet with one agent holding two
             // decisions — the state where "count the agents" and "count the
             // cards" stop agreeing.
@@ -1076,6 +1183,13 @@ final class AppModel {
         answerAttempts = [:]
         answersInFlight = []
         diffs = [:]
+        // **The mutation controllers go with the fleet.** They were left
+        // behind, so a reconnect that re-created a session under the same key
+        // inherited the previous fleet's in-flight ids and settled banners —
+        // one run's uncertainty printed over another's. The durable spent
+        // material is a separate store on purpose and is NOT cleared here:
+        // "what this phone has already sent" survives losing the list.
+        codexControlsByKey.removeAll()
         hasLiveFleet = false
         fleetCachedAt = nil
         fleetCacheRestoredAt = nil
@@ -1391,6 +1505,11 @@ final class AppModel {
             pairing.noteTLSUnusable(
                 ack.capabilities.tls && pairing.endpoint?.hostIsIPLiteral == true)
             startCacheMigration()
+        case .interruptResult, .composeResult:
+            // Awaited by the control that asked, correlated on the request id it
+            // minted. Nothing here may act on one: a stop or a message is a
+            // mutation somebody pressed, and its outcome belongs to that press.
+            break
         case .answerResult, .sendTextResult, .captureResult, .commandCatalog, .diff, .error,
             .pong, .unknown:
             break
@@ -1638,6 +1757,13 @@ final class AppModel {
     /// for sessions that no longer exist are slots taken from sessions that do,
     /// and those rows announce work the user has already read as new.
     private func forgetLocalState(of key: String) {
+        // **The controller goes with the run.** Keyed by `sessionKey`, which
+        // falls back to a reused tmux name on a pre-uid daemon — so a later row
+        // under the same key inherited the departed run's banners, its ten-second
+        // cooldown, and its spent request material.
+        codexControlsByKey.removeValue(forKey: key)
+        // The run is gone, so there is nothing left for its material to reach.
+        codexSpentLedger.forget(session: key)
         subscribed.remove(key)
         states.removeValue(forKey: key)
         diffs.removeValue(forKey: key)
@@ -1699,9 +1825,242 @@ final class AppModel {
     /// shows the confirmed outcome instead of an innocent-looking pending state.
     func lastAttempt(for item: ApprovalItem) -> AnswerAttempt? { answerAttempts[item.id] }
 
+    // MARK: - Codex: stop the turn, say something
+
+    /// One controller per session, created on demand. Held here rather than in a
+    /// view so an in-flight stop survives the sheet being dismissed — and so the
+    /// bounded grey after a link-state refusal is not reset by scrolling the
+    /// fleet.
+    func codexControls(for key: String) -> CodexControls {
+        if let existing = codexControlsByKey[key] { return existing }
+        // **A fixture run writes nothing durable.** The render harness presses
+        // Stop and Compose for real, and two of the staged answers are
+        // `indeterminate` — which is exactly the outcome that spends material
+        // for ever. Persisted, the L pass would silently change what the AX5
+        // pass photographs, and the second render of the same scenario would
+        // show "this was already sent" instead of the state it names. The same
+        // rule `SessionState.recordsReviewMarks` follows: a run that is not real
+        // leaves no trace a sweep could never reach.
+        let fresh = CodexControls(
+            sessionKey: key, ledger: fixturesActive ? nil : codexSpentLedger)
+        codexControlsByKey[key] = fresh
+        return fresh
+    }
+
+    /// The turn this session is running, or nil when the phone holds none.
+    ///
+    /// Derived from the event envelopes, because there is no "a turn began"
+    /// fact on this wire at all — see `CodexTurnTracker`. Decision D2 prefers
+    /// the approval event's own envelope `turn_id` when the Mac supplies one and
+    /// falls back to this; the tracker already reads whichever is present,
+    /// because both arrive as `Event.turnID`.
+    func runningTurn(for key: String) -> String? {
+        let controls = codexControls(for: key)
+        return CodexTurnTracker.runningTurn(
+            in: states[key]?.events ?? [],
+            observed: controls.observedTurns,
+            retired: controls.retiredTurns)
+    }
+
+    /// Why Stop is not offered on this session, or nil when it is.
+    func stopUnavailable(for key: String) -> String? {
+        guard let summary = summary(for: key) else { return "This run is not in the fleet." }
+        return CodexProse.stopUnavailable(
+            agent: summary.agent,
+            daemonHonoursStop: daemonProfile.stopsCodexTurns,
+            link: summary.codexLink,
+            runningTurn: runningTurn(for: key))
+    }
+
+    /// Why the Codex composer cannot send, or nil when it can.
+    func composeUnavailable(for key: String) -> String? {
+        guard let summary = summary(for: key) else { return "This run is not in the fleet." }
+        return CodexProse.composeUnavailable(
+            agent: summary.agent,
+            daemonUnderstandsCompose: daemonProfile.composesToCodex,
+            link: summary.codexLink)
+    }
+
+    /// **Stop this Codex session's running turn.**
+    ///
+    /// Every value the frame carries is derived here, from facts this model
+    /// holds, so a view cannot supply a turn the phone never saw or a session
+    /// reference the hash was not computed over.
+    ///
+    /// **The whole gate lives here**, in one guard chain, and no surface
+    /// re-derives any part of it: `stopUnavailable(for:)` answers the same
+    /// question for the controls, off the same inputs. Two readers of one rule
+    /// is how the link state came to be enforced when drawing a button and not
+    /// when sending a frame.
+    @discardableResult
+    func stopCodexTurn(sessionKey key: String) async -> InterruptResult? {
+        let controls = codexControls(for: key)
+        guard let summary = summary(for: key) else {
+            controls.stopNotSent("This run is not in the fleet.")
+            return nil
+        }
+        // Agent, daemon capability, running turn and **link state**, in the one
+        // place that decides whether a frame may leave.
+        if let blocked = stopUnavailable(for: key) {
+            controls.stopNotSent(blocked)
+            return nil
+        }
+        guard let turn = runningTurn(for: key) else {
+            controls.stopNotSent("Nothing is running to stop.")
+            return nil
+        }
+        // **The uid or nothing** (decision D4). The tmux name is handed to the
+        // next run, so hashing and sending it can aim an abort at a session the
+        // reader never saw. There is no safe fallback, so there is none.
+        guard let reference = Self.sessionReference(summary) else {
+            controls.stopNotSent(Self.noUidSentence)
+            return nil
+        }
+        let hash = CodexHash.interrupt(sessionRef: reference, turnID: turn)
+
+        // **Spent material is never re-sent.** A stop whose outcome nobody
+        // knows — `indeterminate`, or a reply this phone never heard — was
+        // issued, and the daemon's own sentence says it will not be sent again.
+        // Neither will this.
+        guard !controls.stopIsSpent(material: hash) else {
+            controls.stopNotSent(Self.alreadyIssuedSentence(verb: "stop"))
+            return nil
+        }
+        let requestID = controls.stopRequestID(material: hash)
+
+        controls.beginStop()
+        do {
+            let result = try await connection.interrupt(
+                session: reference, requestID: requestID, turnID: turn, payloadHash: hash)
+            controls.settleStop(result, material: hash, turnID: turn, now: now)
+            refreshFleet()
+            return result
+        } catch let refusal as DaemonConnection.CodexRefusal {
+            controls.stopNotSent(Self.sentence(for: refusal, verb: "stop this turn"))
+            return nil
+        } catch ConnectionError.sentButUnanswered {
+            // The frame left. Saying "nothing was sent" here would be the app
+            // inventing a guarantee the transport never gave it.
+            controls.stopSentNoAnswer(Self.sentNoAnswerSentence(verb: "stop"), material: hash)
+            return nil
+        } catch {
+            controls.stopNotSent(error.localizedDescription)
+            return nil
+        }
+    }
+
+    /// **Say something to this Codex session.**
+    @discardableResult
+    func composeToCodex(sessionKey key: String, text: String) async -> ComposeResult? {
+        let controls = codexControls(for: key)
+        guard let summary = summary(for: key) else {
+            controls.composeNotSent("This run is not in the fleet.")
+            return nil
+        }
+        if let blocked = composeUnavailable(for: key) {
+            controls.composeNotSent(blocked)
+            return nil
+        }
+        // Refused here as well as inside the connection: the reader deserves the
+        // byte count in the app's own words rather than after a round trip, and
+        // the connection's copy of the check is the one that guarantees no frame
+        // leaves regardless of which caller forgot.
+        if let blocked = ComposeDraft(text: text).blockedReason {
+            controls.composeNotSent(blocked)
+            return nil
+        }
+        guard let reference = Self.sessionReference(summary) else {
+            controls.composeNotSent(Self.noUidSentence)
+            return nil
+        }
+        let hash = CodexHash.compose(sessionRef: reference, text: text)
+
+        // **The same words are never said twice** once their outcome is
+        // unknown. Editing them makes a different message, which is a different
+        // hash, and goes.
+        guard !controls.composeIsSpent(material: hash) else {
+            controls.composeNotSent(Self.alreadyIssuedSentence(verb: "send"))
+            return nil
+        }
+        let requestID = controls.composeRequestID(material: hash)
+
+        controls.beginCompose()
+        do {
+            let result = try await connection.compose(
+                session: reference, requestID: requestID, text: text, payloadHash: hash)
+            controls.settleCompose(result, material: hash)
+            return result
+        } catch let refusal as DaemonConnection.CodexRefusal {
+            controls.composeNotSent(Self.sentence(for: refusal, verb: "carry this message"))
+            return nil
+        } catch ConnectionError.sentButUnanswered {
+            controls.composeSentNoAnswer(
+                Self.sentNoAnswerSentence(verb: "send"), material: hash)
+            return nil
+        } catch {
+            controls.composeNotSent(error.localizedDescription)
+            return nil
+        }
+    }
+
+    /// The one string a mutation may name a session by: its uid. `nil` when
+    /// there is none, which is a refusal and not a fallback (D4).
+    private static func sessionReference(_ summary: SessionSummary) -> String? {
+        summary.sessionUID.isEmpty ? nil : summary.sessionUID
+    }
+
+    private static let noUidSentence =
+        "This Mac has not given this run an id of its own, so nothing was sent."
+
+    private static func alreadyIssuedSentence(verb: String) -> String {
+        "This was already sent and what became of it is not known; it will not be \(verb) again. "
+            + "Check the Mac."
+    }
+
+    private static func sentNoAnswerSentence(verb: String) -> String {
+        "This left the phone and the Mac never answered, so what became of it is not known; "
+            + "it will not be \(verb) again. Check the Mac."
+    }
+
+    /// A typed refusal in the app's own words. **Never dressed as the daemon's**
+    /// — nothing was sent, so the daemon has said nothing about it.
+    private static func sentence(
+        for refusal: DaemonConnection.CodexRefusal, verb: String
+    ) -> String {
+        switch refusal {
+        case .notAdvertised:
+            return
+                "This Mac's CodeConnect never said it could \(verb), so nothing was sent. Update it."
+        case .notACodexSession(let agent):
+            return "This is a \(agent) session, so nothing was sent."
+        case .nothingToSend(let reason):
+            return reason
+        }
+    }
+
     /// Answers are idempotent by `(session, request_id)` on the daemon side, so
     /// a retry after any failure here is always safe.
     func answer(item: ApprovalItem, decision: AnswerDecision) async -> AnswerAttempt {
+        // **The decision must match the agent, checked on the send path.**
+        //
+        // The two vocabularies are mutually exclusive and the Mac refuses each
+        // one aimed at the other by name. The view already picks the right
+        // surface, but a view is not a guarantee: this closes the path itself,
+        // so a deep link, a stale sheet or a future caller cannot transmit a
+        // decision the daemon will only send back.
+        // Unknown agent fails closed. `?? .claude` was the default here, and
+        // `.claude` is the one vocabulary that transmits — so a card whose run
+        // had left the fleet sent an `allow` for an agent nobody could name.
+        guard let agent = summary(for: item.sessionKey)?.agent else {
+            return .rejected(
+                "This run is no longer on the fleet, so nothing was sent. Answer it at the Mac.")
+        }
+        if let mismatch = Self.decisionMismatch(
+            decision: decision, agent: agent,
+            resolvesCodexCards: daemonProfile.resolvesCodexCards)
+        {
+            return .rejected(mismatch)
+        }
         guard !answersInFlight.contains(item.id) else {
             return .failed("An answer for this card is already being sent.")
         }
@@ -1710,6 +2069,35 @@ final class AppModel {
         let attempt = await sendAnswer(item: item, decision: decision)
         answerAttempts[item.id] = attempt
         return attempt
+    }
+
+    /// Why this decision cannot be sent to this agent, or nil when it can.
+    ///
+    /// Deliberately silent about `.unrecognised`: it is only ever *received*.
+    /// `.text` is **not** silent any more — it is Claude's deny-with-a-reason
+    /// path, which types free text into a composer a Codex session does not
+    /// have, and "the control is not drawn" is a view fact, not a guarantee.
+    static func decisionMismatch(
+        decision: AnswerDecision, agent: AgentKind, resolvesCodexCards: Bool = true
+    ) -> String? {
+        switch (agent, decision) {
+        case (.codex, _) where !resolvesCodexCards:
+            // **F4.** Below minor 19 the resolution carries no `request_id`, so
+            // an answered card can never be retired. A card that cannot be
+            // retired must not be answered from here, by any vocabulary.
+            return "This Mac's CodeConnect is too old to answer a Codex card from the phone, "
+                + "so nothing was sent. Update it, or answer at the Mac."
+        case (.codex, .allow), (.codex, .deny), (.codex, .option), (.codex, .text):
+            return "A Codex card is answered by naming one of the options it offered, "
+                + "so nothing was sent."
+        case (.claude, .optionId):
+            return "An option id is for a Codex session; this is a Claude session, "
+                + "so nothing was sent."
+        case (.unsupported(let raw), _):
+            return "This app does not know how to answer a \(raw) session, so nothing was sent."
+        default:
+            return nil
+        }
     }
 
     private func sendAnswer(item: ApprovalItem, decision: AnswerDecision) async -> AnswerAttempt {

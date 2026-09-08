@@ -394,6 +394,26 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         for state in model.states.values { await state.settleForTesting() }
     }
 
+    /// **A card's run, described.** `AppModel.answer` fails closed when no
+    /// summary names the agent (a card whose run has left the fleet must not
+    /// transmit an `allow` on Claude's behalf), so a test about *answering*
+    /// has to say whose session this is. A test about an unbacked card
+    /// deliberately does not.
+    private func describeSessionAsClaude(_ model: AppModel) {
+        model.connection.injectForTesting(
+            .sessions([
+                try! JSONDecoder().decode(
+                    SessionSummary.self,
+                    from: Data(
+                        """
+                        {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1",
+                         "cwd":"/work","project_label":"work","lifecycle":"live","link":"attached",
+                         "last_seq":1,"created_at":"2026-08-18T09:00:00.000Z",
+                         "updated_at":"2026-08-18T09:00:00.000Z","blocked_on":[],"agent":"claude"}
+                        """.utf8))
+            ]))
+    }
+
     // The two production-boundary expressions the card view actually evaluates.
     private func liveBanner(_ model: AppModel, attempt: AnswerAttempt?)
         -> DecisionCardView.ResolvedBanner
@@ -405,7 +425,8 @@ final class DecisionCardLiveBackingTests: XCTestCase {
     private func liveBarAvailable(_ model: AppModel, attempt: AnswerAttempt?) -> Bool {
         let live = model.liveApproval(sessionKey: sessionKey, id: cardID)
         return DecisionCardView.actionBarAvailable(
-            outcome: live?.outcome, attempt: attempt, isBacked: live != nil)
+            outcome: live?.outcome, codex: live?.codexResolution, attempt: attempt,
+            isBacked: live != nil)
     }
     private func pendingItem(_ model: AppModel) -> ApprovalItem? {
         model.liveApproval(sessionKey: sessionKey, id: cardID)
@@ -426,12 +447,30 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         }
     }
 
+    /// **A card whose run the fleet cannot describe answers nothing.**
+    ///
+    /// The same card as the test below, minus the summary. `AppModel.answer`
+    /// used to read `summary(for:)?.agent ?? .claude`, so this transmitted an
+    /// `allow` on behalf of an agent nobody could name — the one vocabulary the
+    /// daemon accepts, chosen by a default.
+    func testACardWithNoDescribedSessionIsNotAnswered() async throws {
+        let model = AppModel(cache: EventCache())
+        try ingest(requestEvent, into: model)
+        await settle(model)
+
+        let pending = try XCTUnwrap(pendingItem(model))
+        guard case .rejected(let reason) = await model.answer(item: pending, decision: .allow)
+        else { return XCTFail("an unknown agent must be refused, not attempted") }
+        XCTAssertTrue(reason.contains("no longer on the fleet"), reason)
+    }
+
     /// Answer → the daemon crashes → recovery resolves the card as indeterminate.
     /// The open card re-derives it: Unconfirmed, and the action bar disables —
     /// even though a stale dead-socket `.failed` is still stored.
     func testRecoveredIndeterminateOutcomeWinsAndDisablesBar() async throws {
         let model = AppModel(cache: EventCache())  // NOT connected
         try ingest(requestEvent, into: model)
+        describeSessionAsClaude(model)
         await settle(model)
 
         // A real dead-socket failure stored under the card id.
@@ -605,7 +644,8 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         let eff = DecisionCardView.effectiveOutcome(live: live?.outcome, snapshot: snapshot.outcome)
         XCTAssertNotNil(eff, "\(what): the resolved outcome still governs")
         XCTAssertFalse(
-            DecisionCardView.actionBarAvailable(outcome: eff, attempt: nil, isBacked: live != nil),
+            DecisionCardView.actionBarAvailable(
+                outcome: eff, codex: live?.codexResolution, attempt: nil, isBacked: live != nil),
             "\(what): a resolved card must never be actionable")
         switch DecisionCardView.resolvedBanner(attempt: nil, persisted: eff, isBacked: live != nil) {
         case .persisted(let outcome):

@@ -1,0 +1,504 @@
+{
+  "categories": {
+    "link_state": "a fact about the control link right now; the same ask a moment later may well be written",
+    "permanent": "a settled fact — the ask was wrong, the id is spent, or the outcome is already recorded",
+    "transient_local": "this Mac's own store or lookup failed BEFORE anything was written; nothing reached Codex and the same ask may well succeed on a retry",
+    "wire_code": "the app-server or the broker refused the write; the sentence carries their numeric code and never their message"
+  },
+  "counts": {
+    "link_state": 18,
+    "permanent": 43,
+    "total": 68,
+    "transient_local": 5,
+    "wire_code": 2
+  },
+  "sentences": [
+    {
+      "category": "permanent",
+      "id": "unknown_session",
+      "outcome": "rejected",
+      "text": "unknown session {ref}",
+      "verb": "both"
+    },
+    {
+      "category": "transient_local",
+      "id": "session_lookup_failed",
+      "outcome": "rejected",
+      "text": "session lookup failed: {err}",
+      "verb": "both"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_on_claude",
+      "outcome": "rejected",
+      "text": "{uid} is a Claude session, which this daemon cannot stop from a phone; press Escape at the Mac",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_on_unsupported",
+      "outcome": "rejected",
+      "text": "{uid} is a {agent} session, which this daemon does not know how to stop; nothing was sent",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_stale_hash",
+      "outcome": "rejected",
+      "text": "stale payload_hash: the turn you asked to stop is not the one this request names; nothing was sent",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_names_no_turn",
+      "outcome": "rejected",
+      "text": "this request names no turn, so there is nothing to stop",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_id_reused",
+      "outcome": "rejected",
+      "text": "this request id was used to stop a different turn, so nothing was sent; ask again under a new one",
+      "verb": "interrupt"
+    },
+    {
+      "category": "transient_local",
+      "id": "interrupt_ledger_unreadable",
+      "outcome": "rejected",
+      "text": "could not read this run's interrupt ledger ({err}); nothing was sent",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_already_sent_unknown",
+      "outcome": "indeterminate",
+      "text": "this interrupt was already sent and what became of it is not known; it will not be sent again. Check the Mac.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_on_claude",
+      "outcome": "rejected",
+      "text": "{uid} is a Claude session, and this message is the Codex compose; send text to a Claude session with send_text instead",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_on_unsupported",
+      "outcome": "rejected",
+      "text": "{uid} is a {agent} session, which this daemon does not know how to speak to; nothing was sent",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_empty",
+      "outcome": "rejected",
+      "text": "this message is empty, so there is nothing to say",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_too_long",
+      "outcome": "rejected",
+      "text": "this message is {n} bytes; the ceiling is {max}",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_stale_hash",
+      "outcome": "rejected",
+      "text": "stale payload_hash: the message you asked to send is not the one this request names; nothing was sent",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "interrupt_link_bound",
+      "outcome": "rejected",
+      "text": "this Mac is connected to the Codex session but is not yet watching its thread, so a stop cannot be confirmed; nothing was sent",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "interrupt_link_reconnecting",
+      "outcome": "rejected",
+      "text": "this Mac has lost its control link to the Codex session and is reconnecting, so nothing was sent; try again shortly, or stop the turn at the Mac",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "interrupt_link_not_reached",
+      "outcome": "rejected",
+      "text": "this Mac has not yet reached the Codex session, so nothing was sent; try again shortly, or stop the turn at the Mac",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "link_still_picking_up_thread",
+      "outcome": "rejected",
+      "text": "this Mac is connected to the Codex session and is still picking up its thread, so nothing was sent; try again in a few seconds",
+      "verb": "both"
+    },
+    {
+      "category": "link_state",
+      "id": "interrupt_no_link",
+      "outcome": "rejected",
+      "text": "there is no live link to this Codex session, so nothing was sent; stop the turn at the Mac",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_link_bound",
+      "outcome": "rejected",
+      "text": "this Mac is connected to the Codex session but is not yet watching its thread, so a message cannot be confirmed; nothing was sent",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_link_reconnecting",
+      "outcome": "rejected",
+      "text": "this Mac has lost its control link to the Codex session and is reconnecting, so nothing was sent; try again shortly, or say it at the Mac",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_link_not_reached",
+      "outcome": "rejected",
+      "text": "this Mac has not yet reached the Codex session, so nothing was sent; try again shortly, or say it at the Mac",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_no_link",
+      "outcome": "rejected",
+      "text": "there is no live link to this Codex session, so nothing was sent; say it at the Mac",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "interrupt_link_not_running",
+      "outcome": "rejected",
+      "text": "the link to this Codex session is not running, so nothing was sent; stop the turn at the Mac",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_link_stopped_mid_write",
+      "outcome": "indeterminate",
+      "text": "the link stopped while this interrupt was being written, so whether it reached Codex is not known; it will not be sent again. Check the Mac.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "interrupt_no_connection",
+      "outcome": "rejected",
+      "text": "the link to this Codex session has no live connection, so nothing was sent; stop the turn at the Mac",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_settled_unknown",
+      "outcome": "indeterminate",
+      "text": "the link's connection to Codex ended while this request to stop the turn was in flight, so whether that turn was stopped is not known; it will not be sent again. Check the Mac.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_settled_unrecorded",
+      "outcome": "indeterminate",
+      "text": "the link's connection to Codex ended while this request to stop the turn was in flight, and this Mac could not record that either ({err}), so it cannot say what became of it. Check the Mac.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_link_went_away",
+      "outcome": "rejected",
+      "text": "this Mac's link to the Codex session went away before that message was written, so nothing was said; try again",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_link_stopped_mid_write",
+      "outcome": "indeterminate",
+      "text": "this Mac's link to the Codex session stopped while that message was in flight, so whether it was said is not known; it will not be sent again. Check the Mac.",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_no_connection",
+      "outcome": "rejected",
+      "text": "the link to this Codex session has no live connection, so nothing was said; say it at the Mac",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_settled_unknown",
+      "outcome": "indeterminate",
+      "text": "the link's connection to Codex ended while this message was in flight, so whether that message reached the model is not known; it will not be sent again. Check the Mac.",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_settled_unrecorded",
+      "outcome": "indeterminate",
+      "text": "the link's connection to Codex ended while this message was in flight, and this Mac could not record that either, so it cannot say what became of it. Check the Mac.",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "interrupt_reconnected_in_flight",
+      "outcome": "rejected",
+      "text": "this Mac's link to the Codex session reconnected while that request was in flight, so nothing was sent; try again",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_other_thread",
+      "outcome": "rejected",
+      "text": "this Codex session is not on the thread that turn belongs to, so nothing was sent; stop it at the Mac",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_visit_moved_on",
+      "outcome": "rejected",
+      "text": "this Codex session has moved on since that turn was shown, so nothing was sent; open the run again",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_turn_not_running",
+      "outcome": "rejected",
+      "text": "that turn is not the one this Codex session is running, so nothing was sent; it may have finished already",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "interrupt_thread_switching",
+      "outcome": "rejected",
+      "text": "this Codex session is moving to another thread, so nothing was sent; try again once it has settled",
+      "verb": "interrupt"
+    },
+    {
+      "category": "transient_local",
+      "id": "interrupt_already_waiting",
+      "outcome": "rejected",
+      "text": "an interrupt for that turn is already waiting to take effect, so nothing was sent again",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_reconnected_in_flight",
+      "outcome": "rejected",
+      "text": "this Mac's link to the Codex session reconnected while that message was in flight, so nothing was said; try again",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_other_thread",
+      "outcome": "rejected",
+      "text": "this Codex session is not on the thread that message was addressed to, so nothing was said; say it at the Mac",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_visit_moved_on",
+      "outcome": "rejected",
+      "text": "this Codex session has moved on since that message was composed, so nothing was said; open the run again",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_thread_switching",
+      "outcome": "rejected",
+      "text": "this Codex session is moving to another thread, so nothing was said; try again once it has settled",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_launch_unread",
+      "outcome": "rejected",
+      "text": "this Mac has not yet read what this Codex thread runs under, so it cannot start a turn on it; try again shortly, or say it at the Mac",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_id_reused_on_link",
+      "outcome": "rejected",
+      "text": "this request id has already been used for a different stop on this run, so nothing was sent; ask again under a new one",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_run_is_gone",
+      "outcome": "rejected",
+      "text": "this run is gone, so its turn cannot be stopped",
+      "verb": "interrupt"
+    },
+    {
+      "category": "transient_local",
+      "id": "interrupt_claim_unrecorded",
+      "outcome": "rejected",
+      "text": "could not record that this interrupt is being sent ({err}); nothing was sent",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_id_reused",
+      "outcome": "rejected",
+      "text": "this request id was used to say something else, so nothing was sent; ask again under a new one",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_already_sent_unknown",
+      "outcome": "indeterminate",
+      "text": "this message was already sent and what became of it is not known; it will not be sent again. Check the Mac.",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_run_is_gone",
+      "outcome": "rejected",
+      "text": "this run is gone, so nothing can be said to it",
+      "verb": "compose"
+    },
+    {
+      "category": "transient_local",
+      "id": "compose_claim_unrecorded",
+      "outcome": "rejected",
+      "text": "this Mac could not record that the message is being sent; nothing was sent. Check the Mac.",
+      "verb": "compose"
+    },
+    {
+      "category": "wire_code",
+      "id": "interrupt_wire_refused",
+      "outcome": "rejected",
+      "text": "that stop was refused (code {n}) and nothing was changed; stop the turn at the Mac",
+      "verb": "interrupt"
+    },
+    {
+      "category": "wire_code",
+      "id": "compose_wire_refused",
+      "outcome": "rejected",
+      "text": "that message was refused (code {n}) and nothing was changed; say it at the Mac",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_turn_ended_itself",
+      "outcome": "rejected",
+      "text": "that turn ended on its own ({status}) while the request to stop it was in flight, so it was not stopped from here; it will not be sent again",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_outcome_unrecorded",
+      "outcome": "indeterminate",
+      "text": "this Mac could not record what became of that request to stop the turn ({err}), so it cannot say; it will not be sent again. Check the Mac.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_settled_elsewhere",
+      "outcome": "indeterminate",
+      "text": "this request to stop the turn was already settled elsewhere and what became of it is not known; it will not be sent again. Check the Mac.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_settled_elsewhere_unreadable",
+      "outcome": "indeterminate",
+      "text": "this request to stop the turn was settled elsewhere and this Mac cannot read what became of it; it will not be sent again. Check the Mac.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_boundary_unrecorded",
+      "outcome": "indeterminate",
+      "text": "this Mac could not record that the turn ended (turn boundary unrecorded), so it cannot say the turn was stopped from here; it will not be sent again. Check the Mac.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "interrupt_boundary_unreadable",
+      "outcome": "indeterminate",
+      "text": "this Mac could not read whether the turn boundary was recorded, so it cannot say the turn was stopped from here; it will not be sent again. Check the Mac.",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_answer_unreadable",
+      "outcome": "indeterminate",
+      "text": "Codex answered this message with something this Mac could not read, so it cannot say what became of it; it will not be sent again. Check the Mac.",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_settled_elsewhere",
+      "outcome": "indeterminate",
+      "text": "this message was sent and what became of it is not known; it will not be sent again. Check the Mac.",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_settled_elsewhere_unreadable",
+      "outcome": "indeterminate",
+      "text": "this message was sent and this Mac could not read what became of it; it will not be sent again. Check the Mac.",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "compose_outcome_unrecorded",
+      "outcome": "indeterminate",
+      "text": "this message was sent and this Mac could not record what became of it; it will not be sent again. Check the Mac.",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "replay_interrupt_turn_ended",
+      "outcome": "rejected",
+      "text": "that turn had already ended on its own when this was sent before, so nothing was stopped; nothing was sent again",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "replay_interrupt_refused",
+      "outcome": "rejected",
+      "text": "an earlier request to stop that turn was refused, so nothing was sent again",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "replay_interrupt_unknown_word",
+      "outcome": "rejected",
+      "text": "this interrupt is already settled ({word}); nothing was sent again",
+      "verb": "interrupt"
+    },
+    {
+      "category": "permanent",
+      "id": "replay_compose_refused",
+      "outcome": "rejected",
+      "text": "an earlier attempt to say this was refused, so nothing was sent again",
+      "verb": "compose"
+    },
+    {
+      "category": "permanent",
+      "id": "replay_compose_settled",
+      "outcome": "rejected",
+      "text": "this message is already settled and will not be sent again; check the Mac",
+      "verb": "compose"
+    }
+  ],
+  "tokens": {
+    "{agent}": "the name of an agent kind this build does not support",
+    "{err}": "a local store error, rendered by this Mac and never by Codex",
+    "{max}": "a ceiling this build enforces (today only MAX_COMPOSE_BYTES)",
+    "{n}": "a number — the size of the thing asked about, or a wire error code",
+    "{ref}": "the session reference the caller used (a uid or a tmux name)",
+    "{status}": "a turn terminal's own status word from the wire",
+    "{uid}": "a session uid",
+    "{word}": "an outcome word read back from the ledger that this build has no vocabulary for"
+  },
+  "what": "Every sentence ccd can send a phone when a Codex interrupt or compose did not happen. Emitted from mac/ccd/src/codex_refusals.rs, which is the single place each sentence is written; ccd's own gate test requires this file to be byte-identical to what the build emits."
+}

@@ -25,6 +25,20 @@ enum ConnectionError: LocalizedError, Sendable {
     /// because both transport wrappers otherwise reduce a `URLError` to its
     /// sentence, and the sentence cannot be matched honestly.
     case hostUnresolvable
+    /// **The frame left and no reply ever arrived.**
+    ///
+    /// Its own case because the alternative is a lie: every other failure here
+    /// means the request did not happen, and this one means nobody knows. A
+    /// caller that collapses the two tells the reader "nothing was sent" about
+    /// a mutation that may well have landed — which for `compose` is the one
+    /// thing that cannot be taken back.
+    ///
+    /// Raised for a request timeout and for a socket that died with requests in
+    /// flight. The second is deliberately conservative: a waiter is registered
+    /// *before* its send, so when the socket dies the app genuinely cannot tell
+    /// whether the bytes left — and "may have been sent" is the only honest
+    /// reading of that.
+    case sentButUnanswered
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +53,8 @@ enum ConnectionError: LocalizedError, Sendable {
         case .server(let code, let message): return "\(message) (\(code))"
         case .transport(let message): return message
         case .hostUnresolvable: return "The daemon's address is not resolving"
+        case .sentButUnanswered:
+            return "This left the phone and the Mac never answered."
         }
     }
 }
@@ -126,6 +142,17 @@ final class DaemonConnection {
     /// be shown as something the Mac said.
     private(set) var lastDaemonErrorMessage: String?
     private(set) var lastDaemonErrorAt: Date?
+    /// **A message from the Mac this build could not read** — a frame type it
+    /// has never heard of, or one whose bytes would not decode.
+    ///
+    /// Kept apart from `lastErrorMessage` because it is neither a link failure
+    /// nor the daemon complaining: the connection is healthy and the Mac is
+    /// working. It is the app that is behind, and the only honest thing to say
+    /// is so, with the type named — swallowing it (`case .unknown: break`) is
+    /// what made "the phone silently ignores half of what a newer Mac says" a
+    /// state nobody could observe from the outside.
+    private(set) var unreadableFrame: String?
+    private(set) var unreadableFrameAt: Date?
     /// Increments on every successful handshake. Work started for one
     /// connection must not be applied after a later one has replaced it.
     private(set) var generation = 0
@@ -247,6 +274,13 @@ final class DaemonConnection {
     private var deleteWaiters: [String: [Waiter<DeleteSessionResult>]] = [:]
     private var testPushWaiters: [String: [Waiter<TestPushResult>]] = [:]
     private var diffWaiters: [String: [Waiter<SessionDiff>]] = [:]
+    /// Keyed by the phone's own `request_id`, not by session: the reply echoes
+    /// it back, and a phone may hold a stop and a message in flight on one run.
+    private var interruptWaiters: [String: [Waiter<InterruptResult>]] = [:]
+    private var composeWaiters: [String: [Waiter<ComposeResult>]] = [:]
+    /// Which session each in-flight mutation was sent for, so the echoed
+    /// `session_id` on its result can be checked rather than trusted.
+    private var mutationSessions: [String: String] = [:]
     private var nextTicket: UInt64 = 0
 
     /// Comfortably inside the 30s URLSession idle window, so an idle link still
@@ -305,7 +339,7 @@ final class DaemonConnection {
         isRedial = false
         ledger.reset()
         closeCurrentSocket()
-        failAllWaiters(with: ConnectionError.notConnected)
+        failAllWaiters(with: ConnectionError.sentButUnanswered)
         phase = .idle
         capabilities = nil
         helloAck = nil
@@ -678,8 +712,17 @@ final class DaemonConnection {
             guard let decoded = try? decoder.decode(ServerMessage.self, from: payload)
             else {
                 // An undecodable frame is a bug worth seeing, never a reason to
-                // drop a working connection.
-                lastErrorMessage = "Ignored an unreadable frame from the daemon"
+                // drop a working connection — and **the type has to be named**.
+                // "Ignored an unreadable frame" told the reader nothing they
+                // could act on and told the next engineer nothing at all; the
+                // type is the whole diagnosis, and it is the one field that can
+                // be read off a frame that failed to decode as a whole.
+                let type =
+                    (try? decoder.decode(FrameType.self, from: payload))?.type ?? "unrecognised"
+                unreadableFrame =
+                    "This phone could not read a “\(Self.boundedType(type))” message from the Mac."
+                unreadableFrameAt = Date()
+                lastErrorMessage = unreadableFrame
                 continue
             }
 
@@ -733,7 +776,7 @@ final class DaemonConnection {
         self.session = nil
         let wasConnected = phase.isConnected
         if wasConnected { phase = .connecting }
-        failAllWaiters(with: ConnectionError.notConnected)
+        failAllWaiters(with: ConnectionError.sentButUnanswered)
         // A live terminal rides this socket. Telling it now is what keeps a
         // dead terminal from looking live: the alternative is a view still
         // showing the last bytes it received, which is the one thing the
@@ -885,6 +928,77 @@ final class DaemonConnection {
             send: .getDiff(session: session))
     }
 
+    // MARK: - Codex mutations
+
+    /// Why a Codex mutation was not sent, in the phone's own words.
+    ///
+    /// **A typed refusal, not a thrown transport error**, because the two are
+    /// different facts and the UI shows them differently: a transport error
+    /// means the frame may have gone, and every one of these means it certainly
+    /// did not.
+    enum CodexRefusal: Error, Equatable {
+        /// This daemon never advertised the capability. **This is the gate.**
+        case notAdvertised(String)
+        /// This session is not a Codex session, so the message would be refused
+        /// by name at the Mac.
+        case notACodexSession(agent: String)
+        /// The phone holds nothing to name — no running turn (stop), or an
+        /// empty/oversize draft (compose).
+        case nothingToSend(String)
+    }
+
+    /// **Stop a Codex session's running turn.**
+    ///
+    /// The capability check is here, in front of `send`, rather than on the
+    /// button: a control that is merely hidden is one a deep link, a future
+    /// layout or a test can still reach, and the whole point of the gate is that
+    /// *no frame leaves* without the daemon having said it understands one.
+    /// `TerminalCarrier`'s `servesTerminal` guard is the same shape.
+    ///
+    /// `session` must be the `session_uid`: `payloadHash` is computed over the
+    /// exact string this argument becomes on the wire.
+    func interrupt(
+        session: String, requestID: String, turnID: String, payloadHash: String
+    ) async throws -> InterruptResult {
+        guard capabilities?.codexInterrupt == true else {
+            throw CodexRefusal.notAdvertised("codex_interrupt")
+        }
+        guard !turnID.isEmpty else {
+            throw CodexRefusal.nothingToSend("This app is not holding a running turn to stop.")
+        }
+        mutationSessions[requestID] = session
+        defer { mutationSessions.removeValue(forKey: requestID) }
+        return try await request(
+            key: requestID,
+            store: \.interruptWaiters,
+            send: .interrupt(
+                session: session, requestID: requestID, turnID: turnID, payloadHash: payloadHash))
+    }
+
+    /// **Say something to a Codex session.**
+    ///
+    /// The strictest gate in the app, and the reason is not politeness: a
+    /// minor-17 daemon answers `Error{code:"bad_request"}` to a `compose`, not a
+    /// `ComposeResult`. A phone that sent one would register a waiter for a
+    /// typed reply that is never coming and sit there until the 20-second
+    /// timeout — once per tap, on a control that looks like it works.
+    func compose(
+        session: String, requestID: String, text: String, payloadHash: String
+    ) async throws -> ComposeResult {
+        guard capabilities?.codexCompose == true else {
+            throw CodexRefusal.notAdvertised("codex_compose")
+        }
+        let draft = ComposeDraft(text: text)
+        if let reason = draft.blockedReason { throw CodexRefusal.nothingToSend(reason) }
+        mutationSessions[requestID] = session
+        defer { mutationSessions.removeValue(forKey: requestID) }
+        return try await request(
+            key: requestID,
+            store: \.composeWaiters,
+            send: .compose(
+                session: session, requestID: requestID, text: text, payloadHash: payloadHash))
+    }
+
     private typealias WaiterTable<T> = ReferenceWritableKeyPath<
         DaemonConnection, [String: [Waiter<T>]]
     >
@@ -924,10 +1038,11 @@ final class DaemonConnection {
                 }
                 try? await Task.sleep(for: Self.requestTimeout)
                 // Sent but unanswered: a late reply must not be misread as the
-                // next request's.
+                // next request's — and the *caller* must not report this as
+                // "nothing was sent", because the frame did leave.
                 self.abandon(
-                    store: store, key: key, ticket: ticket, with: ConnectionError.timedOut,
-                    keepTombstone: true)
+                    store: store, key: key, ticket: ticket,
+                    with: ConnectionError.sentButUnanswered, keepTombstone: true)
             }
         }
     }
@@ -962,6 +1077,11 @@ final class DaemonConnection {
 
     /// The socket is gone, so no reply is coming for anything — tombstones
     /// included. Clearing them here is what stops them accumulating forever.
+    ///
+    /// Callers are told `sentButUnanswered` rather than the transport's own
+    /// error: a waiter exists from before its send until after its reply, so a
+    /// socket that dies mid-flight leaves the app genuinely unable to say
+    /// whether the bytes left. See `ConnectionError.sentButUnanswered`.
     private func failAllWaiters(with error: Error) {
         let answers = answerWaiters
         answerWaiters = [:]
@@ -994,6 +1114,14 @@ final class DaemonConnection {
         let tests = testPushWaiters
         testPushWaiters = [:]
         for queue in tests.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
+        let interrupts = interruptWaiters
+        interruptWaiters = [:]
+        for queue in interrupts.values { for w in queue { w.continuation?.resume(throwing: error) } }
+
+        let composes = composeWaiters
+        composeWaiters = [:]
+        for queue in composes.values { for w in queue { w.continuation?.resume(throwing: error) } }
     }
 
     /// Why this `hello_ack` cannot be accepted, or `nil` when it can. Pure,
@@ -1086,6 +1214,20 @@ final class DaemonConnection {
             deliver(store: \.testPushWaiters, key: requestID, value: result)
         case .diff(let diff):
             deliver(store: \.diffWaiters, key: diff.sessionID, value: diff)
+        // **The echoed session is checked, not ignored.** Correlation is by
+        // request id, which is this phone's own UUID, so a collision is
+        // negligible — but a daemon bug that answered one session's request with
+        // another's would settle the wrong control with the right-looking id,
+        // and that is a lie the app would have no way to notice. It costs a
+        // string compare to refuse instead.
+        case .interruptResult(let sessionID, let requestID, let result):
+            guard acceptMutationResult(sessionID: sessionID, requestID: requestID, kind: "interrupt")
+            else { break }
+            deliver(store: \.interruptWaiters, key: requestID, value: result)
+        case .composeResult(let sessionID, let requestID, let result):
+            guard acceptMutationResult(sessionID: sessionID, requestID: requestID, kind: "compose")
+            else { break }
+            deliver(store: \.composeWaiters, key: requestID, value: result)
         case .error(let code, let message):
             lastErrorMessage = "\(message) (\(code))"
             lastErrorAt = Date()
@@ -1098,10 +1240,37 @@ final class DaemonConnection {
             // its own channel so terminal bytes never depend on the model's
             // dispatch, and in arrival order like everything else here.
             onTerminal?(message)
-        case .pong, .sessions, .event, .unknown:
+        case .unknown(let type):
+            // **G9: never swallowed.** A frame type this build cannot read is
+            // the difference between a five-minute fix and a day during a phase
+            // that adds four message types, and the reader deserves to know the
+            // Mac is telling them something this app cannot hear.
+            unreadableFrame =
+                "This phone cannot read a “\(Self.boundedType(type))” message from the Mac."
+            unreadableFrameAt = Date()
+        case .pong, .sessions, .event:
             break
         }
         onMessage?(message)
+    }
+
+    /// Whether a mutation result may settle the request it names.
+    ///
+    /// The phone records which session each request was sent for; a reply whose
+    /// echoed `session_id` is a different one is dropped and reported rather
+    /// than delivered. The waiter then times out honestly instead of being
+    /// resumed with another session's outcome.
+    private func acceptMutationResult(sessionID: String, requestID: String, kind: String) -> Bool {
+        guard let expected = mutationSessions[requestID] else { return true }
+        guard expected == sessionID else {
+            unreadableFrame =
+                "The Mac answered this iPhone's \(kind) for one session with another session's "
+                + "result. It was ignored."
+            unreadableFrameAt = Date()
+            return false
+        }
+        mutationSessions.removeValue(forKey: requestID)
+        return true
     }
 
     /// The best account of a failure available after `since`, whoever wrote it.
@@ -1246,4 +1415,24 @@ final class DaemonConnection {
     private static var installationID: String { DeviceIdentity.installationID }
 
     private static let clientName = "CodeConnect iPhone"
+}
+
+/// Just the discriminator, for a frame whose *body* would not decode.
+///
+/// `ServerMessage`'s own decode fails as a whole on one bad field, which leaves
+/// the reader with "something arrived and it was wrong". This reads the one key
+/// every frame on this wire carries, so the report can name what was dropped.
+private struct FrameType: Decodable {
+    let type: String
+}
+
+extension DaemonConnection {
+    /// A frame type is a wire word, not prose, and it is shown in a banner the
+    /// fleet draws above everything. Unbounded, a pathological one would own the
+    /// screen — so it is clipped, and the clip is visible.
+    fileprivate static func boundedType(_ type: String) -> String {
+        let limit = 64
+        guard type.count > limit else { return type }
+        return type.prefix(limit) + "…"
+    }
 }

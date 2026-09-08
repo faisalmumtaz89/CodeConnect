@@ -58,13 +58,27 @@ struct ApprovalItem: Sendable, Hashable, Identifiable {
     var sessionKey: String
     /// `nil` while nobody has answered. Silence is never consent.
     var outcome: AnswerOutcome?
+    /// What became of a **Codex** card, which the wire reports in an entirely
+    /// different shape — a bare `CodexResolution` carrying no decision, no
+    /// actor's transport and no timestamp on most arms.
+    ///
+    /// Kept beside `outcome` rather than mapped onto it, because the two say
+    /// different things and mapping would have to invent the difference: a
+    /// `cleared(turn_aborted)` is not "denied", an `answered(by: .local)` names
+    /// no decision at all, and `AnswerOutcome` has no way to express either
+    /// without claiming something. Both make the card non-actionable; only this
+    /// one is allowed to describe a Codex ending.
+    var codexResolution: CodexResolution?
     /// `capture-pane` text taken when Claude said the prompt was up — the only
     /// source for the exact option list.
     var paneSnapshot: String?
     /// The daemon's own classification, or nil on a daemon too old to send one.
     var risk: WireRisk?
 
-    var isPending: Bool { outcome == nil }
+    /// Whether this card is still waiting on a human. **Either** ending
+    /// retires it: a card the Mac already answered is not pending just because
+    /// the ending arrived in Codex's shape rather than Claude's.
+    var isPending: Bool { outcome == nil && codexResolution == nil }
 
     /// The run *and* the request, because a `request_id` is only unique within
     /// one run. Two runs of the same project can raise the same id — the daemon
@@ -145,6 +159,7 @@ enum TimelineBuilder {
 
         var resultsByToolUse: [String: ToolOutcome] = [:]
         var outcomesByRequest: [String: AnswerOutcome] = [:]
+        var codexResolutionsByRequest: [String: CodexResolution] = [:]
         var panesByPrompt: [String: String] = [:]
         var hookToolCallIDs: Set<String> = []
         var approvalPromptIDs: Set<String> = []
@@ -159,6 +174,16 @@ enum TimelineBuilder {
             case .approvalResolved:
                 if let outcome = event.approvalOutcome {
                     outcomesByRequest[outcome.requestID] = outcome
+                } else if let requestID = event.codexResolvedRequestID,
+                    let resolution = event.codexResolution
+                {
+                    // The second arm, and the order matters: Claude's shape is
+                    // tried first and wins where both could apply, so this phase
+                    // cannot change what a Claude session does. A Codex payload
+                    // fails the first read (it has no `request_id` *inside* an
+                    // `AnswerOutcome`, and none of that struct's other required
+                    // fields) and lands here.
+                    codexResolutionsByRequest[requestID] = resolution
                 }
             case .approvalRequest:
                 if let promptID = event.approvalCard?.promptID { approvalPromptIDs.insert(promptID) }
@@ -331,6 +356,7 @@ enum TimelineBuilder {
                                 requestedAt: event.date,
                                 sessionKey: event.sessionKey,
                                 outcome: outcomesByRequest[card.requestID],
+                                codexResolution: codexResolutionsByRequest[card.requestID],
                                 paneSnapshot: card.promptID.flatMap { panesByPrompt[$0] },
                                 risk: card.risk ?? event.declaredRisk))))
 

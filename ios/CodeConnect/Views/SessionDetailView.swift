@@ -2,9 +2,18 @@ import SwiftUI
 import UIKit
 
 /// What a developer most often tells an agent from a phone, most-used first.
-/// **No "Stop"**: an injected message needs the Mac's composer to be present,
+///
+/// **No "Stop" chip**, and the reason has narrowed rather than gone away. It
+/// used to read *"an injected message needs the Mac's composer to be present,
 /// so it cannot interrupt a running turn — a chip that reads like an interrupt
-/// would be a control the product does not have. Chips insert, never send.
+/// would be a control the product does not have"*. That is still exactly right
+/// about `send_text` and Claude's TTY, and it is **not** right about Codex,
+/// whose `interrupt` really does abort the turn over its own control link.
+///
+/// So Stop exists now, for a Codex session, as a real control with its own
+/// affordance — and it is still not a chip here, because a chip *inserts text*
+/// and a stop is a mutation. A control that looks like a phrase to type and
+/// behaves like an abort would be the same lie in a new place.
 ///
 /// Internal (not view-private) solely so the tests can pin the set.
 enum ComposerTemplates {
@@ -220,6 +229,10 @@ struct SessionDetailView: View {
     }
 
     @Environment(AppModel.self) private var model
+    /// Read for one decision only: the Stop control's label. "Stop this turn"
+    /// clipped mid-word at AX5 and grew the header enough to push the pending
+    /// card's own controls off screen.
+    @Environment(\.dynamicTypeSize) private var screenTypeSize
     /// The widest tool label in this timeline, so every command beside one
     /// starts on the same edge. See `CCToolColumn`.
     @State private var toolColumn: CGFloat = 0
@@ -606,6 +619,7 @@ struct SessionDetailView: View {
                             .padding(.top, CC.space.xxs)
                             .accessibilityIdentifier("session-permission-notice")
                     }
+                    codexStopBlock
                 }
             }
             .padding(.horizontal, CC.space.md)
@@ -615,6 +629,72 @@ struct SessionDetailView: View {
         }
         .background(CC.color.surface)
         .accessibilityElement(children: .contain)
+    }
+
+    // MARK: Stop
+
+    /// **Stop, in the session header**, where the reader is already looking at
+    /// the turn they want to end.
+    ///
+    /// Absent when the phone holds no turn to name — the one honest hide. There
+    /// is no "turn started" fact on the Codex wire at all, so the running turn
+    /// is derived from the event envelopes, and a session with none has nothing
+    /// this control could send.
+    @ViewBuilder
+    private var codexStopBlock: some View {
+        // **One reader of the rule.** `stopUnavailable(for:)` is the same
+        // function `AppModel.stopCodexTurn` consults before it mints anything,
+        // so the control and the frame can never disagree — which they did:
+        // this checked agent + capability + turn and left the link state to the
+        // send path, which did not check it either.
+        if model.stopUnavailable(for: key) == nil {
+            CCButton(
+                // **Two words at AX5, and that is not cosmetic.** "Stop this
+                // turn" clipped mid-word to `▪ this` in a box the header had
+                // grown to fit — and the header growing is the real cost: it
+                // squeezed the timeline until the pending card's own `Review`
+                // button sat under the compose bar, unreachable by scrolling.
+                // Measured on `codex-card-command-worst--ax5.png`. The header
+                // carries the control; its outcome goes where every other
+                // mutation's outcome already goes, above the composer.
+                stopLabel,
+                icon: isStopping ? nil : "stop.fill",
+                variant: .secondary,
+                size: .md,
+                isLoading: isStopping,
+                disabledReason: CCDisabledReason(stopGreyedReason)
+            ) {
+                stopCodexTurn()
+            }
+            .accessibilityIdentifier("stop-\(key)")
+            .accessibilityLabel("Stop the turn this session is running")
+            .padding(.top, CC.space.sm)
+        }
+    }
+
+    private var stopLabel: String {
+        if isStopping { return "Stopping…" }
+        return screenTypeSize.isAccessibilitySize ? "Stop" : "Stop this turn"
+    }
+
+    private var isStopping: Bool {
+        if case .inFlight = model.codexControls(for: key).stop { return true }
+        return false
+    }
+
+    /// Why the control is greyed, or nil.
+    ///
+    /// **Short, and only during the cooldown** — the same rule the fleet row
+    /// follows, and for the same two reasons. Not the link state: the summary
+    /// cannot tell a subscribed link from a reconnecting one (A29a), so Stop is
+    /// offered and the daemon's refusal is what the operator reads. And not the
+    /// daemon's sentence: the composer's own standing note is already printing
+    /// it verbatim, and handing it to the button as well prints the same refusal
+    /// twice — measured on the fleet, where it also rendered as a twelve-line
+    /// column that pushed the row out of line with its Claude neighbour.
+    private var stopGreyedReason: String? {
+        model.codexControls(for: key).isStopGreyed(now: model.now)
+            ? "Try again in a moment." : nil
     }
 
     private var dotColour: Color {
@@ -891,6 +971,16 @@ struct SessionDetailView: View {
     /// palette shows nothing).
     private var paletteContent: CommandPalette.Content? {
         guard composerFocused else { return nil }
+        // **Claude Code's slash vocabulary, on a Claude session only.**
+        //
+        // `/model`, `/effort`, `/compact`, `/clear`, `/cost` are that binary's
+        // built-ins. Offered on a Codex session they are wrong in both
+        // directions: the palette would open a Claude sheet for a command that
+        // session has never heard of, and the injection behind it is a
+        // `send_text` the Mac refuses by name. A leading `/` on a Codex session
+        // is just a message that happens to start with a slash, and it goes
+        // through `compose` like any other.
+        guard summary?.isCodex != true else { return nil }
         return CommandPalette.content(
             for: composeText,
             recoversComposer: model.connection.capabilities?.recoversComposer == true)
@@ -953,6 +1043,51 @@ struct SessionDetailView: View {
         composeText = ""
     }
 
+    // MARK: - Codex
+
+    private var isCodexSession: Bool { model.summary(for: key)?.isCodex == true }
+
+    /// **Say something to a Codex session.**
+    ///
+    /// The draft is consumed on `started`, `steered` and `duplicate` — every arm
+    /// where the words are known to have landed once — and kept on a refusal and
+    /// on `indeterminate`. Kept on `indeterminate` deliberately: the write may
+    /// have landed, so the reader is shown the daemon's sentence and left
+    /// holding their own text, rather than having it silently thrown away by a
+    /// phone that could not say whether it arrived.
+    private func sendToCodex(_ text: String) {
+        sending = true
+        composeResult = nil
+        composeResultClearTask?.cancel()
+        Task {
+            let result = await model.composeToCodex(sessionKey: key, text: text)
+            sending = false
+            switch result {
+            case .started, .steered, .duplicate:
+                composeText = ""
+                tailWatch.arrive()
+            case .rejected, .indeterminate, .unknown, nil:
+                // The draft is kept. On a refusal it can be retried as-is; on
+                // an outcome nobody can account for the send path now refuses
+                // an unchanged retry outright, so keeping the words is what
+                // lets the reader edit them into a different message rather
+                // than losing what they wrote.
+                break
+            }
+        }
+    }
+
+    /// **Stop the running turn.**
+    ///
+    /// This exists, and the comment at the top of this file that says it cannot
+    /// has been amended rather than worked around: *"an injected message needs
+    /// the Mac's composer to be present, so it cannot interrupt a running turn"*
+    /// is a fact about `send_text` and Claude's TTY. Codex's `interrupt` really
+    /// aborts the turn, over its own control link, with no keyboard involved.
+    private func stopCodexTurn() {
+        Task { await model.stopCodexTurn(sessionKey: key) }
+    }
+
     /// `/clear`, past its confirmation. The receipt claims typing, nothing
     /// more; "Conversation cleared." appears in the timeline when the
     /// rotated transcript's own `/clear` entry arrives — the observable
@@ -977,11 +1112,26 @@ struct SessionDetailView: View {
 
     private func send() {
         let text = composeText
+        // **A Codex session takes a different road entirely.** `send_text` is
+        // Claude's TTY takeover and a Codex session refuses it by name; `compose`
+        // is the message the app-server actually accepts, and it is not a
+        // keystroke — there is no composer at the Mac to find, nothing to type
+        // into, and no prompt-presence needle to satisfy.
+        if isCodexSession {
+            sendToCodex(text)
+            return
+        }
         // Slash commands answer to the policy before anything reaches the
         // Mac: native commands open their controls (measured: the Mac-side
         // picker forms lock the composer), dialog built-ins get the honest
         // refusal, and everything else — prose, custom skills — passes
         // through untouched.
+        //
+        // **Claude Code's vocabulary only.** `/model`, `/effort`, `/compact`,
+        // `/clear`, `/diff` are that binary's built-ins; applied to a Codex
+        // session they are wrong in both directions — the app would open a
+        // Claude sheet for a session that has no such command, and the Mac
+        // would refuse the injection anyway. The branch above is the gate.
         let action = ClaudeCommandPolicy.action(
             for: text,
             recoversComposer: model.connection.capabilities?.recoversComposer == true)
@@ -1269,10 +1419,21 @@ private struct SessionComposeBar: View {
                 // the live transcript above is proof the mic hears you, and
                 // the button's stop face is the recording state. Chrome that
                 // restates both was removed at the owner's call.
-                if !dictation.isRecording {
+                // **Withdrawn when the composer cannot send.**
+                //
+                // The mic already dims in that state; the chips did not, so on a
+                // too-old Mac three of them read at full contrast beside "this
+                // Mac's CodeConnect is too old to carry a message" — a
+                // live-looking affordance on a dead composer. They are withdrawn
+                // rather than dimmed because the kit's own rule is that a list
+                // never holds an item whose only behaviour is refusing the tap,
+                // and a chip that inserts text into a field with no destination
+                // is exactly that. The field itself stays draftable.
+                if !dictation.isRecording, sendBlockedReason == nil {
                     templateChips
                 }
                 Spacer(minLength: 0)
+                byteCounter
                 if dictation.isRecording {
                     cancelButton
                 }
@@ -1394,7 +1555,30 @@ private struct SessionComposeBar: View {
 
     @ViewBuilder
     private var standingNote: some View {
-        if let result {
+        // A Codex outcome outranks the Claude ladder below, because on a Codex
+        // session the ladder's vocabulary — "typed into the session", "the
+        // composer did not come back" — describes machinery that is not there.
+        if summary?.isCodex == true, case .settled(let result) = codexControls?.stop {
+            // **One outcome slot, both mutations.** The stop's result used to
+            // live under the header's Stop button; at AX5 that made the header
+            // tall enough to push the pending card's own controls off screen.
+            // It belongs here, where the compose result already goes and where
+            // the reader is looking after they act.
+            codexStopNote(result)
+        } else if summary?.isCodex == true, case .notSent(let reason) = codexControls?.stop {
+            ComposeNote(text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+        } else if summary?.isCodex == true, case .sentNoAnswer(let reason) = codexControls?.stop {
+            ComposeNote(text: reason, tone: .warning, glyph: "questionmark.circle.fill")
+        } else if summary?.isCodex == true, case .settled(let result) = codexControls?.compose {
+            codexComposeNote(result)
+        } else if summary?.isCodex == true, case .notSent(let reason) = codexControls?.compose {
+            ComposeNote(
+                text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+        } else if summary?.isCodex == true,
+            case .sentNoAnswer(let reason) = codexControls?.compose
+        {
+            ComposeNote(text: reason, tone: .warning, glyph: "questionmark.circle.fill")
+        } else if let result {
             feedbackLine(result)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
@@ -1405,6 +1589,50 @@ private struct SessionComposeBar: View {
             ComposeNote(
                 text: "Observe only - answers are given at the Mac.",
                 tone: .neutral, glyph: nil, action: ("Why?", onWhy))
+        }
+    }
+
+    private var codexControls: CodexControls? {
+        guard let key = summary?.sessionKey else { return nil }
+        return model.codexControls(for: key)
+    }
+
+    /// What became of a Codex message, in Codex's own five arms.
+    ///
+    /// **`started` and `steered` are two different sentences**, and a duplicate
+    /// reads with the verb the original earned — see `CodexProse`, where the
+    /// rule lives and is tested.
+    private func codexComposeNote(_ result: ComposeResult) -> some View {
+        let banner = CodexProse.compose(result)
+        return ComposeNote(
+            text: banner.oneLine,
+            tone: banner.tone.ccTone,
+            glyph: banner.icon)
+    }
+
+    /// What became of a stop, in the daemon's own four arms — refusals verbatim.
+    private func codexStopNote(_ result: InterruptResult) -> some View {
+        let banner = CodexProse.interrupt(result)
+        return ComposeNote(
+            text: banner.oneLine,
+            tone: banner.tone.ccTone,
+            glyph: banner.icon)
+    }
+
+    /// **The byte counter**, appearing only as the 8192-byte ceiling comes into
+    /// view. Bytes, not characters: the Mac measures `text.len()`, and a
+    /// message of accented characters is twice the length it looks.
+    @ViewBuilder
+    private var byteCounter: some View {
+        let draft = ComposeDraft(text: text)
+        if summary?.isCodex == true, let counter = draft.counterText {
+            Text(counter)
+                .ccType(CC.type.monoSmall)
+                .foregroundStyle(draft.isOverCeiling ? CC.color.danger : CC.text.tertiary)
+                .lineLimit(1)
+                .accessibilityLabel(
+                    draft.isOverCeiling
+                        ? "Too long. \(counter)." : "\(counter).")
         }
     }
 
@@ -1459,14 +1687,20 @@ private struct SessionComposeBar: View {
     /// enough that the sentence would own the screen. The field is already
     /// labelled `MESSAGE`, so the short form loses nothing.
     private var placeholder: String {
-        typeSize.isAccessibilitySize ? "Say something" : "Say something to this agent"
+        // **Named, where the app knows the name.** "Say something to this agent"
+        // is the honest phrasing when the app cannot say which agent — and on a
+        // Codex session it can, so it does. The two paths behind this field are
+        // genuinely different messages (`send_text` into a TTY, `compose` over a
+        // control link), and a reader who knows which one they are talking to is
+        // a reader who can read the outcome sentence that comes back.
+        let named = summary?.isCodex == true ? "Ask Codex to do anything" : "Say something to this agent"
+        return typeSize.isAccessibilitySize ? "Say something" : named
     }
 
     /// What a developer most often tells an agent from a phone, most-used
-    /// first. **No "Stop"**: an injected message needs the Mac's composer to be
-    /// present, so it cannot interrupt a running turn — a chip that reads like
-    /// an interrupt would be a control the product does not have. These insert,
-    /// never send; the contract lives at `insert(_:)`.
+    /// first. **No "Stop" chip** — see `ComposerTemplates`, where the rationale
+    /// now says which agent it is about. These insert, never send; the contract
+    /// lives at `insert(_:)`.
     private static let templates = ComposerTemplates.all
 
     private func insert(_ template: String) {
@@ -1529,6 +1763,11 @@ private struct SessionComposeBar: View {
 
     /// Text only lands if the composer is actually on screen at the Mac, so the
     /// reasons a send cannot work are the same reasons an answer cannot.
+    ///
+    /// **Except for Codex**, where none of that applies: there is no composer at
+    /// the Mac, no keystrokes and no `send_text`. Its reasons are its own, and
+    /// they are asked first so a Codex session is never refused with a sentence
+    /// about a TTY it does not have.
     private var sendBlockedReason: String? {
         // The sample fleet's reason, not the link's: "Not paired with a daemon."
         // beside a card that answers in sample vocabulary would be two different
@@ -1537,6 +1776,16 @@ private struct SessionComposeBar: View {
             return "These agents are not real. Pair with your Mac to talk to your own."
         }
         if let reason = model.linkHealth.disabledReason { return reason }
+        if let summary, summary.isCodex {
+            // The draft's own ceiling comes first: it is the one the reader can
+            // fix without anything changing at the Mac, and it names the number
+            // they have to cut. Only the *oversize* refusal is shown here — an
+            // empty draft is not a problem to announce, it is a message nobody
+            // has written yet.
+            let draft = ComposeDraft(text: text)
+            if draft.isOverCeiling { return draft.blockedReason }
+            return model.composeUnavailable(for: summary.sessionKey)
+        }
         if model.connection.capabilities?.sendText == false {
             return "This daemon does not accept typed text."
         }

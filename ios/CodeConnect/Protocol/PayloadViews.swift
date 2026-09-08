@@ -46,6 +46,38 @@ extension Event {
     var approvalCard: ApprovalCard? { payload["card"]?.decoded(ApprovalCard.self) }
     var approvalOutcome: AnswerOutcome? { payload.decoded(AnswerOutcome.self) }
 
+    /// **What became of a Codex approval.**
+    ///
+    /// A Codex `approval_resolved` payload is a **bare `CodexResolution`** —
+    /// not an `AnswerOutcome`, not wrapped in one — so `approvalOutcome` reads
+    /// it as nil and a second accessor is the only way to see it at all. This is
+    /// the single most dangerous divergence in the phase: without it a Codex
+    /// card stays live and tappable after it has already been decided.
+    var codexResolution: CodexResolution? {
+        // `kind` is checked here rather than at the call site because a
+        // `CodexResolution` decoder is total by design — every unrecognised
+        // status has a case — so it would happily "decode" an unrelated
+        // payload's object into `.unrecognisedStatus`, and a tool result would
+        // start retiring cards.
+        guard kind == .approvalResolved else { return nil }
+        return payload.decoded(CodexResolution.self)
+    }
+
+    /// Which card a Codex resolution belongs to (decision D1).
+    ///
+    /// The daemon puts `request_id` in the payload additively, in the same
+    /// spelling and position as Claude's. **`source_event_id` is deliberately
+    /// not parsed**: it carries `"resolved:<request_id>"`, and prefix-parsing an
+    /// id-bearing string is precisely the kind of correlation that fails
+    /// silently — a rename, a second prefix, or an id that happens to contain a
+    /// colon all produce a wrong answer rather than no answer. A resolution with
+    /// no `request_id` correlates to nothing, and the card stays live, which is
+    /// the safe direction.
+    var codexResolvedRequestID: String? {
+        guard kind == .approvalResolved else { return nil }
+        return payload["request_id"]?.stringValue
+    }
+
     /// The daemon's risk block, wherever it put it.
     ///
     /// `protocol/src/ws.rs` puts it inside `card`, which `ApprovalCard` already

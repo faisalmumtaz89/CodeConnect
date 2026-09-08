@@ -973,19 +973,42 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
 
     // MARK: forward-compat
 
-    /// An old client decoding a new summary is already safe: JSONDecoder ignores
-    /// keys it was not told about, so a future `agent` field changes nothing.
-    func testSessionSummaryIgnoresAnUnexpectedAgentKey() throws {
-        let summary = try JSONDecoder().decode(
-            SessionSummary.self,
-            from: Data(
-                """
-                {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1","cwd":"/x",
-                 "lifecycle":"live","link":"attached","last_seq":3,
-                 "created_at":"t","updated_at":"t","agent":"codex"}
-                """.utf8))
-        XCTAssertEqual(summary.sessionUID, "u-1")
-        XCTAssertEqual(summary.lifecycle, .live)
-        XCTAssertEqual(summary.link, .attached)
+    /// **Rewritten, not deleted.** This used to read
+    /// `testSessionSummaryIgnoresAnUnexpectedAgentKey`, and it pinned the
+    /// forward-compatibility fact that was true at the time: an old client
+    /// decoding a summary from a newer daemon survives, because `JSONDecoder`
+    /// ignores keys it was not told about.
+    ///
+    /// That fact is still true and still worth holding — the second half below
+    /// is the same assertion, on a key this build genuinely does not know. What
+    /// changed is that `agent` stopped being one of those keys: Phase 5 gave it
+    /// a decoded field, because *ignoring* it is exactly what let a Codex
+    /// session inherit Claude's whole vocabulary. So the first half now asserts
+    /// the opposite of what the old name promised, which is why the name had to
+    /// go with it.
+    func testSessionSummaryDecodesTheAgentAndStillIgnoresKeysItDoesNotKnow() throws {
+        func summary(_ extra: String) throws -> SessionSummary {
+            try JSONDecoder().decode(
+                SessionSummary.self,
+                from: Data(
+                    """
+                    {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1","cwd":"/x",
+                     "lifecycle":"live","link":"attached","last_seq":3,
+                     "created_at":"t","updated_at":"t"\(extra)}
+                    """.utf8))
+        }
+
+        let codex = try summary(#","agent":"codex""#)
+        XCTAssertEqual(codex.sessionUID, "u-1")
+        XCTAssertEqual(codex.lifecycle, .live)
+        XCTAssertEqual(codex.link, .attached)
+        XCTAssertEqual(codex.agent, .codex, "agent is decoded now, not ignored")
+        XCTAssertTrue(codex.isCodex)
+
+        // The forward-compatibility fact itself, on a key this build really has
+        // never heard of: it is ignored, and the summary still decodes whole.
+        let future = try summary(#","agent":"claude","telemetry_budget":{"tokens":42}"#)
+        XCTAssertEqual(future.agent, .claude)
+        XCTAssertEqual(future.sessionUID, "u-1")
     }
 }
