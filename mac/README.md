@@ -1,6 +1,6 @@
 # CodeConnect — Mac side
 
-Three shipped binaries and a shared library in one cargo workspace, plus a chaos
+Three shipped binaries and two shared libraries in one cargo workspace, plus a chaos
 harness that is not shipped.
 
 | Crate | What it is |
@@ -9,6 +9,7 @@ harness that is not shipped.
 | `ccd` | The daemon: SQLite event log, hook gate, transcript tailer, tailnet WebSocket server, push. |
 | `codeconnect` | The shim: `codeconnect claude` hosts a session in `tmux -L codeconnect` and attaches in place. Also the per-session supervisor and the LaunchAgent lifecycle. |
 | `cc-hook` | The tiny binary Claude Code invokes on every wired hook event. |
+| `codex-broker` | Library, not a binary: the broker that sits in front of Codex's JSON-RPC app server, refusing by default on two sockets. It runs in-process inside `codeconnect internal-codex-host`, the host the launcher spawns. |
 | `soak` | Not shipped. The chaos gauntlet — see [Soaking it](#soaking-it). |
 
 ## Run it
@@ -43,6 +44,29 @@ every codex subcommand (only the interactive TUI is hosted).
 **[`docs/codex.md`](../docs/codex.md) is the operator page** — launching, what the phone
 can and cannot do, the security boundary, what happens when Codex updates, quota, and the
 refusal sentences and log lines you will actually see.
+
+What the phone is *allowed* to offer on a Codex session is decided by the daemon's
+protocol minor, which `codeconnect daemon status` prints:
+
+```text
+daemon   pid NNNNN · version 0.6.0 · build <build id>
+         protocol 1.20 · up since 2026-09-09T00:00:00.000Z
+```
+
+The phone hides what the daemon has not advertised rather than failing at the tap. Codex
+support was built across five of those numbers:
+
+| Minor | What the daemon gained |
+|---|---|
+| 1.16 | The phone can answer a Codex approval — `AnswerPath::CodexResponse`, which is neither a hook return nor a keystroke but the app server's own response, written for it. |
+| 1.17 | Stop is honoured rather than refused. Every `InterruptResult` status becomes reachable, and the `codex_interrupt` capability says this daemon does the thing. |
+| 1.18 | Say something — the `codex_compose` message, and a `ComposeResult` that says whether the words *started* a turn or *steered* the one already running. Gated by `codex_compose`. |
+| 1.19 | The three facts that make a Codex session drivable from the fleet without inference: `request_id` inside the `approval_resolved` payload, `turn_id` on the approval card's event envelope, and `SessionSummary.codex_link` (`subscribed` · `bound` · `offline` · `none`). |
+| 1.20 | `codex_link` gains a fifth word, `bound_not_started`: a link bound to a thread the daemon has proved has never run a turn. It is the one un-subscribed state a compose is admitted in — no rollout means no turn to collide with, and none to stop — so the phone may start a fresh session's first turn. |
+
+`subscribed` actuates both verbs; `bound_not_started` actuates compose only; every other
+word actuates neither. A refusal is still the last word: a link can move between the
+summary the phone drew and the tap.
 
 ```sh
 codeconnect ls                    # sessions, identities and link state
@@ -756,7 +780,8 @@ gate then refuses.
 
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
-`send_text`, `capture`, `delete_session` and `test_push` so the app disables
+`send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`,
+`codex_compose` and `supported_agents` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -784,7 +809,18 @@ terminal; `>= 14` adds relay-backed push — the `push_relay` capability,
 `register_push.relay_credential`, the `credential_invalid` test result, and
 `hello_ack.push_environment`, which is the daemon's authoritative APNs
 environment for that device's token and the path a relay-side correction takes
-back to the phone. See `protocol/src/lib.rs` for the authoritative ledger.
+back to the phone. `>= 15` opens the agent seam — `AgentKind`,
+`Capabilities.supported_agents`, `SessionSummary.agent`, the separate
+`CodexResolution` envelope and the composite wire-id codec, with the `interrupt`
+operation defined and refused; `>= 16` lets a phone actually answer a Codex
+approval; `>= 17` honours `interrupt` and adds `codex_interrupt`; `>= 18` adds
+`compose` and `codex_compose`; `>= 19` adds `request_id` to the
+`approval_resolved` payload, `turn_id` to the approval card's envelope and
+`SessionSummary.codex_link`; `>= 20` adds that field's fifth word,
+`bound_not_started`. All additive, and Codex-only:
+`codex_interrupt` and `codex_compose` are build facts about the daemon, so a
+client scopes both controls by the session's own `agent` and `codex_link` as
+well. See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run
 by `session_uid` and never by `session_id` — a tmux name is handed to the next

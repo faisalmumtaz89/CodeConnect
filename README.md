@@ -15,14 +15,16 @@ Your agents keep working while you walk away. CodeConnect puts every session on 
 
 ```
 $ codeconnect claude                 # your normal Claude Code session, now observable
+$ codeconnect codex                  # the same, for OpenAI's Codex CLI
 ```
 
-That's the whole setup. Claude Code itself behaves exactly as it did before, and the session also appears on your phone.
+That's the whole setup. The agent itself behaves exactly as it did before, and the session also appears on your phone.
 
 ## What it does
 
 - **A fleet view.** Every agent, what it's asking for, and how long it's been waiting.
 - **Approvals with the actual command.** Risk-tiered — a read is one tap, a `git push --force` needs a deliberate hold and Face ID. The command is never truncated or faded, because a hidden suffix is where a dangerous argument hides.
+- **Two agents, one fleet.** Claude Code and OpenAI's Codex CLI both run under `codeconnect`, and a Codex session is drivable from the phone: answer an approval with Codex's own options, stop a running turn, or say something — starting a turn when the session is idle, joining the one already running when it is busy. See [`docs/codex.md`](docs/codex.md).
 - **Nothing decides without you.** Claude Code auto-answers an unanswered question after ~60 seconds; CodeConnect holds it open instead. If the daemon can't be reached, the prompt falls back to your keyboard rather than being silently answered.
 - **Diff review that works on a phone.** Unified, monospace, word-level highlighting, comment-to-agent on any hunk.
 - **Talk to it — out loud if you like.** The compose bar stages text into the agent's prompt; template chips insert, never send. Dictation is Apple's own speech recognition — on-device wherever your language supports it; where it doesn't, Apple's speech service does the transcription. A transcript is always staged for review, never auto-sent.
@@ -48,11 +50,11 @@ iPhone (SwiftUI)  ──wss:// tailnet (ws:// fallback)──▶  ccd (Rust daem
 ```
 
 - **`ccd`** — event-sourced daemon. SQLite WAL log with a per-session monotonic sequence, so a reconnect replays gap-free or says it couldn't. Never the parent of an agent: `kill -9 ccd` loses nothing.
-- **`codeconnect`** — launches an agent inside a private tmux server and wires Claude Code's hooks. Claude Code behaves unchanged; the terminal is tmux's while the session is attached.
+- **`codeconnect`** — launches an agent inside a private tmux server. For Claude Code it wires the hooks; for Codex, which has none, it puts a broker in front of Codex's own JSON-RPC app server. The agent behaves unchanged; the terminal is tmux's while the session is attached.
 - **`cc-hook`** — tiny binary the hooks call. Fails safe: if the daemon is unreachable, the decision goes back to the local keyboard.
 - **The phone** — a client of the event log, not a source of truth.
 
-Approval **requests** ride structured channels only (hooks, and later ACP / Codex's app-server). Terminal bytes are never parsed to *derive* a fact — three independent projects tried and abandoned it, and Claude Code's transcript contains no approval events at all. The event log is the only source of truth.
+Approval **requests** ride structured channels only — Claude Code's hooks, and Codex's app server through the broker; ACP later. Terminal bytes are never parsed to *derive* a fact — three independent projects tried and abandoned it, and Claude Code's transcript contains no approval events at all. The event log is the only source of truth.
 
 Your **answer** travels one of two ways, and the daemon tells the app which one is live:
 
@@ -68,6 +70,7 @@ export PATH="$HOME/.codeconnect/bin:$PATH"
 codeconnect daemon install     # run ccd under launchd (restarts on crash)
 codeconnect pair               # QR code to pair the phone
 codeconnect claude             # start a session in the current directory
+codeconnect codex              # the same, for Codex
 ```
 
 The installer downloads the latest release, verifies its Developer ID
@@ -105,6 +108,7 @@ Two things are worth knowing before the daemon comes back up.
 ## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the pieces fit together, and why each is shaped the way it is
+- [`docs/codex.md`](docs/codex.md) — Codex sessions: launching one, what the phone can and cannot do with it, the security boundary, and what happens when Codex updates
 - [`mac/README.md`](mac/README.md) — the daemon in depth: session and prompt identity, durability, pairing, TLS, configuration, and the chaos soak
 - [`ios/README.md`](ios/README.md) — the app: honesty rules, test seams, the render harness, and the design system
 - [`SECURITY.md`](SECURITY.md) — trust boundaries, including exactly what a stolen phone token can do
@@ -126,7 +130,7 @@ The interface is dark mode only, in a Vercel/Geist register. Two principles do m
 
 ## Status
 
-Personal tool, working daily. Claude Code is fully supported; observation of other CLIs (Codex, Grok, Kimi) is next. Mac updates arrive as signed release binaries. **The iPhone app launches on the App Store soon.**
+Personal tool, working daily. Claude Code and OpenAI's Codex CLI are both fully supported — a Codex session is hosted through a broker in front of Codex's app server, and the phone can answer its approvals, stop a turn and say something. Other CLIs (Grok, Kimi) are not supported. Mac updates arrive as signed release binaries. **The iPhone app launches on the App Store soon.**
 
 ## License
 

@@ -222,7 +222,7 @@ Real output, with the home path, host, pid and build id replaced:
 plist    ~/Library/LaunchAgents/com.codeconnect.ccd.plist (1988 bytes)
 launchd  loaded, running as pid NNNNN
 daemon   pid NNNNN · version 0.6.0 · build <build id>
-         protocol 1.19 · up since 2026-09-07T20:19:31.662Z
+         protocol 1.20 · up since 2026-09-08T16:02:47.515Z
          ws://your-mac.your-tailnet.ts.net:8787 · 0 session(s) attached
 managed  yes (com.codeconnect.ccd)
 logs     ~/.codeconnect/logs
@@ -233,24 +233,24 @@ below. `codeconnect ls` shows what is running in tmux even when the daemon is do
 
 ### The refusal sentence on the phone
 
-When a Stop or a message is refused, the phone shows the Mac's own sentence. There are 68
+When a Stop or a message is refused, the phone shows the Mac's own sentence. There are 70
 of them and they fall into four kinds. Which kind it is tells you whether trying again is
 worth anything:
 
 | Kind | How many | What it means | Try again? |
 |---|---|---|---|
-| Link state | 18 | A fact about the Mac's control link right now — reconnecting, not yet watching the thread, no link at all. | Yes, shortly. |
+| Link state | 20 | A fact about the Mac's control link right now — reconnecting, not yet watching the thread, no link at all. | Yes, shortly. |
 | This Mac's own store | 5 | A local lookup or record failed **before** anything was sent. Nothing reached Codex. | Yes. Then check the Mac. |
 | Settled | 43 | The ask was wrong, the id is spent, or the outcome is already recorded. | No. |
 | Wire code | 2 | Codex or the broker refused the write, and the sentence carries their numeric code — never their message. | No. Do it at the Mac. |
 
 Every sentence is written in one place in the daemon and emitted as
 [`fixtures/codex/refusal-sentences.json`](../fixtures/codex/refusal-sentences.json), which
-a build gate compares byte for byte. If you want the exact wording of all 68, read that
+a build gate compares byte for byte. If you want the exact wording of all 70, read that
 file.
 
 Two words in those sentences are worth knowing: **rejected** means nothing was sent, and
-**indeterminate** means it was sent and nobody saw the result. 51 of the 68 are the first,
+**indeterminate** means it was sent and nobody saw the result. 53 of the 70 are the first,
 17 are the second.
 
 ### Lines in the daemon log
@@ -282,9 +282,12 @@ has not advertised rather than failing when you tap.
 | 1.17 | Yes | Yes | No | No |
 | 1.18 | Yes | Yes | Yes | No |
 | 1.19 | Yes, and a card can offer Stop for its own turn | Yes | Yes | Yes — `subscribed`, `bound`, `offline` or `none` |
+| 1.20 | Yes | Yes | Yes, including the first turn of a new session | Yes — adds `bound_not_started`: the thread has no history yet, so the phone may start it |
 
-`subscribed` is the only state in which a Stop or a message reaches Codex. `bound` means
-the Mac knows the thread but is not receiving its frames. `offline` means the link is
+`subscribed` is the only state in which a Stop reaches Codex, and the ordinary one for a
+message. `bound_not_started` (daemon 1.20) is the one exception: the thread is bound but has
+no history yet, so the phone may say something to start its first turn; Stop is refused there
+because nothing is running. `bound` means the Mac knows the thread but is not receiving its frames. `offline` means the link is
 dialling, backing off or mid-handshake. `none` means the run has no Codex control link at
 all — every Claude session reads `none`, and so does any Codex run whose supervisor has
 disconnected. It is a fact about the **link**, not about whether the session is alive.
@@ -304,4 +307,5 @@ disconnected. It is a fact about the **link**, not about whether the session is 
 
 * [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — how the daemon, launcher and phone fit together
 * [`mac/README.md`](../mac/README.md) — the Mac side in detail: pairing, TLS, the LaunchAgent
+* [`ios/README.md`](../ios/README.md#codex-sessions) — the phone side: the card, the two controls and the one rule that gates them
 * [`fixtures/README.md`](../fixtures/README.md) — every recorded Codex measurement and what it proves
