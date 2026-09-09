@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 # CI pins this exact version so the floor is tested, not merely declared. 1.85 is
 # what the lockfile actually needs: `rustls` pulls `zeroize`, which is published

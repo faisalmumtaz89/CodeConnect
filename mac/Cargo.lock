@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "cc-hook"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "protocol",
  "serde_json",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "ccd"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "ccsoak"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "codeconnect"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "codex-broker",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "codex-broker"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -335,7 +335,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
 name = "demo-daemon"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64",
  "libc",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "push-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "http",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "push-relay"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "axum",
