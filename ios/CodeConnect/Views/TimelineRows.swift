@@ -191,7 +191,7 @@ struct AgentMessageRow: View {
                 // renders whole; the clamp is the price of a "Show more",
                 // never a tax on its absence.
                 Text(AgentProse.inline(AgentProse.previewSource(text)))
-                    .ccType(CC.type.body)
+                    .ccType(CC.type.reading)
                     .foregroundStyle(CC.text.primary)
                     .textSelection(.enabled)
                     .lineLimit(4)
@@ -207,7 +207,7 @@ struct AgentMessageRow: View {
                     switch segment {
                     case .prose(let prose):
                         Text(AgentProse.inline(prose))
-                            .ccType(CC.type.body)
+                            .ccType(CC.type.reading)
                             .foregroundStyle(CC.text.primary)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
@@ -221,7 +221,7 @@ struct AgentMessageRow: View {
                         // hierarchy in a document, and here it is a title over
                         // a paragraph.
                         Text(AgentProse.inline(heading))
-                            .ccType(CC.type.headline)
+                            .ccType(CC.type.readingHeading)
                             .foregroundStyle(CC.text.primary)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
@@ -313,18 +313,19 @@ struct AgentMessageRow: View {
             }
         }
         // **No container is not the same as no column.** The agent's prose is
-        // the ground of the timeline and draws nothing around itself, which is
-        // right — but it was also the only run on the screen still starting on
-        // the list's 16pt margin, measured at x=17.33 against the 52.67 that the
-        // notice rows, the identity block and the user's own message hold
-        // perfectly. It has no glyph to hang in the gutter, so it pays the same
-        // step the gutter would have cost it.
-        .padding(.leading, TimelineSpine.content)
-        // And having stepped out, it says so: the declared column is what
-        // lets a mono block or a table inside this message hang its border
-        // into the gutter by the kit's one rule instead of by private
-        // arithmetic — one border edge, one text edge, for every surface.
-        .ccColumnInset(TimelineSpine.content)
+        // the ground of the timeline and draws nothing around itself, so it
+        // reads in its own lane: one `sm` step off the list's 16pt margin, which
+        // lands text on x=28. That is deliberately inside the 52 the tool,
+        // notice and user rows hold — those carry a glyph or a bar in the gutter
+        // and stay on the operational column, while prose, which has no mark to
+        // hang there, reads wider. The asymmetry is the point of the reading lane.
+        .padding(.leading, CC.space.sm)
+        // And having stepped out, it says so: the declared column is what lets a
+        // mono block or a table inside this message hang its border one inner
+        // padding back — border on the 16pt page margin, text on the prose
+        // column at 28 — by the kit's one rule instead of by private arithmetic.
+        // One border edge, one text edge, for every surface.
+        .ccColumnInset(CC.space.sm)
         // **Combined only while collapsed.** The collapsed preview is one
         // clamped Text, and "Agent said: …" makes it one clean VoiceOver
         // stop. Expanded, the message can be arbitrarily long — folding the
