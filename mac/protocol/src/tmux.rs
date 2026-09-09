@@ -4213,15 +4213,19 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
         let uid = crate::uid::new().unwrap();
         // `keep` keeps the server alive so the epoch survives the kill below.
         start_session(&bin, &sock, "keep", &keep_uid);
-        start_session(&bin, &sock, "cc-1", &uid);
-        let pin = resolve_owned_session(&sock, &uid).expect("cc-1 resolves");
 
-        // Kill cc-1 and recreate it under the SAME uid on the SAME server (keep
-        // held it up), retrying until the replacement lands in the SAME `session_created`
-        // second as the original. Requiring equal `session_created` is the whole
-        // point of the hardening: it forces `session_id` to be the *only*
-        // discriminator, so a creation-time-only pin (the old impl) could not
-        // pass. Same-second recreation is the common case, so this converges fast.
+        // Create cc-1, kill it, and recreate it under the SAME uid on the SAME server
+        // (keep holds it up), until the replacement lands in the SAME `session_created`
+        // second as the original. Requiring equal `session_created` is the whole point
+        // of the hardening: it forces `session_id` to be the *only* discriminator, so a
+        // creation-time-only pin (the old impl) could not pass.
+        //
+        // The second belongs to the ORIGINAL, so a kill+recreate that overran it cannot
+        // be rescued by recreating again — the loop used to do exactly that, and on a
+        // hosted runner where one kill+recreate costs more than the slice of the second
+        // that was left, all fifty tries were spent on a second that had already gone.
+        // Each try therefore makes a fresh original at the top of a fresh second, so the
+        // kill+recreate has close to a whole second to land in.
         let kill_cc1 = || {
             std::process::Command::new(&bin)
                 .args([
@@ -4237,18 +4241,33 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
                 .output()
                 .unwrap();
         };
-        let mut replacement = None;
+        let top_of_a_fresh_second = || loop {
+            let into = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_millis();
+            if into < 50 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(1000 - into)));
+        };
+        let mut landed = None;
         for _ in 0..50 {
+            top_of_a_fresh_second();
+            start_session(&bin, &sock, "cc-1", &uid);
+            let pin = resolve_owned_session(&sock, &uid).expect("cc-1 resolves");
             kill_cc1();
             start_session(&bin, &sock, "cc-1", &uid);
             let r = resolve_owned_session(&sock, &uid).expect("the replacement resolves");
             if r.session_created == pin.session_created {
-                replacement = Some(r);
+                landed = Some((pin, r));
                 break;
             }
+            kill_cc1();
         }
-        let replacement = replacement.expect(
-            "could not land a same-second recreation in 50 tries (needed to isolate session_id)",
+        let (pin, replacement) = landed.expect(
+            "could not land an original and its recreation in one second in 50 tries \
+             (needed to isolate session_id)",
         );
 
         // Same server epoch AND same session_created, different internal id: this
