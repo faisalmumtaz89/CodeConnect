@@ -23773,6 +23773,12 @@ mod tests {
         // point, so `abort()` cannot stop it until it returns on its own. The next
         // registration's park→join of this link therefore takes real time, which is the
         // window a blocked answer would be forced to wait out.
+        //
+        // It must be RUNNING before that registration aborts it: tokio cancels a task
+        // that has not been polled yet, the join would then resolve at once, and the
+        // registration would be out of its tail before the answer is issued — which is
+        // what a starved runner did (run 34380614631: the tail assertion went red).
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
         {
             let mut inner = daemon.inner.lock().await;
             let held = inner.codex_links.remove(uid).expect("a link was installed");
@@ -23782,7 +23788,8 @@ mod tests {
                 CodexLinkHandle {
                     epoch: held.epoch,
                     generation: held.generation,
-                    task: tokio::spawn(async {
+                    task: tokio::spawn(async move {
+                        let _ = started_tx.send(());
                         let start = std::time::Instant::now();
                         while start.elapsed() < Duration::from_millis(1800) {
                             std::thread::sleep(Duration::from_millis(25));
@@ -23796,6 +23803,9 @@ mod tests {
                 },
             );
         }
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the stubborn link task must actually be running before it is parked");
 
         // The registration whose tail is now ~1.8 s long.
         let handover = {
