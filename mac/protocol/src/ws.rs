@@ -23,6 +23,14 @@ pub const MAX_CLIENT_MESSAGE_BYTES: usize = 1024 * 1024;
 /// close to this.
 pub const MAX_SEND_TEXT_BYTES: usize = 8 * 1024;
 
+/// Ceiling on one `compose`'s text.
+///
+/// The same number as [`MAX_SEND_TEXT_BYTES`] and for the same reason stated the other
+/// way round: a megabyte typed into a TTY is not a takeover, and a megabyte put into a
+/// model's mouth is not a message. It is a bound on what one tap can inject, chosen to
+/// match the sibling operation so a phone has one answer to "how long may this be".
+pub const MAX_COMPOSE_BYTES: usize = 8 * 1024;
+
 // ------------------------------------------------------------------ terminal
 //
 // The Terminal tab attaches to the exact live tmux session over this same
@@ -123,6 +131,57 @@ pub mod terminal_close {
     pub const SESSION_EXITED: &str = "session_exited";
 }
 
+/// What a client can understand, carried on `hello` and on `register_push`.
+///
+/// The one fact it holds today is which agents the client can render and drive.
+/// A client that sends none — or a daemon reading a frame that predates this
+/// field — is **Claude-only**: [`ClientFeatures::supports`] reads an empty set as
+/// the floor and requires every other agent to be named, which is the honest,
+/// fail-closed reading. It is a struct rather than a bare `Vec` so a later feature
+/// is one additive field here, not a second parallel list on two messages.
+///
+/// **Wire-legal and inert on both messages today: the daemon accepts an
+/// advertisement and stores nothing**, so what a client says here scopes nothing —
+/// not a name resolution, not a push. See [`RegisterPush::features`] for why the
+/// write side was deleted rather than kept working. The predicate below is live all
+/// the same, because push eligibility already asks it — of the *device row*, which
+/// this phase leaves `NULL` on every device.
+///
+/// [`RegisterPush::features`]: ClientMessage::RegisterPush::features
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientFeatures {
+    /// Agents this client can observe and act on. Absent/empty ⇒ Claude-only.
+    /// An unrecognised agent name round-trips as
+    /// [`crate::agent::AgentKind::Unsupported`] and grants nothing.
+    #[serde(default)]
+    pub agents: Vec<crate::agent::AgentKind>,
+}
+
+impl ClientFeatures {
+    /// True when the client advertised it can handle this agent. Claude-only is
+    /// the floor, so Claude is supported by a client that named it *or* that
+    /// named nothing at all (the legacy shape); every other agent must be
+    /// explicitly advertised.
+    ///
+    /// **An unrecognised agent grants nothing, and that has to be said rather
+    /// than left to the set.** `Vec::contains` compares
+    /// [`crate::agent::AgentKind::Unsupported`] by its preserved name, so a
+    /// client that advertised `["gemini"]` matched a doorbell *for* `gemini` and
+    /// authorized it — a build that cannot name the agent vouching that a phone
+    /// can render it. Both sides of that comparison are values this build does
+    /// not understand, and agreeing about a name is not the same as being able
+    /// to act on it.
+    pub fn supports(&self, agent: &crate::agent::AgentKind) -> bool {
+        if matches!(agent, crate::agent::AgentKind::Unsupported(_)) {
+            return false;
+        }
+        if agent.is_claude() && self.agents.is_empty() {
+            return true;
+        }
+        self.agents.contains(agent)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -147,6 +206,19 @@ pub enum ClientMessage {
         client_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_name: Option<String>,
+        /// What this client can understand (its agent set today). Absent from a
+        /// client predating the agent seam, which is Claude-only.
+        ///
+        /// **Wire-legal and inert today, on the same terms as
+        /// [`ClientMessage::RegisterPush::features`]: the daemon reads it off the
+        /// wire and drops it.** It scopes no request on this connection — the
+        /// daemon holds no connection-scoped feature state at all — because a
+        /// scoping path with no input is machinery rather than a feature, and no
+        /// shipping client encodes this field. It rides `hello` because it is a
+        /// property of the whole connection rather than of one request, which is
+        /// what the phase that lands the scoping will want.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        features: Option<ClientFeatures>,
     },
     Sessions,
     /// `session_id` is a **session reference**: either a `session_uid` (exact,
@@ -293,6 +365,22 @@ pub enum ClientMessage {
         /// pair the relay has no binding for.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         relay_credential: Option<crate::secret::Redacted>,
+        /// What this device can be notified about (its agent set).
+        ///
+        /// **Wire-legal and inert today: the daemon accepts this field and stores
+        /// nothing.** The write side was deleted rather than kept working, because
+        /// nothing that ships can fill the field — no client encodes it — and a
+        /// write path with no input is machinery, not a feature. So every device
+        /// row reads `NULL`, which is the Claude floor, and a device hears about a
+        /// non-Claude agent only once a later phase lands both the phone that
+        /// advertises and the persistence that records it.
+        ///
+        /// It rides `register_push` rather than `hello` because push eligibility is
+        /// a property of the *device*, projected per device at dequeue time, not of
+        /// the live connection — which is what the read side already assumes and
+        /// what the write side will land against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        features: Option<ClientFeatures>,
     },
 
     /// Open a live terminal on the session named by `session_uid`. `cols`/
@@ -334,6 +422,87 @@ pub enum ClientMessage {
     /// only the daemon's disposable viewing client goes.
     TerminalDetach {
         attachment_id: String,
+    },
+
+    /// Abort the running turn named by `turn_id` on a Codex session.
+    ///
+    /// A mutating operation, so it carries a ledger identity like every other:
+    /// `request_id` makes a retry idempotent and `payload_hash` binds it to the
+    /// exact turn it was issued against, so a replay can never abort a *different*
+    /// turn the session has since moved on to.
+    ///
+    /// **Honoured**: the daemon genuinely aborts the turn a Codex session is
+    /// running, and answers with a typed [`ServerMessage::InterruptResult`]
+    /// whatever becomes of it. A Claude client never sends it — Claude's stop
+    /// control is the keyboard at the Mac, and a Claude session is refused with
+    /// the sentence that says so rather than by a bare no.
+    ///
+    /// Two gates stand between this message and a stopped turn, and they bind
+    /// different things, which is why neither is redundant. The daemon's own gate
+    /// binds the ask to the exact `turn_id` the hash names, to the thread its
+    /// control link is *subscribed* to, and to that link's current visit
+    /// generation — so the same `request_id` carrying a different turn, thread or
+    /// visit is a conflict rather than a replay, and can never become a stop aimed
+    /// at whatever is running now. It is also the only gate that can be checked
+    /// before anything durable is claimed. The broker then binds the ask again, on
+    /// its own side, to the session's *own* active turn, and refuses one that does
+    /// not name it — and that is the only check with sight of the turn the session
+    /// is actually running. Interrupt is bound to identity at both ends, never to
+    /// a name.
+    Interrupt {
+        session_id: String,
+        request_id: String,
+        /// The turn to abort, as it was named when the card was shown.
+        turn_id: String,
+        /// [`crate::hash::interrupt_hash`] over `session_id`, `turn_id`.
+        payload_hash: String,
+    },
+    /// **Say something to a Codex session from a phone.**
+    ///
+    /// The phone composes words; it does not decide what becomes of them. If the
+    /// session's thread is idle the daemon starts a turn with them; if a turn is
+    /// running it steers that turn with them. Which one happened comes back in the
+    /// [`ComposeResult`], and the phone renders what it is told rather than
+    /// predicting it — the session can move between the tap and the write, and a
+    /// client that guessed would show the wrong thing exactly when it mattered.
+    ///
+    /// **This is not [`ClientMessage::SendText`], and the two must not be
+    /// confused.** `send_text` types at the Mac's TTY and is refused for a Codex
+    /// session by name; this speaks the app-server's own `turn/start` /
+    /// `turn/steer` through the broker and is refused for a Claude session by
+    /// name. They share no ledger, no result type and no failure vocabulary: one
+    /// can report that a composer disappeared, and the other can report which turn
+    /// it joined.
+    ///
+    /// **The compatibility contract is the CLIENT's, and it is a transmission gate rather
+    /// than a UI one.** This is a new message, so a daemon below minor 18 cannot decode it:
+    /// it answers `ServerMessage::Error{code:"bad_request"}` — legible, but not a
+    /// `ComposeResult`, so a client waiting for one waits for something that is not coming.
+    /// A client must therefore not SEND this unless [`Capabilities::codex_compose`] is
+    /// true; hiding the affordance is not the same thing, and Phase 5 owes a test that
+    /// proves the transmission is gated and not merely the button.
+    ///
+    /// A mutating operation, so it carries a ledger identity like every other.
+    /// `request_id` makes a retry idempotent and `payload_hash` binds it to the
+    /// exact text, so a replay can never say something else. **The route is
+    /// snapshotted at the claim, not recomputed on the retry**: a compose that was
+    /// issued as a `turn/start` is re-issued as a `turn/start`, never converted
+    /// into a steer because the session has since become busy — that conversion
+    /// would put the words into a turn nobody composed them for.
+    ///
+    /// Two gates stand between this message and the model, exactly as they do for
+    /// [`ClientMessage::Interrupt`]. The daemon's binds the ask to the thread its
+    /// control link is *subscribed* to and to that link's visit generation, before
+    /// anything durable is claimed. The broker's binds it again to the session's
+    /// own head thread — and, for a steer, to the turn the session is actually
+    /// running — and refuses one that does not name it.
+    Compose {
+        session_id: String,
+        request_id: String,
+        /// What to say. Bounded by [`MAX_COMPOSE_BYTES`].
+        text: String,
+        /// [`crate::hash::compose_hash`] over `session_id`, `text`.
+        payload_hash: String,
     },
 
     Ping,
@@ -469,7 +638,100 @@ pub enum ServerMessage {
         reason: String,
     },
 
+    /// The outcome of an [`ClientMessage::Interrupt`]. Typed like every other
+    /// mutation result so a retry replays a recorded outcome rather than
+    /// aborting twice.
+    ///
+    /// **Every status is reachable**, and the four are genuinely different news
+    /// a client has to render apart: the turn reached its aborted boundary
+    /// ([`InterruptResult::Aborted`]); this exact ask already did that and is not
+    /// doing it twice ([`InterruptResult::Duplicate`]); nothing was actuated and
+    /// here is why ([`InterruptResult::Rejected`]); or the stop was issued and
+    /// this daemon did not live to see what it did
+    /// ([`InterruptResult::Indeterminate`]). Collapsing them — treating anything
+    /// that is not `aborted` as a failure, or anything that is not `rejected` as a
+    /// success — tells the operator something untrue about their own session.
+    InterruptResult {
+        session_id: String,
+        request_id: String,
+        result: InterruptResult,
+    },
+    /// The outcome of a [`ClientMessage::Compose`]. Typed like every other mutation
+    /// result so a retry replays a recorded outcome rather than speaking twice.
+    ComposeResult {
+        session_id: String,
+        request_id: String,
+        result: ComposeResult,
+    },
+
     Pong,
+}
+
+/// What became of an [`ClientMessage::Interrupt`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum InterruptResult {
+    /// The turn reached its aborted boundary.
+    Aborted { turn_id: String },
+    /// This exact interrupt already ran; the turn was not aborted a second time.
+    Duplicate { turn_id: String },
+    /// Refused, with a reason: **nothing was actuated by this ask, and the record
+    /// says so.** The clean complement of [`Self::Indeterminate`] — that one is an
+    /// outcome nobody can name, because the ask went past the point where it was
+    /// committed and what it did was never observed; this one is named precisely
+    /// because the ask never reached that point. A client may say the turn is
+    /// untouched by this ask, which no other status licenses.
+    ///
+    /// The reason is human text, safe to show verbatim: the run is not a Codex
+    /// session (a Claude one is told where its stop control actually is), the
+    /// control link is not watching the turn's thread so no stop could be
+    /// confirmed, the hash does not bind this ask to the turn it names, or a
+    /// settled claim that stopped nothing is being replayed.
+    Rejected { reason: String },
+    /// Issued, outcome unknown — the daemon was killed between claiming the
+    /// interrupt and observing the turn terminate. Never retried automatically.
+    Indeterminate { reason: String },
+}
+
+/// What became of a [`ClientMessage::Compose`].
+///
+/// **Five statuses, and the first two are the ones a client must not collapse.** Which
+/// of them arrives is the answer to "what did my words do" — they began a turn, or they
+/// joined one already running — and it is decided by what the session was doing at the
+/// instant the daemon wrote, not by anything the phone could know when it tapped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ComposeResult {
+    /// The thread was idle and these words began a turn. `turn_id` is that turn, as the
+    /// app-server named it in `turn/started`.
+    Started { turn_id: String },
+    /// A turn was running and these words joined it. `turn_id` is that turn — the SAME
+    /// turn, not a new one: a steer produces no `turn/started` and the only terminal is
+    /// the original turn's.
+    Steered { turn_id: String },
+    /// This exact compose already ran; nothing was said a second time. It replays the
+    /// recorded outcome, including which of `started`/`steered` it was — the route is
+    /// snapshotted at the claim, so a retry after the session moved reports what actually
+    /// happened rather than what would happen now.
+    Duplicate {
+        turn_id: String,
+        /// Whether the original was a start or a steer, so a client can render the
+        /// replay with the same words it rendered the first time.
+        started: bool,
+    },
+    /// Refused, with a reason: **nothing was said by this ask, and the record says so.**
+    /// The clean complement of [`Self::Indeterminate`], exactly as it is for
+    /// [`InterruptResult::Rejected`].
+    ///
+    /// The reason is human text, safe to show verbatim. **It never carries an id the
+    /// phone did not send**: the app-server's own refusal for a stale steer names the
+    /// turn the session is really running, and neither the broker's refusal nor this
+    /// daemon's passes that on.
+    Rejected { reason: String },
+    /// Written, outcome unknown — the daemon was killed between claiming the compose and
+    /// learning what it did. Never retried automatically: saying something twice is not a
+    /// recoverable mistake, and a person who can see the screen is a better judge.
+    Indeterminate { reason: String },
 }
 
 /// Ceiling on a `diff` payload. A phone screen cannot use more, and an
@@ -565,6 +827,72 @@ pub struct Capabilities {
     /// See `terminal_close::NOT_AUTHORISED`.
     #[serde(default)]
     pub terminal_pty: bool,
+    /// **This daemon honours a stop for a Codex session whose control link is
+    /// `Subscribed`** — it really aborts the turn and reports what became of it,
+    /// rather than answering [`InterruptResult::Rejected`] to every ask. Nothing
+    /// else on the wire tells those two daemons apart — both accept
+    /// [`ClientMessage::Interrupt`] and both answer an `interrupt_result` — so
+    /// without this flag a phone shipping a Stop button would have to tap one to find
+    /// out, which is exactly the "offered and silently broken" affordance this app's
+    /// rule forbids: an action the daemon cannot perform is not offered.
+    ///
+    /// # What it does NOT say, stated precisely because it was over-read
+    ///
+    /// It is **connection-global and build-shaped**: one capability set is composed
+    /// per `hello_ack`, from this daemon's supported agents and nothing else. It is
+    /// therefore true on a connection whose fleet is entirely Claude, and true for a
+    /// Codex session whose control link is offline, unbound or merely bound — every
+    /// one of which refuses an ask with a sentence of its own. The name carries
+    /// `codex_` for that reason: a bare `interrupt` read as a promise about whatever
+    /// session the reader had in mind, which is the one thing this flag never was.
+    ///
+    /// **Per-session actuatability is `summary.agent` plus the session's link
+    /// state, and BOTH are now on the summary.** The agent always was;
+    /// `codex_thread_id` never answered the second half, because it is resolved from
+    /// the addressee's *binding* and reads the same whether that link is subscribed,
+    /// bound or reconnecting. [`crate::event::SessionSummary::codex_link`] closes it:
+    /// it is resolved from the same addressee, in the same read, and says which of
+    /// the four states that addressee is in. A client that wants to know whether THIS
+    /// session can be stopped right now computes it from the fleet — this flag AND
+    /// `agent == codex` AND `codex_link == subscribed`.
+    ///
+    /// The honest client rule from a daemon that does not send that field (below its
+    /// minor, where it decodes as [`crate::event::CodexLink::None`]) is unchanged and
+    /// is still the fallback: offer the button on a Codex session hosted by a daemon
+    /// that advertises this, and let the refusal — which always names which of the
+    /// conditions failed — be what the operator reads. A refusal is still the last
+    /// word even with the field, since a link can move between the summary and the
+    /// tap.
+    #[serde(default)]
+    pub codex_interrupt: bool,
+    /// **This daemon honours a compose for a Codex session whose control link is
+    /// `Subscribed`** — it really speaks to the model, and reports which turn heard it.
+    ///
+    /// Advertised for [`Capabilities::codex_interrupt`]'s reason, and it is a stronger
+    /// one here: `compose` is a NEW message, so a daemon below minor 18 does not decode
+    /// it at all and answers nothing. A phone that sent one and waited would wait for
+    /// ever. Absent decodes `false`, which is exactly what such a daemon meant.
+    ///
+    /// **Connection-global and build-shaped**, with the same caveat spelled out on its
+    /// sibling: it says what this daemon honours and nothing about one session. Compose
+    /// exists only for Codex, so a client scopes the affordance by the session's
+    /// [`crate::event::SessionSummary::agent`] and its
+    /// [`crate::event::SessionSummary::codex_link`] as well — the per-session half its
+    /// sibling's doc describes — and lets the refusal, which always names which
+    /// condition failed, be what the operator reads when the link moves between the
+    /// summary and the send.
+    #[serde(default)]
+    pub codex_compose: bool,
+    /// The agents this daemon can actually host, named honestly. A client scopes
+    /// what it offers to this set and intersects it with its own
+    /// [`ClientFeatures`]. Empty — from any daemon predating the agent seam — is
+    /// read as `["claude"]`: Claude is the floor, and this list only ever *adds*
+    /// to it. **Omitted entirely while it would only name Claude** — an empty
+    /// list is skipped on the wire, so a daemon with nothing to add beyond the
+    /// floor sends no field at all and an older phone renders nothing new. It is
+    /// populated once the daemon can actually drive a second agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_agents: Vec<crate::agent::AgentKind>,
 }
 
 /// How the daemon applies an answer on the *installed* Claude Code build.
@@ -577,6 +905,16 @@ pub enum AnswerPath {
     /// Physically identical to answering at the Mac's keyboard, which is what
     /// makes first-answer-wins a property of the TTY rather than of a protocol.
     SendKeys,
+    /// The JSON-RPC response to the app-server's own `requestApproval`, written
+    /// on the Codex link's socket.
+    ///
+    /// Neither of the two above can describe it, and the difference is not
+    /// cosmetic: nothing is rendered and nothing is typed, so "first answer wins"
+    /// is a property of the broker's arbiter rather than of a TTY, and the loser
+    /// of that race is a fact this daemon is *told* rather than one it infers.
+    /// Additive (minor 16): a Claude answer never uses it, so Claude's
+    /// `AnswerPath` serialization is unchanged.
+    CodexResponse,
 }
 
 /// The phone's answer, expressed in terms of what Claude is showing.
@@ -592,6 +930,15 @@ pub enum AnswerDecision {
     /// Free-text takeover.
     Text {
         text: String,
+    },
+    /// Pick a server-offered option by its **opaque** id, for an agent whose
+    /// options are not a 1-based list (Codex's `availableDecisions`). The daemon
+    /// validates it against the exact option set it stored for the request and
+    /// the payload hash over that set — the id is never interpreted here. Additive
+    /// (minor 15): a Claude answer never uses it, so Claude's `AnswerDecision`
+    /// serialization is unchanged.
+    OptionId {
+        option_id: String,
     },
 }
 
@@ -640,6 +987,154 @@ pub struct AnswerOutcome {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// Who resolved a Codex approval, when that is known. Upstream carries no
+/// provenance (A2: `serverRequest/resolved` is the same frame however it was
+/// answered), so this is derived from the broker's own winner disposition, never
+/// read off the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionActor {
+    /// The phone's claim won.
+    Phone,
+    /// Answered at the Mac's keyboard — the TUI beat the phone, or the phone
+    /// never claimed. Honest even when the specific decision is not known.
+    Local,
+}
+
+/// Why a Codex approval was cleared without being answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClearCause {
+    /// A `turn/interrupt` retired the pending (A3).
+    TurnAborted,
+    /// The turn completed and took the pending with it.
+    TurnCompleted,
+    /// **A thread switch retired the old visit's pending — and no measured
+    /// crossing produces one.**
+    ///
+    /// The sweep behind this is real and runs whenever the visit generation
+    /// moves: a card filed under an earlier visit of the same thread is not the
+    /// current visit's to hold, so it is cleared rather than left standing. What
+    /// has no producer is the case this cause was written for — a switch
+    /// admitted while an approval is still unresolved. Every wire position that
+    /// could admit one was driven on a real 0.153.2 session, and none does: with
+    /// a prompt showing, an interrupt is consumed by the prompt as its own
+    /// decline, so the approval reaches a terminal of its own before any new
+    /// thread is born; a resume only subscribes and never moves the head; and
+    /// the only frame that does move it is refused while a turn or an approval
+    /// is live.
+    ///
+    /// So this variant is kept as the honest handler for a crossing the wire has
+    /// not been shown to produce, not deleted and not given an invented
+    /// producer. It stays on the wire because the enum is decoded by clients
+    /// that must not meet an unknown value, and it costs nothing to leave a
+    /// truthful word ready for a release that starts admitting the crossing.
+    Superseded,
+    /// **The item the card was about finished, and no answer to it was ever
+    /// observed.**
+    ///
+    /// The retirement a link that missed the answer still sees. `serverRequest/
+    /// resolved` is broadcast once and never replayed, so a link that dropped
+    /// between the request and its resolution comes back to a card whose
+    /// question has already been settled at the keyboard — and the only frame
+    /// left that says so is the item's own `item/completed`, which a resumed
+    /// link does receive.
+    ///
+    /// **Deliberately not [`ClearCause::TurnCompleted`].** The turn is still
+    /// running when this fires — measured on 0.147 in
+    /// `fixtures/codex/file-change.jsonl`, where the approved `fileChange`
+    /// item completes at line 22 and its turn does not terminalize until line
+    /// 43, twenty-one frames later. Reporting a live turn as completed would
+    /// be a false statement about the run, made to reuse a word; the item
+    /// finishing is what actually happened and is what this says.
+    ItemCompleted,
+}
+
+/// How far a phone claim got before delivery became uncertain. Present only on
+/// [`CodexResolution::Unknown`] (D3): a claim recorded but not provably actuated
+/// is terminal evidence, never retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteStage {
+    /// Claimed durably, never enqueued upstream.
+    ClaimedNotEnqueued,
+    /// The broker accepted it at ingress; upstream acceptance unproven.
+    BrokerIngressAccepted,
+    /// Written toward the app-server; the write itself is unconfirmed.
+    UpstreamWriteUnconfirmed,
+}
+
+/// The terminal outcome of a Codex approval.
+///
+/// A **separate** discriminated type from [`AnswerOutcome`] on purpose: Codex's
+/// resolution taxonomy (four terminals, upstream-provenance-free) does not fit
+/// Claude's `decision + resolved_by + applied_via` shape, and forcing it in
+/// would have changed Claude's serialization. Claude's `AnswerOutcome` and
+/// `AnswerResult` are left byte-identical; this rides its own event. The
+/// `decision`, when present, may be an opaque [`AnswerDecision::OptionId`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CodexResolution {
+    /// Answered. `decision` is absent when only the winner is known and not the
+    /// choice (upstream resolution has no provenance, so a keyboard answer often
+    /// arrives as `answered{by: local}` with no decision).
+    Answered {
+        by: ResolutionActor,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<AnswerDecision>,
+    },
+    /// Cleared without an answer.
+    Cleared { cause: ClearCause },
+    /// No answer arrived in time.
+    Timeout,
+    /// A phone claim whose delivery could not be proven. Terminal, never retried.
+    Unknown {
+        attempted_by: ResolutionActor,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempted_decision: Option<AnswerDecision>,
+        write_stage: WriteStage,
+        /// Human-readable cause of the uncertainty, for the log and the card.
+        cause: String,
+    },
+}
+
+/// **The `approval_resolved` payload for a Codex card: the terminal, plus the
+/// request it is the terminal *of*.**
+///
+/// A *payload*, deliberately not an "envelope": the envelope is the [`crate::event::Event`]
+/// this rides, and what it carries — `turn_id`, `item_id`, `source_event_id` — is a
+/// different set of facts from these.
+///
+/// [`CodexResolution`] says what became of an approval and nothing about which
+/// approval. Until this existed, the only correlation back to the card was the
+/// event's `source_event_id` — the literal `"resolved:"` followed by the request
+/// id — so a client had to strip a prefix off a field that is `Option<String>` on
+/// the wire and is not typed as an identity at all. The failure mode of a prefix
+/// parse is silence: one release renames the prefix, every parse misses, and the
+/// card the operator already answered goes on standing on their phone for ever.
+///
+/// Claude's [`AnswerOutcome`] has carried `request_id` inside the payload since
+/// minor 0. This is the same field, in the same place, for the other agent — so a
+/// client correlates a resolution the one way for both agents, and never parses an
+/// id out of a string.
+///
+/// **Flattened, so this is the resolution's own shape with one key added.** The
+/// status tag and its arms are byte-identical to what they were; a client already
+/// matching on `status` and reading `by` / `cause` / `write_stage` off the payload
+/// is unaffected. And a decoder for a bare [`CodexResolution`] still decodes one of
+/// these — serde's internally-tagged enums ignore keys they do not know — which is
+/// what makes the change additive for the daemon's own persisted events as well as
+/// for the phone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexResolutionPayload {
+    /// The card this resolves, spelled exactly as [`ApprovalCard::request_id`]
+    /// spelled it — the opaque composite id, never the app-server's per-connection
+    /// integer.
+    pub request_id: String,
+    #[serde(flatten)]
+    pub resolution: CodexResolution,
 }
 
 /// What the daemon knows about the installed Claude Code's slash commands.
@@ -926,11 +1421,14 @@ mod tests {
             pairing_code: None,
             client_id: None,
             client_name: Some("iPhone".into()),
+            features: None,
         };
         let s = serde_json::to_string(&msg).unwrap();
         assert!(s.contains("\"type\":\"hello\""));
         assert!(!s.contains("client_id"));
         assert!(!s.contains("pairing_code"));
+        // A hello that names no features is Claude-only, and omits the field.
+        assert!(!s.contains("features"));
         let _: ClientMessage = serde_json::from_str(&s).unwrap();
     }
 
@@ -1072,10 +1570,52 @@ mod tests {
              `register_push.relay_credential`, the `credential_invalid` test result \
              and `hello_ack.push_environment` — is minor 14"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 15,
+            "the agent seam — `AgentKind`, `Capabilities.supported_agents`, the \
+             `hello`/`register_push` client feature set, `SessionSummary.agent`, the \
+             `CodexResolution` envelope, `AnswerDecision::OptionId`, the `interrupt` \
+             operation and the composite-id codec — is minor 15"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 16,
+            "`AnswerPath::CodexResponse` — the phone answering a Codex approval by \
+             writing the app-server's own response, which is neither a hook return nor \
+             a keystroke — is minor 16"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 17,
+            "the honoured interrupt — the daemon actually aborting the turn a Codex \
+             session is running rather than refusing every ask, every `InterruptResult` \
+             status therefore reachable, and the `codex_interrupt` capability that \
+             says so — is minor 17"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 18,
+            "compose — a phone saying something to a Codex session, the daemon choosing \
+             `turn/start` or `turn/steer` by what the session is doing, the `ComposeResult` \
+             statuses that say which happened, and the `codex_compose` capability that \
+             says the daemon understands the message at all — is minor 18"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 19,
+            "the three facts a phone needs to drive a Codex session from the fleet — \
+             `request_id` inside the `approval_resolved` payload, `turn_id` on the \
+             approval card's event envelope, and `SessionSummary.codex_link` — are \
+             minor 19"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 20,
+            "`SessionSummary.codex_link`'s fifth word, `bound_not_started` — the one \
+             un-subscribed state a compose may be admitted in, on a thread the daemon \
+             has proved has never run a turn — is minor 20. It was written into 19 on \
+             the ground that 19 had never shipped; build 72 (`66a03a3`, 2026-09-08) \
+             shipped it, so the word costs a number of its own"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 14);
+        assert_eq!(crate::PROTOCOL_MINOR, 20);
     }
 
     /// **The tags, pinned on this side too.**
@@ -1257,6 +1797,7 @@ mod tests {
             token: "aabb".into(),
             environment: Some("production".into()),
             relay_credential: Some("opaque".into()),
+            features: None,
         })
         .unwrap();
         assert_eq!(carried["type"], "register_push");
@@ -1280,6 +1821,7 @@ mod tests {
             token: "aabb".into(),
             environment: Some("production".into()),
             relay_credential: None,
+            features: None,
         })
         .unwrap();
         assert!(direct_registration.get("relay_credential").is_none());
@@ -1335,6 +1877,13 @@ mod tests {
                 assert!(!capabilities.delete_session);
                 assert!(!capabilities.test_push);
                 assert!(!capabilities.push_relay);
+                assert!(!capabilities.terminal_pty);
+                // A daemon predating the honoured interrupt answered `rejected`
+                // to every ask. Absent must therefore read as "does not honour
+                // it", never as the permissive default — a true here would put a
+                // Stop button on a phone talking to a daemon that cannot stop
+                // anything.
+                assert!(!capabilities.codex_interrupt);
             }
             other => panic!("wrong message: {other:?}"),
         }
@@ -1474,7 +2023,391 @@ mod tests {
             command_catalog: true,
             slash_composer_recovery: true,
             terminal_pty: true,
+            codex_interrupt: true,
+            codex_compose: true,
+            supported_agents: vec![crate::agent::AgentKind::Claude],
         }
+    }
+
+    /// **The Phase-1 byte-identical gate.** Adding the Codex resolution envelope
+    /// and the `option_id` decision variant must not have moved a single byte of
+    /// a Claude answer's serialization. These are the exact strings the shipped
+    /// client already decodes; if a field reorders, a key renames, or an
+    /// `option_id`/`codex` key leaks in, this fails.
+    #[test]
+    fn a_claude_answer_outcome_serializes_byte_for_byte_as_before() {
+        let outcome = AnswerOutcome {
+            request_id: "toolu_1".into(),
+            session_id: "cc-1".into(),
+            decision: AnswerDecision::Allow,
+            resolved_by: ResolvedBy::Phone,
+            applied_via: AnswerPath::SendKeys,
+            resolved_at: "2026-08-18T00:00:00.000Z".into(),
+            detail: None,
+            inferred: false,
+            indeterminate: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&outcome).unwrap(),
+            r#"{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},"resolved_by":"phone","applied_via":"send_keys","resolved_at":"2026-08-18T00:00:00.000Z"}"#
+        );
+
+        let applied = AnswerResult::Applied { outcome };
+        assert_eq!(
+            serde_json::to_string(&applied).unwrap(),
+            r#"{"status":"applied","outcome":{"request_id":"toolu_1","session_id":"cc-1","decision":{"type":"allow"},"resolved_by":"phone","applied_via":"send_keys","resolved_at":"2026-08-18T00:00:00.000Z"}}"#
+        );
+    }
+
+    /// The existing `AnswerDecision` variants must serialize exactly as before;
+    /// `option_id` is purely additive and a Claude answer never emits it.
+    #[test]
+    fn the_claude_decision_variants_are_unchanged_and_option_id_is_additive() {
+        assert_eq!(
+            serde_json::to_string(&AnswerDecision::Allow).unwrap(),
+            r#"{"type":"allow"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&AnswerDecision::Deny).unwrap(),
+            r#"{"type":"deny"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&AnswerDecision::Option { index: 2 }).unwrap(),
+            r#"{"type":"option","index":2}"#
+        );
+        // The additive variant, and its round-trip.
+        let by_id = AnswerDecision::OptionId {
+            option_id: "acceptWithExecpolicyAmendment".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&by_id).unwrap(),
+            r#"{"type":"option_id","option_id":"acceptWithExecpolicyAmendment"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<AnswerDecision>(
+                r#"{"type":"option_id","option_id":"acceptWithExecpolicyAmendment"}"#
+            )
+            .unwrap(),
+            by_id
+        );
+    }
+
+    #[test]
+    fn client_features_absent_is_claude_only() {
+        // A hello/register_push that names no features is the legacy shape:
+        // Claude-only, and Claude is supported by the empty set.
+        let empty = ClientFeatures::default();
+        assert!(empty.supports(&crate::agent::AgentKind::Claude));
+        assert!(!empty.supports(&crate::agent::AgentKind::Codex));
+        // Named agents: Claude must still be listed to be a member of a
+        // non-empty set, but the empty-set case is the only Claude-implicit one.
+        let codex_only = ClientFeatures {
+            agents: vec![crate::agent::AgentKind::Codex],
+        };
+        assert!(!codex_only.supports(&crate::agent::AgentKind::Claude));
+        assert!(codex_only.supports(&crate::agent::AgentKind::Codex));
+        // An unknown agent name is preserved through decode and grants nothing —
+        // not even to itself. Round-tripping the name honestly is a storage
+        // property; authorizing on it would be this build vouching that a phone
+        // can render an agent neither side can name.
+        let json = r#"{"agents":["codex","gemini"]}"#;
+        let decoded: ClientFeatures = serde_json::from_str(json).unwrap();
+        assert!(decoded.supports(&crate::agent::AgentKind::Codex));
+        assert!(!decoded.supports(&crate::agent::AgentKind::Claude));
+        assert!(decoded
+            .agents
+            .contains(&crate::agent::AgentKind::Unsupported("gemini".into())));
+    }
+
+    /// **A device that advertised an unknown agent is not authorized for it.**
+    ///
+    /// The hole this pins was reachable the moment anything writes a feature set:
+    /// `Vec::contains` matches `Unsupported("gemini")` against `Unsupported(
+    /// "gemini")`, so the one set that could *possibly* claim the agent — the one
+    /// that names it — was the one set that authorized it, in direct contradiction
+    /// of the "grants nothing" contract two lines above it.
+    ///
+    /// **Mutation:** drop the `Unsupported` arm from `ClientFeatures::supports`
+    /// and the first assertion fails.
+    #[test]
+    fn an_advertised_unknown_agent_authorizes_nothing() {
+        let gemini = crate::agent::AgentKind::from_str_lossy("gemini");
+        assert_eq!(
+            gemini,
+            crate::agent::AgentKind::Unsupported("gemini".into())
+        );
+        // The device named the very agent being asked about, and it still grants
+        // nothing: this build cannot drive `gemini`, so it cannot vouch for a
+        // phone's ability to render one.
+        let advertised = ClientFeatures {
+            agents: vec![gemini.clone()],
+        };
+        assert!(!advertised.supports(&gemini));
+        // And naming an unknown agent does not buy the floor either: a non-empty
+        // set grants exactly what it names, and it named nothing this build knows.
+        assert!(!advertised.supports(&crate::agent::AgentKind::Claude));
+        assert!(!advertised.supports(&crate::agent::AgentKind::Codex));
+        // The empty set is still the legacy Claude floor, and an unknown agent
+        // gets nothing from it.
+        assert!(!ClientFeatures::default().supports(&gemini));
+    }
+
+    #[test]
+    fn capabilities_supported_agents_defaults_empty_for_an_older_daemon() {
+        // An ack from a daemon predating the seam omits the list; it decodes as
+        // empty, which a client reads as Claude-only.
+        let older = serde_json::json!({
+            "can_approve_reliably": true, "fail_mode": "fail_open",
+            "answer_path": "send_keys", "hold_secs": 0, "send_text": true,
+            "capture": true, "push": false, "tls": true
+        });
+        let caps: Capabilities = serde_json::from_value(older).expect("decodes");
+        assert!(caps.supported_agents.is_empty());
+
+        // An empty list is **omitted** on the wire — a daemon with nothing to add
+        // beyond the Claude floor sends no field, so an older phone renders no new
+        // diagnostic row. This is what the current daemon emits in Phase 1.
+        let mut floor = capabilities_fixture();
+        floor.supported_agents = Vec::new();
+        let s = serde_json::to_string(&floor).unwrap();
+        assert!(
+            !s.contains("supported_agents"),
+            "empty must be omitted: {s}"
+        );
+
+        // A non-empty list (Phase 2, once a second agent can be driven) serializes.
+        let s = serde_json::to_string(&capabilities_fixture()).unwrap();
+        assert!(s.contains(r#""supported_agents":["claude"]"#), "{s}");
+    }
+
+    #[test]
+    fn the_codex_resolution_envelope_round_trips_every_terminal() {
+        for value in [
+            CodexResolution::Answered {
+                by: ResolutionActor::Phone,
+                decision: Some(AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                }),
+            },
+            CodexResolution::Answered {
+                by: ResolutionActor::Local,
+                decision: None,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::TurnAborted,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::Superseded,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::TurnCompleted,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::ItemCompleted,
+            },
+            CodexResolution::Timeout,
+            CodexResolution::Unknown {
+                attempted_by: ResolutionActor::Phone,
+                attempted_decision: Some(AnswerDecision::Allow),
+                write_stage: WriteStage::UpstreamWriteUnconfirmed,
+                cause: "connection reset before ack".into(),
+            },
+        ] {
+            let s = serde_json::to_string(&value).unwrap();
+            assert_eq!(serde_json::from_str::<CodexResolution>(&s).unwrap(), value);
+        }
+        // Pin the wire strings the phone matches by hand.
+        assert_eq!(
+            serde_json::to_string(&CodexResolution::Cleared {
+                cause: ClearCause::TurnAborted
+            })
+            .unwrap(),
+            r#"{"status":"cleared","cause":"turn_aborted"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&CodexResolution::Answered {
+                by: ResolutionActor::Local,
+                decision: None
+            })
+            .unwrap(),
+            r#"{"status":"answered","by":"local"}"#
+        );
+        // The item-bound retirement, pinned by hand like its siblings. Written
+        // out rather than derived from the variant name: this string is what a
+        // phone matches on, so a rename that kept compiling would be a silent
+        // wire change.
+        assert_eq!(
+            serde_json::to_string(&CodexResolution::Cleared {
+                cause: ClearCause::ItemCompleted
+            })
+            .unwrap(),
+            r#"{"status":"cleared","cause":"item_completed"}"#
+        );
+        // And it is a DIFFERENT string from the turn terminal it must never be
+        // confused with — the distinction the variant exists to make.
+        assert_ne!(
+            serde_json::to_string(&CodexResolution::Cleared {
+                cause: ClearCause::ItemCompleted
+            })
+            .unwrap(),
+            serde_json::to_string(&CodexResolution::Cleared {
+                cause: ClearCause::TurnCompleted
+            })
+            .unwrap()
+        );
+    }
+
+    /// **The correlation the phone actually uses, pinned as a wire string.**
+    ///
+    /// Before this field the only route from a resolution back to its card was the
+    /// event's `source_event_id`, `"resolved:<request_id>"` — a prefix parse whose
+    /// failure is silent and whose symptom is an answered card standing on a phone
+    /// for ever. `request_id` now rides the payload, where Claude's has ridden since
+    /// minor 0, so one rule correlates both agents.
+    ///
+    /// **Mutation:** drop the `flatten`, or rename the field, and the first
+    /// assertion fails naming the exact JSON the phone decodes.
+    #[test]
+    fn a_codex_resolution_payload_names_the_request_it_resolves() {
+        let payload = CodexResolutionPayload {
+            request_id: "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1g".into(),
+            resolution: CodexResolution::Answered {
+                by: ResolutionActor::Phone,
+                decision: Some(AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                }),
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"request_id":"AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1g","status":"answered","by":"phone","decision":{"type":"option_id","option_id":"accept"}}"#,
+            "this is the object the phone decodes; `request_id` sits beside `status`, \
+             exactly where `AnswerOutcome` puts Claude's"
+        );
+        assert_eq!(
+            serde_json::from_str::<CodexResolutionPayload>(
+                &serde_json::to_string(&payload).unwrap()
+            )
+            .unwrap(),
+            payload
+        );
+
+        // **Additive, proven rather than asserted**: every terminal still decodes as
+        // a bare `CodexResolution` with the new key present, which is what keeps the
+        // daemon's own readers — and any client written against minor 18 — working.
+        for resolution in [
+            CodexResolution::Answered {
+                by: ResolutionActor::Local,
+                decision: None,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::ItemCompleted,
+            },
+            CodexResolution::Timeout,
+            CodexResolution::Unknown {
+                attempted_by: ResolutionActor::Phone,
+                attempted_decision: None,
+                write_stage: WriteStage::ClaimedNotEnqueued,
+                cause: "the daemon was killed mid-write".into(),
+            },
+        ] {
+            let with_id = CodexResolutionPayload {
+                request_id: "rq-1".into(),
+                resolution: resolution.clone(),
+            };
+            let encoded = serde_json::to_string(&with_id).unwrap();
+            assert!(encoded.contains(r#""request_id":"rq-1""#), "{encoded}");
+            assert_eq!(
+                serde_json::from_str::<CodexResolution>(&encoded).unwrap(),
+                resolution,
+                "a minor-18 decoder must still read this payload: {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_interrupt_operation_round_trips() {
+        let msg = ClientMessage::Interrupt {
+            session_id: "cc-1".into(),
+            request_id: "r-1".into(),
+            turn_id: "turn-7".into(),
+            payload_hash: crate::hash::interrupt_hash("cc-1", "turn-7"),
+        };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(s.contains(r#""type":"interrupt""#), "{s}");
+        let _: ClientMessage = serde_json::from_str(&s).unwrap();
+        let result = ServerMessage::InterruptResult {
+            session_id: "cc-1".into(),
+            request_id: "r-1".into(),
+            result: InterruptResult::Rejected {
+                reason: "interrupt is not supported yet".into(),
+            },
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert!(s.contains(r#""status":"rejected""#), "{s}");
+    }
+
+    /// **The wire matrix, at the type level** (Phase-1 gate): a connection's
+    /// advertised-agent set scopes what may be delivered to it, and the daemon's
+    /// own `supported_agents` is intersected with it. A client that predates the
+    /// seam (no features) is Claude-only, so a Codex session's records are never
+    /// eligible for it; a Codex-aware client is. The per-connection *enforcement*
+    /// of this scoping is a later phase; this pins the primitive it will use.
+    #[test]
+    fn the_advertised_agent_set_scopes_what_a_connection_may_receive() {
+        use crate::agent::AgentKind;
+        // The effective set a connection may receive = the agents the daemon
+        // supports ∩ the agents the client advertised.
+        fn deliverable(daemon: &[AgentKind], client: &ClientFeatures, agent: &AgentKind) -> bool {
+            daemon.contains(agent) && client.supports(agent)
+        }
+        let daemon_supports = [AgentKind::Claude]; // Phase-1 daemon: Claude only.
+
+        // An old reader (no features ⇒ Claude-only): Claude records deliver,
+        // Codex records never do.
+        let old_reader = ClientFeatures::default();
+        assert!(deliverable(
+            &daemon_supports,
+            &old_reader,
+            &AgentKind::Claude
+        ));
+        assert!(!deliverable(
+            &daemon_supports,
+            &old_reader,
+            &AgentKind::Codex
+        ));
+
+        // A Codex-aware reader: Codex would be deliverable *once the daemon also
+        // supports it* — but not while the daemon is Claude-only, so the daemon's
+        // honesty is the backstop even for a client that asks for more.
+        let codex_reader = ClientFeatures {
+            agents: vec![AgentKind::Claude, AgentKind::Codex],
+        };
+        assert!(deliverable(
+            &daemon_supports,
+            &codex_reader,
+            &AgentKind::Claude
+        ));
+        assert!(
+            !deliverable(&daemon_supports, &codex_reader, &AgentKind::Codex),
+            "a daemon must not deliver an agent it does not support, even when asked"
+        );
+        assert!(deliverable(
+            &[AgentKind::Claude, AgentKind::Codex],
+            &codex_reader,
+            &AgentKind::Codex
+        ));
+
+        // An unknown advertised agent grants nothing actionable and is never
+        // Claude.
+        let unknown_reader = ClientFeatures {
+            agents: vec![AgentKind::Unsupported("gemini".into())],
+        };
+        assert!(!deliverable(
+            &daemon_supports,
+            &unknown_reader,
+            &AgentKind::Claude
+        ));
     }
 
     #[test]

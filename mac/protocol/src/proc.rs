@@ -36,11 +36,17 @@ const IDLE_POLL: Duration = Duration::from_millis(5);
 #[derive(Debug)]
 pub enum RunOutcome {
     /// The child exited on its own and both pipes reached end-of-file; the
-    /// status and the complete drained output.
+    /// status and the drained output. `truncated` is set when the capture hit
+    /// [`MAX_STREAM_BYTES`] and dropped bytes — the returned `stdout`/`stderr`
+    /// are then a **prefix**, not the whole answer. A caller that parses the
+    /// output for completeness (a census that must not silently omit a row) MUST
+    /// treat `truncated` as proof-of-nothing (Unavailable/Unknown), never as a
+    /// clean short answer (finding 3).
     Completed {
         status: std::process::ExitStatus,
         stdout: Vec<u8>,
         stderr: Vec<u8>,
+        truncated: bool,
     },
     /// The deadline passed before the child exited — or before its output
     /// finished arriving, which happens when the child handed its pipe to
@@ -83,14 +89,15 @@ pub fn run_deadlined(command: &mut Command, deadline: Duration) -> std::io::Resu
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    let mut truncated = false;
     let mut exit_status: Option<std::process::ExitStatus> = None;
     let until = started + deadline;
 
     loop {
         // Drain first, exit-check second: a child blocked writing into a
         // full pipe cannot exit, so the read is what lets it finish.
-        let read_out = drain_available(&mut stdout_pipe, &mut stdout, until);
-        let read_err = drain_available(&mut stderr_pipe, &mut stderr, until);
+        let read_out = drain_available(&mut stdout_pipe, &mut stdout, until, &mut truncated);
+        let read_err = drain_available(&mut stderr_pipe, &mut stderr, until, &mut truncated);
 
         if exit_status.is_none() {
             match child.try_wait() {
@@ -117,6 +124,7 @@ pub fn run_deadlined(command: &mut Command, deadline: Duration) -> std::io::Resu
                     status,
                     stdout,
                     stderr,
+                    truncated,
                 });
             }
         }
@@ -174,6 +182,7 @@ fn drain_available(
     pipe: &mut Option<(impl Read, std::os::fd::RawFd)>,
     into: &mut Vec<u8>,
     until: Instant,
+    truncated: &mut bool,
 ) -> bool {
     let Some((stream, fd)) = pipe.as_mut() else {
         return false;
@@ -194,9 +203,14 @@ fn drain_available(
                 any = true;
                 let room = MAX_STREAM_BYTES.saturating_sub(into.len());
                 into.extend_from_slice(&chunk[..n.min(room)]);
-                // Past the cap the stream is still consumed, so the child
-                // can keep writing and eventually exit — never block on a
-                // full pipe.
+                // Past the cap the stream is still consumed, so the child can
+                // keep writing and eventually exit — never block on a full pipe.
+                // But record that bytes were dropped: the captured output is now
+                // a prefix, and a completeness-sensitive caller must not read it
+                // as a clean short answer (finding 3).
+                if n > room {
+                    *truncated = true;
+                }
             }
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return any,
@@ -287,12 +301,43 @@ mod tests {
                 status,
                 stdout,
                 stderr,
+                truncated,
             } => {
                 assert!(status.success());
                 assert_eq!(String::from_utf8_lossy(&stdout).trim(), "answer");
                 assert!(stderr.is_empty());
+                assert!(!truncated, "a short answer is not truncated");
             }
             RunOutcome::TimedOut { .. } => panic!("echo does not time out"),
+        }
+    }
+
+    /// Finding 3: output past [`MAX_STREAM_BYTES`] is captured only as a prefix,
+    /// and `Completed.truncated` reports it — so a completeness-sensitive caller
+    /// (a census that must not silently omit a row) can fail closed instead of
+    /// reading a clean short answer.
+    #[test]
+    fn output_past_the_cap_is_reported_truncated() {
+        let over_cap = MAX_STREAM_BYTES + 1024 * 1024; // 1 MiB past the cap
+        let outcome = run_deadlined(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("head -c {over_cap} /dev/zero")),
+            Duration::from_secs(30),
+        )
+        .expect("head spawns");
+        match outcome {
+            RunOutcome::Completed {
+                stdout, truncated, ..
+            } => {
+                assert!(truncated, "output past the cap must be flagged truncated");
+                assert_eq!(
+                    stdout.len(),
+                    MAX_STREAM_BYTES,
+                    "the captured output is exactly the capped prefix"
+                );
+            }
+            RunOutcome::TimedOut { .. } => panic!("head does not time out"),
         }
     }
 

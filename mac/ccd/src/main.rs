@@ -9,6 +9,14 @@
 mod apns;
 mod apns_sender;
 mod catalog;
+mod codex_adapter;
+mod codex_approval;
+mod codex_link;
+/// The gated live gate for the control link — a real codex, a real coordinator, a
+/// real broker. Test-only, and never built into the daemon.
+#[cfg(test)]
+mod codex_link_live;
+mod codex_refusals;
 mod db;
 #[cfg(test)]
 mod fixture_replay;
@@ -243,6 +251,97 @@ async fn main() -> Result<()> {
         })
     };
 
+    // **A12.2.** A registration whose parked link will not stop inside the link stop
+    // budget is accepted with no link installed: Live in the fleet, observed by
+    // nothing. No other part of the daemon ever builds that link — `codex_link::run`
+    // never returns on its own, so a link never vacates the slot, and the only other
+    // builder is the next registration for that uid. This is the retry.
+    //
+    // **A12.2's second half — WHICH thread the rebuilt link binds — is closed now,
+    // and the fix is not here.** This ticker only guarantees that a link gets
+    // BUILT. Which thread it then binds used to be open, and open in the worst way:
+    // a first thread or a `/new` emitting its one-shot `thread/started` during the
+    // accepted observer gap was seen by nobody, and recovery had only the
+    // predecessor's carry and the registration's hint to chase — neither of which
+    // can name a thread that appeared while nothing was watching. With no hint the
+    // link stayed unbound; with a stale hint the broker accepts a resume of a
+    // RETIRED thread (`is_session_thread` widens resume to retired threads on
+    // purpose, for 2e-4c switching) while the active head went undiscovered.
+    //
+    // The blocker was that ccd cannot ask: the head lives in the broker's own
+    // `Binding::creation`, and no ccd-allowlisted method reports it. What was
+    // missing was not a query but the *announcement*, and the broker still had it —
+    // so it keeps the `thread/started` it forwarded and replays those exact bytes
+    // to a `ccd` leg, gated on the thread they name being the binding the broker
+    // itself verified (`codex_broker::relay::deliver_head`). Delivery is on the
+    // BIND, not on the subscribe: a leg that arrives while a creation is still in
+    // flight has no head to be given and misses the live broadcast too (the
+    // announcement precedes the creation response — `thread-switch.jsonl:31`), so
+    // the broker asks again every time the head moves, for as long as the leg is
+    // there. Every link this ticker rebuilds therefore learns the head, and so does
+    // the link a daemon restart builds, whether the head was bound before it
+    // connected or binds after.
+    //
+    // What that does NOT cover, stated so the next reader does not over-read it: a
+    // gap in which the **broker itself** is replaced. The replay lives as long as
+    // the broker does, which is as long as the host and therefore the session does,
+    // so there is no such gap today — but a broker that restarted under a live
+    // session would be back to having nothing to replay. The registration hint
+    // still has no production producer (the supervisor sends
+    // `codex_thread_id: None`).
+    //
+    // Its own ticker rather than a limb of the liveness sweep: that one shells out
+    // and can be turned off entirely (`liveness_sweep_secs: 0`), and this must keep
+    // running when it is.
+    //
+    // Ten seconds. Each attempt can pay the full stop budget for the session it is
+    // retrying, so a shorter period buys nothing but contention on that session's
+    // registration gate; and a pass is a single uncontended lock while nothing is
+    // owed, which in production today is always.
+    let codex_recovery = {
+        let daemon = Arc::clone(&daemon);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(10));
+            // Delay rather than burst, exactly as the liveness sweep does — but for
+            // the reason it actually gives, which is not the one this comment used
+            // to claim. `Delay` does NOT withhold the overdue tick: measured, a pass
+            // that outran its period gets its next tick in ~1µs under all three
+            // behaviours. What it withholds is the CATCH-UP — the tick after the
+            // overdue one is a full period away (~103ms) instead of instant (~125ns
+            // under `Burst`). Every tick's work here is identical, so a burst of
+            // them buys nothing and only contends on the registration gates.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                daemon.recover_stalled_codex_links().await;
+            }
+        })
+    };
+
+    // **The recovery pass for codex launches, which until now had no production
+    // caller at all.** A launch that took the `UF_IMMUTABLE` pin on the codex binary
+    // and did not survive to give it back leaves a flag with no live owner; codex still
+    // runs and can no longer be updated, and the only thing entitled to take the flag
+    // off is a later pass over the launch records. Nothing ran one, so "a later pass"
+    // meant an operator eventually working out that `chflags nouchg` was the answer.
+    // The launcher runs the freeze half of it before every launch; this is the half
+    // that does not need somebody to be launching anything.
+    //
+    // Its own task, one pass immediately and a slow tick behind it — the liveness
+    // sweep's shape, for the liveness sweep's reasons. The launcher is resolved by the
+    // task on every tick rather than once here, so a daemon that starts before its
+    // launcher is in place picks it up instead of parking for its whole life.
+    // Said once here rather than per tick: an override that names nothing is a fact
+    // about the environment this process was started in, and the resolution below
+    // silently falls through to a working candidate, so nothing else would ever
+    // mention it.
+    state::warn_about_an_ignored_launcher_override();
+    let codex_sweep = tokio::spawn(state::run_codex_sweeps(
+        state::codex_launcher,
+        protocol::TMUX_SOCKET_NAME.to_string(),
+        state::CODEX_SWEEP_PERIOD,
+    ));
+
     // launchd holds the log files open, so nothing outside this process can
     // rotate them without leaving launchd appending to an unlinked inode.
     let rotate = {
@@ -270,6 +369,8 @@ async fn main() -> Result<()> {
         result = sweeper => Stop::Task(format!("sweeper exited: {result:?}")),
         result = local_watch => Stop::Task(format!("local resolver exited: {result:?}")),
         result = liveness => Stop::Task(format!("liveness sweeper exited: {result:?}")),
+        result = codex_recovery => Stop::Task(format!("codex link recovery exited: {result:?}")),
+        result = codex_sweep => Stop::Task(format!("codex recovery sweeper exited: {result:?}")),
         result = rotate => Stop::Task(format!("log rotator exited: {result:?}")),
         // The one arm that is a deliberate exit rather than a failure: a
         // tailnet address turned up after this daemon had already fallen back
@@ -1773,6 +1874,9 @@ mod tests {
                 lifecycle: Lifecycle::Live,
                 created_at: now.clone(),
                 updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
             })
             .unwrap()
             .assert_present();
@@ -1792,7 +1896,45 @@ mod tests {
         key
     }
 
-    fn scratch_root(tag: &str) -> std::path::PathBuf {
+    /// A temp root that removes itself, on the panic path too.
+    ///
+    /// It used to be a bare `PathBuf` nobody deleted, so every test left its root in
+    /// TMPDIR forever — 12 of them were counted there. `Deref`/`AsRef` keep the call
+    /// sites reading as the plain path they were.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            match std::fs::remove_dir_all(&self.0) {
+                Ok(()) => {}
+                // The root is handed out unborn — the test (or `harden_state_dir`)
+                // creates it — so one that never existed left nothing behind.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    let msg = format!("scratch not removed: {} ({e})", self.0.display());
+                    // Silence is what let 12 accumulate — but a panic while already
+                    // unwinding aborts the binary and buries the real failure.
+                    assert!(std::thread::panicking(), "{msg}");
+                    eprintln!("{msg}");
+                }
+            }
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn scratch_root(tag: &str) -> Scratch {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "ccd-perm-{tag}-{}-{}",
@@ -1800,7 +1942,7 @@ mod tests {
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        dir
+        Scratch(dir)
     }
 
     fn mode(path: &Path) -> u32 {

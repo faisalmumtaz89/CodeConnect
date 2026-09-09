@@ -123,6 +123,38 @@ const PROMPT_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
 /// is only unique within one.
 type ApprovalId = (String, String);
 
+/// What one terminal did to one Codex card.
+///
+/// **Three answers, because two of them used to be the same `false` and they are
+/// opposites.** "Somebody else already retired this" means nothing is owed;
+/// "the commit failed" means everything is still owed — the claim is back, the
+/// card is still on a phone, and whatever else would let a later terminal finish
+/// the job must be kept too. A caller that cannot tell them apart throws away
+/// the wire mapping on both, and a failed retirement silently becomes a
+/// permanent one. See [`Daemon::retire_codex_approval`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Retirement {
+    /// This terminal owned the card, and its removal and resolution are
+    /// committed.
+    Retired,
+    /// There was no claim to take: an earlier terminal won the race. Nothing
+    /// failed, and nothing is owed.
+    AlreadyGone,
+    /// The transaction failed. The claim has been put back and the card is still
+    /// open; the caller owes it every route a later terminal could arrive by.
+    Failed,
+}
+
+impl Retirement {
+    /// Whether this card is settled — by this terminal or by an earlier one.
+    ///
+    /// The question every caller actually has: may I forget about this card? A
+    /// `Failed` is the only answer that means no.
+    pub(crate) fn is_settled(self) -> bool {
+        !matches!(self, Retirement::Failed)
+    }
+}
+
 /// Where the phone should connect. Resolved once at startup and printed into
 /// the QR, so the code the operator scans and the socket the daemon opened can
 /// never describe different endpoints.
@@ -181,6 +213,66 @@ pub struct Daemon {
     /// behind a write. Kept in its own map so the lock ordering is one-way —
     /// gate, then `inner`, never the reverse.
     publish_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One gate per session, held across a registration's whole **acceptance** —
+    /// stake → row → relabel → publish → control-link transaction — and across the
+    /// disconnect that undoes it.
+    ///
+    /// The same shape as [`Daemon::publish_gate`], for the same reason: a per-uid
+    /// `Arc<Mutex<()>>` in its own map, so the lock ordering stays one-way — gate,
+    /// then `inner`, never the reverse. It is what makes the sequence *one* step:
+    /// without it the acceptance is several acquisitions of `inner` with a row
+    /// upsert, a card relabel, a spawn and a bounded join between them, and every
+    /// interleaving of two registrations for the same session has to be reasoned
+    /// about separately. With it there is one state instead of a reservation
+    /// protocol, and no third claimant can arrive mid-retirement.
+    ///
+    /// **It covers the durable half too**, which is what the epoch check alone could
+    /// not: a check happens at an instant, while the row upsert and the relabel are
+    /// awaits a rival registration can run the whole of itself inside. See
+    /// `register_supervisor`.
+    registration_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One gate per session, held across a phone answer's whole passage through the
+    /// outgoing Codex link — the epoch check, the ask, the claim, the write and the
+    /// broker's disposition — and across the stake that hands the session to a
+    /// replacement registration.
+    ///
+    /// **It exists because the epoch check is an instant and the write is not.**
+    /// [`Daemon::codex_answers_locked`] compares the registration epoch and hands
+    /// back a CLONE of the link's answer sender, and the `inner` lock that made the
+    /// comparison trustworthy is released in the same statement. Everything after it
+    /// — the link's own admission (which gates on thread, switch, wire id and
+    /// duplicate, never on a registration), the durable claim, the socket write —
+    /// runs with no registration held, so a replacement could stake the session and
+    /// the outgoing link would still put a response on its socket. Measured:
+    /// `a_replacement_registration_waits_for_the_outgoing_links_admitted_answer`
+    /// stages exactly that interleaving.
+    ///
+    /// With this gate there are two states and no third. Either an answer holds it,
+    /// and the stake waits until that answer has reached a terminal — never expiring
+    /// it, because an admitted answer is already durable and the honest thing is to
+    /// let it finish; or the stake holds it, and the answer that arrives afterwards
+    /// re-reads the epoch under the new owner and is handed the replacement's link or
+    /// none at all. The outgoing sender is never reachable across the stake.
+    ///
+    /// **An `RwLock`, and not a mutex, because actuations are not rivals of each
+    /// other.** A session can have two cards open and answer both at once — the link
+    /// is built for it, and its ask channel carries one entry per open card — so
+    /// answers take the READ side and stay concurrent exactly as they were. The stake
+    /// is the only writer, and it is what they must be exclusive with. A plain mutex
+    /// would have bought the same safety by serialising a concurrency the link
+    /// deliberately supports, which is a narrowing nothing in this design needs.
+    ///
+    /// **It fences every actuating write and not only an answer**, which is why it is
+    /// named for the class rather than for the first member of it. A phone interrupt
+    /// reaches the link the same way — epoch compared under `inner`, sender cloned,
+    /// claim and socket write outside it — so it has the same window and takes the
+    /// same read side. Nothing about the gate changed to admit it; what changed is
+    /// that the name now says what it was always holding.
+    ///
+    /// Same shape and same one-way ordering as the two gates above — gate, then
+    /// `inner`, never the reverse — and taken INSIDE the registration gate on the
+    /// registration path, so the two can never be acquired in opposite orders.
+    actuation_gates: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
     /// Held for the duration of a liveness sweep, so two never overlap.
     ///
     /// Taken with `try_lock`, which makes a slow sweep skip the next tick
@@ -198,6 +290,36 @@ pub struct Daemon {
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
+}
+
+/// **What the Claude-only gate found**, for the callers that must tell two refusals
+/// apart — see [`Daemon::refuse_unless_claude`].
+///
+/// A bare `Option<String>` could not: it had exactly one shape for "no", so an
+/// unknown session had to be either refused with the wrong sentence or admitted, and
+/// it was admitted. That made a gate whose whole contract is to fail closed fail open
+/// on the one input it cannot vouch for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClaudeOnly {
+    /// The run is hosted, and it is Claude's. The operation may proceed.
+    Admitted,
+    /// The run is hosted and is not Claude's. The connection is welcome; this
+    /// particular thing is not something the daemon can do for this agent.
+    WrongAgent(String),
+    /// **The reference names no run this daemon can vouch for**, or the row could not
+    /// be read. Not evidence that the run is Claude's, and callers that have a code
+    /// for "no such run" should send that one rather than a refusal about authority.
+    Unknown(String),
+}
+
+impl ClaudeOnly {
+    /// The sentence, for a caller with one refusal to give whichever way it went.
+    pub fn reason(self) -> Option<String> {
+        match self {
+            ClaudeOnly::Admitted => None,
+            ClaudeOnly::WrongAgent(why) | ClaudeOnly::Unknown(why) => Some(why),
+        }
+    }
 }
 
 /// How a `hello` was (or was not) authenticated.
@@ -224,6 +346,38 @@ pub enum AuthOutcome {
 pub struct RevokeOutcome {
     pub device: DeviceSummary,
     pub token_revoked: bool,
+}
+
+/// **What an end was established AGAINST** — the observation
+/// [`Daemon::mark_exited`] re-checks under the gate before it commits (round-8 F3,
+/// round-9 F3).
+///
+/// Both paths that establish an end do so at one moment and record it at a later
+/// one, and a registration for the same uid can complete in between. What separates
+/// them is the *kind* of evidence, so each carries the identity its own evidence is
+/// about and leaves the other `None`:
+///
+///   * a **supervisor** watched its own process end. That is a fact about the run
+///     its connection registered, so `owner` is that connection's own epoch
+///     ([`Registration::epoch`]) and nothing about the row's contents can withdraw
+///     it: `row_writes` is `None`.
+///   * a **sweep** proved a row's recorded tmux location empty. That is a fact about
+///     the row it read, so it carries the row's write count as well — a row written
+///     since it looked is a row it never examined, whether or not the session
+///     changed hands.
+///
+/// `None` in either field means "this evidence makes no claim of that kind", never
+/// "the claim is zero": the comparisons below are skipped for it rather than made
+/// against a default.
+#[derive(Debug, Clone, Copy)]
+struct EndEstablishedAgainst {
+    /// The registration this end is about, or `None` when the evidence carries no
+    /// registration identity — an older supervisor, or a run nothing ever
+    /// registered.
+    owner: Option<u64>,
+    /// [`Inner::row_writes`] for this uid at the moment the evidence began, for
+    /// evidence that is about the row itself.
+    row_writes: Option<u64>,
 }
 
 /// What one liveness sweep established, counted in *sessions* rather than in
@@ -288,6 +442,108 @@ struct Inner {
     /// Keyed by `session_uid`. A second run of the same name gets its own slot
     /// instead of evicting the first's supervisor.
     supervisors: HashMap<String, SupervisorHandle>,
+    /// **The epoch of the newest registration that has BEGUN for this session** —
+    /// staked before its first persistent write, and long before its handle or its
+    /// control link are installed.
+    ///
+    /// It exists because those three moments are not one moment and cannot be. A
+    /// registration writes the session row, then publishes its supervisor handle,
+    /// then — under a separate gate, because the link's lifecycle needs awaits that
+    /// must not run under `Inner` — retires the incumbent link and installs its own.
+    /// Between the first and the second, the row already describes the *incoming*
+    /// registration while `supervisors` and `codex_links` still describe the
+    /// outgoing one, and their epochs agree with each other. A resolver comparing
+    /// those two would pair the row one registration just wrote with the connection
+    /// another one is holding — the single thing
+    /// [`Daemon::codex_addressee_locked`] exists to make impossible.
+    ///
+    /// So the claim is what the resolver compares against: it moves at the same
+    /// moment the row does. A registration that then fails leaves the claim standing
+    /// and no link matching it, which reports
+    /// [`CodexAddressee::NoLink`](crate::codex_link::CodexAddressee::NoLink) — fail
+    /// closed, and replaced by the next registration that succeeds.
+    ///
+    /// # It is a TOMBSTONE, not a slot: a disconnect leaves the last epoch behind
+    /// (round-9 F3)
+    ///
+    /// A disconnect used to delete the entry, which made two different histories
+    /// spell the same thing. `A → B → B disconnects` and `A → A disconnects` both
+    /// left the map empty, so an end established against A could no longer be told
+    /// from an end established against a run that had since been REPLACED —
+    /// [`Daemon::mark_exited`] compares against this map, and an absent entry read
+    /// as "nobody owns it" let A's stale evidence commit over B's row.
+    ///
+    /// So the entry survives the disconnect and names the last registration to have
+    /// staked this uid. The two readers both want that reading rather than the old
+    /// one: [`Daemon::codex_addressee_locked`] pairs it with `codex_links`, which a
+    /// disconnect empties in the same breath (so a tombstone matches nothing and
+    /// still answers `NoLink`), and the acceptance check in
+    /// [`Daemon::register_supervisor`] asks only whether the entry is still *this*
+    /// registration's. The disconnect's ownership test is unchanged and still
+    /// load-bearing for the other direction: for the length of the window above, the
+    /// claim and `supervisors` name different registrations, so a disconnect that
+    /// wrote its own epoch by uid alone would erase a claim it never made.
+    ///
+    /// It therefore grows by one entry per uid ever registered and never shrinks —
+    /// the same bound `last_seen_ms` below has always had, for the same reason: a
+    /// uid is not reused, and a `u64` beside a uid is not what a daemon's memory is
+    /// spent on.
+    registration_epochs: HashMap<String, u64>,
+    /// **WHICH SUPERVISOR PROCESS staked the claim above** (round-10 F1).
+    ///
+    /// The epoch says which *registration* owns the session. It cannot say which
+    /// *process* does, and for one caller that is the only question there is: a
+    /// supervisor reporting its own exit replays its registration first, so the
+    /// epoch it is compared against is one that same frame just minted. Compared
+    /// against itself it always agrees, which is how an exit report from a run
+    /// that died came to end the run that had replaced it.
+    ///
+    /// So the claim also records the incarnation behind it — the one identity that
+    /// exists *before* the replay, because a supervisor builds its registration
+    /// frame once at launch and the replay is that frame, re-sent unchanged. See
+    /// [`Incarnation`], and [`protocol::ipc::RegisterSession::exit_replay`] for what the
+    /// replay is and why it has to say so out loud.
+    ///
+    /// Written only by [`Inner::stake`], in the same statement as the epoch, and
+    /// removed by nothing — exactly as `registration_epochs` is, and for the same
+    /// reason it is a tombstone. One writer is what makes "these two always
+    /// describe the same registration" a property of the type rather than a habit
+    /// two call sites happen to share.
+    registration_incarnations: HashMap<String, Incarnation>,
+    /// **How many times this session's ROW has been written**, by any of its three
+    /// production writers (round-9 F3).
+    ///
+    /// The epoch above answers "whose session is this", and that is not the same
+    /// question as "is the row still the row I read". Two traces separate them, and
+    /// both defeat an epoch-only guard:
+    ///
+    ///   * a registration stakes its epoch one await BEFORE its row write, so an
+    ///     observer can snapshot the *new* epoch and then read the *old* row — the
+    ///     two compare equal at the commit and the stale read wins;
+    ///   * [`Daemon::ensure_session`] writes `Lifecycle::Live` without staking
+    ///     anything at all, so a hook can revive a row after it was read and the
+    ///     epoch will not have moved.
+    ///
+    /// A count is enough to see both: it is bumped by each writer *under the same
+    /// per-uid [`Daemon::registration_gate`] that writer already holds*, so a
+    /// reader that captured it before its row read and compares it under the gate
+    /// learns exactly one thing — whether anything wrote this row in between. It
+    /// never decreases, so the comparison cannot be fooled by a value that came
+    /// back round.
+    ///
+    /// Captured *before* the row read rather than beside it, which makes the
+    /// comparison conservative in the safe direction: a write landing between the
+    /// capture and the read refuses a commit whose evidence was in fact fresh, and
+    /// the cost of that is one sweep tick. Making it coherent *with* the row would
+    /// mean carrying a revision in the row itself, which is a schema change and a
+    /// migration for an answer that is already correct in the direction that matters.
+    ///
+    /// **Its bound, stated: it counts writes made by THIS process.** A row written by
+    /// a second `ccd` against the same database would be invisible to it — as it is
+    /// to `registration_epochs`, `supervisors` and every other in-memory answer this
+    /// type gives. One daemon per database is the assumption the whole file rests on;
+    /// this adds nothing to it and does not repair it.
+    row_writes: HashMap<String, u64>,
     pending: HashMap<ApprovalId, PendingApproval>,
     /// Monotonic, so a supervisor's old connection cannot release the slot its
     /// new one has taken. Never reused; a `u64` of registrations is not a
@@ -338,6 +594,745 @@ struct Inner {
     /// spoofed by scrollback, and is exact — a card raised at generation N is
     /// answering a prompt that generation N+1 has already replaced.
     prompt_generation: HashMap<String, u64>,
+    /// Live Codex control links, keyed by `session_uid` — one connection per
+    /// registered Codex session (`crate::codex_link`). Empty on the Claude path,
+    /// which has no control link at all.
+    codex_links: HashMap<String, CodexLinkHandle>,
+    /// Links that were aborted but would not join inside their budget.
+    ///
+    /// **Not left in the slot.** A slot holding an aborted-but-unjoined handle is a
+    /// registration that looks served and is not: the new link was never installed,
+    /// so the session is accepted and unobserved, and nothing says so. The handle is
+    /// parked here instead — the slot is left honestly empty — and the next
+    /// transaction for that session joins it before doing anything else. Bounded: a
+    /// turn joins what is parked and re-parks only what still refuses to die.
+    parked_codex_links: HashMap<String, Vec<OwnedLink>>,
+    /// **The last thread a link for this session ADOPTED, kept across the
+    /// registration boundary.**
+    ///
+    /// A `/new` in the TUI moves the session to another thread and the link follows
+    /// it; the row does not, because the registration frame is its only writer and
+    /// what it carries is the launcher's launch-time belief and nothing since. The
+    /// link holds the newer fact — `Carried::adopted`, published into
+    /// [`CodexLinkHandle::presence`] — and that survives a dropped *connection*,
+    /// because the link outlives one.
+    ///
+    /// It did not survive a dropped *registration*. A supervisor reconnect retires
+    /// the link and takes its presence cell out of the map with it (which is the
+    /// point — a stale task must not keep writing into a cell a lookup can reach),
+    /// and the replacement is built from the registration hint alone. So `A → /new
+    /// → B → supervisor reconnect` resumed retired thread `A`, and the fleet and the
+    /// resolver reported it, for the rest of the run.
+    ///
+    /// This is the fact rescued from the handle on its way out, so the replacement
+    /// can be seeded with it. **In memory, deliberately.** The row is not written
+    /// back after a `/new` by design, and the thing this repairs is a
+    /// process-lifetime gap between two registrations of the same run — a durable
+    /// column would be a second writer for the row's single-writer rule to argue
+    /// with, and it would outlive the only reader it has.
+    ///
+    /// **Only ever overwritten by a link that learned something.** A link retired
+    /// before it heard anything leaves this untouched rather than clearing it: it
+    /// learned nothing, and forgetting on its behalf is the same regression by a
+    /// slower route. See [`crate::codex_link::Carried::is_informative`].
+    ///
+    /// **The whole of the departing link's [`crate::codex_link::Carried`], not the
+    /// one thread it published.** It used to be a single adopted id read off
+    /// [`CodexLinkHandle::presence`], and that projection is lossy by design: during
+    /// an `A → /new → B` chase it reads
+    /// [`crate::codex_link::CodexAddressee::Bound`], which names no adopted thread at
+    /// all — so `A` was dropped, *and* the pending candidate `B` was never carryable
+    /// at all even though `thread/started` is broadcast once and never replayed. Copying
+    /// the link's own state instead makes a registration boundary cost the session
+    /// exactly what a reconnect costs it, which is nothing.
+    ///
+    /// **Scoped to one Codex LAUNCH, not to the uid.** A uid outlives the process it
+    /// names: the supervisor can relaunch Codex under the same session (a new
+    /// `codex_generation`), and the same uid can change agent entirely. Threads do not
+    /// survive either. Keyed by uid but stamped with the generation that learned them,
+    /// and dropped outright when the session registers as something other than Codex —
+    /// so a generation-2 link claiming `C` cannot resume generation 1's `B`, and a
+    /// `Codex → Claude → Codex` sequence cannot resurrect pre-Claude state.
+    ///
+    /// One entry per session whose link has learned anything in this process. This
+    /// used to say "empty in production today, where `supported_agents()` refuses
+    /// every Codex registration"; it is not empty any more. Codex is a supported
+    /// agent, a complete registration installs a link, and a link that learns a
+    /// thread and is then retired leaves its carry here for the next one to resume
+    /// from. The scoping rules above are what that traffic runs through.
+    retained_codex_carry: HashMap<String, RetainedCarry>,
+    /// **What a registration could not install, kept so a later turn can** (A12.2).
+    ///
+    /// A registration whose park will not clear inside [`CODEX_LINK_STOP_BUDGET`]
+    /// installs no link — the slot is left honestly empty — and then publishes its
+    /// supervisor and returns `Ok` anyway. The session is Live in the fleet and
+    /// nothing is observing it, and nothing downstream repairs that: a link's only
+    /// other builder is the *next* registration for this uid, and a supervisor that
+    /// is already connected has no reason to send one. For a session nobody
+    /// restarts, "until a later transaction" meant for ever.
+    ///
+    /// So the install is written down rather than dropped, and
+    /// [`Daemon::recover_stalled_codex_links`] runs the tail of that transaction
+    /// again once the survivor stops.
+    ///
+    /// One entry per uid, holding the epoch it was owed to: a later registration
+    /// overwrites what an earlier one was owed, because the later one is the
+    /// registration the session belongs to, and the epoch is what makes an entry the
+    /// session has moved past harmless — see [`StalledCodexInstall`].
+    ///
+    /// Empty in production today for a second reason as well as the usual one: a
+    /// Claude registration carries no control link, so it can owe no install.
+    stalled_codex_installs: HashMap<String, StalledCodexInstall>,
+}
+
+/// An install a registration was forced to skip, with everything
+/// [`Daemon::recover_stalled_codex_links`] needs to finish it — see
+/// [`Inner::stalled_codex_installs`].
+///
+/// The epoch is the whole reason this is a struct rather than a bare
+/// [`crate::codex_link::ControlLink`]. It is handed straight to
+/// [`Inner::spawn_codex_link_if_owner`], which refuses to spawn anything for a
+/// registration the session has moved on from — so recovery answers the ownership
+/// question in the one place the registration answers it, and adds no reasoning of
+/// its own.
+#[derive(Clone)]
+struct StalledCodexInstall {
+    /// The uid **and the name**: recovery joins a park and logs, and both of those
+    /// take the pair rather than the id (see [`SessionKey`]).
+    session: SessionKey,
+    /// The registration this install is owed to.
+    epoch: u64,
+    /// Exactly what that registration would have installed.
+    link: crate::codex_link::ControlLink,
+}
+
+/// A departing link's [`crate::codex_link::Carried`], with the launch it belongs to.
+///
+/// The generation is the whole reason this is a struct rather than the bare `Carried`:
+/// retention answers "where did the link for THIS launch leave the session", and a
+/// carry whose generation the incoming registration does not match is an answer to a
+/// different question.
+struct RetainedCarry {
+    /// The [`crate::codex_link::ControlLink::generation`] of the link that learned it.
+    generation: u64,
+    carried: crate::codex_link::Carried,
+}
+
+/// A running Codex control link, and the registration epoch that owns it.
+///
+/// The epoch is here for the same reason it is on [`SupervisorHandle`]: a supervisor
+/// that reconnects registers again under the same uid, and the losing connection's
+/// teardown can run afterwards. Acting blindly would tear down the link the *new*
+/// registration had just installed.
+/// **Everything the daemon holds of one link**, minted together and installed
+/// together.
+///
+/// Three cells with one lifetime: they go onto the handle in a single statement,
+/// they leave the map with it, and a stale task still winding down writes into all
+/// three at once — into cells no lookup can reach. Threading them as three separate
+/// arguments said the same thing less well and let a caller pair one link's cell
+/// with another's, which is precisely the mistake the shared lifetime exists to make
+/// unrepresentable.
+struct LinkCells {
+    presence: crate::codex_link::LinkPresence,
+    carry: crate::codex_link::LinkCarry,
+    answers: crate::codex_link::LinkAnswers,
+    interrupts: crate::codex_link::LinkInterrupts,
+    composes: crate::codex_link::LinkComposes,
+}
+
+struct CodexLinkHandle {
+    epoch: u64,
+    /// The [`crate::codex_link::ControlLink::generation`] this link speaks for — the
+    /// Codex launch its threads belong to. Kept so retention can stamp what the link
+    /// learned with the launch that learned it; see [`Inner::retained_codex_carry`].
+    generation: u64,
+    task: tokio::task::JoinHandle<()>,
+    /// **What the link publishes about the connection it is holding** — see
+    /// [`crate::codex_link::LinkPresence`]. Read by the inbound resolver.
+    ///
+    /// It lives on the *handle* rather than in a map of its own, so a link released
+    /// or parked by a newer registration takes its cell out of the map with it: a
+    /// stale task still winding down keeps writing — into a cell no lookup can
+    /// reach. What that does **not** settle is whether the handle still in the slot
+    /// belongs to the registration that owns the session now, because the two are
+    /// published at different moments; [`Daemon::codex_addressee_locked`] compares
+    /// this handle's `epoch` against [`Inner::registration_epochs`] for exactly that
+    /// reason. **Not against the supervisor's epoch** — that comparison agrees with
+    /// itself across the window where the row already describes an incoming
+    /// registration whose handles are not published yet.
+    presence: crate::codex_link::LinkPresence,
+    /// **How the daemon asks this link to write on its socket** — see
+    /// [`crate::codex_link::LinkAnswers`]. On the handle for the same lifetime reason
+    /// as the two cells above, and it is the sharper case of the three: an ask that
+    /// reached a superseded task would put a phone's decision on a socket the session
+    /// no longer owns. Taking the sender out of the map with the handle is what makes
+    /// that unreachable rather than unlikely.
+    answers: crate::codex_link::LinkAnswers,
+    /// **How the daemon asks this link to stop the turn it is watching** — see
+    /// [`crate::codex_link::LinkInterrupts`]. On the handle for the same lifetime
+    /// reason as the answer sender beside it, and the same sharp case: an interrupt
+    /// that reached a superseded task would aim a stop at a socket the session no
+    /// longer owns.
+    interrupts: crate::codex_link::LinkInterrupts,
+    /// **How the daemon asks this link to say something** — see
+    /// [`crate::codex_link::LinkComposes`]. On the handle for the same lifetime reason as
+    /// its two siblings, with the sharpest case of the three: words handed to a superseded
+    /// task would be put into a session's mouth on a socket it no longer owns.
+    composes: crate::codex_link::LinkComposes,
+    /// **What the link itself knows** — see [`crate::codex_link::LinkCarry`]. The
+    /// other cell, on the handle for the same lifetime reason as the presence one,
+    /// and read by exactly one caller: [`Inner::retain_codex_carry`]. **Not when
+    /// this handle leaves the map** — it travels into the park and is read once the
+    /// task writing into it is proven stopped, for the reason retention states.
+    carry: crate::codex_link::LinkCarry,
+}
+
+/// How long a superseded control link may take to stop. Bounded: a task that will
+/// not die must not hold a registration open, and the link's own awaits are short.
+const CODEX_LINK_STOP_BUDGET: Duration = Duration::from_secs(5);
+
+/// The margin the quiesce budget adds above an actuation's own budgets: room for the
+/// durable claim that precedes the socket write (a blocking-pool SQLite upsert, fast but
+/// not itself a `Duration` constant) plus slack, so the sum is genuinely *above* the
+/// worst case and not merely equal to it.
+const ACTUATION_QUIESCE_MARGIN: Duration = Duration::from_secs(3);
+
+/// **The slowest wait any actuation can be in**, so the budget below bounds whichever one
+/// the outgoing link happens to be holding.
+///
+/// An answer waits for the broker's disposition; an interrupt waits for the turn's own
+/// terminal; a compose waits for its own JSON-RPC response. All three are the same fifteen
+/// seconds today, and taking the maximum rather than naming one is what keeps this true if
+/// any is re-measured.
+///
+/// **Compose was missing from this maximum**, which was not wrong today and was already a
+/// stale derivation: a `COMPOSE_BUDGET` re-measured upward without touching this constant
+/// would let a registration handover abort a link and record its compose indeterminate
+/// before the compose's own advertised wait had expired — the daemon contradicting a
+/// budget it published.
+const SLOWEST_ACTUATION_WAIT: Duration = {
+    let a = crate::codex_link::DISPOSITION_BUDGET.as_millis();
+    let b = crate::codex_link::INTERRUPT_BUDGET.as_millis();
+    let c = crate::codex_link::COMPOSE_BUDGET.as_millis();
+    if a >= b && a >= c {
+        crate::codex_link::DISPOSITION_BUDGET
+    } else if b >= c {
+        crate::codex_link::INTERRUPT_BUDGET
+    } else {
+        crate::codex_link::COMPOSE_BUDGET
+    }
+};
+
+/// Every actuation budget is inside the wait the handover derives from them. A const
+/// assertion rather than a test, because a build in which it is false is a build whose
+/// quiesce can abort an actuation before its own deadline.
+const _: () = {
+    assert!(
+        SLOWEST_ACTUATION_WAIT.as_millis() >= crate::codex_link::DISPOSITION_BUDGET.as_millis()
+    );
+    assert!(SLOWEST_ACTUATION_WAIT.as_millis() >= crate::codex_link::INTERRUPT_BUDGET.as_millis());
+    assert!(SLOWEST_ACTUATION_WAIT.as_millis() >= crate::codex_link::COMPOSE_BUDGET.as_millis());
+};
+
+/// How long a registration waits for the outgoing link's admitted actuations to reach
+/// a terminal before it stops waiting and aborts that link instead.
+///
+/// **Derived from the actuation's real worst case, not restated**. An admitted
+/// actuation's whole passage is the durable claim, then
+/// [`crate::codex_link::SEND_BUDGET`] on the socket write, then the wait for whatever
+/// says what became of it — [`SLOWEST_ACTUATION_WAIT`], which is the broker's
+/// disposition for an answer, the turn's own terminal for an interrupt, and its own
+/// response for a compose. This is
+/// that sum plus [`ACTUATION_QUIESCE_MARGIN`], computed from those constants so the
+/// invariant "above the actuation's worst case" holds by construction in BOTH builds
+/// — the old hand-copied `cfg(test)` literal (5 s) was *below* the test worst case
+/// (`SEND_BUDGET` alone did not shrink under test), which is the inverse of the
+/// invariant it claimed.
+///
+/// **On expiry the registration does NOT refuse**. It falls through to
+/// the stake and the park/abort below: aborting the outgoing link is what settles an
+/// answer that has stopped bounding itself — the link task is cancelled, its
+/// [`crate::codex_link::PendingAnswer`] (which now owns the read guard) is dropped,
+/// and the answer ends `Unknown`. Bailing here instead — as an earlier version did,
+/// and from *above* the park — converted a recoverable stall into a permanent,
+/// self-renewing wedge, because the supervisor's backoff loop re-registers forever
+/// and every attempt bailed before reaching the only thing that unwedges a stuck
+/// answer. On any path the wire can produce the wait ends because the actuation
+/// ended, well within budget; the clock is the backstop for a link that has stopped
+/// bounding itself, and aborting it is strictly safer than leaving the session
+/// wedged.
+const ANSWER_QUIESCE_BUDGET: Duration = Duration::from_millis(
+    (crate::codex_link::SEND_BUDGET.as_millis()
+        + SLOWEST_ACTUATION_WAIT.as_millis()
+        + ACTUATION_QUIESCE_MARGIN.as_millis()) as u64,
+);
+
+/// How many times [`Daemon::resolve_codex_inbound`] may re-resolve a reference whose
+/// run changed underneath it.
+///
+/// Not a race budget — the pairing it returns is made coherent by holding the
+/// session's registration gate, not by retrying. This bounds the one thing that gate
+/// cannot settle: a tmux *name* resolving to a different run than the one whose gate
+/// was taken. That needs a new run to be registered under the same name between two
+/// reads, so three failures running is not contention, it is a fault worth reporting.
+const PAIRING_ATTEMPTS: u32 = 3;
+
+/// A control-link task that is **out of the slot and owned by nobody else**.
+///
+/// Its `Drop` aborts the task. That matters because the transaction below is a
+/// future, and a future can be dropped at any await point — a supervisor connection
+/// going away mid-retirement, say. Without this, the handle would simply be dropped,
+/// which **detaches** the task: a link nothing holds, nothing can stop, and nothing
+/// will ever join.
+///
+/// # The rule
+///
+/// A raw `JoinHandle` never exists outside a guard except in the same statement that
+/// installs or parks it, and a guard is never held across an await: parked guards
+/// live in `Inner`, and the join happens **in place** against them
+/// ([`Daemon::join_parked_codex_links`]). So a cancelled transaction can never be
+/// the reason a task stops being tracked.
+///
+/// **Abort-not-detach is the floor; proven-join is the goal.** `Drop` cannot await,
+/// so the most it can do is request cancellation — which is why a guard is only
+/// dropped once [`OwnedLink::is_finished`] says the task is genuinely gone.
+struct OwnedLink {
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// **What this link knows, to be retained the moment its task is proven
+    /// stopped** — see [`Inner::retain_codex_carry`].
+    ///
+    /// The cells ride into the park with the task rather than being read on the
+    /// way in, because reading them on the way in reads them too early: a worker
+    /// that has consumed `thread/started(B)` and not yet reached the write is
+    /// running synchronous code no `abort` can interrupt, and a snapshot taken
+    /// while it is there is a snapshot of the moment before the only announcement
+    /// B will ever get. `None` for a link whose cells nobody kept — an orphan
+    /// handed back by [`Inner::install_codex_link`], which never became this
+    /// session's link — and for one whose session has since changed agent
+    /// ([`Inner::forget_codex_carry`]).
+    retain: Option<ParkedCarry>,
+}
+
+/// A parked link's cells, with the launch they belong to — the same two facts
+/// [`RetainedCarry`] holds, before the task that is still writing into them has
+/// stopped.
+struct ParkedCarry {
+    generation: u64,
+    carry: crate::codex_link::LinkCarry,
+}
+
+impl OwnedLink {
+    fn new(task: tokio::task::JoinHandle<()>, retain: Option<ParkedCarry>) -> OwnedLink {
+        OwnedLink {
+            task: Some(task),
+            retain,
+        }
+    }
+
+    /// Request cancellation without waiting.
+    fn abort(&self) {
+        if let Some(task) = self.task.as_ref() {
+            task.abort();
+        }
+    }
+
+    /// Has the task actually finished? The only proof of completion this type
+    /// accepts — an `abort()` that has returned proves nothing.
+    fn is_finished(&self) -> bool {
+        self.task.as_ref().is_none_or(|task| task.is_finished())
+    }
+}
+
+impl Drop for OwnedLink {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Inner {
+    /// Validate ownership, and **only then** build and install the link.
+    ///
+    /// The spawn happens inside this function, after the check, under the lock that
+    /// guards both maps — because a task that exists is a task that is *running*.
+    /// On a multithreaded runtime it can dial the broker leg and ingest before an
+    /// install a few lines later gets the chance to reject it, so "spawn, then
+    /// check, then hand the handle back" is not a rejection at all: the damage is
+    /// done in the window. `spawn` is therefore a closure this function may decline
+    /// to call.
+    ///
+    /// Returns the task to be cancelled and joined only when the install *itself*
+    /// races (a newer link already in the slot) — never as the ownership check.
+    fn spawn_codex_link_if_owner(
+        &mut self,
+        session_uid: &str,
+        epoch: u64,
+        generation: u64,
+        cells: LinkCells,
+        spawn: impl FnOnce() -> tokio::task::JoinHandle<()>,
+    ) -> Result<Option<tokio::task::JoinHandle<()>>, Option<u64>> {
+        let owner = self.owner_of(session_uid);
+        if owner != Some(epoch) {
+            return Err(owner);
+        }
+        Ok(self.install_codex_link(session_uid, epoch, generation, cells, spawn()))
+    }
+
+    /// **Which registration this session BELONGS to** — the one question every
+    /// step of the link transaction is asking, in one place.
+    ///
+    /// [`Inner::registration_epochs`] and not `supervisors`, and the two are not
+    /// interchangeable. The claim is staked in the same breath as the row; the
+    /// handle is published several awaits later. So in the window between them
+    /// `supervisors` still names the *previous* registration, and a check written
+    /// against it answers "nobody newer has finished yet" — which is a later and
+    /// weaker question than "is this session still mine", and one that says yes to
+    /// a registration that has already been superseded.
+    ///
+    /// It is also the map [`Daemon::codex_addressee_locked`] resolves an installed
+    /// link against, so asking it here makes the condition for installing a link
+    /// and the condition for *reading* one the same condition. A link installed
+    /// against the other map can be one the resolver refuses to answer with for
+    /// the rest of the session's life.
+    fn owner_of(&self, session_uid: &str) -> Option<u64> {
+        self.registration_epochs.get(session_uid).copied()
+    }
+
+    /// **Stake a registration's claim**: mint its epoch, and record the supervisor
+    /// process it belongs to, in one statement.
+    ///
+    /// The only writer of either map. They answer two halves of one question — which
+    /// registration owns this session, and which process that registration came from
+    /// — and a claim that carried only the first is what round-10 F1 defeated. Minting
+    /// and recording separately would mean a window in which the claim exists and its
+    /// owner does not, which is precisely the state the guard reading it must never
+    /// see.
+    fn stake(&mut self, session_uid: &str, incarnation: Incarnation) -> u64 {
+        self.next_epoch += 1;
+        let epoch = self.next_epoch;
+        self.registration_epochs
+            .insert(session_uid.to_string(), epoch);
+        self.registration_incarnations
+            .insert(session_uid.to_string(), incarnation);
+        epoch
+    }
+
+    /// **Which supervisor process the standing claim belongs to.**
+    ///
+    /// `None` means no claim has ever been staked for this uid — the state a daemon
+    /// restart leaves behind, and the one an exit replay is *for*. It is deliberately
+    /// not the same answer as "a claim exists whose incarnation this is not": the one
+    /// caller treats them differently, because there is nothing to displace in the
+    /// first case and a live run to protect in the second.
+    fn claimant_of(&self, session_uid: &str) -> Option<&Incarnation> {
+        self.registration_incarnations.get(session_uid)
+    }
+
+    /// **How many times this session's row has been written** — see
+    /// [`Inner::row_writes`]. A uid nothing has written yet reads `0`, which is the
+    /// same answer its first writer moves off, so an absent entry and a present one
+    /// are one number rather than two cases.
+    fn row_writes_of(&self, session_uid: &str) -> u64 {
+        self.row_writes.get(session_uid).copied().unwrap_or(0)
+    }
+
+    /// **Count one write of this session's row.** Called by each of the row's three
+    /// production writers, from inside the per-uid
+    /// [`Daemon::registration_gate`] that writer holds across its write — which is
+    /// what makes the count and the row move together as far as any reader holding
+    /// the same gate can tell.
+    fn note_row_write(&mut self, session_uid: &str) {
+        *self.row_writes.entry(session_uid.to_string()).or_insert(0) += 1;
+    }
+
+    /// Put a link in the slot — **and this is the transaction's linearization
+    /// point.**
+    ///
+    /// Ownership is re-checked here — through [`Inner::owner_of`], under the very
+    /// lock that guards the claim. It was written when a second registration could
+    /// stake its claim without taking the per-uid gate, so the earlier check was a
+    /// time-of-check the world could move past; checking again *here* made the install
+    /// itself the moment ownership is decided.
+    ///
+    /// **The stake now happens under the acceptance gate too**, so no rival can stake
+    /// for this uid while this transaction runs and the two checks can no longer
+    /// disagree. Kept as the linearization point anyway: it is where the slot is
+    /// actually written, one uncontended comparison, and fail-closed. Like its two
+    /// siblings in `register_supervisor`, it is no longer separately observable.
+    ///
+    /// Returns the task back when this registration no longer owns the session, or
+    /// when a newer one already holds the slot. The caller must then cancel and
+    /// join it — never drop it.
+    fn install_codex_link(
+        &mut self,
+        session_uid: &str,
+        epoch: u64,
+        generation: u64,
+        cells: LinkCells,
+        task: tokio::task::JoinHandle<()>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if self.owner_of(session_uid) != Some(epoch) {
+            return Some(task);
+        }
+        if self
+            .codex_links
+            .get(session_uid)
+            .is_some_and(|held| held.epoch > epoch)
+        {
+            return Some(task);
+        }
+        match self.codex_links.insert(
+            session_uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation,
+                task,
+                presence: cells.presence,
+                answers: cells.answers,
+                interrupts: cells.interrupts,
+                composes: cells.composes,
+                carry: cells.carry,
+            },
+        ) {
+            // Nothing should be here — the gate serializes this sequence and the
+            // take above emptied it — but if something is, it is handed back rather
+            // than dropped.
+            Some(displaced) => Some(displaced.task),
+            None => None,
+        }
+    }
+
+    /// Release the control link belonging to *this* registration, if it still holds
+    /// the slot. Same epoch test as the supervisor handle, for the same reason: a
+    /// stale connection's teardown must not stop the link a newer registration has
+    /// just installed.
+    fn release_codex_link(&mut self, session_uid: &str, epoch: u64) -> Option<CodexLinkHandle> {
+        match self.codex_links.get(session_uid) {
+            Some(held) if held.epoch == epoch => self.codex_links.remove(session_uid),
+            _ => None,
+        }
+    }
+
+    /// **Write down an install this registration could not perform** (A12.2) — see
+    /// [`Inner::stalled_codex_installs`].
+    ///
+    /// A named step rather than three lines inside the registration, for the same
+    /// reason [`Inner::seed_codex_carry`] is one. **The reason it was extracted has
+    /// expired and the extraction has not.** It was extracted because the arm that
+    /// calls it sat behind a closed gate — `supported_agents()` refused every Codex
+    /// registration — so a rule left inline there was a rule nothing could drive.
+    /// Codex is supported now and the arm is genuinely reachable: a complete Codex
+    /// registration over a park that will not clear inside the stop budget calls
+    /// this. Reaching it still takes a survivor that outlives
+    /// [`CODEX_LINK_STOP_BUDGET`], which is why the test that covers this debt
+    /// stages it here directly rather than paying that budget a third time.
+    fn owe_codex_install(
+        &mut self,
+        session: &SessionKey,
+        epoch: u64,
+        link: &crate::codex_link::ControlLink,
+    ) {
+        self.stalled_codex_installs.insert(
+            session.uid.clone(),
+            StalledCodexInstall {
+                session: session.clone(),
+                epoch,
+                link: link.clone(),
+            },
+        );
+    }
+
+    /// **Cancel an install owed to _this_ registration** (A12.2).
+    ///
+    /// The same epoch test as [`Inner::release_codex_link`], and for the same reason:
+    /// a disconnect owns the resources its own connection holds and nothing a
+    /// replacement has since taken. An owed install is one of them — it is a task
+    /// this registration was still going to be given.
+    ///
+    /// Load-bearing rather than tidy. `unregister_supervisor` deliberately leaves the
+    /// claim behind as a tombstone, so [`Inner::owner_of`] — the only guard recovery
+    /// has — still answers with the disconnected registration's epoch for ever after.
+    /// Without this, the sweep would keep the promise to a supervisor that is gone:
+    /// a link spawned for a detached session, in a slot no disconnect will come back
+    /// to release.
+    fn release_owed_codex_install(&mut self, session_uid: &str, epoch: u64) {
+        if self
+            .stalled_codex_installs
+            .get(session_uid)
+            .is_some_and(|owed| owed.epoch == epoch)
+        {
+            self.stalled_codex_installs.remove(session_uid);
+        }
+    }
+
+    /// **Take what a departing link knows and the daemon does not** — see
+    /// [`Inner::retained_codex_carry`].
+    ///
+    /// Reads the link's own [`crate::codex_link::LinkCarry`] and **not** its
+    /// presence. The presence cell is what the *fleet* may be told, and it is lossy
+    /// on purpose — a merely-`Bound` thread is a candidate nobody confirmed, so it
+    /// is not published as the session's thread. Retention is not a reader: it is
+    /// the last moment this link's memory exists, and a link mid-chase knows both
+    /// the thread it adopted and the one it is chasing while the projection can name
+    /// neither.
+    ///
+    /// # Read once the task is PROVEN STOPPED, not when the handle leaves the slot
+    ///
+    /// The two moments are different, and the difference is a lost thread. A worker
+    /// that has consumed `thread/started(B)` writes it into the carry with no await
+    /// in between ([`crate::codex_link::Connection::bind_or_follow`]) — but "no
+    /// await" only closes cancellation of that task, not the scheduler running
+    /// another one. Snapshotting at the departure site races a worker that is inside
+    /// exactly that synchronous stretch on another thread: the snapshot wins, and B's
+    /// write lands a moment later in a cell nothing will ever read again. `/new` then
+    /// costs the session its new thread, permanently, because `thread/started` is
+    /// broadcast once and never replayed.
+    ///
+    /// So both departure sites hand the cells to the park instead, and this is called
+    /// from [`Daemon::join_parked_codex_links`] against a task that `is_finished`
+    /// reports gone. There is no writer left to lose a race to. The abort that got it
+    /// there cannot truncate the write either: cancellation lands at an await point,
+    /// and the stretch between reading the frame and writing the cell has none.
+    fn retain_codex_carry(&mut self, session_uid: &str, parked: ParkedCarry) {
+        let carried = parked.carry.snapshot();
+        if carried.is_informative() {
+            self.retained_codex_carry.insert(
+                session_uid.to_string(),
+                RetainedCarry {
+                    generation: parked.generation,
+                    carried,
+                },
+            );
+        }
+    }
+
+    /// **Forget where a Codex link left this session.** Called when the session
+    /// registers as something that is not Codex: the uid is the same, the run is not,
+    /// and threads belong to the run. Without this a `Codex → Claude → Codex`
+    /// sequence would seed the third registration from the first one's chase.
+    ///
+    /// **Both tenses of it.** What has already been retained is dropped, and so is
+    /// what is still owed: a link parked and not yet proven stopped is holding cells
+    /// [`Daemon::join_parked_codex_links`] would retain later, and a retention landing
+    /// *after* the forgetting would put the pre-Claude chase back where the next Codex
+    /// registration reads it. Which agent registered is settled now; when a retired
+    /// task happens to die is not this fact's business.
+    fn forget_codex_carry(&mut self, session_uid: &str) {
+        self.retained_codex_carry.remove(session_uid);
+        // **A12.2: and what is still OWED, for the same reason as what is still
+        // parked.** A Codex registration that stalled left an install to be retried;
+        // this uid has since registered as something that is not Codex, so
+        // performing it later would attach a link — and a resumed thread — to a run
+        // it was never built for. Which agent registered is settled now.
+        self.stalled_codex_installs.remove(session_uid);
+        if let Some(parked) = self.parked_codex_links.get_mut(session_uid) {
+            for link in parked.iter_mut() {
+                link.retain = None;
+            }
+        }
+    }
+
+    /// **Start a fresh link from what its predecessor knew**, and answer with the
+    /// thread it will resume when that is not the one the registration named.
+    ///
+    /// The registration hint is by construction the oldest fact in the system: the
+    /// frame is built once at supervisor start and re-sent byte-identical on every
+    /// reconnect, and nothing on the launcher side ever learns a `/new`. So it can
+    /// never be the *newer* of the two, and there is no arbitration to do — which is
+    /// why it is seeded as the hint, underneath everything retained, and
+    /// [`crate::codex_link::Carried::first_target`] does the rest. The frame's own
+    /// `thread_id` is left alone: the claim is a fact about the registration, and
+    /// overwriting it would leave nothing able to say what was displaced.
+    ///
+    /// A named step rather than three lines inside the registration. It was
+    /// extracted because the registration reached it only through a gate that was
+    /// closed — `supported_agents()` refused every Codex registration — and a rule
+    /// nothing can drive is a rule nothing can prove. **That gate is open now**:
+    /// Codex is supported, and a complete registration runs this on its way to
+    /// installing a link. The extraction is kept because the rule is still worth
+    /// proving against the frame directly, which is how
+    /// [`crate::codex_link::ControlLink::from_registration`] and the generation
+    /// guard beside it are proven, and because a resume decision asserted through a
+    /// whole registration transaction is asserted through a great deal of unrelated
+    /// machinery.
+    ///
+    /// **Only from the SAME launch.** The retained carry names threads, and a thread
+    /// belongs to the Codex process that created it. A registration arriving at a
+    /// later `codex_generation` is a relaunch — its threads are new ones, and its own
+    /// claim is the newest fact about it — so a mismatch seeds nothing and leaves the
+    /// registration's hint to stand. See [`Inner::retained_codex_carry`].
+    fn seed_codex_carry(
+        &self,
+        session_uid: &str,
+        link: &crate::codex_link::ControlLink,
+        carry: &crate::codex_link::LinkCarry,
+    ) -> Option<String> {
+        let retained = self.retained_codex_carry.get(session_uid)?;
+        if retained.generation != link.generation {
+            return None;
+        }
+        carry.resume_from(&retained.carried);
+        carry
+            .first_target()
+            .filter(|target| Some(target.as_str()) != link.thread_id.as_deref())
+    }
+
+    /// **Tell the fleet where the session is before the replacement link can.**
+    ///
+    /// A fresh [`crate::codex_link::LinkPresence`] says `Offline { thread_id: None }`,
+    /// and a threadless `Offline` sends every reader to the session row — which after
+    /// a `/new` names the thread the session LEFT, because the registration frame is
+    /// the row's only writer. The replacement does not correct that until its first
+    /// connection attempt returns, so the dial, the upgrade and the handshake were all
+    /// a window in which the fleet regressed to exactly the launch-time claim the
+    /// adoption exists to supersede.
+    ///
+    /// **From `adopted` alone, never from
+    /// [`crate::codex_link::Carried::first_target`].** This feeds the cell the fleet is
+    /// TOLD, and only an adopted thread has had a resume accepted for it. Publishing a
+    /// merely-pending candidate here is the one thing "published implies adopted"
+    /// forbids — see [`crate::codex_link::CodexAddressee`].
+    ///
+    /// A named step rather than four lines inside the registration, for the same reason
+    /// [`Inner::seed_codex_carry`] is one — and with the same expiry on that reason.
+    /// It was extracted because the registration reached it only through a gate that
+    /// was closed (`supported_agents()` refused every Codex registration); Codex is
+    /// supported now and a complete registration runs this. The step keeps its name
+    /// because what the fleet is told is worth asking of the frame directly, rather
+    /// than reading it back out of `Daemon::sessions` after a whole transaction.
+    fn seed_codex_presence(
+        &self,
+        session_uid: &str,
+        link: &crate::codex_link::ControlLink,
+        presence: &crate::codex_link::LinkPresence,
+    ) {
+        if let Some(adopted) = self.retained_codex_adoption(session_uid, link) {
+            presence.publish_seed(crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some(adopted),
+            });
+        }
+    }
+
+    /// **The thread the previous link had ADOPTED**, for seeding the replacement's
+    /// presence — scoped to the launch on the same terms as
+    /// [`Inner::seed_codex_carry`], because it answers out of the same entry.
+    ///
+    /// Adopted and not [`crate::codex_link::Carried::first_target`]: this feeds the
+    /// cell the *fleet* reads, and only an adopted thread is one a resume has been
+    /// accepted for. A pending candidate is a thread nobody has confirmed.
+    fn retained_codex_adoption(
+        &self,
+        session_uid: &str,
+        link: &crate::codex_link::ControlLink,
+    ) -> Option<String> {
+        let retained = self.retained_codex_carry.get(session_uid)?;
+        if retained.generation != link.generation {
+            return None;
+        }
+        retained.carried.adopted()
+    }
 }
 
 pub struct SupervisorHandle {
@@ -357,6 +1352,21 @@ pub struct SupervisorHandle {
     /// reports 0 and silently ignores the prompt fingerprint, so the daemon
     /// refuses to actuate a permission prompt through it.
     protocol_minor: u32,
+    /// The Codex thread **generation** (visit) this handle was registered at, if
+    /// any (D4). `None` for Claude, whose sessions have no generations. It is the
+    /// high-water mark the adoption guard compares against, so a stale supervisor
+    /// frame can never overwrite newer adapter state.
+    ///
+    /// **It is the last generation REGISTERED for this uid, not the link's live
+    /// visit count**, and the distinction is what plan A5.1's durable half is
+    /// built on. This field has exactly one writer — the handle publish in
+    /// [`Daemon::register_supervisor`], from `info.codex_generation` — while the
+    /// link's `visit.generation` bumps happen on a connection-local
+    /// `codex_link::Visit` that is never written back here. So
+    /// `codex_sessions.codex_generation`, written by the same acceptance in the
+    /// same statement as the row, restores exactly this quantity across a
+    /// restart, and the adoption guard reads the higher of the two.
+    codex_generation: Option<u64>,
 }
 
 /// Owns one entry in a supervisor's in-flight map for as long as the request is
@@ -380,6 +1390,34 @@ impl Drop for InflightSlot {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&self.id);
+    }
+}
+
+/// **A supervisor process, as it identified itself at launch.**
+///
+/// The pid it is running as and the instant it started, both stamped once —
+/// before its first `Register` — into the frame it holds for the rest of its life.
+/// That is the whole point of taking these two and not something the daemon mints:
+/// they are the only identity that already exists when a *dead* supervisor replays
+/// that same frame to report its exit, so they are the only thing that can say
+/// whether the run being reported is the run the session still belongs to.
+///
+/// The pair rather than the pid: pids are reused, and a reused pid under one uid is
+/// not the fanciful case — a supervisor is spawned per run and a machine that
+/// churns them will hand the number back. The start instant separates two processes
+/// that share a number; the pid separates two runs started in the same millisecond.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Incarnation {
+    pid: u32,
+    started_at: String,
+}
+
+impl Incarnation {
+    fn of(info: &RegisterSession) -> Self {
+        Self {
+            pid: info.supervisor_pid,
+            started_at: info.started_at.clone(),
+        }
     }
 }
 
@@ -532,6 +1570,14 @@ struct PendingApproval {
     /// answered or another run can block, so the name and the number stop
     /// describing the same moment.
     project_label: String,
+    /// Which agent this card belongs to.
+    ///
+    /// **Captured with the card, for the same reason the label is.** It decides
+    /// which doorbells may count this card ([`blocked_runs`]) and therefore
+    /// which devices that doorbell is authorized to — a question that must be
+    /// answered from the same locked snapshot as the count, not by a database
+    /// read taken after the lock was released.
+    agent: protocol::agent::AgentKind,
     /// Which prompt this card belongs to. Compared against the run's current
     /// generation before anything is typed.
     generation: u64,
@@ -679,15 +1725,27 @@ fn card_is_open(inner: &Inner, session_uid: &str, key: &CardKey) -> bool {
     })
 }
 
-/// Which runs are holding a decision, and what each is called.
+/// Which runs **of one agent** are holding a decision, and what each is called.
 ///
 /// **Runs, not cards.** One run can hold a second decision while its first is
 /// claimed and mid-injection — the superseding sweep deliberately leaves a
 /// claimed card in place — and the alert says "agents", so counting cards would
 /// make the sentence say something untrue about the fleet.
-fn blocked_runs(inner: &Inner) -> Vec<(String, String)> {
+///
+/// **And one agent, not the fleet.** The count this produces is the number the
+/// doorbell says out loud *and* the deck the doorbell is authorized as (see
+/// [`crate::apns::PushHint::describing`]). Counting both agents would make those
+/// two disagree the moment a Codex card exists: a Claude doorbell would say "3
+/// agents need you" while naming a deck a Claude-only phone cannot open, and a
+/// Codex doorbell would be inflated by cards its audience will never see. The
+/// filter is what lets `describing` keep the ringing run's own agent instead of
+/// re-describing the alert as somebody else's.
+fn blocked_runs(inner: &Inner, agent: &protocol::agent::AgentKind) -> Vec<(String, String)> {
     let mut by_run: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for pending in inner.pending.values() {
+        if &pending.agent != agent {
+            continue;
+        }
         by_run.insert(&pending.session.uid, &pending.project_label);
     }
     by_run
@@ -713,6 +1771,80 @@ fn snapshot_command(text: &str) -> bool {
     // No arguments: these commands take none, and a snapshot request with
     // extra text is not one of them.
     rest[name.len()..].trim().is_empty() && matches!(name.as_str(), "status" | "usage" | "cost")
+}
+
+/// This daemon run's **feature epoch** — a value unique to the process, so a
+/// stored device feature set authorizes a push only when it was confirmed during
+/// this run. A restarted daemon is a new process with a new epoch, so a set left
+/// by an earlier one is [`crate::store::DeviceFeatures::Unconfirmable`] and that
+/// device hears nothing until it re-advertises: an old daemon that only bumped
+/// `last_seen_at` across a rollback cannot leave Codex eligibility standing.
+///
+/// **Nothing writes a feature set in this phase**, so today every row's column is
+/// `NULL` — the Claude floor — and this value is only ever compared against, never
+/// stamped on anything. It is minted anyway, and at startup, because it is the
+/// authorization epoch [`crate::store::Store::push_targets`] reads against, and
+/// because the write Phase 5 turns on must find a value that already exists rather
+/// than mint one on a push path.
+///
+/// **Uniqueness is structural, not circumstantial.** This value is what
+/// [`crate::store::Store::push_targets`] compares a stored set against, so a
+/// repeat would silently re-authorize another process's advertisement. Process id
+/// and start time alone cannot promise that — pids are reused and a clock can
+/// move backwards — so the identity comes from a uid's ten random bytes, with the
+/// pid and the timestamp kept in front of it for a human reading the column.
+///
+/// # No entropy, no daemon
+///
+/// The earlier form fell back to `pid-millis-no-entropy`, which is **fail-open**
+/// at the exact point that decides authorization: two runs that shared a pid and a
+/// millisecond would share an epoch, and the second would inherit the first's
+/// confirmed advertisements without a phone saying anything. So the fallback is
+/// gone and the failure is loud.
+///
+/// Panicking is the honest answer rather than a harsh one. Every other production
+/// caller of [`protocol::uid::new`] already propagates its failure — a session uid,
+/// a device token, a pairing code — so a machine whose `getrandom` is failing
+/// cannot register a session or pair a phone either. This one call site was alone
+/// in swallowing it, and it was the one call site where swallowing it made a
+/// security claim the daemon could not keep.
+///
+/// **It lands at startup, not at a push, and the wiring is the whole point.**
+/// [`Daemon::recover`] evaluates it before any socket is open. Left to the push
+/// path — which is where every other caller is, and where the only production one
+/// still is — the first evaluation happens inside a task
+/// [`Daemon::dispatch_push`] spawned, and tokio absorbs a panic in a spawned task:
+/// the daemon would go on serving, silently unable to authorize a push, instead of
+/// refusing to come up.
+pub fn feature_epoch() -> &'static str {
+    FEATURE_EPOCH.get_or_init(|| epoch_from(protocol::uid::new()))
+}
+
+/// The cell [`feature_epoch`] fills, hoisted out of the function body.
+///
+/// Not for a second reader — [`feature_epoch`] is the only way to *get* the value.
+/// It is out here so a test can ask **whether the epoch has been minted yet
+/// without minting it**, which is the entire question when what is under test is
+/// where the minting happens: a check written through `feature_epoch()` mints it
+/// on the spot and then reports, truthfully and uselessly, that it is minted.
+static FEATURE_EPOCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The epoch, from an entropy source that may have failed.
+///
+/// Taken apart from [`feature_epoch`] so the refusal is assertable: nothing in a
+/// test can make `getrandom` fail, and "what this daemon does when it cannot mint
+/// an identity" is exactly the rule worth pinning rather than assuming.
+fn epoch_from(nonce: std::io::Result<String>) -> String {
+    let nonce = nonce.expect(
+        "this daemon cannot mint a feature epoch without kernel entropy, and without \
+         one it cannot say which device advertisements belong to this run — refusing \
+         to start rather than authorizing pushes on a value another run could repeat",
+    );
+    format!(
+        "{}-{}-{nonce}",
+        std::process::id(),
+        protocol::time::now_unix_ms()
+    )
 }
 
 impl Daemon {
@@ -741,10 +1873,110 @@ impl Daemon {
             launchd_label: launchd_label(),
             inner: Arc::new(Mutex::new(Inner::default())),
             publish_gates: Mutex::new(HashMap::new()),
+            registration_gates: Mutex::new(HashMap::new()),
+            actuation_gates: Mutex::new(HashMap::new()),
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
         })
+    }
+
+    /// The agents this daemon can actually host, in one place so the WS
+    /// capabilities and the IPC support negotiation can never disagree. Claude is
+    /// always the floor.
+    ///
+    /// **Codex joined this list when a Codex registration became possible to
+    /// send.** The rule has not changed — a daemon must never advertise an agent
+    /// it cannot drive — what changed is that there is now a producer: the Codex
+    /// coordinator supervises its own launch and registers the session with the
+    /// broker's control-link socket and its thread generation, so this daemon can
+    /// observe the run it is being told about. Admitting the agent here is what
+    /// lets that registration past the fail-closed gate in
+    /// [`Daemon::register_supervisor`], and what makes the IPC support
+    /// negotiation answer `supported: true` so the supervisor sends it at all.
+    ///
+    /// What this does **not** open is the shared approval/text ledgers: see
+    /// [`Daemon::shared_ledgers_admit`], which used to be defined in terms of
+    /// this list and no longer is, precisely so that admitting the agent and
+    /// splitting those four tables stay separate decisions.
+    pub fn supported_agents(&self) -> Vec<protocol::agent::AgentKind> {
+        vec![
+            protocol::agent::AgentKind::Claude,
+            protocol::agent::AgentKind::Codex,
+        ]
+    }
+
+    /// Whether a run hosted by `agent` may put a row in the tables that are
+    /// still shared between agents: `text_mutations`, `answer_claims`,
+    /// `answers`.
+    ///
+    /// **There were four, and `pending_approvals` left.** It was split into
+    /// `codex_pending_approvals` the day it got a Codex producer — the approval
+    /// observer — because a table split ahead of its producer is the speculative
+    /// half-surface this plan refuses, and a table left shared *behind* one is
+    /// the rollback hazard the whole split exists to close. The three that
+    /// remain have no Codex producer, so they are still shared and this refusal
+    /// is still what keeps them clean.
+    ///
+    /// **Temporary scaffolding, and the reason it exists is a rollback.** Sessions
+    /// were split by agent so a rolled-back v0.6.0 daemon cannot touch a Codex
+    /// run; these were deliberately left shared, because that daemon reads
+    /// them *globally* rather than by walking a `sessions` row and no split would
+    /// have hidden them anyway. What it does with them is not passive:
+    /// `recover_text_mutations` rewrites every `applying` row it finds to
+    /// `indeterminate`, and its approval recovery deletes `answer_claims` and the
+    /// pending cards that match them — for runs it has no other way of seeing.
+    /// The justification for leaving them shared was that no Codex row could
+    /// reach them, and that holds only while the entry producers refuse one:
+    /// [`Daemon::send_text`] and [`Daemon::answer`]. This is that refusal, in one
+    /// place, so the two read as one decision rather than two coincidences.
+    ///
+    /// **The `PermissionRequest` hook was the third caller and is no longer one.**
+    /// Its table split, so the ledger argument stopped applying to it; it still
+    /// refuses a Codex run, for the different and narrower reason written at that
+    /// gate. A refusal that outlived its justification and kept quoting it would
+    /// be the most misleading kind of comment there is.
+    ///
+    /// The phase that splits the remaining tables per agent is what deletes this
+    /// method and its two call sites.
+    ///
+    /// **This was `supported_agents().contains(agent)`, and the day that stopped
+    /// being right has arrived.** The coupling was deliberate and it was a
+    /// tripwire: the `..._is_refused_before_...` tests name
+    /// `AgentKind::Codex` outright so that admitting the agent would turn them
+    /// red rather than quietly opening these tables to a Codex run. It did.
+    /// The decision it forced is recorded here: **the refusal stays, and the
+    /// coupling goes.** Hosting a Codex session — listing it, observing its
+    /// turns, reporting its exit — is what this build gained; writing Codex
+    /// text mutations and Codex answers into tables a rolled-back v0.6.0
+    /// daemon rewrites and deletes globally is not, and the phase that splits
+    /// them is where the change that makes it safe lives.
+    ///
+    /// So the question is now asked of the value, not of the list — the one place
+    /// in this daemon where that is the right question, because what is being
+    /// asked is not "can this build drive the agent" but "is this run's state
+    /// safe in a table the previous build sweeps". Only the agent that predates
+    /// the split is, and it is the *only* agent a v0.6.0 daemon can even name.
+    /// The tests continue to drive the real producers against a real Codex
+    /// row — a *registered* one now, rather than one staged into the store
+    /// because registration was impossible — so the refusal stays proven at the
+    /// place a later change would have to remove it.
+    ///
+    /// **Asking this of a row is only sound because the answer cannot change
+    /// under the asker.** Each producer reads the row's agent and
+    /// then does its durable write later — `send_text` in the same breath,
+    /// `answer` five awaits later — and neither of them holds the
+    /// registration gate across the pair. A Claude → Codex re-registration landing
+    /// in that window would have the read admit a row the write then lands on as
+    /// Codex, which is exactly the isolation this method claims. It cannot: a uid
+    /// does not leave Claude ([`Daemon::register_supervisor`]'s transition
+    /// refusal), `ensure_session` preserves an existing row's agent, and those two
+    /// are the only production writers of the column. The other direction —
+    /// Codex → Claude — is admitted and harmless here: it can only turn a refusal
+    /// into an admission of a row that is genuinely Claude by the time it is
+    /// written.
+    fn shared_ledgers_admit(&self, agent: &protocol::agent::AgentKind) -> bool {
+        agent.is_claude()
     }
 
     /// Re-derive from the database everything a restart would otherwise lose.
@@ -763,6 +1995,38 @@ impl Daemon {
     ///    recorded as a terminal *indeterminate* result, and never retried.
     pub async fn recover(&self) {
         let now = protocol::time::now_rfc3339();
+
+        // **The feature epoch is minted here, and this is the only reason it is
+        // evaluated at startup at all.** Nothing writes a device feature set in
+        // this phase, so it stamps nothing; it is the value
+        // [`crate::store::Store::push_targets`] compares every stored set against,
+        // and minting it needs kernel entropy that [`epoch_from`] refuses to fake.
+        // Every other caller is on the push path, and a push runs in a task
+        // `dispatch_push` spawned — where tokio absorbs the panic and a daemon that
+        // cannot authorize anything keeps serving as though it could. Asked here it
+        // is a startup failure, which is the honest one.
+        //
+        // **No sweep, and the absence is deliberate.** A startup step used to clear
+        // every set not stamped with this run's epoch. The read refuses those rows
+        // on its own — another process's stamp is
+        // [`crate::store::DeviceFeatures::Unconfirmable`] — so the sweep never made
+        // a device less eligible; and once the read learned to tell an unconfirmable
+        // set from a `NULL` one, the sweep could only make a device MORE eligible,
+        // because clearing writes the empty legacy set, which is the Claude floor.
+        //
+        // **A statement of its own, and not an argument to the line below.**
+        // `log_info!` formats its arguments only when INFO is enabled, so a mint
+        // written inside one is a mint an operator turns off: under
+        // `CODECONNECT_LOG=warn` the first `feature_epoch()` call goes back to
+        // being the one inside a task `dispatch_push` spawned, where tokio absorbs
+        // the panic — which is the whole of what asking here was for. Measured, not
+        // supposed: the wiring test's child runs at `warn` for exactly this reason.
+        let epoch = feature_epoch();
+        crate::log_info!(
+            "recovery: this run authorizes device feature sets under epoch {epoch}; \
+             nothing writes one in this phase, so every device is at the Claude floor \
+             until a phone re-advertises to a daemon that records it"
+        );
 
         match self.db.unresolved_answer_claims().await {
             Ok(claims) if !claims.is_empty() => {
@@ -788,7 +2052,10 @@ impl Daemon {
             Err(err) => crate::log_error!("recovery: could not settle send_text claims: {err:#}"),
         }
 
-        match self.db.list_pending_approvals().await {
+        // **Whether the cards are back, which is what the answer recovery below depends
+        // on.** A read failure is not information: see the comment at the end of this
+        // function.
+        let cards_are_back = match self.db.list_pending_approvals().await {
             Ok(rows) if !rows.is_empty() => {
                 // Counted up front, before the state lock is taken.
                 //
@@ -824,10 +2091,24 @@ impl Daemon {
                 // Resolved before the lock, because naming a run reads the
                 // database and the lock below admits no awaits.
                 let mut labels: HashMap<String, String> = HashMap::new();
+                // The card's agent, resolved here for the same reason the label
+                // is: `blocked_runs` reads it under a lock that admits no awaits.
+                // A row whose session has since gone is dropped rather than
+                // guessed — a recovered card counted under the wrong agent would
+                // be a doorbell authorized to devices that cannot open it, which
+                // is the failure the agent-scoped count exists to prevent.
+                let mut agents: HashMap<String, protocol::agent::AgentKind> = HashMap::new();
                 for row in &rows {
                     if !labels.contains_key(&row.session_uid) {
                         let label = self.effective_project_label(&row.session_uid).await;
                         labels.insert(row.session_uid.clone(), label);
+                    }
+                    if !agents.contains_key(&row.session_uid) {
+                        if let Ok(Some(session)) =
+                            self.db.get_session(row.session_uid.clone()).await
+                        {
+                            agents.insert(row.session_uid.clone(), session.agent);
+                        }
                     }
                 }
 
@@ -838,6 +2119,15 @@ impl Daemon {
                         crate::log_error!(
                             "recovery: dropping an undecodable pending card for {}",
                             row.request_id
+                        );
+                        continue;
+                    };
+                    let Some(agent) = agents.get(&row.session_uid).cloned() else {
+                        crate::log_error!(
+                            "recovery: dropping a pending card for {} whose run is gone; its \
+                             agent cannot be known, and a card counted under the wrong one \
+                             rings phones that cannot open it",
+                            row.session_uid
                         );
                         continue;
                     };
@@ -863,6 +2153,7 @@ impl Daemon {
                                 .get(&row.session_uid)
                                 .cloned()
                                 .unwrap_or_default(),
+                            agent,
                             created_ms: row.created_ms,
                             responder: None,
                             claimed: false,
@@ -880,10 +2171,60 @@ impl Daemon {
                     "recovery: {restored} approval card(s) restored; each is re-checked against \
                      the pane before it can be answered"
                 );
+                true
             }
-            Ok(_) => {}
-            Err(err) => crate::log_error!("recovery: could not read pending approvals: {err:#}"),
+            Ok(_) => true,
+            Err(err) => {
+                crate::log_error!("recovery: could not read pending approvals: {err:#}");
+                false
+            }
+        };
+
+        // **Last, and only if the cards are actually back.**
+        //
+        // A phone answer's terminal retires its card, and retirement claims the card by
+        // removing it from `inner.pending` — so this running before the restore above
+        // would find nothing to claim, file no resolution, and leave behind exactly the
+        // ghost it exists to prevent: a card the phone can see and every tap refuses.
+        //
+        // A restore that FAILED is the same hazard wearing a different hat, and it is
+        // worse because nothing about it looks wrong. With the read broken there is no
+        // card in memory to claim, so every outstanding answer retires as `AlreadyGone`
+        // and settles its ledger row alone — the claim goes terminal while the DURABLE
+        // card row, which the failed read never reached, is untouched. The next healthy
+        // start restores that row onto a phone beside a terminal claim, and no terminal
+        // will ever retire it: the resolution it earned was filed against a card that
+        // was not there.
+        //
+        // So a read failure decides nothing. The `applying` row survives restarts
+        // precisely so a start that CAN see the cards deals with it, and that start does
+        // the whole job in one piece.
+        if cards_are_back {
+            self.recover_codex_answers().await;
+        } else {
+            crate::log_warn!(
+                "recovery: the pending cards could not be read, so no in-flight answer was \
+                 made terminal; their claims stay live for the next start, which is the \
+                 only one that can retire the cards beside them"
+            );
         }
+        // **The other actuating verb, and it is NOT behind that gate.**
+        //
+        // The whole reason the answer recovery waits for the cards is that settling an
+        // answer retires a card, and retiring a card the restore never read files a
+        // resolution against something that is not there. An interrupt has no card:
+        // there is nothing beside the ledger row to retire, and nothing a failed card
+        // read could make this get wrong.
+        //
+        // Standing inside that gate was therefore a hazard for free. A start whose
+        // pending-approval read failed left every in-flight interrupt `applying`, so
+        // the phone that asked for the stop was told the outcome was unknowable at the
+        // next start instead of this one — and in the meantime the id could not be
+        // reused. The failure that kept it there had nothing to do with interrupts.
+        self.recover_codex_interrupts().await;
+        // The third kind, and it needs nothing of the card ordering above for the same
+        // reason the interrupt does not: there is no card beside the row.
+        self.recover_codex_composes().await;
     }
 
     /// Record a claimed-but-unsettled answer as a terminal unknown.
@@ -977,7 +2318,368 @@ impl Daemon {
         Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
 
-    /// Persist a fact and fan it out. Returns `None` if it was a duplicate.
+    /// The gate serializing one session's registrations — the acceptance and the
+    /// disconnect that undoes it. Same eviction rule as [`Daemon::publish_gate`]: an
+    /// entry nobody holds is dropped, so this map is bounded by live sessions rather
+    /// than by every session ever seen.
+    async fn registration_gate(&self, session_uid: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.registration_gates.lock().await;
+        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+        Arc::clone(gates.entry(session_uid.to_string()).or_default())
+    }
+
+    /// The gate serializing one session's actuating writes — a phone answer, a phone
+    /// interrupt — against the stake that hands the session to a replacement
+    /// registration. See [`Daemon::actuation_gates`] for what it is protecting and
+    /// why an epoch comparison could not.
+    ///
+    /// Same eviction rule as its two siblings: an entry nobody holds is dropped, so
+    /// the map is bounded by live sessions rather than by every session ever seen.
+    async fn actuation_gate(&self, session_uid: &str) -> Arc<tokio::sync::RwLock<()>> {
+        let mut gates = self.actuation_gates.lock().await;
+        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+        Arc::clone(gates.entry(session_uid.to_string()).or_default())
+    }
+
+    /// Move whatever link the slot holds into the park, **atomically**.
+    ///
+    /// One lock acquisition, so there is no instant in which the handle belongs to
+    /// neither. That is the point: parking is what records "this task's completion
+    /// is unproven", and a window between the two would be a window in which a
+    /// dropped transaction leaves nothing recorded at all.
+    ///
+    /// **The cells travel with the task; they are not read here.** What the link
+    /// knows is retained by [`Daemon::join_parked_codex_links`], once the task is
+    /// proven stopped — see [`Inner::retain_codex_carry`] for why that moment and
+    /// not this one.
+    async fn park_current_codex_link(&self, session_uid: &str) {
+        let mut inner = self.inner.lock().await;
+        if let Some(handle) = inner.codex_links.remove(session_uid) {
+            inner
+                .parked_codex_links
+                .entry(session_uid.to_string())
+                .or_default()
+                .push(OwnedLink::new(
+                    handle.task,
+                    Some(ParkedCarry {
+                        generation: handle.generation,
+                        carry: handle.carry,
+                    }),
+                ));
+        }
+    }
+
+    /// Abort everything parked for this session and wait, bounded, for it to be
+    /// gone. **Returns whether the park is now empty.**
+    ///
+    /// # Why the handles never leave the map
+    ///
+    /// The obvious shape — take the list out, await each join, put the survivors
+    /// back — has a hole: a transaction dropped mid-await drops the handles it is
+    /// holding, so their tasks are aborted but their *unproven completion* is no
+    /// longer recorded anywhere. The next transaction then sees an empty park and
+    /// installs a second observer beside a task that may still be running.
+    ///
+    /// So nothing is ever removed except on proof. The handles stay owned by
+    /// `Inner` throughout; each turn aborts them and drops only those reporting
+    /// `is_finished`. A cancelled transaction changes nothing — the park is exactly
+    /// as it was, and the next turn tries again.
+    ///
+    /// A survivor is a task still running under this session's uid. Installing a
+    /// link beside it would put two observers on one timeline, so a uid with
+    /// anything parked gets no new link until this returns true.
+    ///
+    /// **And it is where a departing link's memory is taken**, in the same lock
+    /// acquisition that proves the task stopped — see [`Inner::retain_codex_carry`].
+    async fn join_parked_codex_links(self: &Arc<Self>, session: &SessionKey) -> bool {
+        let deadline = std::time::Instant::now() + CODEX_LINK_STOP_BUDGET;
+        loop {
+            // **Settled outside the lock**: an aborted link's open answers are made
+            // terminal (claim indeterminate, card retired) here rather than by the
+            // task, which an abort stops before its own teardown can run. Only a link
+            // that was installed ever receives an answer — the answer path resolves
+            // through the installed handle — and an installed link parks with its
+            // carry, so its ledger is exactly the one reachable through `retain`.
+            let (remaining, empty, to_settle) = {
+                let mut inner = self.inner.lock().await;
+                let Some(parked) = inner.parked_codex_links.get_mut(&session.uid) else {
+                    return true;
+                };
+                // Dropped ONLY on proof. A finished task's guard aborts a corpse,
+                // which is a no-op. **A dropped guard's cells are read on the way
+                // out**, oldest first, so a session that parked twice is left with
+                // what its newest link knew.
+                let mut stopped = Vec::new();
+                parked.retain_mut(|link| {
+                    if !link.is_finished() {
+                        return true;
+                    }
+                    stopped.extend(link.retain.take());
+                    false
+                });
+                let empty = parked.is_empty();
+                if !empty {
+                    for link in parked.iter() {
+                        link.abort();
+                    }
+                }
+                let remaining = parked.len();
+                // **Both ledgers go with the carry**, and both are captured before
+                // retention consumes the parked cell. An interrupt is settled here for
+                // the same reason an answer is — the abort stopped the task before its
+                // own teardown could speak for what it wrote — and the two must be
+                // taken together, because a link holding one of each would otherwise
+                // leave whichever one this loop forgot.
+                let to_settle: Vec<(
+                    crate::codex_link::OpenAnswers,
+                    crate::codex_link::OpenInterrupts,
+                    crate::codex_link::OpenComposes,
+                )> = stopped
+                    .iter()
+                    .map(|parked| {
+                        (
+                            parked.carry.open_answers(),
+                            parked.carry.open_interrupts(),
+                            parked.carry.open_composes(),
+                        )
+                    })
+                    .collect();
+                for parked in stopped {
+                    inner.retain_codex_carry(&session.uid, parked);
+                }
+                if empty {
+                    inner.parked_codex_links.remove(&session.uid);
+                }
+                (remaining, empty, to_settle)
+            };
+            for (answers, interrupts, composes) in &to_settle {
+                crate::codex_link::settle_open_answers(
+                    self,
+                    session,
+                    answers,
+                    "the link to this Codex session was aborted while this answer was in flight",
+                )
+                .await;
+                crate::codex_link::settle_open_interrupts(
+                    self,
+                    session,
+                    interrupts,
+                    "the link to this Codex session was aborted while this request to stop \
+                     the turn was in flight",
+                )
+                .await;
+                // **The third kind, and the abort path is the one that most needs it.** A
+                // link stopped by an abort never runs its own teardown, so this is the only
+                // place that can promise a written compose a terminal — and a claim left
+                // `applying` is an id no phone can ever re-ask under while the person who
+                // asked is told nothing at all.
+                crate::codex_link::settle_open_composes(
+                    self,
+                    session,
+                    composes,
+                    "the link to this Codex session was aborted while this message was in \
+                     flight",
+                )
+                .await;
+            }
+            if empty {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                crate::log_warn!(
+                    "{remaining} codex link(s) for {} are still running after an abort; \
+                     no new link will be installed until they stop",
+                    session.name
+                );
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// **Install the links registrations could not** (A12.2).
+    ///
+    /// The recovery path for [`Inner::stalled_codex_installs`]. A registration whose
+    /// park would not clear inside [`CODEX_LINK_STOP_BUDGET`] is accepted with no
+    /// link installed — Live in the fleet, observed by nothing — and no other part
+    /// of the daemon would ever build one: `codex_link::run` never returns on its
+    /// own, so a link never vacates the slot, and the only other builder is the next
+    /// registration for that uid. This is the "later transaction" that arm's log
+    /// line promises.
+    ///
+    /// Driven from a ticker rather than from `unregister_supervisor`, which is the
+    /// other place a stalled park is joined: a disconnect is the one case that
+    /// already self-heals, because the supervisor that comes back registers again.
+    ///
+    /// A no-op — one uncontended lock — while nothing is owed, which in production
+    /// today is always.
+    ///
+    /// **Sequential, and one stubborn uid DOES delay the ones behind it.** The loop
+    /// below takes each session in turn and each can pay the full
+    /// [`CODEX_LINK_STOP_BUDGET`] joining a survivor that will not stop, so a second
+    /// owed uid waits that out before it is even looked at. That is bounded
+    /// operational latency — the next tick asks again, and nothing is lost — not a
+    /// missed install; but it is not the independence an earlier version of this
+    /// sentence claimed. Left sequential deliberately: concurrent passes would take
+    /// several registration gates at once, and the gate order is what serializes
+    /// this against the registrations and disconnects it must not race.
+    pub async fn recover_stalled_codex_links(self: &Arc<Self>) {
+        let owed: Vec<String> = self
+            .inner
+            .lock()
+            .await
+            .stalled_codex_installs
+            .keys()
+            .cloned()
+            .collect();
+        for session_uid in owed {
+            self.recover_stalled_codex_link(&session_uid).await;
+        }
+    }
+
+    /// One session's owed install: **the tail of the transaction that could not
+    /// finish it, run again** — the same gate, taken in the same order, joining the
+    /// same park before anything is built, seeding the same two cells and installing
+    /// through the same ownership check.
+    ///
+    /// Deliberately not re-derived. Every invariant here belongs to the
+    /// registration, and a second copy of them is a second thing to keep in step.
+    /// The ownership question in particular is asked exactly once, by
+    /// [`Inner::spawn_codex_link_if_owner`], under the lock that guards the map — so
+    /// an entry for a registration the session has moved past spawns nothing, and
+    /// recovery needs no rule of its own about when it is too late.
+    async fn recover_stalled_codex_link(self: &Arc<Self>, session_uid: &str) {
+        // Taken before `inner` on every path, as everything touching these maps is,
+        // and held across the join for the same reason the registration holds it:
+        // this is a park → seed → spawn → install transaction, and no registration
+        // for this uid may be inside it. It is also what serializes this against the
+        // disconnect that cancels what is owed.
+        let gate = self.registration_gate(session_uid).await;
+        let _sequence = gate.lock().await;
+        // Read under the gate, not before it: between the sweep listing the uids and
+        // reaching this one, a registration or a disconnect may have settled the
+        // question already.
+        let Some(owed) = self
+            .inner
+            .lock()
+            .await
+            .stalled_codex_installs
+            .get(session_uid)
+            .cloned()
+        else {
+            return;
+        };
+        // The reason there was nothing to install, asked again. Bounded exactly as
+        // it is in the registration, and destroying nothing that was not already
+        // aborted. A survivor still running leaves the entry where it is; the next
+        // tick asks again.
+        if !self.join_parked_codex_links(&owed.session).await {
+            return;
+        }
+
+        let StalledCodexInstall {
+            session,
+            epoch,
+            link,
+        } = owed;
+        let mut inner = self.inner.lock().await;
+        // Minted, seeded, spawned and installed under one lock with no await
+        // between them — see the registration's copy of this for why the spawn is a
+        // closure the install may decline to call.
+        let presence = crate::codex_link::LinkPresence::new();
+        let carry = crate::codex_link::LinkCarry::new();
+        if let Some(resumed) = inner.seed_codex_carry(&session.uid, &link, &carry) {
+            crate::log_info!(
+                "codex link for {} at epoch {epoch}: resuming {resumed}, where the \
+                 previous link left the session, rather than the registration's claim \
+                 ({})",
+                session.name,
+                link.thread_id.as_deref().unwrap_or("none")
+            );
+        }
+        inner.seed_codex_presence(&session.uid, &link, &presence);
+        let generation = link.generation;
+        let (answers, asks) = crate::codex_link::answer_channel();
+        let (interrupts, stops) = crate::codex_link::interrupt_channel();
+        let (composes, words) = crate::codex_link::compose_channel();
+        let outcome = inner.spawn_codex_link_if_owner(
+            &session.uid,
+            epoch,
+            generation,
+            LinkCells {
+                presence: presence.clone(),
+                carry: carry.clone(),
+                answers,
+                interrupts,
+                composes,
+            },
+            || {
+                tokio::spawn(crate::codex_link::run(
+                    Arc::clone(self),
+                    session.clone(),
+                    link,
+                    presence,
+                    carry,
+                    asks,
+                    stops,
+                    words,
+                ))
+            },
+        );
+        let orphan = match outcome {
+            Err(owner) => {
+                let now = owner
+                    .map(|e| format!("now epoch {e}"))
+                    .unwrap_or_else(|| "now unowned".to_string());
+                crate::log_debug!(
+                    "dropping the codex link owed to {} at epoch {epoch}: the session \
+                     changed hands ({now}) while the previous link was refusing to stop, \
+                     and the registration that owns it now has run this same transaction",
+                    session.name
+                );
+                None
+            }
+            Ok(orphan) => {
+                if orphan.is_none() {
+                    // **Says what it knows, which is less than it used to claim.**
+                    // The condition here is that a handle landed in the slot. The
+                    // task it names has not dialled the socket, let alone
+                    // handshaked, resumed, or had a resume ACCEPTED — so "the
+                    // session is observed again", which this line said, was a claim
+                    // about a thread binding made from the presence of a map entry.
+                    // Whether the link goes on to bind the session's ACTIVE thread
+                    // is the open half of A12.2 (see the ledger): the head it will
+                    // chase comes from predecessor carry and the registration's
+                    // stale hint, and neither is the broker's head.
+                    crate::log_info!(
+                        "codex link for {} installed at epoch {epoch}: the link that \
+                         blocked its registration has stopped, so this session has an \
+                         observer again — which thread it binds is the link's own \
+                         business and is not settled here",
+                        session.name
+                    );
+                }
+                orphan
+            }
+        };
+        // **Owed no longer, on both arms.** It was either installed or it is an
+        // answer to a question the session has moved past — and an entry kept for a
+        // dead epoch is a sweep that never stops asking.
+        inner.stalled_codex_installs.remove(&session.uid);
+        if let Some(orphan) = orphan {
+            // Parked rather than retired in hand, and with nothing to retain, for
+            // the reasons the registration gives at its own copy of this.
+            inner
+                .parked_codex_links
+                .entry(session.uid.clone())
+                .or_default()
+                .push(OwnedLink::new(orphan, None));
+            drop(inner);
+            let _ = self.join_parked_codex_links(&session).await;
+        }
+    }
+
+    /// Persist a fact and fan it out. Returns `None` if it was a duplicate.    /// Persist a fact and fan it out. Returns `None` if it was a duplicate.    /// Persist a fact and fan it out. Returns `None` if it was a duplicate.
     pub async fn ingest(&self, pending: PendingEvent) -> Result<Option<Event>> {
         let mut pending = pending;
         self.truncate_payload(&mut pending);
@@ -1171,6 +2873,53 @@ impl Daemon {
         post: &HookPost,
         input: &HookInput,
     ) -> Result<HookDecision> {
+        // **Refused before the card is built, let alone written**, and this is
+        // the one of the three [`Daemon::shared_ledgers_admit`] refusals that
+        // does NOT lift with the approval observer.
+        //
+        // The refusal was scaffolding for the shared `pending_approvals` table,
+        // and that table is now split: a Codex card goes to
+        // `codex_pending_approvals`, which a rolled-back v0.6.0 daemon has never
+        // heard of. But this path is not the Codex producer. It is the **Claude
+        // hook**, and a `PermissionRequest` posted against a Codex uid is not a
+        // Codex approval arriving by another road — it is a hook this daemon
+        // deliberately does not install for Codex, so a post carrying one means
+        // the uid is wrong or the payload is somebody else's. Carding it would
+        // mint a Claude-shaped card with a Claude `tool_use_id` for a run whose
+        // real approvals arrive as typed app-server requests, and then two cards
+        // would answer for one question. The real producer is
+        // [`Daemon::raise_codex_approval`], reached from the link's approval
+        // observer, and it writes the scoped table directly.
+        //
+        // So the gate stays and the *reason* changed. It is stated against the
+        // agent rather than against the ledger, because the ledger argument is
+        // the one that expired.
+        //
+        // Passthrough, not a denial, and for the same reason the deleted-session
+        // arm above passes through: this daemon is declining to *observe* the
+        // request, and an observer's refusal must never be mistaken for the
+        // human's answer. Nothing else on this path is reached, which is what
+        // also makes `bind_prompt_identity` — the second writer of
+        // `pending_approvals` — unreachable for a non-Claude run: it is only ever
+        // called from the task spawned below, for an entry inserted below.
+        match self.db.get_session(session.uid.clone()).await? {
+            Some(row) if !row.agent.is_claude() => {
+                crate::log_info!(
+                    "dropping a PermissionRequest for {}: it is a {} session, whose approvals \
+                     reach this daemon as app-server requests on its control link, not as \
+                     Claude hooks",
+                    session.uid,
+                    row.agent.as_str()
+                );
+                return Ok(HookDecision::passthrough());
+            }
+            // Absent means the row was deleted between `ensure_session` and here.
+            // There is no non-Claude run to protect and no agent to read; the
+            // existing session-existence guards inside the writers below refuse
+            // it on their own, exactly as they did before this gate.
+            _ => {}
+        }
+
         let tool_name = input.tool_name.clone().unwrap_or_else(|| "unknown".into());
         let tool_input = input.tool_input.clone().unwrap_or(serde_json::Value::Null);
         let display_text = approval_payload_text(&tool_name, &tool_input);
@@ -1267,6 +3016,19 @@ impl Daemon {
 
         let created_ms = protocol::time::now_unix_ms();
         let label = self.effective_project_label(&session.uid).await;
+        // Read here, beside the label, and for the same reason: it is needed
+        // under a lock that admits no awaits. Read rather than assumed Claude —
+        // this path is Claude's today, but a card that lied about its agent
+        // would misdirect every doorbell that counts it, and the value is one
+        // row read away.
+        let agent = self
+            .db
+            .get_session(session.uid.clone())
+            .await
+            .ok()
+            .flatten()
+            .map(|row| row.agent)
+            .unwrap_or(protocol::agent::AgentKind::Claude);
         {
             let mut inner = self.inner.lock().await;
             inner.pending.insert(
@@ -1275,6 +3037,7 @@ impl Daemon {
                     card: card.clone(),
                     session: session.clone(),
                     project_label: label.clone(),
+                    agent,
                     created_ms,
                     responder: responder_tx,
                     claimed: false,
@@ -1350,6 +3113,10 @@ impl Daemon {
                     // ringing, not the moment of admission.
                     blocked_sessions: 0,
                     session_uid: session.uid.clone(),
+                    // A `PermissionRequest` is a Claude hook. Codex approval
+                    // cards arrive in Phase 3 through the app-server's request
+                    // families, and will compose their own hint.
+                    agent: protocol::agent::AgentKind::Claude,
                 },
                 ticket,
                 // A pending decision outlives other tools' progress; only the
@@ -1628,6 +3395,57 @@ impl Daemon {
     /// banner. Closing the sliver itself needs client delivery
     /// acknowledgements — a protocol change deliberately not taken for a
     /// doorbell whose whole content is four words and a count.
+    ///
+    /// # The grace is also a best-effort CANCELLATION window, and it is not
+    /// coordinated with anything
+    ///
+    /// A cancel that arrives after `GRACE` has elapsed does not stop the push: the
+    /// task has already woken, taken its exclusion snapshot and sent. Nothing waits
+    /// for a cancel that might be in flight, and nothing is going to — the failure
+    /// direction is one stale doorbell, and the coordination that would close it
+    /// (making the dispatcher wait on a signal from a control link that may not
+    /// exist) trades a bounded, occasional annoyance for a completion that can be
+    /// held up indefinitely.
+    ///
+    /// The two things that could plausibly land late were **measured** rather than
+    /// argued about, on this machine, against the fixture workload:
+    ///
+    ///   * [`Daemon::note_codex_turn_running`] via the store's novelty read
+    ///     ([`crate::store::Store::turn_terminal_filed`]) — a point query on the
+    ///     unique dedup index, over WAL, on the DB executor: **p50 24 µs, p99 36 µs,
+    ///     worst single sample 0.39 ms** over a 2,000-event log, and **p99 46 µs**
+    ///     with eight tasks writing concurrently. Three to four orders of magnitude
+    ///     inside 400 ms;
+    ///   * a recovery's serial event writes, which is what keeps the control link
+    ///     from reading a `turn/started` already queued on its socket: **0.094
+    ///     ms/event**, so the grace is exhausted only by a single `thread/resume`
+    ///     answer describing more than ~4,250 facts.
+    ///
+    /// The cancel is issued before those writes for exactly this reason — see
+    /// `codex_link::Connection::attach_from_seed`, where the ordering is pinned by a
+    /// test that fails every write and still expects the cancel.
+    ///
+    /// If a resume answer that large is ever observed, the fix is to bound the
+    /// recovery, not to build a rendezvous around the doorbell.
+    ///
+    /// **What is still AHEAD of the cancel, stated rather than implied.** The novelty
+    /// loop stops at the first turn the log holds no terminal for, so the reads it
+    /// makes are no longer bounded by the number of running turns the answer reports —
+    /// but two costs remain in front of it, and neither is a constant:
+    ///
+    ///   * **parsing the answer**, which must happen before anything can know a turn is
+    ///     running at all. A single notification reached 4.0 MB on the live gate and the
+    ///     frame limit is far above that, so this is the dominant term and it is
+    ///     irreducible: the evidence the cancel acts on is inside the thing being
+    ///     parsed;
+    ///   * **the reads for turns the answer describes running that the log has already
+    ///     settled**, which come before the first novel one. Each is the 24–36 µs point
+    ///     query measured above, so a stale prefix of even a hundred turns is ~4 ms.
+    ///
+    /// Both are inside the grace by orders of magnitude at every size the wire has been
+    /// measured at, and both scale with the answer rather than with anything this
+    /// daemon controls — which is the same honest bound the recovery writes have, and
+    /// has the same honest remedy if an answer ever arrives large enough to matter.
     fn dispatch_push(
         &self,
         session_uid: String,
@@ -1687,7 +3505,11 @@ impl Daemon {
                         return;
                     }
                 }
-                blocked_runs(&held)
+                // The ringing run's own agent, which is also the agent
+                // `describing` will keep and `recipients` will authorize
+                // against. One agent through all three, so the sentence, the
+                // count and the audience cannot disagree.
+                blocked_runs(&held, &hint.agent)
             };
             // The subject's name comes out of the same snapshot as the count —
             // see `PushHint::describing` and `PendingApproval::project_label`.
@@ -1695,7 +3517,24 @@ impl Daemon {
                 [(_, label)] => Some(label.clone()),
                 _ => None,
             };
-            sender.send(&hint.describing(blocked.len(), named), &excluded);
+            let described = hint.describing(blocked.len(), named);
+            // **The exclusion list is one thing: who already knows.** It carries
+            // the devices whose live socket wrote this event to them during the
+            // grace, and nothing else — a doorbell must not ring a phone that is
+            // already looking at the fact.
+            //
+            // **Per-device authorization is not here, and deliberately not.** Which
+            // agents a device can render is decided inside `send`, in `recipients`,
+            // from the same row read that produces the token — one read, so a
+            // registration cannot be assembled from two. Expressing it here as a
+            // second exclusion list would be a copy of that decision taken a
+            // database read earlier, and the two senders would each need their own.
+            //
+            // **The subject is the one `describing` settled on**, not the one that
+            // rang: a doorbell re-described to speak for the fleet's decisions is
+            // authorized as that deck, so the audience can never be narrowed to
+            // devices that cannot render what the alert actually says.
+            sender.send(&described, &excluded);
         });
     }
 
@@ -1776,6 +3615,10 @@ impl Daemon {
                 // fleet as it is when the doorbell actually goes.
                 blocked_sessions: 0,
                 session_uid: session.uid.clone(),
+                // The hook path is Claude's, and only Claude's: Codex carries no
+                // hooks at all (`turn/completed` is its completion signal), so a
+                // frame reaching here is a Claude run by construction.
+                agent: protocol::agent::AgentKind::Claude,
             },
             ticket,
             // **A decision outlives other tools' progress wherever it was
@@ -1793,6 +3636,646 @@ impl Daemon {
                 crate::apns::PushKind::Approval => input.prompt_id.clone().map(CardKey::Prompt),
                 _ => None,
             },
+        );
+    }
+
+    /// **A Codex turn is running, which is the run demonstrably moving.**
+    ///
+    /// Codex's analogue of Claude's `Stop`/`PreToolUse` progress: the hooks Claude
+    /// records movement from do not exist here, so the movement has to be read off
+    /// the wire.
+    ///
+    /// **What it buys is the cancellation, not a notification.** A turn ending
+    /// admits a quiet-state doorbell that then waits out its dispatch grace; if the
+    /// next turn *starts* inside that window, the ticket describes a run that is
+    /// working again, and the ring would announce a completion the reader can no
+    /// longer act on. Without this, only a second turn *ending* inside the grace
+    /// cancelled the first — a turn that merely started did not, and the doorbell
+    /// went out while the agent was mid-turn.
+    ///
+    /// # Two witnesses, and why recovery is allowed to be one of them
+    ///
+    /// The wire says a turn is running in two ways, and both call this:
+    ///
+    ///   * a live `turn/started` frame in the **measured shape the real wire always
+    ///     carries** — the flat `threadId` naming the thread this connection is
+    ///     bound to, plus the turn body and running status every captured frame has.
+    ///     `crate::codex_link::Connection::note_turn_start` is where that is
+    ///     enforced and where the measurement is written down; the visit filter
+    ///     admits strictly more than this, because it is answering a different
+    ///     question;
+    ///   * a `thread/resume` answer that describes a turn as still running **and
+    ///     that this daemon has no terminal filed for** — the only witness a link
+    ///     that was **disconnected** when the turn began can ever have, since
+    ///     `turn/started` is broadcast once and never replayed. An answer that
+    ///     rewinds a turn already watched finishing is a stale snapshot, not a
+    ///     witness, and it cancels nothing.
+    ///
+    /// The second is a *recovery* path, and the completion doorbell this cancels is
+    /// deliberately live-only ([`Daemon::push_codex_turn_complete`]). That is not
+    /// an inconsistency but the same rule read in the right direction: recovery may
+    /// never *ring*, because a re-attach is not news; recovery may always
+    /// **silence**, because the failure direction of a cancellation is a doorbell
+    /// that does not sound. A drop-and-reconnect straddling the dispatch grace is
+    /// exactly the case where the daemon learns the run is mid-turn from the only
+    /// evidence there is, and ringing anyway would announce a completion the reader
+    /// can no longer act on.
+    pub(crate) fn note_codex_turn_running(&self, session_uid: &str) {
+        self.push_gate.note_progress(session_uid);
+    }
+
+    /// **The operator started a new thread on this session, which is the person the
+    /// doorbell is for, at the machine** (round-9 F4).
+    ///
+    /// The same cancellation as [`Daemon::note_codex_turn_running`] and for the same
+    /// reason, reached by the one movement that is not a turn. A completion doorbell
+    /// admitted moments ago is waiting out its dispatch grace; a `/new` inside that
+    /// window means the reader is sitting in front of the machine having already
+    /// moved on, so the quiet state the ticket describes is over whatever the new
+    /// thread's turn is doing.
+    ///
+    /// **It is the switch that is the evidence, not the new thread's turn.** That
+    /// distinction is measured rather than tidy: `fixtures/codex/thread-switch.jsonl`
+    /// shows the old subscription receiving `thread/started` for the new thread and
+    /// then, when a turn begins on it, only `thread/status/changed` — the
+    /// `turn/started` this daemon reads movement from goes to the TUI's connection
+    /// alone. So a link waiting to be told the new thread is busy would wait for a
+    /// frame it is measurably never sent, and the stale "Finished a turn" push would
+    /// go out while the agent is demonstrably mid-turn. Reading
+    /// `thread/status/changed` into turn state instead would be building on
+    /// semantics nobody has measured; the switch itself is a frame this build already
+    /// understands, already acts on, and already knows is broadcast to every
+    /// connection.
+    ///
+    /// Live-only by the same call-site discipline the doorbell uses: the one caller
+    /// is `codex_link`'s switch ingest, reached only from a frame read off the wire.
+    /// A recovery may silence and may not ring, which is why a silencing path needs
+    /// no provenance flag of its own.
+    pub(crate) fn note_codex_switch(&self, session_uid: &str) {
+        self.push_gate.note_progress(session_uid);
+    }
+
+    /// **Raise a Codex approval card, through the machinery that already raises
+    /// Claude's.**
+    ///
+    /// The same `ApprovalCard`, the same `inner.pending` map keyed by
+    /// `(session_uid, request_id)`, the same `EventKind::ApprovalRequest` event,
+    /// the same `PushKind::Approval` doorbell. Four things differ, and each is
+    /// a measured difference rather than a style choice:
+    ///
+    ///   * the card goes to `codex_pending_approvals`, because a rolled-back
+    ///     v0.6.0 daemon enumerates and deletes rows in the shared table without
+    ///     ever walking a session row (see `Store::create_schema`);
+    ///   * `agent` is Codex on the card and on the hint, so `blocked_runs`
+    ///     counts it only for a Codex doorbell and `push_queue::recipients`
+    ///     authorizes it only to devices that advertise Codex;
+    ///   * there is no responder and no prompt fingerprint. Nothing is blocked
+    ///     on this daemon's answer — the human at the TUI is being asked — and
+    ///     there is no pane this daemon can type into, which is why
+    ///     `identity_bound` is false and stays false;
+    ///   * the row and the event are **one commit**. Claude's card is a
+    ///     projection of a fact a hook is still blocking on, so losing it to a
+    ///     restart loses nothing a restart had not already lost. A Codex card
+    ///     has no responder and nothing waiting: durability is the entire thing
+    ///     it is for, and a half-written one is either a fact with no card or a
+    ///     card with no fact. See [`crate::store::Store::raise_codex_pending_approval`].
+    ///
+    /// Returns whether a card is now open for this request, so a caller can
+    /// remember it. A re-delivery of an approval already carded answers `true`
+    /// without ringing a second time: the event dedups on its
+    /// `source_event_id`, and the doorbell hangs off a filed event exactly as
+    /// the turn-completion one does. **Every failure answers `false` and leaves
+    /// nothing behind** — no event, no in-memory card, no ring — because an
+    /// approval this daemon cannot mirror honestly is one the operator is still
+    /// being asked at the keyboard.
+    pub(crate) async fn raise_codex_approval(
+        &self,
+        session: &SessionKey,
+        card: ApprovalCard,
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        family: &str,
+    ) -> bool {
+        let request_id = card.request_id.clone();
+        let generation = card.generation;
+        let created_ms = protocol::time::now_unix_ms();
+
+        // The fact the card stands behind. It is committed with the row rather
+        // than before it — see the commit boundary below — and a `None` back
+        // from that commit is a re-delivery: the same item, the same derived
+        // request id, the same `perm:` source id the first sighting filed.
+        let payload = serde_json::json!({ "card": card });
+
+        // **The aggregate bound, checked on the serialised card against the
+        // limit that would destroy it.**
+        //
+        // [`Daemon::truncate_payload`] does not *trim* an oversized payload, it
+        // REPLACES it with a preview object — and a phone handed that decodes no
+        // card at all. `codex_approval`'s per-field bounds keep this rare, and
+        // they cannot make it impossible: nothing on the wire bounds a path, an
+        // execpolicy amendment, or a field a later codex adds, and every field
+        // rides the payload twice because `display_text` is `tool_input`
+        // stringified. So the *total* is asked here, where the real limit lives,
+        // and an approval that cannot be carded honestly is not carded at all.
+        //
+        // Refusing loudly is the right failure: the question is being asked at
+        // the keyboard and is still answerable there, which is the pre-3a status
+        // quo. A silently dead card is not.
+        let encoded_payload = payload.to_string();
+        if encoded_payload.len() > self.config.max_payload_bytes {
+            crate::log_error!(
+                "refusing to card the Codex approval {request_id} for {}: the event would be \
+                 {} bytes against a {}-byte payload limit, and a payload the daemon replaces \
+                 is a card the phone cannot decode. The request stands and is answerable at \
+                 the keyboard.",
+                session.name,
+                encoded_payload.len(),
+                self.config.max_payload_bytes
+            );
+            return false;
+        }
+        // **The turn this card belongs to, on the envelope, because a Stop has to
+        // name one.**
+        //
+        // `ClientMessage::Interrupt` requires a `turn_id`. Without this the phone's
+        // only source for one was the envelope of some *earlier* event — the
+        // `tool_call` an `item/started` files — and "the approval always follows its
+        // item's start" is an ordering, not a contract: a link that rebound
+        // mid-turn cards a command it never saw start. So the card's own request
+        // says which turn it is about, on the same envelope field every other Codex
+        // event already carries it on.
+        //
+        // Read from the approval, never from the link's `RunningTurn`. The
+        // `*/requestApproval` frame declares `turnId` required in both measured
+        // releases and `codex_approval::Approval::read` refuses a frame without one
+        // (`Refusal::Malformed`), so the turn a card is about is a fact the card was
+        // built from; the link's belief about what is running is an inference, and
+        // it is empty on exactly the rebind case above. `None` is therefore
+        // unreachable from the one production caller — it is here because an empty
+        // string is not a turn any interrupt could name, and a `Some("")` on the
+        // wire would hand the phone a Stop button that cannot work.
+        let pending =
+            PendingEvent::new(session, EventKind::ApprovalRequest, payload, Source::Daemon)
+                .with_source_event_id(format!("perm:{request_id}"))
+                .with_turn_id((!turn_id.is_empty()).then(|| turn_id.to_string()));
+
+        let encoded = match serde_json::to_string(&card) {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                crate::log_error!("could not encode the Codex card for {request_id}: {err:#}");
+                return false;
+            }
+        };
+        let row = crate::store::CodexPendingApprovalRow {
+            session_uid: session.uid.clone(),
+            session_id: session.name.clone(),
+            request_id: request_id.clone(),
+            card: encoded,
+            generation,
+            created_ms,
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            item_id: item_id.to_string(),
+            family: family.to_string(),
+        };
+
+        // **One commit boundary, and nothing is exposed before it holds.**
+        //
+        // The event used to be filed first and the row written after, which made
+        // three failures reachable and all three silent. A constraint refusal —
+        // the unique index catching a broken derivation — left the request event
+        // filed with no card and no terminal that could ever retire it. An
+        // ordinary write failure returned success and rang the phone for a card
+        // a restart would forget. And the reverse ordering would have lost the
+        // fact instead of the card.
+        //
+        // So the row and the event share a transaction, and **every** failure of
+        // it is answered the same way: no event, no in-memory card, no ring, and
+        // a loud log. That is not a degraded mode — the request is being asked at
+        // the keyboard and is still answerable there, which is exactly where it
+        // was before this daemon observed anything.
+        //
+        // Published inside the gate for `ingest`'s reason: no later seq may
+        // overtake this one on the way to a socket.
+        let gate = self.publish_gate(&session.uid).await;
+        let raised = {
+            let _ordered = gate.lock().await;
+            let raised = self.db.raise_codex_pending_approval(row, pending).await;
+            if let Ok(crate::store::CodexCardRaise {
+                event: Some(event), ..
+            }) = &raised
+            {
+                let _ = self.events_tx.send(event.clone());
+            }
+            raised
+        };
+        let approval_event = match raised {
+            Ok(raise) if raise.is_open() => raise.event,
+            // The re-delivery carried a DIFFERENT question under the same item
+            // id. Refused loudly and the stored card stands: merging it would
+            // move the row and the in-memory card to the new content while the
+            // filed `ApprovalRequest` and every connected phone kept the old
+            // one — half a representation, changed with no event and no ring to
+            // say so. No capture has ever produced this, so there is nothing
+            // measured to reconcile it against.
+            Ok(crate::store::CodexCardRaise {
+                outcome: crate::store::CodexCardOutcome::ContentChanged,
+                ..
+            }) => {
+                crate::log_error!(
+                    "refusing a re-delivery of the Codex approval {request_id} for {}: item \
+                     {item_id} already holds a card for a DIFFERENT question. The card the \
+                     phone is holding stands, because changing it under a filed request \
+                     event would leave the two disagreeing. This shape is unmeasured.",
+                    session.name
+                );
+                return false;
+            }
+            // The run was deleted between the frame arriving and the card being
+            // filed. Neither half landed, so there is nothing to undo.
+            Ok(_) => {
+                crate::log_info!(
+                    "dropping Codex approval {request_id} for {}: the session was deleted \
+                     while it was in flight",
+                    session.name
+                );
+                return false;
+            }
+            Err(err) => {
+                crate::log_error!(
+                    "refusing the Codex approval {request_id} for {}: neither the card nor \
+                     the request event could be committed, so nothing is raised and nothing \
+                     rings. The request stands and is answerable at the keyboard: {err:#}",
+                    session.name
+                );
+                return false;
+            }
+        };
+
+        let label = self.effective_project_label(&session.uid).await;
+        {
+            let mut inner = self.inner.lock().await;
+            inner
+                .last_seen_ms
+                .insert(session.uid.clone(), protocol::time::now_unix_ms());
+            inner.pending.insert(
+                (session.uid.clone(), request_id.clone()),
+                PendingApproval {
+                    card,
+                    session: session.clone(),
+                    project_label: label.clone(),
+                    agent: protocol::agent::AgentKind::Codex,
+                    created_ms,
+                    // No hook is held open on a Codex approval: the app-server
+                    // asked the TUI, not this daemon, and nothing here is
+                    // blocking on an answer to hand back.
+                    responder: None,
+                    claimed: false,
+                    local_misses: 0,
+                    tool_ran: false,
+                    generation,
+                    // There is no prompt on a pane this daemon can fingerprint,
+                    // so remote actuation stays refused for the reason the field
+                    // exists rather than by a second rule.
+                    prompt: None,
+                },
+            );
+        }
+
+        // The doorbell hangs off the FILED event, and only a first sighting
+        // files one. A re-delivery after a reconnect is not a second question.
+        if let Some(event) = approval_event {
+            if let Some(ticket) = self.push_gate.admit_decision(&session.uid, &request_id) {
+                self.dispatch_push(
+                    session.uid.clone(),
+                    event.seq,
+                    PushHint {
+                        project_label: label,
+                        kind: crate::apns::PushKind::Approval,
+                        blocked_sessions: 0,
+                        session_uid: session.uid.clone(),
+                        // The ringing run's own agent, which is what
+                        // `describing` keeps and `recipients` authorizes
+                        // against. A Codex decision offered to a phone that
+                        // cannot render one is the failure this narrows away.
+                        agent: protocol::agent::AgentKind::Codex,
+                    },
+                    ticket,
+                    false,
+                    Some(CardKey::Request(request_id.clone())),
+                );
+            }
+        }
+        true
+    }
+
+    /// **Retire one Codex card, first terminal wins.**
+    ///
+    /// Claim by removal, exactly as [`Daemon::resolve_without_phone`] does: the
+    /// caller that takes the entry out of `inner.pending` owns the resolution,
+    /// so a `serverRequest/resolved` arriving *after* a `turn/completed
+    /// {interrupted}` already cleared the card finds nothing and overwrites
+    /// nothing. That ordering is not hypothetical — it is what the wire does,
+    /// measured in `fixtures/codex/interrupt.jsonl`, where the turn terminal is
+    /// frame 33 and the resolution is frame 34.
+    ///
+    /// **This claim is one of three guards, and it is not the durable one.**
+    /// Mutation-measured: removing it alone changes nothing, because the link's
+    /// own `outstanding` map has already forgotten the request, and removing
+    /// both of those still changes nothing, because the `resolved:{request_id}`
+    /// source id makes the second event a duplicate the log declines. Only
+    /// removing all three lets a second resolution be filed. The ordering
+    /// matters: the connection map is per-socket and dies with it, the claim is
+    /// per-process and dies with a restart, and the dedup key is in the log — so
+    /// the log is what still holds after a reconnect on a different connection,
+    /// which is exactly the case a re-delivered request produces.
+    ///
+    /// **It does not touch `answers`.** That table is one of the four a
+    /// rolled-back v0.6.0 daemon rewrites globally, and Codex's resolution
+    /// taxonomy does not fit `AnswerOutcome`'s `decision + resolved_by +
+    /// applied_via` shape anyway. [`protocol::ws::CodexResolution`] rides its
+    /// own event for both reasons at once.
+    ///
+    /// # The two durable halves are one commit, and a failure is retryable
+    ///
+    /// Deleting the row and filing the resolution were two writes with the claim
+    /// already given up between them, and both orderings lost something. A
+    /// failed delete followed by a filed resolution left a row recovery restores
+    /// — an already-answered question back on a phone after a restart, because
+    /// nothing writes a Codex row into `answers` and that is the only terminal
+    /// the recovery read knows how to ask about. A successful delete followed by
+    /// a failed append lost the card's only terminal.
+    ///
+    /// They now share a transaction, and the claim is **put back** when it
+    /// fails: the card is still open, still on the phone, and the next terminal
+    /// the wire produces — the item's own `item/completed`, the turn's, or the
+    /// `/new` sweep — retires it for real. Giving the claim away on a failed
+    /// write would make the first terminal both the winner and the loser.
+    ///
+    /// # Three answers, not two
+    ///
+    /// "There was no claim to take" and "the commit failed" are opposite facts
+    /// and were both `false`. A caller that cannot tell them apart cannot know
+    /// whether it still owes this card anything — and the one that could not,
+    /// [`Connection::retire_codex_cards`], threw away the wire mapping on both,
+    /// which is how a failed retirement quietly became a permanent one.
+    /// **Record the thread this session's control link has adopted.**
+    ///
+    /// The link is the only process that learns it: a registration is written before
+    /// the app-server has announced a thread, so the row's `codex_thread_id` stayed
+    /// empty for the whole life of every healthy Codex run and every reader that
+    /// went to the row rather than the live link saw a session on no thread at all.
+    ///
+    /// **Never fatal to the connection, and the OUTCOME is returned.** This is the
+    /// daemon writing down something it already knows, on a path whose real job is
+    /// serving the link's frames; a failed write costs the row its freshness and
+    /// costs the session nothing, so it must not be able to drop a connection. But
+    /// it must also not be able to look like a success: the caller memoizes what it
+    /// has recorded so it does not make a store round trip per frame, and a failure
+    /// swallowed here was memoized as done. One `database is locked` then meant the
+    /// column stayed empty for the whole life of that connection, with nothing that
+    /// would ever look again — the exact emptiness this write was added to fix.
+    ///
+    /// `true` means the row is up to date: written now, or already carrying this
+    /// thread, or at a generation this link does not speak for. All three are
+    /// finished states. `false` is the store failing, and only that.
+    ///
+    /// See [`crate::store::Store::bind_codex_thread`] for why the write is scoped to
+    /// the generation.
+    pub(crate) async fn note_codex_thread(
+        &self,
+        session: &SessionKey,
+        generation: u64,
+        thread_id: &str,
+    ) -> bool {
+        match self
+            .db
+            .bind_codex_thread(session.uid.clone(), generation, thread_id.to_string())
+            .await
+        {
+            Ok(true) => {
+                crate::log_info!(
+                    "codex link for {}: the session row now names thread {thread_id}",
+                    session.name
+                );
+                true
+            }
+            // Nothing owed: already recorded, or a generation this link does not
+            // speak for. Both are ordinary and neither is worth a line.
+            Ok(false) => true,
+            Err(err) => {
+                crate::log_warn!(
+                    "codex link for {}: could not record thread {thread_id} on the session \
+                     row: {err:#}",
+                    session.name
+                );
+                false
+            }
+        }
+    }
+
+    pub(crate) async fn retire_codex_approval(
+        &self,
+        session: &SessionKey,
+        request_id: &str,
+        resolution: protocol::ws::CodexResolution,
+    ) -> Retirement {
+        self.retire_codex_answered(session, request_id, resolution, None)
+            .await
+    }
+
+    /// [`Daemon::retire_codex_approval`], plus the phone answer's own terminal in
+    /// the same commit.
+    ///
+    /// **Why the two cannot be two commits.** A settled claim over a card that is
+    /// still standing is a question the operator can never answer again — the ledger
+    /// refuses the second tap, and the card goes on being displayed. A retired card
+    /// over a live claim is the mirror: recovery finds the claim at the next start
+    /// and files a second terminal for a card that already has one. The transaction
+    /// is what makes both unrepresentable rather than unlikely.
+    ///
+    /// `None` for every terminal that is not a phone answer, which is all of 3a's.
+    pub(crate) async fn retire_codex_answered(
+        &self,
+        session: &SessionKey,
+        request_id: &str,
+        resolution: protocol::ws::CodexResolution,
+        answer: Option<crate::store::AnswerTerminal>,
+    ) -> Retirement {
+        let id: ApprovalId = (session.uid.clone(), request_id.to_string());
+        let Some(claimed) = self.inner.lock().await.pending.remove(&id) else {
+            return Retirement::AlreadyGone;
+        };
+        // **The payload names the card it retires.**
+        //
+        // The resolution on its own is a terminal with no subject: `{"status":
+        // "cleared","cause":"item_completed"}` says what happened and not what it
+        // happened to. The only correlation used to be the `source_event_id` beneath
+        // this line — a client stripping `"resolved:"` off an `Option<String>` — and
+        // a prefix parse fails silently, leaving an answered card standing on a
+        // phone for ever. Claude's `AnswerOutcome` has carried `request_id` inside
+        // its payload since minor 0; this is the same field in the same place, so a
+        // client correlates the two agents with one rule.
+        //
+        // Flattened, so every `status` arm is byte-identical to what it was and
+        // this daemon's own readers — which decode the payload as a bare
+        // `CodexResolution` — keep working.
+        let resolved = protocol::ws::CodexResolutionPayload {
+            request_id: request_id.to_string(),
+            resolution,
+        };
+        let pending = PendingEvent::new(
+            session,
+            EventKind::ApprovalResolved,
+            serde_json::to_value(&resolved).unwrap_or(serde_json::Value::Null),
+            Source::Daemon,
+        )
+        .with_source_event_id(format!("resolved:{request_id}"));
+
+        // Published inside the gate for `ingest`'s reason: no later seq may
+        // overtake this one on the way to a socket.
+        let gate = self.publish_gate(&session.uid).await;
+        let retired = {
+            let _ordered = gate.lock().await;
+            let retired = self
+                .db
+                .retire_codex_pending_approval(
+                    session.uid.clone(),
+                    request_id.to_string(),
+                    pending,
+                    answer,
+                )
+                .await;
+            if let Ok(Some(event)) = &retired {
+                let _ = self.events_tx.send(event.clone());
+            }
+            retired
+        };
+        if let Err(err) = retired {
+            // The claim goes back, so this terminal has neither retired the card
+            // nor consumed the right to: a later one still can.
+            self.inner.lock().await.pending.insert(id, claimed);
+            crate::log_error!(
+                "could not retire the Codex approval {request_id} in {}: neither the card \
+                 nor its resolution was committed, so the card stays open and the next \
+                 terminal will try again: {err:#}",
+                session.name
+            );
+            return Retirement::Failed;
+        }
+        self.inner
+            .lock()
+            .await
+            .last_seen_ms
+            .insert(session.uid.clone(), protocol::time::now_unix_ms());
+        crate::log_info!(
+            "codex approval {request_id} in {} retired: {:?}",
+            session.name,
+            resolved.resolution
+        );
+        Retirement::Retired
+    }
+
+    /// **The doorbell for a Codex turn this daemon watched finish.**
+    ///
+    /// Codex's analogue of Claude's `agent_completed` notification, and the only
+    /// completion signal it has: the plan refuses Codex's `notify` hook and its
+    /// `PermissionRequest` hook precisely so that `turn/completed` is the one thing
+    /// that means a turn ended. So the same gate, the same ticket, the same
+    /// dispatch, the same content-free `PushKind::Completed` sentence — what
+    /// differs is only where the fact came from.
+    ///
+    /// # Live-only, and how that is guaranteed rather than checked
+    ///
+    /// A turn terminal reaches the store from two places, and by deliberate design
+    /// they are byte-identical facts under one dedup key: the live
+    /// `turn/completed` frame, and a `thread/resume` answer describing a turn that
+    /// finished while this daemon was not subscribed. Ringing about the second
+    /// would be a doorbell for news that is already old — the exact thing the whole
+    /// push design exists to avoid.
+    ///
+    /// Nothing distinguishes the two *facts*, so nothing tries to. The two **call
+    /// sites** are distinct instead, and only the live one calls this:
+    /// `codex_link`'s `record_minted` — reached only from `observe_notification`,
+    /// and so only from a frame read off the wire — while the recovery paths hand
+    /// their events to [`Daemon::ingest`] and stop
+    /// there. Adding a provenance field to the event would have been the wrong fix
+    /// twice over: it would break the identity that makes recovery dedup-safe, and
+    /// under first-wins the marker of whichever copy arrived first would become
+    /// permanent.
+    ///
+    /// **The dedup answer is the second guarantee, and it is free.** `ingest`
+    /// returns `None` for a key already filed, so a live terminal for a turn some
+    /// earlier resume already described never reaches this call — a re-attach
+    /// cannot re-ring a turn the reader was told about when it happened.
+    ///
+    /// # Only `completed`
+    ///
+    /// An `interrupted` or `failed` terminal deliberately does not ring.
+    /// `interrupted` means a human stopped the turn at the keyboard, and the person
+    /// who did it is the person the doorbell would wake. `failed` has no honest
+    /// sentence in [`crate::apns::PushKind`]'s closed vocabulary — "Finished a
+    /// turn" would report a failure as a success — and widening that vocabulary is
+    /// a change to what a lock screen may say, which belongs with the phone work
+    /// that renders it. Both are legible gaps, not oversights.
+    ///
+    /// # One ring per turn, except when two turns share a dispatch grace
+    ///
+    /// Each terminal is admitted on its own — the latch is reopened by the very
+    /// event that closes it — so nothing here collapses turns. What collapses them
+    /// is the 400 ms grace every push waits out: a second turn finishing inside the
+    /// first's grace records progress, and progress after an admission is what
+    /// cancels a quiet-state push. Two turns 300 ms apart therefore produce one
+    /// notification, and it is the *later* one — the state the run is actually in.
+    ///
+    /// A second turn merely **starting** inside the grace cancels it too, and
+    /// nothing rings: the run is working again, so there is no completion left to
+    /// announce. See [`Daemon::note_codex_turn_running`].
+    ///
+    /// **This is the Claude path's behaviour, not a Codex divergence, and it was
+    /// measured rather than assumed.** Claude's `Stop` hook records the same
+    /// progress its `agent_completed` notification is admitted beside, so two
+    /// Claude turns 100 ms apart ring once as well; with the notification alone and
+    /// no `Stop` between them, the `Done` latch collapses them to one ring too. All
+    /// three shapes were run against the real hook path and all three rang once.
+    ///
+    /// Which is the right answer for the thing this is: a doorbell whose whole
+    /// content is four words and a count. Two rings 300 ms apart saying "Finished a
+    /// turn" are one fact told twice to somebody whose phone is on a table. The
+    /// contract is therefore *one ring per turn the reader could act on
+    /// separately*, and a turn superseded before its doorbell left the building is
+    /// not one of those.
+    pub(crate) async fn push_codex_turn_complete(&self, session: &SessionKey, trigger: &Event) {
+        // **The movement and the news are one transition** — see
+        // `PushGate::admit_turn_end`. Recorded apart, an unrelated progress landing
+        // between them folds into this ticket and the push it should have cancelled
+        // survives its grace.
+        let ticket = self.push_gate.admit_turn_end(&session.uid);
+        self.dispatch_push(
+            session.uid.clone(),
+            trigger.seq,
+            PushHint {
+                project_label: self.effective_project_label(&session.uid).await,
+                // **Content-free, from the fact's type alone.** The terminal's
+                // payload carries the turn's status, timings and any error text;
+                // none of it is read here. An APNs payload passes through Apple,
+                // and nothing an agent produced ever does.
+                kind: crate::apns::PushKind::Completed,
+                // Overwritten at ring time by `describing`.
+                blocked_sessions: 0,
+                session_uid: session.uid.clone(),
+                // What makes this push reach only the phones that can open a Codex
+                // run — see `crate::push_queue::recipients`.
+                agent: protocol::agent::AgentKind::Codex,
+            },
+            ticket,
+            // A quiet-state push: progress landing during the grace means the run
+            // has moved on from the state this announces, and it should not ring.
+            true,
+            // No card behind it. A Codex approval push is Phase 3's, and it will
+            // carry its own.
+            None,
         );
     }
 
@@ -1902,6 +4385,46 @@ impl Daemon {
             }
         };
 
+        // **From here the write is serialized against this session's registrations**
+        // (round-7 F4).
+        //
+        // The row has exactly three production writers: this one,
+        // [`Daemon::register_supervisor`], and [`Daemon::mark_exited`] — which writes
+        // only `lifecycle`, and holds this same gate for it (round-8 F3), because an
+        // end established before a registration completed would otherwise be recorded
+        // over the run that registration installed. All three count their write into
+        // [`Inner::row_writes`] under this gate (round-9 F3), which is what lets a
+        // reader that looked at the row earlier find out that it has since moved.
+        // The two that write the identity
+        // columns are this one and the registration, and they are what the rest of
+        // this comment is about. Unguarded, they compose into a lost agent:
+        // a hook reads a Claude row, a Codex registration accepts — row, relabel,
+        // publish, link — and the hook then writes the agent it read back over the
+        // one the registration just set, because `agent` is the one identity column
+        // the upsert takes from `excluded` rather than COALESCE-ing. The row says
+        // Claude while a Codex link holds the session, which is precisely the pair
+        // [`Daemon::resolve_codex_inbound`] promises never to return. A resolver
+        // holding the registration gate against registrations alone was guarding one
+        // of the two writers and claiming both.
+        //
+        // **Per session, and only against acceptance.** This is the hot hook path —
+        // every hook every run posts arrives here — so it takes this uid's gate and no
+        // other: a hook waits out an acceptance for its OWN session, which is the wait
+        // that makes its write correct, and never one anywhere else in the fleet.
+        // Measured at 38µs against a 327µs hook (a re-read at 37µs, the uncontended
+        // gate at 2µs) on this machine.
+        //
+        // The row is read twice for the reason the resolver reads it twice: the first
+        // read answers WHICH run this hook belongs to — a hook that carries no uid
+        // names a tmux session, and that resolves to whichever run is live — so there
+        // is no gate to take until something has been read. The only thing it
+        // contributes to the write is the identity it resolved — `uid`, the conflict
+        // key, which is what the gate below is keyed by. Every mutable field the row
+        // carries forward comes from the guarded read, which shadows it.
+        let gate = self.registration_gate(&uid).await;
+        let _coherent = gate.lock().await;
+        let existing = self.db.get_session(uid.clone()).await?;
+
         // **An adopted run gets no tmux location, because it has none we know
         // of.** `claude:` is the prefix cc-hook mints for a session CodeConnect
         // did not launch; recording `codeconnect`/`<name>` for one — a server
@@ -1948,6 +4471,21 @@ impl Daemon {
                 .map(|r| r.created_at.clone())
                 .unwrap_or_else(|| now.clone()),
             updated_at: now,
+            // A hook-driven upsert never changes which agent a run is: it
+            // preserves an existing row's agent (a Codex row is never demoted to
+            // Claude by a stray hook) and defaults a brand-new one to Claude,
+            // which every hook-adopted run is. Codex identity is COALESCE-kept by
+            // the upsert, so `None` here does not blank it.
+            //
+            // **`agent` is not**: the upsert writes `excluded.agent` outright, so
+            // this preservation is entirely the read above — which is why that read
+            // is inside the gate.
+            agent: existing
+                .as_ref()
+                .map(|r| r.agent.clone())
+                .unwrap_or_default(),
+            codex_thread_id: None,
+            codex_socket: None,
         };
         if self.db.upsert_session(row.clone()).await? == crate::store::SessionUpsert::Tombstoned {
             // The uid was deliberately deleted while this hook was in flight.
@@ -1961,6 +4499,13 @@ impl Daemon {
             );
             return Ok(None);
         }
+        // **Counted, under the gate this write is already holding** (round-9 F3).
+        // This writer moves `lifecycle` to `Live` without staking any registration
+        // epoch, so it is invisible to a guard that watches only who owns the
+        // session — and an end established against the row as it was before this
+        // hook would otherwise commit straight over the liveness it just recorded.
+        // See [`Inner::row_writes`].
+        self.inner.lock().await.note_row_write(&uid);
 
         self.relabel_open_cards(&uid, &row.cwd).await;
 
@@ -2016,9 +4561,24 @@ impl Daemon {
     /// observed exiting, so `lifecycle` says `Live` forever and ranking on it
     /// would put that ghost above the run that is genuinely there.
     pub async fn resolve(&self, reference: &str) -> Result<SessionRow> {
+        self.resolve_optional(reference)
+            .await?
+            .ok_or_else(|| anyhow!("unknown session {reference}"))
+    }
+
+    /// The same resolution, with **"named nothing" as a value and a broken store
+    /// as an error**.
+    ///
+    /// [`Daemon::resolve`] folds the two together because its callers answer both
+    /// the same way — with a refusal carrying a message. A caller that has to act
+    /// differently on them (a client error versus an operational fault) cannot
+    /// recover the distinction from the outside: asking the store a second time to
+    /// tell them apart is a race, and treating every error as absence is how a
+    /// failing database comes to look like an empty fleet.
+    async fn resolve_optional(&self, reference: &str) -> Result<Option<SessionRow>> {
         if protocol::uid::is_well_formed(reference) {
             if let Some(row) = self.db.get_session(reference.to_string()).await? {
-                return Ok(row);
+                return Ok(Some(row));
             }
         }
         let attached: Option<SessionRow> = {
@@ -2031,12 +4591,10 @@ impl Daemon {
                 })
                 .max_by(|a, b| a.session_uid.cmp(&b.session_uid))
         };
-        if let Some(row) = attached {
-            return Ok(row);
+        if attached.is_some() {
+            return Ok(attached);
         }
-        self.store
-            .find_session(reference)?
-            .ok_or_else(|| anyhow!("unknown session {reference}"))
+        self.store.find_session(reference)
     }
 
     // --------------------------------------------------------------- answers
@@ -2066,7 +4624,16 @@ impl Daemon {
             return match self.db.get_session(uid.to_string()).await {
                 Ok(Some(row)) => Ok(row.session_uid),
                 Ok(None) => Err(format!("unknown session {uid}")),
-                Err(err) => Err(format!("session lookup failed: {err}")),
+                // **Logged here, not carried.** This `Err` becomes an
+                // `AnswerResult::Rejected` reason verbatim in [`Daemon::answer`], and a
+                // store `Display` is an anyhow chain whose open paths name absolute
+                // filesystem locations. Same rule as
+                // [`crate::codex_refusals::SESSION_LOOKUP_FAILED`], which is the
+                // catalogued twin of this sentence on the other two verbs.
+                Err(err) => {
+                    crate::log_error!("answer for {uid}: session lookup failed: {err:#}");
+                    Err("session lookup failed".to_string())
+                }
             };
         }
 
@@ -2127,7 +4694,1280 @@ impl Daemon {
         match self.db.find_answer_by_request(request_id.to_string()).await {
             Ok(Some((uid, _, _))) => Ok(uid),
             Ok(None) => Err("unknown or already-resolved request".into()),
-            Err(err) => Err(format!("ledger read failed: {err}")),
+            // Logged here, not carried, for the session lookup's reason above.
+            Err(err) => {
+                crate::log_error!(
+                    "answer for {}: the answers ledger could not be read: {err:#}",
+                    logged_request_id(request_id)
+                );
+                Err("ledger read failed".to_string())
+            }
+        }
+    }
+
+    /// **Answer one Codex card from the phone.**
+    ///
+    /// Reached from [`Daemon::answer`] under that function's per-approval
+    /// serialisation, so everything below runs with at most one tap in flight for
+    /// this card.
+    ///
+    /// # What makes this a different function rather than a branch
+    ///
+    /// Claude's path types into a pane, and everything it does is shaped by that:
+    /// it holds a hook responder, it fingerprints the prompt it expects to find, and
+    /// it cannot tell a keyboard answer from its own except by watching the pane.
+    /// None of that applies here. The answer is a JSON-RPC response written on the
+    /// link's own socket, the app-server actuates it, and which of the two answers
+    /// won is a fact the broker reports rather than one this daemon infers.
+    ///
+    /// # The four tables it does not touch
+    ///
+    /// `answers`, `answer_claims`, `text_mutations` and `pending_approvals` are read
+    /// globally by a rolled-back v0.6.0 daemon, so a Codex row in any of them is the
+    /// rollback hazard [`Daemon::shared_ledgers_admit`] exists to prevent. The claim
+    /// this path takes goes in `mutation_ledger` — the generalized Codex ledger,
+    /// which no v0.6.0 statement names — and the tripwire in the tests is pointed at
+    /// exactly that claim.
+    ///
+    /// # Validate here, claim and write there
+    ///
+    /// Everything this function checks is a property of the STORED card: that it is
+    /// still open, that the hash the phone echoed is the one it was displayed under,
+    /// and that the option named is one the app-server itself proposed. None of that
+    /// needs a socket. Everything that needs the socket — whether the connection
+    /// holds a live wire id for this card, on the card's own thread, with no switch
+    /// in flight — is asked of the link, and the link takes the durable claim at the
+    /// one moment it knows the answer is about to be written. That is what keeps a
+    /// refused ask from leaving an `applying` row behind for recovery to turn into a
+    /// spurious `Unknown`.
+    async fn answer_codex(
+        &self,
+        row: &crate::store::SessionRow,
+        request_id: &str,
+        payload_hash: &str,
+        decision: AnswerDecision,
+    ) -> AnswerResult {
+        let AnswerDecision::OptionId { option_id } = &decision else {
+            return AnswerResult::Rejected {
+                reason: "a Codex card is answered by naming one of the options it \
+                         offered; this decision names none of them, so nothing was sent"
+                    .into(),
+            };
+        };
+        let session = SessionKey::new(&row.session_uid, &row.session_id);
+
+        // 1. **The durable ledger wins over everything, including the card.** A
+        //    terminal claim can outlive the question it answered: a lost race leaves
+        //    the card standing for the winner's own terminal to retire, and a bounce
+        //    re-delivers a request the app-server really is still waiting on. In both
+        //    the card is there and the phone must not answer it again — and the
+        //    operator needs to be told which of those it is, not merely refused. The
+        //    link would refuse this on its own claim; asking here is what makes the
+        //    refusal a sentence rather than "there is no link".
+        match self
+            .db
+            .answer_status(session.uid.clone(), request_id.to_string())
+            .await
+        {
+            Ok(Some(crate::store::AnswerStatus::Settled(outcome))) => {
+                // **Branch on what the ledger recorded, not on the fact that it is
+                // terminal.** `lost` is the record that this phone's answer reached
+                // nothing; replaying it as "answered from a phone" tells the operator the
+                // opposite of what happened, at the moment they are asking.
+                return AnswerResult::Rejected {
+                    reason: crate::store::replayed_answer_sentence(&outcome),
+                };
+            }
+            Ok(Some(crate::store::AnswerStatus::Indeterminate)) => {
+                return AnswerResult::Rejected {
+                    reason: "an answer to this card was already sent and what became of it \
+                             is not known; it will not be sent again. Check the Mac."
+                        .into(),
+                }
+            }
+            // `Applying` is an attempt this very daemon has in flight, and the
+            // per-approval gate above means it cannot be for this card. Left to the
+            // link's own claim, which is the one that decides.
+            Ok(_) => {}
+            // Logged here, not carried: a store `Display` is an anyhow chain whose open
+            // paths name absolute filesystem locations. The phone is told the fact and
+            // the consequence, which is all it can act on.
+            Err(err) => {
+                crate::log_error!(
+                    "answer for {}: could not read the answer ledger for {}: {err:#}",
+                    session.uid,
+                    logged_request_id(request_id)
+                );
+                return AnswerResult::Rejected {
+                    reason: "could not read this card's answer ledger; nothing was sent".into(),
+                };
+            }
+        }
+
+        // 2. The card, as this daemon filed it. Not the phone's copy of it: the
+        //    options an answer is checked against have to be the ones the
+        //    app-server proposed, and the hash below is what ties the two together.
+        let cards = match self.db.codex_pending_approvals(session.uid.clone()).await {
+            Ok(cards) => cards,
+            // Logged here, not carried. See the ledger read above.
+            Err(err) => {
+                crate::log_error!(
+                    "answer for {}: could not read the open cards for {}: {err:#}",
+                    session.uid,
+                    logged_request_id(request_id)
+                );
+                return AnswerResult::Rejected {
+                    reason: "could not read this run's open cards; nothing was sent".into(),
+                };
+            }
+        };
+        let Some(held) = cards.into_iter().find(|card| card.request_id == request_id) else {
+            return AnswerResult::Rejected {
+                reason: "unknown or already-resolved request".into(),
+            };
+        };
+        let Ok(card) = serde_json::from_str::<protocol::ws::ApprovalCard>(&held.card) else {
+            return AnswerResult::Rejected {
+                reason: "the stored card could not be read, so what it offered cannot be \
+                         established; nothing was sent"
+                    .into(),
+            };
+        };
+        // **The hash gate, and it covers the option set.** `tool_input.options` is
+        // inside the preimage `payload_hash` is taken over, so a phone echoing the
+        // hash it displayed cannot be answering an option table that has since been
+        // replaced — which is the whole reason the options ride inside the hash.
+        if card.payload_hash != payload_hash {
+            return AnswerResult::Rejected {
+                reason: "stale payload_hash: the card you answered is out of date".into(),
+            };
+        }
+        // 3. The wire decision, rebuilt from the card's own options. A phone sends
+        //    an opaque id; the body of an amendment is never anything it supplied.
+        let Some(wire) =
+            crate::codex_approval::wire_decision(&card.tool_input["options"], option_id)
+        else {
+            return AnswerResult::Rejected {
+                reason: format!(
+                    "{option_id:?} is not one of the options this card offered; nothing was sent"
+                ),
+            };
+        };
+
+        // 4. The material this answer will be claimed with — the whole authorization
+        //    surface, so the same id carrying a different decision, a different card
+        //    or a different thread is a conflict rather than a replay.
+        let claimed = crate::store::ClaimedMaterial {
+            thread_id: held.thread_id.clone(),
+            generation: held.generation,
+            route: option_id.clone(),
+            target_turn_id: Some(held.turn_id.clone()),
+            claimed_hash: protocol::hash::answer_hash(
+                request_id,
+                payload_hash,
+                option_id,
+                &held.thread_id,
+                &wire,
+            ),
+        };
+
+        // 5. The link claims and writes, in that order, and files the terminal
+        //    itself — see [`crate::codex_link::AnswerRequest`].
+        //
+        //    **Held across all of it, and taken before `inner`.** The epoch compared
+        //    on the next line is compared at an instant; the claim and the socket
+        //    write that follow are not, and without this gate a replacement
+        //    registration could stake the session inside that gap and the outgoing
+        //    link would go on to write a response on a socket the session had left.
+        //    See [`Daemon::actuation_gates`]. Ordering: answer gate, then `inner` — the
+        //    same one-way rule the other two gates keep, and the registration path
+        //    takes this one INSIDE its own gate so the pair can never invert. The
+        //    READ side, so two cards answered at once stay concurrent — the stake is
+        //    the only writer, and the only thing an answer must be exclusive with.
+        // **An OWNED read guard, carried into the answer**. A borrowed
+        // guard lives only in this future; but the work happens in the link task, and
+        // if this future is aborted after the ask is enqueued the borrowed guard would
+        // drop while the old link still owned the queued response — the stake could
+        // then land and the old link still write. The owned guard travels with the ask
+        // into [`crate::codex_link::AnswerRequest`]/`PendingAnswer` and is only released
+        // at pre-write refusal or terminal teardown, so the registration's write side
+        // genuinely waits for the response to finish, not merely for this caller to.
+        let quiesce = self.actuation_gate(&session.uid).await;
+        let admitted = Arc::clone(&quiesce).read_owned().await;
+        let link = Daemon::codex_answers_locked(&*self.inner.lock().await, &session.uid, &admitted);
+        let report = match link {
+            Some(answers) => answers.answer(request_id, wire, claimed, admitted).await,
+            None => crate::codex_link::AnswerReport::NotApplied(
+                "there is no live link to this Codex session, so nothing was sent; \
+                 answer at the Mac"
+                    .into(),
+            ),
+        };
+        match report.reason() {
+            Some(reason) => AnswerResult::Rejected {
+                reason: reason.to_string(),
+            },
+            None => AnswerResult::Applied {
+                outcome: protocol::ws::AnswerOutcome {
+                    request_id: request_id.to_string(),
+                    session_id: session.name.clone(),
+                    decision,
+                    resolved_by: protocol::ws::ResolvedBy::Phone,
+                    applied_via: protocol::ws::AnswerPath::CodexResponse,
+                    resolved_at: protocol::time::now_rfc3339(),
+                    detail: None,
+                    inferred: false,
+                    indeterminate: false,
+                },
+            },
+        }
+    }
+
+    /// **Stop the turn a Codex session is running, from a phone.**
+    ///
+    /// Idempotent by `(session, request_id)` in the generalized mutation ledger, and
+    /// bound to one turn by `payload_hash` — so a retry can never abort a *different*
+    /// turn the session has since moved on to, which is the whole reason the hash is
+    /// on the wire.
+    ///
+    /// # What this refuses before it claims anything, and why each one is here
+    ///
+    /// The broker refuses an interrupt that does not name this session's running turn,
+    /// and that refusal is real and measured. It is not sufficient, and the three
+    /// checks below are the difference.
+    ///
+    ///   * **The agent.** "Not Claude" is not evidence of Codex, so every kind is
+    ///     named and anything this build does not understand fails closed — the same
+    ///     rule [`Daemon::answer`] states at the same point in its own path.
+    ///   * **The turn.** The phone names a turn it saw. The `payload_hash` beside it
+    ///     is a CHECKSUM and not a binding — it is recomputed here from the very two
+    ///     fields the request carries, so it can only catch a request whose parts were
+    ///     corrupted or reassembled in transit, never one whose turn a caller chose to
+    ///     change. The turn id itself is the authorization, and it is checked against
+    ///     the turn the link is actually watching.
+    ///   * **The link.** An interrupt handed to a connection that is not subscribed
+    ///     to the turn's thread is accepted into silence, and the operator is owed
+    ///     the reason rather than a wait.
+    ///
+    /// The generation is checked too, and it is checked by the LINK rather than here:
+    /// it is the connection's own visit counter, and reading it from any other place
+    /// would be reading a copy.
+    pub async fn interrupt(
+        &self,
+        session_ref: &str,
+        request_id: &str,
+        turn_id: &str,
+        payload_hash: &str,
+    ) -> protocol::ws::InterruptResult {
+        use protocol::ws::InterruptResult;
+
+        let refuse = |reason: String| InterruptResult::Rejected { reason };
+
+        // 1. **The run, and the agent that is running in it — before any lock or
+        //    durable claim.** An unreadable row is a refusal too: unreadable is not
+        //    evidence of Codex any more than "not Claude" is.
+        let row = match self.resolve_optional(session_ref).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return refuse(crate::codex_refusals::unknown_session(session_ref)),
+            // **Logged here, not carried.** A store `Display` is an anyhow chain whose
+            // open paths name absolute filesystem locations, and the phone is told the
+            // fact rather than this Mac's directory layout. The operator diagnosing the
+            // disk reads the chain here, where they are entitled to it.
+            Err(err) => {
+                crate::log_error!(
+                    "interrupt for {}: session lookup failed: {err:#}",
+                    logged_session_ref(session_ref)
+                );
+                return refuse(crate::codex_refusals::SESSION_LOOKUP_FAILED.to_string());
+            }
+        };
+        match row.agent {
+            protocol::agent::AgentKind::Codex => {}
+            // Claude has no interrupt on this wire. Its stop control is the keyboard
+            // at the Mac, and saying so is more useful than a bare refusal.
+            protocol::agent::AgentKind::Claude => {
+                return refuse(crate::codex_refusals::interrupt_on_claude(&row.session_uid))
+            }
+            protocol::agent::AgentKind::Unsupported(ref name) => {
+                return refuse(crate::codex_refusals::interrupt_on_unsupported(
+                    &row.session_uid,
+                    name,
+                ))
+            }
+        }
+        let session = SessionKey::new(&row.session_uid, &row.session_id);
+
+        // 2. **The checksum, and it is called that on purpose.** It is recomputed
+        //    here from the same two fields the request carries, so it catches a
+        //    request whose parts were corrupted or reassembled in transit and nothing
+        //    else — a caller that changes the turn and recomputes the hash passes it
+        //    trivially. What actually authorizes the stop is the turn id, checked
+        //    below against the turn the link is watching and again by the broker
+        //    against the turn the session is running.
+        let expected = protocol::hash::interrupt_hash(session_ref, turn_id);
+        if expected != payload_hash {
+            return refuse(crate::codex_refusals::INTERRUPT_STALE_HASH.into());
+        }
+        if turn_id.is_empty() {
+            return refuse(crate::codex_refusals::INTERRUPT_NAMES_NO_TURN.into());
+        }
+
+        // 3. **The durable ledger wins over everything.** A terminal claim outlives
+        //    the turn it named, and a duplicate must replay what the first attempt
+        //    recorded rather than aim a second stop at whatever is running now.
+        //
+        //    **And a duplicate is a second ask carrying the same material, not merely
+        //    the same id.** The ledger's own claim primitive will not call two asks a
+        //    duplicate unless every field agrees, and reading a terminal here without
+        //    applying that same law is how one id reused for the turn running NOW
+        //    comes back as `Duplicate` naming that turn — telling the operator the
+        //    turn in front of them has already been stopped when nothing has touched
+        //    it. So the material comes back with the status and is compared before
+        //    anything is replayed.
+        //
+        //    **Compared on what the CLIENT bound**: the turn it named and the hash
+        //    binding this ask to that turn. The thread and the visit generation are
+        //    this daemon's own bookkeeping — a person who reused an id has done
+        //    nothing wrong about a visit they cannot see — and they stay where they
+        //    can mean something, as the live pre-write checks the link makes.
+        match self
+            .db
+            .mutation_status(
+                crate::store::OPERATION_INTERRUPT,
+                session.uid.clone(),
+                request_id.to_string(),
+            )
+            .await
+        {
+            Ok(Some(state)) => {
+                // Compared against the NORMALISED material below, for the reason given
+                // there: the caller's own hash is a checksum over whichever reference
+                // they used, and two spellings of one run must not read as two asks.
+                let bound_to_the_same_turn = state.claimed.target_turn_id.as_deref()
+                    == Some(turn_id)
+                    && state.claimed.claimed_hash
+                        == protocol::hash::interrupt_hash(&row.session_uid, turn_id);
+                if !bound_to_the_same_turn {
+                    return refuse(crate::codex_refusals::INTERRUPT_ID_REUSED.into());
+                }
+                match state.status {
+                    // Replayed through the one mapping both this path and the link's
+                    // own duplicate arm use, so the two can never disagree about what
+                    // a recorded outcome means.
+                    crate::store::AnswerStatus::Settled(outcome) => {
+                        return Daemon::interrupt_result(
+                            crate::codex_link::replayed_interrupt_report(&outcome, turn_id),
+                        )
+                    }
+                    crate::store::AnswerStatus::Indeterminate => {
+                        return InterruptResult::Indeterminate {
+                            reason: crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into(),
+                        }
+                    }
+                    // `Applying` is an attempt this very daemon has in flight. Left to
+                    // the link's own claim, which is the one that decides.
+                    crate::store::AnswerStatus::Applying => {}
+                }
+            }
+            Ok(None) => {}
+            // Logged here, not carried, for the session lookup's reason above.
+            Err(err) => {
+                crate::log_error!(
+                    "interrupt for {}: could not read the interrupt ledger for {}: {err:#}",
+                    session.uid,
+                    logged_request_id(request_id)
+                );
+                return refuse(crate::codex_refusals::INTERRUPT_LEDGER_UNREADABLE.to_string());
+            }
+        }
+
+        // 4. **The link must be an addressee for this turn's thread.** `Subscribed`
+        //    and not merely `Bound`: a bound connection receives no `turn/*` frame, so
+        //    an interrupt written on it would be accepted into a silence in which the
+        //    terminal that is its only evidence could never arrive.
+        let (addressee, visit) = {
+            let inner = self.inner.lock().await;
+            Daemon::codex_visit_locked(&inner, &session.uid)
+        };
+        let thread_id = match &addressee {
+            crate::codex_link::CodexAddressee::Subscribed { thread_id } => thread_id.clone(),
+            // **Both bound states, one sentence — and here that really is one fact.**
+            // [`crate::codex_link::CodexAddressee::BoundNotStarted`] admits a compose
+            // because a thread with no rollout can accept a FIRST turn. A stop is the
+            // opposite ask: it names a turn, and it is answered by that turn's terminal,
+            // which reaches only a subscribed connection. A thread that has never run a
+            // turn has none to stop, and one that has is one this link is not watching.
+            //
+            // [`crate::codex_link::CodexAddressee::StartInFlight`] joins them for the
+            // same reason and needs no third sentence: it is `Bound` plus a fact about a
+            // compose, and a compose is not what is being asked. The turn it names is one
+            // this link has still never been shown a frame of, so the terminal an
+            // interrupt waits on could not arrive — which is precisely what
+            // `INTERRUPT_LINK_BOUND` already says.
+            crate::codex_link::CodexAddressee::Bound { .. }
+            | crate::codex_link::CodexAddressee::BoundNotStarted { .. }
+            | crate::codex_link::CodexAddressee::StartInFlight { .. } => {
+                return refuse(crate::codex_refusals::INTERRUPT_LINK_BOUND.into())
+            }
+            // **Three states, three sentences, because they call for three
+            // different things from the person reading them.** They shared one, and
+            // that one was written for the worst of the three: it told somebody whose
+            // Mac was connected and mid-resume that the link was lost, which rules out
+            // the thing that will actually work — waiting a moment and asking again.
+            //
+            // The other half of the same untruth is a past tense a link may not have
+            // earned. "Has lost its control link" says there was one; a link that has
+            // adopted nothing has never had a connection to lose, and telling an
+            // operator something broke when it has simply not started yet sends them
+            // looking for a fault that is not there.
+            crate::codex_link::CodexAddressee::Offline { thread_id: Some(_) } => {
+                return refuse(crate::codex_refusals::INTERRUPT_LINK_RECONNECTING.into())
+            }
+            crate::codex_link::CodexAddressee::Offline { thread_id: None } => {
+                return refuse(crate::codex_refusals::INTERRUPT_LINK_NOT_REACHED.into())
+            }
+            crate::codex_link::CodexAddressee::Unbound { .. } => {
+                return refuse(crate::codex_refusals::LINK_STILL_PICKING_UP_THREAD.into())
+            }
+            crate::codex_link::CodexAddressee::NoLink => {
+                return refuse(crate::codex_refusals::INTERRUPT_NO_LINK.into())
+            }
+        };
+
+        // 5. **The material this interrupt is claimed with.** The whole authorization
+        //    surface, so the same id carrying a different turn, a different thread or
+        //    a different visit is a conflict rather than a replay. `route` is the
+        //    operation kind's own word for which way the actuation went, and for an
+        //    interrupt there is only one way to go.
+        let claimed = crate::store::ClaimedMaterial {
+            thread_id,
+            generation: visit.generation,
+            route: crate::store::INTERRUPT_ROUTE.to_string(),
+            target_turn_id: Some(turn_id.to_string()),
+            // **Recomputed over the RUN rather than over the reference the caller
+            // happened to use.** A phone may name one run by its uid on one tap and by
+            // its tmux name on the next — both resolve here to the same row — and
+            // storing the caller's own hash made those two spellings different
+            // material under one id, which the ledger would have called a conflict. It
+            // is a checksum, so nothing is lost by normalising it; what is gained is
+            // that the same ask about the same turn is the same ask however it was
+            // addressed.
+            claimed_hash: protocol::hash::interrupt_hash(&row.session_uid, turn_id),
+        };
+
+        // 6. **The link claims and writes, in that order, and settles the terminal
+        //    itself** — see [`crate::codex_link::InterruptRequest`]. Held across all
+        //    of it, and taken before `inner`, for [`Daemon::actuation_gates`]'s
+        //    reason: the epoch compared on the next line is compared at an instant and
+        //    the write that follows is not.
+        let quiesce = self.actuation_gate(&session.uid).await;
+        let admitted = Arc::clone(&quiesce).read_owned().await;
+        let link =
+            Daemon::codex_interrupts_locked(&*self.inner.lock().await, &session.uid, &admitted);
+        let report = match link {
+            Some(interrupts) => {
+                interrupts
+                    .interrupt(request_id, claimed, visit.upstream_epoch, admitted)
+                    .await
+            }
+            None => crate::codex_link::InterruptReport::NotApplied(
+                crate::codex_refusals::INTERRUPT_NO_LINK.into(),
+            ),
+        };
+        Daemon::interrupt_result(report)
+    }
+
+    /// **The one place a link's report becomes the phone's answer.**
+    ///
+    /// A single mapping because the alternative was two, and they disagreed: the
+    /// daemon's own replay of a settled row and the link's duplicate arm are the same
+    /// question asked at two moments, and one of them used to call an exact aborted
+    /// duplicate a refusal. Whichever moment answers, the operator is owed the same
+    /// sentence.
+    /// **Test-only.** The mapping above, reachable from the link's own tests so they
+    /// can assert what the phone is actually told rather than only what the link
+    /// reported.
+    #[cfg(test)]
+    pub(crate) fn interrupt_result_for_tests(
+        report: crate::codex_link::InterruptReport,
+    ) -> protocol::ws::InterruptResult {
+        Daemon::interrupt_result(report)
+    }
+
+    /// **Say something to a Codex session, from a phone.**
+    ///
+    /// [`Daemon::interrupt`]'s shape, and every check is here for the reason its twin
+    /// gives. What differs is what the phone is authorized to name, and that difference is
+    /// the whole security argument: an interrupt names a TURN and is bound to it, while a
+    /// compose names nothing but WORDS. There is no turn to check the ask against, because
+    /// the phone does not choose one — the daemon does, at the moment of the write, from
+    /// the state its link is actually in.
+    ///
+    /// So what stands between a phone and the model's mouth is: the agent, the words'
+    /// checksum, the ledger, the link being *subscribed* to a thread, and then — inside
+    /// the link, atomically with the claim — the visit, the route and the broker's own two
+    /// gates behind that.
+    ///
+    /// # The route is not decided here, and that is deliberate
+    ///
+    /// Only the connection knows whether a turn is running, and knowing it a moment
+    /// earlier than the write is not knowing it. See
+    /// [`crate::codex_link::ComposeRequest`].
+    pub async fn compose(
+        &self,
+        session_ref: &str,
+        request_id: &str,
+        text: String,
+        payload_hash: &str,
+    ) -> protocol::ws::ComposeResult {
+        use protocol::ws::ComposeResult;
+
+        let refuse = |reason: String| ComposeResult::Rejected { reason };
+
+        // 1. **The run, and the agent that is running in it — before any lock or durable
+        //    claim.** An unreadable row is a refusal too: unreadable is not evidence of
+        //    Codex any more than "not Claude" is.
+        let row = match self.resolve_optional(session_ref).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return refuse(crate::codex_refusals::unknown_session(session_ref)),
+            // Logged here, not carried. See [`Daemon::interrupt`]'s twin of this arm.
+            Err(err) => {
+                crate::log_error!(
+                    "compose for {}: session lookup failed: {err:#}",
+                    logged_session_ref(session_ref)
+                );
+                return refuse(crate::codex_refusals::SESSION_LOOKUP_FAILED.to_string());
+            }
+        };
+        match row.agent {
+            protocol::agent::AgentKind::Codex => {}
+            // **The mirror of `send_text`'s refusal, and it names the thing that works.**
+            // Claude's free-text takeover is [`Daemon::send_text`], which types at the
+            // Mac's TTY and refuses a Codex run by name; this refuses a Claude run by
+            // name. Neither silently does the other's job.
+            protocol::agent::AgentKind::Claude => {
+                return refuse(crate::codex_refusals::compose_on_claude(&row.session_uid))
+            }
+            protocol::agent::AgentKind::Unsupported(ref name) => {
+                return refuse(crate::codex_refusals::compose_on_unsupported(
+                    &row.session_uid,
+                    name,
+                ))
+            }
+        }
+        let session = SessionKey::new(&row.session_uid, &row.session_id);
+
+        // 2. **The words themselves.** Bounded for `send_text`'s reason read across: a
+        //    megabyte put into a model's mouth is not a message. Empty is refused because
+        //    there is nothing to say and the app-server's own refusal for it is a shape
+        //    this daemon would then have to explain.
+        if text.is_empty() {
+            return refuse(crate::codex_refusals::COMPOSE_EMPTY.into());
+        }
+        if text.len() > protocol::ws::MAX_COMPOSE_BYTES {
+            return refuse(crate::codex_refusals::compose_too_long(
+                &text.len().to_string(),
+                &protocol::ws::MAX_COMPOSE_BYTES.to_string(),
+            ));
+        }
+
+        // 3. **The checksum, and it is called that on purpose** — [`Daemon::interrupt`]'s
+        //    note applies verbatim. It catches a request whose parts were corrupted in
+        //    transit and nothing else. What authorizes the words is that the phone is
+        //    paired and the run is this Mac's.
+        if protocol::hash::compose_hash(session_ref, &text) != payload_hash {
+            return refuse(crate::codex_refusals::COMPOSE_STALE_HASH.into());
+        }
+        // **Normalised over the RUN, not over the reference the caller used.** A phone may
+        // name one run by its uid on one tap and by its tmux name on the next; storing the
+        // caller's own hash would make those two spellings different material under one
+        // id, which the ledger would call a conflict.
+        let claimed_hash = protocol::hash::compose_hash(&row.session_uid, &text);
+
+        // **There is no pre-claim ledger read here, and that is the point.**
+        //
+        // There used to be: this step asked `mutation_status` and reproduced the whole
+        // settled / indeterminate / different-hash case analysis, and
+        // [`crate::codex_link::Connection::recorded_compose_outcome`] asked the same row
+        // again a moment later and reproduced it a second time — with a DIFFERENT sentence
+        // for the conflict case. Two answers to one question, which is exactly the failure
+        // [`Daemon::interrupt_result`]'s own comment says it collapsed one mapping to
+        // avoid, reintroduced one layer up.
+        //
+        // The link's is the one that decides, because it is the one that then claims: it
+        // reads the row and takes the claim without an await between them, so its answer
+        // cannot be stale by the time it acts on it. This one always could be. What the
+        // daemon keeps is everything the link cannot see — the agent, the words' bound and
+        // checksum, and whether there is an addressee at all — each of which refuses
+        // before anything durable exists.
+        //
+        // 5. **The link must be an addressee for a thread.** `Subscribed` and not merely
+        //    `Bound`, for [`Daemon::interrupt`]'s reason: a bound connection receives no
+        //    `turn/*` frame, so a compose written on it would be answered into a silence
+        //    where nothing could say which turn heard it.
+        //
+        //    The four states that are not an addressee say what a phone can act on, and
+        //    each is a fact about NOW. Which is why none of them is the last word — see
+        //    [`Daemon::settled_compose`] below.
+        let (addressee, visit) = {
+            let inner = self.inner.lock().await;
+            Daemon::codex_visit_locked(&inner, &session.uid)
+        };
+        let addressed = match &addressee {
+            crate::codex_link::CodexAddressee::Subscribed { thread_id } => Ok(thread_id.clone()),
+            // **THE SECOND ADDRESSEE, AND IT IS NARROWER THAN IT LOOKS.**
+            //
+            // A link publishes this only when its OWN `thread/resume` for this very
+            // thread came back with the measured not-ready answer — `-32600 "no rollout
+            // found for thread id …"`. No rollout means no turn has ever run on the
+            // thread; no turn has ever run means none is running; so a `turn/start`
+            // written here cannot join or collide with a turn nobody has seen. That is
+            // the only thing being claimed, and it is the only thing this admits.
+            //
+            // **Why the gate had to move at all.** On a fresh `codeconnect codex`
+            // session the thread has no rollout until its first turn, so every resume is
+            // refused and the link never becomes `Subscribed`. A phone gated on
+            // `Subscribed` could therefore never start the first turn — and only a first
+            // turn creates the rollout. Measured on 0.153.4
+            // (`fixtures/codex/first-turn-from-bound-0.153.4.jsonl`): the app-server
+            // ACCEPTS a start from exactly this position, the turn writes the rollout,
+            // and the next resume succeeds.
+            //
+            // **The ROUTE is not decided here** — see this function's own note, and
+            // [`crate::codex_link::compose_route`], which refuses a steer in this state
+            // because there is no turn to name and an `expectedTurnId` would be a
+            // fabrication. What travels from here is the thread and the visit, exactly
+            // as for a subscribed link.
+            crate::codex_link::CodexAddressee::BoundNotStarted { thread_id } => {
+                Ok(thread_id.clone())
+            }
+            // **And nothing wider.** A bound link whose thread HAS a rollout may have a
+            // turn running that this connection has never been shown — an un-subscribed
+            // connection is handed no `turn/*` frame at all — so "this link has seen no
+            // turn" is not evidence that none is running. Admitting a start there is the
+            // collision the arm above exists to rule out.
+            crate::codex_link::CodexAddressee::Bound { .. } => {
+                Err(crate::codex_refusals::COMPOSE_LINK_BOUND)
+            }
+            // **And the state the arm above turns into the moment a compose is written
+            // from it.** The proof that admitted the first turn is spent at the write —
+            // see [`crate::codex_link::CodexAddressee::StartInFlight`] — so a second ask
+            // arriving before this Mac has caught up has nothing left to stand on, and
+            // `COMPOSE_LINK_BOUND` would be true of the link while being unhelpful about
+            // the situation: what is actually going on is that a turn was just started
+            // from a phone. **This is the gate the second compose meets first**, and it
+            // is the reason both asks are not written; the link makes the same refusal
+            // from the fact itself, for the ask that was already past here when the first
+            // one went out.
+            crate::codex_link::CodexAddressee::StartInFlight { .. } => {
+                Err(crate::codex_refusals::COMPOSE_START_IN_FLIGHT)
+            }
+            crate::codex_link::CodexAddressee::Offline { thread_id: Some(_) } => {
+                Err(crate::codex_refusals::COMPOSE_LINK_RECONNECTING)
+            }
+            crate::codex_link::CodexAddressee::Offline { thread_id: None } => {
+                Err(crate::codex_refusals::COMPOSE_LINK_NOT_REACHED)
+            }
+            crate::codex_link::CodexAddressee::Unbound { .. } => {
+                Err(crate::codex_refusals::LINK_STILL_PICKING_UP_THREAD)
+            }
+            crate::codex_link::CodexAddressee::NoLink => {
+                Err(crate::codex_refusals::COMPOSE_NO_LINK)
+            }
+        };
+        // **A finished mutation outranks the state of the link, and this is the only place
+        // that can say so.**
+        //
+        // Without this, "your words started turn T" — a fact this Mac wrote down and can
+        // still read — was withheld and replaced by "the link is reconnecting" for as long
+        // as the reconnect lasted, purely because the answer travels through the link on
+        // the live path. The phone retrying an id it never got an answer for is exactly the
+        // caller this record exists for, and the reconnect is exactly when it retries.
+        //
+        // It is NOT the duplicate this step used to carry. That one ran on every compose,
+        // ahead of a link that was about to ask the same question and then claim on the
+        // answer, and reproduced its whole case analysis a moment less accurately. This one
+        // runs only when there is no link to ask, and only reads rows that are already
+        // terminal: nothing here decides an `applying` claim, which stays where it can be
+        // decided atomically with the write.
+        let thread_id = match addressed {
+            Ok(thread_id) => thread_id,
+            Err(no_addressee) => {
+                return match self
+                    .settled_compose(&row.session_uid, request_id, &claimed_hash)
+                    .await
+                {
+                    Some(recorded) => recorded,
+                    None => refuse(no_addressee.into()),
+                }
+            }
+        };
+
+        // 6. **The link claims and writes, in that order, and settles the answer itself.**
+        //    The gate is held across all of it and taken before `inner`, for
+        //    [`Daemon::actuation_gates`]'s reason: the epoch compared on the next line is
+        //    compared at an instant and the write that follows is not.
+        let quiesce = self.actuation_gate(&session.uid).await;
+        let admitted = Arc::clone(&quiesce).read_owned().await;
+        let link =
+            Daemon::codex_composes_locked(&*self.inner.lock().await, &session.uid, &admitted);
+        let report = match link {
+            Some(composes) => {
+                composes
+                    .compose(
+                        request_id,
+                        thread_id,
+                        visit.generation,
+                        text,
+                        claimed_hash,
+                        visit.upstream_epoch,
+                        admitted,
+                    )
+                    .await
+            }
+            None => crate::codex_link::ComposeReport::NotApplied(
+                crate::codex_refusals::COMPOSE_NO_LINK.into(),
+            ),
+        };
+        Daemon::compose_result(report)
+    }
+
+    /// **The one place a link's compose report becomes the phone's answer.**
+    ///
+    /// One mapping for [`Daemon::interrupt_result`]'s reason: the daemon's own replay of a
+    /// settled row and the link's duplicate arm are the same question asked at two
+    /// moments, and the operator is owed the same sentence whichever answers.
+    /// **What the ledger already knows about this exact ask, if it is finished.**
+    ///
+    /// Read ONLY when there is no addressee, and only terminal rows are answered from —
+    /// the two restrictions that keep this from becoming the duplicate
+    /// [`Daemon::compose`] deleted. `None` means "the record has nothing final to say", and
+    /// every caller's fallback is the sentence about the link it already had.
+    ///
+    /// # Why `applying` is not answered here
+    ///
+    /// It is a claim some attempt still owns. Deciding it needs the claim itself, which is
+    /// taken in the same critical section as the write and therefore lives in the link. A
+    /// reader here could only guess, and the guess would be about a write that may be
+    /// landing as it guesses.
+    ///
+    /// # Why the material is compared before anything is replayed
+    ///
+    /// [`Daemon::interrupt`]'s reason, in the form a compose takes it: a duplicate is a
+    /// second ask carrying the SAME words. An id reused for different words is two
+    /// mutations under one key, and replaying the first one's turn id at the second would
+    /// tell somebody their new message reached the model when it never left this machine.
+    /// Compared on the checksum alone — the thread, the route and the visit generation in
+    /// the row are this daemon's own bookkeeping, and a person who reused an id did nothing
+    /// wrong about state they cannot see.
+    ///
+    /// # Why an unreadable ledger is `None` rather than a refusal
+    ///
+    /// The caller's fallback already refuses, with a sentence about the link that is true.
+    /// The store's own error is logged here, on the machine entitled to it, and never
+    /// interpolated into what the phone reads — F3's rule, which a new reader of this table
+    /// has to obey too.
+    async fn settled_compose(
+        &self,
+        session_uid: &str,
+        request_id: &str,
+        claimed_hash: &str,
+    ) -> Option<protocol::ws::ComposeResult> {
+        let state = match self
+            .db
+            .mutation_status(
+                crate::store::OPERATION_COMPOSE,
+                session_uid.to_string(),
+                request_id.to_string(),
+            )
+            .await
+        {
+            Ok(state) => state?,
+            Err(err) => {
+                crate::log_error!(
+                    "codex compose for {session_uid}: could not read the compose ledger \
+                     for {request_id}: {err:#}"
+                );
+                return None;
+            }
+        };
+        if matches!(state.status, crate::store::AnswerStatus::Applying) {
+            return None;
+        }
+        if state.claimed.claimed_hash != claimed_hash {
+            return Some(protocol::ws::ComposeResult::Rejected {
+                reason: crate::codex_refusals::COMPOSE_ID_REUSED.into(),
+            });
+        }
+        Some(match state.status {
+            // Through the one mapping the link's own duplicate arm uses, so the two can
+            // never disagree about what a recorded outcome means.
+            crate::store::AnswerStatus::Settled(outcome) => {
+                Daemon::compose_result(crate::codex_link::replayed_compose_report(&outcome))
+            }
+            crate::store::AnswerStatus::Indeterminate => {
+                Daemon::compose_result(crate::codex_link::ComposeReport::Unknown(
+                    crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
+                ))
+            }
+            // Returned above. Restated rather than folded into a wildcard so a fourth
+            // status has to be decided here instead of inheriting a replay.
+            crate::store::AnswerStatus::Applying => return None,
+        })
+    }
+
+    fn compose_result(report: crate::codex_link::ComposeReport) -> protocol::ws::ComposeResult {
+        use protocol::ws::ComposeResult;
+        match report {
+            crate::codex_link::ComposeReport::Started { turn_id } => {
+                ComposeResult::Started { turn_id }
+            }
+            crate::codex_link::ComposeReport::Steered { turn_id } => {
+                ComposeResult::Steered { turn_id }
+            }
+            crate::codex_link::ComposeReport::Duplicate { turn_id, started } => {
+                ComposeResult::Duplicate { turn_id, started }
+            }
+            crate::codex_link::ComposeReport::NotApplied(reason) => {
+                ComposeResult::Rejected { reason }
+            }
+            crate::codex_link::ComposeReport::Unknown(reason) => {
+                ComposeResult::Indeterminate { reason }
+            }
+        }
+    }
+
+    fn interrupt_result(
+        report: crate::codex_link::InterruptReport,
+    ) -> protocol::ws::InterruptResult {
+        use protocol::ws::InterruptResult;
+        match report {
+            crate::codex_link::InterruptReport::Aborted { turn_id } => {
+                InterruptResult::Aborted { turn_id }
+            }
+            crate::codex_link::InterruptReport::Duplicate { turn_id } => {
+                InterruptResult::Duplicate { turn_id }
+            }
+            crate::codex_link::InterruptReport::NotApplied(reason) => {
+                InterruptResult::Rejected { reason }
+            }
+            crate::codex_link::InterruptReport::Unknown(reason) => {
+                InterruptResult::Indeterminate { reason }
+            }
+        }
+    }
+
+    /// **Settle every phone answer this daemon was in the middle of when it
+    /// stopped.**
+    ///
+    /// An `applying` claim under `answer` is one whose response may or may not have
+    /// reached the app-server: the claim is taken only once the live connection has
+    /// accepted the ask, and the write follows immediately, so nothing that survives
+    /// the restart can say which side of it the process died on. The disposition is
+    /// not replayed and `serverRequest/resolved` names no decision, so there is no
+    /// frame left that could tell.
+    ///
+    /// That is terminal `Unknown`, and terminal is the point — the card is retired
+    /// saying exactly that rather than being answered a second time against a request
+    /// the app-server accepts exactly one answer to. Card and claim go in the one
+    /// commit, for [`Daemon::retire_codex_answered`]'s reason.
+    ///
+    /// **It runs after the cards are back in memory**, and that ordering is
+    /// load-bearing: retirement claims the card by removing it from `inner.pending`,
+    /// so a settle that ran first would find nothing, file no resolution, and leave
+    /// a card every future tap refuses.
+    async fn recover_codex_answers(&self) {
+        let claims = match self
+            .db
+            .unsettled_claims(crate::store::OPERATION_ANSWER)
+            .await
+        {
+            Ok(claims) => claims,
+            Err(err) => {
+                crate::log_error!("recovery: could not read codex answer claims: {err:#}");
+                return;
+            }
+        };
+        if claims.is_empty() {
+            return;
+        }
+        crate::log_warn!(
+            "recovery: {} codex answer(s) were in flight; recording them as unknown rather \
+             than sending again",
+            claims.len()
+        );
+        for claim in claims {
+            self.settle_stranded_answer_claim(&claim).await;
+        }
+    }
+
+    /// **Settle every phone interrupt this daemon was in the middle of when it
+    /// stopped.**
+    ///
+    /// The counterpart of [`Daemon::recover_codex_answers`], and simpler for the
+    /// reason [`crate::codex_link::settle_open_interrupts`] is simpler: an interrupt
+    /// has no card, so there is nothing to retire beside the ledger row.
+    ///
+    /// An `applying` claim under `interrupt` is one whose write may or may not have
+    /// reached the app-server — the claim is taken only once the live connection has
+    /// accepted the ask, and the write follows immediately — and the turn's terminal,
+    /// which is the only evidence there ever was, is a live notification that is never
+    /// replayed. So nothing that survives the restart can say, and terminal `Unknown`
+    /// is both the truth and the point: the turn is not stopped a second time against
+    /// a session that may have moved on.
+    async fn recover_codex_interrupts(&self) {
+        let claims = match self
+            .db
+            .unsettled_claims(crate::store::OPERATION_INTERRUPT)
+            .await
+        {
+            Ok(claims) => claims,
+            Err(err) => {
+                crate::log_error!("recovery: could not read codex interrupt claims: {err:#}");
+                return;
+            }
+        };
+        if claims.is_empty() {
+            return;
+        }
+        crate::log_warn!(
+            "recovery: {} codex interrupt(s) were in flight; recording them as unknown \
+             rather than sending again",
+            claims.len()
+        );
+        for claim in claims {
+            self.settle_stranded_interrupt_claim(&claim).await;
+        }
+    }
+
+    /// **Make one stranded interrupt claim terminal, without being able to say what
+    /// it did.**
+    ///
+    /// Shared by the restart recovery and the registration handover, so both close the
+    /// same claim the same way — the mistake the answer path's own history warns
+    /// about, where two closers of one obligation drifted.
+    async fn settle_stranded_interrupt_claim(&self, claim: &crate::store::MutationClaimRow) {
+        match self
+            .db
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_INTERRUPT,
+                claim.session_uid.clone(),
+                claim.client_request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            Ok(true) => crate::log_warn!(
+                "the interrupt {} for {} (turn {:?}) is recorded as unknown: it was in \
+                 flight when this daemon stopped and will not be sent again",
+                claim.client_request_id,
+                claim.session_uid,
+                claim.claimed.target_turn_id
+            ),
+            // Something already made it terminal. Nothing to do and nothing wrong:
+            // first terminal wins here as it does everywhere else in this ledger.
+            Ok(false) => {}
+            Err(err) => crate::log_error!(
+                "recovery: could not settle the interrupt claim {} for {}: {err:#}",
+                claim.client_request_id,
+                claim.session_uid
+            ),
+        }
+    }
+
+    /// **Settle every phone compose this daemon was in the middle of when it stopped.**
+    ///
+    /// [`Daemon::recover_codex_interrupts`]'s counterpart, and the stake is the higher of
+    /// the two: an interrupt sent twice stops a turn that is already stopped, and a
+    /// compose sent twice puts the same words in the model's mouth again. The claim is
+    /// taken only once the live connection has accepted the ask and the write follows
+    /// immediately, so an `applying` row is one whose frame may or may not have reached
+    /// the app-server — and the answer that would have said which is a response to a
+    /// connection that no longer exists. Terminal `Unknown` is both the truth and the
+    /// point.
+    async fn recover_codex_composes(&self) {
+        let claims = match self
+            .db
+            .unsettled_claims(crate::store::OPERATION_COMPOSE)
+            .await
+        {
+            Ok(claims) => claims,
+            Err(err) => {
+                crate::log_error!("recovery: could not read codex compose claims: {err:#}");
+                return;
+            }
+        };
+        if claims.is_empty() {
+            return;
+        }
+        crate::log_warn!(
+            "recovery: {} codex compose(s) were in flight; recording them as unknown \
+             rather than saying them again",
+            claims.len()
+        );
+        for claim in claims {
+            self.settle_stranded_compose_claim(&claim).await;
+        }
+    }
+
+    /// **Make one stranded compose claim terminal, without being able to say what it
+    /// did.**
+    ///
+    /// Shared by the restart recovery and the registration handover, so both close the
+    /// same claim the same way — the mistake the answer path's own history warns about.
+    async fn settle_stranded_compose_claim(&self, claim: &crate::store::MutationClaimRow) {
+        match self
+            .db
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_COMPOSE,
+                claim.session_uid.clone(),
+                claim.client_request_id.clone(),
+                protocol::time::now_rfc3339(),
+            )
+            .await
+        {
+            Ok(true) => crate::log_warn!(
+                "the compose {} for {} (route {}) is recorded as unknown: it was in flight \
+                 when this daemon stopped and will not be sent again",
+                claim.client_request_id,
+                claim.session_uid,
+                claim.claimed.route
+            ),
+            // Something already made it terminal. First terminal wins here as everywhere
+            // else in this ledger.
+            Ok(false) => {}
+            Err(err) => crate::log_error!(
+                "recovery: could not settle the compose claim {} for {}: {err:#}",
+                claim.client_request_id,
+                claim.session_uid
+            ),
+        }
+    }
+
+    /// **Make one stranded answer claim terminal `Unknown`, card and all.**
+    ///
+    /// The per-claim half of [`Daemon::recover_codex_answers`], shared with the
+    /// handover sweep so both close the same claim the same way: the card is
+    /// retired saying its answer's fate is unknown and the claim is settled
+    /// `indeterminate` in the one commit, or — for a run whose card is already
+    /// gone — the ledger alone is made terminal.
+    ///
+    /// **`Err` is not `Ok(None)`.** A run that is genuinely GONE has no card left
+    /// to retire either, so its claim is made terminal in the ledger and nothing
+    /// else happens — that is honest. A read that FAILED says nothing about
+    /// whether the run is there, and settling the ledger on the strength of it
+    /// strands whatever card the run still has, so the claim is left live for the
+    /// next attempt.
+    async fn settle_stranded_answer_claim(&self, claim: &crate::store::MutationClaimRow) {
+        let now = protocol::time::now_rfc3339();
+        let row = match self.db.get_session(claim.session_uid.clone()).await {
+            Ok(Some(row)) => Some(row),
+            Ok(None) => None,
+            Err(err) => {
+                crate::log_error!(
+                    "could not read the run behind the answer to {}, so its \
+                     claim is left live for the next attempt: {err:#}",
+                    claim.client_request_id
+                );
+                return;
+            }
+        };
+        let Some(row) = row else {
+            if let Err(err) = self
+                .db
+                .settle_answer_indeterminate(
+                    claim.session_uid.clone(),
+                    claim.client_request_id.clone(),
+                    now,
+                )
+                .await
+            {
+                crate::log_error!(
+                    "could not make the answer to {} terminal: {err:#}",
+                    claim.client_request_id
+                );
+            }
+            return;
+        };
+        let session = SessionKey::new(&row.session_uid, &row.session_id);
+        let retired = self
+            .retire_codex_answered(
+                &session,
+                &claim.client_request_id,
+                protocol::ws::CodexResolution::Unknown {
+                    attempted_by: protocol::ws::ResolutionActor::Phone,
+                    attempted_decision: Some(AnswerDecision::OptionId {
+                        option_id: claim.claimed.route.clone(),
+                    }),
+                    write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
+                    cause: "this Mac stopped between writing the answer and learning \
+                            what became of it"
+                        .into(),
+                },
+                Some(crate::store::AnswerTerminal::Indeterminate),
+            )
+            .await;
+        if matches!(retired, Retirement::AlreadyGone) {
+            if let Err(err) = self
+                .db
+                .settle_answer_indeterminate(
+                    claim.session_uid.clone(),
+                    claim.client_request_id.clone(),
+                    now,
+                )
+                .await
+            {
+                crate::log_error!(
+                    "could not make the answer to {} terminal: {err:#}",
+                    claim.client_request_id
+                );
+            }
+        }
+    }
+
+    /// **Durably settle every applying claim of an outgoing session, of every kind.**
+    ///
+    /// Both actuating verbs commit their durable claim BEFORE the mutation enters the
+    /// link's in-memory ledger, and the write that commits it is a `spawn_blocking`
+    /// that a cancellation cannot stop. So an abort has a window it cannot see: the
+    /// row is `applying` in the store and `open_answers`/`open_interrupts` hold
+    /// nothing, and the ledger walk the abort performs finds nothing to do. This reads
+    /// the authoritative record — the claim rows themselves — and makes each terminal
+    /// the way a restart's recovery would: the answer's card retired beside its row,
+    /// the interrupt's row alone.
+    ///
+    /// **Run on every in-process abort path**: the quiesce-timeout handover, the
+    /// registration that parks and joins the incumbent (an exit replay included, which
+    /// takes no quiesce and so passes no other sweep), and a supervisor disconnecting.
+    /// Each of those is a moment after which nothing else will ever speak for what
+    /// that link was holding, so a claim left `applying` there sits until the next
+    /// daemon start with its card open on somebody's phone.
+    ///
+    /// **Over [`crate::store::OPERATION_KINDS`] rather than a call per kind.** The two
+    /// closers differ and the `match` below says so; what must not differ is which
+    /// kinds a given abort path covers, and three call sites naming two kinds each is
+    /// six chances to cover one and forget the other — which is exactly the shape the
+    /// interrupt ledger was in.
+    ///
+    /// The one tail it cannot cover is a write that commits *strictly after* this
+    /// read. That claim is no worse off than before this sweep existed, and a
+    /// restart's recovery remains its backstop.
+    async fn sweep_stranded_claims(&self, session_uid: &str, occasion: &str) {
+        for kind in crate::store::OPERATION_KINDS {
+            let claims = match self
+                .db
+                .unsettled_claims_for(kind, session_uid.to_string())
+                .await
+            {
+                Ok(claims) => claims,
+                Err(err) => {
+                    crate::log_error!(
+                        "{occasion} for {session_uid}: could not read the outgoing \
+                         session's {kind} claims, so one committed but not yet in the \
+                         ledger may be left applying until the next start: {err:#}"
+                    );
+                    continue;
+                }
+            };
+            if claims.is_empty() {
+                continue;
+            }
+            crate::log_warn!(
+                "{occasion} for {session_uid}: {} {kind} claim(s) were still applying on \
+                 the outgoing link; recording them as unknown rather than leaving them \
+                 for the next start",
+                claims.len()
+            );
+            for claim in claims {
+                // **A `&str` match cannot be exhaustive, so the last arm is a loud
+                // failure rather than a silent default.** Closing an unknown kind the
+                // way an interrupt is closed would settle a row whose obligations —
+                // a card, say — nothing had discharged.
+                match kind {
+                    crate::store::OPERATION_ANSWER => {
+                        self.settle_stranded_answer_claim(&claim).await
+                    }
+                    crate::store::OPERATION_INTERRUPT => {
+                        self.settle_stranded_interrupt_claim(&claim).await
+                    }
+                    crate::store::OPERATION_COMPOSE => {
+                        self.settle_stranded_compose_claim(&claim).await
+                    }
+                    other => crate::log_error!(
+                        "{occasion} for {session_uid}: the claim {} is of kind {other}, \
+                         which has no closer here; it is left applying for the next \
+                         start rather than closed the wrong way",
+                        claim.client_request_id
+                    ),
+                }
+            }
+        }
+    }
+
+    /// **Refuse an operation that only makes sense against Claude, naming the run's
+    /// own agent.**
+    ///
+    /// [`ClaudeOnly::Admitted`] when the operation may proceed, and one of two
+    /// refusals otherwise. Both carry a sentence a phone can show, because every one
+    /// of these is something a person deliberately asked for and is owed an
+    /// explanation rather than a silence — and they are kept apart because "this run
+    /// is not Claude's" and "this Mac has no such run" are different things to be
+    /// told, and a caller with two close codes should be able to send the right one.
+    ///
+    /// # Why a shared gate and not a check per call site
+    ///
+    /// The two operations behind it are Claude-shaped in different ways, and neither
+    /// was refused explicitly before.
+    ///
+    ///   * **The command catalog** runs the Claude CLI and reads its own inventory of
+    ///     slash commands. A Codex session escaped it only because it happens to
+    ///     report no `claude_bin`, which is an accident of the registration frame
+    ///     rather than a decision — and the sentence it produced ("this session did
+    ///     not report its Claude Code binary") described a missing field rather than
+    ///     the truth, which is that this run has no Claude to ask.
+    ///   * **The terminal attachment** hands a real tmux client to the session's pane
+    ///     and types into it. That is an actuation, and it is the one actuation that
+    ///     does not go through the broker at all — so nothing downstream of it is
+    ///     scoped to an agent, and no gate anywhere else can stand in for this one. A
+    ///     Codex pane belongs to the codex TUI, whose keystrokes and prompts this
+    ///     build has measured nothing about.
+    ///
+    /// **`capture` is deliberately NOT behind it**, and the difference is that it
+    /// actuates nothing: it reads the pane's own screen and returns the text. Reading
+    /// what a Codex session has printed is a fair thing for a phone to do and is not
+    /// a keystroke, so refusing it would remove something useful in the name of a rule
+    /// about writes.
+    ///
+    /// **An unreadable row refuses**, for [`Daemon::answer`]'s reason: unreadable is
+    /// not evidence of Claude.
+    pub async fn refuse_unless_claude(&self, session_ref: &str, what: &str) -> ClaudeOnly {
+        match self.resolve_optional(session_ref).await {
+            Ok(Some(row)) => match row.agent {
+                protocol::agent::AgentKind::Claude => ClaudeOnly::Admitted,
+                protocol::agent::AgentKind::Codex => ClaudeOnly::WrongAgent(format!(
+                    "{} is a Codex session, and {what} is a Claude feature this daemon \
+                     does not offer for it",
+                    row.session_uid
+                )),
+                protocol::agent::AgentKind::Unsupported(ref name) => {
+                    ClaudeOnly::WrongAgent(format!(
+                        "{} is a {name} session, and {what} is something this daemon \
+                         can only do for Claude",
+                        row.session_uid
+                    ))
+                }
+            },
+            // **A reference that names nothing is refused here too, and the caller
+            // still chooses the words.** It used to be admitted, on the reasoning that
+            // an unknown session is the caller's sentence to write rather than this
+            // gate's — which is true, and is why the two refusals are told apart
+            // instead of being merged. What was not true is that admitting it was
+            // free: this gate's whole contract is to fail closed, and at the terminal
+            // attach it is the last check before the lease, with no later existence
+            // test behind it. A row this daemon could not find is not evidence that
+            // the run is Claude's.
+            Ok(None) => ClaudeOnly::Unknown(format!("{session_ref} is not a run this Mac hosts")),
+            Err(err) => ClaudeOnly::Unknown(format!("session lookup failed: {err}")),
         }
     }
 
@@ -2144,7 +5984,87 @@ impl Daemon {
             Ok(uid) => uid,
             Err(reason) => return AnswerResult::Rejected { reason },
         };
+
+        // **Refused before the claim, and before the decision below.** See
+        // [`Daemon::shared_ledgers_admit`]. `approval_target` answers *which run*
+        // and never *which agent*, and no check between here and step 4 asks:
+        // `claim_answer` writes `answer_claims` with no existence guard of its
+        // own, and every refusal that could stop a non-Claude answer lives later
+        // — inside `apply_decision`, or in `supervisor_request`. Those late
+        // refusals release the claim they find, so the leak they leave is a
+        // window rather than a residue: a rolled-back daemon starting inside it
+        // deletes the claim and the card as its own, and a crash inside it leaves
+        // a claim only `settle_indeterminate` can retire — into `answers`, the
+        // fourth shared table.
+        //
+        // **It is now a fork rather than a dead end, and the gate has not moved.**
+        // A Codex answer is not typed and touches none of these four tables; it
+        // goes to [`Daemon::answer_codex`], whose durable claim lands in
+        // `mutation_ledger` — the generalized Codex ledger, which no v0.6.0
+        // statement names. What `shared_ledgers_admit` says is unchanged — these
+        // ledgers are Claude's — and what changed is that the other agent now has
+        // somewhere to be sent instead of nowhere.
+        //
+        // **The branch names the agent it routes to, and refuses the rest.**
+        // `AgentKind::Unsupported` is a run some future build wrote; its contract
+        // is that every actuation site fails closed, and "not Claude" is not
+        // evidence of Codex. Refused here, before any lock or durable claim, so a
+        // database from a build this one does not understand costs nothing but a
+        // sentence.
+        let codex = match self.db.get_session(session_uid.clone()).await {
+            Ok(Some(row)) => match row.agent {
+                protocol::agent::AgentKind::Claude => None,
+                protocol::agent::AgentKind::Codex => Some(row),
+                protocol::agent::AgentKind::Unsupported(ref name) => {
+                    return AnswerResult::Rejected {
+                        reason: format!(
+                            "{session_uid} is a {name} session, which this daemon does not \
+                             know how to answer; nothing was sent"
+                        ),
+                    }
+                }
+            },
+            // No row: the uid came from the answers ledger for a run since
+            // deleted (`approval_target`'s replay arm), so there is no agent to
+            // read and step 1 below replays the stored outcome as it always has.
+            Ok(None) => None,
+            // The same shape `approval_target` uses for a failed session lookup.
+            // Unreadable is not evidence of Claude, and this gate is the one
+            // check on this path that may not be skipped on a bad day.
+            // Logged here, not carried, for `approval_target`'s reason — this is the
+            // same shape and it says the same sentence.
+            Err(err) => {
+                crate::log_error!("answer for {session_uid}: session lookup failed: {err:#}");
+                return AnswerResult::Rejected {
+                    reason: "session lookup failed".into(),
+                };
+            }
+        };
+
         let id: ApprovalId = (session_uid.clone(), request_id.to_string());
+
+        // **A Codex-only decision on the Claude answer path — refused before any
+        // mutation.** `option_id` is an opaque Codex option with no keystroke
+        // representation, so this keystroke-answer path can never apply it. It is
+        // refused here, before the serialise gate and every claim, so it takes no
+        // responder, releases no held hook, writes no durable answer_claim,
+        // removes no card and appends no resolution — none of the actionable
+        // state changes the *late* `apply_decision` refusal (kept below as a
+        // backstop) would otherwise have already caused. Claude's
+        // allow/deny/option-index/text decisions do not reach this branch and are
+        // byte-identical.
+        //
+        // **Claude-only now, and that is what the `codex.is_none()` says.** The
+        // same decision on a Codex session is the only one that path accepts, so
+        // the refusal keeps naming exactly the mistake it always named: an
+        // `option_id` aimed at a session that has no options to name.
+        if codex.is_none() && matches!(decision, AnswerDecision::OptionId { .. }) {
+            return AnswerResult::Rejected {
+                reason: "an option_id answer is for a Codex session; this is a Claude session, \
+                         so nothing was typed"
+                    .into(),
+            };
+        }
 
         // 0. Serialise on this one approval. Two taps arriving together used to
         //    make the second one a *rejection* ("already being applied"), which
@@ -2163,6 +6083,16 @@ impl Daemon {
             Arc::clone(inner.answer_locks.entry(id.clone()).or_default())
         };
         let _serialised = gate.lock().await;
+
+        // **The fork, taken under the same serialisation and no earlier.** Two
+        // taps on one Codex card queue behind each other here exactly as two on a
+        // Claude card do, so the second is a well-formed duplicate that reads the
+        // first one's row rather than a race that claims twice.
+        if let Some(row) = codex {
+            return self
+                .answer_codex(&row, request_id, payload_hash, decision)
+                .await;
+        }
 
         // 1. Durable ledger wins over everything: an already-answered request is
         //    a no-op that replays the original outcome.
@@ -2209,7 +6139,8 @@ impl Daemon {
         {
             Ok(Some(claim)) => {
                 crate::log_warn!(
-                    "{request_id} carries an unsettled claim from {}; refusing to type again",
+                    "{} carries an unsettled claim from {}; refusing to type again",
+                    logged_request_id(request_id),
                     claim.started_at
                 );
                 self.settle_indeterminate(&claim).await;
@@ -2292,7 +6223,10 @@ impl Daemon {
             started_at: protocol::time::now_rfc3339(),
         };
         if let Err(err) = self.db.claim_answer(claim.clone()).await {
-            crate::log_error!("could not claim {request_id} durably: {err:#}");
+            crate::log_error!(
+                "could not claim {} durably: {err:#}",
+                logged_request_id(request_id)
+            );
             let mut inner = self.inner.lock().await;
             if let Some(entry) = inner.pending.get_mut(&id) {
                 entry.claimed = false;
@@ -2478,6 +6412,17 @@ impl Daemon {
             AnswerDecision::Deny => ("\u{1b}".to_string(), false),
             AnswerDecision::Option { index } => (index.to_string(), true),
             AnswerDecision::Text { text } => (text.clone(), true),
+            // An `option_id` decision is a Codex answer (an opaque server-offered
+            // option). It has no meaning at a Claude permission prompt — there is
+            // no keystroke that safely stands for it — so it is refused rather
+            // than guessed at. A Claude client never sends one.
+            AnswerDecision::OptionId { .. } => {
+                return Actuation::Refused(
+                    "an option_id answer is for a Codex session; this is a Claude session, \
+                     so nothing was typed"
+                        .into(),
+                );
+            }
         };
 
         let answers_the_prompt = !matches!(decision, AnswerDecision::Text { .. });
@@ -2665,6 +6610,25 @@ impl Daemon {
             };
         }
         let session_uid = match self.resolve(session_ref).await {
+            // **Refused here, on the row the resolver already read.** See
+            // [`Daemon::shared_ledgers_admit`] for what a rolled-back daemon does
+            // to a `text_mutations` row it finds. The position is the whole
+            // point: the claim below is durable and is written *before* anything
+            // is typed, while the refusal that would otherwise have stopped a
+            // non-Claude takeover is "no supervisor attached", raised inside
+            // `supervisor_request` after the claim exists. A daemon killed in
+            // that window leaves an `applying` row behind, which is exactly the
+            // row the old build rewrites.
+            Ok(row) if !self.shared_ledgers_admit(&row.agent) => {
+                return SendTextResult::Refused {
+                    reason: format!(
+                        "{} is a {} session and this daemon only types into Claude sessions; \
+                         nothing was typed",
+                        row.session_uid,
+                        row.agent.as_str()
+                    ),
+                }
+            }
             Ok(row) => row.session_uid,
             Err(err) => {
                 return SendTextResult::Refused {
@@ -2884,6 +6848,24 @@ impl Daemon {
                 }
             }
         };
+        // **The agent, read explicitly, before the binary is looked for.** A Codex run
+        // used to reach the next block and be turned away by an empty `claude_bin`,
+        // which is a fact about a registration field rather than about the agent — so
+        // a future registration that carried one would have run the Claude CLI against
+        // a session that is not running Claude. See [`Daemon::refuse_unless_claude`].
+        //
+        // **Asked about the row this function already resolved**, not about the
+        // reference again. A tmux name can resolve to a different run between two
+        // reads — a new session registered under the same name is the whole reason
+        // the resolver is bounded and retried — so resolving twice makes the agent
+        // this refuses on a possibly different run from the one it goes on to probe.
+        if let Some(reason) = self
+            .refuse_unless_claude(&row.session_uid, "the slash-command list")
+            .await
+            .reason()
+        {
+            return CommandCatalogResult::Unavailable { reason };
+        }
         let claude_bin = {
             let inner = self.inner.lock().await;
             inner
@@ -3039,7 +7021,7 @@ impl Daemon {
     /// socket is what tells us the supervisor went away, and unregistering by
     /// name would detach whichever run currently holds it.
     pub async fn register_supervisor(
-        &self,
+        self: &Arc<Self>,
         info: RegisterSession,
         tx: mpsc::Sender<DaemonFrame>,
         inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>>,
@@ -3048,6 +7030,11 @@ impl Daemon {
         let existing = self
             .lookup_run(&info.session_id, info.session_uid.as_deref())
             .await?;
+        // The snapshot is taken. Everything below decides from the re-read under the
+        // acceptance gate, and this is what lets a test hold a registration here on
+        // purpose rather than guess at it with a sleep. See [`snapshot_latch`].
+        #[cfg(test)]
+        snapshot_latch::passed(info.session_uid.as_deref());
         let uid = match (&existing, &info.session_uid) {
             (Some(row), _) => row.session_uid.clone(),
             (None, Some(uid)) if protocol::uid::is_well_formed(uid) => uid.clone(),
@@ -3061,23 +7048,599 @@ impl Daemon {
             }
         };
 
+        // **Fail closed on the agent, before any write or install.** A daemon
+        // only hosts what it can actually drive; the authoritative list is
+        // `supported_agents()`, never a property of the value. Any registration
+        // for an agent not on that list — any unrecognised name, or a present
+        // empty string — is refused here, persisting nothing and installing
+        // nothing.
+        //
+        // **The list is `[Claude, Codex]` now.** It was `[Claude]`, and that is
+        // what kept the generation-adoption path and everything below it dormant;
+        // Codex joined the day its coordinator became able to send a registration
+        // at all. What follows this gate is therefore live for Codex rather than
+        // dead code: the control-link fact is read off the frame, the generation
+        // is compared against the standing high-water, the row is routed to
+        // `codex_sessions` by `upsert_session`, and a link is spawned. What did
+        // NOT open with it is the four shared ledgers — see
+        // [`Daemon::shared_ledgers_admit`], which is deliberately no longer
+        // defined in terms of this list.
+        if !self.supported_agents().contains(&info.agent) {
+            anyhow::bail!(
+                "refusing to register {}: agent {:?} is not supported by this daemon",
+                info.session_id,
+                info.agent.as_str()
+            );
+        }
+
+        // **A uid does not leave Claude**, and this is the gate that makes
+        // [`Daemon::shared_ledgers_admit`]'s premise an invariant rather than a
+        // hope.
+        //
+        // The store deliberately *moves* a row between `sessions` and
+        // `codex_sessions` when a re-registration disagrees with where the row
+        // lives ([`crate::store::Store::upsert_session`]), and says in as many
+        // words that whether a run may change agents at all is registration
+        // adoption's question, not storage's. This is that question, answered in
+        // the one direction where the answer is forced.
+        //
+        // A run introduced as Claude may already own rows in the four ledgers a
+        // rolled-back v0.6.0 daemon reads *globally* — `pending_approvals`,
+        // `answer_claims`, `answers`, `text_mutations`. Nothing moves those rows,
+        // and nothing has to: they are keyed by uid alone. So relabelling that uid
+        // Codex leaves Codex-owned rows sitting in exactly the tables the isolation
+        // argument depends on being Claude-only, which is the rollback hazard the
+        // refusal is *for*, arriving by the one route the refusal did not cover.
+        //
+        // **The narrow direction, deliberately.** Codex → Claude is left alone: it
+        // ends with the row where the shared ledgers legitimately admit it, and the
+        // registration retires the Codex link on its way through, so nothing is
+        // stranded. Claude → Codex is the direction that strands, and it is refused
+        // whether or not any ledger row exists today — a count would make the
+        // refusal depend on a race with the producers below rather than on the
+        // agent, and the counting query would be the only reader of four tables
+        // nothing else asks about by uid.
+        //
+        // **This is also what closes the three producers' check/write windows.**
+        // `send_text`, the `PermissionRequest` hook and `answer` each read the row's
+        // agent and write their ledger row later — 0, 7 and 5 awaits later
+        // respectively — without holding the registration gate. The write they are
+        // protecting is only wrong if the row can become Codex in between, and after
+        // this it cannot: `ensure_session` preserves an existing row's agent, and
+        // `register_supervisor` is the only other production writer of the column.
+        // Revalidating under the gate would defend a premise that can no longer
+        // change; making the premise immutable is the smaller statement and the
+        // stronger one. `a_claude_uid_never_becomes_codex` is what keeps it true.
+        //
+        // **Where the check actually stands, and why it is not here.** The refusal
+        // is applied under the acceptance gate below, against a row re-read there —
+        // see the site itself. The snapshot at the top of this function is taken
+        // before any synchronization, so a Codex registration can read *no row*,
+        // queue behind a Claude registration that commits one, and then find the
+        // check it was supposed to fail already behind it. A premise-immutability
+        // argument made from a stale read is not an argument; the read has to be
+        // the one the writer cannot get in front of.
+        //
+        // **Identity guard, keyed off the validated agent — never field
+        // presence.** A Claude registration that carries Codex-only identity
+        // (a generation, thread id or socket) is internally inconsistent, so it
+        // is refused rather than have those fields silently activate the Codex
+        // generation guard below. This is what stops a Claude frame smuggling a
+        // generation into a path that is meant for Codex alone.
+        if info.agent.is_claude()
+            && (info.codex_generation.is_some()
+                || info.codex_thread_id.is_some()
+                || info.codex_socket.is_some())
+        {
+            anyhow::bail!(
+                "refusing to register {}: a Claude registration carried Codex identity fields",
+                info.session_id
+            );
+        }
+
+        // **The other half of that guard, which the documentation claimed and the
+        // code did not have.** A non-Claude registration carrying `claude_bin` is
+        // the mirror-image inconsistency: the frame names one agent and hands over
+        // the other's binary, and `claude_bin` is what
+        // [`Daemon::command_catalog`] would later run to enumerate a session's
+        // slash commands — against a session that is not running it. The typed
+        // producer cannot build it — `registration_frame` derives every one of
+        // these fields from a single `Option<CodexSeat>` — so this is not
+        // production-reachable today; it is here because the receiver is where the
+        // claim was made, and a guard that exists only in a comment is one a later
+        // producer will discover the hard way.
+        if !info.agent.is_claude() && info.claude_bin.is_some() {
+            anyhow::bail!(
+                "refusing to register {}: a {} registration carried a Claude binary",
+                info.session_id,
+                info.agent.as_str()
+            );
+        }
+
+        // **The control-link fact, and the Codex mirror of the guard above.** A
+        // Codex registration must name the broker's ccd leg and the generation its
+        // frames are attributed to, or this daemon would install a session it can
+        // list but never observe — live in the fleet, silent in the log. Extracted
+        // before any write, so a registration that cannot be observed leaves no
+        // trace (`crate::codex_link::ControlLink::from_registration`).
+        //
+        // **Reached now.** This used to be unreachable — `supported_agents()` was
+        // `[Claude]` and refused every Codex registration above — and it was
+        // described here as the guard the ungate would turn on. The ungate has
+        // happened, so this is the guard that decides a real Codex frame's fate:
+        // it is what refuses the incomplete ones, and what hands the complete ones
+        // the link the transaction below installs. Still proven directly against
+        // the frame in `codex_link::tests`, because a truth table is worth
+        // asserting where it lives; the two registration-level outcomes are
+        // `the_claude_path_installs_no_control_link_and_an_unobservable_codex_one_installs_nothing`
+        // and `a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run`.
+        let control_link = crate::codex_link::ControlLink::from_registration(&info)?;
+
+        // **ONE REGISTRATION FOR THIS SESSION AT A TIME, from here to the end of the
+        // acceptance.**
+        //
+        // The gate the control-link transaction below already used, taken earlier and
+        // held across the whole of it. The epoch check before the supervisor publish is
+        // a real guard and it protected the wrong span: everything past this point is
+        // the acceptance — the generation refusal, the stake, the row, the card
+        // relabel, the supervisor handle and the link — and only the last two were
+        // behind it.
+        //
+        // The row upsert and `relabel_open_cards` are awaits, and a second registration
+        // for the same uid could run the whole of itself inside either one. The loser
+        // then wrote ITS cwd, session id, thread id and socket over the winner's row,
+        // and stamped ITS project label onto cards belonging to a session the winner
+        // owns — and only afterwards reached the check and refused. Neither write is
+        // repaired by anything downstream: the registration frame is the row's single
+        // writer, and the relabel is a fire-once edit. The ordering does not even need
+        // the two futures to interleave at an await to go wrong, because
+        // `Db::upsert_session` hands the write to the blocking pool: two registrations
+        // that call it in order can still reach SQLite's one writer in the other order.
+        //
+        // **Taken above the generation refusal AND above the agent transition, not
+        // below them.** The refusals left outside read only the frame, so serializing
+        // them would buy nothing. These two read state a concurrent registration
+        // writes — `supervisors` and the row itself — which is exactly what this gate
+        // protects. Left outside, two Codex registrations at generations 5 and 6 could
+        // both read an empty high-water, both pass, and the session could settle on
+        // the OLDER launch. They are the refusals the gate closes for free.
+        //
+        // Serializing is what makes "a loser mutated nothing" true of the whole
+        // acceptance rather than of its in-memory tail. Taken BEFORE `inner` on every
+        // path, which is the lock ordering this type already uses.
+        let gate = self.registration_gate(&uid).await;
+        let _acceptance = gate.lock().await;
+
+        // **The answer quiesce is taken LATER — just above the stake — not here**
+        //. All of the accept/reject preparation below (the row re-read,
+        // the agent boundary, the generation and thread-binding checks, the exit-replay
+        // corpse refusal) reads only state a concurrent registration writes, never a
+        // phone answer, so serializing it against answers would buy nothing and holding
+        // the answer writer across it is exactly what let a DB/ingest stall block every
+        // new answer indefinitely. The writer is acquired immediately before the stake,
+        // where it belongs, and an exit replay (refused the claim above the stake) never
+        // touches it at all. See [`ANSWER_QUIESCE_BUDGET`] and the block just above
+        // `inner.stake`.
+
+        // **The row, re-read under the gate — and every decision about it made from
+        // THIS read, not the one at the top of the function** (round-2 F2).
+        //
+        // The snapshot above is taken before any synchronization: a registration can
+        // read no row for this uid, block here behind one that commits a row, and
+        // wake up holding a picture of the session that a durable write has already
+        // contradicted. The Claude→Codex refusal was decided from that picture, so a
+        // Codex frame could pass a check against a row it never saw and then
+        // overwrite it — the shared-ledger hazard documented above, arriving by the
+        // exact route the refusal exists to close.
+        //
+        // Re-reading is what makes the refusal a statement about the row this
+        // registration is actually about to overwrite. It costs one `get_session` by
+        // uid on a path that already does a durable write, and it is the same shape
+        // the 2e-5 and 2e-6 rounds took twice: a check whose subject can be written
+        // by a concurrent registration belongs under the gate that orders them.
+        //
+        // **`created_at` below reads the same snapshot and does NOT need this** —
+        // measured, not assumed. `Store::upsert_session`'s `ON CONFLICT DO UPDATE`
+        // deliberately omits `created_at`, so the column is written on insert only
+        // and a stale fallback there reaches no row that already has one. The
+        // shadowed read makes it moot rather than fixing it.
+        let existing = self.lookup_run(&info.session_id, Some(&uid)).await?;
+        if let Some(row) = &existing {
+            if row.agent.is_claude() && !info.agent.is_claude() {
+                anyhow::bail!(
+                    "refusing to register {}: {uid} is a Claude run and a run does not change \
+                     agents — its rows in the shared ledgers would become {}-owned in tables a \
+                     rolled-back daemon rewrites",
+                    info.session_id,
+                    info.agent.as_str()
+                );
+            }
+        }
+
+        // **Stale generation is rejected BEFORE any persistent mutation (D4).**
+        // The upsert and the card relabel below are persistent writes, so the
+        // accept/reject decision — including this generation check — must come
+        // first: a rejected frame must mutate nothing. Only a validated Codex
+        // agent's generation participates (a Claude frame carrying one was
+        // already refused above), so the Claude path never reaches this and is
+        // byte-identical.
+        //
+        // **The high-water is read from two places and the higher one wins
+        // (plan A5.1, "durable high-water evidence in rollback-isolated
+        // storage").** The in-memory half is `SupervisorHandle::codex_generation`
+        // and it is *not* the link's live visit count — measured, not assumed:
+        // that field has exactly one writer, the handle publish below, from
+        // `info.codex_generation`, and the link's `visit.generation` bumps live
+        // on a connection-local `Visit` that is never written back. So the
+        // in-memory high-water means "the last generation REGISTERED for this
+        // uid", and `codex_sessions.codex_generation` — written by the same
+        // acceptance, in the same statement as the row — restores exactly that
+        // quantity after a restart. Restoring the same quantity is what makes
+        // the durable read incapable of stranding a live session: the only
+        // registration it can refuse is one at a generation this daemon has
+        // already adopted, which is the registration the in-memory check was
+        // always going to refuse anyway.
+        //
+        // Before A5.1 this read the in-memory half alone, and a daemon restart
+        // forgot the high-water entirely: a supervisor could kill ccd and
+        // re-register the session onto an older visit, which is the compare that
+        // was not atomic across a restart. Two halves rather than one because
+        // they can genuinely disagree in one direction — a registration whose
+        // row was written and whose handle publish was then refused as
+        // superseded leaves the durable value AHEAD of the surviving handle —
+        // and `max` is the fail-closed reading of that disagreement.
+        //
+        // **Both reads happen here, above every persistent mutation**, which is
+        // the ordering clause: the upsert and the card relabel are below, so a
+        // frame refused by either check has changed nothing in memory or on
+        // disk. `existing` is the row re-read under the acceptance gate a few
+        // lines up, so the thread this compares against is the one the writer
+        // this registration is racing cannot get in front of.
+        if matches!(info.agent, protocol::agent::AgentKind::Codex) {
+            if let Some(incoming) = info.codex_generation {
+                let in_memory = {
+                    let inner = self.inner.lock().await;
+                    inner
+                        .supervisors
+                        .get(&uid)
+                        .and_then(|handle| handle.codex_generation)
+                };
+                let durable = self.db.codex_generation(uid.clone()).await?;
+                if let Some(current) = in_memory.into_iter().chain(durable).max() {
+                    if incoming < current {
+                        anyhow::bail!(
+                            "ignoring registration for {uid} at generation {incoming}; \
+                             generation {current} is already adopted"
+                        );
+                    }
+                }
+
+                // **A generation's thread binding is immutable (plan A5.1).**
+                //
+                // A generation IS a visit: one Codex process, one attach, one
+                // thread. The stale check above is a statement about *order* and
+                // says nothing about identity, so without this a supervisor
+                // could re-register at the generation it already holds and swap
+                // the thread underneath it — and every frame the link has
+                // already attributed to that generation would silently become
+                // frames about a thread the session was never on. The row is the
+                // fleet's answer to "where is this session", the retained carry
+                // is keyed by generation (`Inner::seed_codex_carry`), and both
+                // would then be describing two threads under one visit with
+                // nothing to tell them apart. A relaunch is how a session
+                // legitimately changes thread, and a relaunch carries a *later*
+                // generation — which this leaves alone.
+                //
+                // **Asked of the durable binding, and only when the durable
+                // generation IS the incoming one.** That equality is what makes
+                // the row's `codex_thread_id` *this* generation's thread rather
+                // than some earlier one's: every writer of that column writes it
+                // against a generation — the registration through the same
+                // statement that sets one, the control link through
+                // [`crate::store::Store::bind_codex_thread`], which refuses any
+                // generation but its own — so a row reading `(G, T)` says the
+                // registration recorded at G is currently on T. Reading the
+                // thread without checking the generation would compare against
+                // whatever the last registration left, whichever visit it
+                // belonged to.
+                //
+                // **"Currently on", not "started on", and the difference is a
+                // latent refusal worth naming.** The link's own visit generation
+                // moves with every thread it adopts while its REGISTRATION
+                // generation does not, so after a `/new` the row reads `(G, B)`
+                // where the registration at G came up on A. A re-registration at
+                // G offering A would then be refused here as a second thread
+                // under one visit. Nothing produces that today — the only
+                // registration producer hard-codes no thread at all, which is
+                // why this arm is unreachable on every real run — but the day one
+                // fills the field, this is the sentence that says what will
+                // happen and why.
+                //
+                // **The bound side is now the strongest evidence there is, and
+                // that makes this refusal stronger rather than different.** It
+                // used to be a launch-time claim and is now, on a healthy run,
+                // the thread the link actually adopted. A registration offering
+                // a different thread under the same generation is still a second
+                // thread under one visit, which is still a relaunch that forgot
+                // to advance its generation — the reasoning is unchanged, and
+                // the fact it rests on is better.
+                //
+                // Both sides must be present to disagree, and neither absence is
+                // a violation. An incoming `None` claims no thread — the launch
+                // case `ControlLink::from_registration` documents, where
+                // `thread/started` has not happened yet — so nothing changes and
+                // there is nothing to refuse. A bound `None` is a generation
+                // that has not been given a thread yet, and naming one for the
+                // first time is binding it, not changing it.
+                //
+                // **"Present" is [`crate::codex_link::real_thread_id`]'s answer
+                // on both sides, not `Option::is_some`.** A `"   "` is a field
+                // filled with nothing, and it used to disagree with everything:
+                // offered blank against a real binding was refused as a
+                // rebinding, and a blank that had reached the row *was* the
+                // binding, so the visit's first real thread was refused. Neither
+                // side of a comparison between two thread ids may be a string
+                // that names no thread. The row side is normalized at the write
+                // below and so cannot acquire a new blank, but a row written by
+                // an older build can still hold one — and one spelling of the
+                // question is cheaper than an argument about which rows predate
+                // which build.
+                if durable == Some(incoming) {
+                    if let (Some(bound), Some(offered)) = (
+                        crate::codex_link::real_thread_id(
+                            existing
+                                .as_ref()
+                                .and_then(|row| row.codex_thread_id.as_deref()),
+                        ),
+                        crate::codex_link::real_thread_id(info.codex_thread_id.as_deref()),
+                    ) {
+                        if bound != offered {
+                            anyhow::bail!(
+                                "refusing to register {uid} at generation {incoming}: that \
+                                 generation is already bound to thread {bound}, and the frame \
+                                 offers {offered} — one visit is one thread, so a second thread \
+                                 under the same generation is a relaunch that forgot to advance it"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // **The claim is staked here, in the same breath as the row.**
+        //
+        // Every rejection is behind us — an unsupported agent, an inconsistent
+        // identity, a stale generation — so D4 still holds: a refused frame has
+        // mutated nothing, in memory or on disk. What follows is the acceptance, and
+        // its first act is to say which registration the session now belongs to.
+        //
+        // It cannot wait for the handle below. The row write and the handle publish
+        // are separated by an await, and in that interval the row already describes
+        // *this* registration while the supervisor and link slots still describe the
+        // previous one, agreeing with each other. See
+        // [`Inner::registration_epochs`], which is what the resolver compares
+        // against, and [`Daemon::codex_addressee_locked`].
+        //
+        // Staking early is therefore what makes the window safe to *read* through,
+        // and it is also what makes the publish below conditional: a registration
+        // that comes back to find this entry naming somebody else has been overtaken
+        // inside its own window, and must not publish a handle for a session it no
+        // longer owns.
+        // **A CORPSE'S REPLAY MAY NOT TAKE A SESSION AWAY FROM A LIVING SUPERVISOR**
+        // (round-10 F1).
+        //
+        // `report_exit` opens a fresh connection and replays this frame immediately
+        // before `SessionExited`, so that a run which started *and* ended while `ccd`
+        // was down still has a row to record its end against. That is the only thing
+        // the replay is for, and it is worth keeping. But the frame it sends is the
+        // registration the supervisor built at launch, byte for byte, so up to here
+        // it is indistinguishable from a live supervisor arriving — and treating it
+        // as one is what defeated the round-9 guard from the other end.
+        //
+        // Traced: A registers, A's session dies, B resumes the same uid, and A's
+        // supervisor then replays. The replay staked a *third* epoch and became the
+        // owner, so the exit that followed was established against an identity the
+        // replay itself had just minted; `mark_exited` compared it with the standing
+        // claim, found the same number on both sides, and ended B's run. The epoch
+        // could not see it, because by then the epoch was the replay's own.
+        //
+        // The incarnation can, because it is older than the replay: it is stamped into
+        // the frame at launch and the replay does not restamp it. So a replay whose
+        // incarnation is not the one holding the claim is refused the claim. It is
+        // refused *only* that — the frame is not rejected, because the connection that
+        // sent it still has an exit to report and an exit refused here would fall back
+        // to the identity-less path, which reads the current owner and would end B's
+        // run for a second reason. Instead the epoch below is minted and never staked:
+        // unique, so it matches no standing claim, which is exactly what
+        // `mark_exited` needs to see to refuse the report — and what
+        // `unregister_supervisor` needs to see to leave B's slots alone when this
+        // connection closes.
+        //
+        // Narrow by construction. `exit_replay` is set by `report_exit` and nowhere
+        // else, so no live supervisor introducing a run it is about to host can reach
+        // this; a genuine hand-over is a different frame with the flag clear and
+        // supersedes as it always has. A claim that has never been staked (a daemon
+        // restart) is not a rival — there is nothing to displace, and adopting is the
+        // replay's whole purpose — so only a *standing* claim from *another*
+        // incarnation refuses. A supervisor too old to set the flag behaves exactly as
+        // it did before, which is the same narrowing the identity-less report path
+        // already carries.
+        // **The answer quiesce, taken here — immediately above the stake, and only
+        // for a real registration**.
+        //
+        // The stake below is what makes the incumbent link unaddressable, and it is
+        // the only thing that does: the answer path's epoch check is an instant, and
+        // the claim and socket write that follow it hold no registration at all. So an
+        // answer already admitted must reach a terminal before the stake, or one that
+        // arrives after re-reads the epoch under the new owner — the two are serialized
+        // by this writer against the answer path's reader (which now OWNS its guard,
+        // carried into the [`crate::codex_link::PendingAnswer`], so a cancelled answer
+        // future cannot release it while the link still owns the queued response).
+        //
+        // Acquired here rather than at the top of the function so all of the accept/
+        // reject preparation above (the row re-read, the agent boundary, the generation
+        // and thread-binding checks) runs WITHOUT the writer held — a DB or ingest
+        // stall there no longer blocks every new answer, and the whole worst case a
+        // waiting answer can produce is the two link budgets it is derived from. Taken
+        // AFTER the `inner` used for the corpse check has been released, so the one-way
+        // order (answer gate, then `inner`) still holds: the stake below re-takes
+        // `inner` under this guard.
+        //
+        // **Skipped entirely for an exit replay.** A replay is a corpse recording its
+        // own end (`report_exit` opens a connection, replays the registration, then
+        // sends `SessionExited`); it holds no session and races no answer, and it may
+        // be refused the claim a few lines down. Waiting on the writer would only
+        // delay — and, in an earlier version that bailed on expiry from ABOVE the park,
+        // DROP — the `SessionExited` it exists to deliver, leaving the run Live forever.
+        //
+        // **On expiry it does NOT refuse, and it aborts the outgoing link BEFORE the
+        // stake.** A phone answer still in flight past the budget is one the wire has
+        // stopped bounding, so the outgoing link is parked, aborted, and its open
+        // answers made terminal (claim indeterminate, card retired) right here —
+        // ahead of the stake below. Ordering it before the stake is load-bearing:
+        // once staked the incumbent is unaddressable to NEW answers, but an answer
+        // already admitted on the old link could still land a write after the stake,
+        // and any fallible step between a stake and the abort could `bail!` with the
+        // outgoing link still live and its card still dangling. Settling first closes
+        // both. See [`ANSWER_QUIESCE_BUDGET`].
+        //
+        // Settling the aborted link's `open_answers` is the ledger walk, but a claim
+        // is committed to the store BEFORE it enters that ledger and the commit
+        // cannot be cancelled, so an abort in that window leaves a claim the ledger
+        // walk never sees. The store sweep that follows the join reads the claims
+        // from the authoritative record and makes each terminal, so no claim
+        // committed but not yet in the ledger is left applying with its card open.
+        let quiesce = self.actuation_gate(&uid).await;
+        let quiesced = if info.exit_replay {
+            None
+        } else {
+            match tokio::time::timeout(ANSWER_QUIESCE_BUDGET, Arc::clone(&quiesce).write_owned())
+                .await
+            {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    crate::log_error!(
+                        "registration for {uid}: a phone answer is in flight through the \
+                         outgoing link and has not returned within {ANSWER_QUIESCE_BUDGET:?}; \
+                         aborting the outgoing link and durably settling its open answers \
+                         before staking, so nothing admitted on it can write after the stake \
+                         and no card is left dangling"
+                    );
+                    let outgoing = SessionKey::new(uid.clone(), info.session_id.clone());
+                    self.park_current_codex_link(&uid).await;
+                    let _ = self.join_parked_codex_links(&outgoing).await;
+                    // **Swept here as well as below, and the difference is the stake.**
+                    // The registration goes on to park, join and sweep again a few
+                    // steps down, so the END STATE of this branch does not depend on
+                    // this call — and no test can tell the two apart, which is the
+                    // honest price of the ordering. What this one buys is that the
+                    // claims are terminal and their cards retired BEFORE the stake,
+                    // rather than several awaits after it, so a phone cannot be shown a
+                    // card for a link that is already gone.
+                    self.sweep_stranded_claims(&uid, "handover").await;
+                    None
+                }
+            }
+        };
+
+        let incarnation = Incarnation::of(&info);
+        let epoch = {
+            let mut inner = self.inner.lock().await;
+            // **"A claim stands, and it is not mine"** — two questions of two maps,
+            // because they fail in opposite directions. Whether a claim exists at all
+            // is the epoch's, and an absent one adopts (above). Whether it is *this*
+            // supervisor's is the incarnation's, and an unrecognised answer there
+            // refuses rather than adopts: a standing claim this cannot account for is
+            // the case where taking the session would be worst.
+            let displaces_a_living_owner = info.exit_replay
+                && inner.owner_of(&uid).is_some()
+                && inner.claimant_of(&uid) != Some(&incarnation);
+            if displaces_a_living_owner {
+                // Minted and deliberately never staked. Unique, so it equals no
+                // standing claim: `mark_exited` refuses the exit that follows on
+                // this connection, and `unregister_supervisor` leaves the living
+                // owner's slots alone when it closes. Both of those already ask
+                // exactly this question of exactly this map — nothing new decides
+                // anything, which is why the refusal cannot be forgotten by a
+                // caller that has not heard of it.
+                inner.next_epoch += 1;
+                let unstaked = inner.next_epoch;
+                drop(inner);
+                crate::log_info!(
+                    "not adopting the exit replay for {uid} from supervisor pid {} started at \
+                     {}: a different supervisor holds the session now, so the run this report \
+                     is about is not the run the row describes",
+                    incarnation.pid,
+                    incarnation.started_at
+                );
+                return Ok(Registration {
+                    session: SessionKey::new(uid, info.session_id.clone()),
+                    epoch: unstaked,
+                });
+            }
+            inner.stake(&uid, incarnation)
+        };
+
+        // **Released the instant the stake is taken.** The answer quiesce exists only
+        // to fence the stake against an answer already admitted on the old link; once
+        // the stake stands, the epoch filter makes that link unaddressable and the
+        // guard has done its whole job. Held through the registration tail below it
+        // would block every same-session answer for the rest of this function — and
+        // the phone WebSocket waits on those inline — so it is dropped here, not at
+        // return.
+        drop(quiesced);
+
+        // **The row and the generation it was accepted at, in one statement**
+        // (plan A5.1). The high-water read above is worthless if the value it
+        // reads can be written a moment after the row: a crash in between would
+        // leave the next daemon looking at this registration's row and the
+        // previous one's generation, which is a high-water that has gone
+        // backwards. `upsert_session_at_generation` is the ordinary upsert with
+        // the column in its parameter list, so there is no second write and no
+        // window to crash in. `None` for Claude — guarded above, where a Claude
+        // frame carrying a generation is refused outright — and `COALESCE` in
+        // the statement means every other writer of this row (hook, heartbeat,
+        // tailer) leaves the high-water alone rather than blanking it.
         let wrote = self
             .db
-            .upsert_session(SessionRow {
-                session_uid: uid.clone(),
-                session_id: info.session_id.clone(),
-                tmux_session: info.tmux_session.clone(),
-                tmux_socket: info.tmux_socket.clone(),
-                cwd: info.cwd.clone(),
-                claude_session_id: None,
-                transcript_path: None,
-                lifecycle: Lifecycle::Live,
-                created_at: existing
-                    .as_ref()
-                    .map(|r| r.created_at.clone())
-                    .unwrap_or_else(|| info.started_at.clone()),
-                updated_at: now,
-            })
+            .upsert_session_at_generation(
+                SessionRow {
+                    session_uid: uid.clone(),
+                    session_id: info.session_id.clone(),
+                    tmux_session: info.tmux_session.clone(),
+                    tmux_socket: info.tmux_socket.clone(),
+                    cwd: info.cwd.clone(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: Lifecycle::Live,
+                    created_at: existing
+                        .as_ref()
+                        .map(|r| r.created_at.clone())
+                        .unwrap_or_else(|| info.started_at.clone()),
+                    updated_at: now,
+                    // The registration is the authority on which agent this run
+                    // is. Absent ⇒ Claude; an unrecognised name is preserved and
+                    // fails closed downstream. Codex identity is carried through
+                    // verbatim.
+                    //
+                    // **Except that a blank thread id is not identity.** The link
+                    // built above already reads `"   "` as "no thread named"; the
+                    // row used to keep it verbatim, and the two readings are what
+                    // let a blank become a generation's durable *binding* and
+                    // refuse that visit's first real thread. Normalized with the
+                    // same function the link uses
+                    // ([`crate::codex_link::real_thread_id`]), so the fleet's
+                    // answer to "which thread is this session on" cannot be a
+                    // string no thread has.
+                    agent: info.agent.clone(),
+                    codex_thread_id: crate::codex_link::real_thread_id(
+                        info.codex_thread_id.as_deref(),
+                    )
+                    .map(str::to_string),
+                    codex_socket: info.codex_socket.clone(),
+                },
+                info.codex_generation,
+            )
             .await?;
         // **The supervisor is a cwd writer too.** A run that reconnects from a
         // different directory moves, and any card it is holding has to move
@@ -3093,12 +7656,83 @@ impl Daemon {
                 "session {uid} was deleted; refusing the registration that raced the deletion"
             );
         }
+        // **Counted the moment the row has actually moved, and not when the epoch
+        // was staked** (round-9 F3). The stake is two awaits earlier, so an observer
+        // can hold the new epoch and the OLD row at the same instant — the count is
+        // what closes that gap, because it moves with the write rather than ahead of
+        // it. Below the tombstone check, because a `Tombstoned` upsert wrote nothing
+        // and a count that includes it is not a count of writes. Taken under the
+        // acceptance gate, which this function holds throughout. See
+        // [`Inner::row_writes`].
+        self.inner.lock().await.note_row_write(&uid);
 
         let session = SessionKey::new(uid, info.session_id.clone());
-        let epoch = {
+        {
             let mut inner = self.inner.lock().await;
-            inner.next_epoch += 1;
-            let epoch = inner.next_epoch;
+            // **Publish only if this registration still owns the stake.**
+            //
+            // The damage this prevents is two-sided and neither half is recoverable:
+            // the *live* supervisor channel becomes this registration's, whose
+            // connection the winner is not on, and `registration_epochs` still names
+            // the winner — so [`Daemon::codex_addressee_locked`] compares the winner's
+            // link against this handle's older epoch, disagrees, and answers `NoLink`
+            // for the rest of the session's life.
+            //
+            // **Now a second line of defence rather than the first.** It used to be
+            // the only thing standing between two registrations for one uid, and it
+            // could only ever guard what came after it: the stake and this publication
+            // are separated by two awaits — the row upsert and `relabel_open_cards` —
+            // and a rival could run the whole of itself inside either, leaving its row
+            // and its card labels behind before this check turned it away. The
+            // acceptance gate at the top of this function is what makes the whole
+            // sequence exclusive, so a rival can no longer be *inside* it at all.
+            //
+            // Kept because it is cheap and fail-closed, and because it asks a question
+            // no gate answers: the gate serializes registrations, while this compares
+            // the identity the row was written under against the map the resolver
+            // reads. Asked under the same lock the stake is taken under, so the answer
+            // cannot go stale between the compare and the install. The stake is not
+            // re-taken: it moves with the row on purpose (see above), and a
+            // registration that has lost it has lost the session.
+            //
+            // Refused on the same terms as the tombstone above and at the same
+            // point — after the row, before any in-memory install — so the
+            // abandonment leaves nothing of this registration behind: no supervisor,
+            // no `last_seen_ms`, no link (the transaction below re-checks this very
+            // epoch), and no stake, because the stake is already the winner's.
+            // `unregister_supervisor` removes a claim only when it owns the epoch,
+            // so a late disconnect for this registration cannot erase it either.
+            if inner.registration_epochs.get(&session.uid) != Some(&epoch) {
+                anyhow::bail!(
+                    "registration for {} at epoch {epoch} was superseded while its row was \
+                     being written; refusing to publish a supervisor the session no longer \
+                     belongs to",
+                    session.uid
+                );
+            }
+            // **Atomic compare/install (plan A5.1), and both halves of it are
+            // now here.**
+            //
+            // *In process*: the compare is the generation check above and the
+            // install is this line, and the `registration_gate` taken at the top
+            // of this function is held across both — it is taken above the
+            // generation refusal on purpose (see the note where it is taken),
+            // and it is not released until this function returns. There is no
+            // interleaving for a rival registration on this uid to occupy: it is
+            // not merely that the two steps are ordered, it is that no second
+            // acceptance for this uid can be anywhere between them. The `inner`
+            // lock this block holds is the narrower one and answers a different
+            // question — the epoch compare directly above — which is why the
+            // acceptance gate rather than `inner` is what makes this atomic.
+            //
+            // *Across a restart*: a held lock cannot outlive the process that
+            // holds it, so the in-process gate says nothing about a daemon that
+            // is killed between the compare and the next registration. That half
+            // is closed durably instead: the generation is written with the row
+            // (above) and read back as the high-water (above), so a restarted
+            // daemon compares against the same number the dead one installed.
+            // The gate's compare/install clause is therefore closed by the two
+            // together, and neither alone.
             inner.supervisors.insert(
                 session.uid.clone(),
                 SupervisorHandle {
@@ -3108,13 +7742,243 @@ impl Daemon {
                     epoch,
                     protocol_minor: info.protocol_minor,
                     claude_bin: info.claude_bin.clone(),
+                    codex_generation: info.codex_generation,
                 },
             );
             inner
                 .last_seen_ms
                 .insert(session.uid.clone(), protocol::time::now_unix_ms());
-            epoch
-        };
+            // The supervisor handle is published here; the control link is
+            // installed by the gated transaction below, which re-validates this
+            // very epoch under the lock before it builds anything. The two are
+            // deliberately NOT one step — the link's lifecycle needs awaits (a
+            // bounded join) that must not run under `inner`.
+        }
+
+        // **The control link's whole lifecycle.** Join any parked corpse, take the
+        // incumbent, retire it, spawn the replacement, install it — one transaction, so
+        // no second registration for this session can interleave with any part of it.
+        //
+        // Under the acceptance gate taken at the top of this function, which is the same
+        // gate this block used to take for itself; widening its span is what put the row
+        // and the card relabel behind the same serialization. Still held across awaits,
+        // and still taken before `inner` on every path.
+        {
+            // **Asked BEFORE anything is destroyed, and asked of the claim.**
+            //
+            // The stake check above the supervisor publish is not the last word: a
+            // registration that passes it releases `inner` and then queues here, and
+            // a later one can stake, publish and install its link inside that wait.
+            // A transaction that parked first and asked afterwards therefore retired
+            // the WINNER's link — out of the slot, aborted — before finding out it
+            // had lost, and then installed nothing in its place. The session stayed
+            // registered and permanently unobserved, which nothing downstream can
+            // repair: `thread/started` is broadcast once, and the next transaction
+            // for this uid is the next registration.
+            //
+            // Through [`Inner::owner_of`], which is the one place that question is
+            // answered — the install below asks it again, under the lock that guards
+            // the map, and the two must not be able to answer differently.
+            //
+            // **Second line of defence now, like the publish check above.** The window
+            // it was written for — stake, release `inner`, queue on the gate, and lose
+            // the session inside that wait — is closed by construction since the gate
+            // is taken before the stake rather than here: nothing else can stake for
+            // this uid while this registration holds it, and `unregister_supervisor`
+            // takes the same gate. Kept because it is fail-closed and costs one
+            // uncontended lock, and because the alternative to a cheap redundant check
+            // on a destructive step is trusting a comment. **No test can distinguish it
+            // from a constant `true` any more**, which is the honest price of making
+            // the race structurally impossible instead of merely guarded.
+            let owns = self.inner.lock().await.owner_of(&session.uid) == Some(epoch);
+            // The incumbent moves from the slot into the park in one lock
+            // acquisition, so its unproven completion is recorded before anything can
+            // be dropped. **Only if this registration owns the session** — that is
+            // the whole of the guard above.
+            if owns {
+                self.park_current_codex_link(&session.uid).await;
+            }
+            // Everything parked — anything this transaction just retired, and any
+            // survivor from an earlier turn — is joined together, in place. Run on
+            // every path because it destroys nothing that was not already aborted:
+            // a parked handle is a handle somebody already gave up on, and this only
+            // re-aborts it and drops the ones that have proven they stopped.
+            let park_clear = self.join_parked_codex_links(&session).await;
+
+            // **The claims the abort above could not see.** The join settles what the
+            // outgoing link held in memory; a claim committed in the window before it
+            // reached that ledger is in the store and nowhere else. This is the only
+            // sweep an **exit replay** passes through — a replay takes no quiesce, so
+            // the quiesce-timeout sweep never runs for it — and it is the one that
+            // covers an ordinary supersession too.
+            //
+            // Guarded by `owns` alone, for the reason the forgetting below is: a stale
+            // registration mutates nothing. **Not** by the join: a survivor that
+            // outlived its budget may still settle its own claims afterwards, and
+            // first-terminal-wins means whichever of the two writes first stands while
+            // the other reports honestly that it did not — see
+            // [`crate::codex_link::Settlement`]. Leaving the sweep out on that path
+            // would trade a truthful "unknown" for a row nothing closes at all.
+            if owns {
+                self.sweep_stranded_claims(&session.uid, "registration")
+                    .await;
+            }
+
+            // **The agent boundary is settled first, and it is not conditional on
+            // anything above.** A Claude registration forgets where the Codex link
+            // left the session: the same uid can change agent, and a later Codex
+            // registration seeded from a chase belonging to neither run would resume
+            // a thread two agents ago. See [`Inner::forget_codex_carry`].
+            //
+            // Guarded by `owns` because a stale registration mutates nothing, and by
+            // **nothing else** — least of all by the join. Which agent registered is a
+            // fact about this frame; whether a retired task stopped inside its budget
+            // is a fact about that task, and hanging the first on the second means a
+            // link that outlives the budget leaves the pre-Claude chase to be retained
+            // afterwards and read by the next Codex registration. That is why the
+            // forgetting reaches the park as well as the retained map.
+            if owns && control_link.is_none() {
+                self.inner.lock().await.forget_codex_carry(&session.uid);
+            }
+
+            if !owns {
+                crate::log_debug!(
+                    "not touching the codex link slot for {} at epoch {epoch}: a newer \
+                     registration owns the session, and retiring its link would leave \
+                     it registered and unobserved",
+                    session.name
+                );
+            } else if !park_clear {
+                crate::log_error!(
+                    "codex link for {} at epoch {epoch}: a previous link is still \
+                     running after an abort, so this registration has NO link \
+                     installed. The session is registered and unobserved until a \
+                     later transaction can join it.",
+                    session.name
+                );
+                // **A12.2: and that later transaction is written down here rather
+                // than left to chance.** Nothing else in the daemon would ever build
+                // this link — a link never vacates the slot on its own, so the only
+                // other builder is the *next* registration for this uid, which for a
+                // session nobody restarts never comes. Retried by
+                // [`Daemon::recover_stalled_codex_links`] once the survivor stops.
+                //
+                // Nothing is owed for a Claude registration: it has no link to
+                // install, and the forgetting above has already cancelled anything a
+                // Codex one left behind.
+                if let Some(link) = &control_link {
+                    self.inner
+                        .lock()
+                        .await
+                        .owe_codex_install(&session, epoch, link);
+                }
+            } else {
+                // A Claude registration reclaims the slot and leaves it empty: a link
+                // left running under an epoch no later release can match would never
+                // be stopped. The forgetting that goes with it happened above.
+                if let Some(link) = control_link {
+                    // **Validated, then spawned, then installed — all under one
+                    // lock, with no await between them.** The spawn is a closure
+                    // this call may decline to run: a task that exists is a task
+                    // that is already running, and on a multithreaded runtime a
+                    // stale transaction's link would dial and ingest long before
+                    // a later rejection could matter.
+                    let mut inner = self.inner.lock().await;
+                    // **The daemon owns both cells, the link only writes to
+                    // them.** Minted here so they are installed in the same
+                    // statement as the task they belong to: a cell the *link*
+                    // created would have to be handed back out of the spawn, and
+                    // a spawn this call may decline to run has nothing to hand.
+                    let presence = crate::codex_link::LinkPresence::new();
+                    let carry = crate::codex_link::LinkCarry::new();
+                    // **The replacement starts from what its predecessor knew,
+                    // not from the launcher's launch-time claim** — see
+                    // [`Inner::seed_codex_carry`]. The JOIN above is what put
+                    // that here, a lock acquisition ago: whatever this
+                    // transaction parked, and anything a supervisor that
+                    // disconnected first parked on its way out, was retained the
+                    // moment its task was proven stopped.
+                    if let Some(resumed) = inner.seed_codex_carry(&session.uid, &link, &carry) {
+                        crate::log_info!(
+                            "codex link for {} at epoch {epoch}: resuming {resumed}, \
+                                 where the previous link left the session, rather than \
+                                 the registration's claim ({}); the row is not written \
+                                 back after a /new, so the claim names where the session \
+                                 started, not where it is",
+                            session.name,
+                            link.thread_id.as_deref().unwrap_or("none")
+                        );
+                    }
+                    // **And so does the presence** — see
+                    // [`Inner::seed_codex_presence`], a named step for the same
+                    // reason its sibling above is one.
+                    inner.seed_codex_presence(&session.uid, &link, &presence);
+                    let (answers, asks) = crate::codex_link::answer_channel();
+                    let (interrupts, stops) = crate::codex_link::interrupt_channel();
+                    let (composes, words) = crate::codex_link::compose_channel();
+                    let outcome = inner.spawn_codex_link_if_owner(
+                        &session.uid,
+                        epoch,
+                        link.generation,
+                        LinkCells {
+                            presence: presence.clone(),
+                            carry: carry.clone(),
+                            answers,
+                            interrupts,
+                            composes,
+                        },
+                        || {
+                            tokio::spawn(crate::codex_link::run(
+                                Arc::clone(self),
+                                session.clone(),
+                                link,
+                                presence,
+                                carry,
+                                asks,
+                                stops,
+                                words,
+                            ))
+                        },
+                    );
+                    let orphan = match outcome {
+                        Err(owner) => {
+                            let now = owner
+                                .map(|e| format!("now epoch {e}"))
+                                .unwrap_or_else(|| "now unowned".to_string());
+                            crate::log_debug!(
+                                "not installing a codex link for {} at epoch \
+                                     {epoch}: the session changed hands ({now}) while \
+                                     this transaction was retiring the previous one — \
+                                     nothing was spawned",
+                                session.name
+                            );
+                            None
+                        }
+                        Ok(orphan) => orphan,
+                    };
+                    if let Some(orphan) = orphan {
+                        // Parked rather than retired in hand — for the same
+                        // reason everything else is: a handle held across an
+                        // await is a handle a cancelled transaction loses
+                        // without recording that its completion is unproven.
+                        //
+                        // **Nothing to retain from it.** An orphan is a task that
+                        // never became this session's link — it was handed back
+                        // because the session changed hands, or because a newer
+                        // link already held the slot — so what it may have heard
+                        // is not an answer to "where did this session's link
+                        // leave it".
+                        inner
+                            .parked_codex_links
+                            .entry(session.uid.clone())
+                            .or_default()
+                            .push(OwnedLink::new(orphan, None));
+                        drop(inner);
+                        let _ = self.join_parked_codex_links(&session).await;
+                    }
+                }
+            }
+        }
 
         // Re-attach after a daemon restart is a fact worth logging, not a
         // session boundary: the agent never stopped running.
@@ -3124,7 +7988,25 @@ impl Daemon {
             serde_json::json!({"link": "attached", "reason": "supervisor registered"}),
             Source::Daemon,
         );
-        self.ingest(pending).await?;
+        // **A12.2: the debt above outlives a registration that never completed,
+        // unless it is cancelled here.** This ingest is the last fallible step, and
+        // it is fallible *after* `owe_codex_install` has already written the
+        // promise down. Its `?` returns before the `Registration` token exists, and
+        // that token is the only thing `ipc_server` stores — so no disconnect ever
+        // calls `unregister_supervisor`, and `release_owed_codex_install` (the one
+        // site that clears a debt on the way out) never runs. The claim, meanwhile,
+        // stays: `unregister_supervisor` deliberately leaves it as a tombstone, so
+        // `owner_of` — recovery's only guard — keeps naming this epoch for ever.
+        // The sweep would then install a link for a registration the daemon
+        // rejected, into a slot nothing releases. Cancelled at the failure, where
+        // the epoch that owes it is still in hand.
+        if let Err(err) = self.ingest(pending).await {
+            self.inner
+                .lock()
+                .await
+                .release_owed_codex_install(&session.uid, epoch);
+            return Err(err);
+        }
         crate::log_info!(
             "supervisor registered for {} ({}) speaking minor {}",
             session.name,
@@ -3153,17 +8035,86 @@ impl Daemon {
     /// teardown can run afterwards — removing blindly would detach the
     /// supervisor that had just replaced it, leaving a live session with no way
     /// to be typed into and a `detached` link that never recovers.
-    pub async fn unregister_supervisor(&self, registration: &Registration) {
+    pub async fn unregister_supervisor(self: &Arc<Self>, registration: &Registration) {
+        // The same gate the registration path holds, so a disconnect can never
+        // interleave with a re-registration's acceptance — the row and the card
+        // relabel as much as the park → join → spawn → install.
+        let gate = self.registration_gate(&registration.session.uid).await;
+        let _sequence = gate.lock().await;
         let released = {
             let mut inner = self.inner.lock().await;
-            match inner.supervisors.get(&registration.session.uid) {
+            let released = match inner.supervisors.get(&registration.session.uid) {
                 Some(handle) if handle.epoch == registration.epoch => {
                     inner.supervisors.remove(&registration.session.uid);
+                    // **THE CLAIM IS NOT REMOVED HERE — OR ANYWHERE** (round-9 F3).
+                    //
+                    // It used to be, guarded by an ownership test, and the guard was
+                    // right for the reason below while the removal itself was wrong.
+                    // Deleting the entry made `A → B → B disconnects` and
+                    // `A → A disconnects` spell the same empty map, so
+                    // [`Daemon::mark_exited`] — which reads exactly this map to ask
+                    // whether the evidence in its hands is about the run the row now
+                    // describes — could not tell a disconnect from a REPLACEMENT that
+                    // had since gone too, and let A's stale evidence commit. The entry
+                    // stays behind as a tombstone naming the last registration to stake
+                    // this uid; see [`Inner::registration_epochs`] for why both of its
+                    // readers want that reading.
+                    //
+                    // The ownership test the removal carried is what remains, and it is
+                    // still load-bearing in the other direction: the two slots are
+                    // published a window apart on purpose — a replacement stakes its
+                    // claim in the same breath as the row and publishes its handle
+                    // several awaits later — so at the instant an incumbent disconnects,
+                    // `supervisors` can still be the incumbent's while the claim already
+                    // names the replacement. Writing anything for "the entry for this
+                    // uid" here would overwrite a claim that was never ours, and the
+                    // replacement never stakes again.
+                    //
+                    // The other two maps torn down here ask that same question —
+                    // `supervisors` on the line above, `codex_links` in
+                    // [`Inner::release_codex_link`] — and they are the ones a disconnect
+                    // genuinely owns: a channel and a task, both of which end with the
+                    // connection. The claim is not a resource this connection holds; it
+                    // is a record of what happened to this session.
                     true
                 }
                 _ => false,
+            };
+            // Moved into the park under the same lock that took it out of the
+            // slot, so no instant exists in which it belongs to neither.
+            if let Some(link) =
+                inner.release_codex_link(&registration.session.uid, registration.epoch)
+            {
+                inner
+                    .parked_codex_links
+                    .entry(registration.session.uid.clone())
+                    .or_default()
+                    .push(OwnedLink::new(
+                        link.task,
+                        Some(ParkedCarry {
+                            generation: link.generation,
+                            carry: link.carry,
+                        }),
+                    ));
             }
+            // **A12.2: and the install this registration was still owed.** The third
+            // resource this connection holds, torn down beside the other two and on
+            // the same epoch test — see [`Inner::release_owed_codex_install`] for why
+            // leaving it would spawn a link for a session that has detached.
+            inner.release_owed_codex_install(&registration.session.uid, registration.epoch);
+            released
         };
+        // Stopped and JOINED on the same bounded budget as a supersession. Sound to
+        // cancel because every fact the link produced was already durable when it
+        // produced it — a cancellation can cost a live subscriber the *push* of a
+        // final event, never the event itself. A link that will not stop goes back
+        // in the slot rather than being detached.
+        // Sound to cancel because every fact the link produced was already durable
+        // when it produced it — a cancellation can cost a live subscriber the *push*
+        // of a final event, never the event itself. Anything an earlier transaction
+        // parked is retried here too, so a corpse is not left waiting on a
+        // registration that may never come.
+        let _ = self.join_parked_codex_links(&registration.session).await;
         if !released {
             crate::log_debug!(
                 "ignoring a stale disconnect for {}: a newer supervisor holds it",
@@ -3171,6 +8122,18 @@ impl Daemon {
             );
             return;
         }
+        // **The claims the abort above could not see**, for the reason the same sweep
+        // runs at a registration: a claim commits before it reaches the link's own
+        // ledger, so the join walks a map that does not contain it. A disconnect is
+        // the last thing that ever speaks for this link — no replacement is coming,
+        // by definition — so a row left `applying` here waits for the next daemon
+        // start with its card open on somebody's phone.
+        //
+        // After the `released` test, and only after it: a stale disconnect is not this
+        // session's to settle, and sweeping on one would make a live registration's
+        // claims terminal underneath it.
+        self.sweep_stranded_claims(&registration.session.uid, "disconnect")
+            .await;
         let pending = PendingEvent::new(
             &registration.session,
             EventKind::LinkState,
@@ -3193,11 +8156,22 @@ impl Daemon {
             .insert(row.session_uid, protocol::time::now_unix_ms());
     }
 
+    /// A supervisor reporting that its own run has ended.
+    ///
+    /// `reported_by` is **the registration the reporting connection made**, and it
+    /// is the identity this evidence is established against (round-9 F3). See the
+    /// note at the snapshot below for why it is not the same as "whoever owns this
+    /// session at the moment the report is handled".
     pub async fn session_exited(
         &self,
         session_id: &str,
         session_uid: Option<&str>,
         exit_code: Option<i32>,
+        // The reporter's own account of WHY, when it has one the exit code cannot
+        // carry. Filed verbatim; never derived here. See the note above
+        // `mark_exited` for what this replaced and why.
+        reason: Option<&str>,
+        reported_by: Option<&Registration>,
     ) {
         // Reported over a *fresh* connection by a supervisor whose session is
         // already gone, so the run has to be found again rather than inferred
@@ -3210,6 +8184,46 @@ impl Daemon {
         // means either an older supervisor or a failed replay, and the two
         // outcomes below are kept apart because "we looked and it is not there"
         // and "we could not look" are different facts.
+        //
+        // **THE IDENTITY THIS REPORT IS ESTABLISHED AGAINST IS THE REPORTER'S, NOT
+        // THE CURRENT OWNER'S** (round-9 F3).
+        //
+        // A supervisor reports its exit over a *fresh* connection and replays its
+        // registration on it first (see `cc`'s `report_exit`), so the frame arrives
+        // with an epoch of its own — the one identity that says which run this
+        // evidence is about. Reading the *current* owner instead answers a different
+        // question, and answers it wrongly in the one case the guard exists for:
+        // connection A registers at EA, B replaces it at EB, A's queued exit frame is
+        // then handled, the snapshot reads EB, and `mark_exited` compares EB against
+        // EB and ends the run that REPLACED the one that died.
+        //
+        // The window is real on this path too — `lookup_run` is a database read on
+        // the blocking pool, and a registration completes inside it — but taking the
+        // reporter's epoch closes it from the other end: the evidence carries its own
+        // identity, so no snapshot has to stand in for one.
+        //
+        // **And the epoch it carries is only an identity because the registration that
+        // minted it was judged first** (round-10 F1). The replay is what mints it, so
+        // on its own it is a number the reporter drew a moment ago and compares to
+        // itself — which is how this guard was defeated end to end while reading
+        // exactly as it does here. `register_supervisor` is where that is settled: a
+        // replay from a supervisor that is not the one holding the session is refused
+        // the claim and handed an epoch it never staked, so the comparison below
+        // *does* separate the two runs. The two halves are one guard, and neither
+        // works alone.
+        //
+        // A report with no registration on its connection is an older supervisor, or
+        // one whose replay never landed. It carries no identity, so the best that can
+        // be said is who owned the session before the lookup began — the round-8
+        // reading, kept for exactly that path and narrowed to it. Taken as a snapshot
+        // of every owner rather than of one because which uid this report is about is
+        // what the lookup below is for: there is no single entry to read until it has
+        // answered, and reading one afterwards would be an observation made *after*
+        // the window it exists to see.
+        let fleet_before_the_lookup = match reported_by {
+            Some(_) => None,
+            None => Some(self.inner.lock().await.registration_epochs.clone()),
+        };
         let row = match self.lookup_run(session_id, session_uid).await {
             Ok(Some(row)) => row,
             Ok(None) => {
@@ -3228,9 +8242,56 @@ impl Daemon {
                 return;
             }
         };
-        self.mark_exited(&row.key(), exit_code, None).await;
+        let observed = EndEstablishedAgainst {
+            owner: match reported_by {
+                Some(registration) => Some(registration.epoch),
+                None => fleet_before_the_lookup
+                    .as_ref()
+                    .and_then(|owners| owners.get(&row.session_uid).copied()),
+            },
+            // **Not a claim about the row.** What a supervisor witnessed is its own
+            // process ending, which no later write to the row makes untrue — a hook
+            // from the dying run landing between the lookup and the commit is the
+            // corpse twitching, not a reason to leave the row `Live`. The sweep's
+            // evidence is the opposite kind and carries the opposite answer; see
+            // [`EndEstablishedAgainst`].
+            row_writes: None,
+        };
+        if !self
+            .mark_exited(&row.key(), exit_code, reason, observed)
+            .await
+        {
+            crate::log_info!(
+                "dropping the exit reported for {session_id}: a registration completed \
+                 while the report was in flight, so the row now describes the run that \
+                 replaced the one this exit is about"
+            );
+        }
     }
 
+    /// **Why there is no `never_started_a_thread` here any more.**
+    ///
+    /// This used to derive the `session_end` reason itself, by counting
+    /// `session_start` events and calling zero of them "the codex TUI ended without a
+    /// thread ever binding". Three things were wrong with that, and all three are
+    /// structural rather than fixable in place:
+    ///
+    /// * **It over-claimed.** A host that died before the TUI ever ran, and a session
+    ///   torn down by signal, file no `session_start` either — so both were reported
+    ///   as the thread-binding failure, replacing a real startup or cancellation
+    ///   diagnosis with a false one.
+    /// * **It raced.** The count and `mark_exited` were separate awaits, so a
+    ///   `session_start` filed between them turned a healthy session's ending into
+    ///   the unbound reason.
+    /// * **It named a file that need not exist.** Preserving `broker.log` out of the
+    ///   ephemeral run dir is best-effort, and the early failures this reason was
+    ///   most likely to be attached to are exactly the ones that never reach the
+    ///   copy — so the operator was pointed at a path with nothing behind it.
+    ///
+    /// The reason now arrives on [`protocol::ipc::ClientFrame::SessionExited`],
+    /// asserted by the host (which is the only process that can know it), relayed by
+    /// the supervisor, and filed verbatim. Absent means nothing was asserted, and
+    /// this daemon files no reason rather than inventing one.
     /// Record that a run has ended: the durable lifecycle change, then the fact.
     ///
     /// The single place either half happens, because there are now two ways an
@@ -3252,12 +8313,91 @@ impl Daemon {
     /// the same second its supervisor reconnects to say so. Without the id that
     /// race produces two `SessionEnd` events for one death; with it the second
     /// is deduplicated by the log's own rule and the first account stands.
+    ///
+    /// # This is the row's THIRD writer, and it commits under the same gate as the
+    /// other two (round-8 F3)
+    ///
+    /// Both callers establish an end at one moment and record it at a later one, and
+    /// the gap is not small: the sweep's is a whole confirmation loop — probes,
+    /// sleeps and a second pass over the suspects — and the reported path's is a
+    /// database lookup on the blocking pool. A registration for the same uid
+    /// completes inside that gap whenever a supervisor reconnects or a crashed run
+    /// is resumed under its own uid, and it writes the row `Live`, publishes a
+    /// supervisor and installs a link. Committing then is not recording an end: it
+    /// is killing the run that replaced it, with a `SessionEnd` no later fact can
+    /// withdraw.
+    ///
+    /// **The gate alone is not the fix.** Taking [`Daemon::registration_gate`] here
+    /// makes the commit exclusive against acceptances, but the stale observation was
+    /// made *before* the gate was ever asked for, so a commit that only waits its
+    /// turn still commits stale evidence. So the caller passes what it observed —
+    /// see [`EndEstablishedAgainst`] — and this compares it again under the gate,
+    /// where the answers cannot move between the compare and the write.
+    ///
+    /// **The owner rule is "somebody else has staked it since", not "the owner
+    /// changed".** A caller that observed no owner at all and finds one now has been
+    /// overtaken; a caller whose observation matches the standing claim has not,
+    /// *including* when the connection that made that claim has since disconnected —
+    /// [`Inner::registration_epochs`] is a tombstone (round-9 F3), so a disconnect
+    /// leaves the epoch behind and a real exit report is not refused for having
+    /// arrived after its own socket closed. An absent entry means nothing has ever
+    /// registered for this uid, which is the ordinary shape of a hook-adopted run.
+    ///
+    /// **The row rule is separate, and only one caller has evidence of that kind.**
+    /// A sweep proves a *row's* tmux location empty, so a row written since it
+    /// looked is a row it never examined; a supervisor proves its *own process*
+    /// ended, which no later write makes untrue. So the second comparison is made
+    /// only for the caller that passes a count — again under this gate, against
+    /// [`Inner::row_writes`], which every row writer bumps under the same gate.
+    ///
+    /// Returns whether the end was recorded, so a caller does not narrate an exit
+    /// that was refused: the sweep's `gone` counter and its per-row log line are
+    /// both claims about a write that may not have happened.
+    ///
+    /// Lock order is the type's existing one — `registration_gate` → `publish_gate`
+    /// (inside [`Daemon::ingest`]) → `inner` — which is exactly the order
+    /// `register_supervisor` takes them in across its own acceptance.
     async fn mark_exited(
         &self,
         session: &SessionKey,
         exit_code: Option<i32>,
         reason: Option<&str>,
-    ) {
+        observed: EndEstablishedAgainst,
+    ) -> bool {
+        let gate = self.registration_gate(&session.uid).await;
+        let _commit = gate.lock().await;
+        let (owner, row_writes) = {
+            let inner = self.inner.lock().await;
+            (
+                inner.owner_of(&session.uid),
+                inner.row_writes_of(&session.uid),
+            )
+        };
+        if owner.is_some() && owner != observed.owner {
+            crate::log_info!(
+                "not recording an end for {} ({}): registration {:?} owns it now and the \
+                 end was established against {:?}, so a replacement completed while this \
+                 was in flight",
+                session.name,
+                session.uid,
+                owner,
+                observed.owner
+            );
+            return false;
+        }
+        if observed.row_writes.is_some_and(|seen| seen != row_writes) {
+            crate::log_info!(
+                "not recording an end for {} ({}): this row has been written {} time(s) \
+                 and the end was established against a row written {:?} time(s), so \
+                 something wrote it after the look this end rests on — the look was at a \
+                 row that no longer exists",
+                session.name,
+                session.uid,
+                row_writes,
+                observed.row_writes
+            );
+            return false;
+        }
         if let Err(err) = self
             .db
             .set_lifecycle(session.uid.clone(), Lifecycle::Exited)
@@ -3265,6 +8405,10 @@ impl Daemon {
         {
             crate::log_error!("failed to mark {} exited: {err:#}", session.name);
         }
+        // The row's third writer counts its write like the other two, under the same
+        // gate — so "every writer bumps this" is a property of the type rather than a
+        // habit two of them happen to share. See [`Inner::row_writes`].
+        self.inner.lock().await.note_row_write(&session.uid);
         let payload = match reason {
             Some(reason) => serde_json::json!({"exit_code": exit_code, "reason": reason}),
             None => serde_json::json!({"exit_code": exit_code}),
@@ -3283,6 +8427,7 @@ impl Daemon {
         let _ = self.transcript_tx.send(crate::tailer::TailCommand::Stop {
             session_uid: session.uid.clone(),
         });
+        true
     }
 
     /// Ask the supervisor for something, and be precise about failure.
@@ -3391,11 +8536,456 @@ impl Daemon {
         }
     }
 
+    // ---------------------------------------------- the inbound resolver
+
+    /// **What a Codex session's control link is, right now.** Keyed by uid, which
+    /// is what the `codex_links` slot is keyed by.
+    ///
+    /// [`CodexAddressee::NoLink`](crate::codex_link::CodexAddressee::NoLink) for a
+    /// Claude run, a uid that names nothing, and a run whose supervisor has
+    /// disconnected alike — from here those are one answer, because none of them
+    /// has a connection to address. It is a fact about the *slot*, not about the
+    /// row's `lifecycle`: `mark_exited` does not retire a link handle, so a run the
+    /// liveness sweep has marked `Exited` while its supervisor is still connected
+    /// keeps reporting what its link is doing.
+    ///
+    /// Takes `Inner` rather than the lock, so [`Daemon::sessions`] can ask about
+    /// every row without taking and dropping a lock per session — and, more to the
+    /// point, so the whole list is projected against **one** snapshot of the
+    /// registry instead of a different one per row.
+    ///
+    /// **The link has to belong to the registration that owns the session now.**
+    /// A registration stakes its epoch, writes its row, publishes its supervisor
+    /// handle, and only then — under a separate gate, because the link's lifecycle
+    /// needs awaits that must not run under `inner` — retires the incumbent link.
+    /// Through all of that the slot still holds the previous registration's handle,
+    /// whose connection is on the previous registration's thread. Answering from it
+    /// would pair the row one registration just wrote with the connection another
+    /// one is holding, which is the single thing this resolver exists to make
+    /// impossible.
+    ///
+    /// **Compared against the registration's CLAIM, not against the installed
+    /// supervisor handle** — see [`Inner::registration_epochs`]. The handle is
+    /// published *after* the row, so a handle-based comparison agrees with itself
+    /// for the whole of the first hand-over window: row B, owner A, link A, epochs
+    /// equal, and the resolver hands back A's presence for B's row. The claim moves
+    /// with the row, so there is no such window.
+    ///
+    /// A mismatch is [`NoLink`](crate::codex_link::CodexAddressee::NoLink) — no link
+    /// *for this registration*, which is the truth. The consequence in
+    /// [`Daemon::sessions`] is that a hand-over reports the incoming registration's
+    /// own claim until its link comes up, rather than the outgoing connection's last
+    /// word. In the steady state the two epochs are equal and this costs a map
+    /// lookup.
+    /// **How to reach the link that owns this session right now**, or nothing.
+    ///
+    /// The same epoch test as [`Daemon::codex_addressee_locked`], and for a sharper
+    /// reason than reading presence: a sender belonging to a registration that has
+    /// handed the session on would put a phone's decision on a socket this session no
+    /// longer owns. Asking the ownership map here makes "which link may be read from"
+    /// and "which link may be written to" the same question.
+    fn codex_answers_locked(
+        inner: &Inner,
+        session_uid: &str,
+        // **The answer gate's read guard, by reference, so the ordering is a type
+        // fact**. This function reads the link the answer is about to be
+        // written on; taking it demands the caller already hold the read side of the
+        // answer gate, which is what serializes the write below against a replacement
+        // registration's stake. The parameter is unused except to make "clone the
+        // sender only under the guard" impossible to get wrong — a caller that has not
+        // taken the guard cannot call this, so the "clone before guard" reordering the
+        // mutation battery used to survive no longer type-checks.
+        _admitted: &tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> Option<crate::codex_link::LinkAnswers> {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.answers.clone())
+    }
+
+    /// **The link's interrupt sender, if the handle in the slot is the one the
+    /// session's current registration owns.**
+    ///
+    /// [`Daemon::codex_answers_locked`]'s twin, taking the same guard by reference for
+    /// the same reason: it makes "clone the sender only under the actuation gate" a
+    /// type fact rather than a rule a caller has to remember, so the reordering that
+    /// would let a superseded link write cannot be spelled.
+    /// **The link's compose sender**, under the same ownership filter its two siblings
+    /// use: the handle in the slot must be the one the session's current registration
+    /// owns, so a superseded link cannot write.
+    fn codex_composes_locked(
+        inner: &Inner,
+        session_uid: &str,
+        _admitted: &tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> Option<crate::codex_link::LinkComposes> {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.composes.clone())
+    }
+
+    fn codex_interrupts_locked(
+        inner: &Inner,
+        session_uid: &str,
+        _admitted: &tokio::sync::OwnedRwLockReadGuard<()>,
+    ) -> Option<crate::codex_link::LinkInterrupts> {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.interrupts.clone())
+    }
+
+    /// **Give a test's own link the daemon's ear.**
+    ///
+    /// A scripted-leg test drives the real [`crate::codex_link::run`] against a leg
+    /// it writes the replies for, and nothing in that path stakes a registration —
+    /// while [`Daemon::codex_answers_locked`] deliberately refuses a handle whose
+    /// epoch no registration owns. This stakes one and installs the sender beside
+    /// it, so `Daemon::answer` can reach the link the test is actually driving.
+    ///
+    /// Test-only, and narrow on purpose: it installs the answer channel and
+    /// nothing else, so every other property of a real registration stays
+    /// something a test has to obtain honestly.
+    ///
+    /// **The live gates no longer use it.** `codex_link_live`'s answering gates
+    /// register through [`Daemon::register_supervisor`] with the coordinator's own
+    /// frame, so the epoch, the row, the supervisor handle, the answer channel and
+    /// the link task are all built by the production acceptance there. What is left
+    /// here is the scripted suite, where there is no socket for a real registration
+    /// to name.
+    #[cfg(test)]
+    pub(crate) async fn install_codex_answers_for_tests(
+        &self,
+        session_uid: &str,
+        answers: crate::codex_link::LinkAnswers,
+    ) {
+        let mut inner = self.inner.lock().await;
+        let epoch = inner.registration_epochs.len() as u64 + 1;
+        inner
+            .registration_epochs
+            .insert(session_uid.to_string(), epoch);
+        inner.codex_links.insert(
+            session_uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation: 1,
+                task: tokio::spawn(std::future::pending()),
+                presence: crate::codex_link::LinkPresence::new(),
+                answers,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+    }
+
+    /// **The same, for the stop control** — a staked registration, a presence a test
+    /// chooses, and the interrupt channel's receiving half handed back.
+    ///
+    /// [`Daemon::install_codex_answers_for_tests`]'s twin, and it exists for the same
+    /// reason: a test that wants to drive [`Daemon::interrupt`] through the REAL
+    /// request path — the daemon's ledger read, its addressee check, its claim
+    /// construction, and the ask arriving on the link's own channel — needs the
+    /// daemon to have a link it will actually address, and nothing in a scripted test
+    /// stakes a registration.
+    ///
+    /// The receiver is returned rather than kept, so the test is the thing that
+    /// decides when the link picks each ask up. That is the whole of what makes the
+    /// concurrent-identical-ids ordering stageable: two asks can be past the daemon's
+    /// ledger read while neither has reached the connection yet.
+    #[cfg(test)]
+    pub(crate) async fn install_codex_interrupts_for_tests(
+        &self,
+        session_uid: &str,
+        state: crate::codex_link::CodexAddressee,
+        generation: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::InterruptRequest> {
+        let presence = crate::codex_link::LinkPresence::new();
+        presence.publish_for_tests_on(state, generation);
+        let (interrupts, asks) = crate::codex_link::interrupt_channel();
+        let mut inner = self.inner.lock().await;
+        let epoch = inner.registration_epochs.len() as u64 + 1;
+        inner
+            .registration_epochs
+            .insert(session_uid.to_string(), epoch);
+        inner.codex_links.insert(
+            session_uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation: 1,
+                task: tokio::spawn(std::future::pending()),
+                presence,
+                answers: crate::codex_link::answer_channel().0,
+                interrupts,
+                composes: crate::codex_link::compose_channel().0,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        asks
+    }
+
+    /// **The same again, for the compose control.**
+    ///
+    /// [`Daemon::install_codex_interrupts_for_tests`]'s twin, and the receiver is
+    /// returned for its reason: a test that wants to see whether the daemon's gate
+    /// ADMITTED an ask has to be the thing that receives it, because admission and
+    /// refusal are told apart by whether the ask reaches the link at all.
+    #[cfg(test)]
+    pub(crate) async fn install_codex_composes_for_tests(
+        &self,
+        session_uid: &str,
+        state: crate::codex_link::CodexAddressee,
+        generation: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::ComposeRequest> {
+        let presence = crate::codex_link::LinkPresence::new();
+        presence.publish_for_tests_on(state, generation);
+        let (composes, asks) = crate::codex_link::compose_channel();
+        let mut inner = self.inner.lock().await;
+        let epoch = inner.registration_epochs.len() as u64 + 1;
+        inner
+            .registration_epochs
+            .insert(session_uid.to_string(), epoch);
+        inner.codex_links.insert(
+            session_uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation: 1,
+                task: tokio::spawn(std::future::pending()),
+                presence,
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        asks
+    }
+
+    /// **The addressee AND the visit it belongs to, in one read of one cell.**
+    ///
+    /// Taken together for [`crate::codex_link::LinkPresence::get_with_generation`]'s
+    /// reason: two reads are two instants, and a switch between them pairs one visit's
+    /// thread with another visit's number. Anything that has to act on the pair — an
+    /// interrupt is the only such caller today — takes it here.
+    fn codex_visit_locked(
+        inner: &Inner,
+        session_uid: &str,
+    ) -> (
+        crate::codex_link::CodexAddressee,
+        crate::codex_link::LinkVisit,
+    ) {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.presence.get_with_generation())
+            .unwrap_or((
+                crate::codex_link::CodexAddressee::NoLink,
+                crate::codex_link::LinkVisit::default(),
+            ))
+    }
+
+    fn codex_addressee_locked(
+        inner: &Inner,
+        session_uid: &str,
+    ) -> crate::codex_link::CodexAddressee {
+        let owner = inner.registration_epochs.get(session_uid).copied();
+        inner
+            .codex_links
+            .get(session_uid)
+            .filter(|held| owner == Some(held.epoch))
+            .map(|held| held.presence.get())
+            .unwrap_or(crate::codex_link::CodexAddressee::NoLink)
+    }
+
+    /// **The connection-scoped inbound resolver.**
+    ///
+    /// A phone's session-scoped request names a *session reference* — a uid, or a
+    /// tmux name that resolves to the newest run under it. What a request has to be
+    /// handed to is a *connection*. This is the one step between them: the reference
+    /// becomes a run, and the run becomes the state of the control link that is
+    /// holding it, so a caller decides what to do knowing both.
+    ///
+    /// `Ok(None)` means the reference named nothing — a distinct answer from a run
+    /// that exists and has no link ([`CodexAddressee::NoLink`](crate::codex_link::CodexAddressee::NoLink)),
+    /// because one is a client error and the other is a fact about the fleet.
+    ///
+    /// **It resolves; it does not send.** Nothing on the wire is a Codex actuation
+    /// yet — approval answering is Phase 3, steer and interrupt are Phase 4 — so
+    /// there is deliberately no `send` beside this. What consumes it today is
+    /// [`Daemon::sessions`], which reports the thread the link has actually adopted
+    /// in preference to the one the registration claimed, and — since minor 19 —
+    /// which of the addressee's states that link is in, as
+    /// [`protocol::event::SessionSummary::codex_link`]; the verbs arrive against
+    /// an addressing layer that already exists and is already tested.
+    ///
+    /// **Test-visible only until then**, and on the same footing
+    /// [`crate::store::Store::set_device_features`] is: a thing the phase after this
+    /// one turns on, kept because the read beside it is already real and already
+    /// asserted. The alternative is to invent a phone-facing command that nothing on
+    /// the wire asks for, which is the speculative half of this that the plan puts
+    /// in Phase 3.
+    ///
+    /// # The row and the addressee are two reads, made coherent by the REGISTRATION GATE
+    ///
+    /// They cannot be taken under one lock. The row is a database read, and this
+    /// type's lock ordering forbids awaiting the blocking pool while `inner` is held —
+    /// stated where a restart's recovery counts its approval requests up front for
+    /// exactly that reason, and enforced by the store's `!Send` guards. Read separately
+    /// and unguarded, a registration completing between them returns registration A's
+    /// row beside registration B's addressee: a caller acting on that would address a
+    /// thread using another registration's cwd and agent.
+    ///
+    /// **Counting registrations does not close it, and the obvious counter is worse
+    /// than useless.** [`Inner::next_epoch`] is bumped by the *stake*, which is the
+    /// FIRST act of an acceptance — the row upsert, the card relabel, the supervisor
+    /// publish and the link install all happen after it. So a registration that staked
+    /// before the reads began and finished in the middle of them leaves the count
+    /// unchanged, and an equality check on it reports the torn pair as settled: the
+    /// window it fails to see is exactly the dangerous one.
+    ///
+    /// So the pair is made coherent by construction instead. This takes the session's
+    /// own [`Daemon::registration_gate`] — the same gate `register_supervisor` holds
+    /// across its whole acceptance — and reads BOTH halves inside it. While it is held
+    /// no registration for this uid can be between its stake and its last install, so
+    /// the row and the addressee are necessarily the same registration's. No counter,
+    /// no retry budget, and no new failure mode: a caller waits out an acceptance that
+    /// is genuinely in flight rather than being told the fleet is unreadable.
+    ///
+    /// **The gate is held by every writer of the row, not only by registrations**
+    /// (round-7 F4). There are three: `register_supervisor`, [`Daemon::ensure_session`],
+    /// the hook path, which reads the row and writes it back — and `agent` is the one
+    /// identity column the upsert takes from `excluded` rather than COALESCE-ing, so an
+    /// unguarded hook could restore a Claude agent over a Codex registration and leave
+    /// exactly the pair this function promises not to return. A gate that stopped at
+    /// registrations would be guarding one writer and claiming both, which is a claim
+    /// this function is not entitled to make.
+    ///
+    /// The third is [`Daemon::mark_exited`], reached from a supervisor's exit report
+    /// and from the liveness sweep (round-8 F3). It writes only `lifecycle`, so it can
+    /// never assemble the torn identity pair above — but it takes this gate too, and
+    /// for a reason of its own: it commits an end established at an earlier moment,
+    /// and a registration completing in between makes the row somebody else's. The
+    /// census is spelled out here because "every writer of the row" is the claim this
+    /// function's coherence rests on, and a census that misses one is a claim about a
+    /// set nobody has actually enumerated.
+    ///
+    /// The row is read twice, and the first read is not wasted: a reference may be a
+    /// tmux *name*, which resolves to whichever run is newest, so the uid whose gate to
+    /// take is not known until something has been read. The re-read under the gate is
+    /// the one that counts. If the reference resolves to a different uid the second
+    /// time, the run underneath it changed while we waited, and the resolution is
+    /// simply taken again.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn resolve_codex_inbound(
+        &self,
+        reference: &str,
+    ) -> Result<Option<(SessionRow, crate::codex_link::CodexAddressee)>> {
+        for _ in 0..PAIRING_ATTEMPTS {
+            // `Ok(None)` is a reference that named nothing; an `Err` is a store that
+            // would not answer. Two different things for a caller to do, so the two are
+            // kept apart at the source — see [`Daemon::resolve_optional`] — rather than
+            // by mapping every failure onto absence here, which would report a broken
+            // database as a client error and hide the fault behind a plausible answer.
+            //
+            // This read only learns WHICH session to settle against; every value the
+            // caller receives comes from the guarded read below.
+            let Some(naming) = self.resolve_optional(reference).await? else {
+                return Ok(None);
+            };
+            let gate = self.registration_gate(&naming.session_uid).await;
+            let _settled = gate.lock().await;
+            let Some(row) = self.resolve_optional(reference).await? else {
+                return Ok(None);
+            };
+            if row.session_uid != naming.session_uid {
+                // The reference named a different run than a moment ago — a tmux name
+                // whose newest run changed. The gate in hand is the wrong session's, so
+                // it guarantees nothing about this row; resolve again.
+                continue;
+            }
+            let addressee = {
+                let inner = self.inner.lock().await;
+                Self::codex_addressee_locked(&inner, &row.session_uid)
+            };
+            return Ok(Some((row, addressee)));
+        }
+        anyhow::bail!(
+            "could not resolve {reference} to a settled run: the run it names changed \
+             under it on each of {PAIRING_ATTEMPTS} attempts"
+        )
+    }
+
     // -------------------------------------------------------------- queries
 
+    /// The fleet, as a description to render.
+    ///
+    /// # Every database read happens BEFORE the lock
+    ///
+    /// Two of them: the session rows, and each row's `max_seq`. The second used to be
+    /// awaited *inside* the loop, with `inner` held — which is the thing the lock
+    /// ordering forbids (see the restart recovery, which counts approval requests up
+    /// front to avoid the same shape) and which serialised every other task behind one
+    /// listing's worth of blocking-pool round trips. Hoisted, so the locked section is
+    /// pure in-memory assembly and contains no awaits at all.
+    ///
+    /// # A row can still be one registration behind its liveness, and that is ACCEPTED
+    ///
+    /// The rows come from the store and `attached`/`last_seen`/`blocked_on`/the adopted
+    /// thread come from `inner`, so a registration finishing between the two reads
+    /// leaves this describing a run with the previous registration's cwd and agent
+    /// beside the new one's link. **Not closed here, and deliberately.**
+    ///
+    /// [`Daemon::resolve_codex_inbound`] closes it by taking the session's registration
+    /// gate around both reads, which works because it answers about ONE uid. A listing
+    /// cannot borrow that: making every row coherent means holding each session's gate
+    /// across that session's own row read, which turns one `list_sessions` into a query
+    /// and a gate acquisition per row — and makes a listing wait out any acceptance in
+    /// the fleet, including its bounded five-second join.
+    ///
+    /// That is the wrong trade for this caller. This is a *display*: it is re-read
+    /// continuously, the staleness is one registration deep, it resolves itself on the
+    /// next listing, and nothing is actuated from it — the addressing path, which is
+    /// where a torn pair would matter, is the one that pays for coherence. The honest
+    /// statement is that this is eventually consistent by a registration, not that it
+    /// is atomic.
     pub async fn sessions(&self) -> Result<Vec<SessionSummary>> {
         let rows = self.db.list_sessions().await?;
+        // Read up front, before the lock is taken, one query per row.
+        let mut last_seqs: HashMap<String, u64> = HashMap::with_capacity(rows.len());
+        for row in &rows {
+            last_seqs.insert(
+                row.session_uid.clone(),
+                self.db.max_seq(row.session_uid.clone()).await?,
+            );
+        }
         let inner = self.inner.lock().await;
+        Ok(Self::assemble_sessions(
+            &inner,
+            rows,
+            &last_seqs,
+            &self.config,
+        ))
+    }
+
+    /// Build the fleet listing from rows already read and a state already locked.
+    ///
+    /// Split out so the read above is plainly *all* database work and this is plainly
+    /// *no* database work — the property the lock ordering cares about, made structural
+    /// rather than something the loop has to keep remembering.
+    fn assemble_sessions(
+        inner: &Inner,
+        rows: Vec<SessionRow>,
+        last_seqs: &HashMap<String, u64>,
+        config: &Config,
+    ) -> Vec<SessionSummary> {
         let now = protocol::time::now_unix_ms();
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -3404,7 +8994,7 @@ impl Daemon {
             // Positive liveness only: silence is `stale`, never `idle`.
             let link = match (attached, last_seen) {
                 (false, _) => Link::Detached,
-                (true, Some(ms)) if now - ms > self.config.stale_after_ms as i64 => Link::Stale,
+                (true, Some(ms)) if now - ms > config.stale_after_ms as i64 => Link::Stale,
                 (true, Some(_)) => Link::Attached,
                 (true, None) => Link::Degraded,
             };
@@ -3414,6 +9004,13 @@ impl Daemon {
                 .filter(|p| p.session.uid == row.session_uid)
                 .map(|p| p.card.request_id.clone())
                 .collect();
+            // **One read, two fields.** The thread this run is on and the state of
+            // the link carrying it are both answers about the same addressee, and
+            // resolving it twice would let one summary disagree with itself: the
+            // link can move between two reads, and a row naming a thread beside a
+            // `none` that says there is no link to have named it is a row nothing
+            // can act on. So it is resolved here and both fields are read off it.
+            let addressee = Self::codex_addressee_locked(inner, &row.session_uid);
             out.push(SessionSummary {
                 session_uid: row.session_uid.clone(),
                 session_id: row.session_id.clone(),
@@ -3429,13 +9026,47 @@ impl Daemon {
                 link,
                 claude_session_id: row.claude_session_id,
                 transcript_path: row.transcript_path,
-                last_seq: self.db.max_seq(row.session_uid.clone()).await?,
+                last_seq: last_seqs.get(&row.session_uid).copied().unwrap_or_default(),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 blocked_on,
+                // The per-session agent fact the client scopes its offerings to.
+                // Claude for every row today; the seam carries it either way.
+                agent: row.agent,
+                // **The thread the link ADOPTED, and only then the one the
+                // registration claimed.**
+                //
+                // The row's `codex_thread_id` has a single writer — the registration
+                // frame — so it is what the launcher believed at spawn time and
+                // nothing since. A `/new` in the TUI moves the session to another
+                // thread (2e-4c) and the link follows it; the row does not, because
+                // nothing writes it back. Reporting the row alone therefore names a
+                // retired thread for the rest of the run.
+                //
+                // So the resolver answers first when it can. It is deliberately the
+                // *binding* rather than the subscription — a thread bound and not
+                // yet resumed is still the thread this session is on, and the fleet
+                // is a description of where things are, not of what may be sent.
+                // With no link the claim is all there is, and it is better than
+                // nothing.
+                codex_thread_id: addressee
+                    .thread_id()
+                    .map(str::to_string)
+                    .or(row.codex_thread_id),
+                // **Whether an ask aimed at THIS run can land right now** — the fact
+                // `codex_thread_id` above cannot carry, because it is resolved from
+                // the binding and reads the same whether that link is subscribed,
+                // bound or reconnecting. A client that wanted to know whether one
+                // session could be stopped had to offer the button and let the
+                // refusal answer, which is the affordance this app's rule forbids.
+                //
+                // Deliberately NOT the row's `agent`: a Claude run resolves to
+                // `NoLink` and reports `none` on its own, so the two fields are
+                // independently true rather than one derived from the other.
+                codex_link: addressee.wire_link(),
             });
         }
-        Ok(out)
+        out
     }
 
     // ---------------------------------------------------- liveness sweep
@@ -3520,6 +9151,35 @@ impl Daemon {
             return LivenessSweep::default();
         };
         let started = std::time::Instant::now();
+
+        // **What every session's row and owner were when this sweep's evidence
+        // began** (round-8 F3, round-9 F3).
+        //
+        // Read before the rows are, and therefore before any probe, because
+        // everything after this line is evidence about the world as it was at this
+        // instant: the target a row names is read below and probed later still, so a
+        // write landing at any point from here on has moved the row — possibly to a
+        // different tmux location — and every look taken afterwards is a look at the
+        // wrong thing. Compared again by [`Daemon::mark_exited`] under the per-uid
+        // gate, which is what turns "this looked gone" into "this is still the row
+        // that looked gone".
+        //
+        // **Two observations, because "whose session is this" and "is this still the
+        // row I read" are two questions and the epoch answers only the first.** A
+        // registration stakes its epoch one await BEFORE its row write, so a sweep
+        // can hold the new epoch and the old row at once and find them agreeing at
+        // the commit; and `ensure_session` writes `Lifecycle::Live` without staking
+        // an epoch at all, so a hook can revive a row invisibly to an owner check.
+        // The write count moves with the row in both cases. See
+        // [`Inner::row_writes`].
+        //
+        // One snapshot for the sweep rather than one read per commit: a read at the
+        // commit is the answer *after* the window, which is the one answer that
+        // cannot see into it.
+        let (observed_owners, observed_row_writes) = {
+            let inner = self.inner.lock().await;
+            (inner.registration_epochs.clone(), inner.row_writes.clone())
+        };
 
         let rows = match self.db.list_sessions().await {
             Ok(rows) => rows,
@@ -3646,6 +9306,45 @@ impl Daemon {
         {
             for (target, session, held) in &suspect {
                 let session = &session.clone();
+                // **Attempted before it is narrated** (round-8 F3). The commit can
+                // now decline — a registration completing since the snapshot above
+                // owns this row, and the sweep's evidence is about the run it
+                // replaced — and a log line written first would report an exit that
+                // never happened, which is the same unfounded claim in the log that
+                // the write would have been in the row.
+                let recorded = self
+                    .mark_exited(
+                        session,
+                        // Nobody watched this run end, so there is no exit status to
+                        // report. Saying `null` is the honest answer; inventing a 0
+                        // would claim it finished cleanly.
+                        None,
+                        Some(&format!(
+                            "no tmux session {:?} on server {:?}; the daemon never saw this run \
+                             end and established it had by asking tmux",
+                            target.name, target.socket
+                        )),
+                        EndEstablishedAgainst {
+                            owner: observed_owners.get(&session.uid).copied(),
+                            // The sweep's proof is about a ROW — the tmux location
+                            // this row recorded — so a row written since the look is
+                            // one this sweep never examined.
+                            row_writes: Some(
+                                observed_row_writes.get(&session.uid).copied().unwrap_or(0),
+                            ),
+                        },
+                    )
+                    .await;
+                if !recorded {
+                    crate::log_info!(
+                        "liveness: {} ({}) looked gone, but its row was written while the sweep \
+                         was proving that; the row describes a run this sweep never looked at \
+                         and is left alive",
+                        session.name,
+                        session.uid
+                    );
+                    continue;
+                }
                 // Two different facts, and the log must not report the second as
                 // the first. A name nobody holds and a name held by a *newer run*
                 // both mean this run is gone, but only one of them means there is
@@ -3669,19 +9368,6 @@ impl Daemon {
                         target.socket
                     ),
                 }
-                self.mark_exited(
-                    session,
-                    // Nobody watched this run end, so there is no exit status to
-                    // report. Saying `null` is the honest answer; inventing a 0
-                    // would claim it finished cleanly.
-                    None,
-                    Some(&format!(
-                        "no tmux session {:?} on server {:?}; the daemon never saw this run end \
-                         and established it had by asking tmux",
-                        target.name, target.socket
-                    )),
-                )
-                .await;
                 sweep.gone += 1;
             }
         }
@@ -3832,7 +9518,23 @@ impl Daemon {
             inner
                 .pending
                 .iter()
-                .filter(|(_, p)| !p.claimed && now - p.created_ms > max_age_ms)
+                .filter(|(_, p)| {
+                    // **Claude's cards only**, the same filter the pane sweep already
+                    // applies and for a sharper reason. `resolve_without_phone` writes
+                    // the shared `answers`, reports `AnswerPath::SendKeys` and deletes
+                    // from the shared `pending_approvals` — three of the four tables a
+                    // rolled-back v0.6.0 daemon rewrites globally — so a Codex card
+                    // passing through here is the rollback leak the agent split exists
+                    // to prevent, and the outcome it files is a keyboard timeout for a
+                    // question no keyboard was ever shown.
+                    //
+                    // There is no Codex sweep to put in its place, and the absence is
+                    // the measurement rather than an omission: the app-server holds a
+                    // `serverRequest` open until something answers it, so a Codex
+                    // approval does not go stale. The frames that settle it are what
+                    // retire the card.
+                    p.agent.is_claude() && !p.claimed && now - p.created_ms > max_age_ms
+                })
                 .map(|((_, request_id), p)| (request_id.clone(), p.session.clone()))
                 .collect()
         };
@@ -3880,12 +9582,29 @@ impl Daemon {
 
         // Snapshot first: capturing a pane is a subprocess round-trip and must
         // not happen with the state lock held.
+        //
+        // **Claude's cards only, and that is now a filter rather than a fact.**
+        // Every line of this sweep is about a *Claude* prompt: it searches the
+        // pane for Claude's permission box and Claude's composer, it binds a
+        // Claude prompt fingerprint, and it resolves through
+        // [`Daemon::resolve_without_phone`], which writes `answers` — one of the
+        // tables a rolled-back v0.6.0 daemon rewrites globally — and deletes
+        // from `pending_approvals`, which is not where a Codex card lives.
+        //
+        // Until the approval observer there were no Codex cards in `pending`, so
+        // the whole sweep was Claude-only by construction and needed no filter.
+        // There are now, and run against one the sweep would do three wrong
+        // things at once: read a Codex TUI pane for a Claude prompt, leak a
+        // Codex row into `answers`, and delete nothing from
+        // `codex_pending_approvals` — leaving the card on the phone with the only
+        // thing that could retire it already gone from memory. A Codex card is
+        // retired by the frames that actually settle it, on the link.
         let candidates: Vec<(String, SessionKey, bool, i64)> = {
             let inner = self.inner.lock().await;
             inner
                 .pending
                 .iter()
-                .filter(|(_, p)| !p.claimed)
+                .filter(|(_, p)| !p.claimed && p.agent.is_claude())
                 .map(|((_, request_id), p)| {
                     (
                         request_id.clone(),
@@ -4134,6 +9853,14 @@ impl Daemon {
     /// transaction: a rotation that landed the new token beside the old bearer
     /// would present the relay a pair it has no binding for, and every push
     /// would be refused as a credential failure that no repair could fix.
+    ///
+    /// **A registration carries no feature set.** `register_push` once wrote the
+    /// device's advertised agents in this same statement; nothing on the wire can
+    /// send that field, so the write was machinery for an input no client produces
+    /// and it is gone. `devices.features` stays `NULL` for every row, which is the
+    /// Claude floor, and the read
+    /// ([`crate::store::Store::push_targets`]) keeps every fail-closed branch it
+    /// had. Phase 5 lands the write with the phone that exercises it.
     pub async fn register_push(
         &self,
         device_id: &str,
@@ -4453,6 +10180,547 @@ fn note_tool_result(inner: &mut Inner, event: &Event) {
     }
 }
 
+// -------------------------------------------------- codex recovery sweep
+
+/// The env override naming the launcher this daemon runs the codex recovery pass
+/// through, ahead of every derived candidate. The house shape — a
+/// `CODECONNECT_<TOOL>_BIN` checked first, then the places the tool actually lives.
+pub(crate) const LAUNCHER_BIN_ENV: &str = "CODECONNECT_LAUNCHER_BIN";
+
+/// How often the daemon asks again, after the pass it runs at startup.
+///
+/// **Slow on purpose, and a constant rather than a knob.** What the pass repairs is
+/// wreckage — a launch killed inside its own hash→exec window, a custodian that ran
+/// out of patience — so on a healthy Mac every pass finds nothing and the only cost
+/// worth minimising is the one it pays for finding nothing: one short-lived child
+/// every five minutes. Nothing about the right number changes between runs or between
+/// machines, which is the test for whether a value belongs in the config file.
+pub(crate) const CODEX_SWEEP_PERIOD: Duration = Duration::from_secs(300);
+
+/// How long one pass may run before it is abandoned.
+///
+/// **The last resort, not the mechanism.** The pass ends ITSELF at its own deadline,
+/// which is well inside this, so the ordinary ending is a child that exits having said
+/// what it did. This is what is left for a child that cannot reach its own deadline at
+/// all — one wedged on a stalled filesystem. Generous, because a full pass killed
+/// part-way through can leave a record transition whose other half was to be performed
+/// afterwards; the next tick repairs that. Two passes cannot be alive at once, but not
+/// because of this number: the sweeper awaits each pass before it ticks again.
+pub(crate) const CODEX_SWEEP_BUDGET: Duration = Duration::from_secs(60);
+
+/// The most lines of one pass's own account this daemon copies into its log — a bound
+/// on what a pathological sessions directory can write into the log the daemon shares
+/// with everything else. Past the cap the child's output is still DRAINED, because a
+/// child stopped on a full pipe never finishes the repairs it was started for; what is
+/// dropped is counted and said.
+const CODEX_SWEEP_MAX_LINES: usize = 32;
+
+/// What one codex recovery pass came to: what it said, and what (if anything) means
+/// nothing it owed can be assumed done.
+///
+/// `failed` covers three endings that are one thing to the caller — no launcher, a
+/// pass that could not be run or waited for, a pass that exited non-zero — because the
+/// daemon's answer to all three is identical: latch the reason and ask again next
+/// tick. The difference between them is the sentence, and the sentence is in the field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexSweep {
+    said: Vec<String>,
+    failed: Option<String>,
+}
+
+/// **One test at a time may own the process-global log sink.**
+///
+/// [`crate::log::capture`] is a single process-wide buffer by construction — `emit` is
+/// process-wide, so anything mirroring it must be — and its `install`/`drain`/
+/// `uninstall` carry no notion of an owner. Two tests using it at once do not interleave
+/// harmlessly: `install` CLEARS the buffer, `drain` EMPTIES it, and `uninstall` stops
+/// recording altogether, so whichever test is midway through its drive silently loses
+/// the very lines it is about to assert on. The victim then fails on an EMPTY capture,
+/// which reads like a daemon that said nothing rather than like a test that was robbed.
+///
+/// **Measured, not surmised.** Under default threads,
+/// `cargo test -p ccd --bin ccd codex_link::tests` failed the same two tests on every
+/// run — `an_unreadable_re_ask_keeps_the_link_and_is_reported_once` with `left: 0,
+/// right: 1` and `a_phone_chosen_request_id_cannot_forge_a_line_in_the_log` with an
+/// empty line list — while both pass single-threaded, three runs out of three. The
+/// throttle those reports go through is per-connection (`&mut AmendThrottle`, owned by
+/// one link task), so nothing about the daemon is shared here; only the sink is.
+///
+/// **A turnstile rather than an owner token inside `log::capture`.** The buffer is
+/// test-only scaffolding, and giving it an ownership protocol would be new surface in a
+/// production module for a hazard that exists only in the test binary. This is
+/// `state::tests::captured`'s own `TURN` mutex, widened from one module's two callers to
+/// every user in the binary — which is what it should always have been, because the
+/// thing it protects was never local to one module.
+///
+/// **Take it BEFORE any scripted leg.** `codex_link::tests::ONE_LEG_AT_A_TIME` is taken
+/// inside `drive`, so a capture user that drives a leg holds this one on the outside;
+/// no user takes the leg first, so the order is total and there is no cycle.
+///
+/// `blocking_lock` from a plain `#[test]`, `lock().await` from a `#[tokio::test]` — one
+/// mutex either way, because two would be two turnstiles and no order between them.
+#[cfg(test)]
+pub(crate) static ONE_LOG_CAPTURE_AT_A_TIME: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
+/// **The cap on a client-chosen identifier this daemon will write to `ccd.log`.**
+///
+/// MEASURED by `codex-broker`, whose `session::MAX_REQUEST_ID_BYTES` is this same
+/// number for this same reason: real request ids run 1–59 bytes, the longest being
+/// `"startup-thread-start-<uuid>"`. 128 is more than twice the measured maximum, so it
+/// cannot refuse a real one, while making the length of a log line a property of this
+/// build rather than of whatever a phone chose to send.
+pub(crate) const MAX_LOGGED_CLIENT_ID_BYTES: usize = 128;
+
+/// Is this client-chosen string a plain identifier — safe to write out as it is?
+///
+/// **The grammar is `mac/codex-broker/src/redact.rs`'s, which is the source of truth
+/// for it**, and this is a COPY rather than a call. `codex-broker` is a
+/// **dev-dependency** of this crate and deliberately so: `ccd/Cargo.toml` marks it
+/// TEST-ONLY, so that `codex_link_live`'s "is the installed codex one this build is
+/// grounded against?" question has exactly one answer. Production code here cannot
+/// reach it, and promoting the dependency so that one log helper could would undo a
+/// decision taken for a different and better reason.
+///
+/// The rule, unchanged: ASCII alphanumerics plus `-`, `_`, `.` and `:`, non-empty, and
+/// within [`MAX_LOGGED_CLIENT_ID_BYTES`]. A string matching it can hold no newline, no
+/// carriage return, no control byte and no quote — which is exactly why it cannot forge
+/// a line — and it covers every id form measured on the wire, every session uid (a
+/// ULID) and every ordinary tmux session name.
+fn is_a_plain_client_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LOGGED_CLIENT_ID_BYTES
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+}
+
+/// **A phone-chosen `request_id`, rendered safe to write to `ccd.log`.**
+///
+/// The id on an `Answer`, an `Interrupt` or a `Compose` frame is chosen entirely by the
+/// phone and is interpolated into this daemon's log at eleven sites. A newline in it
+/// forges a whole line into the file operators and the live gates read: an id of
+/// `"x\n2026-09-09T00:00:00.000Z ERROR codex recovery: ownership asserted"` writes a
+/// second line that greps exactly like a real one, and nothing downstream can tell the
+/// two apart.
+///
+/// A conforming id is written AS IT IS, because an operator diagnosing a refusal needs
+/// to know *which* ask; anything else is written as its byte count and nothing more.
+/// See [`is_a_plain_client_id`] for the grammar and where it comes from.
+///
+/// **One deliberate difference from `redact.rs`:** a conforming id is written bare
+/// rather than through `{:?}`. The broker's audit lines use the quoting to tell an
+/// echoed id from a rendered shape; `ccd.log` is prose whose lines already interpolate
+/// the id bare, and the grammar has already excluded every byte the quoting would be
+/// protecting against.
+pub(crate) fn logged_request_id(id: &str) -> std::borrow::Cow<'_, str> {
+    if is_a_plain_client_id(id) {
+        std::borrow::Cow::Borrowed(id)
+    } else {
+        std::borrow::Cow::Owned(format!("<non-conforming request id, {} bytes>", id.len()))
+    }
+}
+
+/// **A phone-chosen session reference, rendered safe to write to `ccd.log`.**
+///
+/// [`logged_request_id`]'s twin, and it exists because a `session_id` on the wire is a
+/// uid OR a bare tmux name — so, unlike a resolved `session_uid` read back out of the
+/// store, it is client-chosen text and is a log-injection channel in exactly the same
+/// way. Same grammar; a different noun, so a shape in the log says which field could
+/// not be written.
+pub(crate) fn logged_session_ref(reference: &str) -> std::borrow::Cow<'_, str> {
+    if is_a_plain_client_id(reference) {
+        std::borrow::Cow::Borrowed(reference)
+    } else {
+        std::borrow::Cow::Owned(format!(
+            "<non-conforming session reference, {} bytes>",
+            reference.len()
+        ))
+    }
+}
+
+/// The `codeconnect` launcher this daemon runs the recovery pass through.
+///
+/// **Why a subprocess and not a function call.** The launch records are the
+/// launcher's — their lock, their schema, their atomic rename — and the warrants for
+/// taking an `UF_IMMUTABLE` pin off somebody's codex binary live in one function
+/// there, shared between the custodian and the sweep precisely so two actors cannot
+/// come to different conclusions about the same file. `ccd` does not depend on that
+/// crate and cannot: it is a binary crate with no library. A second copy of those
+/// warrants in this daemon would be the drift that discipline exists to prevent, and
+/// the direction it drifts in is a flag taken off a live launch's binary. So the
+/// daemon asks the one process that owns the records to do it, and reads what it says.
+pub(crate) fn codex_launcher() -> Result<std::path::PathBuf, String> {
+    launcher_among(
+        std::env::var(LAUNCHER_BIN_ENV).ok(),
+        std::env::current_exe().ok(),
+        protocol::root_dir(),
+        state_dir_owner(),
+    )
+}
+
+/// **The uid a launcher override has to belong to**, or `None` when this daemon
+/// cannot establish one.
+///
+/// `~/.codeconnect` rather than `getuid(2)`: `ccd` carries no `libc` dependency, and
+/// adding one for a single symbol would buy a weaker anchor than this. The state
+/// directory holds this daemon's database, its TLS material and its device tokens —
+/// everything the process already trusts absolutely — so "owned by whoever owns
+/// that" is the ownership the whole daemon rests on rather than a proxy for it. On a
+/// machine where the two differ, the override is not the operator's to choose.
+fn state_dir_owner() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(protocol::root_dir())
+        .ok()
+        .map(|meta| meta.uid())
+}
+
+/// **Is this override a program this daemon may spawn?**
+///
+/// `CODECONNECT_LAUNCHER_BIN` was `is_file()` and nothing else, and what it selects
+/// is executed every five minutes by a launchd job holding the APNs signing key and
+/// this Mac's tailnet identity. Its sibling `CODECONNECT_CODEX_BIN` is canonicalised,
+/// read exactly once, checked for a Mach-O header and pinned by SHA-256 — see
+/// `resolve_codex_bin` in `mac/codeconnect/src/codex.rs`, where that discipline is
+/// written down — because the file an environment variable names is the file that
+/// ends up running.
+///
+/// Three conditions, and each is a different way the override stops being the
+/// operator's own choice:
+///
+///   * **a regular file.** A directory, a fifo or a device is not a program. This is
+///     the question `is_file()` was already asking; it is asked here so all three
+///     answers come from one read of one file rather than from three separate ones.
+///   * **owned by the uid that owns this daemon's state.** Another user's file is
+///     another user's decision about what this daemon runs.
+///   * **writable by nobody but its owner.** A group- or other-writable path can be
+///     rewritten between this check and the spawn — and between two ticks of a sweep
+///     that runs every five minutes — so a file that passed is not necessarily the
+///     file that runs. `mode & 0o022`, which is both bits and no others: the execute
+///     and read bits say nothing about who can revise it.
+///
+/// **Deliberately NOT `codex.rs`'s digest pin.** The launcher is this build's own
+/// binary and every install replaces it, so a hash would refuse the ordinary upgrade
+/// and stop the recovery sweep on exactly the machines that had just been updated.
+/// What is borrowed is the shape of the question, not its strictness.
+///
+/// `metadata` and not `symlink_metadata`: a symlink is an ordinary way to name an
+/// installed launcher, and the thing that gets executed is the target — so the target
+/// is what has to answer for itself.
+///
+/// **`owner` is `None` when this daemon could not read its own state directory.** The
+/// ownership question is then unanswerable, and it is skipped rather than guessed at
+/// in either direction; the other two conditions still apply, so the check degrades
+/// to a narrower one rather than to none.
+fn launcher_is_spawnable(path: &std::path::Path, owner: Option<u32>) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).map_err(|err| format!("it cannot be examined ({err})"))?;
+    if !meta.is_file() {
+        return Err("it is not a regular file".to_string());
+    }
+    if let Some(owner) = owner {
+        if meta.uid() != owner {
+            return Err(format!(
+                "it belongs to uid {}, and this daemon's own state belongs to uid {owner}",
+                meta.uid()
+            ));
+        }
+    }
+    let mode = meta.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Err(format!(
+            "it is writable by its group or by everyone (mode {mode:04o}), so what runs \
+             need not be what was checked"
+        ));
+    }
+    Ok(())
+}
+
+/// The candidate list, given its three inputs rather than reading them: the override,
+/// then the launcher beside this daemon, then the one in the install prefix.
+///
+/// **Beside first, because a daemon wants the launcher of its own build** — which is
+/// what being beside it means, in a cargo target directory and an installed prefix
+/// alike. **The install prefix is a fallback and not a reach across releases:** the
+/// launchd job is the only production topology, and there `beside` and `<root>/bin`
+/// are the same directory, so the fallback is never taken. What it covers is a `ccd`
+/// started by hand from somewhere else on a machine that has an install. A dev tree
+/// that also has an install can therefore reach the installed launcher, and the
+/// override exists to say otherwise; cross-build drift degrades safely, because a
+/// record the running launcher cannot parse is reported rather than acted on.
+///
+/// Split out so the precedence is exercised without touching the environment. This
+/// process is a daemon with live tasks in it and `setenv` is not thread-safe on this
+/// platform — a test that set `CODECONNECT_LAUNCHER_BIN` to prove which candidate wins
+/// would be racing every other test in the binary for the answer, and the failure mode
+/// of losing that race is a green test.
+fn launcher_among(
+    named: Option<String>,
+    exe: Option<std::path::PathBuf>,
+    root: std::path::PathBuf,
+    owner: Option<u32>,
+) -> Result<std::path::PathBuf, String> {
+    let mut looked = Vec::new();
+    // An override this daemon will not spawn is REPORTED and then passed, not obeyed:
+    // an operator who mistyped the path — or who left it somewhere anyone can rewrite —
+    // should learn that from the log rather than from a recovery pass that quietly
+    // stopped running. Said at startup by [`warn_about_an_ignored_launcher_override`],
+    // because a fallback that works would otherwise swallow it here, and the reason is
+    // carried into `looked` so the no-launcher error names it too.
+    //
+    // **The candidates BESIDE this daemon and in the install prefix are not checked
+    // this way, and the asymmetry is the point.** Those two are wherever this binary
+    // was installed; an operator who can write there can replace `ccd` itself, so a
+    // guard on them would be theatre. The override is the one candidate a *caller* —
+    // an environment variable on a launchd job, a shell that started this by hand —
+    // gets to choose, which is the only place the choice can be somebody else's.
+    if let Some(named) = named.filter(|value| !value.is_empty()) {
+        let path = std::path::PathBuf::from(named);
+        match launcher_is_spawnable(&path, owner) {
+            Ok(()) => return Ok(path),
+            Err(why) => looked.push(format!("{} ({LAUNCHER_BIN_ENV}: {why})", path.display())),
+        }
+    }
+    if let Some(beside) = exe.as_deref().and_then(std::path::Path::parent) {
+        let beside = beside.join("codeconnect");
+        if beside.is_file() {
+            return Ok(beside);
+        }
+        looked.push(format!("{} (beside this daemon)", beside.display()));
+    }
+    let installed = root.join("bin").join("codeconnect");
+    if installed.is_file() {
+        return Ok(installed);
+    }
+    looked.push(format!("{} (the install prefix)", installed.display()));
+    Err(format!(
+        "no `codeconnect` launcher was found, so a codex launch record left holding a vnode \
+         freeze cannot be repaired from here; looked at {}",
+        looked.join(", ")
+    ))
+}
+
+/// Say, once at startup, that `CODECONNECT_LAUNCHER_BIN` names nothing.
+///
+/// [`launcher_among`] passes such an override and takes the next candidate, so on a
+/// machine where a candidate exists the mistyped path is never mentioned anywhere — the
+/// daemon runs happily through a launcher the operator did not choose. Said here rather
+/// than per tick because it is a condition of the environment this process was started
+/// in and cannot change under it.
+pub(crate) fn warn_about_an_ignored_launcher_override() {
+    if let Some(why) =
+        an_ignored_launcher_override(std::env::var(LAUNCHER_BIN_ENV).ok(), state_dir_owner())
+    {
+        crate::log_warn!("codex recovery: {why}");
+    }
+}
+
+/// The sentence, given the override rather than reading it — split out for the reason
+/// [`launcher_among`] is: `setenv` is not thread-safe on this platform and this process
+/// is a daemon with live tasks in it, so a test that set the variable would be racing
+/// every other test in the binary and the failure mode of losing that race is a green
+/// test.
+fn an_ignored_launcher_override(named: Option<String>, owner: Option<u32>) -> Option<String> {
+    let named = named.filter(|value| !value.is_empty())?;
+    // The same predicate [`launcher_among`] passes the override through, so the
+    // complaint cannot describe a different rule from the one that was applied.
+    let why = launcher_is_spawnable(std::path::Path::new(&named), owner).err()?;
+    Some(format!(
+        "{LAUNCHER_BIN_ENV} names {named}, which this daemon will not spawn because \
+         {why}; it is ignored and the launcher is looked for in the usual places"
+    ))
+}
+
+/// Run one bounded codex recovery pass through `program`, and bring back what it said.
+///
+/// **Its account is read as it is written, not collected at the end.** The pass says a
+/// line at the moment it settles each claim, and settling one takes the flag off the
+/// binary AND the claim off the record — so a pass killed before it spoke leaves
+/// nothing behind that says either happened. `said` lives outside the raced future for
+/// exactly that reason: what the pass managed to say survives being ended.
+///
+/// stdout is `/dev/null`: the pass says everything on stderr, and a stream nobody
+/// writes to is one more thing that could fill and stop the child.
+pub(crate) async fn sweep_codex_recovery(
+    program: &std::path::Path,
+    socket: &str,
+    budget: Duration,
+) -> CodexSweep {
+    use tokio::io::AsyncBufReadExt as _;
+
+    let mut command = tokio::process::Command::new(program);
+    command
+        .arg(protocol::CODEX_SWEEP_SUBCOMMAND)
+        .args(["--socket", socket])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        // A daemon shutting down mid-pass must not leave the pass itself behind.
+        // Dropping the future drops the child, and this is what makes that a kill — of
+        // the child, and only of it. The pass's own descendants are gate children and
+        // replacement custodians, which are detached on purpose and outlive it.
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            return CodexSweep {
+                said: Vec::new(),
+                failed: Some(format!("{} could not be run: {err}", program.display())),
+            }
+        }
+    };
+    let mut said = Vec::new();
+    let mut dropped = 0usize;
+    let stderr = child.stderr.take();
+    // The borrow ends with the future, so both counters are readable again whether the
+    // pass finished or was ended.
+    let outcome = {
+        let ran = async {
+            if let Some(stderr) = stderr {
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                loop {
+                    let line = match lines.next_line().await {
+                        Ok(Some(line)) => line,
+                        Ok(None) => break,
+                        // **Said rather than read as the end.** A read error and an EOF
+                        // are the same empty result otherwise, and this is the channel
+                        // the pass's whole account comes down: a janitor that stopped
+                        // being heard mid-sentence must not look like one that had
+                        // finished speaking.
+                        Err(err) => {
+                            said.push(format!(
+                                "the rest of what the pass said could not be read ({err})"
+                            ));
+                            break;
+                        }
+                    };
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if said.len() >= CODEX_SWEEP_MAX_LINES {
+                        // Kept draining rather than stopping: an unread pipe fills, and
+                        // a child stopped on a full pipe never finishes its repairs.
+                        dropped += 1;
+                        continue;
+                    }
+                    said.push(line);
+                }
+            }
+            child.wait().await
+        };
+        tokio::time::timeout(budget, ran).await
+    };
+    // Counted here rather than at the reader's EOF, so a pass that says more than the
+    // cap and is then ended still states its truncation.
+    if dropped > 0 {
+        said.push(format!(
+            "and {dropped} further line(s) the daemon did not copy into this log; the pass \
+             said them all on its own stderr"
+        ));
+    }
+    let failed = match outcome {
+        Err(_) => Some(format!(
+            "the pass did not finish within {budget:?} and was ended; the next pass asks again"
+        )),
+        Ok(Err(err)) => Some(format!(
+            "the pass could not be waited for: {err}; the next pass asks again"
+        )),
+        Ok(Ok(status)) if status.success() => None,
+        Ok(Ok(status)) => {
+            Some(match status.code() {
+                Some(code) => {
+                    format!("the pass exited {code} with something still owed; the next pass asks again")
+                }
+                None => "the pass was killed by a signal; the next pass asks again".to_string(),
+            })
+        }
+    };
+    CodexSweep { said, failed }
+}
+
+/// What the daemon has already said about the recovery pass, so it does not say it
+/// again.
+///
+/// **Everything is said once.** A line about a claim the pass SETTLED is a distinct
+/// event and cannot repeat: settling a claim withdraws it, so the next pass has nothing
+/// to say about it. Every other line is a CONDITION — a claim still waited on, a record
+/// that could not be read, a launcher that is not there — and a condition holds until
+/// something changes. Repeating one every period for the life of a machine buries the
+/// events under it, which is the rule the liveness sweep follows and for its reason.
+#[derive(Debug, Default)]
+struct SweepLatch {
+    said: Vec<String>,
+    complaint: Option<String>,
+}
+
+/// Say what one pass came to, and say nothing when it came to nothing.
+fn report_codex_sweep(sweep: &CodexSweep, latch: &mut SweepLatch) {
+    for line in &sweep.said {
+        if !latch.said.contains(line) {
+            crate::log_info!("codex recovery: {line}");
+        }
+    }
+    latch.said.clone_from(&sweep.said);
+    // Unchanged is unsaid — which is also why a first quiet pass says nothing at all:
+    // `None == None` returns here, and the clearing line below is reachable only when
+    // there was a complaint to clear.
+    if sweep.failed == latch.complaint {
+        return;
+    }
+    match &sweep.failed {
+        Some(why) => crate::log_warn!("codex recovery: {why}"),
+        // Said, because an operator who read the complaint needs to see it end.
+        None => crate::log_info!("codex recovery: the pass is completing again"),
+    }
+    latch.complaint.clone_from(&sweep.failed);
+}
+
+/// The daemon's codex recovery sweeper: **one pass now**, then one every `period`.
+///
+/// **The pass now is the startup half of H2.1** and is the one that matters. Every
+/// launch record on this machine was written by a process a previous boot or a previous
+/// daemon was watching; a codex binary left immutable by a launch that did not survive
+/// to give the pin back stays immutable, and codex stays un-updatable, until something
+/// comes back for the claim. Before this, nothing did. The ticker behind it is the
+/// backstop for the claim that is leaked while this daemon is already up.
+///
+/// **Concurrently with the listeners, not before them**, exactly as the liveness sweep
+/// is and for its reason: this shells out, and holding the sockets shut for the length
+/// of a child would put a hole in the hook path on every restart. Nothing is lost by
+/// sweeping late — the flag has been on that file since before this process existed.
+///
+/// **The launcher is looked for on every tick, not once**, because "there is no
+/// launcher" is a state a machine leaves: a first install, an update mid-flight, a
+/// launchd job that came up before the install prefix was populated. Resolving once and
+/// parking on failure would put the feature back in the state H2.1 exists to end —
+/// machinery with no caller — for the life of a daemon that may run for weeks. The cost
+/// of asking again is three `stat` calls per period, and the complaint is latched so a
+/// machine with genuinely no launcher says so once rather than every period.
+pub(crate) async fn run_codex_sweeps<F>(launcher: F, socket: String, period: Duration)
+where
+    F: Fn() -> Result<std::path::PathBuf, String>,
+{
+    let mut latch = SweepLatch::default();
+    let mut ticker = tokio::time::interval(period);
+    // Delay rather than burst: a Mac that has just woken must not fire every missed
+    // tick at once, and each tick's work is identical, so catching up buys nothing.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        // The first tick is immediate, so this IS the startup pass; every one after it
+        // is the ticker's.
+        ticker.tick().await;
+        let sweep = match launcher() {
+            Ok(program) => sweep_codex_recovery(&program, &socket, CODEX_SWEEP_BUDGET).await,
+            Err(why) => CodexSweep {
+                said: Vec::new(),
+                failed: Some(why),
+            },
+        };
+        report_codex_sweep(&sweep, &mut latch);
+    }
+}
+
 /// The launchd job this process belongs to, or `None` if it has none.
 ///
 /// macOS sets `XPC_SERVICE_NAME` for every process, not only for launchd jobs:
@@ -4526,6 +10794,61 @@ pub(crate) fn hook_event(
         pending = pending.with_source_event_id(format!("{prefix}:{tool_use_id}"));
     }
     pending
+}
+
+/// **The ordered seam that makes "past its snapshot" a fact** (round-3 F7).
+///
+/// [`Daemon::register_supervisor`] reads the row for its uid once before any
+/// synchronization and again under the acceptance gate, and the Claude→Codex refusal
+/// is decided from the SECOND read. Proving that requires a test to hold a
+/// registration provably past the FIRST read before it commits the row the second one
+/// must see.
+///
+/// `sleep(80ms)` plus `!is_finished()` does not prove it. An unscheduled task and one
+/// still inside the pre-gate `get_session` are both unfinished, so with the check
+/// regressed above the gate a task that had not yet read would read the
+/// already-committed Claude row and refuse *normally* — the test green, and asserting
+/// nothing about where the check lives.
+///
+/// So the snapshot says so itself. Armed per uid because these tests run in parallel
+/// and a process-global signal cannot tell one registration's read from another's;
+/// `notify_one` and not `notify_waiters` because the registration may pass the seam
+/// before the test reaches its await, and a stored permit is the difference between an
+/// ordering and a race.
+#[cfg(test)]
+pub(crate) mod snapshot_latch {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use tokio::sync::Notify;
+
+    fn table() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
+        static T: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
+        T.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Watch for the next pre-gate snapshot taken for `uid`.
+    pub(crate) fn arm(uid: &str) -> Arc<Notify> {
+        let signal = Arc::new(Notify::new());
+        table()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(uid.to_string(), Arc::clone(&signal));
+        signal
+    }
+
+    /// Called by `register_supervisor` the moment its pre-gate row read returns.
+    pub(crate) fn passed(uid: Option<&str>) {
+        let Some(uid) = uid else { return };
+        let armed = table()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(uid)
+            .cloned();
+        if let Some(signal) = armed {
+            signal.notify_one();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4615,6 +10938,688 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // ---------------------------------------------- codex recovery sweep
+
+    /// Aborts its task whatever happens, **including the path where an assertion
+    /// panics** — which is the path a broken change takes. A trailing `abort()` runs
+    /// only when the test passes, and a sweeper left running against a tearing-down
+    /// runtime spawns children nobody is waiting for.
+    struct SweeperTask(tokio::task::JoinHandle<()>);
+    impl Drop for SweeperTask {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    /// Removes its stub whatever happens, for the reason [`SweeperTask`] exists.
+    struct StubDir(std::path::PathBuf);
+    impl Drop for StubDir {
+        fn drop(&mut self) {
+            if let Some(dir) = self.0.parent() {
+                std::fs::remove_dir_all(dir).ok();
+            }
+        }
+    }
+
+    /// **The log sink is process-global, so the tests that read it take turns.**
+    ///
+    /// `crate::log::capture` holds one `Vec` for the whole binary: a `drain` takes
+    /// another test's lines with it, an `install` discards them, and an `uninstall`
+    /// stops recording for everybody. The assertion that cannot survive that is the
+    /// NEGATIVE one — a quiet pass proving it wrote nothing would be failed by any
+    /// other test's line arriving in its window. Held across install…uninstall, and
+    /// never poisoned into a panic, so a failing assertion inside the lock does not
+    /// take every other test down with it.
+    /// **Async, because the turnstile is.** Both callers are `#[tokio::test]`, so a
+    /// `blocking_lock` here blocks the very thread that would have to release it and
+    /// tokio refuses outright. `body` stays synchronous: what it runs is a sweep report,
+    /// and the sink must not be shared with anything that could yield inside it.
+    ///
+    /// The turnstile is [`crate::state::ONE_LOG_CAPTURE_AT_A_TIME`] and no longer a
+    /// mutex private to this module: the sink it protects is process-global, so a
+    /// turnstile only two callers in one file respect protects nothing from the capture
+    /// users in the others.
+    async fn captured(body: impl FnOnce()) -> Vec<String> {
+        let _turn = crate::state::ONE_LOG_CAPTURE_AT_A_TIME.lock().await;
+        crate::log::capture::install();
+        body();
+        let logged = crate::log::capture::drain();
+        crate::log::capture::uninstall();
+        logged
+    }
+
+    /// This thread's id, spelled so it can be part of a pathname a shell will see.
+    /// `ThreadId`'s own `Debug` is `ThreadId(4)`, and the parentheses in an unquoted
+    /// redirect target are a syntax error rather than a filename.
+    fn thread_tag() -> String {
+        format!("{:?}", std::thread::current().id())
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect()
+    }
+
+    /// A stand-in launcher: a script that records the argv it was handed and then
+    /// behaves as `body` says.
+    ///
+    /// A stub rather than the real launcher, and the split is deliberate. What the
+    /// pass DOES to a standing freeze claim is proven in the crate that owns the
+    /// records, against real flags on a real file and real processes
+    /// (`codex_custodian`'s `..._clears_a_standing_claim_whose_holder_is_dead`).
+    /// What is left for this side is what a daemon can get wrong on its own: whether
+    /// it asks at all, whether it asks again, what it asks for, and what it does with
+    /// the answer. Driving the real launcher from here would prove those against the
+    /// operator's own `~/.codeconnect`, which the suite is not allowed to touch.
+    fn a_stub_launcher(tag: &str, body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "cc-codex-sweep-{tag}-{}-{}",
+            std::process::id(),
+            // The thread id's own spelling carries parentheses, and this name reaches
+            // a shell script's redirect target.
+            thread_tag()
+        ));
+        std::fs::create_dir_all(&dir).expect("a place for the stub");
+        let ledger = dir.join("asked");
+        let program = dir.join("codeconnect");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n{body}\n",
+                ledger.display()
+            ),
+        )
+        .expect("write the stub");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .expect("make the stub runnable");
+        (program, ledger)
+    }
+
+    /// Everything the stub wrote, one entry per invocation.
+    fn asked(ledger: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(ledger)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Wait for the stub to have been asked `want` times, or give up.
+    ///
+    /// **Its own hard deadline**, because this polls a background task: a test that
+    /// waited on a condition a broken change never reaches would hang the suite rather
+    /// than fail it, and a hung suite is the one failure nobody reads.
+    async fn asked_at_least(ledger: &std::path::Path, want: usize) -> Vec<String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let seen = asked(ledger);
+            if seen.len() >= want {
+                return seen;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the daemon asked {} time(s) in ten seconds; {want} were expected",
+                seen.len()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// **H2.1: a daemon that starts runs the recovery pass, without being asked.**
+    ///
+    /// This is the residual H1 filed and could not close: the pass was dispatchable
+    /// machinery with no production caller, so a codex binary left immutable by a
+    /// launch that did not survive to give the pin back stayed immutable until an
+    /// operator worked out that `chflags nouchg` was the answer. "A later pass" was as
+    /// unconditional as somebody typing one. Every launch record on this machine
+    /// predates this process; the pass at startup is what looks at them.
+    #[tokio::test]
+    async fn a_daemon_that_starts_runs_a_codex_recovery_pass() {
+        let (program, ledger) = a_stub_launcher("startup", "exit 0");
+        let _stub = StubDir(program.clone());
+        // An hour, so nothing the ticker does can be mistaken for the startup pass.
+        let found = program.clone();
+        let task = SweeperTask(tokio::spawn(run_codex_sweeps(
+            move || Ok(found.clone()),
+            protocol::TMUX_SOCKET_NAME.to_string(),
+            Duration::from_secs(3600),
+        )));
+
+        let seen = asked_at_least(&ledger, 1).await;
+
+        drop(task);
+        assert_eq!(
+            seen[0],
+            format!(
+                "{} --socket {}",
+                protocol::CODEX_SWEEP_SUBCOMMAND,
+                protocol::TMUX_SOCKET_NAME
+            ),
+            "the daemon must ask for the pass by the name the launcher dispatches, on \
+             the socket the fleet uses"
+        );
+    }
+
+    /// **And it asks again on its tick, which is the backstop for the claim leaked
+    /// while this daemon is already up.**
+    ///
+    /// The startup pass covers what the machine was left holding. A launch killed
+    /// inside its own hash→exec window an hour into the daemon's life is not covered by
+    /// anything else: its custodian is entitled to stop waiting and exit, and the
+    /// launcher's own pass only runs when somebody launches. Driven at a period a test
+    /// can wait out; production's is five minutes.
+    #[tokio::test]
+    async fn the_daemon_asks_again_on_its_periodic_tick() {
+        let (program, ledger) = a_stub_launcher("tick", "exit 0");
+        let _stub = StubDir(program.clone());
+        let found = program.clone();
+        let task = SweeperTask(tokio::spawn(run_codex_sweeps(
+            move || Ok(found.clone()),
+            protocol::TMUX_SOCKET_NAME.to_string(),
+            Duration::from_millis(50),
+        )));
+
+        let seen = asked_at_least(&ledger, 3).await;
+
+        drop(task);
+        assert!(
+            seen.len() >= 3,
+            "a startup pass and at least two ticks were expected; got {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .all(|line| line.starts_with(protocol::CODEX_SWEEP_SUBCOMMAND)),
+            "every pass must ask the same thing: {seen:?}"
+        );
+    }
+
+    /// **A pass that outruns its budget is ended, and the ending is said.**
+    ///
+    /// This runs unattended for the life of the daemon, so a wedged child would hold
+    /// two pipes and a process slot until the Mac is restarted. The budget is what
+    /// makes the future's own drop a kill.
+    #[tokio::test]
+    async fn a_pass_that_outruns_its_budget_is_ended_and_said() {
+        let (program, _ledger) = a_stub_launcher("wedged", "sleep 3");
+        let _stub = StubDir(program.clone());
+
+        let sweep = sweep_codex_recovery(
+            &program,
+            protocol::TMUX_SOCKET_NAME,
+            Duration::from_millis(200),
+        )
+        .await;
+
+        let why = sweep
+            .failed
+            .as_deref()
+            .expect("a pass past its budget owes another pass");
+        assert!(why.contains("did not finish"), "{why}");
+        assert!(
+            why.contains("asks again"),
+            "and the retry has to be said, or an operator reads one ending as the end \
+             of it: {why}"
+        );
+    }
+
+    /// **A condition is said when it starts and when it ends, not every period; and a
+    /// pass that found nothing says nothing at all.**
+    ///
+    /// "The launcher is missing" and "the pass could not finish" hold until something
+    /// changes. Repeating either every five minutes for the life of a machine would
+    /// bury the lines that are events — the claims the pass actually settled — under a
+    /// complaint the operator read the first time. The clearing is said too, because
+    /// somebody who read the complaint needs to see it end. And nearly every pass on
+    /// nearly every machine finds nothing: a line a period into the log the daemon
+    /// shares with everything else carries no information while burying the ones that
+    /// do.
+    #[tokio::test]
+    async fn a_standing_complaint_is_said_once_and_its_ending_is_said_too() {
+        let (failing, _l1) = a_stub_launcher("latch-bad", "exit 1");
+        let _s1 = StubDir(failing.clone());
+        let (quiet, _l2) = a_stub_launcher("latch-good", "exit 0");
+        let _s2 = StubDir(quiet.clone());
+
+        let bad = sweep_codex_recovery(
+            &failing,
+            protocol::TMUX_SOCKET_NAME,
+            Duration::from_secs(10),
+        )
+        .await;
+        let good =
+            sweep_codex_recovery(&quiet, protocol::TMUX_SOCKET_NAME, Duration::from_secs(10)).await;
+        assert_eq!(
+            good,
+            CodexSweep {
+                said: Vec::new(),
+                failed: None
+            },
+            "a pass with nothing to say owes nothing"
+        );
+
+        let logged = captured(|| {
+            let mut latch = SweepLatch::default();
+            report_codex_sweep(&good, &mut latch);
+            report_codex_sweep(&bad, &mut latch);
+            report_codex_sweep(&bad, &mut latch);
+            report_codex_sweep(&bad, &mut latch);
+            report_codex_sweep(&good, &mut latch);
+            report_codex_sweep(&good, &mut latch);
+        })
+        .await;
+
+        let complaints = logged
+            .iter()
+            .filter(|l| l.contains("something still owed"))
+            .count();
+        assert_eq!(
+            complaints, 1,
+            "three identical failures are one complaint: {logged:?}"
+        );
+        let clearings = logged
+            .iter()
+            .filter(|l| l.contains("completing again"))
+            .count();
+        assert_eq!(
+            clearings, 1,
+            "and its ending is said exactly once: {logged:?}"
+        );
+        assert_eq!(
+            logged.len(),
+            2,
+            "the quiet passes on either side of it must write nothing at all: {logged:?}"
+        );
+    }
+
+    /// **A launcher that cannot be run is not a pass that found nothing.**
+    ///
+    /// The two are the same silence otherwise, and one of them means the flag on
+    /// somebody's codex binary is never coming off.
+    #[tokio::test]
+    async fn a_launcher_that_cannot_be_run_is_told_apart_from_a_quiet_pass() {
+        use std::os::unix::fs::PermissionsExt;
+        let (program, _ledger) = a_stub_launcher("unrunnable", "exit 0");
+        let _stub = StubDir(program.clone());
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let sweep = sweep_codex_recovery(
+            &program,
+            protocol::TMUX_SOCKET_NAME,
+            Duration::from_secs(10),
+        )
+        .await;
+
+        assert!(
+            sweep
+                .failed
+                .as_deref()
+                .is_some_and(|why| why.contains("could not be run")),
+            "a launcher that will not run must be a complaint, not a quiet pass: {sweep:?}"
+        );
+    }
+
+    /// **A condition the pass repeats every tick is written into the log once.**
+    ///
+    /// Only the daemon's own complaint was latched; the pass's ACCOUNT was copied
+    /// unconditionally, on the reasoning that every line names a claim it dealt with
+    /// and each of those is a distinct event. That is not true of every line, and the
+    /// exceptions are permanent: a claim whose record names no holder can never be
+    /// settled, so the pass writes the same sentence about it on every pass, for ever
+    /// — 288 identical lines a day, in a log the daemon shares with everything else,
+    /// naming no remedy. A settled claim is genuinely new each time, because settling
+    /// it withdraws the claim; a condition is not, and is said when it starts and when
+    /// it changes.
+    #[tokio::test]
+    async fn a_condition_the_pass_repeats_every_tick_is_said_once() {
+        let (program, _ledger) = a_stub_launcher(
+            "repeats",
+            "echo 'codex-sweep: u1 still claims a vnode freeze — it names no holder' 1>&2\n\
+             exit 0",
+        );
+        let _stub = StubDir(program.clone());
+
+        let mut ticks = Vec::new();
+        for _ in 0..3 {
+            ticks.push(
+                sweep_codex_recovery(
+                    &program,
+                    protocol::TMUX_SOCKET_NAME,
+                    Duration::from_secs(10),
+                )
+                .await,
+            );
+        }
+
+        let logged = captured(|| {
+            let mut latch = SweepLatch::default();
+            for tick in &ticks {
+                report_codex_sweep(tick, &mut latch);
+            }
+        })
+        .await;
+
+        assert_eq!(
+            logged
+                .iter()
+                .filter(|l| l.contains("still claims a vnode freeze"))
+                .count(),
+            1,
+            "three passes saying the same thing is one thing said: {logged:?}"
+        );
+    }
+
+    /// **A pass cut short at the cap still says by how much, even when it is then
+    /// ended at the budget.**
+    ///
+    /// The dropped-line count was appended only when the child's stderr reached EOF,
+    /// so a pass that said more than the cap and then wedged had its future dropped
+    /// before the count was written — and the truncation was silent, which is the one
+    /// thing the cap is not allowed to be. The machine that hits the budget is the
+    /// machine with the wreckage on it.
+    #[tokio::test]
+    async fn a_truncated_account_says_by_how_much_even_when_the_pass_is_ended() {
+        let (program, _ledger) = a_stub_launcher(
+            "verbose-wedged",
+            "i=0; while [ $i -lt 100 ]; do echo \"codex-sweep: line $i\" 1>&2; i=$((i+1)); \
+             done\nsleep 30",
+        );
+        let _stub = StubDir(program.clone());
+
+        let sweep = sweep_codex_recovery(
+            &program,
+            protocol::TMUX_SOCKET_NAME,
+            Duration::from_millis(2_000),
+        )
+        .await;
+
+        assert!(
+            sweep
+                .failed
+                .as_deref()
+                .is_some_and(|why| why.contains("did not finish")),
+            "a pass past its budget owes another pass: {sweep:?}"
+        );
+        let said = &sweep.said;
+        assert!(
+            said.iter().any(|l| l.contains(&format!(
+                "and {} further line(s)",
+                100 - CODEX_SWEEP_MAX_LINES
+            ))),
+            "the cut must be counted whether the child ended or was ended: {said:?}"
+        );
+    }
+
+    /// **An override that names nothing is said once, even when a fallback works.**
+    ///
+    /// [`launcher_among`] passes an unusable override and takes the next candidate, so
+    /// on any machine that has one — which is every installed machine — the operator's
+    /// mistyped path is never mentioned anywhere at all: the daemon runs happily,
+    /// through a launcher they did not choose, and the only symptom is the wrong build
+    /// reading this build's records. The complaint is only reachable today when NO
+    /// candidate exists.
+    #[test]
+    fn an_override_that_names_nothing_is_reported_even_though_it_is_passed() {
+        let missing = std::env::temp_dir().join(format!(
+            "cc-launcher-override-{}-{}",
+            std::process::id(),
+            thread_tag()
+        ));
+        assert!(!missing.is_file(), "the fixture path must not exist");
+
+        let why = an_ignored_launcher_override(Some(missing.display().to_string()), None)
+            .expect("an override that names nothing must be reported");
+        assert!(
+            why.contains(LAUNCHER_BIN_ENV) && why.contains(&missing.display().to_string()),
+            "and it must name the variable and the path, or an operator cannot fix it: \
+             {why}"
+        );
+
+        assert_eq!(
+            an_ignored_launcher_override(None, None),
+            None,
+            "no override is not a complaint"
+        );
+        assert_eq!(
+            an_ignored_launcher_override(Some(String::new()), None),
+            None,
+            "and an empty one is not an override"
+        );
+        // **A file the running user owns and only they can write.** It used to be
+        // `/bin/sh`, which stopped being an example of an obeyed override the moment
+        // the override began to be checked the way a spawned binary is: `/bin/sh`
+        // belongs to root, and this daemon does not. See
+        // [`a_launcher_override_that_anyone_could_rewrite_is_not_obeyed`].
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let ours = std::env::temp_dir().join(format!(
+            "cc-launcher-obeyed-{}-{}",
+            std::process::id(),
+            thread_tag()
+        ));
+        std::fs::write(&ours, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&ours, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let owner = std::fs::metadata(&ours).unwrap().uid();
+        assert_eq!(
+            an_ignored_launcher_override(Some(ours.display().to_string()), Some(owner)),
+            None,
+            "an override that names a binary this daemon may spawn is obeyed, not \
+             complained about"
+        );
+        std::fs::remove_file(&ours).ok();
+    }
+
+    /// **The override names a binary this daemon will SPAWN, so it is asked what a
+    /// binary is asked.**
+    ///
+    /// `CODECONNECT_LAUNCHER_BIN` was `is_file()` and nothing else, and the file it
+    /// selects is executed every five minutes by a launchd job holding the APNs signing
+    /// key and this Mac's tailnet identity. A world-writable path was obeyed: anybody who
+    /// could write it owned that job's next tick.
+    ///
+    /// Each condition is asserted on its own, because each is a different way the
+    /// override stops being the operator's choice and a person told "ignored" without
+    /// being told which one cannot fix it. Then the whole thing is asserted through
+    /// [`launcher_among`], which is where it matters: a loose override is passed over for
+    /// the launcher beside this daemon rather than obeyed, and
+    /// [`an_ignored_launcher_override`] says so at startup rather than letting the
+    /// working fallback swallow it.
+    ///
+    /// **Mutation:** delete any one of the three tests in [`launcher_is_spawnable`] and
+    /// the leg naming it goes green.
+    #[test]
+    fn a_launcher_override_that_anyone_could_rewrite_is_not_obeyed() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!(
+            "cc-launcher-guard-{}-{}",
+            std::process::id(),
+            thread_tag()
+        ));
+        struct Tree(std::path::PathBuf);
+        impl Drop for Tree {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).ok();
+            }
+        }
+        let _tree = Tree(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        // Whoever owns this tree is whoever is running the test, which is exactly the
+        // relationship production asserts between the override and `~/.codeconnect`.
+        // Taken from the filesystem rather than from a syscall for the reason
+        // [`state_dir_owner`] gives: this crate has no `libc`.
+        let owner = std::fs::metadata(&dir).unwrap().uid();
+        let write = |path: &std::path::Path, mode: u32| {
+            std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        // The one shape that is admitted: a regular file, ours, and ours alone to write.
+        let beside = dir.join("beside");
+        std::fs::create_dir_all(&beside).unwrap();
+        let good = beside.join("codeconnect");
+        write(&good, 0o755);
+        assert_eq!(
+            launcher_is_spawnable(&good, Some(owner)),
+            Ok(()),
+            "an ordinary 0755 binary this user owns is what the override is FOR"
+        );
+
+        // Writable by everyone: rewritable between the check and the spawn.
+        let loose = dir.join("loose");
+        write(&loose, 0o666);
+        let why = launcher_is_spawnable(&loose, Some(owner))
+            .expect_err("a world-writable binary must be refused");
+        assert!(
+            why.contains("writable by its group or by everyone") && why.contains("0666"),
+            "and the refusal must name the mode, or an operator cannot fix it: {why}"
+        );
+        // Group-writable alone is the same fault: `0o022` and not `0o002`.
+        let group = dir.join("group");
+        write(&group, 0o775);
+        assert!(
+            launcher_is_spawnable(&group, Some(owner)).is_err(),
+            "a group-writable binary is rewritable by everyone in that group"
+        );
+
+        // Not a program at all.
+        let a_directory = dir.join("adir");
+        std::fs::create_dir_all(&a_directory).unwrap();
+        let why = launcher_is_spawnable(&a_directory, Some(owner))
+            .expect_err("a directory must be refused");
+        assert!(why.contains("not a regular file"), "{why}");
+
+        // Somebody else's file, asserted by moving the EXPECTATION rather than the
+        // file: a test cannot chown, and the comparison is the thing under test.
+        let why = launcher_is_spawnable(&good, Some(owner.wrapping_add(1)))
+            .expect_err("another user's binary must be refused");
+        assert!(
+            why.contains("belongs to uid"),
+            "and it must name both uids: {why}"
+        );
+
+        // An owner this daemon could not establish leaves the other two conditions
+        // standing rather than admitting everything.
+        assert_eq!(launcher_is_spawnable(&good, None), Ok(()));
+        assert!(
+            launcher_is_spawnable(&loose, None).is_err(),
+            "an unreadable state directory must not turn the mode check off too"
+        );
+
+        // And the whole of it where it acts: the loose override is passed over for the
+        // launcher beside this daemon, and the pass-over says why.
+        assert_eq!(
+            launcher_among(
+                Some(loose.display().to_string()),
+                Some(beside.join("ccd")),
+                dir.join("prefix"),
+                Some(owner),
+            ),
+            Ok(good),
+            "an override anyone in the group can rewrite is not this daemon's to spawn"
+        );
+        let why = an_ignored_launcher_override(Some(loose.display().to_string()), Some(owner))
+            .expect("a rewritable override must be reported at startup");
+        assert!(
+            why.contains(LAUNCHER_BIN_ENV) && why.contains("writable"),
+            "or the daemon runs a launcher the operator did not choose and never says so: \
+             {why}"
+        );
+    }
+
+    /// **Which launcher the daemon runs, and what it says when there is none.**
+    ///
+    /// A daemon running out of a dev tree on a machine that also has an installed
+    /// release must reach the launcher OF ITS OWN BUILD — the one beside it — and not
+    /// hand this build's launch records to another release's reader. The override
+    /// outranks both, and an override that names nothing is reported rather than
+    /// obeyed, so a mistyped path is learned from the log and not from a recovery pass
+    /// that quietly stopped running.
+    #[test]
+    fn the_launcher_is_looked_for_beside_the_daemon_before_the_install_prefix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "cc-codex-sweep-where-{}-{}",
+            std::process::id(),
+            thread_tag()
+        ));
+        struct Tree(std::path::PathBuf);
+        impl Drop for Tree {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).ok();
+            }
+        }
+        let _tree = Tree(dir.clone());
+        let beside = dir.join("beside");
+        let prefix = dir.join("prefix").join("bin");
+        let named = dir.join("named");
+        for d in [&beside, &prefix, &named] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        for d in [&beside, &prefix, &named] {
+            let bin = d.join("codeconnect");
+            std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let exe = beside.join("ccd");
+        let root = dir.join("prefix");
+        // The uid the override is required to belong to. See
+        // [`a_launcher_override_that_anyone_could_rewrite_is_not_obeyed`] for what else
+        // it is asked; here it is only the precedence that is under test.
+        let owner = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&dir).unwrap().uid()
+        };
+
+        assert_eq!(
+            launcher_among(
+                Some(named.join("codeconnect").display().to_string()),
+                Some(exe.clone()),
+                root.clone(),
+                Some(owner),
+            ),
+            Ok(named.join("codeconnect")),
+            "the override outranks everything"
+        );
+        assert_eq!(
+            launcher_among(None, Some(exe.clone()), root.clone(), Some(owner)),
+            Ok(beside.join("codeconnect")),
+            "the launcher beside this daemon is the one of this build"
+        );
+        assert_eq!(
+            launcher_among(
+                Some(String::new()),
+                Some(exe.clone()),
+                root.clone(),
+                Some(owner)
+            ),
+            Ok(beside.join("codeconnect")),
+            "an empty override is not an override"
+        );
+        std::fs::remove_file(beside.join("codeconnect")).unwrap();
+        assert_eq!(
+            launcher_among(None, Some(exe.clone()), root.clone(), Some(owner)),
+            Ok(prefix.join("codeconnect")),
+            "and the install prefix is the fallback"
+        );
+
+        std::fs::remove_file(prefix.join("codeconnect")).unwrap();
+        let nowhere = launcher_among(
+            Some(named.join("gone").display().to_string()),
+            Some(exe),
+            root,
+            Some(owner),
+        )
+        .expect_err("nothing is there");
+        for expected in [
+            "CODECONNECT_LAUNCHER_BIN",
+            "beside this daemon",
+            "the install prefix",
+        ] {
+            assert!(
+                nowhere.contains(expected),
+                "every place looked at must be named, so an operator can put one there: \
+                 {nowhere}"
+            );
+        }
+    }
+
     // The sweep's own fixtures, so the tests that hold `revoke` to running it
     // and the tests that hold the sweep to its rules cannot drift into
     // disagreeing about what an installed entry looks like.
@@ -4672,6 +11677,14 @@ mod tests {
     /// A store two daemons can share, so a test can express "ccd was killed and
     /// came back" as literally that rather than as a mock of it.
     fn shared_store() -> Arc<Store> {
+        shared_store_on_disk().0
+    }
+
+    /// The same store, keeping the file it lives in — for the tests that have to
+    /// ask SQLite directly what is in a table. `Store` exposes readers for the
+    /// rows *it* knows how to make, and a test whose whole claim is "no row of
+    /// any shape landed here" must not be answered through that surface.
+    fn shared_store_on_disk() -> (Arc<Store>, std::path::PathBuf) {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let path = std::env::temp_dir().join(format!(
             "ccd-state-{}-{}-{}.db",
@@ -4680,7 +11693,7 @@ mod tests {
             protocol::time::now_unix_ms()
         ));
         let _ = std::fs::remove_file(&path);
-        Arc::new(Store::open(&path).unwrap())
+        (Arc::new(Store::open(&path).unwrap()), path)
     }
 
     fn daemon_on(store: Arc<Store>, config: Config) -> Arc<Daemon> {
@@ -4724,6 +11737,24 @@ mod tests {
     fn test_key() -> SessionKey {
         assert!(protocol::uid::is_well_formed(TEST_UID));
         SessionKey::new(TEST_UID, "cc-1")
+    }
+
+    /// The session as it stands right now — what a caller of
+    /// [`Daemon::mark_exited`] observes before it goes off and establishes an end
+    /// (round-8 F3, round-9 F3), read through the very maps the commit revalidates
+    /// against.
+    ///
+    /// A test that wanted an end recorded used to just call `mark_exited`. It now
+    /// has to say what its end is established against, and answering with the real
+    /// current state is what the sweep and the exit report both do — the difference
+    /// being that they answer *before* the work that establishes the end, which is
+    /// what makes the window the guard closes exist at all.
+    async fn observed_now(daemon: &Arc<Daemon>, session_uid: &str) -> EndEstablishedAgainst {
+        let inner = daemon.inner.lock().await;
+        EndEstablishedAgainst {
+            owner: inner.owner_of(session_uid),
+            row_writes: Some(inner.row_writes_of(session_uid)),
+        }
     }
 
     async fn hello_with_code(daemon: &Arc<Daemon>, code: &str) -> AuthOutcome {
@@ -5177,8 +12208,14 @@ mod tests {
                     cwd: "/tmp".to_string(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -5207,8 +12244,14 @@ mod tests {
                     cwd: "/tmp".to_string(),
                     supervisor_pid: 4242,
                     claude_bin: Some(claude_bin.display().to_string()),
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -5631,8 +12674,14 @@ mod tests {
                     cwd: "/tmp".to_string(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::clone(&inflight),
@@ -5738,7 +12787,13 @@ mod tests {
             tool_call(&daemon, "cc-1", &first.session.uid, &format!("toolu_a{i}")).await;
         }
         daemon
-            .session_exited("cc-1", Some(&first.session.uid), Some(0))
+            .session_exited(
+                "cc-1",
+                Some(&first.session.uid),
+                Some(0),
+                None,
+                Some(&first),
+            )
             .await;
 
         let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
@@ -5959,7 +13014,7 @@ mod tests {
         // Once that run has exited, the same hook is a *new* run: `cc-1` having
         // ended and `cc-1` having restarted are indistinguishable from a name.
         daemon
-            .session_exited("cc-1", Some(&live.session.uid), Some(0))
+            .session_exited("cc-1", Some(&live.session.uid), Some(0), None, Some(&live))
             .await;
         daemon
             .handle_hook(HookPost {
@@ -6007,7 +13062,13 @@ mod tests {
             )
             .unwrap();
         daemon
-            .session_exited("cc-1", Some(&first.session.uid), Some(0))
+            .session_exited(
+                "cc-1",
+                Some(&first.session.uid),
+                Some(0),
+                None,
+                Some(&first),
+            )
             .await;
 
         let second = register(&daemon, "cc-1", Some("01K1B3XZZZC0DE5FGH7JKMNPQR")).await;
@@ -6210,6 +13271,187 @@ mod tests {
         );
     }
 
+    /// **A Codex-only `option_id` answer is refused EARLY, before any mutation**
+    /// (the defect: the old refusal ran only in `apply_decision`, after the
+    /// generic path had already claimed the entry, taken the held hook responder,
+    /// and written a durable answer_claim). In hold mode the held hook must stay
+    /// held — not released, not advanced to the local `ask` — no answer_claim is
+    /// written, no resolution is appended, the card remains, and a subsequent
+    /// legitimate `allow` still resolves through the same held hook.
+    #[tokio::test]
+    async fn an_option_id_answer_is_refused_before_it_claims_or_releases_the_held_hook() {
+        let daemon = daemon_with(Config {
+            hold_ms: 5_000,
+            ..Config::default()
+        });
+        let uid = TEST_UID;
+        register(&daemon, "cc-1", Some(uid)).await;
+
+        // Raise a PermissionRequest with `wait: true` so the hook is genuinely
+        // held on its responder (hold mode). It blocks until we answer.
+        let tool_input = json!({ "command": "git status" });
+        let request_id = format!(
+            "pr-p1-{}",
+            &protocol::hash::approval_payload_hash("Bash", &tool_input)[..16]
+        );
+        let hook = {
+            let daemon = Arc::clone(&daemon);
+            let tool_input = tool_input.clone();
+            tokio::spawn(async move {
+                daemon
+                    .handle_hook(HookPost {
+                        session_id: "cc-1".into(),
+                        session_uid: Some(uid.to_string()),
+                        event: "PermissionRequest".into(),
+                        payload: json!({
+                            "hook_event_name": "PermissionRequest",
+                            "cwd": "/tmp",
+                            "prompt_id": "p1",
+                            "tool_name": "Bash",
+                            "tool_input": tool_input,
+                        }),
+                        wait: true,
+                    })
+                    .await
+            })
+        };
+
+        // Wait until the held pending exists with its responder installed.
+        let id = (uid.to_string(), request_id.clone());
+        let mut ready = false;
+        for _ in 0..80 {
+            if daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .get(&id)
+                .is_some_and(|entry| entry.responder.is_some())
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(ready, "the held pending never appeared");
+
+        let hash = protocol::hash::approval_payload_hash("Bash", &tool_input);
+
+        // The Codex-only decision is refused, and touches nothing.
+        assert!(matches!(
+            daemon
+                .answer(
+                    &request_id,
+                    &hash,
+                    AnswerDecision::OptionId {
+                        option_id: "acceptForSession".into()
+                    },
+                    Some("cc-1"),
+                )
+                .await,
+            AnswerResult::Rejected { .. }
+        ));
+
+        {
+            let inner = daemon.inner.lock().await;
+            let entry = inner.pending.get(&id).expect("the card must remain");
+            assert!(!entry.claimed, "the entry must not be claimed");
+            assert!(
+                entry.responder.is_some(),
+                "the held hook must NOT be released by a refused option_id"
+            );
+        }
+        assert!(
+            daemon
+                .store
+                .answer_claim(uid, &request_id)
+                .unwrap()
+                .is_none(),
+            "a refused option_id must write no durable answer_claim"
+        );
+        assert!(
+            daemon
+                .store
+                .events_after(uid, 0, 1000)
+                .unwrap()
+                .iter()
+                .all(|e| e.kind != EventKind::ApprovalResolved),
+            "a refused option_id must append no resolution"
+        );
+
+        // A real Claude decision still resolves through the SAME held hook.
+        match daemon
+            .answer(&request_id, &hash, AnswerDecision::Allow, Some("cc-1"))
+            .await
+        {
+            AnswerResult::Applied { outcome } => {
+                assert_eq!(outcome.applied_via, AnswerPath::HookReturn, "{outcome:?}");
+            }
+            other => panic!("the allow must apply via the held hook; got {other:?}"),
+        }
+        // The held hook unblocked with an allow — proving the responder survived
+        // the refused option_id and was still there for the real answer.
+        let decision = hook.await.unwrap();
+        assert_eq!(
+            decision.decision,
+            protocol::hook::Decision::Allow,
+            "the held hook returned {decision:?}"
+        );
+    }
+
+    /// The send-keys variant (`hold_ms == 0`, no held hook): an `option_id`
+    /// answer is refused before any claim, writes no durable answer_claim,
+    /// appends no resolution, and leaves the card in place — the same early gate,
+    /// on the path where there is no responder to release.
+    #[tokio::test]
+    async fn an_option_id_answer_in_send_keys_mode_claims_and_resolves_nothing() {
+        let daemon = test_daemon(); // hold_ms == 0
+        let uid = TEST_UID;
+        register(&daemon, "cc-1", Some(uid)).await;
+        let request_id = raise_prompt(&daemon, uid, "p1", "git status").await;
+        let hash = protocol::hash::approval_payload_hash("Bash", &json!({"command": "git status"}));
+
+        assert!(matches!(
+            daemon
+                .answer(
+                    &request_id,
+                    &hash,
+                    AnswerDecision::OptionId {
+                        option_id: "accept".into()
+                    },
+                    Some("cc-1"),
+                )
+                .await,
+            AnswerResult::Rejected { .. }
+        ));
+        assert!(
+            daemon
+                .store
+                .answer_claim(uid, &request_id)
+                .unwrap()
+                .is_none(),
+            "no durable claim"
+        );
+        assert!(
+            daemon
+                .store
+                .events_after(uid, 0, 1000)
+                .unwrap()
+                .iter()
+                .all(|e| e.kind != EventKind::ApprovalResolved),
+            "no resolution"
+        );
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .contains_key(&(uid.to_string(), request_id.clone())),
+            "the card remains"
+        );
+    }
+
     // ------------------------------------------------------- hook mapping
 
     #[tokio::test]
@@ -6247,7 +13489,9 @@ mod tests {
                 wait: false,
             })
             .await;
-        daemon.session_exited("cc-1", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
+            .await;
         let kinds: Vec<EventKind> = daemon
             .store
             .events_after(TEST_UID, 0, 10)
@@ -6267,7 +13511,9 @@ mod tests {
         // vanished entirely, and there was no evidence anywhere that an agent
         // had run at all.
         let daemon = test_daemon();
-        daemon.session_exited("cc-9", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-9", Some(TEST_UID), Some(0), None, None)
+            .await;
         assert!(
             daemon
                 .store
@@ -6288,7 +13534,9 @@ mod tests {
         let daemon = test_daemon();
         let registration = register(&daemon, "cc-9", Some(TEST_UID)).await;
         assert_eq!(registration.session.uid, TEST_UID);
-        daemon.session_exited("cc-9", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-9", Some(TEST_UID), Some(0), None, Some(&registration))
+            .await;
 
         let kinds: Vec<EventKind> = daemon
             .store
@@ -6417,9 +13665,121 @@ mod tests {
                 lifecycle,
                 created_at: now.clone(),
                 updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
             })
             .unwrap()
             .assert_present();
+    }
+
+    /// The same seed, for a run hosted by Codex rather than Claude.
+    fn seed_codex_session(daemon: &Arc<Daemon>, uid: &str, name: &str) {
+        let now = protocol::time::now_rfc3339();
+        daemon
+            .store
+            .upsert_session(&SessionRow {
+                session_uid: uid.into(),
+                session_id: name.into(),
+                tmux_session: name.into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Codex,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+    }
+
+    /// The payload of the `session_end` filed for `uid`, or `None` if none was.
+    fn end_payload(daemon: &Arc<Daemon>, uid: &str) -> Option<serde_json::Value> {
+        daemon
+            .store
+            .events_after(uid, 0, 100)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == EventKind::SessionEnd)
+            .map(|event| event.payload)
+    }
+
+    /// **THE REPORTER'S REASON IS FILED VERBATIM, AND NOTHING IS INFERRED.**
+    ///
+    /// The exit code alone cannot carry this. `exit_code: 0` is equally true of a
+    /// session someone worked in for an hour and of one whose first `thread/start`
+    /// the broker refused — and the second is the shape of the defect: the pane
+    /// flickers, the log the refusal was written in is swept with the run dir, and
+    /// nothing anywhere says a session never started.
+    ///
+    /// The reason arrives on the wire, asserted by the host that watched the TUI die
+    /// and relayed by the supervisor. This daemon files it and does not interpret it,
+    /// which is the whole of the contract: the string that reaches the operator is
+    /// the string the process that knew wrote.
+    ///
+    /// **Mutation:** drop `reason` on the way into `mark_exited` and the payload
+    /// carries no `reason` at all.
+    #[tokio::test]
+    async fn a_reported_reason_is_filed_verbatim() {
+        let daemon = test_daemon();
+        seed_codex_session(&daemon, TEST_UID, "cc-1");
+        let reported = "the codex TUI exited without ever starting a thread; the broker's \
+                        decision log is at /tmp/logs/broker-cc-1-U.log";
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), Some(reported), None)
+            .await;
+
+        let payload = end_payload(&daemon, TEST_UID).expect("the end was recorded");
+        assert_eq!(
+            payload.get("reason").and_then(|r| r.as_str()),
+            Some(reported),
+            "the reporter's own sentence must reach the operator unaltered: {payload}"
+        );
+        // The exit code still rides alongside, exactly as it did — a client that has
+        // never heard of `reason` renders what it always rendered.
+        assert_eq!(payload.get("exit_code").and_then(|c| c.as_i64()), Some(0));
+    }
+
+    /// **No reason reported, no reason invented — for every ending that is not the
+    /// one the host asserts.**
+    ///
+    /// This is the regression the review named. The daemon used to derive the reason
+    /// itself by counting `session_start` events, so a host that died BEFORE the TUI
+    /// ran, and a session torn down by signal, were both handed "the codex TUI ended
+    /// without a thread ever binding" — a diagnosis of a failure that had not
+    /// happened, pointing at a broker log that in those paths is never even written.
+    /// Absence of a report now means absence of a reason.
+    #[tokio::test]
+    async fn an_unreported_ending_gets_no_invented_reason() {
+        // A codex run that filed no `session_start` at all — the exact shape the old
+        // count-based inference mislabelled. Without a reported reason it must now
+        // end with none, because nothing asserted one.
+        let pre_thread_crash = test_daemon();
+        seed_codex_session(&pre_thread_crash, TEST_UID, "cc-1");
+        pre_thread_crash
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
+            .await;
+        assert_eq!(
+            end_payload(&pre_thread_crash, TEST_UID).expect("the end was recorded"),
+            serde_json::json!({"exit_code": 0}),
+            "a codex run whose host died before the TUI ran must NOT be told it \
+             exited without binding a thread"
+        );
+
+        let claude = test_daemon();
+        seed_session(&claude, TEST_UID, "cc-1", Lifecycle::Live);
+        claude
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
+            .await;
+        assert_eq!(
+            end_payload(&claude, TEST_UID).expect("the end was recorded"),
+            serde_json::json!({"exit_code": 0}),
+            "and a Claude run is untouched"
+        );
     }
 
     fn lifecycle_of(daemon: &Arc<Daemon>, uid: &str) -> Lifecycle {
@@ -6590,6 +13950,16 @@ mod tests {
     /// second decision while its first is claimed — is not reachable through
     /// the hooks.
     fn pending_card(uid: &str, label: &str) -> PendingApproval {
+        pending_card_for(uid, label, protocol::agent::AgentKind::Claude)
+    }
+
+    /// The same, for a named agent — the agent-scoped count is what makes the
+    /// distinction observable.
+    fn pending_card_for(
+        uid: &str,
+        label: &str,
+        agent: protocol::agent::AgentKind,
+    ) -> PendingApproval {
         PendingApproval {
             card: serde_json::from_value(json!({
                 "request_id": "r", "payload_hash": "h", "tool_name": "Bash",
@@ -6598,6 +13968,7 @@ mod tests {
             .unwrap(),
             session: SessionKey::new(uid, "cc-1"),
             project_label: label.into(),
+            agent,
             created_ms: 0,
             responder: None,
             claimed: false,
@@ -6626,7 +13997,7 @@ mod tests {
             pending_card("other-run", "Ledger"),
         );
 
-        let mut blocked = blocked_runs(&inner);
+        let mut blocked = blocked_runs(&inner, &protocol::agent::AgentKind::Claude);
         blocked.sort();
         assert_eq!(
             blocked,
@@ -6636,7 +14007,44 @@ mod tests {
             ],
             "two cards on one run are one agent, named once"
         );
-        assert!(blocked_runs(&Inner::default()).is_empty());
+        assert!(blocked_runs(&Inner::default(), &protocol::agent::AgentKind::Claude).is_empty());
+    }
+
+    /// **A Codex card does not inflate a Claude doorbell, and vice versa.**
+    ///
+    /// The count a doorbell says out loud is also the deck it is authorized as
+    /// (`PushHint::describing` keeps the ringing run's agent, and
+    /// `push_queue::recipients` narrows by it). Counting the other agent's
+    /// cards would make a Claude alert say "2 agents need you" while naming a
+    /// deck half of which a Claude-only phone cannot open — the exact
+    /// misauthorization the hardcoded-Claude line used to cause in reverse.
+    ///
+    /// **Mutation:** drop the `agent` filter from `blocked_runs` and both
+    /// counts become 2.
+    #[test]
+    fn a_card_is_counted_only_by_a_doorbell_of_its_own_agent() {
+        let mut inner = Inner::default();
+        inner.pending.insert(
+            ("claude-run".to_string(), "r-1".to_string()),
+            pending_card_for("claude-run", "Aion", protocol::agent::AgentKind::Claude),
+        );
+        inner.pending.insert(
+            ("codex-run".to_string(), "r-2".to_string()),
+            pending_card_for("codex-run", "Ledger", protocol::agent::AgentKind::Codex),
+        );
+
+        let claude = blocked_runs(&inner, &protocol::agent::AgentKind::Claude);
+        assert_eq!(
+            claude,
+            vec![("claude-run".to_string(), "Aion".to_string())],
+            "a Codex card must not be counted by a Claude doorbell"
+        );
+        let codex = blocked_runs(&inner, &protocol::agent::AgentKind::Codex);
+        assert_eq!(
+            codex,
+            vec![("codex-run".to_string(), "Ledger".to_string())],
+            "a Claude card must not be counted by a Codex doorbell"
+        );
     }
 
     /// **A run that moves takes its open cards with it.**
@@ -6742,8 +14150,14 @@ mod tests {
                     cwd: "/srv/dev/after".to_string(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -7166,6 +14580,7 @@ mod tests {
             kind: crate::apns::PushKind::NeedsInput,
             blocked_sessions: 1,
             session_uid: uid.into(),
+            agent: protocol::agent::AgentKind::Claude,
         };
 
         // Nothing has ever filed a row under this uid, which is the state a
@@ -7378,6 +14793,9 @@ mod tests {
             lifecycle: Lifecycle::Live,
             created_at: protocol::time::now_rfc3339(),
             updated_at: protocol::time::now_rfc3339(),
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            codex_socket: None,
         };
         daemon.store.upsert_session(&row).unwrap().assert_present();
         row.session_uid = "01KYZ5E56X0D1RT7ZVRYK1ZEF8".into();
@@ -7518,8 +14936,14 @@ mod tests {
                     cwd: "/tmp".into(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -7537,6 +14961,4726 @@ mod tests {
         assert!(
             daemon.store.get_session(uid).unwrap().is_none(),
             "and no resurrected row"
+        );
+    }
+
+    /// Build and submit a registration with a chosen agent and Codex identity,
+    /// returning the raw result so a test can assert it was refused.
+    ///
+    /// **It carries no `codex_socket`, and that is now load-bearing rather than
+    /// incidental.** While Codex was outside `supported_agents()` the field could
+    /// not matter — the agent gate refused the frame before anything read it. Now
+    /// that Codex is admitted, a frame built here is a Codex registration the
+    /// daemon could list but never observe, so it is refused one guard further
+    /// down by [`crate::codex_link::ControlLink::from_registration`]. Callers that
+    /// want an *acceptable* Codex frame build one in full; see
+    /// `a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run`.
+    async fn try_register(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        agent: protocol::agent::AgentKind,
+        codex_generation: Option<u64>,
+        codex_thread_id: Option<String>,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-1".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent,
+                    agent_bin: None,
+                    codex_thread_id,
+                    codex_socket: None,
+                    codex_generation,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **A registration this daemon cannot host is refused, and WHICH fact
+    /// refused it is asserted (Finding 1).** Nothing is persisted and nothing is
+    /// installed on any of the three arms. Absence still means Claude and works.
+    ///
+    /// The three arms no longer fail for one reason, and separating them is the
+    /// whole of what changed here. `gemini` and the present empty string are
+    /// refused by `supported_agents()`: this daemon does not host them. **Codex
+    /// is not one of those any more** — it joined that list when its coordinator
+    /// became able to send a registration — so its arm passes the agent gate and
+    /// is refused one guard further down, because the frame `try_register` builds
+    /// names no control-link socket and a session this daemon cannot observe is
+    /// one it will not list ([`crate::codex_link::ControlLink::from_registration`]).
+    ///
+    /// **The reason is asserted per arm because `is_err()` was not enough.** This
+    /// test was written to go red the day Codex was admitted, and it did not: the
+    /// Codex arm kept passing on a refusal about something else entirely, and a
+    /// gate opened underneath a green suite. An assertion that only says "refused"
+    /// cannot tell a closed door from a different closed door.
+    #[tokio::test]
+    async fn a_registration_for_an_unsupported_agent_is_refused_with_no_trace() {
+        use protocol::agent::AgentKind;
+        let daemon = test_daemon();
+
+        for (uid, agent, refusal) in [
+            (
+                "01K1B3XQ8ZC0DE5FGH7JKMNP01",
+                AgentKind::Codex,
+                // The agent is supported; the frame is not observable.
+                "carries no control-link socket",
+            ),
+            (
+                "01K1B3XQ8ZC0DE5FGH7JKMNP02",
+                AgentKind::Unsupported("gemini".into()),
+                "is not supported by this daemon",
+            ),
+            (
+                "01K1B3XQ8ZC0DE5FGH7JKMNP03",
+                AgentKind::Unsupported(String::new()),
+                "is not supported by this daemon",
+            ),
+        ] {
+            assert!(protocol::uid::is_well_formed(uid), "{uid}");
+            let refused = try_register(&daemon, uid, agent.clone(), None, None)
+                .await
+                .expect_err(&format!("{agent:?} must be refused"));
+            assert!(
+                refused.to_string().contains(refusal),
+                "{agent:?} must be refused for {refusal:?}, and was refused for: {refused}"
+            );
+            let inner = daemon.inner.lock().await;
+            assert!(
+                !inner.supervisors.contains_key(uid),
+                "{agent:?} left a supervisor handle"
+            );
+            drop(inner);
+            assert!(
+                daemon.store.get_session(uid).unwrap().is_none(),
+                "{agent:?} left a session row"
+            );
+        }
+
+        // Absence ⇒ Claude, which is supported, so an ordinary registration still
+        // succeeds and installs.
+        let claude_uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        assert!(
+            try_register(&daemon, claude_uid, AgentKind::Claude, None, None)
+                .await
+                .is_ok(),
+            "a Claude registration must still succeed"
+        );
+        assert!(daemon.store.get_session(claude_uid).unwrap().is_some());
+    }
+
+    /// **Identity guard (Finding 2).** A Claude registration that carries any
+    /// Codex-only identity field is internally inconsistent and refused, so those
+    /// fields can never smuggle a generation into the Codex-only adoption path.
+    #[tokio::test]
+    async fn a_claude_registration_carrying_codex_identity_is_refused() {
+        use protocol::agent::AgentKind;
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let with_generation = try_register(&daemon, uid, AgentKind::Claude, Some(3), None).await;
+        assert!(
+            with_generation.is_err(),
+            "Claude + codex_generation must be refused"
+        );
+        let with_thread =
+            try_register(&daemon, uid, AgentKind::Claude, None, Some("th_1".into())).await;
+        assert!(
+            with_thread.is_err(),
+            "Claude + codex_thread_id must be refused"
+        );
+        assert!(
+            daemon.store.get_session(uid).unwrap().is_none(),
+            "an inconsistent Claude frame must leave no row"
+        );
+    }
+
+    /// **A Claude registration installs no control link, and an unobservable
+    /// Codex one installs nothing either.**
+    ///
+    /// The old name for this test — "and codex never gets that far" — described a
+    /// build in which `supported_agents()` was `[Claude]` and the control-link
+    /// guard sat behind a door no Codex frame could open. That door is open now,
+    /// and the second half of this test walks through it: the Codex registration
+    /// below reaches `ControlLink::from_registration`, is refused there because it
+    /// names no socket, and is refused *before any install* — which is the
+    /// property worth pinning, because the link is the one thing a registration
+    /// installs that outlives the call as a running task.
+    ///
+    /// The first half is unchanged and is the one that never depended on the gate:
+    /// a Claude session has no control link and never grows one, whatever else
+    /// moves around it.
+    ///
+    /// The guard's own truth table is proven against the frame directly in
+    /// `codex_link::tests::a_codex_registration_missing_the_fact_is_refused`; what
+    /// this test adds is that the registration transaction honours it on both
+    /// sides, leaving the slot empty either way. The accepting direction — a
+    /// complete Codex frame, which *does* install a link — is
+    /// `a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run`.
+    #[tokio::test]
+    async fn the_claude_path_installs_no_control_link_and_an_unobservable_codex_one_installs_nothing(
+    ) {
+        use protocol::agent::AgentKind;
+        let daemon = test_daemon();
+        let claude = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        assert!(try_register(&daemon, claude, AgentKind::Claude, None, None)
+            .await
+            .is_ok());
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "a Claude session has no control link to install"
+        );
+
+        let codex = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        let refused = try_register(&daemon, codex, AgentKind::Codex, Some(1), None)
+            .await
+            .expect_err("a Codex registration naming no socket must be refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("carries no control-link socket"),
+            "the refusal must name the missing control-link fact, not agent support: {refused}"
+        );
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "a refused registration must leave no link task behind"
+        );
+    }
+
+    /// **A complete Codex registration is ACCEPTED — the daemon half of the
+    /// producer-side gate A9.2.**
+    ///
+    /// Every other Codex assertion in this file is a refusal, and refusals are a
+    /// set of claims a daemon that hosted no Codex run at all would satisfy
+    /// perfectly. This is the one that says the door opens, and without it the
+    /// suite could not tell "Codex is admitted and correctly filed" from "Codex
+    /// is still refused, now for a different reason" — which is precisely the
+    /// mistake the two tests above were repointed to stop making.
+    ///
+    /// Driven with the frame the **real** producer sends. The Codex coordinator
+    /// supervises its own launch and registers the session with `agent=codex`,
+    /// the broker's ccd leg as `codex_socket`, the launch's `codex_generation`,
+    /// no `codex_thread_id` — nothing has started a thread yet, and the row's
+    /// thread identity is learned from the link rather than claimed at launch —
+    /// and no `claude_bin`, which for a Codex frame would be the inconsistent
+    /// identity the guard above refuses.
+    ///
+    /// Four mechanisms have to agree before a Codex run can be hosted at all, and
+    /// all four are asserted:
+    ///
+    ///   * `supported_agents()` admits the agent, so the fail-closed gate passes;
+    ///   * the control-link fact is complete, so `ControlLink::from_registration`
+    ///     yields a link instead of bailing;
+    ///   * `upsert_session` files the row in `codex_sessions` and **not** in
+    ///     `sessions` — read off the daemon's own database file rather than
+    ///     through `Store`, because `Store::get_session` reads both tables and so
+    ///     cannot tell a correctly filed row from one sitting in the table a
+    ///     rolled-back v0.6.0 daemon sweeps;
+    ///   * the published supervisor handle carries the generation, which is what
+    ///     the stale-generation refusal compares the *next* registration against.
+    ///     A handle that forgot it would let a relaunch settle on the older visit.
+    ///
+    /// **The socket names nothing that listens, on purpose, and that is what keeps
+    /// this test from hanging.** An accepted Codex registration spawns a control
+    /// link, and a link with nowhere to dial fails its connect and backs off — the
+    /// same arrangement
+    /// `a_registration_a_survivor_blocked_gets_its_link_from_the_recovery_sweep`
+    /// relies on. Nothing here waits on that task or on anything it would produce:
+    /// every assertion is about the row and the maps, both settled before
+    /// `register_supervisor` returns.
+    #[tokio::test]
+    async fn a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run() {
+        let (store, db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        assert!(protocol::uid::is_well_formed(uid), "{uid}");
+        let socket = std::env::temp_dir().join("ccd-a92-nothing-listens-here.sock");
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+
+        let registration = daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-7".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-7".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/work".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(socket.to_string_lossy().into_owned()),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect("the Codex coordinator's own registration frame must be accepted");
+        assert_eq!(registration.session.uid, uid);
+
+        // **Which table**, asked of SQLite directly. `sessions` is the one a
+        // rolled-back daemon rewrites and prunes globally, so "not there" is a
+        // claim about the file and may not be answered through a reader that
+        // consults both.
+        let conn = rusqlite::Connection::open(&db).expect("the daemon's own database file");
+        let filed_in = |table: &str| -> i64 {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE session_uid = ?1"),
+                [uid],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or_else(|err| panic!("counting {table}: {err}"))
+        };
+        assert_eq!(
+            filed_in("codex_sessions"),
+            1,
+            "an accepted Codex registration's row belongs in codex_sessions"
+        );
+        assert_eq!(
+            filed_in("sessions"),
+            0,
+            "and must never land in the table a rolled-back v0.6.0 daemon sweeps"
+        );
+
+        // The row is the registration's, field for field — a row filed in the
+        // right table under the wrong facts would satisfy the counts above.
+        let row = store
+            .get_session(uid)
+            .unwrap()
+            .expect("the accepted registration's row");
+        assert_eq!(row.agent, protocol::agent::AgentKind::Codex);
+        assert_eq!(row.session_id, "cc-7");
+        assert_eq!(row.tmux_session, "cc-7");
+        assert_eq!(row.tmux_socket, protocol::TMUX_SOCKET_NAME);
+        assert_eq!(row.cwd, "/work");
+        assert_eq!(
+            row.codex_socket,
+            Some(socket.to_string_lossy().into_owned()),
+            "the broker leg the link dials is carried through verbatim"
+        );
+        assert_eq!(
+            row.codex_thread_id, None,
+            "the launcher claims no thread; the link is what learns one"
+        );
+        assert!(matches!(row.lifecycle, Lifecycle::Live));
+
+        let inner = daemon.inner.lock().await;
+        let handle = inner
+            .supervisors
+            .get(uid)
+            .expect("an accepted registration publishes a supervisor handle");
+        assert_eq!(
+            handle.codex_generation,
+            Some(1),
+            "the handle must carry the launch's generation: it is the high-water the \
+             next registration's stale-generation refusal is compared against, and a \
+             handle that dropped it would let a relaunch settle on the older visit"
+        );
+        assert_eq!(
+            handle.epoch, registration.epoch,
+            "and the epoch the row was staked under"
+        );
+    }
+
+    // ------------------------------------------- generation-aware adoption (A5.1)
+
+    /// A complete Codex registration at a chosen generation and thread.
+    ///
+    /// The four A5.1 tests below disagree about exactly those two fields and
+    /// agree about everything else, so the frame is built once: three hand-built
+    /// copies would drift on the fields under test, which is the same reason
+    /// `codex_frame` exists for the retention tests.
+    ///
+    /// **The socket names nothing that listens, on purpose.** An accepted
+    /// registration spawns a control link, which dials, fails and backs off;
+    /// nothing here waits on the link or on anything it produces, so every
+    /// assertion below is about the row and the maps — both settled before
+    /// `register_supervisor` returns.
+    async fn register_codex_at(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        generation: u64,
+        thread: Option<&str>,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-9".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-9".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/work".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: thread.map(str::to_string),
+                    codex_socket: Some(
+                        std::env::temp_dir()
+                            .join(format!("ccd-a51-{uid}-nothing-listens.sock"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    codex_generation: Some(generation),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **A generation this daemon has already adopted is never re-adopted, and
+    /// the refusal costs the session nothing that was written.**
+    ///
+    /// The in-memory leg of plan A5.1's adoption guard, which had no test at all
+    /// before this one: the refusal existed and nothing exercised it, so a
+    /// deletion would have left the suite green while a stale supervisor could
+    /// walk a session back onto an older visit.
+    ///
+    /// The assertions are about what the *row* says, not only about the `Err`.
+    /// A refusal that arrives after the upsert is not a refusal — the ordering
+    /// clause A5.1 turns on is that a rejected frame mutates nothing — so the
+    /// row's cwd and thread are read back and must still be generation 2's.
+    ///
+    /// **Mutation:** change `incoming < current` to `incoming < 0` and the
+    /// stale frame is accepted; the row's thread becomes `th-g1` and the
+    /// high-water drops to 1.
+    #[tokio::test]
+    async fn a_generation_already_adopted_is_refused_and_writes_nothing() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+
+        register_codex_at(&daemon, uid, 2, Some("th-g2"))
+            .await
+            .expect("the newer launch registers");
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&daemon, uid, 1, Some("th-g1"))
+                .await
+                .expect_err("a generation older than the adopted one must be refused")
+        );
+        assert!(
+            refusal.contains("generation 2 is already adopted"),
+            "the refusal must name the high-water it was made against: {refusal}"
+        );
+
+        let row = store.get_session(uid).unwrap().expect("the survivor's row");
+        assert_eq!(
+            row.codex_thread_id.as_deref(),
+            Some("th-g2"),
+            "a refused frame must not have reached the upsert"
+        );
+        assert_eq!(
+            store.codex_generation(uid).unwrap(),
+            Some(2),
+            "nor moved the durable high-water backwards"
+        );
+    }
+
+    /// **The high-water survives the daemon that adopted it** (plan A5.1,
+    /// "durable high-water evidence" and the across-a-restart half of "atomic
+    /// compare/install").
+    ///
+    /// A held lock cannot outlive the process holding it, so the acceptance gate
+    /// makes the compare and the install atomic *in process* and says nothing
+    /// about a daemon that is killed in between. Before this the whole
+    /// high-water was one field of an in-memory `SupervisorHandle`, so `pkill
+    /// ccd` was a complete bypass: the next registration read `None`, refused
+    /// nothing, and the session settled on whichever visit re-registered first.
+    ///
+    /// The restart is literal — a second `Daemon` over the same `Store`, which
+    /// is what [`shared_store_on_disk`] is for — rather than a mock of one. The
+    /// second daemon's `supervisors` map is empty by construction, so the only
+    /// evidence it can possibly refuse on is the durable column.
+    ///
+    /// **Mutation:** drop the `.chain(durable)` from the high-water read and the
+    /// stale registration is accepted by the restarted daemon.
+    #[tokio::test]
+    async fn the_codex_generation_high_water_survives_a_daemon_restart() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        {
+            let before = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_at(&before, uid, 3, Some("th-g3"))
+                .await
+                .expect("the launch registers");
+        }
+
+        let after = daemon_on(Arc::clone(&store), Config::default());
+        assert!(
+            !after.inner.lock().await.supervisors.contains_key(uid),
+            "the premise: a restarted daemon remembers no supervisor, so the \
+             in-memory high-water is gone"
+        );
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&after, uid, 2, Some("th-g2"))
+                .await
+                .expect_err("a restart must not forget which visit was adopted")
+        );
+        assert!(
+            refusal.contains("generation 3 is already adopted"),
+            "and must refuse against the generation read off the row: {refusal}"
+        );
+        assert_eq!(
+            store.codex_generation(uid).unwrap(),
+            Some(3),
+            "the refused frame left the high-water where it was"
+        );
+
+        // The other direction is the point of the guard being a high-water and
+        // not a freeze: the relaunch this daemon has not seen is still adopted.
+        register_codex_at(&after, uid, 4, Some("th-g4"))
+            .await
+            .expect("a later visit is a relaunch and must be adopted");
+        assert_eq!(store.codex_generation(uid).unwrap(), Some(4));
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-g4"),
+            "a relaunch is how a session legitimately changes thread"
+        );
+    }
+
+    /// **One visit is one thread: an equal generation carrying a different
+    /// thread is refused** (plan A5.1, "an equal generation with a changed
+    /// thread is refused — immutable generation/thread binding").
+    ///
+    /// A generation IS a visit — one Codex process, one attach, one thread — and
+    /// the stale check is a statement about order that says nothing about
+    /// identity. Without this clause a supervisor could re-register at the
+    /// generation it already holds and swap the thread underneath it, and every
+    /// frame the link had already attributed to that generation would silently
+    /// become a frame about a thread the session was never on. The retained
+    /// carry is keyed by generation (`Inner::seed_codex_carry`) and the row is
+    /// the fleet's answer to "where is this session"; both would then describe
+    /// two threads under one visit with nothing to tell them apart.
+    ///
+    /// Three legs, because the refusal has to be exactly this narrow:
+    ///
+    ///   * the same thread at the same generation is the ordinary reconnect and
+    ///     is accepted — without this leg the test would pass against a rule
+    ///     that refused every re-registration;
+    ///   * a frame claiming **no** thread is the launch case
+    ///     `ControlLink::from_registration` documents, where `thread/started`
+    ///     has not happened yet. It changes nothing (`COALESCE` keeps the bound
+    ///     thread), so there is nothing to refuse;
+    ///   * a **different** thread at the same generation is refused, and the row
+    ///     still names the thread the generation was bound to.
+    ///
+    /// **Mutation:** replace the `bound != offered` refusal with `if false` and
+    /// the third leg is accepted, leaving the row on `th-second` at generation 1
+    /// — a second thread under one visit.
+    #[tokio::test]
+    async fn a_second_thread_under_one_codex_generation_is_refused() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+
+        register_codex_at(&daemon, uid, 1, Some("th-bound"))
+            .await
+            .expect("the launch binds the generation to a thread");
+
+        register_codex_at(&daemon, uid, 1, Some("th-bound"))
+            .await
+            .expect("the same visit reconnecting on the same thread is an ordinary reconnect");
+
+        register_codex_at(&daemon, uid, 1, None)
+            .await
+            .expect("a frame that claims no thread changes nothing and is not a rebinding");
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-bound"),
+            "and COALESCE really did keep the binding, which is why it had \
+             nothing to refuse"
+        );
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&daemon, uid, 1, Some("th-second"))
+                .await
+                .expect_err("a second thread under one generation must be refused")
+        );
+        assert!(
+            refusal.contains("already bound to thread th-bound"),
+            "the refusal must name the binding it protects: {refusal}"
+        );
+        assert!(
+            refusal.contains("th-second"),
+            "and what was offered in its place: {refusal}"
+        );
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-bound"),
+            "a refusal before any persistent mutation must leave the binding \
+             exactly where it was"
+        );
+    }
+
+    /// The binding refusal must survive a restart too, or it is a rule a
+    /// supervisor can shake off by killing the daemon.
+    ///
+    /// It reads the same durable pair the high-water does — the generation
+    /// column and `codex_thread_id`, written by one statement in one acceptance
+    /// — so the row a restarted daemon re-reads says `(G, T)` exactly when a
+    /// registration at G named T. This is what makes the equality test on the
+    /// generation load-bearing rather than decorative: without it the check
+    /// would compare against whatever thread the last accepted registration
+    /// left, whichever visit it belonged to.
+    ///
+    /// **Mutation:** change `durable == Some(incoming)` to `durable.is_some()`
+    /// and the second leg here — a *later* generation naming a new thread, which
+    /// is what a relaunch is — is refused instead of adopted.
+    #[tokio::test]
+    async fn the_generation_thread_binding_is_enforced_across_a_restart() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        {
+            let before = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_at(&before, uid, 1, Some("th-bound"))
+                .await
+                .expect("the launch binds the generation to a thread");
+        }
+
+        let after = daemon_on(Arc::clone(&store), Config::default());
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&after, uid, 1, Some("th-second"))
+                .await
+                .expect_err("a restart must not forget which thread the visit is bound to")
+        );
+        assert!(
+            refusal.contains("already bound to thread th-bound"),
+            "read back off the row, not off a handle the restart destroyed: {refusal}"
+        );
+
+        // And the binding is per generation, not per uid: the relaunch that
+        // legitimately changes thread carries a later one and is adopted.
+        register_codex_at(&after, uid, 2, Some("th-second"))
+            .await
+            .expect("a later visit is a new binding, not a changed one");
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-second")
+        );
+        assert_eq!(store.codex_generation(uid).unwrap(), Some(2));
+    }
+
+    /// **A generation binds only the thread IT was registered with** (round-C
+    /// F2) — the invariant the guard above states, now asserted end to end.
+    ///
+    /// The guard reads the row as a pair and calls `(G, T)` "the record of a
+    /// registration at G that named T". `COALESCE` alone did not make that true:
+    /// a registration at G2 carrying no thread advanced the generation while
+    /// preserving G1's thread, so the row read `(G2, A)` for an acceptance that
+    /// never happened — and the visit's first REAL thread was then refused as a
+    /// second thread under one generation. A session that relaunched and then
+    /// learned its thread could not record it.
+    ///
+    /// The three steps are the sequence exactly: `(G1,A)`, `(G2,none)`, `(G2,B)`.
+    /// The fourth is what keeps the fix from being a hole — once G2 has genuinely
+    /// bound B, a third thread under G2 is refused as it always was.
+    ///
+    /// **Reachability, measured and stated rather than assumed.** No producer in
+    /// this fleet can send this sequence today: `codex_coordinator` mints the
+    /// literal generation `1` and `supervisor::registration_frame` sends
+    /// `codex_thread_id: None` unconditionally, building the frame once and
+    /// replaying that same frame on exit. So the sequence arrives only from a
+    /// client that is not the coordinator — which is the only class of frame the
+    /// generation guard exists for, and the reason a wrong record of what was
+    /// adopted is worth fixing before a producer starts sending one.
+    ///
+    /// **Mutation:** restore the bare `COALESCE` on `codex_thread_id` in
+    /// `Store::upsert_session_at_generation` and step three is refused —
+    /// "generation 2 is already bound to thread th-a".
+    #[tokio::test]
+    async fn a_generation_that_named_no_thread_admits_its_own_first_one() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        let thread = || {
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .clone()
+        };
+
+        register_codex_at(&daemon, uid, 1, Some("th-a"))
+            .await
+            .expect("the launch binds generation 1 to a thread");
+
+        register_codex_at(&daemon, uid, 2, None)
+            .await
+            .expect("the relaunch is a later visit and is adopted");
+        assert_eq!(
+            thread(),
+            None,
+            "generation 2 named no thread, so the row must not carry generation \
+             1's as though it were this visit's binding"
+        );
+
+        register_codex_at(&daemon, uid, 2, Some("th-b"))
+            .await
+            .expect("naming generation 2's thread for the first time is binding it");
+        assert_eq!(thread(), Some("th-b".into()));
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&daemon, uid, 2, Some("th-c"))
+                .await
+                .expect_err("and a SECOND thread under generation 2 is still refused")
+        );
+        assert!(
+            refusal.contains("already bound to thread th-b"),
+            "against the thread generation 2 actually bound: {refusal}"
+        );
+    }
+
+    /// **The high-water advances on a frame that names no thread**, which is the
+    /// property that decided how F2 was fixed.
+    ///
+    /// The alternative fix was to hold the generation back on a write that did not
+    /// change the thread. It closes F2 and reopens the clause above it: the
+    /// generation is the ratchet the stale-frame refusal turns on
+    /// (`incoming < current`), so a G2 registration that recorded no G2 leaves the
+    /// durable high-water at 1 — and after a restart, which is the only place the
+    /// durable half is load-bearing at all, a stale G1 frame is adopted again.
+    /// Measured: with that variant in place, this test fails at the refusal below
+    /// while every A5.1 test that predates round C stays green, because none of
+    /// them registers a visit without a thread.
+    ///
+    /// Clearing the thread instead keeps both clauses: the visit count still
+    /// ratchets, and the thread — which is what the binding check reads — no
+    /// longer describes a visit that has ended.
+    ///
+    /// **Mutation:** drop `codex_generation` from the `ON CONFLICT DO UPDATE` list
+    /// and the restarted daemon adopts the stale generation-1 frame.
+    #[tokio::test]
+    async fn a_registration_that_names_no_thread_still_advances_the_high_water() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        {
+            let before = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_at(&before, uid, 1, Some("th-a"))
+                .await
+                .expect("the launch registers");
+            register_codex_at(&before, uid, 2, None)
+                .await
+                .expect("the relaunch registers before it knows its thread");
+        }
+        assert_eq!(
+            store.codex_generation(uid).unwrap(),
+            Some(2),
+            "the visit the daemon adopted is the visit the row records"
+        );
+
+        let after = daemon_on(Arc::clone(&store), Config::default());
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&after, uid, 1, Some("th-a"))
+                .await
+                .expect_err("a stale frame must still be refused after a restart")
+        );
+        assert!(
+            refusal.contains("generation 2 is already adopted"),
+            "on the evidence of the row, which is all a restarted daemon has: {refusal}"
+        );
+    }
+
+    /// **A whitespace thread id binds nothing** (round-C F4).
+    ///
+    /// `ControlLink` has always read `"   "` as "no thread named" — the same
+    /// reading it takes of the socket beside it — and the row did not, so a blank
+    /// was persisted verbatim and became the generation's durable binding. The
+    /// visit's first real thread was then refused against a thread nothing is on,
+    /// and the fleet reported that string as where the session was.
+    ///
+    /// Three legs, one per way the blank could still do damage: it must not be
+    /// stored, it must not refuse the real thread that follows it, and it must not
+    /// be read as a rebinding when it is what arrives *after* a real one.
+    ///
+    /// **Mutation:** drop the `real_thread_id` call at the row write and the
+    /// second leg is refused — "already bound to thread    ".
+    #[tokio::test]
+    async fn a_blank_thread_id_never_becomes_a_generations_binding() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+        let thread = || {
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .clone()
+        };
+
+        register_codex_at(&daemon, uid, 1, Some("   "))
+            .await
+            .expect("a blank thread is a frame that names none, not an invalid frame");
+        assert_eq!(
+            thread(),
+            None,
+            "a string with no content names no thread and must not reach the row"
+        );
+
+        register_codex_at(&daemon, uid, 1, Some("th-real"))
+            .await
+            .expect("so the visit's first real thread binds it rather than being refused");
+        assert_eq!(thread(), Some("th-real".into()));
+
+        register_codex_at(&daemon, uid, 1, Some("  "))
+            .await
+            .expect("and a blank offered against a real binding claims nothing to refuse");
+        assert_eq!(
+            thread(),
+            Some("th-real".into()),
+            "leaving the binding exactly where it was"
+        );
+    }
+
+    /// **A generation the ledger cannot record is refused before anything is
+    /// written** (round-C F3).
+    ///
+    /// `codex_generation` is a `u64` off a JSON frame; the column is SQLite's
+    /// `i64`. The store used to saturate the difference, and the saturation was
+    /// not a rounding error: the durable half read back `i64::MAX` while the
+    /// handle kept the real number, so `durable == Some(incoming)` was false and
+    /// the thread-binding check under it never ran — and a restart reloaded a
+    /// high-water that had regressed by the whole width of the range, re-admitting
+    /// every frame in it.
+    ///
+    /// **Nothing legitimate produces one, measured.** The fleet's only producer of
+    /// this field is `CodexSeat`, built with the literal `1`; there is no counter
+    /// and no flag anywhere that mints a second value. So a 64-bit generation is a
+    /// frame no launcher wrote, and refusing it is smaller and more honest than
+    /// widening the column to hold a number that would still be a lie.
+    ///
+    /// Asserted against the row and the high-water, not only against the `Err`:
+    /// the refusal happens at `ControlLink::from_registration`, above the
+    /// acceptance gate, the epoch stake and the upsert, so D4's "a refused frame
+    /// mutates nothing" is what the last two assertions are checking.
+    ///
+    /// **Mutation:** delete the `i64::try_from(generation).is_err()` bail in
+    /// `ControlLink::from_registration` and the frame is accepted as far as the
+    /// store, which then refuses it — after the epoch has been staked.
+    #[tokio::test]
+    async fn a_generation_the_ledger_cannot_hold_is_refused_before_any_mutation() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP01";
+
+        register_codex_at(&daemon, uid, 5, Some("th-real"))
+            .await
+            .expect("the honest launch registers");
+
+        let refusal = format!(
+            "{:#}",
+            register_codex_at(&daemon, uid, u64::MAX, Some("th-huge"))
+                .await
+                .expect_err("a generation no producer can mint must be refused")
+        );
+        assert!(
+            refusal.contains(&u64::MAX.to_string()),
+            "and the refusal must name the number it refused rather than \
+             silently storing another: {refusal}"
+        );
+
+        assert_eq!(
+            store.codex_generation(uid).unwrap(),
+            Some(5),
+            "the high-water is the honest launch's, not a saturated i64::MAX"
+        );
+        assert_eq!(
+            store
+                .get_session(uid)
+                .unwrap()
+                .unwrap()
+                .codex_thread_id
+                .as_deref(),
+            Some("th-real"),
+            "and the refused frame reached no write at all"
+        );
+    }
+
+    /// **The control-link slot's epoch bookkeeping**, driven directly.
+    ///
+    /// Driven at [`Inner`] rather than through `register_supervisor`. The original
+    /// reason was that `supported_agents()` was `[Claude]` and no Codex
+    /// registration could reach the install, so the rules would otherwise have
+    /// shipped with no coverage at all until the ungate. That is no longer why:
+    /// Codex is supported and a complete registration installs a link. The
+    /// bookkeeping is kept here because it is bookkeeping — epochs superseding,
+    /// releasing and being retired — and each case wants a slot in a chosen state
+    /// rather than whatever state a transaction happens to leave. The three that
+    /// matter are the three that can lose a task or stop the wrong one: a
+    /// supersede, a stale release, and the agent-change case where the incoming
+    /// registration carries no link of its own.
+    /// **A control link is always installed or joined — never detached.**
+    ///
+    /// Driven through the **real** registration transaction: each `try_register` is
+    /// a full gate → join-parked → ownership-check → retire → install turn. Those
+    /// registrations carry no control link — `try_register` builds no socket — so
+    /// the spawn arm is not taken on this path, and the link under test is installed
+    /// by hand at the epoch the real registration published. It is then the real
+    /// transaction that retires it, which is the half that matters here. (This used
+    /// to say the spawn arm *cannot* be reached, `supported_agents()` being
+    /// `[Claude]`; it can be reached now, and reaching it would only mean this test
+    /// had less control over what it is retiring.)
+    ///
+    /// Dropping a `JoinHandle` detaches its task, and a detached link is one nothing
+    /// can ever stop, ingesting into a session under an epoch no later release can
+    /// match. Every path below ends in an install or a proven join.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_control_link_is_always_installed_or_joined_and_never_detached() {
+        use protocol::agent::AgentKind;
+        fn park() -> tokio::task::JoinHandle<()> {
+            tokio::spawn(std::future::pending())
+        }
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let daemon = test_daemon();
+
+        // A real registration owns the session; a link is installed at its epoch.
+        let first = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("accepted");
+        let link = park();
+        let link_watch = link.abort_handle();
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .install_codex_link(
+                uid,
+                first.epoch,
+                1,
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                },
+                link
+            )
+            .is_none());
+
+        // **A real re-registration retires it.** This is the whole transaction: the
+        // gate, the parked join, the ownership check, and the retire — and the
+        // retire is a proven join, not a fire-and-forget abort.
+        let second = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("accepted");
+        assert!(
+            link_watch.is_finished(),
+            "the real transaction must CANCEL AND JOIN the incumbent, not detach it"
+        );
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "and a Claude registration leaves the slot empty"
+        );
+
+        // A link under the current owner installs; a stale disconnect must not take
+        // it, and the owning registration must.
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .install_codex_link(
+                uid,
+                second.epoch,
+                1,
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                },
+                park()
+            )
+            .is_none());
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .release_codex_link(uid, first.epoch)
+                .is_none(),
+            "a stale disconnect must not release a newer registration's link"
+        );
+        let released = daemon
+            .inner
+            .lock()
+            .await
+            .release_codex_link(uid, second.epoch)
+            .expect("the owning registration releases its own link");
+        {
+            let link = OwnedLink::new(released.task, None);
+            link.abort();
+            for _ in 0..200 {
+                if link.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(link.is_finished(), "the link must be proven finished");
+        }
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        // And unregistering runs the teardown half of the same transaction.
+        daemon.unregister_supervisor(&second).await;
+        assert!(!daemon.inner.lock().await.supervisors.contains_key(uid));
+    }
+
+    /// **A dropped transaction aborts the link it was holding, never detaches it.**
+    ///
+    /// The transaction is a future, and a future can be dropped at any await point —
+    /// a supervisor connection going away mid-retirement, say. `OwnedLink`'s `Drop`
+    /// is what makes that safe: a handle merely dropped would detach its task, and a
+    /// detached link runs for ever with nothing able to reach it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_a_transaction_mid_retirement_aborts_the_link_it_held() {
+        // Started for real before it is abandoned: a task the runtime has never
+        // polled can report finished for the wrong reason, which would make this
+        // pass without proving anything.
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await
+        });
+        started_rx.await.expect("the task must be running");
+        let watch = task.abort_handle();
+        drop(OwnedLink::new(task, None));
+        for _ in 0..200 {
+            if watch.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            watch.is_finished(),
+            "a guard dropped mid-transaction must ABORT its task, not detach it"
+        );
+    }
+
+    /// **A link that will not stop is parked, and the slot is left honestly empty.**
+    ///
+    /// Reinstalling an aborted-but-unjoined handle would leave the incoming
+    /// registration accepted and unobserved behind a slot that looks served. Parking
+    /// it says the truth instead — no link installed — and the next transaction
+    /// joins the corpse before doing anything else.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_link_that_will_not_stop_is_parked_not_reinstalled() {
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let session = SessionKey::new(uid.to_string(), "cc-1".to_string());
+        let daemon = test_daemon();
+
+        // A task that genuinely cannot be cancelled inside the budget: a blocking
+        // one has no await point to be cancelled at. It must be RUNNING before the
+        // abort — tokio cancels a blocking task that has not started, and the handle
+        // would then resolve instantly, which is a cancellation working rather than
+        // the case under test.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            std::thread::sleep(CODEX_LINK_STOP_BUDGET + Duration::from_secs(1));
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the blocking task must actually be running before it is aborted");
+
+        // Installed, then parked the way the transaction parks it: one lock, out of
+        // the slot and into the park, with no instant in which it belongs to neither.
+        daemon.inner.lock().await.codex_links.insert(
+            uid.to_string(),
+            CodexLinkHandle {
+                epoch: 1,
+                generation: 1,
+                task: stubborn,
+                presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        daemon.park_current_codex_link(uid).await;
+        assert!(
+            !daemon.join_parked_codex_links(&session).await,
+            "a blocking task cannot be cancelled within the budget, so the park must \
+             report UNCLEAR"
+        );
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "the slot must be left EMPTY — a stale handle there would masquerade as \
+             a served registration"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.parked_codex_links[uid].len(),
+            1,
+            "and the corpse must be parked, not lost"
+        );
+
+        // The next transaction joins it — by then its blocking work has finished, so
+        // the join succeeds and the park empties.
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "a parked corpse must be joined on the next turn, and the park reported \
+             EMPTY — that report is what lets a registration install at all"
+        );
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .parked_codex_links
+            .get(uid)
+            .is_none_or(Vec::is_empty));
+    }
+
+    /// **A12.3(b): a join cancelled mid-flight leaves the park exactly as it was.**
+    ///
+    /// [`Daemon::join_parked_codex_links`] is an await loop, and the transaction
+    /// holding it can be dropped at any turn — a supervisor connection going away
+    /// mid-retirement. The rule that makes that safe is that the handles never leave
+    /// the map: nothing is removed except on proof of completion, so a cancelled turn
+    /// changes nothing and the next one tries again. The obvious shape — take the vec
+    /// out, join, put the survivors back — loses the handles the cancelled turn was
+    /// holding, and the next transaction then reads an empty park and installs a
+    /// second observer beside a task that is still running.
+    ///
+    /// Two handles, because the two halves of "changes nothing" are observable on
+    /// different tasks. The blocking one cannot be cancelled at all, so it is what
+    /// keeps the join Pending on the poll this test cancels it at; the ordinary one
+    /// is what shows the cancelled turn still did its abort. Both must still be
+    /// **recorded** afterwards — the ordinary one is finished by then, but nothing
+    /// has yet proven it, and unproven completion is the whole of what the park is
+    /// for.
+    ///
+    /// **Mutation:** rewrite the join to take the vec out, join, and put the survivors
+    /// back — and note that it has to hold the handles **across the sleep between
+    /// turns**, because that await is where a dropped transaction is dropped. (A
+    /// version that puts them back before the sleep leaves this test green, which is
+    /// a mutation that does not reach the defect rather than a test that misses it.)
+    /// Written faithfully, the drop loses both handles and the assertion immediately
+    /// after `drop(joining)` reads `None` against `Some(2)` — the next turn would
+    /// report an empty park, retain nothing, and clear the way for a second observer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_join_cancelled_mid_flight_leaves_the_park_holding_what_it_was_given() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+
+        // A task that genuinely cannot be cancelled inside the budget: a blocking one
+        // has no await point to be cancelled at. It must be RUNNING before the abort
+        // — tokio cancels a blocking task that has not started, and the handle would
+        // then resolve instantly, which is a cancellation working rather than the
+        // case under test.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = stop_rx.recv();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the blocking task must actually be running before it is aborted");
+
+        let carry = crate::codex_link::LinkCarry::new();
+        carry.set_for_tests(Some("th-g1-adopted"), None);
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 1,
+                generation: 1,
+                task: stubborn,
+                presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry,
+            },
+        );
+        daemon.park_current_codex_link(&uid).await;
+
+        // The second, parked beside it: an ordinary task, so an abort actually lands
+        // on it. Started for real for the same reason as above — a task the runtime
+        // has never polled can report finished for the wrong reason.
+        let (running_tx, running_rx) = tokio::sync::oneshot::channel();
+        let ordinary = tokio::spawn(async move {
+            let _ = running_tx.send(());
+            std::future::pending::<()>().await
+        });
+        running_rx.await.expect("the task must be running");
+        let abortable = ordinary.abort_handle();
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 2,
+                generation: 1,
+                task: ordinary,
+                presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        daemon.park_current_codex_link(&uid).await;
+        assert_eq!(
+            daemon.inner.lock().await.parked_codex_links[&uid].len(),
+            2,
+            "the premise: two unproven completions are recorded"
+        );
+
+        // One poll carries the join through its abort of both handles and onto the
+        // 20ms sleep between turns — and that sleep is the await a dropped
+        // transaction is dropped at. Held as a future this test owns rather than a
+        // spawned task, so the cancellation is a fact rather than a hope (see
+        // `nudge`).
+        let mut joining = Box::pin(daemon.join_parked_codex_links(&session));
+        assert!(
+            nudge(joining.as_mut()).is_pending(),
+            "a park holding a task that cannot be cancelled must keep the join in \
+             flight — that is the turn this test cancels it at"
+        );
+        drop(joining);
+
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .parked_codex_links
+                .get(&uid)
+                .map(Vec::len),
+            Some(2),
+            "a cancelled join must leave the park EXACTLY as it was: both completions \
+             are still unproven, and a handle the cancellation dropped is a task \
+             nothing can stop and nothing will ever join"
+        );
+        for _ in 0..200 {
+            if abortable.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            abortable.is_finished(),
+            "and the turn it was cancelled on still did its work: everything parked \
+             is aborted on every turn, whether or not that turn completes"
+        );
+
+        // And the next turn behaves: the stubborn one stops, both are proven, and
+        // what the newest of them knew is retained on the way out.
+        let _ = stop_tx.send(());
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "the park a cancelled turn left untouched is joined by the next one"
+        );
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .parked_codex_links
+            .get(&uid)
+            .is_none_or(Vec::is_empty));
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .get(&uid)
+                .and_then(|retained| retained.carried.adopted()),
+            Some("th-g1-adopted".to_string()),
+            "and the cells rode through the cancellation with their handle, so the \
+             join that finally proved the task stopped is the one that read them"
+        );
+    }
+
+    /// **A12.2: a registration a survivor blocks is accepted with NO link — and the
+    /// recovery sweep installs the one it was owed.**
+    ///
+    /// The first half is the defect, driven through the **real** transaction: a park
+    /// this registration's own join cannot clear inside [`CODEX_LINK_STOP_BUDGET`]
+    /// leaves the slot honestly empty, and the registration then publishes its
+    /// supervisor and returns `Ok` anyway. Live in the fleet, observed by nothing —
+    /// and nothing used to build that link afterwards, because a link never vacates
+    /// the slot on its own and the only other builder is the next registration for
+    /// the uid.
+    ///
+    /// The debt itself is staged by hand at the epoch the real registration
+    /// published. **The reason for that has changed and is worth stating exactly.**
+    /// It used to be that the arm recording the debt could not be reached at all —
+    /// a Claude registration carries no control link, and `supported_agents()` was
+    /// `[Claude]`, so no registration carrying one got past the agent gate. Codex
+    /// is supported now, so that arm IS reachable: a complete Codex registration
+    /// over an unclearable park runs it. What it costs to reach that way is the
+    /// stop budget a *third* time, on top of the two this test already pays, and
+    /// the debt's own shape is a fact about [`Inner`] rather than about the
+    /// transaction. So it stays staged, for the same reason `install_codex_link`
+    /// and the two seeding steps are proven against [`Inner`] directly.
+    ///
+    /// Costs the stop budget twice, which is why there is one test of this shape and
+    /// not four: once for the registration that gives up, and once for the sweep that
+    /// tries while the survivor is still running.
+    ///
+    /// **Mutation:** drop the `join_parked_codex_links` guard from
+    /// [`Daemon::recover_stalled_codex_link`] and the middle assertion fails — a
+    /// second observer is installed beside a task that is still running.
+    ///
+    /// **And one mutation this does NOT kill, said plainly rather than left to be
+    /// discovered:** deleting the `owe_codex_install` call from the `!park_clear`
+    /// arm changes nothing here, because the debt is staged by hand and the
+    /// registration this test drives is a **Claude** one, which carries no control
+    /// link and so never enters that `if let`. That was previously written down as
+    /// "the call site is unreachable"; it is not, since Codex joined
+    /// `supported_agents()`, and the correction matters — the survivor is what
+    /// makes it expensive to reach, not the agent gate. The arm is therefore
+    /// unobserved rather than unreachable, which is a weaker position than the one
+    /// this doc used to claim and an honest one. What *is* observable is the arm's
+    /// other half, and it is asserted: a Claude registration over an unclearable
+    /// park owes nothing at all.
+    ///
+    /// **THE CLAIM, NARROWED — this test proves a HANDLE, not a BINDING.** The
+    /// socket below names nothing, deliberately, so the installed task dials, fails
+    /// and backs off: it never handshakes, never sends a `thread/resume`, and never
+    /// adopts a thread. Every assertion here is about the shape of [`Inner`]'s maps.
+    /// That is the whole of what the mechanism guarantees and the whole of what is
+    /// asserted — but it must not be read as "the session is observed again" in the
+    /// semantic sense, because WHICH thread the recovered link binds is the open
+    /// half of A12.2 and is not settled anywhere in this file. Recovery seeds from
+    /// predecessor carry and the registration's hint; a `/new` that landed inside
+    /// the accepted observer gap is in neither, and the broker's active head is not
+    /// readable from this process (`thread/started` is broadcast once and never
+    /// replayed, and no ccd-allowlisted method reports the binding). The ledger row
+    /// carries that blocker; this doc carries the limit of the test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registration_a_survivor_blocked_gets_its_link_from_the_recovery_sweep() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-9".to_string());
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = stop_rx.recv();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the blocking task must actually be running before it is aborted");
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 1,
+                generation: 7,
+                task: stubborn,
+                presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        daemon.park_current_codex_link(&uid).await;
+
+        // The real transaction, over a park it cannot clear.
+        let registration = register(&daemon, "cc-9", Some(&uid)).await;
+        {
+            let inner = daemon.inner.lock().await;
+            assert_eq!(
+                inner.supervisors.get(&uid).map(|handle| handle.epoch),
+                Some(registration.epoch),
+                "the registration is ACCEPTED: the supervisor is published and the \
+                 session is Live in the fleet"
+            );
+            assert!(
+                inner.codex_links.is_empty(),
+                "and nothing is observing it — the whole of A12.2"
+            );
+            assert_eq!(
+                inner.parked_codex_links[&uid].len(),
+                1,
+                "because the survivor that blocked the install is still running"
+            );
+            assert!(
+                inner.stalled_codex_installs.is_empty(),
+                "and a CLAUDE registration owes nothing for it: it has no link to \
+                 install, so there is nothing for a later sweep to owe it"
+            );
+        }
+
+        // What a Codex registration would have left behind, at the epoch this one
+        // published. The socket names nothing: the link task dials, fails and backs
+        // off, which is what a link does whenever its wrapper is not up yet.
+        let owed = crate::codex_link::ControlLink {
+            socket: std::path::PathBuf::from("/tmp/ccd-a12-2-no-such-broker.sock"),
+            generation: 7,
+            thread_id: Some("th-owed".to_string()),
+            launch_cwd: "/work".into(),
+        };
+        daemon
+            .inner
+            .lock()
+            .await
+            .owe_codex_install(&session, registration.epoch, &owed);
+
+        // A sweep while the survivor is still running must install NOTHING — two
+        // observers on one timeline is the state the park exists to prevent — and
+        // must not forget what it could not do.
+        daemon.recover_stalled_codex_links().await;
+        {
+            let inner = daemon.inner.lock().await;
+            assert!(
+                inner.codex_links.is_empty(),
+                "the sweep must not install a link beside a task that is still running"
+            );
+            assert!(
+                inner.stalled_codex_installs.contains_key(&uid),
+                "and an attempt that could not be made must leave the debt standing"
+            );
+        }
+
+        // The survivor finally stops, and the sweep is the "later transaction" the
+        // registration's own log line promised.
+        let _ = stop_tx.send(());
+        daemon.recover_stalled_codex_links().await;
+        let inner = daemon.inner.lock().await;
+        let installed = inner
+            .codex_links
+            .get(&uid)
+            .expect("the sweep installs the link the registration could not");
+        assert_eq!(
+            installed.epoch, registration.epoch,
+            "at the epoch it was owed to, which is the claim the resolver compares \
+             against — a link installed at any other is one it answers `NoLink` for"
+        );
+        assert_eq!(
+            installed.generation, 7,
+            "speaking for the launch the registration named"
+        );
+        assert!(
+            inner.stalled_codex_installs.is_empty(),
+            "and the debt is discharged rather than retried for ever"
+        );
+        assert!(inner.parked_codex_links.get(&uid).is_none_or(Vec::is_empty));
+    }
+
+    /// **A12.2: an install owed to a registration the session has moved past spawns
+    /// nothing, and is dropped.**
+    ///
+    /// Recovery adds no ownership reasoning of its own — it hands the epoch it wrote
+    /// down to [`Inner::spawn_codex_link_if_owner`], the same check the registration
+    /// installs through. A debt whose epoch no longer owns the session is therefore a
+    /// no-op, and forgetting it is what stops the sweep asking a question the session
+    /// has already answered.
+    ///
+    /// The stale epoch is staged rather than produced by a second registration,
+    /// because a second *Claude* registration would cancel the debt through
+    /// [`Inner::forget_codex_carry`] before recovery ever saw it, and a second Codex
+    /// one cannot be driven at all.
+    ///
+    /// **Mutation:** delete the `stalled_codex_installs.remove` after the match in
+    /// [`Daemon::recover_stalled_codex_link`] and the debt outlives its own answer.
+    /// For the ownership refusal it takes **both** copies: deleting the one in
+    /// `spawn_codex_link_if_owner` alone leaves this green, because the second in
+    /// `install_codex_link` catches the task and hands it straight back as an orphan,
+    /// which is parked and joined — the slot ends up empty by the slower route. Delete
+    /// both and a link is installed for a registration that lost the session. That
+    /// redundancy is deliberate (see `install_codex_link`, the linearization point);
+    /// what it costs is that the outer refusal is not separately observable here.
+    #[tokio::test]
+    async fn an_install_owed_to_a_superseded_registration_spawns_nothing() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+        let registration = register(&daemon, "cc-1", Some(&uid)).await;
+
+        let owed = crate::codex_link::ControlLink {
+            socket: std::path::PathBuf::from("/tmp/ccd-a12-2-no-such-broker.sock"),
+            generation: 1,
+            thread_id: None,
+            launch_cwd: "/work".into(),
+        };
+        daemon
+            .inner
+            .lock()
+            .await
+            .owe_codex_install(&session, registration.epoch + 1, &owed);
+
+        daemon.recover_stalled_codex_links().await;
+        let inner = daemon.inner.lock().await;
+        assert!(
+            inner.codex_links.is_empty(),
+            "a debt owed to an epoch that does not own the session must spawn nothing"
+        );
+        assert!(
+            inner.stalled_codex_installs.is_empty(),
+            "and must be forgotten rather than retried on every tick for ever"
+        );
+    }
+
+    /// **A12.2: the two things that make an owed install wrong to keep, cancel it.**
+    ///
+    /// A change of agent, because threads belong to a run and the run has changed —
+    /// the same fact [`Inner::forget_codex_carry`] settles for what has already been
+    /// retained, settled here for what is still owed. And a disconnect, because the
+    /// claim is deliberately left behind as a tombstone: [`Inner::owner_of`] goes on
+    /// naming the departed registration for ever, so nothing else would stop the
+    /// sweep spawning a link for a session that has detached — into a slot no
+    /// disconnect will come back to release.
+    ///
+    /// On the same epoch test as the link slot, and that half is what the third leg
+    /// pins: a stale disconnect must not cancel what a newer registration is owed.
+    ///
+    /// **Mutation:** delete the `stalled_codex_installs.remove` from
+    /// `forget_codex_carry` and the first leg fails; delete the
+    /// `release_owed_codex_install` call from `unregister_supervisor` and the second
+    /// fails; make it unconditional (drop the epoch compare) and the third fails.
+    #[tokio::test]
+    async fn an_owed_codex_install_is_cancelled_by_a_change_of_agent_and_by_a_disconnect() {
+        let owed = crate::codex_link::ControlLink {
+            socket: std::path::PathBuf::from("/tmp/ccd-a12-2-no-such-broker.sock"),
+            generation: 1,
+            thread_id: None,
+            launch_cwd: "/work".into(),
+        };
+
+        // The uid comes back as Claude. The registration is real, and it is the real
+        // forgetting inside it that clears the debt.
+        {
+            let daemon = test_daemon();
+            let uid = protocol::uid::new().unwrap();
+            let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+            let first = register(&daemon, "cc-1", Some(&uid)).await;
+            daemon
+                .inner
+                .lock()
+                .await
+                .owe_codex_install(&session, first.epoch, &owed);
+            register(&daemon, "cc-1", Some(&uid)).await;
+            assert!(
+                daemon.inner.lock().await.stalled_codex_installs.is_empty(),
+                "a uid that has stopped being Codex owes no Codex link: performing it \
+                 later would attach a link, and a resumed thread, to a run it was \
+                 never built for"
+            );
+        }
+
+        // The registration that was owed it disconnects.
+        {
+            let daemon = test_daemon();
+            let uid = protocol::uid::new().unwrap();
+            let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+            let registration = register(&daemon, "cc-1", Some(&uid)).await;
+            daemon
+                .inner
+                .lock()
+                .await
+                .owe_codex_install(&session, registration.epoch, &owed);
+            daemon.unregister_supervisor(&registration).await;
+            assert!(
+                daemon.inner.lock().await.stalled_codex_installs.is_empty(),
+                "a detached session is owed nothing: the claim it would be installed \
+                 against outlives the disconnect, so nothing else would refuse it"
+            );
+        }
+
+        // And a stale disconnect must not cancel what a newer registration is owed —
+        // the same epoch test the link slot is released on.
+        {
+            let daemon = test_daemon();
+            let uid = protocol::uid::new().unwrap();
+            let session = SessionKey::new(uid.clone(), "cc-1".to_string());
+            let stale = register(&daemon, "cc-1", Some(&uid)).await;
+            daemon
+                .inner
+                .lock()
+                .await
+                .owe_codex_install(&session, stale.epoch + 1, &owed);
+            daemon.unregister_supervisor(&stale).await;
+            assert_eq!(
+                daemon
+                    .inner
+                    .lock()
+                    .await
+                    .stalled_codex_installs
+                    .get(&uid)
+                    .map(|entry| entry.epoch),
+                Some(stale.epoch + 1),
+                "a losing connection's teardown must leave the replacement's debt \
+                 alone, exactly as it leaves the replacement's link alone"
+            );
+        }
+    }
+
+    /// **M7: ownership is re-checked where the map is locked, not only where the
+    /// gate was taken.**
+    ///
+    /// The gated check is a time-of-check the world can move past: a second
+    /// connection publishes its supervisor epoch **without** taking the per-uid
+    /// gate, so between an older transaction's check and its install the session
+    /// can change hands. `install_codex_link` therefore re-reads `supervisors`
+    /// under the very lock that guards the link map, and that install is the
+    /// moment ownership is decided.
+    ///
+    /// Driven against the real maps, and shaped so it can only pass for the right
+    /// reason: the SLOT is left empty throughout, so a slot-only check — or no
+    /// check — would install happily. Only a check against `supervisors` refuses.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_install_is_refused_when_the_session_changed_hands_mid_transaction() {
+        use protocol::agent::AgentKind;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let daemon = test_daemon();
+
+        // One registration owns the session; note the epoch it published.
+        let owner = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("a Claude registration is accepted");
+        let current = owner.epoch;
+
+        // The slot is EMPTY — so nothing about the link map can refuse this install.
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        // An older transaction (its gated ownership check long since passed) tries
+        // to install. The session has moved on, and the install must say so.
+        let stale = tokio::spawn(std::future::pending::<()>());
+        let watch = stale.abort_handle();
+        let handed_back = daemon
+            .inner
+            .lock()
+            .await
+            .install_codex_link(
+                uid,
+                current - 1,
+                1,
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                },
+                stale,
+            )
+            .expect(
+                "an install by a registration that no longer owns the session must be \
+                 REFUSED — the empty slot cannot be what refuses it, so only the \
+                 supervisor check can",
+            );
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "and nothing may be left in the slot"
+        );
+        // The handed-back task is the caller's to stop, never to drop.
+        let handed_back = OwnedLink::new(handed_back, None);
+        handed_back.abort();
+        for _ in 0..200 {
+            if handed_back.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(watch.is_finished());
+
+        // The CURRENT owner installs fine, which is what stops this test from
+        // passing because installs simply never work.
+        let live = tokio::spawn(std::future::pending::<()>());
+        assert!(daemon
+            .inner
+            .lock()
+            .await
+            .install_codex_link(
+                uid,
+                current,
+                1,
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                },
+                live,
+            )
+            .is_none());
+        assert_eq!(daemon.inner.lock().await.codex_links[uid].epoch, current);
+        let installed = daemon
+            .inner
+            .lock()
+            .await
+            .release_codex_link(uid, current)
+            .expect("installed");
+        {
+            let link = OwnedLink::new(installed.task, None);
+            link.abort();
+            for _ in 0..200 {
+                if link.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(link.is_finished(), "the link must be proven finished");
+        }
+    }
+
+    /// **P1: a stale transaction never SPAWNS.**
+    ///
+    /// The distinction the earlier shape missed: rejecting an install is not the
+    /// same as not building the thing. A task that exists is already running, so on
+    /// a multithreaded runtime a stale transaction's link can dial the broker leg
+    /// and ingest before any later rejection matters — the damage is done inside the
+    /// window, and handing the handle back afterwards cannot undo it.
+    ///
+    /// So the factory is asserted **never called**. A `pending()` task could not
+    /// show this (nothing observable happens either way); this one records the fact
+    /// that it was built at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_transaction_never_spawns_its_link() {
+        use protocol::agent::AgentKind;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let daemon = test_daemon();
+        let owner = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("accepted");
+        let current = owner.epoch;
+
+        // The slot is EMPTY, so nothing about the link map can be what refuses this.
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        let built = Arc::new(AtomicBool::new(false));
+        let refused = {
+            let built = Arc::clone(&built);
+            daemon.inner.lock().await.spawn_codex_link_if_owner(
+                uid,
+                current - 1,
+                1,
+                LinkCells {
+                    presence: crate::codex_link::LinkPresence::new(),
+                    carry: crate::codex_link::LinkCarry::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                },
+                move || {
+                    built.store(true, Ordering::SeqCst);
+                    tokio::spawn(std::future::pending())
+                },
+            )
+        };
+        assert!(
+            refused.is_err(),
+            "a registration that no longer owns the session must be refused"
+        );
+        assert!(
+            !built.load(Ordering::SeqCst),
+            "and it must be refused BEFORE the link is built — a spawned task is a \
+             running task, and no later rejection can un-dial the socket it opened"
+        );
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        // The current owner does build and install, so this cannot pass by never
+        // spawning anything at all.
+        let built_now = Arc::new(AtomicBool::new(false));
+        let orphan = {
+            let built_now = Arc::clone(&built_now);
+            daemon
+                .inner
+                .lock()
+                .await
+                .spawn_codex_link_if_owner(
+                    uid,
+                    current,
+                    1,
+                    LinkCells {
+                        presence: crate::codex_link::LinkPresence::new(),
+                        carry: crate::codex_link::LinkCarry::new(),
+                        answers: crate::codex_link::answer_channel().0,
+                        interrupts: crate::codex_link::interrupt_channel().0,
+                        composes: crate::codex_link::compose_channel().0,
+                    },
+                    move || {
+                        built_now.store(true, Ordering::SeqCst);
+                        tokio::spawn(std::future::pending())
+                    },
+                )
+                .expect("the owner may install")
+        };
+        assert!(orphan.is_none(), "and the install is accepted");
+        assert!(built_now.load(Ordering::SeqCst));
+        let installed = daemon
+            .inner
+            .lock()
+            .await
+            .release_codex_link(uid, current)
+            .expect("installed");
+        let link = OwnedLink::new(installed.task, None);
+        link.abort();
+        for _ in 0..200 {
+            if link.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(link.is_finished());
+    }
+
+    /// **P2: a uid with a survivor gets no new link.**
+    ///
+    /// `join_parked_codex_links` reporting the park EMPTY is the precondition for
+    /// installing at all. A survivor is a task still running under this session, and
+    /// a link installed beside it would put two observers on one timeline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_with_a_surviving_parked_link_reports_the_park_unclear() {
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let session = SessionKey::new(uid.to_string(), "cc-1".to_string());
+        let daemon = test_daemon();
+
+        // A task that cannot be cancelled inside the budget, running for real.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            std::thread::sleep(CODEX_LINK_STOP_BUDGET * 2 + Duration::from_secs(1));
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("running before it is aborted");
+        daemon
+            .inner
+            .lock()
+            .await
+            .parked_codex_links
+            .entry(uid.to_string())
+            .or_default()
+            .push(OwnedLink::new(stubborn, None));
+
+        assert!(
+            !daemon.join_parked_codex_links(&session).await,
+            "a survivor must report the park UNCLEAR, which is what withholds a new \
+             link from this session"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.parked_codex_links[uid].len(),
+            1,
+            "and the survivor must remain parked in place, still guarded, for the next turn"
+        );
+    }
+
+    /// **The real registration transaction**, driven through `register_supervisor`
+    /// and `unregister_supervisor` rather than around them.
+    ///
+    /// Every registration here is a **Claude** one, so the spawn arm is not taken —
+    /// not because it cannot be, which is what this doc used to say when Claude was
+    /// the only agent this daemon hosted, but because a Claude frame carries no
+    /// control link and the spawn is what installing one does. The rest of the
+    /// transaction runs on this path either way: the gate is taken, ownership is
+    /// re-validated against the freshly published supervisor epoch, parked corpses
+    /// are joined, and the slot is reclaimed. What it pins is that a registration
+    /// leaves **no** link behind on the Claude path, and that a corpse parked by an
+    /// earlier turn is collected by the next real transaction rather than waiting
+    /// for one that never comes. The spawning direction is
+    /// `a_complete_codex_registration_is_accepted_and_filed_as_a_codex_run`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_real_registration_transaction_runs_the_link_lifecycle() {
+        use protocol::agent::AgentKind;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let daemon = test_daemon();
+
+        // Park a corpse the way a timed-out retirement would, then register for
+        // real: the transaction must collect it.
+        let idle = tokio::spawn(std::future::pending::<()>());
+        let watch = idle.abort_handle();
+        daemon
+            .inner
+            .lock()
+            .await
+            .parked_codex_links
+            .entry(uid.to_string())
+            .or_default()
+            .push(OwnedLink::new(idle, None));
+        assert_eq!(daemon.inner.lock().await.parked_codex_links[uid].len(), 1);
+
+        let first = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("a Claude registration is accepted");
+        assert!(
+            watch.is_finished(),
+            "the real transaction must join what an earlier turn parked"
+        );
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .parked_codex_links
+                .get(uid)
+                .is_none_or(Vec::is_empty),
+            "and empty the park"
+        );
+        assert!(
+            daemon.inner.lock().await.codex_links.is_empty(),
+            "a Claude registration installs no link"
+        );
+
+        // A re-registration bumps the epoch and runs the whole transaction again.
+        let second = try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .expect("a re-registration is accepted");
+        assert!(daemon.inner.lock().await.codex_links.is_empty());
+
+        // And the stale connection's teardown, arriving late, must not disturb the
+        // newer registration.
+        daemon.unregister_supervisor(&first).await;
+        assert!(
+            daemon.inner.lock().await.supervisors.contains_key(uid),
+            "a stale disconnect must not detach the newer registration"
+        );
+        daemon.unregister_supervisor(&second).await;
+        assert!(!daemon.inner.lock().await.supervisors.contains_key(uid));
+    }
+
+    /// **The gate makes the sequence one step.** Two registrations for the same
+    /// session cannot interleave their take → retire → spawn → install, so a third
+    /// claimant cannot arrive mid-retirement — the shape a reservation protocol
+    /// would have had to defend against with extra states.
+    #[tokio::test]
+    async fn the_registration_gate_serializes_one_sessions_lifecycle() {
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let gate = daemon.registration_gate(uid).await;
+        let held = gate.lock().await;
+
+        // A second sequence for the SAME session cannot start while one is running.
+        let other = daemon.registration_gate(uid).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), other.lock())
+                .await
+                .is_err(),
+            "one session's link lifecycle must be serialized end to end"
+        );
+        // A different session is unaffected — the gate is per-uid, not global.
+        let elsewhere = daemon.registration_gate("01K1B3XQ8ZC0DE5FGH7JKMNP99").await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), elsewhere.lock())
+                .await
+                .is_ok(),
+            "another session's lifecycle must not queue behind this one"
+        );
+        drop(held);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), other.lock())
+                .await
+                .is_ok(),
+            "and the next sequence proceeds once the first releases"
+        );
+    }
+
+    /// A normal Claude registration is unaffected by the generation machinery:
+    /// it carries no generation, never enters the Codex-only branch, and still
+    /// installs a live supervisor exactly as before.
+    #[tokio::test]
+    async fn a_plain_claude_registration_still_installs_unchanged() {
+        use protocol::agent::AgentKind;
+        let daemon = test_daemon();
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        assert!(try_register(&daemon, uid, AgentKind::Claude, None, None)
+            .await
+            .is_ok());
+        let inner = daemon.inner.lock().await;
+        assert!(
+            inner.supervisors.contains_key(uid),
+            "a Claude supervisor is installed as always"
+        );
+    }
+
+    // ------------------------------- the inbound resolver (2e-5)
+
+    /// A Codex run in the session table, with a control link published into the
+    /// registry the way a registration installs one.
+    ///
+    /// **The supervisor handle is installed too, at the link's own epoch**, because
+    /// that is the only way a link ever exists: `register_supervisor` publishes the
+    /// handle and the gated transaction installs the link under the very epoch it
+    /// carries. A fixture that skipped it described a state production cannot
+    /// produce — and, worse, one the resolver is now required to refuse, since a
+    /// link belonging to no current registration is no link for this session.
+    /// Retire the live link the way a replacement registration retires it: park it,
+    /// then join it.
+    ///
+    /// **The join is not a tidy-up, it is where retention happens** — see
+    /// [`Inner::retain_codex_carry`] — so a fixture that parked and stopped short
+    /// would assert against a map the production sequence has not filled yet.
+    async fn retire_the_live_codex_link(daemon: &Arc<Daemon>, uid: &str) {
+        daemon.park_current_codex_link(uid).await;
+        assert!(
+            daemon
+                .join_parked_codex_links(&SessionKey::new(uid.to_string(), "cc-9".to_string()))
+                .await,
+            "the premise: the retired task stops inside the budget, which is what makes \
+             what it knew retainable at all"
+        );
+    }
+
+    /// The other departure: the supervisor disconnects first, so the link is
+    /// released, parked and joined — the sequence `Daemon::unregister_supervisor`
+    /// runs, and for the same reason the one above is a sequence rather than a call.
+    async fn disconnect_the_codex_supervisor(daemon: &Arc<Daemon>, uid: &str, epoch: u64) {
+        {
+            let mut inner = daemon.inner.lock().await;
+            let link = inner.release_codex_link(uid, epoch).expect(
+                "the premise: this epoch's link is in the slot, and it leaves \
+                         through the real departure site",
+            );
+            inner
+                .parked_codex_links
+                .entry(uid.to_string())
+                .or_default()
+                .push(OwnedLink::new(
+                    link.task,
+                    Some(ParkedCarry {
+                        generation: link.generation,
+                        carry: link.carry,
+                    }),
+                ));
+        }
+        assert!(
+            daemon
+                .join_parked_codex_links(&SessionKey::new(uid.to_string(), "cc-9".to_string()))
+                .await,
+            "the premise: the released task stops inside the budget"
+        );
+    }
+
+    async fn codex_run_with_link(
+        daemon: &Arc<Daemon>,
+        claimed_thread: Option<&str>,
+        state: crate::codex_link::CodexAddressee,
+    ) -> (String, crate::codex_link::LinkPresence) {
+        codex_run_with_link_at(daemon, claimed_thread, state, 1, 1).await
+    }
+
+    /// The same, with the two epochs named separately, so a test can express the
+    /// hand-over window: a registration that owns the session and whose link has not
+    /// replaced the incumbent yet.
+    ///
+    /// `owning_epoch` is staked in **both** places a real registration stakes it —
+    /// the claim (`registration_epochs`, written beside the row) and the supervisor
+    /// handle (published one await later). Staging only one of them would build a
+    /// world no registration produces.
+    async fn codex_run_with_link_at(
+        daemon: &Arc<Daemon>,
+        claimed_thread: Option<&str>,
+        state: crate::codex_link::CodexAddressee,
+        owning_epoch: u64,
+        link_epoch: u64,
+    ) -> (String, crate::codex_link::LinkPresence) {
+        let uid = protocol::uid::new().unwrap();
+        let now = protocol::time::now_rfc3339();
+        daemon
+            .store
+            .upsert_session(&crate::store::SessionRow {
+                session_uid: uid.clone(),
+                session_id: "cc-9".into(),
+                tmux_session: "cc-9".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/work".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Codex,
+                codex_thread_id: claimed_thread.map(str::to_string),
+                codex_socket: Some("/tmp/ccd.sock".into()),
+            })
+            .unwrap()
+            .assert_present();
+        let presence = crate::codex_link::LinkPresence::new();
+        presence.publish_for_tests(state);
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        let mut inner = daemon.inner.lock().await;
+        inner.registration_epochs.insert(uid.clone(), owning_epoch);
+        // A real registration at this epoch left the allocator here, so the next
+        // one this daemon takes is a *later* epoch — without which a staged world
+        // hands the next registration an epoch it has already used.
+        inner.next_epoch = inner.next_epoch.max(owning_epoch.max(link_epoch));
+        inner.supervisors.insert(
+            uid.clone(),
+            SupervisorHandle {
+                tx,
+                inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                epoch: owning_epoch,
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                claude_bin: None,
+                codex_generation: Some(1),
+            },
+        );
+        inner.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: link_epoch,
+                generation: 1,
+                // Nothing drives it; the resolver reads the cell, never the task.
+                task: tokio::spawn(std::future::pending()),
+                presence: presence.clone(),
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                // Empty: what the link KNOWS is a separate cell from what it
+                // publishes, and a test that needs one reaches through the handle.
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+        drop(inner);
+        (uid, presence)
+    }
+
+    /// A finished-turn fact, filed the way the live link files one.
+    async fn codex_turn_terminal(daemon: &Arc<Daemon>, session: &SessionKey, key: &str) -> Event {
+        daemon
+            .ingest(
+                PendingEvent::new(
+                    session,
+                    EventKind::TurnComplete,
+                    json!({"status": "completed"}),
+                    protocol::event::Source::Codex,
+                )
+                .with_source_event_id(key.to_string()),
+            )
+            .await
+            .expect("the append succeeds")
+            .expect("a fresh key files a fact")
+    }
+
+    /// **A reference resolves to a run, and a run resolves to a connection.**
+    ///
+    /// Three answers a caller has to be able to tell apart, and collapsing any two
+    /// of them is a way to send a request nowhere: a reference that names nothing,
+    /// a run with no Codex link at all, and a live link with a state of its own.
+    #[tokio::test]
+    async fn an_inbound_reference_resolves_to_the_links_own_state() {
+        let daemon = test_daemon();
+
+        assert!(
+            daemon
+                .resolve_codex_inbound("cc-nonexistent")
+                .await
+                .unwrap()
+                .is_none(),
+            "a reference that names no run is absence, not a fact about the fleet"
+        );
+
+        // A Claude run: it exists, and it has no connection to address.
+        daemon
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        let claude = daemon.store.find_session("cc-1").unwrap().unwrap();
+        let (row, addressee) = daemon
+            .resolve_codex_inbound(&claude.session_uid)
+            .await
+            .unwrap()
+            .expect("the run is there");
+        assert_eq!(row.agent, protocol::agent::AgentKind::Claude);
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::NoLink,
+            "a Claude run has no control link, and the resolver says so rather than \
+             inventing an offline one"
+        );
+
+        // A Codex run whose link is subscribed: the addressee Phase 3/4 will send to.
+        let (uid, presence) = codex_run_with_link(
+            &daemon,
+            None,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-live".into(),
+            },
+        )
+        .await;
+        let (row, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the codex run is there");
+        assert_eq!(row.session_uid, uid);
+        assert!(
+            addressee.is_subscribed(),
+            "a subscribed link is the one state a request can be handed to: {addressee:?}"
+        );
+
+        // The link reconnects: the resolver follows it, because it reads the cell
+        // rather than a snapshot taken when the session was registered.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Offline { thread_id: None });
+        let (_, addressee) = daemon.resolve_codex_inbound(&uid).await.unwrap().unwrap();
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+            "a link between connections has no addressee, and a resolver that still \
+             said Subscribed would hand a request to a socket that is gone"
+        );
+    }
+
+    /// **A store that will not answer is not a reference that named nothing.**
+    ///
+    /// One is a client error — the phone asked about a run that does not exist —
+    /// and the other is an operational fault on this Mac. A resolver that reported
+    /// both as absence would hand a caller a plausible answer built out of a
+    /// failure, and the fault would surface as "no such session" for as long as the
+    /// database stayed broken.
+    #[tokio::test]
+    async fn a_broken_store_is_an_error_and_not_an_absent_run() {
+        let daemon = test_daemon();
+        daemon.store.break_session_lookups_for_tests();
+        assert!(
+            daemon.resolve_codex_inbound("cc-1").await.is_err(),
+            "a lookup that could not be made is not a lookup that found nothing"
+        );
+    }
+
+    /// **The fleet names the thread the link ADOPTED, not the one launch guessed.**
+    ///
+    /// The row's `codex_thread_id` is written once, from the registration frame. A
+    /// `/new` in the TUI moves the session to another thread and the link follows
+    /// it; nothing writes that back. Before the resolver, the phone was shown the
+    /// retired thread for the rest of the run.
+    #[tokio::test]
+    async fn the_session_list_reports_the_thread_the_link_is_actually_on() {
+        let daemon = test_daemon();
+        let (uid, presence) = codex_run_with_link(
+            &daemon,
+            Some("th-at-launch"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-after-a-switch".into(),
+            },
+        )
+        .await;
+        let thread_of = |sessions: &[SessionSummary]| {
+            sessions
+                .iter()
+                .find(|s| s.session_uid == uid)
+                .and_then(|s| s.codex_thread_id.clone())
+        };
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-after-a-switch"),
+            "the wire's own evidence outranks the registration's claim"
+        );
+
+        // Bound and not yet subscribed is still where the session IS: the fleet
+        // describes what is happening, not what may be sent.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Bound {
+            thread_id: "th-being-chased".into(),
+        });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-being-chased")
+        );
+
+        // **The reconnect does not undo the switch.** A dropped connection ends an
+        // addressee, not a session's place: the link carries the thread it adopted
+        // into its backoff and says so. Publishing a threadless `Offline` here sent
+        // the fleet back to the launch-time claim for the whole of every outage —
+        // which after a `/new` is precisely the staleness this reports away.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Offline {
+            thread_id: Some("th-after-a-switch".into()),
+        });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-after-a-switch"),
+            "a link between connections still knows which thread it is coming back to"
+        );
+
+        // **Nor does the connection that comes back.** A fresh connection has bound
+        // nothing and had nothing accepted, but the link is resuming the thread it
+        // adopted — and a threadless answer here regressed the fleet to the launch
+        // claim for the length of every handshake-and-resume round trip.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Unbound {
+            adopted: Some("th-after-a-switch".into()),
+        });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-after-a-switch"),
+            "the link is dialling back to the thread it adopted, and says so"
+        );
+
+        // With nothing adopted the claim is all there is, and it beats nothing.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Offline { thread_id: None });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-at-launch"),
+            "a link that has adopted nothing has no better answer to offer, so the \
+             row's claim stands rather than the thread disappearing from the fleet"
+        );
+    }
+
+    /// **A replacement link is addressable at the thread its predecessor ADOPTED
+    /// from the instant it is installed** — not from the moment its first
+    /// connection returns.
+    ///
+    /// A freshly minted [`crate::codex_link::LinkPresence`] says
+    /// `Offline { thread_id: None }`, and a threadless answer sends the fleet to the
+    /// row. The row's `codex_thread_id` has exactly one writer, the registration
+    /// frame, so after a `/new` it names the thread the session LEFT — and the
+    /// replacement cannot correct it until it has dialled, upgraded, handshaken and
+    /// had a resume accepted. Every supervisor reconnect therefore reopened, at the
+    /// registration boundary, precisely the staleness the adoption exists to close.
+    ///
+    /// **The row names a different thread from the retained adoption on purpose.**
+    /// With the same thread in both, a working seed and a fallback to the row are
+    /// the same answer and this test could not tell them apart.
+    ///
+    /// **Driven through [`Inner::seed_codex_presence`]**, the whole rule in one named
+    /// step, for the same reason [`Inner::seed_codex_carry`] beside it is one. That
+    /// reason was originally that the registration calling it sat behind a closed
+    /// gate — `supported_agents()` refused every Codex registration — and a rule
+    /// nothing can drive is a rule nothing can prove. The gate is open now, and the
+    /// step is still driven directly: what the fleet is TOLD is a four-way claim
+    /// about one function, and reading it back out of a whole accepted transaction
+    /// would assert it through a great deal that has nothing to do with it. The link
+    /// it is asked about is read off a real registration frame by
+    /// `ControlLink::from_registration`, so the generation the scoping turns on is the
+    /// one a registration actually carries.
+    ///
+    /// Asserted through what the fleet is actually told — `Daemon::sessions` and
+    /// `Daemon::resolve_codex_inbound` — and while the replacement's task has run
+    /// exactly nothing, which is the window the regression used to occupy. Four legs:
+    /// the seed, the counterfactual that says what it is worth, "published implies
+    /// adopted", and the launch scoping.
+    ///
+    /// **Mutations:** empty the body of `Inner::seed_codex_presence` and the first leg
+    /// fails — the fleet is sent back to the row. Seed it from
+    /// [`crate::codex_link::LinkCarry::first_target`] instead of the adopted slot and
+    /// the third leg fails, because a link mid-chase would publish a candidate nobody
+    /// has confirmed. Drop the generation guard it inherits from
+    /// [`Inner::retained_codex_adoption`] and the fourth fails.
+    #[tokio::test]
+    async fn the_replacement_link_is_addressable_at_the_adopted_thread_before_it_dials() {
+        let daemon = test_daemon();
+        // The launcher claimed `A`; the link then followed a `/new` to `B`, adopted
+        // it, and was subscribed to it when the registration boundary arrived.
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            Some("th-a-at-launch"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-b-adopted".into(),
+            },
+        )
+        .await;
+        daemon.inner.lock().await.codex_links[&uid]
+            .carry
+            .set_for_tests(Some("th-b-adopted"), None);
+
+        // A replacement registration arriving on top of the live link, which is what
+        // puts the departing link's memory where the next one can find it.
+        retire_the_live_codex_link(&daemon, &uid).await;
+
+        // The replacement's cells, minted and seeded exactly as the registration
+        // mints and seeds them, and installed in the same lock acquisition.
+        let link = codex_link_from(&uid, 1, "th-a-at-launch");
+        let presence = crate::codex_link::LinkPresence::new();
+        let carry = crate::codex_link::LinkCarry::new();
+        {
+            let mut inner = daemon.inner.lock().await;
+            inner.seed_codex_carry(&uid, &link, &carry);
+            inner.seed_codex_presence(&uid, &link, &presence);
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 1,
+                    // Nothing drives it: the whole claim is that the fleet has the
+                    // right answer BEFORE this task's first connection attempt.
+                    task: tokio::spawn(std::future::pending()),
+                    presence: presence.clone(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry,
+                },
+            );
+        }
+        assert_eq!(
+            presence.get(),
+            crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some("th-b-adopted".into())
+            },
+            "the cell the link will inherit already names the adopted thread, and it \
+             is an OFFLINE addressee: a link that has not dialled yet is not a link \
+             that has adopted nothing"
+        );
+
+        let thread_of = |sessions: &[SessionSummary]| {
+            sessions
+                .iter()
+                .find(|s| s.session_uid == uid)
+                .and_then(|s| s.codex_thread_id.clone())
+        };
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-b-adopted"),
+            "the fleet is told where the session IS from the moment the replacement \
+             is installed, rather than being sent back to the launch-time claim for \
+             the length of a dial, an upgrade and a handshake"
+        );
+        let (row, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the run resolves");
+        assert_eq!(
+            row.codex_thread_id.as_deref(),
+            Some("th-a-at-launch"),
+            "the row still names the retired thread — nothing writes it back after a \
+             `/new` — which is what makes the assertion above a fact about the seed \
+             and not about the store"
+        );
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some("th-b-adopted".into())
+            },
+            "and the inbound resolver answers with the same fact, which is the pair a \
+             caller acts on"
+        );
+
+        // **The counterfactual, in the same shape.** An unseeded cell is exactly the
+        // regression, so this is what the seed is worth rather than a claim about it.
+        presence.publish_for_tests(crate::codex_link::CodexAddressee::Offline { thread_id: None });
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-a-at-launch"),
+            "what a fresh cell says: the fleet falls back to the row and names the \
+             thread the session left"
+        );
+
+        // **Only an adopted thread may be seeded, never a pending candidate.** A link
+        // mid-chase knows both, and `Carried::first_target` deliberately ranks the
+        // candidate FIRST — which is right for deciding what to resume and wrong for
+        // deciding what to say, because the candidate is a thread nobody has confirmed
+        // and the presence is what the fleet is TOLD.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let chasing = crate::codex_link::LinkCarry::new();
+            chasing.set_for_tests(Some("th-b-adopted"), Some("th-c-being-chased"));
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 1,
+                    task: tokio::spawn(async {}),
+                    presence: crate::codex_link::LinkPresence::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry: chasing,
+                },
+            );
+            assert!(
+                inner.release_codex_link(&uid, 1).is_some(),
+                "the premise: a link mid-chase departs, and both threads it holds are \
+                 retained"
+            );
+        }
+        let mid_chase = crate::codex_link::LinkPresence::new();
+        {
+            let mut inner = daemon.inner.lock().await;
+            inner.seed_codex_presence(&uid, &link, &mid_chase);
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 1,
+                    task: tokio::spawn(std::future::pending()),
+                    presence: mid_chase.clone(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        assert_eq!(
+            mid_chase.get(),
+            crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some("th-b-adopted".into())
+            },
+            "publishing `th-c-being-chased` here would be the one thing \"published \
+             implies adopted\" forbids: no resume has been accepted for it, and the \
+             chase may yet come to nothing"
+        );
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-b-adopted"),
+            "and the fleet is told the confirmed thread rather than the one being \
+             chased — a caller sent at an unconfirmed thread is sent nowhere"
+        );
+
+        // **The seed is scoped to the LAUNCH, on the same terms as the carry**, since
+        // it answers out of the same retained entry. A relaunch's threads are its own.
+        let relaunched = codex_link_from(&uid, 2, "th-g2-at-launch");
+        let after_relaunch = crate::codex_link::LinkPresence::new();
+        {
+            let mut inner = daemon.inner.lock().await;
+            inner.seed_codex_presence(&uid, &relaunched, &after_relaunch);
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 2,
+                    task: tokio::spawn(std::future::pending()),
+                    presence: after_relaunch.clone(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        assert_eq!(
+            after_relaunch.get(),
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+            "a second Codex process adopted nothing yet, and generation 1's adopted \
+             thread belongs to one that has exited"
+        );
+        assert_eq!(
+            thread_of(&daemon.sessions().await.unwrap()).as_deref(),
+            Some("th-a-at-launch"),
+            "so the fleet falls back to the row, which is the only fact about this \
+             launch anybody has"
+        );
+    }
+
+    /// **What a link KNOWS survives the REGISTRATION boundary, not just the
+    /// connection one** (round-4 P9, round-5 F2).
+    ///
+    /// The test above proves a `/new` survives a dropped connection, because the link
+    /// outlives one and carries `Carried` through its backoff. A supervisor reconnect
+    /// is a different boundary and it lost the fact: the link is retired, its cells go
+    /// out of the map with it, the row is never written back after a `/new` by design,
+    /// and the `thread/started` announcement is broadcast once and never replayed. So
+    /// `A → /new → B → supervisor reconnect` rebuilt the link from the registration
+    /// hint alone and resumed retired `A`, for the rest of the run.
+    ///
+    /// **Retention reads the link's own carry and not its published presence**, and
+    /// the first leg is why. Mid-chase the presence is `Bound { B }` — a candidate
+    /// nobody has confirmed, which is deliberately not published as the session's
+    /// thread — so a retention that read the projection saved *nothing*: it lost the
+    /// adopted `A` the link was still holding, and it could never have carried the
+    /// pending `B` at all. Both are in the carry, and both come across.
+    ///
+    /// The old form of this test could not see that. It exercised `Bound` only after
+    /// an earlier leg had already put a thread in the retained map, so "unchanged"
+    /// passed whether the projection had saved the wrong thread or nothing at all.
+    /// The empty map is the production case, so this one starts there.
+    ///
+    /// Both departure sites are driven through their real functions, because they are
+    /// the two different reconnect shapes: `release_codex_link` is the supervisor
+    /// **disconnecting** first, `park_current_codex_link` is a replacement
+    /// registration arriving while the incumbent still holds the slot. Each is
+    /// followed by the join, because that is the departure — the sites above only
+    /// hand the cells to the park, and `join_parked_codex_links` is what reads them.
+    ///
+    /// **Mutations:** drop the `retain_codex_carry` call from the join and both legs
+    /// fail; retain `handle.presence.get()` instead of the carry and the chase leg
+    /// fails; seed only the adopted slot and the fallback assertion fails.
+    #[tokio::test]
+    async fn what_a_link_knows_outlives_the_registration_that_installed_it() {
+        let daemon = test_daemon();
+        let (uid, presence) = codex_run_with_link(
+            &daemon,
+            Some("th-at-launch"),
+            // The projection a link mid-chase publishes: bound to the candidate,
+            // naming no adopted thread at all.
+            crate::codex_link::CodexAddressee::Bound {
+                thread_id: "th-being-chased".into(),
+            },
+        )
+        .await;
+        async fn carry_of(daemon: &Arc<Daemon>, uid: &str) -> crate::codex_link::LinkCarry {
+            daemon.inner.lock().await.codex_links[uid].carry.clone()
+        }
+        async fn nothing_retained(daemon: &Arc<Daemon>, uid: &str) -> bool {
+            !daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(uid)
+        }
+        // What the link knows, which is strictly more than what it says.
+        carry_of(&daemon, &uid)
+            .await
+            .set_for_tests(Some("th-after-a-switch"), Some("th-being-chased"));
+        assert!(
+            nothing_retained(&daemon, &uid).await,
+            "the production case, and the one the old test could not reach: nothing \
+             has been retained for this session yet"
+        );
+
+        // A replacement registration arriving on top of a live link: the cells go into
+        // the park with the task, and are read once the task is proven stopped.
+        retire_the_live_codex_link(&daemon, &uid).await;
+        assert!(!nothing_retained(&daemon, &uid).await);
+
+        // The seed itself, proven against a real registration frame. It used to be
+        // that nothing else could drive it — `supported_agents()` refused every
+        // Codex registration — and now a complete one would; the rule is still
+        // proven where the guard beside it is, because the frame is the whole of
+        // its input and a transaction around it would only add noise.
+        let frame = |thread: Option<&str>| protocol::ipc::RegisterSession {
+            session_id: "cc-9".into(),
+            session_uid: Some(uid.clone()),
+            tmux_session: "cc-9".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/work".into(),
+            supervisor_pid: 4242,
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Codex,
+            agent_bin: None,
+            codex_thread_id: thread.map(str::to_string),
+            codex_socket: Some("/tmp/ccd.sock".into()),
+            codex_generation: Some(1),
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        };
+        let link = crate::codex_link::ControlLink::from_registration(&frame(Some("th-at-launch")))
+            .unwrap()
+            .unwrap();
+        let carry = crate::codex_link::LinkCarry::new();
+        let resumed = daemon
+            .inner
+            .lock()
+            .await
+            .seed_codex_carry(&uid, &link, &carry);
+        assert_eq!(
+            resumed.as_deref(),
+            Some("th-being-chased"),
+            "the replacement picks the chase up where the previous link left it — \
+             `thread/started` is announced once, so nothing else can ever name it \
+             again — and it says so, because a link resuming somewhere other than \
+             where it was told to is worth one line in the log"
+        );
+        assert_eq!(
+            carry.slots_for_tests(),
+            (
+                Some("th-after-a-switch".to_string()),
+                Some("th-being-chased".to_string()),
+                Some("th-after-a-switch".to_string())
+            ),
+            "and the ADOPTED thread comes across with it, as the fallback: a \
+             candidate that never becomes a session thread must not strand the \
+             replacement on a thread it can never read"
+        );
+        assert_eq!(
+            link.thread_id.as_deref(),
+            Some("th-at-launch"),
+            "the frame's own claim is left alone — it is a fact about this \
+             registration, and `Carried::first_target` already ranks it last"
+        );
+
+        // **A link that learned nothing does not erase what is known.** The
+        // replacement above may fail to dial, or come up and never have a resume
+        // accepted; retiring it in turn must not send the next one back to the
+        // launch claim.
+        {
+            let mut inner = daemon.inner.lock().await;
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation: 1,
+                    task: tokio::spawn(async {}),
+                    presence: presence.clone(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        // The supervisor disconnecting, which is the other way a handle leaves.
+        disconnect_the_codex_supervisor(&daemon, &uid, 1).await;
+        let after = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &link, &after),
+            Some("th-being-chased".to_string()),
+            "a link that learned nothing has nothing to say about where the session \
+             is, and forgetting on its behalf is the same regression by a slower route"
+        );
+
+        // **The other departure site rescues too, and this is the leg that proves
+        // it.** The one above passes whether or not `release_codex_link` retains
+        // anything, because the link it retires learned nothing either way. So this
+        // one retires a link that has moved on — the chase settled, and a third
+        // thread was adopted — through the supervisor-disconnect path.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let carry = crate::codex_link::LinkCarry::new();
+            carry.set_for_tests(Some("th-settled-elsewhere"), None);
+            inner.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: 2,
+                    generation: 1,
+                    task: tokio::spawn(async {}),
+                    presence: presence.clone(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry,
+                },
+            );
+        }
+        disconnect_the_codex_supervisor(&daemon, &uid, 2).await;
+        let moved_on = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &link, &moved_on),
+            Some("th-settled-elsewhere".to_string()),
+            "a supervisor disconnecting is the other moment a link's cells stop being \
+             reachable, and what it had learned by then must survive it too"
+        );
+
+        // And a session that never adopted anything is left exactly as the
+        // registration described it.
+        let untouched = crate::codex_link::LinkCarry::new();
+        let fresh = crate::codex_link::ControlLink::from_registration(&frame(Some("th-at-launch")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry("a-uid-with-no-history", &fresh, &untouched),
+            None
+        );
+        assert_eq!(untouched.slots_for_tests(), (None, None, None));
+        assert_eq!(fresh.thread_id.as_deref(), Some("th-at-launch"));
+    }
+
+    /// A Codex registration frame at a chosen launch and launch-time claim.
+    ///
+    /// Shared by the retention tests below because the thing they disagree about is
+    /// the `codex_generation`, and a frame built three times by hand invites the
+    /// three copies to drift on the field that is under test.
+    fn codex_frame(uid: &str, generation: u64, thread: &str) -> RegisterSession {
+        RegisterSession {
+            session_id: "cc-9".into(),
+            session_uid: Some(uid.to_string()),
+            tmux_session: "cc-9".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/work".into(),
+            supervisor_pid: 4242,
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Codex,
+            agent_bin: None,
+            codex_thread_id: Some(thread.to_string()),
+            codex_socket: Some("/tmp/ccd.sock".into()),
+            codex_generation: Some(generation),
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        }
+    }
+
+    /// The control link that frame installs — read off the frame by the real
+    /// extractor, so the generation a test seeds against is the one a registration
+    /// would actually carry rather than a number written into a struct literal.
+    fn codex_link_from(uid: &str, generation: u64, thread: &str) -> crate::codex_link::ControlLink {
+        crate::codex_link::ControlLink::from_registration(&codex_frame(uid, generation, thread))
+            .expect("a complete Codex frame is accepted")
+            .expect("a Codex frame carries a control link")
+    }
+
+    /// A Codex link that has learned where the session went, taken out of the slot
+    /// the way a supervisor disconnect takes one out.
+    ///
+    /// Driven through the real departure — release, park, join — rather than by
+    /// writing the retained map, because retention is half of what the tests below
+    /// are about: a fixture that inserted the entry directly would prove the lookups
+    /// and nothing about how an entry comes to exist or what launch it is stamped
+    /// with.
+    async fn retire_a_codex_link_mid_chase(daemon: &Arc<Daemon>, uid: &str, generation: u64) {
+        {
+            let mut inner = daemon.inner.lock().await;
+            let carry = crate::codex_link::LinkCarry::new();
+            carry.set_for_tests(Some("th-g1-adopted"), Some("th-g1-chased"));
+            inner.codex_links.insert(
+                uid.to_string(),
+                CodexLinkHandle {
+                    epoch: 1,
+                    generation,
+                    task: tokio::spawn(async {}),
+                    presence: crate::codex_link::LinkPresence::new(),
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry,
+                },
+            );
+        }
+        disconnect_the_codex_supervisor(daemon, uid, 1).await;
+    }
+
+    /// **What a link knew is retained for the LAUNCH that learned it, not for the
+    /// uid.**
+    ///
+    /// A uid outlives the process it names. The supervisor can relaunch Codex under
+    /// the same session — a later `codex_generation` — and the threads the previous
+    /// launch was on do not come with it: they belong to a process that has exited.
+    /// The retained carry is keyed by uid alone, so without the launch stamped onto
+    /// it the second launch's link is seeded from the first one's chase and spends
+    /// its whole life resuming a thread nothing can read, while the claim its own
+    /// registration carried — by construction the only fact anybody has about this
+    /// launch — is discarded as older than what was retained. The fallback makes it
+    /// permanent: a candidate that is never adopted strands the link on the dead
+    /// adopted thread behind it rather than on the new launch's own.
+    ///
+    /// The same-launch leg is the premise and is asserted first. Without it this
+    /// test would pass just as well against a retention that seeded nothing at all.
+    ///
+    /// **Mutation:** delete the `retained.generation != link.generation` guard from
+    /// `Inner::seed_codex_carry` and the relaunch leg fails — the second launch is
+    /// handed the first one's pending candidate and copies its slots wholesale.
+    #[tokio::test]
+    async fn a_carry_retained_by_one_codex_launch_never_seeds_a_link_from_a_later_one() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        retire_a_codex_link_mid_chase(&daemon, &uid, 1).await;
+
+        // The premise: the same launch reconnecting is seeded, which is the whole
+        // reason anything is retained.
+        let reconnect = codex_link_from(&uid, 1, "th-g1-at-launch");
+        let resumed = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &reconnect, &resumed)
+                .as_deref(),
+            Some("th-g1-chased"),
+            "a supervisor reconnecting under the SAME launch picks the chase up \
+             where the previous link left it"
+        );
+
+        // The relaunch. A second `codex_generation` under this uid is a second Codex
+        // process, and nothing generation 1 was holding exists inside it.
+        let relaunched = codex_link_from(&uid, 2, "th-g2-at-launch");
+        let fresh = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &relaunched, &fresh),
+            None,
+            "a relaunch resumes what its own registration named, not a thread \
+             belonging to a process that has exited"
+        );
+        assert_eq!(
+            fresh.slots_for_tests(),
+            (None, None, None),
+            "and nothing was copied into it on the way: a seeded fallback would \
+             strand the new launch on the previous one's dead thread the first time \
+             its own chase came to nothing"
+        );
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_adoption(&uid, &relaunched),
+            None,
+            "the presence seed answers out of the same entry and is scoped on the \
+             same terms — publishing generation 1's adopted thread would tell the \
+             fleet the new launch is somewhere it has never been"
+        );
+        assert_eq!(
+            relaunched.thread_id.as_deref(),
+            Some("th-g2-at-launch"),
+            "the frame's own claim is left alone: for a relaunch it is the newest \
+             fact about the session and the only one there is"
+        );
+    }
+
+    /// **A Claude registration clears the Codex chase it took the session over from.**
+    ///
+    /// The uid is stable across an agent change — the same tmux session, the same
+    /// row — and the retained carry is keyed by it. Retention happens when the
+    /// departed link's task is proven stopped, which is right when the next
+    /// registration is the same run reconnecting and wrong when it is a different
+    /// agent taking the session over. Nothing after it cleared the entry, so a later
+    /// Codex link was seeded from a chase belonging to a run two agents ago. The
+    /// generation stamp does not catch this on its own: the seeding link can
+    /// perfectly well carry the generation the first one used, and this test uses
+    /// that one deliberately.
+    ///
+    /// **What leg three is, exactly** (round-3 F9). It is a direct
+    /// [`Inner::seed_codex_carry`] — the seeding step a Codex registration performs —
+    /// and NOT a third registration. It cannot be one: the Claude→Codex prohibition
+    /// this phase added refuses a Codex registration on a uid whose row is Claude, so
+    /// a real `Codex → Claude → Codex` sequence of registrations is now unreachable.
+    /// What stays reachable, and what this pins, is the seeding step reading a stale
+    /// entry — so the assertion is made where the entry is read rather than through a
+    /// registration that would be refused before it got there.
+    ///
+    /// The Claude leg is a **real** registration, through the whole of
+    /// `register_supervisor` and into the control-link transaction, because that is
+    /// where the forgetting belongs: it is the one moment the daemon learns that
+    /// this uid is not Codex any more.
+    ///
+    /// **Mutation:** delete the `forget_codex_carry` call from the transaction and
+    /// the third leg is handed `th-g1-chased`.
+    #[tokio::test]
+    async fn a_claude_registration_between_two_codex_launches_forgets_the_codex_chase() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+
+        // Leg one: a Codex link learns where the session went, then departs.
+        retire_a_codex_link_mid_chase(&daemon, &uid, 1).await;
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(&uid),
+            "the premise: the departing link's chase is retained"
+        );
+
+        // Leg two: the uid comes back as Claude.
+        register(&daemon, "cc-9", Some(&uid)).await;
+        assert!(
+            !daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(&uid),
+            "a registration that is not Codex is not this run reconnecting, and \
+             threads belong to the run"
+        );
+
+        // Leg three: the seeding step a later Codex link would run, at the generation
+        // leg one used. Called directly — see the doc above for why a third
+        // registration is not the reachable shape any more.
+        let relaunched = codex_link_from(&uid, 1, "th-g3-at-launch");
+        let carry = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &relaunched, &carry),
+            None,
+            "the later Codex link starts from its own claim; the chase it would \
+             otherwise resume belongs to a run two agents ago"
+        );
+        assert_eq!(
+            carry.slots_for_tests(),
+            (None, None, None),
+            "and no slot was carried across, so nothing can fall back to a thread \
+             the Claude run in between never even had"
+        );
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_adoption(&uid, &relaunched),
+            None,
+            "nor is the fleet told the new run is on the old one's adopted thread"
+        );
+    }
+
+    /// **A thread announced before the retirement and written after it is still
+    /// retained** (round-7 F1).
+    ///
+    /// `thread/started` is broadcast once and never replayed, so the instant a
+    /// worker reads it is the only instant `B` exists anywhere.
+    /// `Connection::bind_or_follow` writes it into the carry with no await in
+    /// between — which closes cancellation of *that task* and nothing else. A
+    /// registration retiring the link runs on another thread, and a retirement that
+    /// read the cells on the way out could land its snapshot inside that synchronous
+    /// stretch: the snapshot wins, the write lands a moment later in a cell no lookup
+    /// will ever reach again, and the replacement resumes `A`. The session's new
+    /// thread is then lost for the rest of the run, because nothing will announce it
+    /// a second time.
+    ///
+    /// So the cells travel into the park with the task and are read once
+    /// [`OwnedLink::is_finished`] says there is no writer left — see
+    /// [`Inner::retain_codex_carry`].
+    ///
+    /// **The window is reproduced exactly, and without a sleep.** The task says it
+    /// has consumed the frame and then blocks on a channel the test owns, which is
+    /// what "inside a synchronous stretch" means to an `abort`: cancellation lands at
+    /// an await point, and between the read and the write there is none. The
+    /// retirement runs while the task is parked there. Nothing here is timing —
+    /// the write is *ordered after* the retirement, every run.
+    ///
+    /// **Mutation:** snapshot at the departure site instead — `retain_codex_carry`
+    /// beside the removal in [`Daemon::park_current_codex_link`], `None` into the
+    /// park — and the replacement is seeded with nothing: `left: None`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_thread_announced_before_the_park_and_written_after_it_is_still_retained() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-9".to_string());
+
+        let carry = crate::codex_link::LinkCarry::new();
+        let (announced_tx, announced_rx) = std::sync::mpsc::channel();
+        let (write_tx, write_rx) = std::sync::mpsc::channel::<()>();
+        let writing = carry.clone();
+        let task = tokio::spawn(async move {
+            // The frame has been read and the id is in hand; the write has not
+            // happened yet. A blocking receive rather than an await, because a task
+            // sitting at an await is a task an abort can end — and this one is
+            // running code, which is the case that loses the race.
+            announced_tx.send(()).expect("the test is listening");
+            write_rx.recv().expect("the test releases the write");
+            writing.set_for_tests(None, Some("th-announced-once"));
+        });
+        announced_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker must have consumed the announcement before the retirement");
+
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 1,
+                generation: 1,
+                task,
+                presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry,
+            },
+        );
+
+        // The replacement registration retires the incumbent — while the incumbent
+        // is between the announcement and the write.
+        daemon.park_current_codex_link(&uid).await;
+        write_tx.send(()).expect("the worker is waiting to write");
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "the premise: the retired task stops, so its memory is readable at all"
+        );
+
+        let replacement = codex_link_from(&uid, 1, "th-at-launch");
+        let seeded = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &replacement, &seeded)
+                .as_deref(),
+            Some("th-announced-once"),
+            "the replacement resumes the thread the wire announced, not the one the \
+             registration frame claims: the frame names where the session started and \
+             the announcement is the only fact about where it went"
+        );
+    }
+
+    /// **The same rule at the OTHER departure site: a supervisor disconnect**
+    /// (round-8 F4).
+    ///
+    /// A link leaves the slot in two places, not one. The sibling above drives
+    /// [`Daemon::park_current_codex_link`] — the retirement a replacement registration
+    /// performs — and pins the rule there. The release inside
+    /// [`Daemon::unregister_supervisor`] is a second, independently written departure:
+    /// its own [`Inner::release_codex_link`] call, its own construction of the
+    /// [`OwnedLink`], its own [`ParkedCarry`]. An early snapshot restored there alone
+    /// is a regression the sibling cannot see, and every other fixture that reaches
+    /// this path arrives with the carry already written and the task already finished
+    /// — which is precisely the shape in which taking the snapshot early and taking it
+    /// late give the same answer. Two departure sites, two proofs.
+    ///
+    /// **The window, at this site.** The task has consumed `thread/started` and is
+    /// inside the synchronous stretch before the write — a blocking receive, because a
+    /// task sitting at an await is a task an `abort` can end, and it is the one still
+    /// *running* that loses the race. The disconnect runs while it is there.
+    ///
+    /// **Ordered, not timed.** The write is released by a watcher that has first
+    /// observed the handle land in `parked_codex_links`, which is the departure having
+    /// happened. So "written after the departure" is an ordering this test establishes
+    /// rather than a race it hopes to win — and the disconnect's own bounded join then
+    /// finds a task that genuinely finishes, so nothing here costs
+    /// [`CODEX_LINK_STOP_BUDGET`].
+    ///
+    /// **Mutation:** restore the early snapshot at this site alone —
+    /// `inner.retain_codex_carry(uid, ParkedCarry { .. })` beside the
+    /// `release_codex_link` call, `None` into the park — and this fails with
+    /// `left: None, right: Some("th-announced-once")` while the park sibling above
+    /// stays green, which is what proves this leg reaches the release case and not the
+    /// one already covered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_thread_written_after_a_disconnect_releases_the_link_is_still_retained() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        // A real registration, because the release path is keyed by its epoch: the
+        // slot is only this connection's to give up if the handle in it says so.
+        let registration = register(&daemon, "cc-9", Some(&uid)).await;
+
+        let carry = crate::codex_link::LinkCarry::new();
+        let (announced_tx, announced_rx) = std::sync::mpsc::channel();
+        let (write_tx, write_rx) = std::sync::mpsc::channel::<()>();
+        let writing = carry.clone();
+        let task = tokio::spawn(async move {
+            announced_tx.send(()).expect("the test is listening");
+            write_rx.recv().expect("the watcher releases the write");
+            writing.set_for_tests(None, Some("th-announced-once"));
+        });
+        announced_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker must have consumed the announcement before the disconnect");
+
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: registration.epoch,
+                generation: 1,
+                task,
+                presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry,
+            },
+        );
+
+        // Releases the write the instant the link is in the park and not before, so
+        // the write is ordered strictly after the departure.
+        let watcher = {
+            let daemon = Arc::clone(&daemon);
+            let uid = uid.clone();
+            tokio::spawn(async move {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    if daemon
+                        .inner
+                        .lock()
+                        .await
+                        .parked_codex_links
+                        .contains_key(&uid)
+                    {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the disconnect must move the link into the park"
+                    );
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                write_tx.send(()).expect("the worker is waiting to write");
+            })
+        };
+        daemon.unregister_supervisor(&registration).await;
+        watcher.await.expect("the watcher must not panic");
+
+        assert!(
+            daemon.join_parked_codex_links(&registration.session).await,
+            "the premise: the released task stops, so its memory is readable at all"
+        );
+
+        let replacement = codex_link_from(&uid, 1, "th-at-launch");
+        let seeded = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &replacement, &seeded)
+                .as_deref(),
+            Some("th-announced-once"),
+            "a disconnect that read the cells on its way out would hand the next \
+             registration the thread the session LEFT, and `thread/started` is \
+             broadcast once — so the new thread would be lost for the rest of the run"
+        );
+    }
+
+    /// **The agent boundary is a fact about the registration, not about when the
+    /// retired task happens to die** (round-7 F3).
+    ///
+    /// A link that will not stop inside [`CODEX_LINK_STOP_BUDGET`] leaves the park
+    /// unclear, and a registration that hung the forgetting on that report skipped it
+    /// — so the pre-Claude chase was still owed, was retained by whichever later
+    /// transaction finally joined the corpse, and seeded the next same-generation
+    /// Codex registration. The Claude registration in the middle had already
+    /// happened; agreeing with it a second time is not something a later join can be
+    /// asked to remember.
+    ///
+    /// The Claude leg is a **real** registration and its park is genuinely unclear,
+    /// which is the whole of the case: the sibling test above passes on the tidy path
+    /// whether or not the forgetting depends on the join.
+    ///
+    /// **Mutation:** move the `forget_codex_carry` call back inside the
+    /// `park_clear` arm and the last leg is handed `th-g1-chased`; drop the park
+    /// sweep from [`Inner::forget_codex_carry`] and it is handed the same thing by
+    /// the slower route.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_claude_registration_forgets_a_chase_a_link_that_will_not_stop_still_holds() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+        let session = SessionKey::new(uid.clone(), "cc-9".to_string());
+
+        // A task that genuinely cannot be cancelled inside the budget: a blocking one
+        // has no await point to be cancelled at. It must be RUNNING before the abort
+        // — tokio cancels a blocking task that has not started, and the handle would
+        // then resolve instantly, which is a cancellation working rather than the
+        // case under test.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let stubborn = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = stop_rx.recv();
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the blocking task must actually be running before it is aborted");
+
+        let carry = crate::codex_link::LinkCarry::new();
+        carry.set_for_tests(Some("th-g1-adopted"), Some("th-g1-chased"));
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: 1,
+                generation: 1,
+                task: stubborn,
+                presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry,
+            },
+        );
+        daemon.park_current_codex_link(&uid).await;
+        assert!(
+            !daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(&uid),
+            "the premise: nothing is retained yet, because nothing has stopped yet"
+        );
+
+        // The uid comes back as Claude, over a park this registration's own join
+        // cannot clear — the path that used to skip the forgetting entirely.
+        register(&daemon, "cc-9", Some(&uid)).await;
+
+        // The corpse finally stops, and a later transaction joins it.
+        let _ = stop_tx.send(());
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "a parked corpse is joined on a later turn, and that join is what retains"
+        );
+        assert!(
+            !daemon
+                .inner
+                .lock()
+                .await
+                .retained_codex_carry
+                .contains_key(&uid),
+            "and it retains NOTHING: this uid stopped being Codex while the corpse was \
+             still running, and a retention landing afterwards is the pre-Claude chase \
+             coming back by the slow route"
+        );
+
+        // Codex again, at the generation leg one used — the case the generation stamp
+        // cannot catch on its own.
+        let relaunched = codex_link_from(&uid, 1, "th-g3-at-launch");
+        let seeded = crate::codex_link::LinkCarry::new();
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .seed_codex_carry(&uid, &relaunched, &seeded),
+            None,
+            "the relaunch starts from its own claim; the chase it would otherwise \
+             resume belongs to a run two agents ago"
+        );
+    }
+
+    // ------------------------------- codex push admission (2e-5)
+
+    /// **A Codex turn-complete rings the same doorbell Claude's does, and carries
+    /// the agent that decides who hears it.**
+    #[tokio::test]
+    async fn a_codex_turn_complete_rings_once_per_turn() {
+        let (daemon, capture) = capture_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            None,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+        )
+        .await;
+        let session = SessionKey::new(&uid, "cc-9");
+        let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
+        daemon.push_codex_turn_complete(&session, &first).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        {
+            let rings = capture.0.lock().unwrap();
+            assert_eq!(rings.len(), 1, "one finished turn, one ring: {rings:?}");
+            assert_eq!(rings[0].0.kind, crate::apns::PushKind::Completed);
+            assert_eq!(
+                rings[0].0.agent,
+                protocol::agent::AgentKind::Codex,
+                "the fan-out cannot narrow to Codex-capable phones without this"
+            );
+        }
+
+        // **The second turn is second news.** Claude's `agent_completed` re-fires on
+        // a timer and the ambient latch collapses the repeats; `turn/completed`
+        // fires exactly once per turn, so there is nothing to collapse and every
+        // terminal must ring on its own. Far enough apart to be two doorbells —
+        // what the dispatch grace does to two turns closer together than that is
+        // `two_turns_inside_one_dispatch_grace_ring_once_on_both_paths`.
+        let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
+        daemon.push_codex_turn_complete(&session, &second).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            2,
+            "a second turn finishing is a second fact, not a repeat of the first"
+        );
+    }
+
+    /// **Two turns inside one dispatch grace are one ring, on either agent's path.**
+    ///
+    /// The 400 ms grace exists so a doorbell describes the world at the moment it
+    /// rings rather than the moment it was admitted, and the price of that is
+    /// exactly this: a turn superseded before its push left the building does not
+    /// ring, and the reader is told the later, truer thing once. The alternative —
+    /// two "Finished a turn" banners 300 ms apart — is one fact said twice.
+    ///
+    /// Asserted for both agents in one test because the claim is *parity*: Claude
+    /// coalesces here by the same mechanism (its `Stop` hook records the progress
+    /// its `agent_completed` is admitted beside), and a Codex path that behaved
+    /// differently would be the defect. Measured, not assumed — this test is what
+    /// measured it.
+    #[tokio::test]
+    async fn two_turns_inside_one_dispatch_grace_ring_once_on_both_paths() {
+        let (daemon, capture) = capture_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            None,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+        )
+        .await;
+        let session = SessionKey::new(&uid, "cc-9");
+        let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
+        daemon.push_codex_turn_complete(&session, &first).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
+        daemon.push_codex_turn_complete(&session, &second).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            1,
+            "the first turn's doorbell is superseded by the second, which rings"
+        );
+
+        // The Claude control, through the real hook path: `Stop` then the
+        // notification, twice, 100 ms apart — the shape the wire actually produces.
+        let (claude, claude_capture) = capture_daemon();
+        let stop = || HookPost {
+            session_id: "cc-1".into(),
+            session_uid: Some(TEST_UID.into()),
+            event: "Stop".into(),
+            payload: json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"}),
+            wait: false,
+        };
+        claude.handle_hook(stop()).await;
+        claude
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        claude.handle_hook(stop()).await;
+        claude
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            claude_capture.0.lock().unwrap().len(),
+            1,
+            "Claude collapses the same pair the same way — the grace is agent-neutral"
+        );
+    }
+
+    /// **A turn that merely STARTS inside the grace cancels the doorbell too.**
+    ///
+    /// The parity test above covers the second turn *finishing*. This is the other
+    /// half, and it was the live hole: turn A completes, turn B starts 200 ms later,
+    /// and A's completion doorbell was still valid when its grace expired — so a
+    /// phone was told "finished a turn" about a run that was mid-turn. Codex, unlike
+    /// Claude, has a turn-start signal on the wire, and this is what reads it.
+    ///
+    /// Claude is the control again: its `Stop` hook records exactly this progress
+    /// beside the completion, and a `PreToolUse` arriving afterwards cancels a
+    /// waiting doorbell by the same epoch bump.
+    #[tokio::test]
+    async fn a_turn_starting_inside_the_grace_cancels_the_last_turns_doorbell() {
+        let (daemon, capture) = capture_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            None,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+        )
+        .await;
+        let session = SessionKey::new(&uid, "cc-9");
+        let first = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
+        daemon.push_codex_turn_complete(&session, &first).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The next turn begins. No terminal, no fact, no event — just the run
+        // going back to work.
+        daemon.note_codex_turn_running(&uid);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            0,
+            "a completion doorbell must not ring about a run that is mid-turn again"
+        );
+
+        // And the latch is open, not stuck: the turn that started then finishes,
+        // and *that* is news.
+        let second = codex_turn_terminal(&daemon, &session, "th:turn:2").await;
+        daemon.push_codex_turn_complete(&session, &second).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(
+            capture.0.lock().unwrap().len(),
+            1,
+            "the turn that superseded the first one rings when it ends"
+        );
+    }
+
+    /// **A link belongs to the registration that installed it, and to no other.**
+    ///
+    /// `register_supervisor` publishes its epoch and writes its row before the gated
+    /// transaction retires the incumbent link — the two cannot be one step, because
+    /// the retirement needs awaits that must not run under `inner`. For that
+    /// interval the slot holds the *previous* registration's connection, sitting on
+    /// the previous registration's thread. Answering from it would pair the row one
+    /// registration just wrote with the connection another one is holding.
+    #[tokio::test]
+    async fn a_link_from_a_superseded_registration_is_no_link_at_all() {
+        let daemon = test_daemon();
+        let (uid, _presence) = codex_run_with_link_at(
+            &daemon,
+            Some("th-b-just-registered"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-a-the-incumbent".into(),
+            },
+            2, // the new registration's supervisor epoch, already published
+            1, // the incumbent link, not yet retired
+        )
+        .await;
+
+        let (_, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the run is there");
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::NoLink,
+            "the incumbent's connection is not this registration's addressee"
+        );
+        assert_eq!(
+            daemon
+                .sessions()
+                .await
+                .unwrap()
+                .iter()
+                .find(|s| s.session_uid == uid)
+                .and_then(|s| s.codex_thread_id.clone())
+                .as_deref(),
+            Some("th-b-just-registered"),
+            "so the hand-over reports the incoming registration's own claim, never \
+             the outgoing connection's last word"
+        );
+    }
+
+    /// **The FIRST hand-over window, which the epoch filter used to miss.**
+    ///
+    /// The staged test above is the *later* window — supervisor B published, link A
+    /// still in the slot. This is the earlier one, and it is the one a
+    /// handle-based comparison cannot see: registration B writes the row and only
+    /// then publishes its handle, so for the length of that gap the row is B's while
+    /// `supervisors` and `codex_links` both still say A — agreeing with each other,
+    /// and handing back A's connection for B's row.
+    ///
+    /// It is staged through the failure that makes it observable rather than through
+    /// a race: a registration whose row is refused by the uid's tombstone has staked
+    /// its claim and gone no further, which is exactly a registration that has begun
+    /// and not finished. If the claim were staked *after* the row (the old order),
+    /// the refusal would leave nothing behind and the incumbent's connection would
+    /// still answer for the session.
+    ///
+    /// **Mutation:** move the claim below the `upsert_session` — or read
+    /// `supervisors` in `codex_addressee_locked` — and this fails.
+    #[tokio::test]
+    async fn a_registration_that_has_begun_owns_the_session_before_its_row_lands() {
+        let daemon = test_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            Some("th-at-launch"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-a-the-incumbent".into(),
+            },
+        )
+        .await;
+        let (_, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the run is there");
+        assert!(
+            addressee.is_subscribed(),
+            "the premise: the incumbent's connection answers for this session"
+        );
+
+        // The uid is deleted, which leaves a tombstone the next upsert refuses. A
+        // registration for it therefore gets as far as its row and no further —
+        // the shape of a registration caught part-way through, made deterministic.
+        daemon.store.set_lifecycle(&uid, Lifecycle::Exited).unwrap();
+        daemon.store.delete_exited_session(&uid).unwrap();
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        assert!(
+            daemon
+                .register_supervisor(
+                    RegisterSession {
+                        session_id: "cc-9".into(),
+                        session_uid: Some(uid.clone()),
+                        tmux_session: "cc-9".into(),
+                        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                        cwd: "/work".into(),
+                        supervisor_pid: 4242,
+                        claude_bin: None,
+                        agent: protocol::agent::AgentKind::Claude,
+                        agent_bin: None,
+                        codex_thread_id: None,
+                        codex_socket: None,
+                        codex_generation: None,
+                        started_at: protocol::time::now_rfc3339(),
+                        protocol_minor: protocol::PROTOCOL_MINOR,
+                        exit_replay: false,
+                    },
+                    tx,
+                    Arc::new(std::sync::Mutex::new(HashMap::new())),
+                )
+                .await
+                .is_err(),
+            "the premise: this registration got as far as its row and no further"
+        );
+
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            Daemon::codex_addressee_locked(&inner, &uid),
+            crate::codex_link::CodexAddressee::NoLink,
+            "a registration has begun for this session, and the incumbent's \
+             connection is not its addressee"
+        );
+    }
+
+    /// **A disconnect does not touch a claim it never made.**
+    ///
+    /// The window the claim exists for cuts both ways. While a replacement has
+    /// staked its claim and not yet published its handle, the claim names B and
+    /// `supervisors` still names A — so anything A's disconnect writes "for this
+    /// uid" lands on a claim A never made. B then installs its supervisor and its
+    /// link, never stakes again (the stake happens once, beside the row), and every
+    /// later read finds a link no claim matches: `NoLink`, for the rest of that
+    /// session's life, for a registration that *succeeded*.
+    ///
+    /// Round 9 made that structural rather than conditional: a disconnect no longer
+    /// writes this map at all, because the entry is a tombstone that outlives the
+    /// connection (see [`Inner::registration_epochs`]). What the test asserts is
+    /// unchanged, and what can now break it is a disconnect that starts writing.
+    ///
+    /// Staged through the same refusal as the test above — a registration whose
+    /// row the uid's tombstone rejects has staked and gone no further, which is
+    /// exactly a registration caught inside the window.
+    ///
+    /// **Mutation:** have `unregister_supervisor` write its own epoch for this uid
+    /// (`registration_epochs.insert(uid, registration.epoch)` inside the released
+    /// arm) and both assertions fail.
+    #[tokio::test]
+    async fn an_incumbents_disconnect_never_erases_a_replacements_claim() {
+        let daemon = test_daemon();
+        let incumbent = register(&daemon, "cc-1", None).await;
+        let uid = incumbent.session.uid.clone();
+
+        daemon.store.set_lifecycle(&uid, Lifecycle::Exited).unwrap();
+        daemon.store.delete_exited_session(&uid).unwrap();
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        assert!(
+            daemon
+                .register_supervisor(
+                    RegisterSession {
+                        session_id: "cc-1".into(),
+                        session_uid: Some(uid.clone()),
+                        tmux_session: "cc-1".into(),
+                        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                        cwd: "/tmp".into(),
+                        supervisor_pid: 4242,
+                        claude_bin: None,
+                        agent: protocol::agent::AgentKind::Claude,
+                        agent_bin: None,
+                        codex_thread_id: None,
+                        codex_socket: None,
+                        codex_generation: None,
+                        started_at: protocol::time::now_rfc3339(),
+                        protocol_minor: protocol::PROTOCOL_MINOR,
+                        exit_replay: false,
+                    },
+                    tx,
+                    Arc::new(std::sync::Mutex::new(HashMap::new())),
+                )
+                .await
+                .is_err(),
+            "the premise: the replacement staked its claim and got no further"
+        );
+        let staked = {
+            let inner = daemon.inner.lock().await;
+            inner.registration_epochs.get(&uid).copied()
+        };
+        assert!(
+            staked.is_some() && staked != Some(incumbent.epoch),
+            "the premise: the claim now names the replacement, not the incumbent"
+        );
+
+        // The incumbent's socket closes inside that window.
+        daemon.unregister_supervisor(&incumbent).await;
+
+        assert_eq!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .registration_epochs
+                .get(&uid)
+                .copied(),
+            staked,
+            "the incumbent released its own slot and left the replacement's claim"
+        );
+
+        // And the consequence the claim is compared for: the replacement's link,
+        // installed at the epoch it staked, answers for the session. (Installed
+        // directly, because the registration that would install it is the one the
+        // tombstone stopped — the stake is the only part of it this test needs.)
+        let addressee = crate::codex_link::CodexAddressee::Subscribed {
+            thread_id: "th-b-the-replacement".into(),
+        };
+        {
+            let presence = crate::codex_link::LinkPresence::new();
+            presence.publish_for_tests(addressee.clone());
+            daemon.inner.lock().await.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: staked.expect("the claim"),
+                    generation: 1,
+                    task: tokio::spawn(std::future::pending()),
+                    presence,
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            Daemon::codex_addressee_locked(&inner, &uid),
+            addressee,
+            "a registration that staked, survived a disconnect it did not own, and \
+             installed its link is addressable"
+        );
+    }
+
+    /// Advance a future by exactly one poll, and never wait on it.
+    ///
+    /// The registration this stages has to be **stopped** between two of its own
+    /// await points, which a spawned task cannot be: a spawned task runs whenever
+    /// the executor pleases, so "B pauses while C runs" would be a race staged with
+    /// sleeps and would stage the *opposite* order half the time. Held as a future
+    /// this test polls by hand, B makes progress on the polls it is given and on no
+    /// others, and the interleaving is a fact rather than a hope.
+    ///
+    /// The waker is a no-op for the same reason: nothing may wake B behind the
+    /// test's back. That is safe only while B is parked on a `spawn_blocking` join
+    /// — a lock acquisition parked with a dead waker would hold its place in
+    /// tokio's fair queue and strand everyone behind it, which is why the loop below
+    /// stops at the stake, on the poll that carries B into its row write.
+    fn nudge<F: std::future::Future>(fut: std::pin::Pin<&mut F>) -> std::task::Poll<F::Output> {
+        fut.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    /// **Two registrations for one session, both good, and only the winner may
+    /// publish.**
+    ///
+    /// The stake and the supervisor publish are separated by two awaits — the row
+    /// upsert and `relabel_open_cards` — and a whole second registration fits in
+    /// that gap. B stakes, pauses in its row write; C stakes a later epoch and runs
+    /// to the end, publishing its handle; B wakes and, published unconditionally,
+    /// overwrote it. Nothing about that is recoverable by anything downstream: the
+    /// live supervisor channel becomes B's, whose connection C is not on, while
+    /// `registration_epochs` still names C — so `codex_addressee_locked` compares
+    /// C's link against B's older epoch and answers `NoLink` for the rest of the
+    /// session's life, for a registration that *succeeded*.
+    ///
+    /// B goes through the real path. It is a future this test owns (see `nudge`)
+    /// rather than a spawned task, so nothing happens inside its pause except what
+    /// this test does there; polling stops on the poll that stakes B's claim, which
+    /// is the poll that carries B into `upsert_session` and leaves it there.
+    ///
+    /// **C is staked by hand, because it can no longer be a second registration.**
+    /// The acceptance gate (finding 6) is taken above B's stake and held to the end
+    /// of its link transaction, so a real C would queue outside B's window rather
+    /// than run inside it, and the two would simply happen in order. The check under
+    /// test is therefore no longer the first line of defence but a kept fail-closed
+    /// second one — and asking whether it still holds means staging the state it
+    /// exists to refuse, exactly as the tests around this one stage a link the gated
+    /// Codex path cannot install. C is staked in **both** places a real acceptance
+    /// stakes it: the claim, written beside the row, and the supervisor handle
+    /// published several awaits later.
+    ///
+    /// **Mutation:** make the publish unconditional again and the surviving handle
+    /// is B's — both the epoch assertion and the resolver assertion fail.
+    #[tokio::test]
+    async fn two_successful_concurrent_registrations_leave_only_the_winner_published() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        let mut overtaken = Box::pin(daemon.register_supervisor(
+            RegisterSession {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.clone()),
+                tmux_session: "cc-1".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                cwd: "/tmp".into(),
+                supervisor_pid: 4242,
+                claude_bin: None,
+                agent: protocol::agent::AgentKind::Claude,
+                agent_bin: None,
+                codex_thread_id: None,
+                codex_socket: None,
+                codex_generation: None,
+                started_at: protocol::time::now_rfc3339(),
+                protocol_minor: protocol::PROTOCOL_MINOR,
+                exit_replay: false,
+            },
+            tx,
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
+        ));
+
+        // Drive B as far as its stake and no further. `try_lock` so this test never
+        // joins the queue for `inner` itself and cannot be what B is waiting on.
+        let mut staked = None;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(overtaken.as_mut()).is_pending(),
+                "B must still be in flight: the window this test needs is the one \
+                 between its stake and its publish"
+            );
+            if let Ok(inner) = daemon.inner.try_lock() {
+                if let Some(epoch) = inner.registration_epochs.get(&uid).copied() {
+                    staked = Some(epoch);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let staked = staked.expect("B must reach its stake");
+
+        // C, inside B's pause: a later epoch, staked with a row and published as a
+        // handle, which is the whole of what B has to find when it wakes.
+        let winner = {
+            let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+            Box::leak(Box::new(rx));
+            let mut inner = daemon.inner.lock().await;
+            inner.next_epoch += 1;
+            let epoch = inner.next_epoch;
+            inner.registration_epochs.insert(uid.clone(), epoch);
+            inner.supervisors.insert(
+                uid.clone(),
+                SupervisorHandle {
+                    tx,
+                    inflight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                    next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                    epoch,
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    claude_bin: None,
+                    codex_generation: None,
+                },
+            );
+            epoch
+        };
+        assert!(
+            winner > staked,
+            "the premise: C staked after B ({winner} vs {staked})"
+        );
+
+        let refused = overtaken.await;
+        assert!(
+            refused.is_err(),
+            "a registration that lost the session while its row was being written \
+             must be abandoned, not completed: {refused:?}"
+        );
+
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            inner.supervisors.get(&uid).map(|handle| handle.epoch),
+            Some(winner),
+            "the surviving supervisor is the winner's, not the one that woke up last"
+        );
+        assert_eq!(
+            inner.registration_epochs.get(&uid).copied(),
+            Some(winner),
+            "and the claim was never disturbed by the loser's abandonment"
+        );
+
+        // The consequence the two are compared for: the winner's link, installed at
+        // the epoch it staked, is what the session resolves to. (Installed directly,
+        // because a Claude registration installs no link — the disagreement between
+        // the claim and the published handle is the whole of what is under test.)
+        drop(inner);
+        let addressee = crate::codex_link::CodexAddressee::Subscribed {
+            thread_id: "th-the-winner".into(),
+        };
+        {
+            let presence = crate::codex_link::LinkPresence::new();
+            presence.publish_for_tests(addressee.clone());
+            daemon.inner.lock().await.codex_links.insert(
+                uid.clone(),
+                CodexLinkHandle {
+                    epoch: winner,
+                    generation: 1,
+                    task: tokio::spawn(std::future::pending()),
+                    presence,
+                    answers: crate::codex_link::answer_channel().0,
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry: crate::codex_link::LinkCarry::new(),
+                },
+            );
+        }
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            Daemon::codex_addressee_locked(&inner, &uid),
+            addressee,
+            "the claim and the published handle agree, so the resolver answers the \
+             winner's connection rather than `NoLink` for the life of the session"
+        );
+    }
+
+    /// One registration for `uid` with every field this session is described by
+    /// carried differently, so which registration wrote what is legible afterwards.
+    ///
+    /// Returned as a future rather than awaited, because the tests below have to
+    /// stop it between two of its own await points; see `nudge`.
+    fn distinguishable_registration(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        name: &str,
+    ) -> impl std::future::Future<Output = Result<Registration>> {
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        let daemon = Arc::clone(daemon);
+        let info = RegisterSession {
+            session_id: format!("cc-{name}"),
+            session_uid: Some(uid.to_string()),
+            tmux_session: format!("cc-{name}"),
+            tmux_socket: format!("/tmp/{name}.sock"),
+            cwd: format!("/tmp/{name}-project"),
+            supervisor_pid: 4242,
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Claude,
+            agent_bin: None,
+            codex_thread_id: None,
+            codex_socket: None,
+            codex_generation: None,
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        };
+        async move {
+            daemon
+                .register_supervisor(info, tx, Arc::new(std::sync::Mutex::new(HashMap::new())))
+                .await
+        }
+    }
+
+    /// Poll a future until it is ready, or give up. Bounded, and the sleep between
+    /// polls is what gives the rest of the runtime — the blocking pool a `nudge`d
+    /// future is parked on, most of all — a chance to make it ready.
+    async fn nudge_to_completion<F: std::future::Future>(
+        mut fut: std::pin::Pin<&mut F>,
+        turns: u32,
+    ) -> Option<F::Output> {
+        for _ in 0..turns {
+            if let std::task::Poll::Ready(out) = nudge(fut.as_mut()) {
+                return Some(out);
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        None
+    }
+
+    /// **A registration that does not own the session cannot write its ROW or
+    /// relabel its CARDS** (finding 6).
+    ///
+    /// The stake check above the supervisor publish is a real guard and it protected
+    /// the wrong span. Two acceptance steps happen before it and both are durable:
+    /// `Db::upsert_session` writes this registration's cwd, session id, socket and
+    /// thread id over whatever the row said, and `relabel_open_cards` stamps this
+    /// registration's project onto every card the session is holding. Both are
+    /// awaits, and a whole second registration for the same uid fits inside either
+    /// one. The loser therefore left its working directory on the winner's row and
+    /// its project name on the winner's cards, and only afterwards reached the check
+    /// and refused — so "a refused registration mutated nothing" was true of the
+    /// in-memory tail and false of the half that survives a restart. Neither is
+    /// repaired by anything downstream: the registration frame is the row's only
+    /// writer, and the relabel is a fire-once edit.
+    ///
+    /// **The two registrations differ in every field under test** — cwd, session id,
+    /// tmux name and socket — because with the identical `/tmp` frames the test
+    /// above uses, neither consequence is observable at all: the loser's row write
+    /// and the winner's are byte-identical, and the two project labels are the same
+    /// word.
+    ///
+    /// **What is asserted is that the acceptance is ATOMIC**, not who won it. Under
+    /// the gate the first future through completes its whole acceptance and the
+    /// second's runs after it; with the gate around the link transaction alone the
+    /// second runs *inside* the first's row write. The two worlds disagree about
+    /// whether the first future succeeds or is refused, so that is deliberately not
+    /// asserted. What must hold either way is that the row, the cards, the claim and
+    /// the published handle all describe **one** registration — the last one to
+    /// stake — and under the mutation they do not.
+    ///
+    /// Both registrations are futures this test polls by hand (see `nudge`) rather
+    /// than spawned tasks, so the interleaving is a fact and not a hope, and so that
+    /// a second registration parked on the acceptance gate stays parked until this
+    /// test polls it again.
+    ///
+    /// **Mutation:** move the gate acquisition back down so it wraps only the
+    /// control-link transaction. The second registration then runs start to finish
+    /// inside the first's row write; the first wakes, relabels the card it no longer
+    /// owns with its own project, and only then refuses. The card assertion fails.
+    /// The row assertion is the same defect and is asserted for the same reason, but
+    /// it is not what makes this test go red: both registrations hand their write to
+    /// the blocking pool, and which of them reaches SQLite's single writer first is
+    /// not something a test can pin.
+    #[tokio::test]
+    async fn a_registration_that_loses_the_session_writes_neither_its_row_nor_its_cards() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+
+        // A card the session is already holding, filed under a project neither
+        // registration names, so a relabel by either one is visible.
+        daemon.inner.lock().await.pending.insert(
+            (uid.clone(), "r-1".to_string()),
+            pending_card(&uid, "before"),
+        );
+
+        let mut first = Box::pin(distinguishable_registration(&daemon, &uid, "first"));
+        // Stopped on the poll that stakes its claim, which is the poll that carries
+        // it into `upsert_session` and leaves it there. `try_lock`, so this test
+        // never joins the queue for `inner` and cannot be what a registration is
+        // waiting on.
+        let mut staked = None;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(first.as_mut()).is_pending(),
+                "the window this test needs is the one between the stake and the \
+                 publish, so the first registration must still be in flight"
+            );
+            if let Ok(inner) = daemon.inner.try_lock() {
+                if let Some(epoch) = inner.registration_epochs.get(&uid).copied() {
+                    staked = Some(epoch);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let staked = staked.expect("the first registration must reach its stake");
+
+        // The second, driven as far as it can get inside that pause. Under the
+        // acceptance gate that is nowhere at all — it parks on `register_supervisor`'s
+        // first act and stays there. With the gate moved down it runs to the end here,
+        // which is the world this test exists to refuse.
+        let mut second = Box::pin(distinguishable_registration(&daemon, &uid, "second"));
+        let inside = nudge_to_completion(second.as_mut(), 400).await;
+
+        // Both are walked out. Nothing is asserted until each has settled, so what
+        // follows is about the state the pair left behind rather than about who
+        // reached it first.
+        let first_out = nudge_to_completion(first.as_mut(), 5_000)
+            .await
+            .expect("the first registration must settle");
+        let second_out = match inside {
+            Some(out) => out,
+            None => nudge_to_completion(second.as_mut(), 5_000)
+                .await
+                .expect("the second registration must settle once the gate frees"),
+        };
+        let winner = second_out.expect("the later registration is accepted");
+        assert!(
+            winner.epoch > staked,
+            "the premise: the second staked after the first ({} vs {staked}); \
+             the first settled as {first_out:?}",
+            winner.epoch
+        );
+
+        let row = daemon
+            .store
+            .get_session(&uid)
+            .unwrap()
+            .expect("the session has a row");
+        assert_eq!(
+            row.cwd, "/tmp/second-project",
+            "the durable half of the acceptance belongs to the registration that \
+             owns the session: a run's working directory is where the fleet says it \
+             is and where every card it opens is named from"
+        );
+        assert_eq!(
+            row.session_id, "cc-second",
+            "and so does its identity — the registration frame is this column's only \
+             writer, so a loser's value stands for the life of the run"
+        );
+        assert_eq!(
+            row.tmux_socket, "/tmp/second.sock",
+            "and the socket the daemon would type into"
+        );
+
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            inner
+                .pending
+                .values()
+                .map(|card| card.project_label.clone())
+                .collect::<Vec<_>>(),
+            vec!["second-project".to_string()],
+            "and the open card wears the owner's project: the relabel is a \
+             fire-once edit, so a card a losing registration renamed keeps that \
+             name — one project on a lock screen and another on the list behind it"
+        );
+        assert_eq!(
+            inner.registration_epochs.get(&uid).copied(),
+            Some(winner.epoch),
+            "the claim is the owner's"
+        );
+        assert_eq!(
+            inner.supervisors.get(&uid).map(|handle| handle.epoch),
+            Some(winner.epoch),
+            "and so is the live supervisor channel, which is the pairing the whole \
+             acceptance exists to keep consistent with the row above"
+        );
+    }
+
+    /// **The row and the addressee are two reads and they are validated as ONE
+    /// fact** (finding 7).
+    ///
+    /// They cannot be taken under one lock: the row is a database read, and this
+    /// type's lock ordering forbids awaiting the blocking pool with `inner` held.
+    /// So a registration that completed between them returned one registration's row
+    /// beside another's addressee — a caller told a thread, a cwd and an agent that
+    /// never described a single run at any instant.
+    ///
+    /// The tear is constructed rather than raced, and **the construction is the whole
+    /// difficulty**. An earlier form of this test paused the resolver on its own first
+    /// poll and ran the registration in that pause — which proved nothing, because that
+    /// pause is the read that only learns WHICH session to settle against, and it
+    /// happens before the gate is taken. The registration finished, the resolver then
+    /// walked through an uncontended gate, and both of its real reads landed after the
+    /// acceptance: a coherent pair, gate or no gate. Removing the gate entirely left it
+    /// green. A test that cannot see the guard it names is worse than no test.
+    ///
+    /// So the order is inverted. The REGISTRATION is the future parked mid-acceptance,
+    /// stopped on the poll that stakes its claim — which is the poll that carries it
+    /// into its row write while it holds the acceptance gate. Only then is the resolver
+    /// started, and what is asserted is that it **cannot finish**: it is polled far
+    /// past the point where both of its database reads would have completed, and it
+    /// must still be pending, because it is parked on a gate the registration is
+    /// holding. That is the assertion the guard is load-bearing for — without the gate
+    /// the resolver runs to completion right here, reading the pre-registration row and
+    /// pairing it with whatever the half-finished acceptance has published.
+    ///
+    /// Then the registration is released, the resolver is walked out, and the pair it
+    /// returns must be wholly post-registration. That second half is what proves the
+    /// pendency above was the gate rather than a wedged future.
+    ///
+    /// The two halves of the row that are asserted are its **agent** and its **cwd**,
+    /// which are the fields a registration actually moves. Not `codex_thread_id`: the
+    /// upsert coalesces that column, so a Claude registration cannot clear it and the
+    /// two rows would agree on it whichever one came back.
+    ///
+    /// **Mutation:** drop the gate acquisition in `resolve_codex_inbound` (keep the
+    /// `registration_gate` lookup, take no lock). The resolver then completes while the
+    /// registration is still parked, and the "must still be pending" assertion fails.
+    #[tokio::test]
+    async fn the_resolver_never_pairs_one_registrations_row_with_anothers_addressee() {
+        let daemon = test_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            Some("th-before"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-before".into(),
+            },
+        )
+        .await;
+        // The premise: settled, the pair describes the Codex run the fixture staged.
+        let (before, addressee) = daemon
+            .resolve_codex_inbound(&uid)
+            .await
+            .unwrap()
+            .expect("the run resolves");
+        assert_eq!(before.cwd, "/work");
+        assert_eq!(addressee.thread_id(), Some("th-before"));
+
+        // A real registration, parked mid-acceptance with the gate in its hand. It
+        // moves the session onto another agent and another directory, and its
+        // control-link transaction reclaims the slot and leaves it empty — so once it
+        // lands the session has no addressee at all.
+        //
+        // Stopped on the poll that stakes its claim, which is the poll that carries it
+        // into `upsert_session` and leaves it there. `try_lock`, so this test never
+        // joins the queue for `inner` and cannot be what the registration waits on.
+        // The fixture already staked a claim for this uid, so the stake to wait for is
+        // a CHANGE to it, not its presence.
+        let before_stake = daemon
+            .inner
+            .lock()
+            .await
+            .registration_epochs
+            .get(&uid)
+            .copied();
+        let mut moving = Box::pin(distinguishable_registration(&daemon, &uid, "moved"));
+        let mut staked = None;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(moving.as_mut()).is_pending(),
+                "the window this test needs is the one inside the acceptance, so the \
+                 registration must still be in flight"
+            );
+            if let Ok(inner) = daemon.inner.try_lock() {
+                let now = inner.registration_epochs.get(&uid).copied();
+                if now != before_stake {
+                    staked = now;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let staked = staked.expect("the registration must reach its stake");
+
+        // **The assertion the gate is load-bearing for.** Both of the resolver's reads
+        // are point queries on the blocking pool and would have settled many times over
+        // inside this budget — the same budget the registration above needed only a
+        // handful of turns of. It gets no further than the gate.
+        let mut resolving = Box::pin(daemon.resolve_codex_inbound(&uid));
+        assert!(
+            nudge_to_completion(resolving.as_mut(), 400).await.is_none(),
+            "a resolution may not be assembled across an acceptance that is still in \
+             flight: the row and the addressee would come from either side of it, and \
+             the caller would be handed a run that never existed at any instant"
+        );
+
+        // Released. Now it must settle, which is what makes the pendency above a gate
+        // and not a wedge.
+        let moved = nudge_to_completion(moving.as_mut(), 5_000)
+            .await
+            .expect("the registration must settle")
+            .expect("the registration is accepted");
+        assert!(moved.epoch >= staked, "the premise: the acceptance landed");
+
+        let (row, addressee) = nudge_to_completion(resolving.as_mut(), 5_000)
+            .await
+            .expect("the resolver settles once the gate frees")
+            .unwrap()
+            .expect("the run resolves");
+        assert_eq!(
+            addressee,
+            crate::codex_link::CodexAddressee::NoLink,
+            "the registration retired the Codex link and installed none in its \
+             place, so this is the addressee half of the pair"
+        );
+        assert_eq!(
+            row.cwd, "/tmp/moved-project",
+            "and the row it comes back with is the one that same registration \
+             wrote, not the one read before it started"
+        );
+        assert_eq!(
+            row.agent,
+            protocol::agent::AgentKind::Claude,
+            "a row still saying Codex beside a `NoLink` addressee is a description \
+             of no run that ever existed — the link was retired BY the registration \
+             that made this row say Claude"
+        );
+    }
+
+    /// **The hook path is the row's OTHER writer, and it is gated too** (round-7 F4).
+    ///
+    /// The resolver above holds the session's registration gate and says the pair it
+    /// returns is coherent. That is a claim about every writer of the row, and there
+    /// are three: `register_supervisor`, `Daemon::ensure_session` — which every hook
+    /// every run posts goes through, and which this test is about — and
+    /// `Daemon::mark_exited`, the lifecycle-only writer that takes the same gate for
+    /// its own reason (round-8 F3; see the sweep test that pins it).
+    /// `ensure_session` reads the row and writes it
+    /// back — `agent`, `cwd`, `tmux_session` and `created_at` are all carried forward
+    /// from what it read — and `agent` is the one identity column
+    /// `Store::upsert_session` takes from `excluded` rather than COALESCE-ing. So an
+    /// unguarded hook that read before an acceptance and wrote after it restored the
+    /// agent the acceptance had just changed, and the resolver then returned that row
+    /// beside the new registration's addressee: the exact pair it promises not to
+    /// return, assembled by a writer its gate was not holding.
+    ///
+    /// Two legs, because the guard has two halves and a mutation can remove either.
+    ///
+    /// **Leg one — the re-read.** The hook is stopped on its first poll, which
+    /// dispatches the read that only answers WHICH run this hook is for. A whole
+    /// registration then runs and lands, moving the agent and the cwd. Walked out, the
+    /// hook must write what the registration left, because the values it carries
+    /// forward come from the read it takes under the gate and not from that first one.
+    ///
+    /// **Leg two — the gate.** A second hook is polled until it holds this session's
+    /// gate, and a registration is then asserted unable to finish: it is polled far
+    /// past the point where its own reads and writes would have settled. Released, it
+    /// lands — which is what proves the pendency was the gate and not a wedge.
+    ///
+    /// The registration is a Claude one moving a Codex row. That used to be the only
+    /// direction the real path could drive — `supported_agents()` refused every Codex
+    /// registration, so the reviewer's own direction would have meant staging a
+    /// registration nothing could make — and both directions are now makeable. It is
+    /// kept as it stands because the column and the mechanism are the same either
+    /// way, and because this direction needs no control-link fixture to set up: what
+    /// is under test is a read-modify-write on the row, not which agent won it. `cwd` is asserted beside `agent` because the hook carries no
+    /// `cwd` of its own here, which is what makes that field a read-modify-write too —
+    /// and unlike `agent` it is a corruption this phase can actually reach.
+    ///
+    /// **Mutations:** build the row from the unguarded read (delete the re-read under
+    /// the gate) and leg one hands back `Codex` and `/work`; drop the gate acquisition
+    /// in `ensure_session` and leg two's registration runs to completion inside the
+    /// hook's read-modify-write.
+    #[tokio::test]
+    async fn a_hook_may_not_write_the_row_across_a_registration_for_its_own_session() {
+        let daemon = test_daemon();
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            Some("th-before"),
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-before".into(),
+            },
+        )
+        .await;
+        // No `cwd` and no `transcript_path`: the fields under test are then exactly
+        // the ones the hook carries forward from the row rather than asserting itself.
+        let input = input_from(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#);
+        let agent_of = |daemon: Arc<Daemon>, uid: String| async move {
+            let row = daemon
+                .db
+                .get_session(uid)
+                .await
+                .unwrap()
+                .expect("the run has a row");
+            (row.agent, row.cwd)
+        };
+        assert_eq!(
+            agent_of(Arc::clone(&daemon), uid.clone()).await,
+            (protocol::agent::AgentKind::Codex, "/work".to_string()),
+            "the premise: the row describes the Codex run the fixture staged"
+        );
+
+        // ---- Leg one: the re-read is the one that counts.
+        //
+        // Stopped on the first poll, which is the one that dispatches the read that
+        // only learns which run this is — before any gate is taken, because the uid a
+        // gate is keyed by is not known until that read answers.
+        let mut hooking = Box::pin(daemon.ensure_session("cc-9", Some(&uid), &input));
+        assert!(
+            nudge(hooking.as_mut()).is_pending(),
+            "the window this test needs is the one inside the hook, so it must still \
+             be in flight"
+        );
+        nudge_to_completion(
+            Box::pin(distinguishable_registration(&daemon, &uid, "moved")).as_mut(),
+            5_000,
+        )
+        .await
+        .expect("the registration must settle")
+        .expect("the registration is accepted");
+        nudge_to_completion(hooking.as_mut(), 5_000)
+            .await
+            .expect("the hook must settle once the gate frees")
+            .unwrap()
+            .expect("the hook keeps its run");
+        assert_eq!(
+            agent_of(Arc::clone(&daemon), uid.clone()).await,
+            (
+                protocol::agent::AgentKind::Claude,
+                "/tmp/moved-project".to_string()
+            ),
+            "a hook writes back what the row says NOW, not what it said when the hook \
+             worked out which run it belonged to: restoring either of these would hand \
+             the resolver a row describing the registration before last beside the \
+             addressee of the one that just landed"
+        );
+
+        // ---- Leg two: and nothing may register underneath it while it writes.
+        let gate = daemon.registration_gate(&uid).await;
+        let mut writing = Box::pin(daemon.ensure_session("cc-moved", Some(&uid), &input));
+        let mut held = false;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(writing.as_mut()).is_pending(),
+                "a hook that finishes before this session's gate is ever contended \
+                 took no gate at all, and its read-modify-write is unguarded"
+            );
+            if gate.try_lock().is_err() {
+                held = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            held,
+            "the hook must reach its guarded section and hold this session's gate"
+        );
+        let mut arriving = Box::pin(distinguishable_registration(&daemon, &uid, "later"));
+        assert!(
+            nudge_to_completion(arriving.as_mut(), 400).await.is_none(),
+            "an acceptance may not land inside a hook's read-modify-write: the hook \
+             would write the row it read a moment before the acceptance over the one \
+             the acceptance just wrote"
+        );
+
+        // Released, and both settle — which is what makes the pendency above a gate
+        // rather than a wedged future.
+        nudge_to_completion(writing.as_mut(), 5_000)
+            .await
+            .expect("the hook settles")
+            .unwrap()
+            .expect("the hook keeps its run");
+        nudge_to_completion(arriving.as_mut(), 5_000)
+            .await
+            .expect("the registration settles once the hook releases the gate")
+            .expect("the registration is accepted");
+        assert_eq!(
+            agent_of(Arc::clone(&daemon), uid.clone()).await.1,
+            "/tmp/later-project".to_string(),
+            "and the last writer is the registration, which ran wholly after the hook \
+             rather than inside it"
+        );
+    }
+
+    /// **A registration that has lost the session must not retire the winner's
+    /// link.**
+    ///
+    /// The retirement is the destructive half of the acceptance: the incumbent's
+    /// link goes out of the slot and is aborted, and the transaction that did it
+    /// installs a replacement. A transaction that ran that first act on behalf of a
+    /// registration the session no longer belongs to destroyed the OWNER's observer
+    /// and put nothing in its place — the session stayed registered and permanently
+    /// unobserved, which nothing downstream repairs, because `thread/started` is
+    /// broadcast once and the next transaction for this uid is the next
+    /// registration. So every step of the acceptance past the stake has to be
+    /// reachable only by whoever holds it.
+    ///
+    /// **The racing form of this is no longer constructible, and that is the fix,
+    /// not an omission.** The acceptance gate (finding 6) is taken above the stake
+    /// and held to the end of the link transaction, so no second registration can be
+    /// inside another's acceptance at any point: a loser cannot be overtaken between
+    /// its publish and its transaction, because nothing else can stake in that
+    /// window at all. What can still be staged is the state those guards exist to
+    /// refuse, and that is what this test stages — the same way the tests around it
+    /// stage a control link the gated Codex path cannot install.
+    ///
+    /// Three things are asked, in the order a registration meets them:
+    ///
+    ///   * the stake check refuses a registration whose claim has been taken, and it
+    ///     refuses it **before** the transaction, so the live link is untouched;
+    ///   * `Inner::owner_of` answers out of the CLAIM and not out of `supervisors`.
+    ///     The two disagree by design in the hand-over window — the claim is staked
+    ///     beside the row and the handle is published several awaits later — so an
+    ///     ownership check written against `supervisors` tells a transaction it still
+    ///     owns a session it has already lost;
+    ///   * the retirement is deferred and not skipped: the owner's own registration
+    ///     goes through the real path and does it.
+    ///
+    /// The link in the slot is installed by hand, for the same reason the test above
+    /// installs one. That reason was that no registration this daemon accepted could
+    /// carry a control link, `supported_agents()` being `[Claude]`; a complete Codex
+    /// registration carries one now. It is still installed by hand because what this
+    /// test needs is a link *belonging to a losing epoch*, and the shortest way to
+    /// arrange that is to put one where the loser would have put it. The destructive
+    /// phase is not Codex-only — it runs for every agent, on every registration —
+    /// which is what makes a Claude loser able to abort a Codex link.
+    ///
+    /// **Mutation:** make `Inner::owner_of` read `supervisors` instead of the claim
+    /// and the middle leg fails. The "park before the ownership check" mutation the
+    /// earlier form of this test also killed is no longer observable from outside:
+    /// under the acceptance gate `owns` cannot be false when the transaction is
+    /// reached, so the two orders behave identically. The guard is kept fail-closed;
+    /// nothing here can prove it any more.
+    #[tokio::test]
+    async fn a_registration_that_lost_the_session_does_not_retire_the_live_link() {
+        let daemon = test_daemon();
+        let uid = protocol::uid::new().unwrap();
+
+        // The incumbent, and the link it is being observed through.
+        let incumbent = register(&daemon, "cc-1", Some(&uid)).await;
+        let live = tokio::spawn(std::future::pending());
+        let watch = live.abort_handle();
+        daemon.inner.lock().await.codex_links.insert(
+            uid.clone(),
+            CodexLinkHandle {
+                epoch: incumbent.epoch,
+                generation: 1,
+                task: live,
+                presence: crate::codex_link::LinkPresence::new(),
+                answers: crate::codex_link::answer_channel().0,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry: crate::codex_link::LinkCarry::new(),
+            },
+        );
+
+        // The loser: a real registration, stopped on the poll that stakes its claim
+        // and carries it into its row write. `try_lock`, so this test never joins the
+        // queue for `inner` and cannot be what a registration is waiting on.
+        let mut loser = Box::pin(distinguishable_registration(&daemon, &uid, "loser"));
+        let mut lost = None;
+        for _ in 0..2_000 {
+            assert!(
+                nudge(loser.as_mut()).is_pending(),
+                "the window this test needs is one inside the loser's own acceptance"
+            );
+            match daemon
+                .inner
+                .try_lock()
+                .ok()
+                .and_then(|inner| inner.registration_epochs.get(&uid).copied())
+            {
+                Some(epoch) if epoch > incumbent.epoch => {
+                    lost = Some(epoch);
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(1)).await,
+            }
+        }
+        let lost = lost.expect("the loser must reach its stake");
+
+        // The winner's claim, staked by hand. Its handle is deliberately NOT
+        // published: this is the hand-over window, and the whole question is which of
+        // the two maps a later step is entitled to believe.
+        let won = {
+            let mut inner = daemon.inner.lock().await;
+            inner.next_epoch += 1;
+            let won = inner.next_epoch;
+            inner.registration_epochs.insert(uid.clone(), won);
+            won
+        };
+        assert!(won > lost, "the premise: the winner staked after the loser");
+
+        {
+            let inner = daemon.inner.lock().await;
+            assert_eq!(
+                inner.supervisors.get(&uid).map(|handle| handle.epoch),
+                Some(incumbent.epoch),
+                "the premise: in this window the claim is the winner's and the \
+                 published handle is still somebody else's, so the two maps disagree \
+                 about who owns the session"
+            );
+            assert_eq!(
+                inner.owner_of(&uid),
+                Some(won),
+                "ownership is the claim, and only the claim: `supervisors` is a \
+                 window behind it by design, and a transaction that believed it \
+                 would retire the winner's link on a loser's behalf"
+            );
+        }
+
+        // The loser wakes into the rest of its acceptance and finds the session gone.
+        let outcome = nudge_to_completion(loser.as_mut(), 5_000)
+            .await
+            .expect("the loser must settle");
+        assert!(
+            outcome.is_err(),
+            "a registration that lost the session must be abandoned, not completed: \
+             {outcome:?}"
+        );
+
+        {
+            let inner = daemon.inner.lock().await;
+            assert_eq!(
+                inner.codex_links.get(&uid).map(|held| held.epoch),
+                Some(incumbent.epoch),
+                "a registration that has lost the session has nothing to retire: \
+                 destroying the link would leave the run unobserved with nothing to \
+                 install in its place"
+            );
+            assert!(
+                inner.parked_codex_links.get(&uid).is_none_or(Vec::is_empty),
+                "and nothing was moved into the park on the way"
+            );
+            assert!(
+                !watch.is_finished(),
+                "parking a link aborts it, and an aborted observer is not recoverable \
+                 by anything downstream"
+            );
+        }
+
+        // **Deferred, not skipped.** The retirement belongs to whoever owns the
+        // session, and the owner does it — through the real path, into the very
+        // transaction the loser was turned away from.
+        let winner = register(&daemon, "cc-1", Some(&uid)).await;
+        let inner = daemon.inner.lock().await;
+        assert_eq!(
+            inner.registration_epochs.get(&uid).copied(),
+            Some(winner.epoch)
+        );
+        assert!(
+            inner.codex_links.is_empty(),
+            "the winner's own transaction retired the incumbent's link — a Claude \
+             registration reclaims the slot and leaves it empty"
+        );
+    }
+
+    /// **This run's epoch cannot be another run's by accident.**
+    ///
+    /// It is what `push_targets` compares a stored feature set against, so a repeat
+    /// silently re-authorizes an advertisement made to a different process. A pid
+    /// and a millisecond cannot promise that — pids are reused and clocks move — so
+    /// the identity is a uid's ten random bytes, and the legible pair is only a
+    /// prefix for whoever reads the column.
+    #[test]
+    fn the_feature_epoch_carries_an_identity_and_not_just_a_timestamp() {
+        let epoch = feature_epoch();
+        assert_eq!(epoch, feature_epoch(), "one value for the life of the run");
+        let nonce = epoch
+            .rsplit('-')
+            .next()
+            .expect("the epoch is a hyphenated triple");
+        assert!(
+            protocol::uid::is_well_formed(nonce),
+            "the epoch's last field must be a minted identity, not a derived number: \
+             {epoch}"
+        );
+        assert!(
+            epoch.starts_with(&format!("{}-", std::process::id())),
+            "and the pid stays in front of it, for a human reading the column: {epoch}"
+        );
+    }
+
+    /// **The nonce in the epoch is the nonce that was handed in** (round-8 F8).
+    ///
+    /// The sibling above, the refusal below and the startup-wiring test after it are
+    /// three assertions about the same value and none of them looks at where it came
+    /// from: the first checks a shape, the second what happens when entropy fails,
+    /// the third which function evaluates it. A fixed well-formed uid written into
+    /// [`epoch_from`] satisfies all three at once — the last field is still a
+    /// well-formed uid, `Err` still panics, `recover` still mints — while handing
+    /// every run of every daemon on every machine the same epoch. That is the exact
+    /// failure the whole design exists to prevent: `push_targets` compares a stored
+    /// feature set against this string, so two runs that share it re-authorize each
+    /// other's advertisements, and the tests would have said nothing.
+    ///
+    /// So the nonce is *controlled* here rather than observed. [`epoch_from`] taking
+    /// its entropy as an argument is what makes that possible, and is the same reason
+    /// the refusal below is assertable: nothing in a test can steer `getrandom`, but
+    /// everything can steer a parameter.
+    ///
+    /// **Mutation:** replace the parameter's value with a fixed well-formed uid
+    /// inside `epoch_from` and this fails on the tail comparison, with the constant
+    /// on the left and the nonce this test minted on the right; the three sibling
+    /// epoch tests stay green throughout, which is the masking being demonstrated
+    /// rather than asserted.
+    #[test]
+    fn the_epoch_is_built_from_the_entropy_it_was_handed() {
+        let nonce = protocol::uid::new().expect("a test machine has entropy");
+        let epoch = epoch_from(Ok(nonce.clone()));
+        let (_, tail) = epoch
+            .rsplit_once('-')
+            .expect("the epoch is a hyphenated triple");
+        assert_eq!(
+            tail, nonce,
+            "the epoch must carry the identity it was given; a constant here would \
+             pass every other assertion in this file and still give two runs one epoch"
+        );
+    }
+
+    /// **A daemon that cannot mint an identity does not invent one.**
+    ///
+    /// The epoch used to fall back to `pid-millis-no-entropy`, which is fail-open
+    /// at the exact comparison that authorizes a push: two runs sharing a pid and a
+    /// millisecond would share it, and the second would inherit the first's
+    /// confirmed advertisements. `Daemon::recover` mints the epoch before any
+    /// socket opens, so this refusal is a startup failure and not a push-time one.
+    ///
+    /// **Mutation:** put the `unwrap_or_else(|_| "no-entropy".into())` back and
+    /// this test fails.
+    #[test]
+    #[should_panic(expected = "kernel entropy")]
+    fn a_daemon_that_cannot_mint_an_identity_refuses_to_make_an_epoch() {
+        epoch_from(Err(std::io::Error::other("getrandom refused")));
+    }
+
+    /// **Startup is where the epoch is minted, and that is the wiring under test.**
+    ///
+    /// `epoch_from(Err(..))` above pins what the refusal *is*; it says nothing about
+    /// *where* it happens, and where is the whole of the fix. Minting it costs
+    /// kernel entropy, so the call can panic — and every other caller of
+    /// [`feature_epoch`] is on the push path, reached from a task
+    /// [`Daemon::dispatch_push`] spawned, where tokio absorbs the panic. A daemon
+    /// wired that way starts, serves for hours, and dies invisibly the first time a
+    /// doorbell tries to work out who may hear it. Asked in
+    /// [`Daemon::recover`] it is a process that refuses to come up.
+    ///
+    /// Read through [`FEATURE_EPOCH`] rather than through `feature_epoch()`,
+    /// because the question is whether the cell was *already* full: a check written
+    /// through the accessor fills it and then reports that it is full.
+    ///
+    /// **Why a child process.** The cell is process-wide and fills exactly once, so
+    /// in a full parallel suite any earlier test that reaches `feature_epoch()` has
+    /// already filled it — and this assertion then passes on that test's mint rather
+    /// than on `recover`'s. Removing the mint from `recover` altogether stayed green
+    /// that way, which is to say the test could not fail for the reason it exists.
+    /// A documented "run it alone" is not a fix: it is an instruction nothing
+    /// enforces, and CI runs plain `cargo test --workspace`.
+    ///
+    /// So the child is this same binary running this same test with the sentinel
+    /// set, in a process where nothing else has run. It asserts the emptiness FIRST
+    /// — that premise is what makes the mint observable — and the parent counts the
+    /// harness line, because the child is selected by a path spelled as a string and
+    /// a rename would leave it running no test and exiting zero.
+    ///
+    /// **Mutation:** drop the `feature_epoch()` call from `recover` and this fails.
+    #[tokio::test]
+    async fn recovery_is_where_the_feature_epoch_is_minted() {
+        const CHILD: &str = "CCD_FEATURE_EPOCH_MINT_CHILD";
+
+        if std::env::var_os(CHILD).is_some() {
+            // The level the parent set, applied — and the point of setting it.
+            crate::log::init_from_env();
+            assert!(
+                FEATURE_EPOCH.get().is_none(),
+                "the premise this test rests on: in a process where nothing else has \
+                 run, the cell is still empty when recovery begins — otherwise the \
+                 assertion below would pass on somebody else's mint"
+            );
+            let daemon = test_daemon();
+            daemon.recover().await;
+            let minted = FEATURE_EPOCH.get().expect(
+                "recovery must evaluate the feature epoch: it is the last moment a \
+                 daemon that cannot mint one can refuse to start, instead of failing \
+                 inside a spawned push task tokio will swallow",
+            );
+            assert_eq!(
+                minted.as_str(),
+                feature_epoch(),
+                "and the accessor hands back the value startup already settled on, \
+                 rather than minting a second one"
+            );
+            return;
+        }
+
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "state::tests::recovery_is_where_the_feature_epoch_is_minted",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            // **And at a level that does not print the line the mint used to hide
+            // in.** `log_info!` evaluates its arguments only when INFO is enabled,
+            // so a mint written inside one is a mint an operator can turn off:
+            // `CODECONNECT_LOG=warn` would put the first `feature_epoch()` call
+            // back inside a spawned push task, where tokio swallows the refusal —
+            // the exact wiring this test exists to pin. Measured: with the call
+            // inside the log line, this child fails.
+            .env("CODECONNECT_LOG", "warn")
+            .output()
+            .unwrap();
+        let told = String::from_utf8_lossy(&child.stderr).into_owned();
+        let harness = String::from_utf8_lossy(&child.stdout).into_owned();
+        assert!(
+            child.status.success(),
+            "startup is not where the feature epoch is minted: {told}"
+        );
+        assert!(
+            harness.contains("test result: ok. 1 passed"),
+            "the child ran no test: the path in `args` no longer names this one. {harness}"
         );
     }
 
@@ -7571,7 +19715,18 @@ mod tests {
         let request_id = raise_prompt(&daemon, uid, "p1", "touch /tmp/a").await;
         assert!(wait_bound(&daemon, uid, &request_id).await);
 
-        daemon.mark_exited(&test_key(), Some(0), Some("test")).await;
+        assert!(
+            daemon
+                .mark_exited(
+                    &test_key(),
+                    Some(0),
+                    Some("test"),
+                    observed_now(&daemon, uid).await
+                )
+                .await,
+            "the premise: the end is recorded — this test is about what a recorded end \
+             does NOT make deletable"
+        );
         daemon.unregister_supervisor(&pane._registration).await;
         assert_eq!(lifecycle_of(&daemon, uid), Lifecycle::Exited);
         {
@@ -7606,7 +19761,18 @@ mod tests {
         let daemon = test_daemon();
         let uid = TEST_UID;
         let _pane = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
-        daemon.mark_exited(&test_key(), Some(0), Some("test")).await;
+        assert!(
+            daemon
+                .mark_exited(
+                    &test_key(),
+                    Some(0),
+                    Some("test"),
+                    observed_now(&daemon, uid).await
+                )
+                .await,
+            "the premise: the end is recorded — this test is about what a recorded end \
+             does NOT make deletable"
+        );
         {
             let inner = daemon.inner.lock().await;
             assert!(inner.supervisors.contains_key(uid));
@@ -7899,7 +20065,9 @@ mod tests {
         seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
         let tmux = ScriptedPresence::always(protocol::tmux::SessionPresence::Gone);
         daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
-        daemon.session_exited("cc-1", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
+            .await;
 
         let ends = kinds_of(&daemon, TEST_UID)
             .iter()
@@ -7907,6 +20075,392 @@ mod tests {
             .count();
         assert_eq!(ends, 1, "one death, one `SessionEnd`");
         assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Exited);
+    }
+
+    /// A prober that lets a registration land in the one window round-8 F3 names:
+    /// **after the sweep's final look and before its commit.**
+    ///
+    /// The window cannot be staged from outside. `reconcile_liveness_with` probes
+    /// and commits inside one call with nothing in between a test can hold, so the
+    /// only seam is the probe itself — which is exactly where the real window opens,
+    /// because the sweep's evidence stops being current the instant the last answer
+    /// is given. Registering from inside the final `presence` call is therefore not
+    /// a contrivance: it is the same instant a real reconnect would occupy, and it
+    /// is *ordered*, so nothing here is timing.
+    struct ReregistersOnTheLastLook {
+        daemon: Arc<Daemon>,
+        uid: String,
+        looks: std::sync::Mutex<u32>,
+    }
+
+    impl crate::liveness::Presence for ReregistersOnTheLastLook {
+        async fn presence(&self, _target: &crate::liveness::Target) -> crate::liveness::Sighting {
+            let look = {
+                let mut looks = self.looks.lock().unwrap();
+                *looks += 1;
+                *looks
+            };
+            // Answered `Gone` on every look, so the sweep genuinely confirms the
+            // exit and genuinely reaches its commit. The replacement lands after the
+            // last of those answers is settled.
+            if look == protocol::tmux::EXIT_CONFIRMATIONS {
+                register(&self.daemon, "cc-1", Some(&self.uid)).await;
+            }
+            crate::liveness::Sighting {
+                presence: protocol::tmux::SessionPresence::Gone,
+                owner: None,
+            }
+        }
+    }
+
+    /// **A replacement registration that completes before the sweep commits keeps
+    /// the row** (round-8 F3).
+    ///
+    /// The sweep's proof is a tmux answer, and an answer is only ever a fact about
+    /// the moment it was given. Between the last look and
+    /// [`Daemon::mark_exited`] there is a whole confirmation loop's worth of
+    /// scheduling — and a supervisor reconnecting, or a crashed run resumed under
+    /// its own uid, completes a registration in it. The row then says `Live` because
+    /// the registration wrote it, the daemon holds that registration's supervisor
+    /// and link, and the sweep writes `Exited` over all of it and files a
+    /// `SessionEnd` for a session that is running. That is the same lie the sweep
+    /// exists to stop, told in the opposite direction.
+    ///
+    /// Gating alone does not fix it, which is why the fix is a gate **and** a
+    /// revalidation: the stale look happened before the gate was ever taken, so a
+    /// commit that merely waits its turn still commits stale evidence. What makes it
+    /// safe is comparing the owner the sweep observed against the owner at the
+    /// commit, under the gate that makes the answer unable to change.
+    ///
+    /// **Mutation:** drop the `observed_owner` comparison in `mark_exited` — keep
+    /// the gate — and this fails at the lifecycle assertion, `left: Exited, right:
+    /// Live`, with a `SessionEnd` filed against a live run.
+    #[tokio::test]
+    async fn a_replacement_registration_that_lands_before_the_commit_keeps_its_row_alive() {
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+
+        let tmux = ReregistersOnTheLastLook {
+            daemon: Arc::clone(&daemon),
+            uid: TEST_UID.to_string(),
+            looks: std::sync::Mutex::new(0),
+        };
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(
+            *tmux.looks.lock().unwrap(),
+            protocol::tmux::EXIT_CONFIRMATIONS,
+            "the premise: the sweep confirmed this row gone the full number of times \
+             and therefore reached its commit — a test whose sweep stopped early \
+             would pass for a reason that has nothing to do with the guard"
+        );
+        assert_eq!(
+            lifecycle_of(&daemon, TEST_UID),
+            Lifecycle::Live,
+            "the row belongs to the registration that completed, not to the answer a \
+             probe gave before it"
+        );
+        assert!(
+            !kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd),
+            "and no end is filed either: a `SessionEnd` is durable, so a phone told \
+             this run had finished would never be told otherwise"
+        );
+        assert_eq!(sweep.gone, 0, "nothing was proven gone");
+    }
+
+    /// The same seam, occupied by a **hook** rather than a registration.
+    ///
+    /// A hook is the writer the owner comparison cannot see: [`Daemon::ensure_session`]
+    /// writes the row `Live` and stakes no epoch at all, so the claim standing at the
+    /// commit is byte-identical to the one the sweep observed.
+    struct AHookLandsOnTheLastLook {
+        daemon: Arc<Daemon>,
+        uid: String,
+        looks: std::sync::Mutex<u32>,
+    }
+
+    impl crate::liveness::Presence for AHookLandsOnTheLastLook {
+        async fn presence(&self, _target: &crate::liveness::Target) -> crate::liveness::Sighting {
+            let look = {
+                let mut looks = self.looks.lock().unwrap();
+                *looks += 1;
+                *looks
+            };
+            if look == protocol::tmux::EXIT_CONFIRMATIONS {
+                self.daemon
+                    .handle_hook(HookPost {
+                        session_id: "cc-1".into(),
+                        session_uid: Some(self.uid.clone()),
+                        event: "SessionStart".into(),
+                        payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
+                        wait: false,
+                    })
+                    .await;
+            }
+            crate::liveness::Sighting {
+                presence: protocol::tmux::SessionPresence::Gone,
+                owner: None,
+            }
+        }
+    }
+
+    /// **A ROW WRITTEN AFTER THE LOOK IS A ROW THE SWEEP NEVER EXAMINED** (round-9 F3).
+    ///
+    /// The owner comparison round 8 added answers "whose session is this", and that
+    /// is not the same question as "is this still the row I read". A hook is the
+    /// plainest demonstration: [`Daemon::ensure_session`] writes `Lifecycle::Live`
+    /// and stakes nothing, so the claim at the commit equals the claim the sweep
+    /// observed and an owner-only guard waves the stale evidence through — over the
+    /// liveness the hook just recorded, with a `SessionEnd` no later fact can
+    /// withdraw.
+    ///
+    /// The same guard covers the other trace in the same finding, which this cannot
+    /// stage without hand-polling a future parked on a lock: a registration stakes
+    /// its epoch two awaits BEFORE its row write, so a sweep can hold the *new*
+    /// epoch and the *old* row at once and find them agreeing. That the two move
+    /// independently, and that evidence carrying one of each is refused, is
+    /// [`an_end_established_between_a_registrations_stake_and_its_row_write_is_refused`].
+    ///
+    /// **Mutation:** drop the `row_writes` comparison in `mark_exited` — keep the
+    /// gate and the owner comparison — and this fails at the lifecycle assertion,
+    /// `left: Exited, right: Live`, with a `SessionEnd` filed against a run whose
+    /// hook had just said it was alive.
+    #[tokio::test]
+    async fn a_hook_that_lands_before_the_commit_keeps_its_row_alive() {
+        let daemon = test_daemon();
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+
+        let tmux = AHookLandsOnTheLastLook {
+            daemon: Arc::clone(&daemon),
+            uid: TEST_UID.to_string(),
+            looks: std::sync::Mutex::new(0),
+        };
+        let sweep = daemon.reconcile_liveness_with(&tmux, Duration::ZERO).await;
+
+        assert_eq!(
+            *tmux.looks.lock().unwrap(),
+            protocol::tmux::EXIT_CONFIRMATIONS,
+            "the premise: the sweep confirmed this row gone the full number of times \
+             and therefore reached its commit"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.owner_of(TEST_UID),
+            None,
+            "the premise this test turns on: a hook stakes no registration, so the \
+             owner comparison sees the same answer before and after and cannot be \
+             what refuses this commit"
+        );
+        assert_eq!(
+            lifecycle_of(&daemon, TEST_UID),
+            Lifecycle::Live,
+            "the row was written after the look this end rests on, so the look was at \
+             a row that no longer exists"
+        );
+        assert!(
+            !kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd),
+            "and no end is filed either: a `SessionEnd` is durable"
+        );
+        assert_eq!(sweep.gone, 0, "nothing was proven gone");
+    }
+
+    /// **THE STAKE AND THE ROW WRITE ARE TWO MOMENTS, AND AN END BETWEEN THEM IS
+    /// STALE** (round-9 F3).
+    ///
+    /// The first half is the premise the second rests on, measured rather than
+    /// assumed: a registration that stakes its claim and is then refused by the
+    /// uid's tombstone has moved the owner and written no row, so the two
+    /// observations a commit compares genuinely move independently — which is
+    /// exactly the state a sweep can snapshot, since its snapshot is taken before
+    /// its row read and a registration holding the acceptance gate is running on the
+    /// other side of it.
+    ///
+    /// The second half is the refusal: evidence naming the *new* owner and the *old*
+    /// row count is evidence about a row that has since been overwritten, and the
+    /// owner comparison alone reads it as current.
+    ///
+    /// **Mutation:** drop the `row_writes` comparison in `mark_exited` and the final
+    /// assertion fails — the commit is accepted and the row the registration wrote
+    /// is marked `Exited`.
+    #[tokio::test]
+    async fn an_end_established_between_a_registrations_stake_and_its_row_write_is_refused() {
+        let daemon = test_daemon();
+
+        // Half one: a registration that stakes and gets no further. Its uid is
+        // deleted out from under it, so the upsert is refused and the row is never
+        // written — the same shape as a registration caught mid-window.
+        let doomed = register(&daemon, "cc-2", None).await;
+        let doomed_uid = doomed.session.uid.clone();
+        daemon
+            .store
+            .set_lifecycle(&doomed_uid, Lifecycle::Exited)
+            .unwrap();
+        daemon.store.delete_exited_session(&doomed_uid).unwrap();
+        let before = observed_now(&daemon, &doomed_uid).await;
+        let (tx, rx) = mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        assert!(
+            daemon
+                .register_supervisor(
+                    RegisterSession {
+                        session_id: "cc-2".into(),
+                        session_uid: Some(doomed_uid.clone()),
+                        tmux_session: "cc-2".into(),
+                        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                        cwd: "/tmp".into(),
+                        supervisor_pid: 4242,
+                        claude_bin: None,
+                        agent: protocol::agent::AgentKind::Claude,
+                        agent_bin: None,
+                        codex_thread_id: None,
+                        codex_socket: None,
+                        codex_generation: None,
+                        started_at: protocol::time::now_rfc3339(),
+                        protocol_minor: protocol::PROTOCOL_MINOR,
+                        exit_replay: false,
+                    },
+                    tx,
+                    Arc::new(std::sync::Mutex::new(HashMap::new())),
+                )
+                .await
+                .is_err(),
+            "the premise: this registration staked its claim and its row write was refused"
+        );
+        let after = observed_now(&daemon, &doomed_uid).await;
+        assert_ne!(
+            after.owner, before.owner,
+            "the claim is staked before the row is written, which is the whole window"
+        );
+        assert_eq!(
+            after.row_writes, before.row_writes,
+            "and nothing was written, so the two observations a commit compares are \
+             demonstrably not one observation"
+        );
+
+        // Half two: the commit. A sweep that snapshotted inside that window holds
+        // the incoming registration's epoch beside the outgoing row's count.
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        let before = observed_now(&daemon, TEST_UID).await;
+        let replacement = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        let mid_window = EndEstablishedAgainst {
+            owner: Some(replacement.epoch),
+            row_writes: before.row_writes,
+        };
+        assert!(
+            !daemon
+                .mark_exited(&test_key(), None, Some("test"), mid_window)
+                .await,
+            "the epochs agree because the stake had already happened; the row does \
+             not, because the write had not"
+        );
+        assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Live);
+        assert!(!kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd));
+    }
+
+    /// **AN EXIT REPORT IS ABOUT THE RUN THAT REPORTED IT** (round-9 F3).
+    ///
+    /// A supervisor reports its exit over a fresh connection and replays its
+    /// registration on it first, so the frame arrives carrying an identity of its
+    /// own. Reading the *current* owner instead — round 8's shape — answers a
+    /// different question, and the answer is wrong in exactly the case the guard
+    /// exists for: A registers, B replaces it, A's queued frame is then handled, and
+    /// the snapshot reads B. `EB == EB`, so the commit ends the run that REPLACED
+    /// the one that died and files its `SessionEnd`.
+    ///
+    /// The round-8 test cannot see this: it snapshots *before* the replacement, so
+    /// its observation and the current owner differ for the ordinary reason.
+    ///
+    /// **Mutation:** ignore `reported_by` in `session_exited` and take the fleet
+    /// snapshot on every path — the first two assertions fail.
+    #[tokio::test]
+    async fn a_stale_reporters_exit_never_ends_the_registration_that_replaced_it() {
+        let daemon = test_daemon();
+        let stale = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        let replacement = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        assert!(
+            replacement.epoch > stale.epoch,
+            "the premise: one uid, two registrations, the second owning it"
+        );
+
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, Some(&stale))
+            .await;
+
+        assert_eq!(
+            lifecycle_of(&daemon, TEST_UID),
+            Lifecycle::Live,
+            "the run that ended is the one the reporter registered, and something \
+             else holds this row now"
+        );
+        assert!(
+            !kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd),
+            "a `SessionEnd` cannot be withdrawn, so it must not be filed for a run \
+             that is still running"
+        );
+
+        // And the owner's own report still lands, which is what keeps this a guard
+        // rather than a refusal to record exits.
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, Some(&replacement))
+            .await;
+        assert_eq!(lifecycle_of(&daemon, TEST_UID), Lifecycle::Exited);
+        assert!(kinds_of(&daemon, TEST_UID).contains(&EventKind::SessionEnd));
+    }
+
+    /// **A DISCONNECT IS NOT AN ERASURE** (round-9 F3).
+    ///
+    /// [`Inner::registration_epochs`] used to lose its entry when the owning
+    /// supervisor disconnected, and that made two different histories spell the same
+    /// thing: `A → B → B disconnects` and `A → A disconnects` both left the map
+    /// empty. `mark_exited` reads exactly that map, so with the entry gone it could
+    /// not tell a session that had merely gone quiet from one that had been
+    /// REPLACED and then gone quiet — and A's stale evidence committed against B's
+    /// row.
+    ///
+    /// Both directions are asserted, because a tombstone that refused everything
+    /// would be worse than the erasure: an exit reported by the last registration
+    /// there was must still land after its own socket has closed, which is the
+    /// ordinary shape of every reported exit.
+    ///
+    /// **Mutation:** restore the removal in `unregister_supervisor` (delete the
+    /// entry when this registration owns it) and the first half fails — the stale
+    /// report is accepted and the replacement's row is marked `Exited`.
+    #[tokio::test]
+    async fn a_replaced_registrations_exit_is_refused_even_after_the_replacement_goes_quiet() {
+        let daemon = test_daemon();
+        let stale = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        let replacement = register(&daemon, "cc-1", Some(TEST_UID)).await;
+        daemon.unregister_supervisor(&replacement).await;
+        assert!(
+            !daemon.inner.lock().await.supervisors.contains_key(TEST_UID),
+            "the premise: nothing is connected any more, so only the record of what \
+             happened can tell these two histories apart"
+        );
+
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, Some(&stale))
+            .await;
+        assert_eq!(
+            lifecycle_of(&daemon, TEST_UID),
+            Lifecycle::Live,
+            "a registration replaced this one; its disconnect does not hand the \
+             session back to the run it replaced"
+        );
+
+        // The other direction, on a session whose only registration has gone: the
+        // report lands, because a disconnect leaves the reporter's own epoch behind
+        // rather than somebody else's.
+        let other = "01K1B3XZZZC0DE5FGH7JKMNPQR";
+        let only = register(&daemon, "cc-2", Some(other)).await;
+        daemon.unregister_supervisor(&only).await;
+        daemon
+            .session_exited("cc-2", Some(other), Some(0), None, Some(&only))
+            .await;
+        assert_eq!(
+            lifecycle_of(&daemon, other),
+            Lifecycle::Exited,
+            "the supervisor that owned this run said it ended; its socket having \
+             closed first is what a reported exit always looks like"
+        );
     }
 
     #[tokio::test]
@@ -7959,7 +20513,9 @@ mod tests {
         // true by construction rather than by two people remembering.
         let (daemon, mut tails) = daemon_watching_tails(shared_store(), Config::default());
         seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
-        daemon.session_exited("cc-1", Some(TEST_UID), Some(0)).await;
+        daemon
+            .session_exited("cc-1", Some(TEST_UID), Some(0), None, None)
+            .await;
         assert_eq!(
             tails.try_recv().expect("the tailer must be told to stop"),
             crate::tailer::TailCommand::Stop {
@@ -9065,6 +21621,9 @@ mod tests {
                     lifecycle: Lifecycle::Live,
                     created_at: now.clone(),
                     updated_at: now,
+                    agent: protocol::agent::AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
                 })
                 .unwrap()
                 .assert_present();
@@ -9208,8 +21767,14 @@ mod tests {
                     cwd: "/tmp".into(),
                     supervisor_pid: 4242,
                     claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -9430,5 +21995,5589 @@ mod tests {
             &input,
         );
         assert_eq!(event.source_event_id, None);
+    }
+
+    // ======================================= the still-shared ledger tables
+
+    /// The four tables a rolled-back v0.6.0 daemon reads — and writes — without
+    /// walking a session row, which is why splitting sessions by agent did not
+    /// hide them and why [`Daemon::shared_ledgers_admit`] exists.
+    ///
+    /// `store.rs` holds the same line one layer down, in
+    /// `no_codex_row_reaches_a_table_a_rolled_back_daemon_sweeps_globally`. That
+    /// test constructs a bare `Store` and so cannot see the three producers; it
+    /// stays green while a producer leaks, which is what the three tests below
+    /// are for. They drive the real entry points against a real Codex row.
+    const SHARED_LEDGERS: [&str; 4] = [
+        "text_mutations",
+        "pending_approvals",
+        "answer_claims",
+        "answers",
+    ];
+
+    /// What each of the four holds for `session_uid`, asked of SQLite on a
+    /// connection of our own. Deliberately not asked through `Store`: its readers
+    /// answer for the rows it knows how to make, and the claim here is the
+    /// stronger "no row of any shape landed", which only the table can settle.
+    fn ledger_rows(db: &std::path::Path, session_uid: &str) -> Vec<(&'static str, i64)> {
+        let conn = rusqlite::Connection::open(db).expect("the daemon's own database file");
+        SHARED_LEDGERS
+            .into_iter()
+            .map(|table| {
+                let count = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE session_uid = ?1"),
+                        [session_uid],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or_else(|err| panic!("counting {table}: {err}"));
+                (table, count)
+            })
+            .collect()
+    }
+
+    fn assert_no_ledger_rows(db: &std::path::Path, session_uid: &str) {
+        let rows = ledger_rows(db, session_uid);
+        assert!(
+            rows.iter().all(|(_, count)| *count == 0),
+            "a Codex run must own no row in the tables a rolled-back daemon sweeps \
+             globally: {rows:?}"
+        );
+    }
+
+    /// **A durable audit of insert *attempts*, because counting rows afterwards
+    /// cannot tell a gate from a tidy-up.**
+    ///
+    /// Most of these producers end in a refusal whether or not they are gated,
+    /// and those ungated shapes clean up after themselves: `send_text` claims a
+    /// `text_mutations` row, discovers there is no supervisor, and *releases*
+    /// the claim; `answer` claims, and when nothing actuates it settles. The
+    /// exceptions do the opposite and prove the same point: an ungated
+    /// `PermissionRequest` persists a card, and a responder-backed `answer`
+    /// records an answer row — durable rows the final-state assertions DO see.
+    /// For the cleaning shapes the final table contents read zero either way,
+    /// and a gate moved to after the claim would leave those tests green while
+    /// restoring
+    /// the exact window the rollback story is about — a daemon killed between
+    /// the claim and the release leaves the `applying` row behind, and a
+    /// rolled-back v0.6.0 rewrites every one it finds.
+    ///
+    /// An `AFTER INSERT` trigger per table settles it. It fires inside the
+    /// producer's own transaction, so its audit row commits when the claim
+    /// commits — and the release that follows deletes the claim, not the audit.
+    /// The question the audit answers is therefore "did a row ever exist", which
+    /// is the question the rollback cares about, rather than "does one exist
+    /// now".
+    ///
+    /// Installed on a connection of our own after the store is open; SQLite's
+    /// schema cookie makes the daemon's connections pick them up.
+    fn arm_ledger_tripwire(db: &std::path::Path) {
+        let conn = rusqlite::Connection::open(db).expect("the daemon's own database file");
+        conn.execute_batch(
+            "CREATE TABLE ledger_insert_audit(table_name TEXT NOT NULL, session_uid TEXT);",
+        )
+        .expect("arming the audit table");
+        for table in SHARED_LEDGERS {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER audit_{table} AFTER INSERT ON {table}
+                 BEGIN
+                     INSERT INTO ledger_insert_audit(table_name, session_uid)
+                     VALUES('{table}', NEW.session_uid);
+                 END;"
+            ))
+            .unwrap_or_else(|err| panic!("arming the audit trigger on {table}: {err}"));
+        }
+    }
+
+    /// What the tripwire caught. Empty is the only acceptable answer for a
+    /// Codex run.
+    fn assert_no_insert_was_attempted(db: &std::path::Path, session_uid: &str) {
+        let conn = rusqlite::Connection::open(db).expect("the daemon's own database file");
+        let caught: Vec<String> = conn
+            .prepare("SELECT table_name FROM ledger_insert_audit WHERE session_uid = ?1")
+            .unwrap()
+            .query_map([session_uid], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            caught.is_empty(),
+            "the gate let a durable write BEGIN before refusing: rows were inserted into \
+             {caught:?} for a Codex run and then cleaned up again. A daemon killed in that \
+             window leaves them behind, and a rolled-back v0.6.0 rewrites every one it finds"
+        );
+    }
+
+    /// A live Codex run, **registered** the way production makes one: the frame
+    /// the Codex coordinator sends, through the real `register_supervisor`.
+    ///
+    /// **This was `stage_codex_session`, and it wrote the row straight into the
+    /// store.** It had to: the doc that stood here said `register_supervisor`
+    /// failed closed on every agent outside `supported_agents`, so no test could
+    /// arrive at a Codex row by registering one, and staging was the only way to
+    /// put the three gates below in front of a Codex session at all.
+    ///
+    /// That stopped being true when Codex joined `Daemon::supported_agents` — see
+    /// [`Daemon::shared_ledgers_admit`] for the decision that day forced, which
+    /// was to keep these refusals and cut them loose from the supported list. With
+    /// registration possible, staging became the weaker fixture rather than the
+    /// only one: a row put into the store by hand proves the refusals hold for a
+    /// row this daemon might never have produced, and the interesting claim is
+    /// that they hold for a session it will actually be handed. So the row is
+    /// produced by the producer now, and the three tests below are refusals
+    /// standing in front of a session that genuinely registered.
+    ///
+    /// The row still lands in `codex_sessions` — `upsert_session` routes by agent
+    /// — and the assertion here is still that every daemon read finds it, because
+    /// a gate reading through `all_sessions` is the only reason these tests mean
+    /// anything.
+    ///
+    /// **The socket names nothing that listens.** The accepted registration spawns
+    /// a control link, which dials, fails and backs off; nothing below waits on it
+    /// or on anything it would produce, so the real registration costs these tests
+    /// no time and no flakiness.
+    ///
+    /// **The supervisor's receiver is dropped when this helper returns, and that
+    /// is deliberate.** A registered session now has a supervisor handle where a
+    /// staged one had none, which changes what the *ungated* path would do — see
+    /// the counterfactual in
+    /// `send_text_to_a_codex_session_is_refused_before_it_claims_anything`. A
+    /// closed channel keeps that counterfactual a prompt refusal instead of a wait
+    /// on a supervisor that will never answer.
+    async fn register_codex_session(daemon: &Arc<Daemon>, uid: &str, name: &str) {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: name.into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(
+                        std::env::temp_dir()
+                            .join(format!("ccd-ledger-{uid}-nothing-listens.sock"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect("the Codex coordinator's own registration frame must be accepted");
+        assert_eq!(
+            daemon.store.get_session(uid).unwrap().unwrap().agent,
+            protocol::agent::AgentKind::Codex,
+            "a registered Codex run must read back as one, or every gate below is \
+             being handed a Claude row and passing for the wrong reason"
+        );
+    }
+
+    /// The same frame with the agent swapped, so a test can register the SAME uid
+    /// as Claude and then try to move it.
+    async fn register_claude_session(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        name: &str,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: name.into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: Some("/usr/local/bin/claude".into()),
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: Some("/usr/local/bin/claude".into()),
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **A uid does not leave Claude, and the rows are why.**
+    ///
+    /// The three gates above ask [`Daemon::shared_ledgers_admit`] of the row's
+    /// agent and then write later — `send_text` immediately, the hook seven awaits
+    /// later, `answer` five. That is only sound if the answer cannot change under
+    /// them, and the store will happily change it: an `upsert_session` whose agent
+    /// disagrees with where the row lives *moves* the row, deliberately, leaving
+    /// the four shared ledgers exactly where they were, because they are keyed by
+    /// uid and nothing walks them.
+    ///
+    /// So a Claude run that has raised one card and is then re-registered as Codex
+    /// would leave a Codex-owned `pending_approvals` row in the one table a
+    /// rolled-back v0.6.0 daemon reads *globally* and deletes — which is the
+    /// precise hazard the three refusals exist to prevent, reached by relabelling
+    /// instead of by writing.
+    ///
+    /// **Mutation:** delete the transition refusal in `register_supervisor` and
+    /// this goes red at the `expect_err` — and the row reads `codex` with its
+    /// Claude card still sitting in `pending_approvals`.
+    #[tokio::test]
+    async fn a_claude_uid_never_becomes_codex_while_its_ledger_rows_stay_behind() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_claude_session(&daemon, uid, "cc-1")
+            .await
+            .expect("a Claude registration is ordinary");
+
+        // A real card, through the real producer, so the rows this is about exist.
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.to_string()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "cwd": "/tmp",
+                    "prompt_id": "p1",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "touch /tmp/a" },
+                }),
+                wait: false,
+            })
+            .await;
+        let before = ledger_rows(&db, uid);
+        assert!(
+            before.iter().any(|(_, count)| *count > 0),
+            "the premise: a Claude run owns rows in the shared ledgers. {before:?}"
+        );
+
+        let refusal = register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect_err("a Claude uid must not be relabelled Codex");
+        let refusal = format!("{refusal:#}");
+        assert!(
+            refusal.contains("does not change agents"),
+            "the refusal must name what it is refusing: {refusal}"
+        );
+
+        let row = daemon.store.get_session(uid).unwrap().unwrap();
+        assert_eq!(
+            row.agent,
+            protocol::agent::AgentKind::Claude,
+            "a refused transition must leave the row where it was"
+        );
+        assert_eq!(
+            ledger_rows(&db, uid),
+            before,
+            "and must not have touched the rows it was protecting"
+        );
+    }
+
+    /// Commit a Claude row for `uid`, through the same [`Store::upsert_session`] a
+    /// registration's own acceptance calls.
+    ///
+    /// The test below holds the acceptance gate in order to stage an interleave, so
+    /// it cannot reach that acceptance through `register_supervisor` — it would park
+    /// on the very gate being held. The row commit is the whole of the other
+    /// registration that this interleave depends on: what the loser must not do is
+    /// decide from a picture taken before that row existed.
+    fn commit_claude_row(daemon: &Arc<Daemon>, uid: &str, name: &str) {
+        daemon
+            .store
+            .upsert_session(&SessionRow {
+                session_uid: uid.into(),
+                session_id: name.into(),
+                tmux_session: name.into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: Lifecycle::Live,
+                created_at: protocol::time::now_rfc3339(),
+                updated_at: protocol::time::now_rfc3339(),
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+    }
+
+    /// **The refusal has to read the row it is about to overwrite, not the one it
+    /// happened to see on the way in** (2e-7b round-2 F2).
+    ///
+    /// The sequential test above cannot expose this ordering: it registers Claude,
+    /// *then* Codex, so the Codex frame's own snapshot already contains the Claude
+    /// row and any check anywhere would refuse. The defect lives in the interleave —
+    /// a Codex registration snapshots **no row**, queues behind a Claude
+    /// registration that commits one, and then makes its transition decision from
+    /// the absent row it saw before it waited. Checked pre-gate, it passes, and
+    /// overwrites a committed Claude row as Codex: the exact shared-ledger hazard
+    /// the refusal exists to prevent, arriving by the route the refusal did not
+    /// cover.
+    ///
+    /// Staged rather than hoped for, and **ordered rather than slept through**
+    /// (round-3 F7). The gate is held from outside so the registration cannot reach
+    /// its decision, and the pre-gate snapshot signals [`snapshot_latch`] the instant
+    /// it returns — so "this frame has already read an absent row" is an observed
+    /// event, not an inference from 80ms and `!is_finished()`. Those two are equally
+    /// true of a task that was never scheduled and of one still inside the read, and
+    /// with the check regressed above the gate such a task would read the committed
+    /// Claude row and refuse for the ordinary reason, leaving this green.
+    ///
+    /// **Mutation:** move the transition check back above the gate (or drop the
+    /// re-read and test `existing` from the top of the function) and this goes red
+    /// at the `expect_err`, with the row reading `codex`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_registration_refuses_a_transition_committed_while_it_waited_for_the_gate() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+
+        let gate = daemon.registration_gate(uid).await;
+        let held = gate.lock().await;
+        assert!(
+            daemon.store.get_session(uid).unwrap().is_none(),
+            "the premise: there is no row for this uid, so the frame below snapshots \
+             an absent one"
+        );
+
+        let snapshot_taken = crate::state::snapshot_latch::arm(uid);
+        let codex = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { register_codex_over(&daemon, uid, "cc-1").await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), snapshot_taken.notified())
+            .await
+            .expect(
+                "the registration never reached its pre-gate snapshot — nothing below \
+                 would be staging the interleave this test exists for",
+            );
+        assert!(
+            !codex.is_finished(),
+            "and it cannot get past the acceptance gate this test is holding"
+        );
+
+        // The other registration's row lands while this one waits.
+        commit_claude_row(&daemon, uid, "cc-1");
+
+        drop(held);
+        let refusal = format!(
+            "{:#}",
+            codex
+                .await
+                .unwrap()
+                .expect_err("a uid that became Claude under this frame must still refuse")
+        );
+        assert!(
+            refusal.contains("does not change agents"),
+            "and refuse for the reason it exists for: {refusal}"
+        );
+        assert_eq!(
+            daemon.store.get_session(uid).unwrap().unwrap().agent,
+            protocol::agent::AgentKind::Claude,
+            "the row the loser never saw must survive it"
+        );
+    }
+
+    /// The Codex frame [`register_codex_session`] sends, as a plain `Result` so a
+    /// test can assert the refusal rather than unwrap it.
+    async fn register_codex_over(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        name: &str,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: name.into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(
+                        std::env::temp_dir()
+                            .join(format!("ccd-move-{uid}-nothing-listens.sock"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **The mirror of the Claude-carrying-Codex-fields guard**, which the
+    /// producer's own documentation claimed for months before it existed.
+    ///
+    /// `claude_bin` is not decoration: [`Daemon::command_catalog`] runs it to
+    /// enumerate a session's slash commands. A Codex registration carrying one
+    /// names a binary that is not driving the session it describes.
+    ///
+    /// Not producer-reachable — `registration_frame` builds all five identity
+    /// fields from one `Option<CodexSeat>` — which is exactly why it belongs on
+    /// the receiver: this daemon accepts frames from whatever can open its socket,
+    /// and a guard that lives only in a comment is one the next producer discovers
+    /// the hard way.
+    ///
+    /// **Mutation:** delete the guard and the registration is accepted, with
+    /// `claude_bin` sitting in the supervisor handle of a Codex run.
+    #[tokio::test]
+    async fn a_codex_registration_carrying_a_claude_binary_is_refused() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        let refusal = daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: "cc-1".into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: Some("/usr/local/bin/claude".into()),
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: Some("/opt/homebrew/bin/codex".into()),
+                    codex_thread_id: None,
+                    codex_socket: Some("/tmp/nothing-listens.sock".into()),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect_err("a Codex registration naming a Claude binary is internally inconsistent");
+        assert!(
+            format!("{refusal:#}").contains("carried a Claude binary"),
+            "the refusal must name the inconsistency: {refusal:#}"
+        );
+        assert!(
+            daemon.store.get_session(uid).unwrap().is_none(),
+            "a refusal before any write must leave no trace"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_text_to_a_codex_session_is_refused_before_it_claims_anything() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // The run is registered before the tripwire is armed. A registration
+        // writes `codex_sessions`, which is none of the four, but scoping the
+        // audit to the call under test is what makes an empty answer mean
+        // something about the gate rather than about the fixture.
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
+
+        let text = "deploy";
+        let hash = protocol::hash::send_text_hash(uid, text, true);
+        let result = daemon
+            .send_text(
+                uid,
+                text.to_string(),
+                Some("st-1"),
+                Some(&hash),
+                true,
+                false,
+            )
+            .await;
+
+        // **The reason is asserted, and it is the load-bearing assertion.**
+        // Without the gate this call still ends in a refusal — the registered
+        // supervisor's channel is closed, so `supervisor_request` cannot deliver
+        // — but only after `claim_text_mutation` has written an `applying` row,
+        // and that late refusal then releases it. (Before the run was registered
+        // rather than staged, the late refusal was "no supervisor attached"
+        // instead; it is a different sentence at the same point on the path, and
+        // the point is what this test is about.) So the count below reads zero
+        // either way, and
+        // only the reason says which side of the durable write the refusal
+        // happened on. The window it leaves is not theoretical: a daemon killed
+        // inside it leaves the `applying` row behind, and a rolled-back v0.6.0
+        // rewrites every one it finds.
+        match &result {
+            SendTextResult::Refused { reason } => assert!(
+                reason.contains("codex session") && reason.contains("nothing was typed"),
+                "the refusal must name the agent it refused, before the claim: {reason}"
+            ),
+            other => panic!("a Codex session must not be typed into: {other:?}"),
+        }
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+    }
+
+    /// **A Claude hook is not the road a Codex approval arrives on.**
+    ///
+    /// This tripwire used to say something stronger and now says something
+    /// narrower, and the narrowing is the point. It was written when *no* Codex
+    /// card could exist, because `pending_approvals` was shared with a v0.6.0
+    /// daemon that sweeps it globally; the table is now split and
+    /// [`Daemon::raise_codex_approval`] raises Codex cards for real. What
+    /// remains true — and is what this pins — is that they do not arrive
+    /// *here*. This daemon installs no `PermissionRequest` hook for Codex, so a
+    /// hook posted against a Codex uid means the uid or the payload is somebody
+    /// else's, and carding it would mint a second, Claude-shaped card for a
+    /// question the link is already asking properly.
+    ///
+    /// So the assertions are unchanged and their justification is not: no card,
+    /// no row in any shared ledger, and a passthrough rather than a denial —
+    /// declining to observe must never reach the agent as the human's answer.
+    ///
+    /// **Mutation:** change the gate's arm to `self.shared_ledgers_admit(..)`
+    /// and this stays green, which is why the sentence matters more than the
+    /// predicate; delete the gate entirely and both the card assertion and
+    /// `assert_no_insert_was_attempted` go red, because `persist_pending` writes
+    /// the shared table and the schema trigger then refuses the write.
+    #[tokio::test]
+    async fn a_permission_request_for_a_codex_session_raises_no_card() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // Registered rather than staged — see `register_codex_session`. The hook
+        // below posts against the same `cc-1` this registration owns, so
+        // `ensure_session` finds the registration's row and preserves its agent,
+        // which is the arm the gate reads.
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
+
+        // Posted exactly as `raise_prompt` does, inline only because this test is
+        // about the answer the hook gets back and that helper discards it.
+        let decision = daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.to_string()),
+                event: "PermissionRequest".into(),
+                payload: json!({
+                    "hook_event_name": "PermissionRequest",
+                    "cwd": "/tmp",
+                    "prompt_id": "p1",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "touch /tmp/a" },
+                }),
+                wait: true,
+            })
+            .await;
+
+        // The durable half first, because it is the one the rollback story turns
+        // on: `persist_pending` writes `pending_approvals` unconditionally once a
+        // card exists, and that row survives everything.
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+        assert!(
+            daemon.inner.lock().await.pending.is_empty(),
+            "no card may exist for a run whose answers cannot be typed"
+        );
+        // Declining to observe is not answering: a refusal that reached the agent
+        // as `Deny` would be this daemon denying a tool call nobody was asked
+        // about.
+        assert!(
+            matches!(decision.decision, Decision::Passthrough),
+            "an unobserved request must pass through, never deny: {decision:?}"
+        );
+    }
+
+    /// A real command approval, read by the production parser so the option table
+    /// on the card is the one the wire and `Family::labels` actually produce.
+    fn codex_command_card(request_id: &str) -> protocol::ws::ApprovalCard {
+        codex_command_approval().card(request_id.to_string(), 1)
+    }
+
+    /// The same approval, before it is carded — for a caller that needs the
+    /// **derived** request id, which is a function of the item rather than
+    /// something a test may name.
+    fn codex_command_approval() -> crate::codex_approval::Approval {
+        let params = json!({
+            "kind": "command",
+            "threadId": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+            "turnId": "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+            "itemId": "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+            "environmentId": "local",
+            "reason": "May I create the requested probe file?",
+            "command": "/bin/zsh -lc 'touch /tmp/marker.txt'",
+            "cwd": "/tmp",
+            "proposedExecpolicyAmendment": ["touch"],
+            "availableDecisions": [
+                "accept",
+                {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["touch"]}},
+                "cancel"
+            ]
+        });
+        crate::codex_approval::Approval::read(crate::codex_approval::Family::Command, &params, None)
+            .expect("the production parser reads a measured command approval")
+    }
+
+    /// Put a card on the store the way the observer does, and hand the daemon a
+    /// link whose asks this test answers itself.
+    ///
+    /// Overwriting the handle `register_supervisor` installed is the point: that
+    /// one's link is dialling a socket nothing listens on, which is the
+    /// `NotAddressable` case. Replacing its sender at the same epoch is what makes
+    /// the *other* three outcomes reachable without a real app-server.
+    async fn codex_card_with_a_link(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+    ) -> (
+        protocol::ws::ApprovalCard,
+        tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::AnswerRequest>,
+        // **A live clone of the outgoing sender**. A test that keeps
+        // it can distinguish "no ask arrived" (a real timeout on the resolver) from
+        // "the channel closed because the handle left the map" — the collapse the
+        // vacuous post-stake test used to accept.
+        crate::codex_link::LinkAnswers,
+    ) {
+        let session = SessionKey::new(uid, "cc-1");
+        let card = codex_command_card(request_id);
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    card.clone(),
+                    "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                    "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                    "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a real card, filed the way the observer files one"
+        );
+        let (answers, asks) = crate::codex_link::answer_channel();
+        let retained = answers.clone();
+        let mut inner = daemon.inner.lock().await;
+        let epoch = *inner
+            .registration_epochs
+            .get(uid)
+            .expect("the registration staked its claim");
+        let held = inner.codex_links.remove(uid).expect("a link was installed");
+        held.task.abort();
+        inner.codex_links.insert(
+            uid.to_string(),
+            CodexLinkHandle {
+                epoch,
+                generation: held.generation,
+                task: tokio::spawn(std::future::pending()),
+                presence: held.presence,
+                answers,
+                interrupts: crate::codex_link::interrupt_channel().0,
+                composes: crate::codex_link::compose_channel().0,
+                carry: held.carry,
+            },
+        );
+        drop(inner);
+        (card, asks, retained)
+    }
+
+    /// **One Codex approval rings one doorbell, and a re-delivery rings none.**
+    ///
+    /// The app-server re-delivers an outstanding request to a reconnecting leg,
+    /// with the same item id and therefore the same derived request id, so "the
+    /// same approval filed twice" is an ordinary event rather than a fault. The
+    /// doorbell must not be an ordinary event twice: a phone buzzing again for a
+    /// question it is already holding is the fleet telling the same news twice.
+    ///
+    /// **Two independent layers hold it, and this asserts them together**, which
+    /// is deliberate and was measured: breaking either one alone still rings
+    /// once, so a test that named only one of them would be satisfied by a build
+    /// that had lost it.
+    ///
+    /// * The doorbell hangs off the FILED event, and a re-delivery files none —
+    ///   the event carries `perm:{request_id}`, and the events table refuses a
+    ///   second row under the same source id, so `dispatch_push` is not reached.
+    /// * The push gate admits one decision per `(session, request_id)` for the
+    ///   life of the run, so even an event that were filed twice rings once.
+    ///
+    /// A third layer sits below both, in the per-device queue that replaces a
+    /// waiting doorbell rather than joining it; that one is asserted in
+    /// `apns_sender`, because it is about a device rather than about a question.
+    ///
+    /// The hint is asserted whole, because what it says is what the fan-out then
+    /// authorizes: `agent: Codex` is what narrows the fleet to phones that can
+    /// open a Codex run, and `kind: Approval` is what makes a tap open the
+    /// decision list rather than the timeline.
+    ///
+    /// **Mutation:** make the event's source id unique per raise AND make
+    /// `PushGate::admit_decision` always hand back a ticket. Either alone leaves
+    /// this green — which is the point of asserting them together — and both
+    /// together ring the phone twice for one question.
+    #[tokio::test]
+    async fn a_codex_approval_rings_one_doorbell_and_a_redelivery_rings_none() {
+        let (daemon, capture) = capture_daemon();
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let session = SessionKey::new(uid, "cc-1");
+        let card = codex_command_card("rq-ring-once");
+        let raise = || {
+            let card = card.clone();
+            let session = session.clone();
+            let daemon = Arc::clone(&daemon);
+            async move {
+                daemon
+                    .raise_codex_approval(
+                        &session,
+                        card,
+                        "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                        "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                        "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+                        "commandExecution",
+                    )
+                    .await
+            }
+        };
+
+        assert!(raise().await, "the first delivery files the card");
+        // Byte-identical, under the same item id: what a reconnecting leg is
+        // handed. It rebinds onto the card already standing.
+        assert!(
+            raise().await,
+            "the re-delivery rebinds rather than refusing"
+        );
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "the premise: one question, one card"
+        );
+
+        // The dispatch grace: a doorbell describes the world at the moment it
+        // rings, not the moment it was admitted, so it is read after that window.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings: Vec<(crate::apns::PushKind, protocol::agent::AgentKind)> = capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(hint, _)| (hint.kind, hint.agent.clone()))
+            .collect();
+        assert_eq!(
+            rings,
+            vec![(
+                crate::apns::PushKind::Approval,
+                protocol::agent::AgentKind::Codex
+            )],
+            "one approval, one doorbell, about the run that raised it"
+        );
+    }
+
+    /// Take the link handle away, leaving the registration standing.
+    ///
+    /// The state a daemon is in when the wrapper is gone but the run is not: an
+    /// answer has nowhere to go, and the honest report is that nothing was sent.
+    /// The cards this run still has open, read from the store rather than from
+    /// memory: a card that is only in memory is not one a restart would restore.
+    fn open_cards(daemon: &Arc<Daemon>, uid: &str) -> Vec<crate::store::CodexPendingApprovalRow> {
+        daemon.store.codex_pending_approvals(uid).unwrap()
+    }
+
+    async fn unlink_codex(daemon: &Arc<Daemon>, uid: &str) {
+        if let Some(held) = daemon.inner.lock().await.codex_links.remove(uid) {
+            held.task.abort();
+        }
+    }
+
+    /// **A replacement registration waits for the outgoing link's admitted answer,
+    /// and never takes the session out from under one.**
+    ///
+    /// # The window this closes, as it was measured
+    ///
+    /// The registration epoch is consulted exactly once on the answer path, by
+    /// [`Daemon::codex_answers_locked`], and what it hands back is a CLONE of the
+    /// outgoing link's sender. The `inner` lock that made that comparison
+    /// trustworthy is released in the same statement, and nothing between there and
+    /// the socket asks again — not the link's own admission (which gates on thread,
+    /// switch, wire id and duplicate, never on a registration), not the durable
+    /// claim, and not the write. Staged, the interleaving ran: an answer admitted
+    /// under one epoch was completed and reported applied while a second
+    /// registration owned the session, with the second registration's own transaction
+    /// having run to completion in between.
+    ///
+    /// # What this asserts instead
+    ///
+    /// The stake now waits. The answer is admitted, the replacement registration is
+    /// started, and it is still not finished while the answer is outstanding —
+    /// **that** is the assertion, because the alternative is the window. Then the
+    /// answer reaches its terminal, the registration completes, and both outcomes are
+    /// what they would have been alone: the answer applied, the session staked to the
+    /// replacement.
+    ///
+    /// An admitted answer is never expired to make room for the handover. By the time
+    /// it is admitted it is durable, and its outcome is the truth about a response
+    /// that may already be on the wire; a registration that cancelled it would be
+    /// choosing a convenient answer over a true one.
+    ///
+    /// **Mutation:** drop the `_quiesced` guard in `register_supervisor` (or the
+    /// `_admitted` one in `answer_codex`) and the registration finishes while the ask
+    /// is still outstanding — the measured window, back.
+    #[tokio::test]
+    async fn a_replacement_registration_waits_for_the_outgoing_links_admitted_answer() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-handover").await;
+        let epoch_before = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the first registration staked its claim");
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        // Admitted: the epoch matched, the sender was cloned, the ask is with the
+        // outgoing link and its outcome is still open.
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon must reach the link within the budget")
+            .expect("the outgoing link is handed the answer");
+        assert_eq!(ask.request_id, card.request_id);
+        // **Hold the reply and the read guard separately**. The guard
+        // travelled with the ask; splitting it out lets this test show that it — not
+        // the reply — is what the handover waits on, and that the wait ends because the
+        // guard is RELEASED, not because [`ANSWER_QUIESCE_BUDGET`] expired.
+        let crate::codex_link::AnswerRequest { reply, gate, .. } = ask;
+
+        let handover = {
+            let daemon = Arc::clone(&daemon);
+            let uid = uid.to_string();
+            tokio::spawn(async move { register_codex_over(&daemon, &uid, "cc-1").await })
+        };
+        // Well inside the budget, so a registration that finishes here finished because
+        // nothing held it back — not because it timed out and fell through.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            !handover.is_finished(),
+            "the replacement registration completed while an admitted answer still held \
+             the answer gate"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.owner_of(uid),
+            Some(epoch_before),
+            "and nothing was staked while it waited"
+        );
+
+        // The answer's OWN outcome is reported, exactly as it would be alone.
+        reply
+            .send(crate::codex_link::AnswerReport::Delivered)
+            .expect("the daemon is still waiting on the outgoing link");
+        let result = tokio::time::timeout(Duration::from_secs(5), answering)
+            .await
+            .expect("the answer must return within the budget")
+            .expect("the answering task");
+        assert!(
+            matches!(result, AnswerResult::Applied { .. }),
+            "an admitted answer is never expired by a handover: {result:?}"
+        );
+
+        // **The reply alone does not release the handover** — the guard does. In
+        // production the link drops its `PendingAnswer` (reply and guard together) at
+        // the terminal; here they are separated so the guard's role is provable: the
+        // handover is STILL blocked with the guard held.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !handover.is_finished(),
+            "the handover completed on the reply, before the answer gate's read guard \
+             was released — the guard is not what serializes the stake"
+        );
+
+        // Releasing the guard is what lets the session move, and it moves PROMPTLY —
+        // the 2 s budget is well under the ~4.5 s quiesce budget, so a handover that
+        // only completed here by timing out would fail this.
+        drop(gate);
+        tokio::time::timeout(Duration::from_secs(2), handover)
+            .await
+            .expect("the handover completes promptly once the guard is released, not by timeout")
+            .expect("the registration task")
+            .expect("the replacement registration is accepted");
+        let epoch_after = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the replacement staked its claim");
+        assert!(
+            epoch_after > epoch_before,
+            "the handover still happens ({epoch_before} -> {epoch_after})"
+        );
+    }
+
+    /// **Two cards on one session are still answered at once.**
+    ///
+    /// The gate that makes a handover wait is a per-session lock, and the obvious
+    /// form of it — a mutex — would have made every phone answer in a session wait
+    /// for the one before it. The link is built for the opposite: its ask channel
+    /// carries one entry per open card precisely so two approvals can be answered
+    /// together. So the gate is an `RwLock` and answers take the read side, and this
+    /// is what says so: both asks are outstanding **at the same time**, before either
+    /// is replied to.
+    ///
+    /// **Mutation:** make [`Daemon::actuation_gates`] a `Mutex` again (and
+    /// `answer_codex` take it exclusively) and the second ask never arrives — the
+    /// gate would have been bought with a concurrency nothing required it to spend.
+    #[tokio::test]
+    async fn two_cards_on_one_session_are_answered_concurrently() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (first, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-one").await;
+        // The second card rides the link the first one installed — the state a session
+        // is in whenever the agent asks two things before either is answered.
+        let session = SessionKey::new(uid, "cc-1");
+        let second = codex_command_card("rq-two");
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    second.clone(),
+                    "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                    "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                    "exec-9c0f1f4c-0f0e-4a6d-9a41-1d0b6f2f5a02",
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a second open card on the same session"
+        );
+
+        let answering: Vec<_> = [&first, &second]
+            .into_iter()
+            .map(|card| {
+                let daemon = Arc::clone(&daemon);
+                let request_id = card.request_id.clone();
+                let payload_hash = card.payload_hash.clone();
+                let uid = uid.to_string();
+                tokio::spawn(async move {
+                    daemon
+                        .answer(
+                            &request_id,
+                            &payload_hash,
+                            protocol::ws::AnswerDecision::OptionId {
+                                option_id: "accept".into(),
+                            },
+                            Some(&uid),
+                        )
+                        .await
+                })
+            })
+            .collect();
+
+        // **Both, before either is replied to.** Collecting them first is the whole
+        // assertion: under an exclusive gate the second would not exist yet.
+        let mut outstanding = Vec::new();
+        for _ in 0..2 {
+            outstanding.push(
+                tokio::time::timeout(Duration::from_secs(5), asks.recv())
+                    .await
+                    .expect("both answers must reach the link concurrently")
+                    .expect("the link is handed the answer"),
+            );
+        }
+        let mut ids: Vec<&str> = outstanding
+            .iter()
+            .map(|ask| ask.request_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["rq-one", "rq-two"]);
+
+        for ask in outstanding {
+            ask.reply
+                .send(crate::codex_link::AnswerReport::Delivered)
+                .expect("the daemon is still waiting on the link");
+        }
+        for task in answering {
+            let result = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("the answer must return within the budget")
+                .expect("the answering task");
+            assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
+        }
+    }
+
+    /// **The other half of the same two-state claim: an answer that arrives after the
+    /// stake never reaches the outgoing link's sender — and it is the epoch FILTER
+    /// that stops it, not a dropped map entry or a closed channel**.
+    ///
+    /// Together with the gate above there is no third state. Either the answer holds
+    /// the session's answer gate and the stake waits, or the stake holds it and the
+    /// answer that follows re-reads the epoch under the new owner — which is what
+    /// [`Daemon::codex_answers_locked`]'s filter does.
+    ///
+    /// An earlier version was vacuous: it accepted both a timeout AND an `Ok(None)`
+    /// from a channel that had closed because the handover took the sender out of the
+    /// map, and it never checked the answer's terminal. Either outcome passed a build
+    /// that simply drops every post-handover answer. This pins the real thing:
+    ///
+    ///   * a handle is re-inserted at the OLD epoch whose sender is STILL ALIVE and
+    ///     feeds this receiver, so a `None` is impossible and "nothing arrived" can
+    ///     only be the epoch filter refusing a present, live entry;
+    ///   * the wait must be a real timeout, not a closed channel; and
+    ///   * the answer's terminal is asserted — with no link at the current epoch it is
+    ///     `Rejected` (NotApplied), not silently dropped.
+    ///
+    /// **Mutation:** drop the `owner == Some(held.epoch)` filter in
+    /// `codex_answers_locked` and this goes red — the stale-epoch sender is handed the
+    /// ask.
+    #[tokio::test]
+    async fn an_answer_after_the_stake_is_stopped_by_the_epoch_filter_not_a_dropped_entry() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, retained_sender) =
+            codex_card_with_a_link(&daemon, uid, "rq-after-stake").await;
+        let old_epoch = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the first registration staked its claim");
+
+        register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect("the replacement registration is accepted");
+        let new_epoch = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the replacement staked its claim");
+        assert!(new_epoch > old_epoch, "the handover moved the epoch");
+
+        // **Re-insert a handle at the OLD epoch whose sender is still alive.** The
+        // map now HAS an entry for this uid and a live sender feeding `asks`, so if the
+        // answer fails to arrive it can ONLY be the epoch filter — not a missing entry
+        // and not a closed channel.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let repl = inner
+                .codex_links
+                .remove(uid)
+                .expect("the replacement installed a link");
+            repl.task.abort();
+            inner.codex_links.insert(
+                uid.to_string(),
+                CodexLinkHandle {
+                    epoch: old_epoch,
+                    generation: repl.generation,
+                    task: tokio::spawn(std::future::pending()),
+                    presence: repl.presence,
+                    answers: retained_sender.clone(),
+                    interrupts: crate::codex_link::interrupt_channel().0,
+                    composes: crate::codex_link::compose_channel().0,
+                    carry: repl.carry,
+                },
+            );
+        }
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        // A REAL timeout — the sender is alive, so `recv` cannot return `None`. An ask
+        // arriving here would mean the stale-epoch entry was handed the answer.
+        let reached = tokio::time::timeout(Duration::from_millis(1000), asks.recv())
+            .await
+            .map(|opt| opt.map(|ask| ask.request_id));
+        assert!(
+            reached.is_err(),
+            "the epoch filter must stop the answer, but an ask reached a live sender at \
+             the stale epoch: {reached:?}"
+        );
+        // And the answer's own terminal: no link at the current epoch is NotApplied.
+        let result = tokio::time::timeout(Duration::from_secs(5), answering)
+            .await
+            .expect("the answer returns a terminal, it is not dropped")
+            .expect("the answering task");
+        assert!(
+            matches!(result, AnswerResult::Rejected { .. }),
+            "an answer with no live link at the current epoch is Rejected: {result:?}"
+        );
+        drop(retained_sender);
+    }
+
+    /// **A registration that cannot quiesce the outgoing answer within the budget
+    /// does NOT refuse — it stakes, aborts the outgoing link, and lets that link's
+    /// teardown settle the stuck answer**.
+    ///
+    /// An earlier version bailed here, and it bailed from *above* the park — the one
+    /// thing that unsticks a wedged answer. That turned a recoverable stall into a
+    /// permanent, self-renewing wedge: the supervisor's reconnect loop re-registers
+    /// forever, and every attempt bailed before reaching the abort. The direction is
+    /// now the safe one: on expiry the registration falls through, stakes a new epoch,
+    /// and the park/abort below aborts the outgoing link — whose teardown ends the
+    /// answer `Unknown` (3b's gate). The session is legible again either way.
+    ///
+    /// The ask carries the answer gate's read guard, so holding it here is what
+    /// makes the write side time out; this is the only path that reaches the expiry
+    /// branch at all, which is why it is exercised with a real held guard rather than
+    /// a shortened budget.
+    ///
+    /// **Mutation:** restore the `bail!` on quiesce timeout and this goes red at the
+    /// `expect(... accepted)` — the wedge is back.
+    #[tokio::test]
+    async fn a_registration_that_cannot_quiesce_the_outgoing_answer_falls_through_and_stakes() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-wedged").await;
+        let epoch_before = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the first registration staked its claim");
+
+        // **A SECOND answer, admitted on the outgoing link and left in its ledger** —
+        // the state a real answer is in the instant after its durable claim is taken
+        // and its write goes out: an `applying` claim in the store and a
+        // `PendingAnswer` in the link's `open_answers`. The abort below must make it
+        // terminal, not leave it `applying` with a card on a phone. Its gate guard is
+        // moved into the pending answer, so settling it is what releases the guard.
+        let session = SessionKey::new(uid, "cc-1");
+        let admitted = codex_command_card("rq-admitted");
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    admitted.clone(),
+                    "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                    "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                    "exec-admitted-0000-0000-000000000000",
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a second real card is filed"
+        );
+        assert!(
+            matches!(
+                daemon
+                    .db
+                    .claim_answer_mutation(
+                        uid.to_string(),
+                        admitted.request_id.clone(),
+                        crate::store::ClaimedMaterial {
+                            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                            generation: 1,
+                            route: "accept".into(),
+                            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+                            claimed_hash: admitted.payload_hash.clone(),
+                        },
+                        protocol::time::now_rfc3339(),
+                    )
+                    .await
+                    .expect("the claim is written"),
+                crate::store::MutationClaim::Claimed
+            ),
+            "the admitted answer holds an applying claim before the abort"
+        );
+        {
+            let gate = daemon.actuation_gate(uid).await.read_owned().await;
+            let open = daemon
+                .inner
+                .lock()
+                .await
+                .codex_links
+                .get(uid)
+                .expect("the outgoing link")
+                .carry
+                .open_answers();
+            crate::codex_link::insert_pending_answer_for_tests(
+                &open,
+                4242,
+                &admitted.request_id,
+                "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                gate,
+            );
+        }
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        // Held, and never answered: the link that took this ask is the wedged one, and
+        // the ask holds the answer gate's read guard, so the write side cannot acquire.
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon must reach the link within the budget")
+            .expect("the outgoing link is handed the answer");
+
+        // The replacement cannot quiesce within the budget; it must fall through and
+        // succeed, not refuse. (This waits out ANSWER_QUIESCE_BUDGET, ~4.5 s in test.)
+        register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect("a registration that cannot quiesce the answer falls through, not refuses");
+        let epoch_after = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the fall-through staked its claim");
+        assert!(
+            epoch_after > epoch_before,
+            "the session moved despite the wedged answer ({epoch_before} -> {epoch_after})"
+        );
+
+        // **And the admitted answer is durably terminal, not left applying.** The
+        // timeout path aborted the outgoing link before staking and settled its open
+        // answers: the claim is `Indeterminate` and the card is retired, so nothing
+        // dangles in `applying` for process-start recovery and no card is left on a
+        // phone that no tap can answer.
+        assert_eq!(
+            daemon
+                .db
+                .answer_status(uid.to_string(), admitted.request_id.clone())
+                .await
+                .expect("the answer status is readable"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "the admitted answer is made terminal by the abort, not left applying"
+        );
+        assert!(
+            !open_cards(&daemon, uid)
+                .iter()
+                .any(|row| row.request_id == admitted.request_id),
+            "the admitted answer's card is retired by the abort"
+        );
+
+        // The stuck answer is the aborted link's to settle. This test harness drives
+        // the channel by hand, so dropping the ask (its reply and its read guard)
+        // models the aborted link's teardown; the answer then reaches a terminal
+        // rather than wedging — which is the whole difference this placement buys.
+        drop(ask);
+        let result = tokio::time::timeout(Duration::from_secs(5), answering)
+            .await
+            .expect("the answer reaches a terminal after the link is aborted, it does not wedge")
+            .expect("the answering task");
+        assert!(
+            !matches!(result, AnswerResult::Applied { .. }),
+            "an answer the handover overtook was never confirmed applied: {result:?}"
+        );
+    }
+
+    /// **A claim committed but not yet in the daemon's ledger is still settled by
+    /// the handover.**
+    ///
+    /// A phone answer commits its durable claim BEFORE it enters the link's
+    /// in-memory `open_answers`, and the write that commits it cannot be
+    /// cancelled. There is therefore a window where the claim is `applying` in the
+    /// store and nothing is in `open_answers` — the exact state an abort in that
+    /// gap leaves behind. The quiesce-timeout handover aborts the outgoing link
+    /// and settles that link's `open_answers`, which walks an EMPTY ledger and
+    /// finds nothing to do; only the store sweep reads the authoritative claim row
+    /// and makes it terminal. This is the sibling of the wedged-answer test above,
+    /// with the one difference that isolates the sweep: the admitted claim is
+    /// committed but deliberately NOT inserted into `open_answers`, so the ledger
+    /// walk cannot see it and the sweep is the only thing that can.
+    ///
+    /// **Mutation:** remove the `sweep_stranded_claims` call after the
+    /// join in the quiesce-timeout branch and this goes red — the claim stays
+    /// `applying` and its card stays open, exactly the leak the sweep closes.
+    #[tokio::test]
+    async fn a_claim_committed_before_it_reaches_the_ledger_is_swept_at_the_handover() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-holder").await;
+        let epoch_before = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the first registration staked its claim");
+
+        // **A second answer whose durable claim is committed but NOT in the link's
+        // ledger** — the state a real answer is in for the window between its claim
+        // reaching the store and its `PendingAnswer` reaching `open_answers`. An
+        // abort in that window is what this covers, so the pending answer is
+        // deliberately never inserted: only the store sweep can see this claim.
+        let session = SessionKey::new(uid, "cc-1");
+        let admitted = codex_command_card("rq-uncharted");
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    admitted.clone(),
+                    "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                    "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                    "exec-uncharted-0000-0000-000000000000",
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a second real card is filed"
+        );
+        assert!(
+            matches!(
+                daemon
+                    .db
+                    .claim_answer_mutation(
+                        uid.to_string(),
+                        admitted.request_id.clone(),
+                        crate::store::ClaimedMaterial {
+                            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                            generation: 1,
+                            route: "accept".into(),
+                            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+                            claimed_hash: admitted.payload_hash.clone(),
+                        },
+                        protocol::time::now_rfc3339(),
+                    )
+                    .await
+                    .expect("the claim is written"),
+                crate::store::MutationClaim::Claimed
+            ),
+            "the admitted answer holds an applying claim before the abort"
+        );
+
+        // **And the same window for the other actuating verb.** An interrupt's claim
+        // is committed before its `PendingInterrupt` reaches `open_interrupts` too, so
+        // an abort in that window leaves a row no ledger walk can see. It has no card
+        // to retire, which is exactly why nothing else would ever find it: only the
+        // store sweep reads the authoritative row.
+        assert!(
+            matches!(
+                daemon
+                    .db
+                    .claim_mutation(
+                        crate::store::OPERATION_INTERRUPT,
+                        uid.to_string(),
+                        "stop-uncharted".to_string(),
+                        crate::store::ClaimedMaterial {
+                            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                            generation: 1,
+                            route: crate::store::INTERRUPT_ROUTE.into(),
+                            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+                            claimed_hash: "h".into(),
+                        },
+                        protocol::time::now_rfc3339(),
+                    )
+                    .await
+                    .expect("the claim is written"),
+                crate::store::MutationClaim::Claimed
+            ),
+            "the interrupt holds an applying claim before the abort, and reaches no \
+             in-memory ledger"
+        );
+
+        // A real answer on the FIRST card, held and never returned, is what holds the
+        // answer gate's read guard so the handover's write side times out. Its ask is
+        // intercepted here rather than processed, so nothing about it reaches
+        // `open_answers` either — the ledger the abort walks is genuinely empty.
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon must reach the link within the budget")
+            .expect("the outgoing link is handed the answer");
+
+        // The replacement cannot quiesce within the budget; it falls through, aborts
+        // the outgoing link, joins its (empty) ledger, and sweeps the store.
+        register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect("a registration that cannot quiesce the answer falls through, not refuses");
+        let epoch_after = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the fall-through staked its claim");
+        assert!(
+            epoch_after > epoch_before,
+            "the session moved despite the wedged answer ({epoch_before} -> {epoch_after})"
+        );
+
+        // **The interrupt the ledger walk never saw is terminal too.** Same window,
+        // same authority, same sweep — and it has no card, so if the sweep did not
+        // cover this kind nothing at this handover ever would and the row would sit
+        // `applying` until the next daemon start.
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, uid, "stop-uncharted")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "the handover sweeps the interrupt claims as well as the answer claims"
+        );
+
+        // **The claim the ledger walk never saw is terminal, and its card is gone.**
+        // Nothing was in `open_answers` to settle it, so this is the store sweep's
+        // work alone: `applying` -> `indeterminate`, card retired.
+        assert_eq!(
+            daemon
+                .db
+                .answer_status(uid.to_string(), admitted.request_id.clone())
+                .await
+                .expect("the answer status is readable"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "a claim committed but never in the ledger is still made terminal by the sweep"
+        );
+        assert!(
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
+            "no applying claim is left for the outgoing session after the handover"
+        );
+        assert!(
+            !open_cards(&daemon, uid)
+                .iter()
+                .any(|row| row.request_id == admitted.request_id),
+            "the swept claim's card is retired, not left open on a phone"
+        );
+
+        // Cleanup: dropping the ask (its reply and read guard) models the aborted
+        // link's teardown so the held answer reaches a terminal rather than hanging.
+        drop(ask);
+        let _ = tokio::time::timeout(Duration::from_secs(5), answering).await;
+    }
+
+    /// A Codex registration frame for `uid` from a **named incarnation**.
+    ///
+    /// The supervisor's identity is its pid and the moment it started, and an exit
+    /// replay is only adopted when it names the incarnation that holds the session —
+    /// a replay from a stranger is refused before anything is torn down. So a test
+    /// about what a replay DOES has to register and replay under one identity, which
+    /// is what naming `started_at` here is for.
+    async fn register_codex_incarnation(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        name: &str,
+        started_at: &str,
+        exit_replay: bool,
+    ) -> Result<Registration> {
+        let (tx, _rx) =
+            mpsc::channel::<DaemonFrame>(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(_rx));
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: name.into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(
+                        std::env::temp_dir()
+                            .join(format!("ccd-replay-{uid}-nothing-listens.sock"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    codex_generation: Some(1),
+                    started_at: started_at.to_string(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+    }
+
+    /// **The claim-before-ledger window, committed for this run and reachable only
+    /// from the store.**
+    ///
+    /// Both actuating verbs write their durable claim BEFORE the mutation enters the
+    /// link's in-memory ledger, and the write that commits it is a `spawn_blocking`
+    /// that a cancellation cannot stop. So there is a window in which the row is
+    /// `applying` and `open_answers`/`open_interrupts` hold nothing — the state an
+    /// abort in that window leaves behind, and the state a ledger walk cannot see.
+    /// Staged here by committing the rows and deliberately never inserting the
+    /// in-memory entries.
+    async fn a_claim_of_each_kind_committed_but_never_in_the_ledger(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        answer_id: &str,
+        interrupt_id: &str,
+    ) {
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+            generation: 1,
+            route: "accept".into(),
+            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+            claimed_hash: "h".into(),
+        };
+        for (kind, request_id) in [
+            (crate::store::OPERATION_ANSWER, answer_id),
+            (crate::store::OPERATION_INTERRUPT, interrupt_id),
+        ] {
+            assert!(
+                matches!(
+                    daemon
+                        .db
+                        .claim_mutation(
+                            kind,
+                            uid.to_string(),
+                            request_id.to_string(),
+                            crate::store::ClaimedMaterial {
+                                route: if kind == crate::store::OPERATION_INTERRUPT {
+                                    crate::store::INTERRUPT_ROUTE.into()
+                                } else {
+                                    material.route.clone()
+                                },
+                                ..material.clone()
+                            },
+                            protocol::time::now_rfc3339(),
+                        )
+                        .await
+                        .expect("the claim is written"),
+                    crate::store::MutationClaim::Claimed
+                ),
+                "the premise: a {kind} claim is applying and reaches no in-memory ledger"
+            );
+        }
+    }
+
+    /// The status of one claim of one kind, straight from the store.
+    fn claim_status(
+        store: &Arc<crate::store::Store>,
+        kind: &str,
+        uid: &str,
+        request_id: &str,
+    ) -> Option<crate::store::AnswerStatus> {
+        store
+            .mutation_status(kind, uid, request_id)
+            .unwrap()
+            .map(|state| state.status)
+    }
+
+    /// **A supervisor disconnecting settles what its link committed but never
+    /// reached the ledger with.**
+    ///
+    /// [`Daemon::unregister_supervisor`] aborts the link and joins it, and that join
+    /// is the last thing that can speak for what the link was holding. It settles the
+    /// two in-memory ledgers — and a claim caught in the claim-before-ledger window is
+    /// in neither of them, so for that claim the join walks an empty map and finds
+    /// nothing to do. Only a sweep of the authoritative record can close it, and
+    /// before this there was none on this path: the row sat `applying` until the next
+    /// daemon start, with the answer's card open on somebody's phone for all of it.
+    ///
+    /// **Both kinds, asserted together**, because covering one and forgetting the
+    /// other is the exact shape of the defect this closes.
+    ///
+    /// **Mutation:** drop the sweep from `unregister_supervisor` and both assertions
+    /// go red.
+    #[tokio::test]
+    async fn a_disconnect_sweeps_the_claims_its_link_never_put_in_the_ledger() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let registration = register_codex_over(&daemon, uid, "cc-1")
+            .await
+            .expect("the Codex registration is accepted");
+        a_claim_of_each_kind_committed_but_never_in_the_ledger(
+            &daemon,
+            uid,
+            "rq-uncharted",
+            "stop-uncharted",
+        )
+        .await;
+
+        // The supervisor's connection ends. Nothing else runs on this path — no
+        // quiesce, no timeout, no replacement registration.
+        daemon.unregister_supervisor(&registration).await;
+
+        assert_eq!(
+            claim_status(
+                &store,
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "stop-uncharted"
+            ),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "a disconnect leaves no interrupt claim for the next start to reason about"
+        );
+        assert_eq!(
+            claim_status(&store, crate::store::OPERATION_ANSWER, uid, "rq-uncharted"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "and none of the other kind either"
+        );
+    }
+
+    /// **An exit replay settles them too, and it is the path that skips the quiesce.**
+    ///
+    /// A corpse recording its own end registers with `exit_replay` set, which
+    /// deliberately skips the answer quiesce — and with it the quiesce-timeout branch
+    /// that was the only store sweep in the registration path. It still parks and
+    /// joins the outgoing link, so it is an in-process abort with exactly the same
+    /// claim-before-ledger window and, until now, nothing to close it.
+    ///
+    /// **Mutation:** drop the sweep that follows the join in `register_supervisor` and
+    /// both assertions go red.
+    #[tokio::test]
+    async fn an_exit_replay_sweeps_the_claims_its_link_never_put_in_the_ledger() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // One incarnation throughout: the replay must be the corpse of the very
+        // supervisor that holds the session, or it is refused before anything is
+        // torn down and this would pass for the wrong reason.
+        let started_at = protocol::time::now_rfc3339();
+        register_codex_incarnation(&daemon, uid, "cc-1", &started_at, false)
+            .await
+            .expect("the Codex registration is accepted");
+        a_claim_of_each_kind_committed_but_never_in_the_ledger(
+            &daemon,
+            uid,
+            "rq-replayed",
+            "stop-replayed",
+        )
+        .await;
+
+        register_codex_incarnation(&daemon, uid, "cc-1", &started_at, true)
+            .await
+            .expect("the exit replay is adopted");
+
+        assert_eq!(
+            claim_status(
+                &store,
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "stop-replayed"
+            ),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "an exit replay leaves no interrupt claim behind, though it takes no quiesce"
+        );
+        assert_eq!(
+            claim_status(&store, crate::store::OPERATION_ANSWER, uid, "rq-replayed"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "and none of the other kind either"
+        );
+    }
+
+    /// **A same-session answer is not blocked by the TAIL of a registration.**
+    ///
+    /// The answer quiesce fences the stake against an answer admitted on the old link,
+    /// and once the stake stands its job is done. Held through the rest of the
+    /// registration — the row write, the card relabel, the park/join of the old link,
+    /// the ingest — it would block every same-session answer for all of that, and the
+    /// phone waits on those inline. Dropping it at the stake is what keeps a slow tail
+    /// from wedging an unrelated answer.
+    ///
+    /// The tail is made observably long on purpose: the outgoing link is replaced with
+    /// a task that cannot be cancelled at an await point, so the replacement's
+    /// park→join loops out real time before the registration returns. A same-session
+    /// answer issued into that window must come back promptly, not wait the tail out.
+    ///
+    /// **Mutation:** move the `drop(quiesced)` down to the end of `register_supervisor`
+    /// (hold the guard to return) and this goes red — the answer waits the whole tail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_same_session_answer_is_not_blocked_by_the_tail_of_a_registration() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, _asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-tail").await;
+
+        // Replace the outgoing link with a task that runs synchronous work with no await
+        // point, so `abort()` cannot stop it until it returns on its own. The next
+        // registration's park→join of this link therefore takes real time, which is the
+        // window a blocked answer would be forced to wait out.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let held = inner.codex_links.remove(uid).expect("a link was installed");
+            held.task.abort();
+            inner.codex_links.insert(
+                uid.to_string(),
+                CodexLinkHandle {
+                    epoch: held.epoch,
+                    generation: held.generation,
+                    task: tokio::spawn(async {
+                        let start = std::time::Instant::now();
+                        while start.elapsed() < Duration::from_millis(1800) {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                    }),
+                    presence: held.presence,
+                    answers: held.answers,
+                    interrupts: held.interrupts,
+                    composes: held.composes,
+                    carry: held.carry,
+                },
+            );
+        }
+
+        // The registration whose tail is now ~1.8 s long.
+        let handover = {
+            let daemon = Arc::clone(&daemon);
+            let uid = uid.to_string();
+            tokio::spawn(async move { register_codex_over(&daemon, &uid, "cc-1").await })
+        };
+
+        // Let it pass the stake and enter its tail (past the drop of the quiesce guard).
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !handover.is_finished(),
+            "the registration should still be in its tail when the answer is issued"
+        );
+
+        // A same-session answer, issued while the registration is in its tail. It must
+        // return promptly: the write guard was released at the stake, so nothing on the
+        // answer path is waiting on the registration to finish.
+        let started = std::time::Instant::now();
+        let answered = tokio::time::timeout(
+            Duration::from_secs(2),
+            daemon.answer(
+                &card.request_id,
+                &card.payload_hash,
+                protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            ),
+        )
+        .await;
+        let waited = started.elapsed();
+        assert!(
+            answered.is_ok(),
+            "the same-session answer was blocked by the registration tail past its budget"
+        );
+        assert!(
+            waited < Duration::from_millis(1200),
+            "the answer waited on the registration tail rather than proceeding: {waited:?}"
+        );
+
+        let _ = tokio::time::timeout(Duration::from_secs(10), handover).await;
+    }
+
+    /// **Aborting the answer's caller after the ask is enqueued does NOT release the
+    /// gate — the guard travels with the ask**.
+    ///
+    /// The read guard used to live in the answer-path future. Once the ask was
+    /// enqueued the work was the link's, but the guard was still the caller's — so a
+    /// caller aborted after enqueue (a phone WebSocket dropping, say) released the gate
+    /// while the old link still owned the queued response, and a stake could land under
+    /// it. Carrying the guard into the ask closes that: this aborts the caller with the
+    /// ask outstanding and shows a handover is STILL blocked, and only settling the ask
+    /// (dropping it, as the link's teardown does) lets the session move.
+    ///
+    /// **Mutation:** move the guard back to the caller (drop the `gate` field and take
+    /// a borrowed `quiesce.read()` in `answer_codex`) and the first assertion goes red
+    /// — the handover finishes the moment the caller is aborted.
+    #[tokio::test]
+    async fn an_answer_aborted_after_it_is_enqueued_keeps_the_gate_until_its_ask_is_settled() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, mut asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-abort").await;
+        let epoch_before = daemon.inner.lock().await.owner_of(uid).expect("staked");
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card.request_id.clone();
+            let payload_hash = card.payload_hash.clone();
+            let uid = uid.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        // Enqueued: the ask (and the read guard it carries) is now the test's.
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon must reach the link within the budget")
+            .expect("the outgoing link is handed the answer");
+
+        // The caller goes away — but the guard is in `ask`, not the caller.
+        answering.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(1), answering).await;
+
+        let handover = {
+            let daemon = Arc::clone(&daemon);
+            let uid = uid.to_string();
+            tokio::spawn(async move { register_codex_over(&daemon, &uid, "cc-1").await })
+        };
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            !handover.is_finished(),
+            "aborting the answer's caller released the answer gate while the ask still \
+             held the outgoing response"
+        );
+        assert_eq!(
+            daemon.inner.lock().await.owner_of(uid),
+            Some(epoch_before),
+            "and nothing was staked while the ask still held the guard"
+        );
+
+        // Settling the ask (the link's teardown drops its PendingAnswer) releases the
+        // guard, and only then does the session move — promptly, not by timeout.
+        drop(ask);
+        tokio::time::timeout(Duration::from_secs(2), handover)
+            .await
+            .expect("the handover completes once the ask is settled, not by timeout")
+            .expect("the registration task")
+            .expect("the replacement registration is accepted");
+    }
+
+    /// **The epoch filter, tested directly: a link whose epoch the owner has moved
+    /// past is not addressable**.
+    ///
+    /// This is the invariant [`Daemon::codex_answers_locked`] exists for, and it used
+    /// to be pinned only through the whole handover machinery — where a false pass had
+    /// several other ways to hide. Here it is exercised on the map alone: a link at the
+    /// owning epoch is handed out; move the owner forward (as a stake does) and leave
+    /// the link where it is, and the same lookup returns `None`.
+    ///
+    /// **Mutation:** drop the `owner == Some(held.epoch)` filter and the second
+    /// assertion goes red.
+    #[tokio::test]
+    async fn codex_answers_locked_hides_a_link_whose_epoch_the_owner_has_left() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (_card, _asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-filter").await;
+        let gate = daemon.actuation_gate(uid).await.read_owned().await;
+
+        let epoch = daemon
+            .inner
+            .lock()
+            .await
+            .owner_of(uid)
+            .expect("the registration staked its claim");
+        assert!(
+            Daemon::codex_answers_locked(&*daemon.inner.lock().await, uid, &gate).is_some(),
+            "a link at the owning epoch is addressable"
+        );
+
+        // Move the owner forward, as a replacement stake would, but leave the link at
+        // the old epoch — exactly the split the answer path must read as "no link".
+        daemon
+            .inner
+            .lock()
+            .await
+            .registration_epochs
+            .insert(uid.to_string(), epoch + 1);
+        assert!(
+            Daemon::codex_answers_locked(&*daemon.inner.lock().await, uid, &gate).is_none(),
+            "the filter must hide a link whose epoch the owner has moved past"
+        );
+    }
+
+    /// **The answer gate is per session: one session's held answer does not gate
+    /// another session's handover**.
+    ///
+    /// Every other answer test uses one uid, so a gate accidentally made global — one
+    /// lock shared across sessions — would pass all of them. This is the one that
+    /// would not: session A's answer is held (its read guard outstanding), and a
+    /// registration handover on session B must still complete promptly. Under a global
+    /// lock B's write side would block on A's reader and time out.
+    ///
+    /// **Mutation:** make [`Daemon::actuation_gates`] hand back one shared lock for every
+    /// uid and this goes red — B's handover waits on A.
+    #[tokio::test]
+    async fn one_sessions_held_answer_does_not_gate_another_sessions_handover() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // Two distinct, valid ULIDs — the daemon adopts a generated one for any uid
+        // that is not ULID-shaped, which would defeat the per-session premise.
+        let uid_a = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let uid_b = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+        register_codex_session(&daemon, uid_a, "cc-a").await;
+        register_codex_session(&daemon, uid_b, "cc-b").await;
+        let (card_a, mut asks_a, _sa) = codex_card_with_a_link(&daemon, uid_a, "rq-iso-a").await;
+
+        // Session A's answer is admitted and then held — its read guard is outstanding
+        // for as long as this test keeps `ask_a`.
+        let answering_a = {
+            let daemon = Arc::clone(&daemon);
+            let request_id = card_a.request_id.clone();
+            let payload_hash = card_a.payload_hash.clone();
+            let uid = uid_a.to_string();
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        &request_id,
+                        &payload_hash,
+                        protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into(),
+                        },
+                        Some(&uid),
+                    )
+                    .await
+            })
+        };
+        let ask_a = tokio::time::timeout(Duration::from_secs(5), asks_a.recv())
+            .await
+            .expect("session A's answer must reach its link")
+            .expect("A's link is handed the answer");
+
+        // Session B's handover must not be blocked by A's held answer gate.
+        let handover_b = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move { register_codex_over(&daemon, uid_b, "cc-b").await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), handover_b)
+            .await
+            .expect(
+                "session B's handover blocked on session A's answer: the gate is not per-session",
+            )
+            .expect("the registration task")
+            .expect("session B's replacement registration is accepted");
+
+        // Cleanup: release A's held answer.
+        drop(ask_a);
+        answering_a.abort();
+    }
+
+    /// **An option the card never offered is refused before anything is claimed.**
+    ///
+    /// `decline` is in the app-server's own decision grammar and is deliberately in
+    /// neither family's table — the TUI does not render it — so it is the exact
+    /// shape of a decision that is wire-legal and still not this card's to give.
+    ///
+    /// **Mutation:** have `wire_decision` fall back to `Value::String(option_id)`
+    /// when the id is not in the options and this goes red: a phone could name any
+    /// decision the app-server understands, whatever the card showed.
+    #[tokio::test]
+    async fn an_option_the_card_never_offered_is_refused_before_the_claim() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-decline").await;
+        // **Dropped on purpose.** With the receiver gone the ask cannot be parked,
+        // so a build that let this option through fails the send and refuses for
+        // the WRONG reason — a fast, legible failure instead of a test that hangs
+        // waiting for a reply nobody was going to give.
+        drop(asks);
+
+        let result = daemon
+            .answer(
+                &card.request_id,
+                &card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "decline".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("not one of the options") && reason.contains("nothing was sent"),
+                "the refusal must name what was wrong with it: {reason}"
+            ),
+            other => panic!("a decision this card never offered must not be sent: {other:?}"),
+        }
+        assert!(
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
+            "a refusal that happens before the ask leaves no claim to recover"
+        );
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "the question still stands, so a correct answer can still be given"
+        );
+    }
+
+    /// **A stale `payload_hash` is refused, and refused before anything is
+    /// claimed.**
+    ///
+    /// The hash is taken over the card's whole preimage, `tool_input.options`
+    /// included, so it is what ties an answer to the exact option table the phone
+    /// was shown. A phone answering a card that has since been re-delivered with a
+    /// different question would otherwise be picking an option out of a list nobody
+    /// is looking at any more.
+    ///
+    /// **Mutation:** drop the `card.payload_hash != payload_hash` gate and this
+    /// goes red — the answer would be written against whatever the card now says.
+    #[tokio::test]
+    async fn a_stale_payload_hash_is_refused_before_anything_is_claimed() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-stale").await;
+        drop(asks);
+
+        let result = daemon
+            .answer(
+                &card.request_id,
+                "sha256:a-hash-this-card-was-never-displayed-under",
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("stale payload_hash"),
+                "the refusal must say the card is out of date: {reason}"
+            ),
+            other => panic!("an answer to a card nobody is showing must not be sent: {other:?}"),
+        }
+        assert!(
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
+            "the gate is before the claim, so a stale answer leaves nothing behind"
+        );
+        assert_eq!(open_cards(&daemon, uid).len(), 1);
+    }
+
+    /// **An answer with no link to write it on leaves no claim and no terminal.**
+    ///
+    /// This is the case the claim ordering exists for. Claiming first would leave
+    /// an `applying` row for an answer that provably went nowhere, and the next
+    /// restart's recovery would retire a perfectly answerable card as `Unknown` —
+    /// so the operator loses the question because the wrapper was briefly down.
+    ///
+    /// **Mutation:** take the claim in `Daemon::answer_codex` before asking the
+    /// link and this goes red at `unsettled_answer_claims`.
+    #[tokio::test]
+    async fn an_answer_with_no_link_leaves_no_claim_and_the_card_standing() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, _asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-nolink").await;
+        unlink_codex(&daemon, uid).await;
+
+        let result = daemon
+            .answer(
+                &card.request_id,
+                &card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("no live link") && reason.contains("nothing was sent"),
+                "the refusal must say what stopped it, and that nothing went out: {reason}"
+            ),
+            other => panic!("with nothing to write on, nothing can be sent: {other:?}"),
+        }
+        assert!(
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
+            "an answer that provably actuated nothing leaves no claim: the operator's \
+             next tap is a first attempt and not a duplicate"
+        );
+        assert_eq!(open_cards(&daemon, uid).len(), 1);
+        assert_no_ledger_rows(&db, uid);
+    }
+
+    /// **A FRESH daemon settles an answer the last one left in flight, and the
+    /// card goes with it.**
+    ///
+    /// Driven through [`Daemon::recover`] on a store seeded with a card and an
+    /// `applying` claim, because that is the only version of the question worth
+    /// asking: recovery's two halves are ordered, and calling the private settle
+    /// directly is exactly what hid the ordering bug. Retirement claims the card by
+    /// removing it from `inner.pending`, so a settle that ran before the cards were
+    /// restored found nothing, filed no resolution, and left a card every future tap
+    /// refuses.
+    ///
+    /// **Mutation:** move `recover_codex_answers` back above the pending restore in
+    /// `Daemon::recover` and both the resolution assertion and the "no card" one go
+    /// red.
+    #[tokio::test]
+    async fn a_fresh_daemon_recovers_an_outstanding_answer_as_terminal_unknown() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let request_id = "rq-recovered";
+        {
+            let seeder = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_session(&seeder, uid, "cc-1").await;
+            let (card, _asks, _sender) = codex_card_with_a_link(&seeder, uid, request_id).await;
+            // The claim the dead daemon took, exactly as the link takes it.
+            assert_eq!(
+                store
+                    .claim_mutation(
+                        crate::store::OPERATION_ANSWER,
+                        uid,
+                        request_id,
+                        &crate::store::ClaimedMaterial {
+                            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                            generation: 1,
+                            route: "accept".into(),
+                            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+                            claimed_hash: "hash".into(),
+                        },
+                        &protocol::time::now_rfc3339(),
+                    )
+                    .unwrap(),
+                crate::store::MutationClaim::Claimed
+            );
+            assert!(!card.payload_hash.is_empty());
+        }
+
+        // A daemon that has never seen any of this, doing what a restart does.
+        let reborn = daemon_on(Arc::clone(&store), Config::default());
+        reborn.recover().await;
+
+        assert!(
+            store.codex_pending_approvals(uid).unwrap().is_empty(),
+            "a card whose answer is terminal is retired, not restored"
+        );
+        assert!(
+            reborn.inner.lock().await.pending.is_empty(),
+            "and it is not left in memory either, or the phone shows a question \
+             nothing can answer"
+        );
+        let resolved = approval_events(&reborn, uid, EventKind::ApprovalResolved)
+            .into_iter()
+            .map(|e| serde_json::from_value::<protocol::ws::CodexResolution>(e.payload).unwrap())
+            .collect::<Vec<_>>();
+        match resolved.as_slice() {
+            [protocol::ws::CodexResolution::Unknown {
+                attempted_by,
+                attempted_decision,
+                write_stage,
+                ..
+            }] => {
+                assert_eq!(*attempted_by, protocol::ws::ResolutionActor::Phone);
+                assert_eq!(
+                    *attempted_decision,
+                    Some(AnswerDecision::OptionId {
+                        option_id: "accept".into()
+                    }),
+                    "the claim's route is what lets a recovered terminal say what was \
+                     attempted"
+                );
+                assert_eq!(
+                    *write_stage,
+                    protocol::ws::WriteStage::UpstreamWriteUnconfirmed
+                );
+            }
+            other => panic!("one terminal, and it says nothing is known: {other:?}"),
+        }
+        assert!(
+            store
+                .unsettled_claims(crate::store::OPERATION_ANSWER)
+                .unwrap()
+                .is_empty(),
+            "and the claim is terminal, so a second restart does not do this again"
+        );
+    }
+
+    /// **A terminal `unknown` is never answered again.**
+    ///
+    /// The card is deliberately still there in the case this covers: a bounce
+    /// re-delivers the request, the app-server is genuinely still waiting, and the
+    /// keyboard can still answer it. What must not happen is the phone writing a
+    /// second response to a request that accepts exactly one — so the refusal comes
+    /// from the ledger and the card is left alone rather than suppressed.
+    ///
+    /// **Mutation:** let `claim_mutation` replace a terminal row (`INSERT OR
+    /// REPLACE`, or dropping the `status = 'applying'` guard on the settle) and the
+    /// second answer below is admitted.
+    #[tokio::test]
+    async fn a_terminal_unknown_answer_is_never_sent_again() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let (card, asks, _sender) = codex_card_with_a_link(&daemon, uid, "rq-terminal").await;
+        drop(asks);
+        let now = protocol::time::now_rfc3339();
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+            generation: 1,
+            route: "accept".into(),
+            target_turn_id: Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee".into()),
+            claimed_hash: "hash".into(),
+        };
+        store
+            .claim_mutation(
+                crate::store::OPERATION_ANSWER,
+                uid,
+                &card.request_id,
+                &material,
+                &now,
+            )
+            .unwrap();
+        assert!(store
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_ANSWER,
+                uid,
+                &card.request_id,
+                &now
+            )
+            .unwrap());
+
+        let result = daemon
+            .answer(
+                &card.request_id,
+                &card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("not known") && reason.contains("will not be sent again"),
+                "the operator has to be told why, or the card just looks broken: {reason}"
+            ),
+            other => panic!("a terminal unknown must never be re-answered: {other:?}"),
+        }
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "the server is still waiting, so the keyboard can still answer it"
+        );
+    }
+
+    /// **A session this build has no word for is refused before any lock or
+    /// claim.**
+    ///
+    /// `AgentKind::Unsupported` is a run some future build wrote, and its contract
+    /// is that every actuation site fails closed. "Not Claude" is not evidence of
+    /// Codex: routing it down the Codex path would enter the claim machinery for a
+    /// wire this daemon cannot speak.
+    ///
+    /// **Mutation:** restore the `!shared_ledgers_admit(..)` test in place of the
+    /// explicit `AgentKind` match and this goes red — the answer reaches the Codex
+    /// path and refuses for the wrong reason.
+    #[tokio::test]
+    async fn an_unsupported_agent_is_refused_before_any_lock_or_claim() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
+        // A row of the shape a later build writes, read by this one.
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE codex_sessions SET agent = 'gemini' WHERE session_uid = ?1",
+                [uid],
+            )
+            .unwrap();
+
+        let result = daemon
+            .answer(
+                "rq-unsupported",
+                "hash",
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("gemini") && reason.contains("nothing was sent"),
+                "the refusal must name the agent it refused: {reason}"
+            ),
+            other => panic!("an unknown agent must fail closed: {other:?}"),
+        }
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+        assert!(store
+            .unsettled_claims(crate::store::OPERATION_ANSWER)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// **Answering a Codex card writes nothing a rolled-back daemon can reach —
+    /// on the refusing path AND on the succeeding one.**
+    ///
+    /// Phase 3b turned `shared_ledgers_admit`'s dead end into a fork, so the
+    /// question this test asks changed shape: it is no longer "is a Codex answer
+    /// refused" but "does a Codex answer, refused or not, stay out of the four
+    /// tables a rolled-back v0.6.0 daemon rewrites globally". Both decisions are
+    /// fired here for that reason — a `Deny` the Codex path has no words for, and
+    /// an `option_id` it does — and the tripwire has to stay silent for both.
+    ///
+    /// The tripwire, not a row count, for the reason [`arm_ledger_tripwire`]
+    /// gives: a path that inserts and then cleans up leaves the same zero behind
+    /// as one that never inserted, and a daemon killed in that window does not.
+    ///
+    /// **Mutation:** point the answer path's durable claim at `claim_answer`
+    /// instead of `claim_mutation` — or read `answers` instead of the mutation
+    /// ledger in step 1 — and `assert_no_insert_was_attempted` goes red.
+    ///
+    /// **It fires on the second call, and only there, which is a property of the
+    /// staging rather than a weakness in it.** The first call carries a decision
+    /// the Codex path has no words for, so it is refused by the grammar check
+    /// before any claim is reached and touches nothing either way — that half is
+    /// asserting the refusal happens *before* the ledger, which is its own claim.
+    /// The `option_id` call is the one that walks the whole path (ledger read,
+    /// stored card, hash gate, option table, claimed material, ask), so it is the
+    /// one a widened fork would show up in.
+    /// **A recovery that could not read the cards must not decide anything about them.**
+    ///
+    /// The restore reads `all_pending_approvals`; a failure there was
+    /// logged and stepped over, and answer recovery ran anyway. With no card in
+    /// `inner.pending`, the retirement it attempts returns `AlreadyGone` and settles the
+    /// LEDGER on its own — so the claim becomes terminal `indeterminate` while the
+    /// durable card row, which the failed read never reached, is untouched.
+    ///
+    /// The next healthy start then restores that row onto a phone, beside a terminal
+    /// claim. Every tap on it is refused for ever, and no terminal will ever retire it:
+    /// the resolution it earned was filed against a card that was not there.
+    ///
+    /// A read failure is not information. The claim is left exactly as it was — the
+    /// `applying` row is the durable record that survives restarts precisely so it can be
+    /// dealt with by a start that CAN see the cards — and the second recovery here does
+    /// the whole job in one piece.
+    ///
+    /// **Mutation:** go back to running `recover_codex_answers` after a failed restore
+    /// (drop the `restored` guard) and the first two assertions go red together: a ghost
+    /// card stands beside an indeterminate claim, and its resolution was filed by the
+    /// recovery that could not see it.
+    #[tokio::test]
+    async fn a_recovery_that_cannot_read_the_cards_leaves_the_claim_for_the_next_one() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let writing = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&writing, uid, "cc-1").await;
+        assert!(raise_codex_card(&writing, uid, "req-ghost", "item-ghost").await);
+        let held = open_cards(&writing, uid)
+            .into_iter()
+            .find(|row| row.request_id == "req-ghost")
+            .expect("the producer filed the card");
+        let card: ApprovalCard = serde_json::from_str(&held.card).expect("the card decodes");
+
+        // The durable claim the link takes at the moment it writes — and then the
+        // process that took it is gone, which is the whole premise of recovery.
+        assert_eq!(
+            writing
+                .db
+                .claim_answer_mutation(
+                    uid.to_string(),
+                    "req-ghost".into(),
+                    crate::store::ClaimedMaterial {
+                        thread_id: "th-1".into(),
+                        generation: 1,
+                        route: "accept".into(),
+                        target_turn_id: Some("tu-1".into()),
+                        claimed_hash: card.payload_hash.clone(),
+                    },
+                    protocol::time::now_rfc3339(),
+                )
+                .await
+                .expect("the claim"),
+            crate::store::MutationClaim::Claimed
+        );
+        drop(writing);
+
+        // --- a start that cannot read the cards ---
+        // The restore reads `all_pending_approvals`; taking that view away is the
+        // smallest faithful stand-in for the class (a contended read, a corrupt page)
+        // and it is reversible, so the SECOND start below is an ordinary healthy one.
+        store.break_pending_card_reads_for_tests(true);
+        let blind = daemon_on(Arc::clone(&store), Config::default());
+        blind.recover().await;
+        store.break_pending_card_reads_for_tests(false);
+        assert_eq!(
+            blind
+                .store
+                .answer_status(uid, "req-ghost")
+                .expect("read the ledger"),
+            Some(crate::store::AnswerStatus::Applying),
+            "a start that could not see the cards has decided nothing about them"
+        );
+        drop(blind);
+
+        // --- and a healthy one behind it ---
+        let healthy = daemon_on(Arc::clone(&store), Config::default());
+        healthy.recover().await;
+
+        assert!(
+            open_cards(&healthy, uid).is_empty(),
+            "no card may be left standing beside a terminal claim — that is the ghost \
+             every future tap refuses: {:?}",
+            open_cards(&healthy, uid)
+        );
+        assert_eq!(
+            healthy
+                .store
+                .answer_status(uid, "req-ghost")
+                .expect("read the ledger"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "the recovery that COULD see the card is the one that made it terminal"
+        );
+        let filed: Vec<protocol::ws::CodexResolution> = healthy
+            .store
+            .events_after(uid, 0, 10_000)
+            .expect("read the events")
+            .into_iter()
+            .filter(|e| e.kind == EventKind::ApprovalResolved)
+            .map(|e| serde_json::from_value(e.payload).expect("a resolution decodes"))
+            .collect();
+        assert!(
+            matches!(
+                filed.as_slice(),
+                [protocol::ws::CodexResolution::Unknown {
+                    attempted_by: protocol::ws::ResolutionActor::Phone,
+                    ..
+                }]
+            ),
+            "exactly one terminal, filed once, by the start that retired the card: {filed:?}"
+        );
+    }
+
+    /// **A run this daemon could not READ is not a run that is gone.**
+    ///
+    /// The other half of the failed-restore gap. Answer recovery needs the run's name for the
+    /// resolution event, and it read that with `let Ok(Some(row)) = get_session(..) else`
+    /// — one pattern for two facts that call for opposite actions. `Ok(None)` is a run
+    /// that was genuinely deleted: it has no card left to retire either, so making the
+    /// claim terminal in the ledger and doing nothing else is honest. `Err` says only
+    /// that this read failed, and settling the ledger on the strength of it strands
+    /// whatever card the run still has — the same ghost, reached by a different door.
+    ///
+    /// `recover_codex_answers` is called directly rather than through `recover`, because
+    /// the branch under test is inside it and a whole recovery with the fleet view gone
+    /// would fail in a dozen places first — which would prove nothing about this one.
+    ///
+    /// **Mutation:** fold the `Err` arm back into `Ok(None)` (restore the
+    /// `let Ok(Some(row)) = .. else` pattern) and the first assertion goes red: the claim
+    /// is terminal while the card that belongs to it is still standing.
+    #[tokio::test]
+    async fn a_run_whose_read_failed_is_not_a_run_that_is_gone() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "req-unread", "item-unread").await);
+        let held = open_cards(&daemon, uid)
+            .into_iter()
+            .find(|row| row.request_id == "req-unread")
+            .expect("the producer filed the card");
+        let card: ApprovalCard = serde_json::from_str(&held.card).expect("the card decodes");
+        assert_eq!(
+            daemon
+                .db
+                .claim_answer_mutation(
+                    uid.to_string(),
+                    "req-unread".into(),
+                    crate::store::ClaimedMaterial {
+                        thread_id: "th-1".into(),
+                        generation: 1,
+                        route: "accept".into(),
+                        target_turn_id: Some("tu-1".into()),
+                        claimed_hash: card.payload_hash.clone(),
+                    },
+                    protocol::time::now_rfc3339(),
+                )
+                .await
+                .expect("the claim"),
+            crate::store::MutationClaim::Claimed
+        );
+
+        store.break_session_reads_for_tests(true);
+        daemon.recover_codex_answers().await;
+        store.break_session_reads_for_tests(false);
+
+        assert_eq!(
+            daemon
+                .store
+                .answer_status(uid, "req-unread")
+                .expect("read the ledger"),
+            Some(crate::store::AnswerStatus::Applying),
+            "a read that failed says nothing about the run, so it decides nothing about \
+             the claim either"
+        );
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "and the card is exactly where it was"
+        );
+
+        // …and a pass that CAN read the run does the whole job in one piece.
+        daemon.recover_codex_answers().await;
+        assert_eq!(
+            daemon
+                .store
+                .answer_status(uid, "req-unread")
+                .expect("read the ledger"),
+            Some(crate::store::AnswerStatus::Indeterminate)
+        );
+        assert!(
+            open_cards(&daemon, uid).is_empty(),
+            "the card is retired by the pass that could name its run"
+        );
+    }
+
+    /// **A ledger replay says what the ledger actually recorded, and `lost` is not
+    /// "a phone answered".**
+    ///
+    /// `Settled` is the ledger's word for *terminal*, and it carries two very different
+    /// outcomes. `delivered` is a phone answer the broker confirmed went upstream.
+    /// `lost` is the opposite fact: this phone's answer forwarded ZERO bytes, something
+    /// else settled the request, and the card was left standing for that other terminal.
+    /// Replaying both as "already answered from a phone" tells the operator their tap was
+    /// applied when the whole record says it was not — and it is the sentence a second
+    /// tap on a lost card gets, which is exactly the moment they are asking.
+    ///
+    /// The card is a real one, raised through the observer's own producer, and the ledger
+    /// row is settled through the store's own primitive, so this is the replay path and
+    /// not a hand-built string.
+    ///
+    /// **Mutation:** collapse `replayed_answer_sentence` back to one format string over
+    /// `{outcome}` and the second assertion goes red — the operator is told a phone
+    /// answered a card no phone answer ever reached.
+    #[tokio::test]
+    async fn a_lost_answer_replays_as_a_loss_and_not_as_a_phone_answer() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "req-lost", "item-lost").await);
+        let held = open_cards(&daemon, uid)
+            .into_iter()
+            .find(|row| row.request_id == "req-lost")
+            .expect("the producer filed the card");
+        let card: ApprovalCard = serde_json::from_str(&held.card).expect("the card decodes");
+
+        // The exact durable state a lost race leaves: a claim under this card's key,
+        // settled `lost`, with the card still standing for the winner's own terminal.
+        let claimed = crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 1,
+            route: "accept".into(),
+            target_turn_id: Some("tu-1".into()),
+            claimed_hash: card.payload_hash.clone(),
+        };
+        let now = protocol::time::now_rfc3339();
+        assert_eq!(
+            daemon
+                .db
+                .claim_answer_mutation(uid.to_string(), "req-lost".into(), claimed, now.clone())
+                .await
+                .expect("the claim"),
+            crate::store::MutationClaim::Claimed
+        );
+        assert!(daemon
+            .db
+            .settle_answer_mutation(uid.to_string(), "req-lost".into(), "lost", now)
+            .await
+            .expect("the settle"));
+
+        let again = daemon
+            .answer(
+                "req-lost",
+                &card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+
+        let AnswerResult::Rejected { reason } = &again else {
+            panic!("a terminal claim may never actuate again: {again:?}");
+        };
+        assert!(
+            reason.contains("nothing was sent again"),
+            "the refusal must say nothing went out: {reason}"
+        );
+        assert!(
+            !reason.contains("answered from a phone"),
+            "no phone answer ever reached Codex for this card — `lost` is the record \
+             that it did not: {reason}"
+        );
+        assert!(
+            reason.contains("lost") || reason.contains("something else answered"),
+            "and the operator is told what actually happened to it: {reason}"
+        );
+    }
+
+    // ------------------------------------------------ stopping a turn from a phone
+
+    /// The hash the phone computes and the daemon re-derives. Spelled through the
+    /// production function, so a test cannot pass by agreeing with itself.
+    fn interrupt_hash(session_ref: &str, turn_id: &str) -> String {
+        protocol::hash::interrupt_hash(session_ref, turn_id)
+    }
+
+    /// Put a link in the slot with a presence a test can drive, and give the daemon
+    /// its interrupt sender. Returns the receiver, so a test can see what — if
+    /// anything — reached the link.
+    async fn install_codex_link_for_tests(
+        daemon: &Arc<Daemon>,
+        session_uid: &str,
+        state: crate::codex_link::CodexAddressee,
+        generation: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::codex_link::InterruptRequest> {
+        daemon
+            .install_codex_interrupts_for_tests(session_uid, state, generation)
+            .await
+    }
+
+    /// **Every refusal that must happen before a claim, happens before a claim.**
+    ///
+    /// The ledger is the thing being protected. An interrupt that leaves an
+    /// `applying` row behind is one a restart has to make terminal, and one the phone
+    /// can never re-ask under the same id — so a refusal that wrote a row would turn
+    /// "we did not send this" into "we may have sent this" for every case below.
+    ///
+    /// **Mutation:** move the agent branch below the claim, or drop the addressee
+    /// check, and the ledger assertion at the end of each case goes red.
+    #[tokio::test]
+    async fn every_interrupt_refusal_leaves_the_ledger_untouched() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+
+        let claude = "01K1B3XQ8ZC0DE5FGH7JKMNCLA";
+        let codex = "01K1B3XQ8ZC0DE5FGH7JKMNCDX";
+        let now = protocol::time::now_rfc3339();
+        for (uid, name, agent) in [
+            (claude, "cc-claude", protocol::agent::AgentKind::Claude),
+            (
+                "01K1B3XQ8ZC0DE5FGH7JKMNGEM",
+                "cc-gemini",
+                protocol::agent::AgentKind::Unsupported("gemini".into()),
+            ),
+        ] {
+            store
+                .upsert_session(&SessionRow {
+                    session_uid: uid.into(),
+                    session_id: name.into(),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Live,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    agent,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .unwrap()
+                .assert_present();
+        }
+        register_codex_session(&daemon, codex, "cc-1").await;
+
+        let ledger_rows = || {
+            store
+                .unsettled_claims(crate::store::OPERATION_INTERRUPT)
+                .unwrap()
+                .len()
+        };
+
+        // **A Claude run.** It has no interrupt on this wire, and the refusal says
+        // what to do instead rather than only that the answer is no.
+        let refused = daemon
+            .interrupt(
+                "cc-claude",
+                "req-1",
+                "turn-1",
+                &interrupt_hash("cc-claude", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a Claude session must be refused: {refused:?}");
+        };
+        assert!(reason.contains("Claude session"), "{reason}");
+        assert!(reason.contains("at the Mac"), "{reason}");
+
+        // **A run some future build wrote.** "Not Claude" is not evidence of Codex.
+        let refused = daemon
+            .interrupt(
+                "cc-gemini",
+                "req-2",
+                "turn-1",
+                &interrupt_hash("cc-gemini", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("an unsupported agent must be refused: {refused:?}");
+        };
+        assert!(reason.contains("gemini"), "the refusal names it: {reason}");
+
+        // **A hash that does not bind the turn it names.** The phone saw one turn and
+        // this request names another, which is the substitution the hash exists for.
+        let refused = daemon
+            .interrupt(
+                "cc-1",
+                "req-3",
+                "turn-1",
+                &interrupt_hash("cc-1", "turn-OTHER"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a mismatched hash must be refused: {refused:?}");
+        };
+        assert!(reason.contains("stale payload_hash"), "{reason}");
+
+        // **No link at all** — a Codex row whose supervisor never registered, which
+        // is the state the fleet reports as `NoLink` and is a different fact from a
+        // link that exists and is between connections.
+        store
+            .upsert_session(&SessionRow {
+                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNORP".into(),
+                session_id: "cc-orphan".into(),
+                tmux_session: "cc-orphan".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                agent: protocol::agent::AgentKind::Codex,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+        let refused = daemon
+            .interrupt(
+                "cc-orphan",
+                "req-4",
+                "turn-1",
+                &interrupt_hash("cc-orphan", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a run with no link must be refused: {refused:?}");
+        };
+        assert!(reason.contains("no live link"), "{reason}");
+
+        // **A link that is connected and not watching the thread.** Bound is not
+        // subscribed: no `turn/*` frame reaches it, so the terminal that is an
+        // interrupt's only evidence could never arrive.
+        let mut asks_0 = install_codex_link_for_tests(
+            &daemon,
+            codex,
+            crate::codex_link::CodexAddressee::Bound {
+                thread_id: "th-1".into(),
+            },
+            3,
+        )
+        .await;
+        let refused = daemon
+            .interrupt("cc-1", "req-5", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a bound-but-unsubscribed link must be refused: {refused:?}");
+        };
+        assert!(reason.contains("not yet watching"), "{reason}");
+
+        // **And the wire has gone quiet under a session that is still alive.**
+        daemon.inner.lock().await.codex_links.remove(codex);
+        let mut asks_1 = install_codex_link_for_tests(
+            &daemon,
+            codex,
+            crate::codex_link::CodexAddressee::Offline {
+                thread_id: Some("th-1".into()),
+            },
+            0,
+        )
+        .await;
+        let refused = daemon
+            .interrupt("cc-1", "req-6", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("an offline link must be refused: {refused:?}");
+        };
+        assert!(reason.contains("lost its control link"), "{reason}");
+        assert!(
+            reason.contains("try again shortly"),
+            "a link that is reconnecting is worth asking again: {reason}"
+        );
+
+        // **A link that has never reached the session at all.** The same refusal, and
+        // emphatically not the same sentence: nothing was lost, because nothing was
+        // ever established, and telling somebody a thing broke sends them looking for
+        // a fault that is not there.
+        daemon.inner.lock().await.codex_links.remove(codex);
+        let mut asks_2 = install_codex_link_for_tests(
+            &daemon,
+            codex,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+            0,
+        )
+        .await;
+        let refused = daemon
+            .interrupt("cc-1", "req-7", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("a link that has not connected must be refused: {refused:?}");
+        };
+        assert!(
+            !reason.contains("lost"),
+            "there was never a link to lose: {reason}"
+        );
+        assert!(reason.contains("not yet reached"), "{reason}");
+
+        // **Connected, handshaken, and still picking up its thread.** This one used to
+        // share the offline sentence, which told the operator the link was lost and so
+        // ruled out the one thing that actually works here: waiting a moment.
+        daemon.inner.lock().await.codex_links.remove(codex);
+        let mut asks_3 = install_codex_link_for_tests(
+            &daemon,
+            codex,
+            crate::codex_link::CodexAddressee::Unbound {
+                adopted: Some("th-1".into()),
+            },
+            3,
+        )
+        .await;
+        let refused = daemon
+            .interrupt("cc-1", "req-8", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("an unbound link must be refused: {refused:?}");
+        };
+        assert!(
+            !reason.contains("lost"),
+            "the link is connected; nothing is lost: {reason}"
+        );
+        assert!(
+            reason.contains("still picking up its thread") && reason.contains("few seconds"),
+            "and the honest advice is to wait, not to walk to the Mac: {reason}"
+        );
+
+        assert_eq!(
+            ledger_rows(),
+            0,
+            "not one of these refusals may leave a claim behind: a durable row is a \
+             record that something was actuated, and nothing was"
+        );
+        // **And nothing reached the link either.** The ledger says no row was written;
+        // this says no ask was even handed over. Binding these receivers and never
+        // reading them left the stronger half of "nothing was sent" unasserted — a
+        // refusal that enqueued an ask and then happened not to claim would have been
+        // green.
+        assert!(
+            asks_0.try_recv().is_err(),
+            "leg 0: a refusal that reached the link is not a refusal before the write"
+        );
+        assert!(
+            asks_1.try_recv().is_err(),
+            "leg 1: a refusal that reached the link is not a refusal before the write"
+        );
+        assert!(
+            asks_2.try_recv().is_err(),
+            "leg 2: a refusal that reached the link is not a refusal before the write"
+        );
+        assert!(
+            asks_3.try_recv().is_err(),
+            "leg 3: a refusal that reached the link is not a refusal before the write"
+        );
+    }
+
+    /// **A duplicate interrupt replays what the first one recorded, and sends
+    /// nothing.**
+    ///
+    /// The ledger's whole job. Each of the three settled outcomes reads back
+    /// differently, because they are three different things to have happened and a
+    /// phone told "already stopped" about a turn that ended on its own has been told
+    /// something false.
+    ///
+    /// **Mutation:** make the `Settled` arm return `Duplicate` for every outcome and
+    /// the `turn_ended`/`refused` cases stop being refusals — an operator would be
+    /// told their tap worked when the record says it did not.
+    #[tokio::test]
+    async fn a_duplicate_interrupt_replays_the_recorded_outcome() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let _asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+
+        // **Staged as the daemon itself would write it**, which means the checksum is
+        // over the RUN and not over the name the phone used to reach it: a row seeded
+        // with the caller's own spelling would be material this daemon never produces,
+        // and the replay it is here to test would compare against a fiction.
+        let settle = |request_id: &str, outcome: &'static str| {
+            let material = crate::store::ClaimedMaterial {
+                thread_id: "th-1".into(),
+                generation: 2,
+                route: crate::store::INTERRUPT_ROUTE.into(),
+                target_turn_id: Some("turn-1".into()),
+                claimed_hash: interrupt_hash(uid, "turn-1"),
+            };
+            let now = protocol::time::now_rfc3339();
+            assert_eq!(
+                store
+                    .claim_mutation(
+                        crate::store::OPERATION_INTERRUPT,
+                        uid,
+                        request_id,
+                        &material,
+                        &now
+                    )
+                    .unwrap(),
+                crate::store::MutationClaim::Claimed
+            );
+            assert!(store
+                .settle_mutation(
+                    crate::store::OPERATION_INTERRUPT,
+                    uid,
+                    request_id,
+                    outcome,
+                    &now
+                )
+                .unwrap());
+        };
+
+        // The turn stopped. Asking again is a duplicate, not a refusal: the thing the
+        // operator wanted has happened.
+        settle("req-aborted", crate::store::INTERRUPT_ABORTED);
+        assert_eq!(
+            daemon
+                .interrupt(
+                    "cc-1",
+                    "req-aborted",
+                    "turn-1",
+                    &interrupt_hash("cc-1", "turn-1")
+                )
+                .await,
+            InterruptResult::Duplicate {
+                turn_id: "turn-1".into()
+            }
+        );
+
+        // The turn ended on its own. Nothing was stopped, and the sentence says so.
+        settle("req-ended", crate::store::INTERRUPT_TURN_ENDED);
+        let replayed = daemon
+            .interrupt(
+                "cc-1",
+                "req-ended",
+                "turn-1",
+                &interrupt_hash("cc-1", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &replayed else {
+            panic!("a turn that ended on its own was not stopped from here: {replayed:?}");
+        };
+        assert!(reason.contains("ended on its own"), "{reason}");
+
+        // The write was refused. Same again: nothing was stopped.
+        settle("req-refused", crate::store::INTERRUPT_REFUSED);
+        let replayed = daemon
+            .interrupt(
+                "cc-1",
+                "req-refused",
+                "turn-1",
+                &interrupt_hash("cc-1", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Rejected { reason } = &replayed else {
+            panic!("a refused write is not a stop: {replayed:?}");
+        };
+        assert!(reason.contains("refused"), "{reason}");
+
+        // A claim nobody settled — the shape a daemon killed after the write leaves —
+        // is terminal and never sent again.
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 2,
+            route: crate::store::INTERRUPT_ROUTE.into(),
+            target_turn_id: Some("turn-1".into()),
+            claimed_hash: interrupt_hash(uid, "turn-1"),
+        };
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-unknown",
+                &material,
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        store
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-unknown",
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        let replayed = daemon
+            .interrupt(
+                "cc-1",
+                "req-unknown",
+                "turn-1",
+                &interrupt_hash("cc-1", "turn-1"),
+            )
+            .await;
+        let InterruptResult::Indeterminate { reason } = &replayed else {
+            panic!("an unprovable interrupt is never retried: {replayed:?}");
+        };
+        assert!(reason.contains("not known"), "{reason}");
+    }
+
+    /// **Every kind of claim the ledger has is made terminal at the next start.**
+    ///
+    /// The two kinds are written by different paths and settled by different rules —
+    /// an answer retires a card beside its row, an interrupt has only the row — so
+    /// they are recovered by two functions rather than one loop. What they must not
+    /// differ about is being recovered at all: a claim left `applying` is one no
+    /// phone can ever re-ask under the same id, and the second kind spent a while
+    /// with half a recovery precisely because "which kinds are covered" lived only in
+    /// the reader's head.
+    ///
+    /// Driven off [`crate::store::OPERATION_KINDS`], so a third kind added to that
+    /// list without a recovery behind it fails here rather than quietly stranding
+    /// every claim it takes.
+    ///
+    /// **Mutation:** remove either recovery call from the start path and this goes
+    /// red, naming the kind that was dropped.
+    #[tokio::test]
+    async fn every_kind_of_claim_is_made_terminal_at_the_next_start() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        {
+            let daemon = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_session(&daemon, uid, "cc-1").await;
+        }
+        for kind in crate::store::OPERATION_KINDS {
+            store
+                .claim_mutation(
+                    kind,
+                    uid,
+                    &format!("req-{kind}"),
+                    &crate::store::ClaimedMaterial {
+                        thread_id: "th-1".into(),
+                        generation: 1,
+                        route: "accept".into(),
+                        target_turn_id: Some("turn-1".into()),
+                        claimed_hash: "h".into(),
+                    },
+                    &protocol::time::now_rfc3339(),
+                )
+                .unwrap();
+        }
+
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        daemon.recover().await;
+
+        for kind in crate::store::OPERATION_KINDS {
+            assert_eq!(
+                store
+                    .mutation_status(kind, uid, &format!("req-{kind}"))
+                    .unwrap()
+                    .map(|state| state.status),
+                Some(crate::store::AnswerStatus::Indeterminate),
+                "a {kind} claim left in flight must be terminal after a restart"
+            );
+            assert!(
+                store.unsettled_claims(kind).unwrap().is_empty(),
+                "and no {kind} claim is left for a later start to reason about"
+            );
+        }
+    }
+
+    /// **One run named two ways is one ask, not a conflict.**
+    ///
+    /// A phone may reach the same run by its uid on one tap and by its tmux name on
+    /// the next — both resolve to the same row, and both are ordinary. The
+    /// `payload_hash` it computes is over whichever it used, so storing the caller's
+    /// own hash as the claimed material made the two spellings different material
+    /// under one id: the honest retry that a slow reply invites came back as a
+    /// conflict, telling the operator they had asked for something else.
+    ///
+    /// The checksum is normalised over the RUN instead, which loses nothing — it is a
+    /// checksum, recomputed here from the request's own two fields — and makes the
+    /// same ask about the same turn the same ask however it was addressed.
+    ///
+    /// **Mutation:** build the claim with the caller's `payload_hash` (the
+    /// `claimed_hash` in `Daemon::interrupt`'s `ClaimedMaterial`) and the second tap
+    /// becomes a conflict.
+    #[tokio::test]
+    async fn one_run_named_by_uid_and_by_name_is_one_interrupt() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let mut asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+
+        // **The first tap names the run by its tmux name, and the material it is
+        // claimed with is the DAEMON'S, not this test's.**
+        //
+        // Taken off the link's own channel rather than written by hand, because the
+        // thing under test is what `Daemon::interrupt` puts in that material: a
+        // hand-built claim carrying an already-normalised hash would agree with the
+        // replay below whatever the production path had done, and the test would pass
+        // by agreeing with itself.
+        let tapping = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .interrupt("cc-1", "req-1", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+                    .await
+            })
+        };
+        let ask = tokio::time::timeout(Duration::from_secs(5), asks.recv())
+            .await
+            .expect("the daemon reaches the link within the budget")
+            .expect("the first tap is handed to the link");
+        assert_eq!(
+            ask.claimed.claimed_hash,
+            interrupt_hash(uid, "turn-1"),
+            "the claim is bound to the RUN, whatever reference the caller used to \
+             address it"
+        );
+
+        // The link's own claim-and-settle, with the daemon's material: the first tap
+        // stopped the turn and the record says so.
+        let now = protocol::time::now_rfc3339();
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                &ask.claimed,
+                &now,
+            )
+            .unwrap();
+        assert!(store
+            .settle_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                crate::store::INTERRUPT_ABORTED,
+                &now
+            )
+            .unwrap());
+        // The first caller is told by dropping the ask, which is what an aborted link
+        // does; what it heard is not this test's subject.
+        drop(ask);
+        let _ = tokio::time::timeout(Duration::from_secs(5), tapping).await;
+
+        // The retry names the same run by its uid. Same run, same turn, same id — and
+        // a `payload_hash` computed over a different reference, because that is what
+        // the phone had in hand.
+        for reference in ["cc-1", uid] {
+            assert_eq!(
+                daemon
+                    .interrupt(
+                        reference,
+                        "req-1",
+                        "turn-1",
+                        &interrupt_hash(reference, "turn-1")
+                    )
+                    .await,
+                InterruptResult::Duplicate {
+                    turn_id: "turn-1".into()
+                },
+                "the same ask about the same turn, addressed as {reference}"
+            );
+        }
+        assert!(
+            asks.try_recv().is_err(),
+            "and neither spelling sent anything: both are replays of a recorded outcome"
+        );
+    }
+
+    /// **One id, two turns: a conflict, and nothing is sent.**
+    ///
+    /// A phone reuses a request id — a retry counter that wrapped, a client that
+    /// mints one per screen rather than per ask — and the second ask names the turn
+    /// that is running NOW. The ledger's own law is that a duplicate replays the
+    /// material the first attempt was claimed with; a reply that reads the outcome
+    /// column alone cannot apply that law, and the answer it gives is the worst one
+    /// available: `Duplicate` naming the running turn, which tells the operator the
+    /// turn in front of them has already been stopped when nothing has touched it.
+    ///
+    /// The comparison is over what the CLIENT bound — the turn it named and the hash
+    /// binding this ask to it. The visit generation is the daemon's own bookkeeping
+    /// and stays a live pre-write check, because a person who reused an id has not
+    /// done anything wrong about a visit they cannot see.
+    ///
+    /// **Mutation:** compare the outcome alone and the second ask becomes a
+    /// `Duplicate` of a turn nobody stopped.
+    #[tokio::test]
+    async fn a_settled_interrupt_id_naming_another_turn_is_a_conflict_not_a_duplicate() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let mut asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+
+        // `req-1` stopped turn-1, and that is durably recorded.
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 2,
+            route: crate::store::INTERRUPT_ROUTE.into(),
+            target_turn_id: Some("turn-1".into()),
+            claimed_hash: interrupt_hash(uid, "turn-1"),
+        };
+        let now = protocol::time::now_rfc3339();
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                &material,
+                &now,
+            )
+            .unwrap();
+        assert!(store
+            .settle_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                crate::store::INTERRUPT_ABORTED,
+                &now
+            )
+            .unwrap());
+
+        // The same id, aimed at turn-2, with turn-2's own valid hash.
+        let reused = daemon
+            .interrupt("cc-1", "req-1", "turn-2", &interrupt_hash("cc-1", "turn-2"))
+            .await;
+        let InterruptResult::Rejected { reason } = &reused else {
+            panic!(
+                "turn-2 was never stopped, so nothing may report it as already \
+                 stopped: {reused:?}"
+            );
+        };
+        assert!(
+            reason.contains("different turn"),
+            "the operator is told which of the two facts is wrong: {reason}"
+        );
+        assert!(
+            asks.try_recv().is_err(),
+            "a conflict is decided from the record, so nothing reaches the link"
+        );
+
+        // And the honest duplicate still replays, so the conflict is not a blanket
+        // refusal of every retry.
+        assert_eq!(
+            daemon
+                .interrupt("cc-1", "req-1", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+                .await,
+            InterruptResult::Duplicate {
+                turn_id: "turn-1".into()
+            }
+        );
+        assert!(
+            asks.try_recv().is_err(),
+            "and it too is decided from the record"
+        );
+    }
+
+    /// **An aborted link owes both its verbs a terminal, not just one of them.**
+    ///
+    /// A link is stopped by abort on paths that run none of its own teardown: a
+    /// supervisor disconnecting ([`Daemon::unregister_supervisor`]) and an exit
+    /// replay's registration both reach [`Daemon::join_parked_codex_links`] without
+    /// passing through the quiesce timeout that sweeps the store. So the join is the
+    /// last thing that can speak for what the link was holding — and it spoke for the
+    /// answers only. A written interrupt's claim stayed `applying` for ever, and the
+    /// person who tapped Stop was never told anything at all, because the sender they
+    /// were waiting on died with the task.
+    ///
+    /// The two ledgers are settled the same way for the same reason, so this asserts
+    /// them together: a test that checked only the new one would not notice the old
+    /// one being dropped on the way.
+    ///
+    /// **Mutation:** settle only `open_answers` in the join and the interrupt half
+    /// goes red — the claim stays applying and the caller hears nothing.
+    #[tokio::test]
+    async fn an_aborted_link_settles_its_interrupts_as_well_as_its_answers() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let session = SessionKey::new(uid, "cc-1");
+        let _asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+
+        // One of each verb, claimed and written, waiting on evidence that will now
+        // never arrive.
+        let material = |turn: &str, hash: &str| crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 2,
+            route: crate::store::INTERRUPT_ROUTE.into(),
+            target_turn_id: Some(turn.to_string()),
+            claimed_hash: hash.to_string(),
+        };
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-stop",
+                &material("turn-1", "h"),
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        store
+            .claim_mutation(
+                crate::store::OPERATION_ANSWER,
+                uid,
+                "req-answer",
+                &material("turn-1", "h"),
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+
+        let stopped = {
+            let gate = daemon.actuation_gate(uid).await.read_owned().await;
+            let answer_gate = daemon.actuation_gate(uid).await.read_owned().await;
+            let inner = daemon.inner.lock().await;
+            let carry = &inner.codex_links.get(uid).expect("the outgoing link").carry;
+            crate::codex_link::insert_pending_answer_for_tests(
+                &carry.open_answers(),
+                4242,
+                "req-answer",
+                "th-1",
+                answer_gate,
+            );
+            crate::codex_link::insert_pending_interrupt_for_tests(
+                &carry.open_interrupts(),
+                4243,
+                "req-stop",
+                "th-1",
+                "turn-1",
+                gate,
+            )
+        };
+
+        // The abort, exactly as a disconnect or an exit replay reaches it.
+        daemon.park_current_codex_link(uid).await;
+        assert!(
+            daemon.join_parked_codex_links(&session).await,
+            "the park clears, which is the precondition for the settle"
+        );
+
+        let status = |request_id: &str| {
+            store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, uid, request_id)
+                .unwrap()
+                .map(|state| state.status)
+        };
+        assert_eq!(
+            status("req-stop"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "a written interrupt the link can no longer hear about is terminal, so no \
+             later start has to reason about it and no phone can send it again"
+        );
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_ANSWER, uid, "req-answer")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "and the answer beside it, which is the half that already worked"
+        );
+
+        // And the person who tapped Stop is told, rather than left holding a sender
+        // that will never fire.
+        let report = tokio::time::timeout(Duration::from_secs(5), stopped)
+            .await
+            .expect("the caller is told inside the budget")
+            .expect("and told by a sender that was not simply dropped");
+        let crate::codex_link::InterruptReport::Unknown(why) = &report else {
+            panic!("an aborted link knows nothing about what it wrote: {report:?}");
+        };
+        assert!(why.contains("will not be sent again"), "{why}");
+    }
+
+    /// **A claim this daemon was in the middle of when it stopped becomes terminal at
+    /// the next start, and is never sent again.**
+    ///
+    /// The kill-after-write shape, without a kill: an `applying` row is exactly what a
+    /// process death between the claim and the terminal leaves, and what recovery does
+    /// with it is the whole contract.
+    ///
+    /// **Mutation:** drop the `recover_codex_interrupts` call from the start path and
+    /// the row stays `applying` — a phone could then be told "not applied" for an
+    /// interrupt that may well have stopped the turn.
+    #[tokio::test]
+    async fn an_interrupt_in_flight_across_a_restart_becomes_one_terminal_unknown() {
+        use protocol::ws::InterruptResult;
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        {
+            let daemon = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_session(&daemon, uid, "cc-1").await;
+        }
+        let material = crate::store::ClaimedMaterial {
+            thread_id: "th-1".into(),
+            generation: 2,
+            route: crate::store::INTERRUPT_ROUTE.into(),
+            target_turn_id: Some("turn-1".into()),
+            claimed_hash: interrupt_hash(uid, "turn-1"),
+        };
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                &material,
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .unsettled_claims(crate::store::OPERATION_INTERRUPT)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // The next daemon start.
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        daemon.recover().await;
+        assert!(
+            store
+                .unsettled_claims(crate::store::OPERATION_INTERRUPT)
+                .unwrap()
+                .is_empty(),
+            "recovery must leave no claim for a later start to reason about"
+        );
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, uid, "req-1")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate)
+        );
+
+        let _asks = install_codex_link_for_tests(
+            &daemon,
+            uid,
+            crate::codex_link::CodexAddressee::Subscribed {
+                thread_id: "th-1".into(),
+            },
+            2,
+        )
+        .await;
+        let replayed = daemon
+            .interrupt("cc-1", "req-1", "turn-1", &interrupt_hash("cc-1", "turn-1"))
+            .await;
+        let InterruptResult::Indeterminate { reason } = &replayed else {
+            panic!("a recovered claim is terminal and never retried: {replayed:?}");
+        };
+        assert!(reason.contains("will not be sent again"), "{reason}");
+    }
+
+    /// **An interrupt is recovered even when the approval cards cannot be read.**
+    ///
+    /// The answer recovery genuinely depends on the cards being back: settling an
+    /// answer retires its card, and retiring one the restore never read files a
+    /// resolution against something that is not there. An interrupt has no card, so
+    /// none of that reasoning is about it — and standing inside the same gate bought
+    /// nothing while costing the phone a whole extra restart before it could be told
+    /// what became of its tap, and before the id could be used again.
+    ///
+    /// The fault is a real one rather than an injected flag: a second connection to
+    /// the same file takes the approvals table away, which is the shape a disk error
+    /// or a half-applied migration has at this boundary.
+    ///
+    /// **Mutation:** put the interrupt recovery back inside `if cards_are_back` and
+    /// this goes red, with the claim still applying.
+    #[tokio::test]
+    async fn an_interrupt_is_recovered_even_when_the_cards_cannot_be_read() {
+        let (store, db_path) = shared_store_on_disk();
+        let uid = TEST_UID;
+        {
+            let daemon = daemon_on(Arc::clone(&store), Config::default());
+            register_codex_session(&daemon, uid, "cc-1").await;
+        }
+        store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                "req-1",
+                &crate::store::ClaimedMaterial {
+                    thread_id: "th-1".into(),
+                    generation: 2,
+                    route: crate::store::INTERRUPT_ROUTE.into(),
+                    target_turn_id: Some("turn-1".into()),
+                    claimed_hash: interrupt_hash(uid, "turn-1"),
+                },
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+
+        // Take the cards away. The restore this start makes will fail, and the answer
+        // recovery behind it will correctly decline to run.
+        rusqlite::Connection::open(&db_path)
+            .expect("the same file")
+            .execute_batch("DROP TABLE pending_approvals;")
+            .expect("the table exists until now");
+
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        daemon.recover().await;
+
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_INTERRUPT, uid, "req-1")
+                .unwrap()
+                .map(|state| state.status),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "an interrupt has no card, so a failed card read decides nothing about it"
+        );
+    }
+
+    /// **The two Claude-only operations are refused for a Codex run, by the agent and
+    /// not by an accident.**
+    ///
+    /// The catalog's old refusal was a missing `claude_bin`, which is a fact about a
+    /// registration field; the terminal had no agent check at all. Both now read the
+    /// row and say what they found.
+    ///
+    /// **Mutation:** delete the `refuse_unless_claude` call from `command_catalog` and
+    /// the reason reverts to the binary sentence — which this asserts is gone.
+    #[tokio::test]
+    async fn the_claude_only_operations_are_refused_for_a_codex_run() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        let catalog = daemon.command_catalog("cc-1").await;
+        let protocol::ws::CommandCatalogResult::Unavailable { reason } = &catalog else {
+            panic!("a Codex run has no Claude to ask: {catalog:?}");
+        };
+        assert!(
+            reason.contains("Codex session"),
+            "the refusal names the agent, not a missing field: {reason}"
+        );
+        assert!(
+            !reason.contains("Claude Code binary"),
+            "the old accidental refusal described a registration field rather than the \
+             truth: {reason}"
+        );
+
+        // The gate the terminal attach reads, asked directly — the attach path itself
+        // is driven over a real WebSocket in `ws_server`'s own suite.
+        let crate::state::ClaudeOnly::WrongAgent(refused) =
+            daemon.refuse_unless_claude(uid, "the terminal").await
+        else {
+            panic!("a Codex run may not be typed into through a terminal")
+        };
+        assert!(refused.contains("Codex session"), "{refused}");
+        assert!(refused.contains("terminal"), "{refused}");
+
+        // **A reference this daemon cannot vouch for is refused, not admitted.** This
+        // is the gate's whole contract, and the terminal attach is the one call site
+        // with no later existence check behind it — everything after that line takes
+        // the lease and opens a client. A row the store does not have is not evidence
+        // that the run is Claude's.
+        //
+        // **Mutation:** admit `Ok(None)` and this goes red.
+        assert!(
+            matches!(
+                daemon
+                    .refuse_unless_claude("a-run-this-mac-has-never-heard-of", "the terminal")
+                    .await,
+                crate::state::ClaudeOnly::Unknown(_)
+            ),
+            "an unreadable or absent row fails closed"
+        );
+
+        // And a Claude run is untouched by the gate.
+        //
+        // **The uid is a well-formed one, and that is load-bearing here.** `L` is not
+        // in the ULID alphabet, so the id this leg used to carry was never a uid the
+        // resolver would look up: it fell through to a name lookup that matched
+        // nothing, and the gate answered about a row it had not found. That answer
+        // happened to be the one the assertion wanted, so the leg was green while
+        // proving nothing — which is the same fail-open the gate itself had.
+        let claude = "01K1B3XQ8ZC0DE5FGH7JKMNCJ2";
+        let now = protocol::time::now_rfc3339();
+        store
+            .upsert_session(&SessionRow {
+                session_uid: claude.into(),
+                session_id: "cc-claude".into(),
+                tmux_session: "cc-claude".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+        assert_eq!(
+            daemon.refuse_unless_claude(claude, "the terminal").await,
+            crate::state::ClaudeOnly::Admitted,
+            "the gate is about the agent and nothing else"
+        );
+    }
+
+    /// **G8: the two free-text takeovers refuse each other's agent, by name.**
+    ///
+    /// `send_text` types at the Mac's TTY and is Claude's; `compose` speaks the
+    /// app-server's own `turn/start`/`turn/steer` and is Codex's. Neither silently does
+    /// the other's job, and each refusal names the one that works — which is the
+    /// difference between an operator who knows what to press next and one who does not.
+    ///
+    /// Every refusal here is taken BEFORE any durable claim, so a refused ask leaves the
+    /// ledger empty. That is asserted rather than assumed: the whole reason the interrupt
+    /// gained a local gate in 4a was a live run that left a row recording an actuation
+    /// that never happened.
+    ///
+    /// **Mutation:** delete the `AgentKind::Claude` arm from `Daemon::compose` and the
+    /// first half goes red — a Claude run would fall through to the link lookup and be
+    /// refused for having no Codex link, which is a true sentence about the wrong thing.
+    #[tokio::test]
+    async fn compose_is_codexs_and_send_text_is_claudes_and_each_refuses_the_other() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let codex = TEST_UID;
+        register_codex_session(&daemon, codex, "cc-1").await;
+
+        let claude = "01K1B3XQ8ZC0DE5FGH7JKMNCJ3";
+        let now = protocol::time::now_rfc3339();
+        store
+            .upsert_session(&SessionRow {
+                session_uid: claude.into(),
+                session_id: "cc-claude".into(),
+                tmux_session: "cc-claude".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+
+        // A Claude session refuses the Codex compose, and says where its text goes.
+        let text = "please stop and summarise".to_string();
+        let refused = daemon
+            .compose(
+                claude,
+                "c-1",
+                text.clone(),
+                &protocol::hash::compose_hash(claude, &text),
+            )
+            .await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &refused else {
+            panic!("a Claude session has no Codex thread to speak to: {refused:?}")
+        };
+        assert!(reason.contains("Claude session"), "{reason}");
+        assert!(
+            reason.contains("send_text"),
+            "the refusal names the operation that works: {reason}"
+        );
+
+        // And the Codex session refuses the Claude takeover, which is the same statement
+        // read from the other end.
+        let typed = daemon
+            .send_text(codex, "hello".into(), None, None, true, false)
+            .await;
+        let protocol::ws::SendTextResult::Refused { reason } = &typed else {
+            panic!("a Codex session is not typed into: {typed:?}")
+        };
+        assert!(
+            reason.contains("only types into Claude sessions"),
+            "{reason}"
+        );
+
+        // **A refused compose leaves the ledger empty.** Both of these are taken before
+        // any claim: the agent branch above, and the link lookup below for a Codex run
+        // with no live link.
+        let none = daemon
+            .compose(
+                codex,
+                "c-2",
+                text.clone(),
+                &protocol::hash::compose_hash(codex, &text),
+            )
+            .await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &none else {
+            panic!("a Codex run whose link is not watching cannot be spoken to: {none:?}")
+        };
+        // The refusal names the WIRE rather than the run: the session is fine, the link
+        // has not reached it yet, and "try again shortly" is the true instruction.
+        assert!(
+            reason.contains("has not yet reached the Codex session"),
+            "{reason}"
+        );
+        for (uid, id) in [(claude, "c-1"), (codex, "c-2")] {
+            assert_eq!(
+                store
+                    .mutation_status(crate::store::OPERATION_COMPOSE, uid, id)
+                    .unwrap(),
+                None,
+                "a refusal taken before the claim leaves no row: {uid}/{id}"
+            );
+        }
+
+        // The checksum, and the ceiling. Both are refusals about the request rather than
+        // about the session, and both are taken before the link is even consulted.
+        let bad_hash = daemon
+            .compose(codex, "c-3", text.clone(), "not-the-hash")
+            .await;
+        assert!(matches!(
+            bad_hash,
+            protocol::ws::ComposeResult::Rejected { .. }
+        ));
+        let huge = "x".repeat(protocol::ws::MAX_COMPOSE_BYTES + 1);
+        let too_long = daemon
+            .compose(
+                codex,
+                "c-4",
+                huge.clone(),
+                &protocol::hash::compose_hash(codex, &huge),
+            )
+            .await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &too_long else {
+            panic!("a message over the ceiling is refused: {too_long:?}")
+        };
+        assert!(reason.contains("ceiling"), "{reason}");
+        // An empty message says nothing and is refused as such.
+        let empty = daemon
+            .compose(
+                codex,
+                "c-5",
+                String::new(),
+                &protocol::hash::compose_hash(codex, ""),
+            )
+            .await;
+        assert!(matches!(
+            empty,
+            protocol::ws::ComposeResult::Rejected { .. }
+        ));
+    }
+
+    /// **THE COMPOSE GATE ADMITS EXACTLY ONE UN-SUBSCRIBED STATE, AND IT IS THE
+    /// PROVABLE ONE.**
+    ///
+    /// The whole safety of breaking the first-turn dead end is this distinction:
+    ///
+    ///   * [`crate::codex_link::CodexAddressee::BoundNotStarted`] is a link whose own
+    ///     `thread/resume` came back with the MEASURED not-ready answer. No rollout
+    ///     means no turn has ever run on the thread, which means no turn is running
+    ///     now, which means a `turn/start` cannot collide with one. Admitted.
+    ///   * [`crate::codex_link::CodexAddressee::Bound`] is every other un-subscribed
+    ///     binding — a thread that may well have a rollout and a turn nobody here has
+    ///     seen, because an un-subscribed connection is handed no `turn/*` frame at all.
+    ///     Refused, exactly as before.
+    ///
+    /// **THE MUTANT THIS TEST EXISTS FOR:** widen the gate to admit any `Bound` — fold
+    /// the two arms into one `Ok(thread_id.clone())` — and the second half goes red: the
+    /// ask reaches the link instead of being refused, and the ledger is no longer empty
+    /// for it. That is the unsafe widening, and it must not compile-and-pass.
+    ///
+    /// A stop is unaffected in both states: it names a turn and is answered by that
+    /// turn's terminal, which reaches only a subscribed connection.
+    #[tokio::test]
+    async fn a_compose_is_admitted_on_the_bound_state_the_wire_has_proved_and_no_other() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+        let said = "Reply with the single word amber and nothing else.".to_string();
+        let hash = protocol::hash::compose_hash(uid, &said);
+
+        // ---- ADMITTED: the link has PROVED the thread has never run a turn ----------
+        let mut asks = daemon
+            .install_codex_composes_for_tests(
+                uid,
+                crate::codex_link::CodexAddressee::BoundNotStarted {
+                    thread_id: "th-fresh".into(),
+                },
+                4,
+            )
+            .await;
+        // The link's half, standing in for a connection that wrote the frame and read
+        // the answer. It has to run beside the call, because `Daemon::compose` waits on
+        // the report the link sends back.
+        let link = tokio::spawn(async move {
+            let ask = asks.recv().await.expect("the gate must admit this compose");
+            let seen = (
+                ask.thread_id.clone(),
+                ask.generation,
+                ask.claimed_hash.clone(),
+            );
+            let _ = ask.reply.send(crate::codex_link::ComposeReport::Started {
+                turn_id: "turn-first".into(),
+            });
+            seen
+        });
+        let admitted = daemon.compose(uid, "say-first", said.clone(), &hash).await;
+        let protocol::ws::ComposeResult::Started { turn_id } = &admitted else {
+            panic!("a thread with no rollout can be given its first turn: {admitted:?}")
+        };
+        assert_eq!(turn_id, "turn-first");
+        let (thread, generation, claimed) = link.await.expect("the link half");
+        assert_eq!(
+            (thread.as_str(), generation),
+            ("th-fresh", 4),
+            "the ask is addressed to the thread and the visit the addressee named"
+        );
+        assert_eq!(
+            claimed, hash,
+            "and it carries the daemon's own hash over the run and the words"
+        );
+
+        // ---- REFUSED: a binding that proves nothing about a running turn ------------
+        daemon.inner.lock().await.codex_links.remove(uid);
+        let mut asks = daemon
+            .install_codex_composes_for_tests(
+                uid,
+                crate::codex_link::CodexAddressee::Bound {
+                    thread_id: "th-unknown".into(),
+                },
+                5,
+            )
+            .await;
+        // **Bounded, because the mutant this row exists for does not fail — it
+        // HANGS.** A widened gate hands the ask to a link nothing is answering for,
+        // and `Daemon::compose` waits on that report. A test that hung would be a
+        // test nobody could read the verdict of, so the wait is given a budget and
+        // the budget expiring IS the failure.
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            daemon.compose(uid, "say-second", said.clone(), &hash),
+        )
+        .await
+        .expect(
+            "a bound link that has proved nothing must be REFUSED at the gate; a gate \
+             that admitted it would hand the ask to the link and wait for ever",
+        );
+        let protocol::ws::ComposeResult::Rejected { reason } = &refused else {
+            panic!("a bound link that has proved nothing must be refused: {refused:?}")
+        };
+        assert_eq!(reason, crate::codex_refusals::COMPOSE_LINK_BOUND);
+        assert!(
+            asks.try_recv().is_err(),
+            "a refusal taken at the gate never reaches the link"
+        );
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_COMPOSE, uid, "say-second")
+                .unwrap(),
+            None,
+            "and it leaves no durable claim behind"
+        );
+
+        // ---- REFUSED: the proof, already SPENT on a start this link wrote ----------
+        //
+        // The state the first row's link is in the moment its compose is written. The
+        // ask reaches the gate before this Mac has caught up with the turn it just
+        // started, and there is nothing left to admit it: another `turn/start` would be
+        // a second first turn, and this connection is handed no `turn/*` frame, so
+        // there is no running turn to join either.
+        //
+        // **The mutant this row exists for:** leave `not_ready_thread` standing across
+        // the write — do not spend it into
+        // [`crate::codex_link::CodexAddressee::StartInFlight`] — and this state is
+        // never published, so the second ask arrives on `BoundNotStarted`, is admitted,
+        // and is written as a second start.
+        daemon.inner.lock().await.codex_links.remove(uid);
+        let mut asks = daemon
+            .install_codex_composes_for_tests(
+                uid,
+                crate::codex_link::CodexAddressee::StartInFlight {
+                    thread_id: "th-fresh".into(),
+                },
+                5,
+            )
+            .await;
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            daemon.compose(uid, "say-third", said.clone(), &hash),
+        )
+        .await
+        .expect(
+            "a link whose proof is already spent must be REFUSED at the gate; a gate \
+             that admitted it would hand the ask to the link and wait for ever",
+        );
+        let protocol::ws::ComposeResult::Rejected { reason } = &refused else {
+            panic!("a spent proof admits nothing: {refused:?}")
+        };
+        assert_eq!(reason, crate::codex_refusals::COMPOSE_START_IN_FLIGHT);
+        assert!(
+            reason.contains("try again shortly"),
+            "it is a link-state refusal, and the phone reads that family by this \
+             clause: {reason}"
+        );
+        assert!(
+            asks.try_recv().is_err(),
+            "a refusal taken at the gate never reaches the link"
+        );
+        assert_eq!(
+            store
+                .mutation_status(crate::store::OPERATION_COMPOSE, uid, "say-third")
+                .unwrap(),
+            None,
+            "and it leaves no durable claim behind"
+        );
+
+        // ---- AND A STOP IS REFUSED IN ALL THREE, because there is no turn to name ---
+        for state in [
+            crate::codex_link::CodexAddressee::BoundNotStarted {
+                thread_id: "th-fresh".into(),
+            },
+            crate::codex_link::CodexAddressee::StartInFlight {
+                thread_id: "th-fresh".into(),
+            },
+            crate::codex_link::CodexAddressee::Bound {
+                thread_id: "th-unknown".into(),
+            },
+        ] {
+            daemon.inner.lock().await.codex_links.remove(uid);
+            let _asks = daemon
+                .install_codex_interrupts_for_tests(uid, state.clone(), 6)
+                .await;
+            let stop = daemon
+                .interrupt(
+                    "cc-1",
+                    "stop-1",
+                    "turn-1",
+                    &protocol::hash::interrupt_hash("cc-1", "turn-1"),
+                )
+                .await;
+            let protocol::ws::InterruptResult::Rejected { reason } = &stop else {
+                panic!("an un-subscribed link can never see a turn's terminal: {stop:?}")
+            };
+            assert!(reason.contains("not yet watching"), "{state:?}: {reason}");
+        }
+    }
+
+    /// **A finished compose is replayed while the link is gone, and the link's absence is
+    /// not the answer.**
+    ///
+    /// The phone that retries an id is, almost always, the phone that never heard the first
+    /// answer — and the reason it never heard it is usually that the link went down. So the
+    /// state this test puts the daemon in is not a corner: it is the ordinary one in which
+    /// a retry happens. What the Mac wrote down about a mutation that already ran outranks
+    /// what its socket is doing right now.
+    ///
+    /// Four rows, four different answers, all with the same dead link:
+    ///
+    ///   * a settled row with the same words replays the turn that heard them;
+    ///   * a settled row reached with DIFFERENT words is the conflict, named plainly,
+    ///     because replaying the first turn's id would tell somebody their new message
+    ///     reached the model when it never left this machine;
+    ///   * an unsettled `applying` claim is left alone — deciding it needs the claim, which
+    ///     is taken atomically with the write and so lives in the link;
+    ///   * and no row at all is the sentence about the link, unchanged.
+    ///
+    /// **Mutation:** drop the [`Daemon::settled_compose`] call and every one of these
+    /// becomes "this Mac has not yet reached the Codex session" — safe, and false.
+    #[tokio::test]
+    async fn a_finished_compose_is_replayed_even_when_the_link_is_gone() {
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        let said = "say the word amber".to_string();
+        let hash = protocol::hash::compose_hash(uid, &said);
+        let now = protocol::time::now_rfc3339();
+        let claim = |request_id: &str, claimed_hash: &str| {
+            store
+                .claim_mutation(
+                    crate::store::OPERATION_COMPOSE,
+                    uid,
+                    request_id,
+                    &crate::store::ClaimedMaterial {
+                        thread_id: "th-1".into(),
+                        generation: 1,
+                        route: crate::store::COMPOSE_ROUTE_START.into(),
+                        target_turn_id: None,
+                        claimed_hash: claimed_hash.to_string(),
+                    },
+                    &now,
+                )
+                .unwrap()
+        };
+
+        // The baseline the fix has to preserve: nothing recorded, so the link is all there
+        // is to say.
+        let cold = daemon.compose(uid, "say-0", said.clone(), &hash).await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &cold else {
+            panic!("an unrecorded ask with no link is refused: {cold:?}")
+        };
+        assert!(
+            reason.contains("has not yet reached the Codex session"),
+            "{reason}"
+        );
+
+        // A compose that landed: claimed, then settled with the turn that heard it.
+        claim("say-1", &hash);
+        store
+            .settle_mutation(
+                crate::store::OPERATION_COMPOSE,
+                uid,
+                "say-1",
+                &crate::store::compose_outcome(crate::store::COMPOSE_ROUTE_START, "turn-1"),
+                &now,
+            )
+            .unwrap();
+        assert_eq!(
+            daemon.compose(uid, "say-1", said.clone(), &hash).await,
+            protocol::ws::ComposeResult::Duplicate {
+                turn_id: "turn-1".into(),
+                started: true,
+            },
+            "the record names the turn these words began, and the dead link does not \
+             change that"
+        );
+
+        // The same id, different words. Not a duplicate — two mutations under one key.
+        let other = "say the word umber instead".to_string();
+        let conflict = daemon
+            .compose(
+                uid,
+                "say-1",
+                other.clone(),
+                &protocol::hash::compose_hash(uid, &other),
+            )
+            .await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &conflict else {
+            panic!("an id reused for other words is refused, not replayed: {conflict:?}")
+        };
+        assert_eq!(reason, crate::codex_refusals::COMPOSE_ID_REUSED);
+
+        // Written, and what became of it never learned.
+        claim("say-2", &hash);
+        store
+            .settle_mutation_indeterminate(crate::store::OPERATION_COMPOSE, uid, "say-2", &now)
+            .unwrap();
+        let unknown = daemon.compose(uid, "say-2", said.clone(), &hash).await;
+        let protocol::ws::ComposeResult::Indeterminate { reason } = &unknown else {
+            panic!("an unprovable compose is never re-sent: {unknown:?}")
+        };
+        assert_eq!(reason, crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN);
+
+        // An `applying` claim is somebody's live attempt. It is NOT answered here — the
+        // claim decides, and the claim lives where the write does.
+        claim("say-3", &hash);
+        let in_flight = daemon.compose(uid, "say-3", said.clone(), &hash).await;
+        let protocol::ws::ComposeResult::Rejected { reason } = &in_flight else {
+            panic!("an unsettled claim is left to the link: {in_flight:?}")
+        };
+        assert!(
+            reason.contains("has not yet reached the Codex session"),
+            "{reason}"
+        );
+    }
+
+    /// **One ceiling, stated twice, asserted equal here.**
+    ///
+    /// The phone's words are bounded in two places by two crates that cannot see each
+    /// other: [`Daemon::compose`] refuses text over `protocol::ws::MAX_COMPOSE_BYTES`
+    /// before it hashes anything, and the broker refuses a `turn/start` whose single
+    /// text item exceeds `codex_broker::refusal::MAX_PHONE_TEXT_BYTES` before it
+    /// forwards a byte. `protocol` does not depend on the broker and the broker does
+    /// not depend on `protocol`, so neither can name the other's constant; ccd is the
+    /// only crate that sees both, which is why the equality is stated from here.
+    ///
+    /// Why it has to be an equality rather than an ordering. A broker ceiling BELOW
+    /// this one would refuse text the daemon had already accepted, hashed and claimed
+    /// in the ledger — the phone would get a policy refusal it could not have predicted
+    /// from the only bound it was ever told, and the claim would have to be settled as
+    /// a refusal after the fact. A broker ceiling ABOVE it would make the daemon's edge
+    /// the only real bound, so any `turn/start` authored by something other than
+    /// [`Daemon::compose`] would carry unbounded text past the guard that exists to
+    /// stop exactly that.
+    #[test]
+    fn the_brokers_phone_text_bound_is_the_protocols() {
+        assert_eq!(
+            codex_broker::refusal::MAX_PHONE_TEXT_BYTES,
+            protocol::ws::MAX_COMPOSE_BYTES,
+            "the ceiling the phone is told and the ceiling the broker enforces are one \
+             number; moving either alone changes what a paired phone may say"
+        );
+    }
+
+    #[tokio::test]
+    async fn answering_a_codex_card_is_refused_before_the_claim() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        // Registered rather than staged — see `register_codex_session`. The card
+        // is still placed by hand below; what the registration buys is that
+        // `answer`'s gate is reading the agent off a row this daemon produced.
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
+
+        // The card is placed in memory rather than raised through the hook,
+        // because the hook gate makes raising one impossible — which is the
+        // arrangement this test is about. `answer` is the gate *behind* that one,
+        // and it has to hold for a card that got into memory some other way: a
+        // `pending_approvals` projection written by a build without this
+        // scaffolding and restored by `recover`, or the Codex producer Phase 3
+        // adds.
+        let request_id = "toolu_codex_1";
+        let tool_input = json!({ "command": "touch /tmp/a" });
+        let payload_hash = approval_payload_hash("Bash", &tool_input);
+        let card = ApprovalCard {
+            request_id: request_id.to_string(),
+            payload_hash: payload_hash.clone(),
+            tool_name: "Bash".into(),
+            tool_input: tool_input.clone(),
+            display_text: approval_payload_text("Bash", &tool_input),
+            permission_suggestions: None,
+            prompt_id: Some("p1".into()),
+            permission_mode: None,
+            risk: None,
+            generation: 1,
+            identity_bound: false,
+        };
+        // A live receiver, because a held hook is the case that writes the most:
+        // with a responder to answer through, `apply_decision` needs no supervisor
+        // and no prompt fingerprint, returns `Applied`, and `record_answer` puts a
+        // permanent row in `answers`. Ungated, that is what this call does.
+        let (responder_tx, responder_rx) = oneshot::channel::<HookDecision>();
+        daemon.inner.lock().await.pending.insert(
+            (uid.to_string(), request_id.to_string()),
+            PendingApproval {
+                card,
+                session: SessionKey::new(uid, "cc-1"),
+                // The tripwire's whole point is a Codex card that got into
+                // memory some other way, so it is a Codex card here too.
+                agent: protocol::agent::AgentKind::Codex,
+                created_ms: protocol::time::now_unix_ms(),
+                responder: Some(responder_tx),
+                claimed: false,
+                local_misses: 0,
+                tool_ran: false,
+                project_label: "cc-1".into(),
+                generation: 1,
+                prompt: None,
+            },
+        );
+
+        let result = daemon
+            .answer(request_id, &payload_hash, AnswerDecision::Allow, Some(uid))
+            .await;
+
+        match &result {
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("naming one of the options") && reason.contains("nothing was sent"),
+                "a Codex card names its options; a bare allow/deny is not one of them: {reason}"
+            ),
+            other => panic!("a decision this card never offered must not be sent: {other:?}"),
+        }
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+
+        // **And the decision the Codex path DOES accept, on a card the producer
+        // really raised.**
+        //
+        // A hand-placed card would refuse at the store lookup — "unknown or
+        // already-resolved request" — which is the honest answer for a request no
+        // Codex card stands behind, and is exactly why it proves nothing here: the
+        // shared ledgers are never reached because the function returns before
+        // them. So this half raises a real card through the observer's own
+        // producer, and the answer runs the whole validating path on it: the
+        // ledger read, the store card, the hash gate, the option table, the
+        // claimed material, and the ask. Every one of those is a place a widened
+        // fork would have touched a shared table, and the tripwire has to stay
+        // silent through all of it.
+        assert!(raise_codex_card(&daemon, uid, "derived-tripwire", "exec-tripwire").await);
+        let real = open_cards(&daemon, uid)
+            .into_iter()
+            .find(|row| row.request_id == "derived-tripwire")
+            .expect("the producer filed the card");
+        let real_card: ApprovalCard =
+            serde_json::from_str(&real.card).expect("the stored card decodes");
+        let by_option = daemon
+            .answer(
+                &real.request_id,
+                &real_card.payload_hash,
+                AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(uid),
+            )
+            .await;
+        match &by_option {
+            // Refused at the link, which is the last gate on the path and the
+            // furthest a daemon with no live connection can get. What matters is
+            // where it got to before it was refused, and the two assertions below
+            // are what say so.
+            AnswerResult::Rejected { reason } => assert!(
+                reason.contains("nothing was sent"),
+                "the refusal must say that nothing went out: {reason}"
+            ),
+            other => panic!("with no connection to write on, nothing can be sent: {other:?}"),
+        }
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+        // Held open for the whole call: a dropped receiver would send
+        // `apply_decision` down the typing path instead, which is not the path
+        // that writes the most.
+        drop(responder_rx);
+    }
+
+    /// **The Claude pane sweep does not touch a Codex card.**
+    ///
+    /// Every line of `sweep_local_resolutions` is about a Claude prompt: it
+    /// searches the pane for Claude's permission box and Claude's composer, and
+    /// it resolves through `resolve_without_phone`, which writes `answers` — one
+    /// of the tables a rolled-back v0.6.0 daemon rewrites globally — and deletes
+    /// from `pending_approvals`, which is not where a Codex card lives.
+    ///
+    /// Before the approval observer this was safe by construction, because
+    /// `pending` could hold nothing but Claude cards. It now can, and run
+    /// against one the sweep would do three wrong things at once: read a Codex
+    /// TUI pane for a Claude prompt, leak a Codex row into `answers`, and delete
+    /// nothing from `codex_pending_approvals` — leaving the card on the phone
+    /// with the only thing that could retire it already gone from memory.
+    ///
+    /// **`tool_ran` is set by hand, and that is what makes this test mean
+    /// anything.** This sweep has two arms: the `tool_ran` arm, which resolves
+    /// at once and needs no pane, and the pane arm, which is behind a
+    /// `capture_visible` that fails outright in a test with no supervisor. The
+    /// first version of this test drove only the pane arm — and passed with the
+    /// filter REMOVED, because the capture failed and the sweep `continue`d
+    /// before reaching anything. Measured, not suspected. So it drives the arm
+    /// that runs, which is the one immediately behind the filter.
+    ///
+    /// **Mutation:** drop `p.agent.is_claude()` from the candidate filter and
+    /// the Codex card is resolved: `answers` gets a row for a Codex run, which
+    /// is a table a rolled-back v0.6.0 daemon rewrites globally, and the card
+    /// leaves memory while its row in `codex_pending_approvals` stays — the
+    /// phone keeps a card nothing can ever retire.
+    #[tokio::test]
+    async fn the_claude_pane_sweep_leaves_a_codex_card_alone() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        // No grace, so a single sweep is enough to resolve anything the filter
+        // admits. Without it this would pass for the trivial reason that nothing
+        // had waited long enough.
+        let config = Config {
+            local_resolve: true,
+            local_resolve_grace_ms: 0,
+            ..Config::default()
+        };
+        let daemon = daemon_on(Arc::clone(&store), config);
+        register_codex_session(&daemon, uid, "cc-1").await;
+        arm_ledger_tripwire(&db);
+
+        let request_id = "codex-composite-1";
+        let tool_input = json!({ "command": "touch /tmp/a" });
+        let card = ApprovalCard {
+            request_id: request_id.to_string(),
+            payload_hash: approval_payload_hash("command", &tool_input),
+            tool_name: "command".into(),
+            tool_input: tool_input.clone(),
+            display_text: approval_payload_text("command", &tool_input),
+            permission_suggestions: None,
+            prompt_id: None,
+            permission_mode: None,
+            risk: None,
+            generation: 1,
+            identity_bound: false,
+        };
+        daemon.inner.lock().await.pending.insert(
+            (uid.to_string(), request_id.to_string()),
+            PendingApproval {
+                card,
+                session: SessionKey::new(uid, "cc-1"),
+                agent: protocol::agent::AgentKind::Codex,
+                // Old enough that the grace cannot be what saves it.
+                created_ms: 0,
+                responder: None,
+                claimed: false,
+                local_misses: 0,
+                // See the note above: the arm of this sweep that resolves
+                // without reading a pane, so the filter is what has to stop it.
+                tool_ran: true,
+                project_label: "cc-1".into(),
+                generation: 1,
+                prompt: None,
+            },
+        );
+
+        // Swept as many times as the miss counter could possibly need.
+        for _ in 0..(LOCAL_RESOLVE_MISSES + 2) {
+            daemon.sweep_local_resolutions().await;
+        }
+
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .contains_key(&(uid.to_string(), request_id.to_string())),
+            "a Codex card is retired by the frames that settle it, not by a sweep \
+             looking for a Claude prompt on a Codex pane"
+        );
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+    }
+
+    /// Raise one ordinary Codex command card, the way the link does.
+    async fn raise_codex_card(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+        item_id: &str,
+    ) -> bool {
+        let approval = crate::codex_approval::Approval::read(
+            crate::codex_approval::Family::Command,
+            &json!({
+                "threadId": "th-1",
+                "turnId": "tu-1",
+                "itemId": item_id,
+                "environmentId": "local",
+                "command": "/bin/zsh -lc 'touch /tmp/a'",
+                "cwd": "/work",
+                "availableDecisions": ["accept", "cancel"],
+            }),
+            None,
+        )
+        .expect("a command approval");
+        let card = approval.card(request_id.to_string(), 1);
+        daemon
+            .raise_codex_approval(
+                &SessionKey::new(uid, "cc-1"),
+                card,
+                &approval.thread_id,
+                &approval.turn_id,
+                &approval.item_id,
+                "commandExecution",
+            )
+            .await
+    }
+
+    /// **Claude's stale-approval sweep must never reach a Codex card.**
+    ///
+    /// The sweep answers an unanswered card at the Mac's expense: it writes the
+    /// shared `answers` table, reports `AnswerPath::SendKeys` and deletes from the
+    /// shared `pending_approvals`. Every one of those is a table a rolled-back
+    /// v0.6.0 daemon rewrites globally, so a Codex card passing through it is the
+    /// rollback leak the whole agent split exists to prevent — and the outcome it
+    /// files is a Claude-shaped keyboard timeout for a question no keyboard was
+    /// ever shown.
+    ///
+    /// It is also a lie about the wire. The measured Codex approval never times
+    /// out: the app-server holds the `serverRequest` open until something answers
+    /// it, and the frames that settle it are what retire the card.
+    ///
+    /// **Mutation:** drop the `p.agent.is_claude()` filter from
+    /// `expire_stale_approvals` and both halves go red — the Codex card vanishes
+    /// from memory and a row appears in the shared ledgers.
+    #[tokio::test]
+    async fn a_codex_card_is_never_swept_by_claudes_stale_approval_expiry() {
+        let (store, db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+
+        // Older than any age the sweep could be asked about.
+        daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .get_mut(&(uid.to_string(), "derived-1".to_string()))
+            .expect("the card just raised")
+            .created_ms = 0;
+        daemon.expire_stale_approvals(1).await;
+
+        assert_eq!(
+            open_cards(&daemon, uid).len(),
+            1,
+            "the app-server is still waiting on this request, so the card stands"
+        );
+        assert!(
+            approval_events(&daemon, uid, EventKind::ApprovalResolved).is_empty(),
+            "a Claude-shaped keyboard timeout is not a terminal any Codex frame produced"
+        );
+        assert_no_ledger_rows(&db, uid);
+    }
+
+    /// **A Codex approval's two events carry what the phone needs to act on the
+    /// card: which turn it belongs to, and which card the terminal ends.**
+    ///
+    /// Neither fact was on the wire, and each hole had a different bad answer.
+    ///
+    ///   * **The turn.** `ClientMessage::Interrupt` requires a `turn_id` and the
+    ///     card event carried none, so a Stop offered from a card had to name a turn
+    ///     read off some *earlier* event's envelope. "The approval always follows its
+    ///     item's `tool_call`" is an ordering the phone would have been relying on,
+    ///     not a contract — and it is false for a link that rebound mid-turn, which
+    ///     cards a command whose `item/started` it never saw.
+    ///   * **The card.** The resolution payload named nothing, so the only
+    ///     correlation was stripping `"resolved:"` off `source_event_id`. A prefix
+    ///     parse that misses is silent, and its symptom is an answered card standing
+    ///     on somebody's phone for ever.
+    ///
+    /// Driven through the production path — the observer's own `raise_codex_approval`
+    /// and the terminal's own `retire_codex_approval` — so what is asserted is what a
+    /// subscriber is sent, not what a struct can be built to look like.
+    ///
+    /// **Mutation:** drop the `with_turn_id` in `raise_codex_approval` and the first
+    /// half goes red; serialize the bare `CodexResolution` again in
+    /// `retire_codex_answered` and the second does.
+    #[tokio::test]
+    async fn a_codex_approval_names_its_turn_and_its_terminal_names_its_card() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+
+        let raised = approval_events(&daemon, uid, EventKind::ApprovalRequest);
+        assert_eq!(raised.len(), 1, "one card, one request event");
+        assert_eq!(
+            raised[0].turn_id.as_deref(),
+            Some("tu-1"),
+            "the turn the approval's own request named, on the envelope field every \
+             other Codex event carries it on — this is what a Stop from the card names"
+        );
+
+        assert_eq!(
+            daemon
+                .retire_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    "derived-1",
+                    protocol::ws::CodexResolution::Cleared {
+                        cause: protocol::ws::ClearCause::ItemCompleted,
+                    },
+                )
+                .await,
+            Retirement::Retired
+        );
+        let resolved = approval_events(&daemon, uid, EventKind::ApprovalResolved);
+        assert_eq!(resolved.len(), 1, "one terminal, one resolution event");
+        assert_eq!(
+            resolved[0].payload["request_id"].as_str(),
+            Some("derived-1"),
+            "the payload names the card, where Claude's `AnswerOutcome` has named \
+             one since minor 0"
+        );
+        assert_eq!(
+            resolved[0].payload["request_id"].as_str(),
+            raised[0].payload["card"]["request_id"].as_str(),
+            "and it is the SAME id the card was raised under — the whole point of \
+             the field is that a phone joins the two without parsing a string"
+        );
+
+        // **Additive, proven on the daemon's own output.** The payload still decodes
+        // as a bare `CodexResolution` — which is what every reader in this crate, and
+        // any phone written against minor 18, does with it.
+        assert_eq!(
+            serde_json::from_value::<protocol::ws::CodexResolution>(resolved[0].payload.clone())
+                .expect("a minor-18 decoder still reads this payload"),
+            protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::ItemCompleted,
+            }
+        );
+        // The prefix parse the field replaces is still there, and still agrees. It is
+        // asserted rather than removed: a client that already ships it must not be
+        // broken by the addition.
+        assert_eq!(
+            resolved[0].source_event_id.as_deref(),
+            Some("resolved:derived-1")
+        );
+    }
+
+    /// **The fleet says where each Codex session's control link stands, so a client
+    /// can tell whether THIS session can be stopped without tapping to find out.**
+    ///
+    /// The limit `ws::Capabilities::codex_interrupt`'s doc named: the capability is
+    /// build-shaped and connection-global, and `codex_thread_id` is resolved from the
+    /// binding, so it reads identically for a subscribed link and a link that is
+    /// merely bound. Both of those sessions are one row apart in the fleet and only
+    /// one of them can be stopped.
+    ///
+    /// All five addressee states are driven, because the fold is the part that can
+    /// silently go wrong: `Unbound` and `Offline` are one word, and `NoLink` is the
+    /// word every Claude row reports.
+    ///
+    /// **Mutation:** report `Bound` as `Subscribed` — the collapse `CodexAddressee`
+    /// exists to prevent — and the second assertion goes red.
+    #[tokio::test]
+    async fn the_fleet_says_where_each_codex_sessions_control_link_stands() {
+        use crate::codex_link::CodexAddressee;
+        use protocol::event::CodexLink;
+
+        let daemon = test_daemon();
+        let (subscribed, _s) = codex_run_with_link(
+            &daemon,
+            None,
+            CodexAddressee::Subscribed {
+                thread_id: "th-subscribed".into(),
+            },
+        )
+        .await;
+        let (bound, _b) = codex_run_with_link(
+            &daemon,
+            None,
+            CodexAddressee::Bound {
+                thread_id: "th-bound".into(),
+            },
+        )
+        .await;
+        let (offline, _o) = codex_run_with_link(
+            &daemon,
+            None,
+            CodexAddressee::Offline {
+                thread_id: Some("th-offline".into()),
+            },
+        )
+        .await;
+        let (unbound, _u) =
+            codex_run_with_link(&daemon, None, CodexAddressee::Unbound { adopted: None }).await;
+        let claude = register(&daemon, "cc-claude", None)
+            .await
+            .session
+            .uid
+            .clone();
+
+        let fleet: HashMap<String, SessionSummary> = daemon
+            .sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.session_uid.clone(), s))
+            .collect();
+
+        assert_eq!(
+            fleet[&subscribed].codex_link,
+            CodexLink::Subscribed,
+            "the one state an ask actually reaches the model in"
+        );
+        assert_eq!(
+            fleet[&bound].codex_link,
+            CodexLink::Bound,
+            "bound is not subscribed: this link knows the thread and receives none \
+             of its frames, so an ask handed to it is accepted into silence"
+        );
+        assert_eq!(fleet[&offline].codex_link, CodexLink::Offline);
+        assert_eq!(
+            fleet[&unbound].codex_link,
+            CodexLink::Offline,
+            "connected and bound to nothing is not a binding, and the client's \
+             answer for it is the one it gives an offline link"
+        );
+        assert_eq!(
+            fleet[&claude].codex_link,
+            CodexLink::None,
+            "a Claude run has no Codex control link to be in any state"
+        );
+
+        // **The thread and the link state agree, because they are one read.** The
+        // bound row is the case that made the field necessary: it names a thread and
+        // cannot be stopped, and before `codex_link` those two rows were identical.
+        assert_eq!(
+            fleet[&bound].codex_thread_id.as_deref(),
+            Some("th-bound"),
+            "the premise: this row names a thread exactly as the subscribed one does"
+        );
+        assert_eq!(
+            fleet[&subscribed].codex_thread_id.as_deref(),
+            Some("th-subscribed")
+        );
+        assert_eq!(
+            fleet[&claude].agent,
+            protocol::agent::AgentKind::Claude,
+            "`agent` was already on the wire and is unchanged — the client needs \
+             both fields, and this is the one it already had"
+        );
+        assert_eq!(fleet[&subscribed].agent, protocol::agent::AgentKind::Codex);
+    }
+
+    /// **The three fields minor 19 adds, as one real session produces them.**
+    ///
+    /// `fixtures/codex/minor-19-wire.json` is what the daemon actually emits — the
+    /// `approval_request` event with the turn on its envelope, the
+    /// `approval_resolved` event with the request id in its payload, and a two-row
+    /// fleet whose Codex row is `subscribed` and whose Claude row is `none` — for one
+    /// drive of the production path: the observer's `raise_codex_approval`, the
+    /// terminal's `retire_codex_approval`, and `Daemon::sessions`.
+    ///
+    /// It exists for `ios/`, which this repository cannot compile: the phone is being
+    /// built against these bytes right now, and a fixture nobody re-derives goes stale
+    /// silently. So the test asserts the phone's decode against the **committed** file
+    /// and then re-derives the file from this build and requires the two to be
+    /// byte-identical — a change to any of the three shapes must change the file, in
+    /// the diff, where a reviewer sees it.
+    ///
+    /// **The only thing normalised is time.** Three keys — the events' `ts` and the
+    /// summaries' `created_at`/`updated_at` — are clock reads, and nothing else in the
+    /// file is: the uids are pinned, the request id is *derived* from the item (so it
+    /// is the same composite id the card fixture carries), and the seqs are the
+    /// daemon's own numbering. The normalisation is asserted below rather than
+    /// trusted, so a field that starts carrying a clock cannot slip in under it.
+    ///
+    /// **Mutation:** any of the three production changes reverted, and the byte
+    /// comparison fails naming the file and the command that regenerates it.
+    #[tokio::test]
+    async fn the_minor_19_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/codex/minor-19-wire.json");
+        let committed: serde_json::Value =
+            serde_json::from_str(FIXTURE).expect("the fixture must be JSON");
+
+        // Gate one: what the phone decodes, asserted on the committed bytes.
+        let request = &committed["approval_request"];
+        let resolved = &committed["approval_resolved"];
+        assert_eq!(
+            request["turn_id"].as_str(),
+            Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee"),
+            "the turn a Stop pressed from this card names, on the event envelope"
+        );
+        assert_eq!(
+            resolved["payload"]["request_id"], request["payload"]["card"]["request_id"],
+            "the resolution names the card it retires — the join the phone makes \
+             without parsing `source_event_id`"
+        );
+        assert_eq!(resolved["payload"]["status"], json!("answered"));
+        // Both events decode as the daemon's own type, and the resolution payload
+        // decodes BOTH ways: as the new payload and as the bare resolution a
+        // minor-18 client reads.
+        let decoded_request: Event =
+            serde_json::from_value(request.clone()).expect("an Event the phone decodes");
+        assert_eq!(
+            decoded_request.turn_id.as_deref(),
+            Some("01a06db1-2223-7ed0-8be5-1d7e3ccdeaee")
+        );
+        let _: Event = serde_json::from_value(resolved.clone()).expect("an Event");
+        let payload: protocol::ws::CodexResolutionPayload =
+            serde_json::from_value(resolved["payload"].clone()).expect("the new payload");
+        assert_eq!(
+            payload.resolution,
+            protocol::ws::CodexResolution::Answered {
+                by: protocol::ws::ResolutionActor::Phone,
+                decision: Some(protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into()
+                }),
+            }
+        );
+        let _: protocol::ws::CodexResolution = serde_json::from_value(resolved["payload"].clone())
+            .expect("a minor-18 decoder still reads it");
+
+        let sessions = committed["sessions"]
+            .as_array()
+            .expect("the fleet is a list");
+        assert_eq!(sessions.len(), 2);
+        let mut seen = Vec::new();
+        for row in sessions {
+            let summary: SessionSummary =
+                serde_json::from_value(row.clone()).expect("a SessionSummary the phone decodes");
+            seen.push((summary.agent, summary.codex_link));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (
+                    protocol::agent::AgentKind::Codex,
+                    protocol::event::CodexLink::Subscribed
+                ),
+                (
+                    protocol::agent::AgentKind::Claude,
+                    protocol::event::CodexLink::None
+                ),
+            ],
+            "the row a Stop may be offered on, and the row it may not"
+        );
+        assert_eq!(
+            sessions[0]["blocked_on"],
+            json!([request["payload"]["card"]["request_id"]]),
+            "the fleet row names the very card above — the two rides of one fact"
+        );
+
+        // Gate two: the file is what this build produces.
+        let derived = phase5_wire_rows().await;
+        assert_eq!(
+            derived, committed,
+            "the committed minor-19 wire contract no longer matches what this build \
+             emits. Regenerate it: cargo test -p ccd --bin ccd -- --ignored --nocapture \
+             regenerate_the_minor_19_wire_fixture > fixtures/codex/minor-19-wire.json"
+        );
+    }
+
+    /// Regenerate `fixtures/codex/minor-19-wire.json`. Run with
+    /// `cargo test -p ccd --bin ccd -- --ignored --nocapture regenerate_the_minor_19`.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_19_wire_fixture() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&phase5_wire_rows().await).unwrap()
+        );
+    }
+
+    /// **Every sentence a phone can be told a Codex stop or message did not
+    /// happen, as this build says it.**
+    ///
+    /// `fixtures/codex/refusal-sentences.json` exists because the phone reads
+    /// these sentences with `String.contains`. `InterruptResult::Rejected` is a
+    /// bare reason on the wire — there is no code — so the iOS side decides
+    /// whether to grey Stop and Compose for a few seconds by matching the
+    /// clauses that describe a link which is coming back. That match is
+    /// correct for every sentence today and would go silently wrong the first
+    /// time somebody reworded one: nothing on this side would fail, because the
+    /// daemon would still be saying something true.
+    ///
+    /// So [`crate::codex_refusals`] is where each sentence is written, exactly
+    /// once, and this is [`the_minor_19_wire_fixture_is_what_this_build_emits`]'s
+    /// shape applied to it — assert what the phone reads against the
+    /// **committed** bytes, then re-derive those bytes from this build and
+    /// require them to be identical. `ios/` cannot be compiled here, so the
+    /// file is the only place the two sides can meet.
+    ///
+    /// **Nothing is normalised, because nothing in it is read from anything.**
+    /// The interpolated sentences are assembled by calling the very formatters
+    /// production calls, with the fixture's own `{uid}`/`{n}` tokens as their
+    /// arguments — so a template here cannot drift from the code, there being no
+    /// second copy of it to drift.
+    ///
+    /// **There is no `{err}` token, and there must never be one again.** Five
+    /// sentences were assembled from this Mac's own store error — an anyhow chain
+    /// whose open paths name absolute filesystem locations — and a phone read the
+    /// lot. The rule is pinned on the sentences themselves by
+    /// [`crate::codex_link`]'s
+    /// `a_store_error_never_reaches_the_phone_from_a_compose_an_interrupt_or_an_answer`;
+    /// what this file adds is that the phone's own splitter stops carrying a token
+    /// that can no longer appear.
+    ///
+    /// **Mutation:** edit one sentence in the checked-in file and the byte
+    /// comparison fails, naming the file and the command that regenerates it.
+    #[test]
+    fn the_refusal_sentences_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/codex/refusal-sentences.json");
+        const REGENERATE: &str =
+            "cargo test -p ccd --bin ccd -- --ignored regenerate_the_refusal_sentences_fixture";
+        let committed: serde_json::Value =
+            serde_json::from_str(FIXTURE).expect("the fixture must be JSON");
+
+        // Gate one: what the phone matches on, asserted on the committed bytes.
+        let sentences = committed["sentences"]
+            .as_array()
+            .expect("the sentences are a list");
+        let mut link_state = Vec::new();
+        for row in sentences {
+            for key in ["id", "verb", "outcome", "category", "text"] {
+                assert!(
+                    row[key].as_str().is_some_and(|v| !v.is_empty()),
+                    "every row carries a non-empty `{key}`: {row}"
+                );
+            }
+            assert!(
+                matches!(row["verb"].as_str(), Some("interrupt" | "compose" | "both")),
+                "`verb` names a control the phone offers: {row}"
+            );
+            assert!(
+                matches!(row["outcome"].as_str(), Some("rejected" | "indeterminate")),
+                "`outcome` is the wire variant the reason rides in: {row}"
+            );
+            assert!(
+                matches!(
+                    row["category"].as_str(),
+                    Some("link_state" | "permanent" | "transient_local" | "wire_code")
+                ),
+                "`category` is one this file documents: {row}"
+            );
+            if row["category"] == json!("link_state") {
+                link_state.push(row["text"].as_str().expect("a text").to_string());
+            }
+        }
+        assert_eq!(
+            committed["counts"]["total"].as_u64(),
+            Some(sentences.len() as u64),
+            "the count the phone reads is the number of rows it gets"
+        );
+        // **The link-state family is named, not merely counted.** These are the
+        // five addressee states plus the moments a write meets a link that has
+        // just moved, and the phone's whole grey-for-ten-seconds rule is a
+        // statement about exactly this set. A sentence leaving it is the change
+        // worth seeing in a diff.
+        for needle in [
+            "there is no live link to this Codex session",
+            "is not yet watching its thread",
+            "has lost its control link to the Codex session and is reconnecting",
+            "has not yet reached the Codex session",
+            "is still picking up its thread",
+        ] {
+            assert!(
+                link_state.iter().any(|text| text.contains(needle)),
+                "the link-state family still says {needle:?}"
+            );
+        }
+        assert!(
+            link_state
+                .iter()
+                .all(|text| !text.contains("will not be sent again")),
+            "nothing a phone may retry also tells it never to retry"
+        );
+        // The wire's refusal passes a code and never the refuser's message.
+        let wire: Vec<&str> = sentences
+            .iter()
+            .filter(|row| row["category"] == json!("wire_code"))
+            .map(|row| row["text"].as_str().expect("a text"))
+            .collect();
+        assert_eq!(wire.len(), 2, "one for the stop, one for the message");
+        assert!(
+            wire.iter().all(|text| text.contains("(code {n})")),
+            "the code is the part that is passed on: {wire:?}"
+        );
+
+        // Gate two: the file is what this build produces. Compared as a value
+        // first, because that is the comparison whose failure is readable — it
+        // names the row that moved — and then as BYTES, because the phone reads
+        // the file and not a parse of it, and a fixture that may be reformatted
+        // by hand is one whose diff stops being the record of a reword.
+        let derived = crate::codex_refusals::fixture();
+        assert_eq!(
+            derived, committed,
+            "the committed refusal sentences no longer match what this build \
+             emits. Regenerate them: {REGENERATE}"
+        );
+        assert_eq!(
+            FIXTURE,
+            crate::codex_refusals::fixture_bytes(),
+            "the committed refusal sentences say what this build emits but are \
+             not written the way it writes them. Regenerate them: {REGENERATE}"
+        );
+    }
+
+    /// Regenerate `fixtures/codex/refusal-sentences.json`. Run with
+    /// `cargo test -p ccd --bin ccd -- --ignored regenerate_the_refusal_sentences_fixture`.
+    ///
+    /// **It writes the file itself**, rather than printing it for a shell to
+    /// redirect. libtest owns the same stdout, so `--nocapture > file` wrote the
+    /// harness's own "running 1 test" lines into the JSON and produced a fixture
+    /// that did not parse; `CC_REFUSAL_FIXTURE_OUT` names another path when the
+    /// tree should not be touched.
+    #[test]
+    #[ignore = "generator, not a gate"]
+    fn regenerate_the_refusal_sentences_fixture() {
+        let path = crate::codex_refusals::write_fixture();
+        println!("wrote {}", path.display());
+    }
+
+    /// One drive of the production path, with the clock reads replaced.
+    ///
+    /// Both uids are pinned, because a fixture whose identities move cannot be
+    /// byte-compared — and because pinning them lets the two events and the fleet row
+    /// be *the same run*, which is the shape the phone joins them in.
+    async fn phase5_wire_rows() -> serde_json::Value {
+        const CODEX_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        const CLAUDE_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+        const AT: &str = "2026-09-07T00:00:00.000Z";
+
+        let (store, _db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, CODEX_UID, "cc-1").await;
+        register(&daemon, "cc-2", Some(CLAUDE_UID)).await;
+
+        // **A subscribed link, staged rather than dialled.** The registration above
+        // installs a real link, and its socket is a path nothing listens on — so it
+        // would publish `Offline` and the fixture would show the one state that says
+        // least. Its task is stopped and its own presence cell is published into, so
+        // what the summary reads is the cell production reads.
+        {
+            let mut inner = daemon.inner.lock().await;
+            let held = inner
+                .codex_links
+                .remove(CODEX_UID)
+                .expect("the registration installed a link");
+            held.task.abort();
+            held.presence
+                .publish_for_tests(crate::codex_link::CodexAddressee::Subscribed {
+                    thread_id: "01a06db1-1f8e-7db2-8fd5-10f13af55d1b".into(),
+                });
+            inner.codex_links.insert(CODEX_UID.to_string(), held);
+        }
+
+        // A real 0.153 `commandExecution` approval, read by the production parser and
+        // carded under the id **derived** from its item — the same composite-id codec
+        // `fixtures/codex/approval-card-0.153.json` is built with, over this capture's
+        // own thread and item rather than that one's.
+        let approval = codex_command_approval();
+        let request_id = approval
+            .request_id(CODEX_UID, 1)
+            .expect("the item derives an id");
+        let session = SessionKey::new(CODEX_UID, "cc-1");
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    approval.card(request_id.clone(), 1),
+                    &approval.thread_id,
+                    &approval.turn_id,
+                    &approval.item_id,
+                    "commandExecution",
+                )
+                .await,
+            "the premise: a real card, filed the way the observer files one"
+        );
+
+        // The fleet as the phone sees it while the card is open: the Codex row is
+        // subscribed AND blocked on this very request.
+        let mut sessions = daemon.sessions().await.expect("the fleet reads");
+        sessions.sort_by(|a, b| a.session_uid.cmp(&b.session_uid));
+
+        assert_eq!(
+            daemon
+                .retire_codex_approval(
+                    &session,
+                    &request_id,
+                    protocol::ws::CodexResolution::Answered {
+                        by: protocol::ws::ResolutionActor::Phone,
+                        decision: Some(protocol::ws::AnswerDecision::OptionId {
+                            option_id: "accept".into()
+                        }),
+                    },
+                )
+                .await,
+            Retirement::Retired
+        );
+
+        let one = |kind: EventKind| {
+            let mut events = approval_events(&daemon, CODEX_UID, kind.clone());
+            assert_eq!(events.len(), 1, "one {kind:?} event for one card");
+            events.remove(0)
+        };
+        let mut out = json!({
+            "approval_request": one(EventKind::ApprovalRequest),
+            "approval_resolved": one(EventKind::ApprovalResolved),
+            "sessions": sessions,
+        });
+
+        // **Only the clock reads are replaced, and that is checked rather than
+        // assumed**: each key must have been an RFC3339 stamp before it is
+        // overwritten, so a field that starts carrying a clock cannot pass through
+        // here unnoticed, and one that stops carrying one fails loudly.
+        fn normalise(value: &mut serde_json::Value, at: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, slot) in map.iter_mut() {
+                        if matches!(key.as_str(), "ts" | "created_at" | "updated_at") {
+                            let was = slot.as_str().unwrap_or_default();
+                            assert!(
+                                was.len() == 24 && was.ends_with('Z'),
+                                "{key} was expected to be an RFC3339 clock read, and is {slot}"
+                            );
+                            *slot = json!(at);
+                        } else {
+                            normalise(slot, at);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    items.iter_mut().for_each(|item| normalise(item, at))
+                }
+                _ => {}
+            }
+        }
+        normalise(&mut out, AT);
+        out
+    }
+
+    fn approval_events(daemon: &Daemon, uid: &str, kind: EventKind) -> Vec<Event> {
+        daemon
+            .store
+            .events_after(uid, 0, 50)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == kind)
+            .collect()
+    }
+
+    /// **A card the store refuses files no fact about it.**
+    ///
+    /// The unique index on `(session_uid, thread_id, item_id)` is the schema
+    /// saying one wire item is one card, and it catches the one failure the
+    /// primary key cannot: a *broken derivation*, which produces a different
+    /// request id for the same item. The event used to be appended first, so
+    /// that refusal left an `ApprovalRequest` in the log with no card anywhere
+    /// and no terminal that could ever retire it — a question the timeline shows
+    /// forever. One transaction is what makes the refusal total.
+    ///
+    /// **Mutation:** append the event before the row (or in a second
+    /// transaction) and the second assertion goes red with two request events
+    /// for one item.
+    #[tokio::test]
+    async fn a_card_the_schema_refuses_leaves_no_request_event_behind() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+        // The same item under a second derived id: the derivation broke, and the
+        // index is what says so.
+        assert!(
+            !raise_codex_card(&daemon, uid, "derived-1-forked", "exec-1").await,
+            "one wire item must not become two cards"
+        );
+
+        assert_eq!(
+            approval_events(&daemon, uid, EventKind::ApprovalRequest).len(),
+            1,
+            "the refused card must file no request event: an ApprovalRequest with no \
+             card behind it can never be resolved"
+        );
+        let pending = daemon.inner.lock().await;
+        assert_eq!(pending.pending.len(), 1);
+        assert!(pending
+            .pending
+            .contains_key(&(uid.to_string(), "derived-1".to_string())));
+    }
+
+    /// **A re-delivery that changed the question is refused, not merged.**
+    ///
+    /// The silent-refresh path moved one half of the representation. The stored
+    /// row and the in-memory card would take the new content while the
+    /// already-filed `ApprovalRequest` — the fact every connected client holds,
+    /// and the fact Phase 3b would answer against — kept the old one. No event,
+    /// no ring, nothing anywhere saying the question had changed under a card a
+    /// human is looking at.
+    ///
+    /// The measured re-delivery is byte-identical (the live bounce capture), so
+    /// this shape is one the wire has never produced; the honest answer is to
+    /// refuse it loudly and leave the card the phone is holding alone, rather
+    /// than invent a reconciliation for an input nothing can currently generate.
+    ///
+    /// **Mutation:** restore `ON CONFLICT … DO UPDATE SET card, turn_id` and the
+    /// stored-card assertion goes red while the request-event count stays at 1 —
+    /// which is exactly the two halves disagreeing.
+    #[tokio::test]
+    async fn a_redelivery_that_changed_the_question_is_refused_and_the_card_stands() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+        let filed = daemon.store.codex_pending_approvals(uid).unwrap();
+        assert_eq!(filed.len(), 1);
+        let stored = filed[0].card.clone();
+
+        // The same item and the same derived id, carrying a different command.
+        let approval = crate::codex_approval::Approval::read(
+            crate::codex_approval::Family::Command,
+            &json!({
+                "threadId": "th-1",
+                "turnId": "tu-1",
+                "itemId": "exec-1",
+                "environmentId": "local",
+                "command": "/bin/zsh -lc 'rm -rf /'",
+                "cwd": "/work",
+                "availableDecisions": ["accept", "cancel"],
+            }),
+            None,
+        )
+        .expect("a command approval");
+        let swapped = approval.card("derived-1".to_string(), 1);
+        assert_ne!(
+            swapped.payload_hash, filed[0].card,
+            "the premise: this is a different question"
+        );
+        assert!(
+            !daemon
+                .raise_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    swapped,
+                    &approval.thread_id,
+                    &approval.turn_id,
+                    &approval.item_id,
+                    "commandExecution",
+                )
+                .await,
+            "a re-delivery that changed the question is not a rebind"
+        );
+
+        let after = daemon.store.codex_pending_approvals(uid).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].card, stored,
+            "the stored card must still be the one the filed request event describes"
+        );
+        assert_eq!(
+            approval_events(&daemon, uid, EventKind::ApprovalRequest).len(),
+            1,
+            "and no second request event was filed for it either"
+        );
+        // The in-memory card is the stored one too, so nothing on this daemon
+        // holds the swapped question.
+        let held = daemon.inner.lock().await;
+        let entry = held
+            .pending
+            .get(&(uid.to_string(), "derived-1".to_string()))
+            .expect("the original card is still open");
+        assert_eq!(serde_json::to_string(&entry.card).unwrap(), stored);
+    }
+
+    /// **A card that cannot be persisted is not raised at all.**
+    ///
+    /// The old arm called an I/O failure "not evidence of anything about the
+    /// card", kept the in-memory half and rang the phone — a card that exists
+    /// only in this process, that a restart forgets, and that the rebind path
+    /// can never find because the store is its only witness. For Codex that is
+    /// the whole guarantee: nothing is blocked on this daemon's answer, so a
+    /// card's only value is that it is durable. Refusing loudly leaves the
+    /// question where it already is — in front of the operator at the keyboard.
+    ///
+    /// **Mutation:** restore the `Err` arm that logs and falls through, and all
+    /// three assertions go red.
+    #[tokio::test]
+    async fn a_card_that_cannot_be_persisted_is_refused_rather_than_raised_in_memory() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        store.break_codex_card_writes_for_tests();
+
+        assert!(!raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+        assert!(
+            approval_events(&daemon, uid, EventKind::ApprovalRequest).is_empty(),
+            "no card, so no fact claiming there is one"
+        );
+        assert!(
+            daemon.inner.lock().await.pending.is_empty(),
+            "an in-memory-only card is a card the rebind path can never find"
+        );
+        // And the doorbell was never admitted: the gate's key for this request is
+        // still free, which it would not be if a push had been dispatched.
+        assert!(
+            daemon.push_gate.admit_decision(uid, "derived-1").is_some(),
+            "a refused card must not have rung"
+        );
+    }
+
+    /// **A retirement that cannot commit keeps the card, and the SAME daemon
+    /// finishes it.**
+    ///
+    /// Deleting the row and filing the resolution were two writes with the claim
+    /// given up between them. A failed delete plus a filed resolution left a row
+    /// recovery restores — an answered question back on a phone after a restart.
+    /// A successful delete plus a failed append lost the only terminal the card
+    /// will ever have. One transaction removes both, and putting the claim back
+    /// is what keeps the failure retryable: a terminal that neither retired the
+    /// card nor consumed the right to must not be the winner.
+    ///
+    /// **The retry is on the same daemon, the same store and the same claim**,
+    /// because that is the only version of the question worth asking. An earlier
+    /// draft of this test "retried" by building a fresh store, a fresh daemon and
+    /// a fresh card — which exercises a first retirement, not a retry, and would
+    /// have passed with the restored claim thrown away. The failure is therefore
+    /// injected reversibly (`hide_codex_cards_for_tests`) so the retry meets the
+    /// card the first terminal left behind.
+    ///
+    /// **Mutation:** drop the `pending.insert(id, claimed)` on the error arm and
+    /// the retry finds `AlreadyGone` — the card is gone from memory with no
+    /// resolution anywhere and its row still in the store.
+    #[tokio::test]
+    async fn a_retirement_that_cannot_commit_is_retried_by_the_next_terminal() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+
+        // The row is unreachable, so the delete half cannot land. Reversible, so
+        // the retry below is a real retry.
+        store.hide_codex_cards_for_tests(true);
+        let cleared = protocol::ws::CodexResolution::Cleared {
+            cause: protocol::ws::ClearCause::TurnAborted,
+        };
+        assert_eq!(
+            daemon
+                .retire_codex_approval(&SessionKey::new(uid, "cc-1"), "derived-1", cleared.clone())
+                .await,
+            Retirement::Failed,
+            "a failed commit must not report itself as a settled card"
+        );
+        assert!(
+            approval_events(&daemon, uid, EventKind::ApprovalResolved).is_empty(),
+            "a resolution filed against a card still in the store is what resurrects \
+             it on the next restart"
+        );
+        assert!(
+            daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .contains_key(&(uid.to_string(), "derived-1".to_string())),
+            "the claim goes back, or this terminal has consumed the right to retire \
+             the card without retiring it"
+        );
+
+        // The store answers again, and the next terminal — same daemon, same
+        // claim, same card — finishes what the first one could not.
+        store.hide_codex_cards_for_tests(false);
+        assert_eq!(
+            daemon
+                .retire_codex_approval(&SessionKey::new(uid, "cc-1"), "derived-1", cleared)
+                .await,
+            Retirement::Retired,
+            "the restored claim is what makes the next terminal able to retire it"
+        );
+        assert_eq!(
+            approval_events(&daemon, uid, EventKind::ApprovalResolved).len(),
+            1
+        );
+        assert!(daemon
+            .store
+            .codex_pending_approvals(uid)
+            .unwrap()
+            .is_empty());
+        assert!(daemon.inner.lock().await.pending.is_empty());
+
+        // And a third terminal for the same card is `AlreadyGone`, not a second
+        // failure and not a second resolution.
+        assert_eq!(
+            daemon
+                .retire_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    "derived-1",
+                    protocol::ws::CodexResolution::Cleared {
+                        cause: protocol::ws::ClearCause::ItemCompleted,
+                    },
+                )
+                .await,
+            Retirement::AlreadyGone
+        );
+        assert_eq!(
+            approval_events(&daemon, uid, EventKind::ApprovalResolved).len(),
+            1,
+            "first terminal wins, and the loser files nothing"
+        );
+    }
+
+    /// **A resolved card leaves no row for recovery to resurrect.**
+    ///
+    /// Recovery restores every open card in `all_pending_approvals` whose
+    /// request has no `answers` row — and nothing writes a Codex row into
+    /// `answers`, by design, because that table is one of the four a rolled-back
+    /// v0.6.0 daemon rewrites globally. So for a Codex card the SQL terminal
+    /// check can never fire, and the *only* thing standing between an answered
+    /// question and a second appearance on the phone is that its row is gone.
+    /// The atomic retirement is what guarantees that, and this is the assertion
+    /// that says so end to end.
+    ///
+    /// **Mutation:** delete the row and file the resolution as two writes, break
+    /// the delete, and the restored count comes back 1.
+    #[tokio::test]
+    async fn recovery_does_not_resurrect_a_codex_card_that_was_already_resolved() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+        assert!(raise_codex_card(&daemon, uid, "derived-1", "exec-1").await);
+        assert_eq!(
+            daemon
+                .retire_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    "derived-1",
+                    protocol::ws::CodexResolution::Answered {
+                        by: protocol::ws::ResolutionActor::Local,
+                        decision: None,
+                    },
+                )
+                .await,
+            Retirement::Retired
+        );
+
+        // A fresh daemon over the same store is exactly what a restart is.
+        let restarted = daemon_on(Arc::clone(&store), Config::default());
+        restarted.recover().await;
+        assert!(
+            restarted.inner.lock().await.pending.is_empty(),
+            "a question that was answered before the restart must not come back \
+             asking to be answered again"
+        );
+    }
+
+    /// The largest card `codex_approval`'s bounds can produce: every field at
+    /// its ceiling, and the file list at `MAX_CHANGES` with maximal diffs.
+    fn worst_case_codex_approval() -> crate::codex_approval::Approval {
+        let started = json!({
+            "type": "fileChange",
+            "id": "exec-worst",
+            "changes": (0..64)
+                .map(|n| json!({
+                    "path": format!("/work/{}/file{n}.txt", "ünïcodé".repeat(64)),
+                    "kind": {"type": "update", "move_path": serde_json::Value::Null},
+                    "diff": "→".repeat(64 * 1024),
+                }))
+                .collect::<Vec<serde_json::Value>>(),
+        });
+        crate::codex_approval::Approval::read(
+            crate::codex_approval::Family::FileChange,
+            &json!({
+                "threadId": "01a06db1-b6a5-7500-8956-6c35b83b32d2",
+                "turnId": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0",
+                "itemId": "exec-worst",
+            }),
+            Some(&started),
+        )
+        .expect("a worst-case file change is still readable")
+    }
+
+    /// **A worst-case card survives the daemon's own truncation, intact.**
+    ///
+    /// This is the assertion the per-field bounds were believed to buy and did
+    /// not. `Daemon::truncate_payload` does not trim an oversized payload — it
+    /// REPLACES it with `{_codeconnect_truncated, _original_bytes, _preview}`,
+    /// and a phone handed that decodes no card, so both buttons are gone. The
+    /// old ceilings multiplied out to 512 KiB of diffs *before* counting that
+    /// every field rides the payload twice (once as `tool_input`, once
+    /// JSON-escaped inside `display_text`): a 32-file patch of maximal diffs
+    /// measured 1,056,469 bytes against the 524,288-byte default, and the cliff
+    /// was at **sixteen** files, not thirty-two.
+    ///
+    /// So the bound that matters is the aggregate one, it is measured on the
+    /// serialised card, and it is checked here — through the real `ingest`, at
+    /// the real configured limit, not against a constant this test also owns.
+    ///
+    /// **Mutation:** restore the per-file `MAX_DIFF_BYTES` in place of the
+    /// shared `MAX_TOTAL_DIFF_BYTES` split and the filed payload comes back
+    /// replaced by the preview object.
+    #[tokio::test]
+    async fn the_largest_card_the_bounds_admit_survives_the_daemons_truncation() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        let approval = worst_case_codex_approval();
+        let card = approval.card("codex-worst-case".into(), 1);
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    card,
+                    &approval.thread_id,
+                    &approval.turn_id,
+                    &approval.item_id,
+                    "fileChange",
+                )
+                .await,
+            "the worst case the bounds admit must still be cardable"
+        );
+
+        let event = daemon
+            .store
+            .events_after(uid, 0, 50)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == EventKind::ApprovalRequest)
+            .expect("the approval must be logged");
+        assert!(
+            event.payload["_codeconnect_truncated"].is_null(),
+            "the daemon replaced its own card with a preview object; the phone \
+             decodes nothing from that. Payload was {} bytes against a {}-byte limit.",
+            event.payload.to_string().len(),
+            daemon.config.max_payload_bytes
+        );
+        // And it is still the card the phone verifies, after the round trip.
+        let filed: ApprovalCard =
+            serde_json::from_value(event.payload["card"].clone()).expect("a decodable card");
+        assert_eq!(
+            filed.payload_hash,
+            protocol::hash::sha256_hex(filed.display_text.as_bytes())
+        );
+    }
+
+    /// **And a card that cannot fit is refused rather than filed dead.**
+    ///
+    /// The per-field bounds make the aggregate check rare; they cannot make it
+    /// unreachable, because nothing on the wire bounds a path, an execpolicy
+    /// amendment, or a field a later codex adds — and `max_payload_bytes` is an
+    /// operator setting that clamps as low as 4 KiB. When the total does not
+    /// fit, the honest answer is no card: the question is being asked at the
+    /// keyboard and is still answerable there. A filed event whose payload the
+    /// daemon replaced is a permanent unanswerable card.
+    ///
+    /// **Mutation:** delete the size check in `raise_codex_approval` and the
+    /// event is filed with `_codeconnect_truncated`, in memory and on the phone.
+    #[tokio::test]
+    async fn a_card_too_large_for_the_payload_limit_is_refused_rather_than_filed_dead() {
+        let (store, _db) = shared_store_on_disk();
+        let uid = TEST_UID;
+        let daemon = daemon_on(
+            Arc::clone(&store),
+            Config {
+                max_payload_bytes: 4096,
+                ..Config::default()
+            },
+        );
+        register_codex_session(&daemon, uid, "cc-1").await;
+
+        let approval = worst_case_codex_approval();
+        let card = approval.card("codex-too-large".into(), 1);
+        assert!(
+            !daemon
+                .raise_codex_approval(
+                    &SessionKey::new(uid, "cc-1"),
+                    card,
+                    &approval.thread_id,
+                    &approval.turn_id,
+                    &approval.item_id,
+                    "fileChange",
+                )
+                .await,
+            "a card the daemon would have to replace is not a card"
+        );
+        assert!(
+            daemon
+                .store
+                .events_after(uid, 0, 50)
+                .unwrap()
+                .into_iter()
+                .all(|e| e.kind != EventKind::ApprovalRequest),
+            "a refused card files no request event"
+        );
+        assert!(
+            daemon.inner.lock().await.pending.is_empty(),
+            "and leaves nothing in memory to ring about"
+        );
     }
 }

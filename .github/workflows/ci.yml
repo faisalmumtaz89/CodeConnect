@@ -22,6 +22,11 @@ jobs:
       - name: Install toolchain
         run: rustup component add rustfmt clippy
 
+      # The launcher's lifecycle gates drive real tmux sessions and refuse to
+      # report green without one; the macOS image does not ship tmux.
+      - name: Install tmux
+        run: brew install tmux
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -240,3 +245,16 @@ jobs:
             echo "::error::use .ccResizableSheet()/.ccTallSheet(), not raw presentationDetents"
             exit 1
           fi
+
+      # **A fixture the phone carries a copy of must equal the copy the Rust
+      # side reads.** Xcode cannot reference a file outside its source root, so
+      # `ios/**/Resources` holds literal duplicates of `fixtures/codex/` rather
+      # than links — and until this step nothing compared them. A regenerated
+      # `refusal-sentences.json` once left the iOS copy a release behind, and the
+      # composer failed *open* against a daemon that was refusing the link.
+      #
+      # The loop lives in the script rather than here so the gate a contributor
+      # runs locally and the gate CI runs cannot drift apart — which is the exact
+      # failure this step exists to prevent, one level up.
+      - name: Duplicated fixtures match their source
+        run: ./fixtures/check-duplicated-fixtures.sh

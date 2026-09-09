@@ -48,12 +48,170 @@ struct RenderDriver {
 
     // MARK: Waiting
 
+    /// **Waits for the subject, then brings it ON SCREEN — and fails if it
+    /// cannot.**
+    ///
+    /// This was `waitForExistence` alone, and that cannot fail for an element
+    /// scrolled out of the viewport: XCUITest reports a subject that is nowhere
+    /// near the screen as existing. So a scenario "passed" while photographing
+    /// none of what it exists to show.
+    ///
+    /// Measured at AX5 on a 402×874pt iPhone 17 Pro, by an independent
+    /// reviewer's probe:
+    ///
+    /// ```
+    /// stop-offered    the Stop control    exists=YES hittable=false y=965..1026
+    /// stop-link-down  'try again shortly' exists=YES hittable=false y=1275..2008
+    /// stop-aborted    the 'Stopped'banner exists=YES hittable=false y=1170..1441
+    /// ```
+    ///
+    /// All three are below an 874pt screen. `codex-stop-link-down--ax5.png` was
+    /// sold as *"the daemon's refusal VERBATIM, and a Stop greyed for ten
+    /// seconds"* and contained neither. The whole S-series AX5 evidence
+    /// certified nothing — which is the one failure an instrument must not have.
+    ///
+    /// The same three are fully on screen at `L`, so this is AX5-specific and
+    /// reproducible, and it is a **harness** defect: the control is one drag
+    /// away, and an accessibility user can reach it.
+    /// Exists — the question a **navigation** step asks.
+    ///
+    /// Reaching a screen and photographing a subject are two different claims,
+    /// and only the second one needs geometry. Conflating them made a route
+    /// step demand that a card's option list be on screen before the scenario
+    /// whose subject is the card's *header* could take its picture.
     @discardableResult
-    func require(_ element: XCUIElement, _ what: String) throws -> XCUIElement {
+    func requireExists(_ element: XCUIElement, _ what: String) throws -> XCUIElement {
         guard element.waitForExistence(timeout: timeout) else {
             throw RenderFailure.unreachable(what)
         }
         return element
+    }
+
+    /// - Parameter scrollingWithin: a sibling that is **already on screen and
+    ///   inside the same scroll view as the subject**. When given, the drags
+    ///   happen inside that element rather than on the app, which is the
+    ///   difference between scrolling the list and scrolling nothing at all.
+    ///
+    ///   Needed because `dragUp` presses at fixed fractions of the *screen*,
+    ///   and at AX5 on the smaller phone the software keyboard owns everything
+    ///   below ~0.45 — so both gestures landed on the keyboard and the command
+    ///   palette's own list never moved. Measured on iPhone 17 Pro, where
+    ///   `session-palette`, `session-palette-filtered` and
+    ///   `session-snapshot-cost-is-usage` all failed while passing on the Pro
+    ///   Max, whose extra height happened to put 0.45 inside the list.
+    @discardableResult
+    func require(
+        _ element: XCUIElement, _ what: String, scrollingWithin anchor: XCUIElement? = nil
+    ) throws -> XCUIElement {
+        guard element.waitForExistence(timeout: timeout) else {
+            throw RenderFailure.unreachable(what)
+        }
+        // When the subject lives in a list that clips its own content, the
+        // window is the wrong frame to ask about. See `isPhotographed(_:in:)`.
+        func photographed() -> Bool {
+            if let anchor { return Self.isPhotographed(element, in: anchor) }
+            return Self.isPhotographed(element)
+        }
+        guard !photographed() else { return element }
+        let app = XCUIApplication()
+        // A drag never travels further than the viewport, so nothing can be
+        // scrolled past unseen; the list therefore needs more of them than a
+        // screen-sized fling does to reach the end of eight AX5 rows.
+        for _ in 0..<(anchor == nil ? 12 : 16) {
+            let before = element.frame.minY
+            if let anchor { dragUp(within: anchor) } else { dragUp(app) }
+            if photographed() { return element }
+            // **Nothing moved, so the press missed what scrolls.** A sheet at
+            // its `.medium` detent owns the bottom half of the screen, and
+            // `dragUp` starts at 0.45 — on the dimmed backdrop above it. Four
+            // scenarios failed exactly this way at AX5 (`session-model-sheet`,
+            // `session-effort-sheet`, `session-compact-sheet`,
+            // `session-model-kept`): subject 20 to 600 points below the screen,
+            // twelve drags, and not one point of movement.
+            if element.frame.minY == before, anchor == nil {
+                dragUpInsideSheet(app)
+                if photographed() { return element }
+            }
+        }
+        throw RenderFailure.offScreen(what, frame: element.frame)
+    }
+
+    /// **Is the subject really in the photograph?**
+    ///
+    /// Two questions, because a subject can fail to be photographed in two
+    /// different ways, and one test cannot catch both:
+    ///
+    ///   * a **control** must be `isHittable` — K1's own word. Geometry alone
+    ///     passed `codex-stop-offered--ax5`, where the Stop sits *inside* the
+    ///     window but *underneath* the fleet's "1 decision needs you" bar. A
+    ///     control the shutter cannot see and a thumb cannot reach is exactly
+    ///     the certificate this gate exists to refuse.
+    ///   * anything **else** — a `Text` in a banner, a section header — is never
+    ///     hittable however plainly it is drawn, so for those the question is
+    ///     the geometry below. Demanding hittability of text is what regressed
+    ///     thirteen good Claude sheet scenarios on the first attempt.
+    private static func isPhotographed(_ element: XCUIElement) -> Bool {
+        // **A control: hittable, and the point you would touch is on screen.**
+        //
+        // `isHittable` alone passed `codex-stop-offered--ax5`, where the PNG
+        // showed no Stop pill at all. Demanding the whole control fit was the
+        // other extreme and wrong for a different reason: at AX5 a fleet *row*
+        // is a button taller than the screen, so "wholly" can never hold and
+        // three A-series scenarios failed on their way in.
+        //
+        // What a photograph of a control means is that the thing you would
+        // press is in it. So: hittable, and its hit point inside the window.
+        if element.elementType == .button {
+            guard element.isHittable else { return false }
+            let window = XCUIApplication().frame
+            let frame = element.frame
+            guard !window.isEmpty, !frame.isEmpty else { return false }
+            return window.contains(CGPoint(x: frame.midX, y: frame.midY))
+        }
+        return isInFrame(element)
+    }
+
+    /// **Is the subject in the photograph, when the photograph is a list?**
+    ///
+    /// The window is the wrong frame to ask about whenever the subject sits in
+    /// a scroll view that clips its own content. Measured on iPhone 17 Pro at
+    /// AX5: the command palette's list is about 120pt tall and the compose bar
+    /// and keyboard own everything below it, so the discovery caption at
+    /// `y=350` is inside the *window* and behind the *composer*. Both devices
+    /// certified `session-palette--ax5` that way and neither PNG has the
+    /// caption in it — a green render of a screen nobody photographed.
+    ///
+    /// So: inside the list's own frame, and enough of it to be worth the
+    /// certificate — the whole subject when it fits, and a full viewport of it
+    /// when the subject is taller than the list (the AX5 caption is).
+    private static func isPhotographed(_ element: XCUIElement, in viewport: XCUIElement) -> Bool {
+        let frame = element.frame
+        let box = viewport.frame
+        guard !frame.isEmpty, !box.isEmpty else { return false }
+        let shown = frame.intersection(box)
+        guard !shown.isNull, !shown.isEmpty else { return false }
+        return shown.height >= min(frame.height, box.height) - 1
+            && shown.width >= min(frame.width, box.width) - 1
+    }
+
+    /// **Is this element in the photograph?**
+    ///
+    /// Not `isHittable`, which was the first attempt and is the wrong question
+    /// twice over: a `Text` inside a banner is never hittable however plainly it
+    /// is on screen, and that regressed thirteen perfectly good Claude sheet
+    /// scenarios at AX5. What a render certifies is what the shutter caught, so
+    /// the test is the geometry: the subject overlaps the window, and its top
+    /// edge is inside it.
+    ///
+    /// The second clause is what catches the S-series. A subject at
+    /// `y=965..1026` on an 874pt screen overlaps nothing and fails; a long
+    /// banner running from `y=400` off the bottom starts on screen and passes,
+    /// because it is in the picture even though its tail is not.
+    private static func isInFrame(_ element: XCUIElement) -> Bool {
+        let window = XCUIApplication().frame
+        let frame = element.frame
+        guard !window.isEmpty, !frame.isEmpty else { return false }
+        return window.intersects(frame) && frame.minY >= window.minY - 1
     }
 
     func text(containing fragment: String, in app: XCUIApplication) -> XCUIElement {
@@ -76,6 +234,106 @@ struct RenderDriver {
             .press(
                 forDuration: 0.05,
                 thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)))
+    }
+
+    /// **The scroll view that holds this text**, so a drag can be aimed at the
+    /// list rather than at whatever happens to be under a screen fraction.
+    ///
+    /// Anchoring on a *row* was the first attempt and is subtly wrong: the row
+    /// scrolls away, and every drag after the first one presses where it used
+    /// to be. Measured — the palette's caption climbed 326pt over twelve drags
+    /// and then stopped, because eleven of them landed on nothing. A scroll
+    /// view stays where it is while its content moves under it.
+    func list(holding fragment: String, in app: XCUIApplication) -> XCUIElement {
+        app.scrollViews.containing(
+            NSPredicate(format: "label CONTAINS[c] %@", fragment)
+        ).firstMatch
+    }
+
+    /// That list's frame, resolved now and kept — the rectangle a scroll-back
+    /// aims inside for as long as it takes, after the row that named it is
+    /// gone. The screen's own frame is the fallback, and a wrong one: it is
+    /// there so a missing list fails as a subject that never came on screen
+    /// rather than as a crash.
+    func listFrame(holding fragment: String, in app: XCUIApplication) throws -> CGRect {
+        let list = list(holding: fragment, in: app)
+        guard list.waitForExistence(timeout: timeout) else { return app.frame }
+        return list.frame
+    }
+
+    /// **A drag that lands inside a named element**, and therefore inside the
+    /// scroll view that holds it.
+    ///
+    /// One row's worth of travel per call rather than a screen's: a command
+    /// palette shows about four rows, and a fling that overshoots the subject
+    /// is the same failure as never reaching it.
+    func dragUp(within anchor: XCUIElement) {
+        let start = anchor.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        // Never more than the viewport, or a row can pass the shutter between
+        // two drags and the loop will keep dragging past it forever.
+        let travel = max(anchor.frame.height * 0.8, 40)
+        start.press(
+            forDuration: 0.05,
+            thenDragTo: start.withOffset(CGVector(dx: 0, dy: -travel)))
+    }
+
+    /// **Back up the list**, for a subject the screen has already scrolled past.
+    ///
+    /// Every other route here drags *forward*, because every other subject is
+    /// at or below the tail a timeline follows. A conversation's opening lines
+    /// are not: they are above the viewport, and in a lazy list they are not
+    /// merely off screen — they are **not in the accessibility tree at all**,
+    /// so `require` throws `unreachable` before it ever drags. Hence the
+    /// existence check inside the loop rather than a `waitForExistence` in
+    /// front of it.
+    /// - Parameter inside: the list's own frame, measured by the caller
+    ///   **before any scrolling** — see `listFrame(holding:in:)`. Screen
+    ///   fractions were tried first and are wrong here for the same reason they
+    ///   were wrong for the command palette: at AX5 a fixed 0.35 of the screen
+    ///   lands on a decision card's own controls and 0.70 on the composer, and
+    ///   sixteen drags moved the timeline by nothing
+    ///   (`codex-phone-turn-stream--ax5`, run 20260908-204539).
+    ///
+    ///   A `CGRect` rather than the element, because the query that finds the
+    ///   list names a row inside it — and by the second call that row has
+    ///   scrolled out of a lazy list, so the query resolves to nothing and the
+    ///   drags go back to guessing (run 20260908-211915, where the first
+    ///   subject was reached and the second was not).
+    @discardableResult
+    func requireEarlier(
+        _ element: XCUIElement, _ what: String, inside box: CGRect
+    ) throws -> XCUIElement {
+        for _ in 0..<16 {
+            if element.exists, Self.isPhotographed(element) { return element }
+            dragDown(inside: box)
+        }
+        guard element.exists else { throw RenderFailure.unreachable(what) }
+        throw RenderFailure.offScreen(what, frame: element.frame)
+    }
+
+    /// The mirror of `dragUp`: begun a quarter of the way into the list and
+    /// travelling **down**, which moves the content down and brings earlier
+    /// rows into view. Both ends stay inside `box`, so the gesture belongs to
+    /// the list from touch-down to lift.
+    func dragDown(inside box: CGRect) {
+        let origin = XCUIApplication().coordinate(withNormalizedOffset: .zero)
+        let start = origin.withOffset(
+            CGVector(dx: box.midX, dy: box.minY + box.height * 0.2))
+        let travel = max(box.height * 0.6, 40)
+        start.press(
+            forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: travel)))
+    }
+
+    /// The same gesture, begun **low enough to be inside a half-height sheet**.
+    ///
+    /// Kept separate from `dragUp` rather than replacing it: every route in this
+    /// catalogue is calibrated against that gesture, and this one is only
+    /// reached when a drag demonstrably moved nothing.
+    func dragUpInsideSheet(_ app: XCUIApplication) {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.80))
+            .press(
+                forDuration: 0.05,
+                thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.30)))
     }
 
     /// Scrolls until `condition` holds, or says what it gave up waiting for.
@@ -149,7 +407,13 @@ struct RenderDriver {
         let target = app.buttons.matching(
             NSPredicate(format: "label BEGINSWITH[c] %@", row)
         ).firstMatch
-        try require(target, "the \(row) palette row")
+        // **Scrolled within the palette's own list.** At AX5 on the smaller
+        // phone the keyboard leaves room for about one row, so the wanted row
+        // is usually below it — and a drag aimed at the screen lands on the
+        // keyboard. The palette's first row is on screen by construction (the
+        // fragment filtered to it), and it shares the list's scroll view.
+        try require(
+            target, "the \(row) palette row", scrollingWithin: list(holding: row, in: app))
         target.tap()
     }
 
@@ -166,6 +430,11 @@ struct RenderDriver {
 /// The one failure this harness raises. It is never about a pixel.
 enum RenderFailure: Error, CustomStringConvertible {
     case unreachable(String)
+    /// The subject exists and could not be brought into the viewport. Its own
+    /// case, and it carries the frame: "could not reach X" and "X is at
+    /// y=1275..2008 on an 874pt screen" send the next reader to different
+    /// places, and only the second is true when the render is a lie.
+    case offScreen(String, frame: CGRect)
     /// The process resolved to a different content-size category than the one
     /// the pass claims to be rendering. See `CCRenderProbe` in `RootView.swift`.
     case wrongTypeSize(expected: String, actual: String)
@@ -174,6 +443,10 @@ enum RenderFailure: Error, CustomStringConvertible {
         switch self {
         case .unreachable(let what):
             return "could not reach \(what)"
+        case .offScreen(let what, let frame):
+            return
+                "\(what) exists but never came on screen — last seen at "
+                + "y=\(Int(frame.minY))..\(Int(frame.maxY)); the render would have certified nothing"
         case .wrongTypeSize(let expected, let actual):
             return "rendered at \(actual), not \(expected) — the pass would have been a lie"
         }
@@ -188,7 +461,7 @@ enum RenderCatalog {
     /// Ordered the way a reader meets them: the fleet, the decision, the
     /// session, the diff, the terminal, the trust screen, then the kit's own
     /// gallery — which is the only reachable render several components have.
-    static let all: [RenderScenario] = product + gallery
+    static let all: [RenderScenario] = product + codex + gallery
 
     static let product: [RenderScenario] = [
         RenderScenario(
@@ -361,9 +634,11 @@ enum RenderCatalog {
                 try driver.typeIntoComposer(app, "/")
                 try driver.require(
                     driver.element(containing: "/model", in: app), "the /model row")
+                // Scrolled by its own list, which stays put while its rows move.
                 try driver.require(
                     driver.text(containing: "Run other commands", in: app),
-                    "the discovery caption")
+                    "the discovery caption",
+                    scrollingWithin: driver.list(holding: "Run other commands", in: app))
             }),
         RenderScenario(
             name: "session-palette-filtered",
@@ -376,7 +651,8 @@ enum RenderCatalog {
                 try driver.require(
                     driver.element(containing: "/compact", in: app), "the /compact row")
                 try driver.require(
-                    driver.element(containing: "/cost", in: app), "the /cost row")
+                    driver.element(containing: "/cost", in: app), "the /cost row",
+                    scrollingWithin: driver.list(holding: "/cost", in: app))
             }),
         // **Opened on the session that carries the facts.** `fx-4`'s log
         // holds a SessionStart with the raw hook id `claude-opus-5[1m]` and a
@@ -694,6 +970,530 @@ enum RenderCatalog {
                 try driver.scrollUntil(app, "the pairing-required message on screen") {
                     driver.element(containing: "bootstrap connection", in: app).isHittable
                 }
+            }),
+    ]
+
+    // =========================================================================
+    //  Codex — one scenario per frame of the step-1 mock.
+    //
+    //  Every one is seeded from `fixtures/codex/*` through `-CC_CODEX <state>`,
+    //  which stages the session's history, its daemon's age and what the daemon
+    //  answers a mutation with. The mutation states are *pressed*, not painted:
+    //  the fixture drives the real send path, so what these photograph is what
+    //  a tap produces.
+    //
+    //  **The worst-case data is not optional here.** Each card carries the
+    //  measured 75-character command, the daemon's own 120-character amendment
+    //  label (four lines at reading size, and the widest thing any Codex card
+    //  draws), and the real 169-character `request_id` — whose whole job in a
+    //  fixture is to prove that nothing renders it. AX5 is where these break.
+    // =========================================================================
+
+    /// **The session key every Codex fixture uses**, and the state names.
+    ///
+    /// Spelled as strings rather than shared with `CodexFixtures.State`, because
+    /// this target drives the app from *outside* — it is an XCUITest runner with
+    /// no `@testable import`, which is the whole point of it: what it
+    /// photographs is what a user could reach, not what a test could construct.
+    ///
+    /// The cost is two lists that must agree, so `CodexFixtureCatalogTests`
+    /// (in the unit target, which *can* see both) pins them against each other.
+    /// A state added on one side and not the other fails there rather than
+    /// producing a render nobody notices is missing.
+    static let codexSessionKey = "cx-1"
+
+    /// One scenario, with the boilerplate every Codex render shares.
+    private static func codexScenario(
+        _ state: String,
+        purpose: String,
+        route: String = "fleet",
+        /// The session the deeplink opens, when it is not the shared `cx-1` —
+        /// the captured stream carries the identity the daemon recorded.
+        sessionKey: String? = nil,
+        reach: @escaping (XCUIApplication, RenderDriver) throws -> Void
+    ) -> RenderScenario {
+        var arguments = ["-CC_CODEX", state]
+        if route != "fleet" {
+            arguments += [
+                "-CC_DEEPLINK", "codeconnect://session/\(sessionKey ?? codexSessionKey)",
+            ]
+        }
+        return RenderScenario(
+            name: "codex-\(state)", purpose: purpose, arguments: arguments, reach: reach)
+    }
+
+    /// Brings a control the tail-follow pill may be sitting on top of into
+    /// reach, and taps it.
+    ///
+    /// **The occlusion is intermittent, which is why this is a loop and not a
+    /// one-shot.** At AX5 the timeline's `Latest` pill is drawn over the
+    /// trailing edge of a decision card's footer — exactly where `Review` and
+    /// `View` sit — and whether it is up at the moment the harness looks depends
+    /// on where the scroll happened to settle. Across four passes a *different*
+    /// single scenario failed each time, which is the signature. Dismissing it
+    /// once before scrolling fixed most runs and not all; dismissing it whenever
+    /// it reappears fixes the route.
+    ///
+    /// The occlusion itself is a **product defect in shared tail-follow
+    /// chrome** — a decision card's primary control covered by an overlay at
+    /// accessibility sizes. It is not Codex's, this phase does not fix it, and
+    /// it is reported.
+    private static func tapPastTheTailPill(
+        _ app: XCUIApplication, _ driver: RenderDriver, _ control: XCUIElement, _ what: String
+    ) throws {
+        for _ in 0..<12 {
+            let latest = app.buttons.matching(
+                NSPredicate(format: "label CONTAINS[c] 'Latest'")).firstMatch
+            if latest.exists, latest.isHittable { latest.tap() }
+            if control.isHittable { control.tap(); return }
+            driver.dragUp(app)
+        }
+        guard control.isHittable else { throw RenderFailure.unreachable(what) }
+        control.tap()
+    }
+
+    /// Opens a **resolved** card, through the row's own `View` button.
+    ///
+    /// The ending's banner lives on the card, not on the timeline: the row
+    /// carries one word (`RESOLVED` / `RETIRED`) and the card carries the
+    /// sentence. Reaching it through the button is also the assertion that
+    /// matters — a resolved card is still *readable*, it is only no longer
+    /// answerable.
+    private static func openResolvedCard(
+        _ app: XCUIApplication, _ driver: RenderDriver
+    ) throws {
+        // **Deep-linked to the run by name, never `openFirstSession`.**
+        //
+        // `openFirstSession` taps whichever row sorts first, and the Codex run
+        // does not always sort first: once its card is resolved AND its turn has
+        // ended it is an ordinary Idle row beside the Claude neighbour, and the
+        // fleet's ordering can put either ahead. Measured — three scenarios
+        // (`cleared-turn-aborted`, `cleared-turn-completed`,
+        // `retired-item-completed`) opened the *Claude* session, found no card,
+        // and then scrolled twelve times looking for a `View` button that was
+        // never going to be there. The twelfth drag opened the diff sheet, which
+        // is what the FAILED screenshot showed.
+        //
+        // These scenarios carry `-CC_DEEPLINK codeconnect://session/cx-1`, so
+        // the session is already open; there is nothing to navigate.
+        let view = app.buttons["View"].firstMatch
+        try driver.require(view, "the resolved card's View button")
+        try tapPastTheTailPill(app, driver, view, "the View button on screen")
+        try driver.require(driver.text(containing: "Decision", in: app), "the decision sheet")
+    }
+
+    /// Opens the staged card as a sheet, the way it really ships.
+    ///
+    /// **Through the card's own Review button, not the `?request=` deep link.**
+    /// That route is spent on a cold launch — consumed once, before the approval
+    /// has arrived, and never retried — so it opens the card at `L` and not at
+    /// AX5. That is the `deeplink-request-race` defect, it is filed and NOT
+    /// fixed here, and a scenario built on it would be a scenario that renders
+    /// at one size only.
+    /// Opens the staged card, **wherever it legitimately lands**.
+    ///
+    /// The card has two homes — the per-session sheet and the Deck — and it is
+    /// the same `DecisionCardView` in both. Asserting on the *sheet's* chrome
+    /// therefore fails on a perfectly good render: measured on
+    /// `codex-card-two-options--ax5--FAILED.png`, which photographed the card
+    /// open, correct, and answerable in the Deck while the scenario went on
+    /// hunting for a `Review` button that had already done its job.
+    ///
+    /// So the marker is the **card's own** — the section header over Codex's
+    /// option list, which is the thing every A-series scenario exists to show.
+    private static func openCard(_ app: XCUIApplication, _ driver: RenderDriver) throws {
+        let cardIsUp = { driver.element(containing: "Choose one", in: app).exists }
+        if !cardIsUp() {
+            try driver.openFirstSession(app)
+        }
+        if !cardIsUp() {
+            let review = app.buttons["Review"].firstMatch
+            if review.waitForExistence(timeout: 10) {
+                try tapPastTheTailPill(app, driver, review, "the Review button on screen")
+            }
+        }
+        // **Existence, not in-frame.** This is the navigation gate: its job is
+        // to prove the card is *open*. Which part of it the shutter must catch
+        // is the scenario's own business, and every A-series scenario says so
+        // on the next line with `require`. Demanding the option list be in
+        // frame here failed `card-ceiling`, whose subject is the fold at the
+        // top of a card whose options are five screens below it.
+        try driver.requireExists(
+            driver.element(containing: "Choose one", in: app),
+            "the card and its option list, in whichever home it opened")
+    }
+
+    static let codex: [RenderScenario] = [
+        // ---- A-series: the card ----------------------------------------
+        codexScenario(
+            "card-command-worst",
+            purpose:
+                "the widest card the corpus can produce: 75-char command, 120-char amendment label",
+            reach: { app, driver in
+                try openCard(app, driver)
+                try driver.require(
+                    driver.text(containing: "Choose one", in: app), "Codex's own option list")
+            }),
+        codexScenario(
+            "card-two-options",
+            purpose:
+                "two options — the shape that was UNANSWERABLE before this phase (Claude's >2 rule)",
+            reach: { app, driver in
+                try openCard(app, driver)
+                try driver.require(
+                    driver.element(containing: "Yes, proceed", in: app), "the first option row")
+                // The card must offer NO Allow and NO Deny: both are refused by
+                // name at the Mac, so a bar carrying them would be two controls
+                // whose only behaviour is a refusal.
+                XCTAssertFalse(
+                    app.buttons["Allow"].exists, "a Codex card must not offer Allow")
+            }),
+        codexScenario(
+            "card-filechange-wide",
+            purpose: "the inline patch: three files, and 33 more the Mac could not send",
+            reach: { app, driver in
+                try openCard(app, driver)
+                try driver.require(
+                    driver.text(containing: "are not shown here", in: app),
+                    "the changes_omitted line (CONSTRUCTED shape — no capture exercises it)")
+            }),
+        // **The ceiling: 32 files, ~128 KiB.** The largest card the Mac's own
+        // bounds allow. Rendered because "a valid card can make the decision
+        // surface unresponsive" is not a claim any three-hunk fixture can test.
+        codexScenario(
+            "card-ceiling",
+            purpose: "32 files and ~128 KiB of diff — the largest card the daemon may send",
+            reach: { app, driver in
+                try openCard(app, driver)
+                try driver.require(
+                    driver.text(containing: "32 files", in: app), "the whole-card file count")
+                try driver.require(
+                    app.buttons["show-all-changes"], "the fold, which keeps the card bounded")
+            }),
+        codexScenario(
+            "card-minimal",
+            purpose: "every optional field absent — the measured file-change shape",
+            reach: { app, driver in
+                try openCard(app, driver)
+                try driver.require(
+                    driver.text(containing: "1 file", in: app), "the single-file header")
+            }),
+
+        // **The card that may be read and must not be answered.** Below minor
+        // 19 an answered card can never be retired, so `DecisionCard` returns
+        // `.noneAnswerable` and says why on the card itself. Any un-updated Mac
+        // puts a reader here, and it was the one card state no render reached:
+        // `daemon-minor16` and `daemon-minor17` photograph a dead composer, not
+        // a card.
+        //
+        // **Reached through the Deck, not the timeline**, and that is the
+        // finding this scenario turned up rather than a convenience: a card
+        // from a pre-minor-19 daemon carries no D2 turn envelope — `turn_id` is
+        // a minor-19 field — so it has no turn to hang a timeline row on and
+        // does not appear in the session's timeline at all. The Deck is where
+        // such a card is readable, which is also the honest reader path: it is
+        // a thing that needs you and that you cannot act on from here.
+        //
+        // The subject is the caveat AND the absence of the option list, so both
+        // are required — a render that merely failed to draw the options would
+        // otherwise pass as a read-only card.
+        codexScenario(
+            "card-read-only",
+            purpose: "the read-only card: card-two-options on a minor-17 Mac, with no answer to give",
+            reach: { app, driver in
+                try driver.openDeck(app)
+                try driver.require(
+                    driver.element(containing: "answer it at the Mac", in: app),
+                    "the card's own reason, and where the question can be answered")
+                guard !driver.element(containing: "Choose one", in: app).exists else {
+                    throw RenderFailure.unreachable(
+                        "a read-only card must not draw an option list to tap")
+                }
+                // **The promise this card must not make.** It is asserted here
+                // as well as in `ReadOnlyCardProseTests` because the unit test
+                // proves the sentence is not produced and this proves it is not
+                // on screen — the two are different claims, and it was on
+                // screen, at both sizes, in the pass before this one.
+                guard !driver.element(containing: "Nothing decides this but you", in: app).exists
+                else {
+                    throw RenderFailure.unreachable(
+                        "a read-only card must not promise that nothing decides it but you")
+                }
+            }),
+        // ---- R-series: how a card ends ---------------------------------
+        codexScenario(
+            "resolved-accepted", purpose: "answered from this phone, on the Codex link",
+            route: "session",
+            reach: { app, driver in
+                try openResolvedCard(app, driver)
+                try driver.require(
+                    driver.element(containing: "Answered from this phone", in: app),
+                    "the ending's own sentence, on the card")
+            }),
+        codexScenario(
+            "resolved-declined", purpose: "declined from this phone — Codex was told no",
+            route: "session",
+            reach: { app, driver in
+                try openResolvedCard(app, driver)
+                try driver.require(
+                    driver.element(containing: "Answered from this phone", in: app),
+                    "the ending's own sentence, on the card")
+            }),
+        codexScenario(
+            "resolved-at-mac",
+            purpose:
+                "answered at the keyboard, with NO decision — the wire carries no provenance for one",
+            route: "session",
+            reach: { app, driver in
+                try openResolvedCard(app, driver)
+                try driver.require(
+                    driver.element(containing: "Answered at the Mac", in: app),
+                    "the ending's own sentence, on the card")
+            }),
+        codexScenario(
+            "cleared-turn-aborted", purpose: "the turn was stopped and the question went with it",
+            route: "session",
+            reach: { app, driver in
+                try openResolvedCard(app, driver)
+                try driver.require(
+                    driver.element(containing: "The turn was stopped", in: app),
+                    "the ending's own sentence, on the card")
+            }),
+        codexScenario(
+            "cleared-turn-completed", purpose: "Codex finished before this was answered",
+            route: "session",
+            reach: { app, driver in
+                try openResolvedCard(app, driver)
+                try driver.require(
+                    driver.element(containing: "The turn ended", in: app),
+                    "the ending's own sentence, on the card")
+            }),
+        codexScenario(
+            "retired-item-completed",
+            purpose: "item_completed — the turn is STILL RUNNING, said in its own words",
+            route: "session",
+            reach: { app, driver in
+                try openResolvedCard(app, driver)
+                try driver.require(
+                    driver.element(containing: "This step finished", in: app),
+                    "the ending's own sentence, on the card")
+            }),
+        codexScenario(
+            "timeout-unknown", purpose: "Codex stopped waiting; nothing was approved or denied",
+            route: "session",
+            reach: { app, driver in
+                try openResolvedCard(app, driver)
+                try driver.require(
+                    driver.element(containing: "No answer arrived in time", in: app),
+                    "the ending's own sentence, on the card")
+            }),
+        codexScenario(
+            "write-unknown", purpose: "written, outcome unknown — never retried, check the Mac",
+            route: "session",
+            reach: { app, driver in
+                try openResolvedCard(app, driver)
+                try driver.require(
+                    driver.element(containing: "Sent, outcome unknown", in: app),
+                    "the ending's own sentence, on the card")
+            }),
+
+        // ---- S-series: Stop --------------------------------------------
+        codexScenario(
+            "stop-offered",
+            purpose: "the Stop pill on a running Codex row, in line with its Claude neighbour",
+            reach: { app, driver in
+                try driver.fleet(app)
+                // **Two subjects, because the button alone is not the picture.**
+                //
+                // The control has to be reachable — `require` on the button is
+                // hittability plus its hit point on screen. But at AX5 the row
+                // is two screens tall and XCUI answered "hittable, hit point in
+                // window" for a pill that was nowhere in the PNG: whatever frame
+                // it reports for that button is not where the pill is drawn.
+                // The pill's own LABEL is a `Text`, so it goes through the
+                // geometry rule, which is measured against what the shutter
+                // catches. Requiring both is what makes this render certify the
+                // thing it is named after.
+                try driver.require(
+                    app.buttons["stop-\(codexSessionKey)"], "the Stop control")
+                // `staticTexts["Stop"]` is the pill's own title — `CCButton`
+                // draws it as a `Text`, so this element's frame is where the
+                // words are, not where some ancestor claims to be. Matching by
+                // *containment* found a container again (the row carries the
+                // accessibility label "Stop the turn … is running"), which is
+                // how the last two attempts passed on a PNG with no pill in it.
+                try driver.require(app.staticTexts["Stop"], "the Stop pill's own label")
+            }),
+        codexScenario(
+            "stop-aborted", purpose: "the turn reached its aborted boundary",
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(
+                    driver.element(containing: "Stopped", in: app), "the stopped banner")
+            }),
+        // **The gate, photographed.** `codex_link` is `offline`, so F1's send
+        // path refuses before anything leaves: what is on screen is the app's
+        // own sentence over "Nothing was sent", and the Mac has said nothing
+        // because it was never asked.
+        codexScenario(
+            "stop-link-down",
+            purpose: "the phone's own refusal: an offline link, so no frame ever left",
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(
+                    driver.element(containing: "Nothing was sent", in: app),
+                    "the app's own words, not the daemon's")
+                try driver.require(
+                    driver.element(containing: "lost its link", in: app),
+                    "why the phone would not send")
+            }),
+        // **The refusal after the fact**, which is a different screen and a
+        // different author. The summary said `subscribed`, the frame left, and
+        // the Mac answered that its own link had gone down in between.
+        codexScenario(
+            "stop-refused-late",
+            purpose:
+                "the daemon's refusal VERBATIM, and a Stop greyed for ten seconds — not for ever",
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(
+                    driver.element(containing: "try again shortly", in: app),
+                    "the daemon's own sentence, unedited")
+            }),
+        // **The session route**, so the header's own Stop control is
+        // photographed too. The other three S-series scenarios drive the fleet
+        // row; this one drives the same mutation from the screen a reader is on
+        // when they are watching the turn they want to end, and the two draw the
+        // control differently — a pill beside the activity line there, a
+        // full-width button with its outcome beneath it here.
+        codexScenario(
+            "stop-indeterminate",
+            purpose: "issued, outcome unknown — NO retry offered, on the session's own Stop",
+            route: "session",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "Sent, outcome unknown", in: app),
+                    "the indeterminate banner under the session's Stop")
+            }),
+
+        // ---- C-series: Compose -----------------------------------------
+        codexScenario(
+            "compose-started", purpose: "Codex was idle: your words began the turn it is running",
+            route: "session",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "started a new turn", in: app),
+                    "the started sentence")
+                // **The exchange is certified by `phone-turn-stream`, not
+                // here.** Requiring it in this scenario was tried and is not
+                // satisfiable at AX5: the compose banner wraps to five lines
+                // and takes the whole region between the tab bar and the
+                // composer, so the timeline is laid out at zero height and its
+                // rows are never realized — visible in
+                // `codex-compose-started--ax5` and `codex-compose-steered--ax5`,
+                // where the timeline is simply blank. That squeeze is a
+                // pre-existing property of the banner at accessibility sizes,
+                // not something this phase introduced, and it is reported
+                // rather than worked around with a weaker gate.
+                //
+                // The L photograph of this scenario does carry the whole
+                // exchange, which is what proves the message shape here.
+            }),
+        // **The one Codex render whose input is the daemon's own output.**
+        //
+        // Every other scenario on this list is staged from JSON written in this
+        // repo, and that is how a P0 shipped: the hand-made `user_message` wore
+        // Claude's `{"message":{"content":…}}` while the adapter sends
+        // `{"text":…}`, so the fixtures and the app agreed with each other, both
+        // renders were green, and a real phone drew a whole Codex turn as a lone
+        // "Turn complete". This one replays
+        // `fixtures/codex/phone-turn-stream-0.153.4.json` — the file ccd
+        // byte-compares against — frame for frame, and requires the words and
+        // the tool rows to be in the photograph.
+        codexScenario(
+            "phone-turn-stream",
+            purpose: "the daemon's own capture of a phone-started turn, replayed frame for frame",
+            route: "session",
+            sessionKey: "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            reach: { app, driver in
+                // The screen opens on the tail, and the subject is the head of
+                // the conversation — so these scroll *back*, which nothing in
+                // this catalogue had ever needed to do. The command row first,
+                // then the words just above it, so the photograph ends on the
+                // thing the operator could not see.
+                // Measured once, from a row that is on screen at the tail:
+                // the rectangle stays valid after that row has scrolled away.
+                let timeline = try driver.listFrame(holding: "Turn complete", in: app)
+                try driver.requireEarlier(
+                    driver.element(containing: "/bin/zsh", in: app),
+                    "the command tool row, whose argument the payload holds at its top level",
+                    inside: timeline)
+                try driver.requireEarlier(
+                    // "just run it" rather than "Do not explain": both of the
+                    // capture's user messages end with that phrase, and a
+                    // fragment two rows answer to is a fragment that certifies
+                    // whichever one the query happened to reach first.
+                    driver.element(containing: "just run it", in: app),
+                    "what the phone said, from the daemon's own bytes",
+                    inside: timeline)
+            }),
+        codexScenario(
+            "compose-steered", purpose: "Codex was working: your words joined the running turn",
+            route: "session",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "joined the running turn", in: app),
+                    "the steered sentence — never the same as started")
+            }),
+        codexScenario(
+            "compose-duplicate",
+            purpose: "a replay reading with the verb the ORIGINAL earned (started:false ⇒ steered)",
+            route: "session",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "second time", in: app),
+                    "the nothing-was-said-twice sentence")
+            }),
+        codexScenario(
+            "compose-rejected", purpose: "nothing was sent, in the daemon's own words",
+            route: "session",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "not yet watching its thread", in: app),
+                    "the refusal, verbatim")
+            }),
+        codexScenario(
+            "compose-indeterminate",
+            purpose: "written, outcome unknown — the draft is KEPT, and nothing is resent",
+            route: "session",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "Sent, outcome unknown", in: app),
+                    "the indeterminate sentence")
+            }),
+
+        // ---- M-series: an older Mac ------------------------------------
+        //
+        // **First-open states**, and the memory warns exactly about these: a
+        // disabled primary with a visible reason reads as scolding if nobody
+        // looks at it on first open. Both are looked at here, at both sizes.
+        codexScenario(
+            "daemon-minor17",
+            purpose: "a Mac that can stop a Codex turn but cannot carry a message to one",
+            route: "session",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "too old to carry a message", in: app),
+                    "the composer's reason, on first open")
+            }),
+        codexScenario(
+            "daemon-minor16",
+            purpose: "a Mac that can do neither — a dead composer WITH a sentence",
+            route: "session",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "too old", in: app),
+                    "the composer's reason, on first open")
             }),
     ]
 

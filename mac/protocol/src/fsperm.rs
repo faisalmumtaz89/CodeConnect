@@ -136,7 +136,39 @@ fn harden(path: &Path, mode: u32) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
+    /// A temp dir that removes itself, on the panic path too.
+    ///
+    /// It used to be a bare `PathBuf` nobody deleted, so every test left its dir in
+    /// TMPDIR forever — 160 of them were counted there. `Deref`/`AsRef` keep the
+    /// call sites reading as the plain path they were.
+    struct Scratch(std::path::PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if let Err(e) = fs::remove_dir_all(&self.0) {
+                let msg = format!("scratch not removed: {} ({e})", self.0.display());
+                // Silence is what let 160 accumulate — but a panic while already
+                // unwinding aborts the binary and buries the real failure.
+                assert!(std::thread::panicking(), "{msg}");
+                eprintln!("{msg}");
+            }
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for Scratch {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "cc-fsperm-{tag}-{}-{}",
@@ -145,7 +177,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     #[test]

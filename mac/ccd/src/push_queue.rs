@@ -69,6 +69,10 @@ pub(crate) struct PushTarget {
     /// `String` here made the redaction a promise about a hand-written `Debug`
     /// that the next carrier to hold this field could quietly break.
     pub(crate) credential: Option<Redacted>,
+    /// What this device advertised it can render, as
+    /// [`crate::store::Store::push_targets`] resolved it — already fail-closed for
+    /// anything this run has not confirmed. See [`crate::store::DeviceFeatures`].
+    pub(crate) features: crate::store::DeviceFeatures,
 }
 
 /// **Hand-written so the token is abbreviated.** The credential renders itself
@@ -88,21 +92,84 @@ impl std::fmt::Debug for PushTarget {
 
 /// Whether this push is for this device.
 ///
-/// **A function, so the seen-filter can be tested.** A device whose live socket
-/// already carried the fact must not also be rung, and that is the whole of the
-/// gate — worth asserting directly rather than inferring from a payload.
+/// **A function, so the filters can be tested.** Who a doorbell reaches is worth
+/// asserting directly rather than inferring from a payload.
 ///
 /// **The list, not a predicate.** `send` iterates exactly what this returns, so
 /// a test of this function is a test of who gets rung — which a per-target
 /// predicate could only be if every call site were also read.
-pub(crate) fn recipients(targets: Vec<PushTarget>, excluded: &[String]) -> Vec<PushTarget> {
+///
+/// # The two filters, and why they are one function
+///
+/// The `excluded` list asks whether this device should be skipped for a reason
+/// settled at dispatch: its live socket already carried the fact this push
+/// announces. The agent filter asks whether it could
+/// *use* the fact: a phone that never advertised it can render Codex has no
+/// screen to open behind a Codex doorbell, so ringing it produces a notification
+/// whose tap goes nowhere. Both are answers to "who gets rung", and there are two
+/// independent senders — a direct one and a relayed one — so a filter added beside
+/// only one of them is a filter that silently applies to half the fleet. They live
+/// here together because this is the list both senders iterate.
+///
+/// **Agent eligibility is the device's claim, met fail-closed.**
+/// [`crate::store::DeviceFeatures::supports`] treats Claude as the floor for a
+/// client that advertised nothing (the shape every pre-Codex phone sends),
+/// requires every other agent to be named explicitly, and grants nothing at all
+/// for a stored set this run cannot read — so a Codex push reaches exactly the
+/// devices that said the word.
+pub(crate) fn recipients(
+    targets: Vec<PushTarget>,
+    excluded: &[String],
+    agent: &protocol::agent::AgentKind,
+) -> Vec<PushTarget> {
     targets
         .into_iter()
         .filter(|target| {
             if excluded.contains(&target.device_id) {
-                // This device's live socket already carried the fact. Ringing
-                // it again is the noise the gate exists to stop.
-                crate::log_debug!("push: {} already saw this live; skipping", target.device_id);
+                // One refusal, and it is settled before the sender is called: the
+                // device's live socket already carried the fact this push
+                // announces. `PushGate::exclusions_if_valid` is what builds the
+                // list — the devices whose delivered watermark for this session
+                // has reached the triggering seq — and `Daemon::dispatch_push` is
+                // its only caller. Round-8: this line also claimed the list
+                // carried "could not confirm what the device said it can render",
+                // which it never has. That is `DeviceFeatures::Unconfirmable`, and
+                // it is refused at the second filter below, where the log line
+                // says so.
+                crate::log_debug!(
+                    "push: {} is excluded from this doorbell; skipping",
+                    target.device_id
+                );
+                return false;
+            }
+            if !target.features.supports(agent) {
+                // One predicate, two reasons — and an operator reading the log
+                // needs to know which, because they are fixed differently: the
+                // first is the phone's own claim, the second is a row this run
+                // cannot vouch for.
+                //
+                // Today only the first line can be reached. No shipping handler
+                // writes the column — no shipping handler CALLS the store's
+                // writer, which is compiled into every build and used by nothing
+                // but tests, and every hello path drops the wire-legal feature
+                // field — so every row is `NULL`, the Claude floor, and a Codex
+                // doorbell is refused here for every device. The second line is
+                // what the phase that lands the writes will need; until then no
+                // advertisement exists to repair a row with.
+                match &target.features {
+                    crate::store::DeviceFeatures::Advertised(_) => crate::log_debug!(
+                        "push: {} has not advertised {}; it has nothing to open behind this \
+                         doorbell, so it is not rung",
+                        target.device_id,
+                        agent.as_str()
+                    ),
+                    crate::store::DeviceFeatures::Unconfirmable => crate::log_debug!(
+                        "push: {} has a stored feature set this run cannot confirm; it hears \
+                         nothing until a later phase records an advertisement under this \
+                         run's epoch",
+                        target.device_id
+                    ),
+                }
                 return false;
             }
             true
@@ -114,6 +181,31 @@ pub(crate) fn recipients(targets: Vec<PushTarget>, excluded: &[String]) -> Vec<P
 /// database and the tests do not need one.
 pub(crate) trait PushRegistry: Send + Sync {
     fn targets(&self) -> Vec<PushTarget>;
+    /// Is this ONE device still one to tell about this agent?
+    ///
+    /// **Not `targets()` filtered down.** The same answer is in the fleet list,
+    /// but the cost is not: the fan-out asks "who" once per doorbell, while this
+    /// is asked once per transport attempt, per device, with as many attempts in
+    /// flight as there are phones with work. Answering it from the list makes one
+    /// push cost a read of every registration; this is the indexed question it
+    /// actually is.
+    ///
+    /// **Async, and that is the point.** The store-backed implementation goes
+    /// through the daemon's blocking-pool boundary (see [`crate::db`]) rather
+    /// than doing SQL on the runtime worker that is about to post — which is what
+    /// `targets()` does, deliberately, because [`crate::apns::PushSender::send`]
+    /// is synchronous and has nowhere to await. A worker loop has somewhere.
+    ///
+    /// Boxed rather than an `async fn` in the trait because the senders hold this
+    /// as `dyn PushRegistry`.
+    ///
+    /// **Fail closed.** A device that is gone, revoked, or whose row this run
+    /// cannot read answers `false`: a row that cannot vouch for anything does not.
+    fn eligible<'a>(
+        &'a self,
+        device_id: String,
+        agent: protocol::agent::AgentKind,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
     /// Apple said this token is dead (`410 Unregistered`) — the app is gone
     /// from that device, which never recovers.
     ///
@@ -163,6 +255,48 @@ pub(crate) struct Delivery {
     pub(crate) collapse: &'static str,
     /// Set only for the test push, which reports back to whoever asked for it.
     pub(crate) respond: Option<tokio::sync::oneshot::Sender<TestDelivery>>,
+    /// **What this delivery has to be authorized for, carried so the check can
+    /// be made again at the last moment.**
+    ///
+    /// [`recipients`] answers "who gets rung" when the fan-out runs, and that
+    /// answer can go stale before the push leaves: a device's queue is served one
+    /// delivery at a time, so a doorbell filed while a phone was eligible can sit
+    /// behind an in-flight attempt for as long as that attempt takes — a slow
+    /// network, a retry — and be posted after the phone stopped being a device
+    /// this daemon should tell about that agent. The `PushTarget` in this struct
+    /// is a snapshot and cannot answer the question a second time, so the SUBJECT
+    /// of the authorization travels beside it and [`serve_with`] asks again.
+    ///
+    /// `None` for a delivery that is not about any run — the test push, which is
+    /// about the transport and is deliberately not agent-filtered at the fan-out
+    /// either.
+    pub(crate) authorized_for: Option<protocol::agent::AgentKind>,
+}
+
+/// Is this device still one to tell about this agent?
+///
+/// The same question [`recipients`] answers at the fan-out, asked of the registry
+/// as it reads now, for one device. A device that has left the registry entirely
+/// answers `false`: a row that is gone cannot vouch for anything, and the whole
+/// point of asking late is to fail closed on a world that moved.
+///
+/// **One indexed read about one device per delivery attempt, off the runtime.**
+/// It is asked once per attempt, per device, with as many attempts in flight as
+/// there are phones with work — so the shape of the read is not a detail. The
+/// fleet list [`recipients`] works from is the wrong instrument here twice over:
+/// it makes a single push cost a read of every registration, and the store-backed
+/// registry answers it synchronously, which would put that scan on a Tokio worker
+/// against the boundary [`crate::db`] exists to keep. [`PushRegistry::eligible`]
+/// is the per-device question, awaited, so the cost sits beside the network round
+/// trip it precedes rather than in front of the whole runtime.
+pub(crate) async fn still_authorized(
+    registry: &dyn PushRegistry,
+    device_id: &str,
+    agent: &protocol::agent::AgentKind,
+) -> bool {
+    registry
+        .eligible(device_id.to_string(), agent.clone())
+        .await
 }
 
 /// **One device's pushes, in the order the daemon decided them.**
@@ -280,6 +414,35 @@ impl DeviceQueue {
         self.wake.notify_one();
     }
 
+    /// How many deliveries are waiting here.
+    ///
+    /// The key set of the queue map answers *which* devices a fan-out reached
+    /// and cannot answer *how many times*, and those are different claims
+    /// exactly where it matters: a doorbell filed twice for one device is
+    /// coalesced by [`DeviceQueue::push`] into one, and a reader that could see
+    /// only the key set would read the coalescing and a genuine duplicate
+    /// identically.
+    #[cfg(test)]
+    pub(crate) fn depth(&self) -> usize {
+        self.waiting.lock().expect("push queue").len()
+    }
+
+    /// What each waiting delivery has to stay authorized for.
+    ///
+    /// The subject is what makes the dequeue check possible at all, and it is
+    /// set at the fan-out — two steps apart, in two files. A sender that filed
+    /// its doorbells with no subject would pass every ordering test and every
+    /// worker test, and simply never re-check anything.
+    #[cfg(test)]
+    pub(crate) fn waiting_subjects(&self) -> Vec<Option<protocol::agent::AgentKind>> {
+        self.waiting
+            .lock()
+            .expect("push queue")
+            .iter()
+            .map(|delivery| delivery.authorized_for.clone())
+            .collect()
+    }
+
     fn is_closed(&self) -> bool {
         self.closed.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -325,10 +488,12 @@ pub(crate) fn retire(queues: &mut HashMap<String, Arc<DeviceQueue>>, device_id: 
 /// two closures so that ordering, serialisation and the revocation check
 /// can be proven without a network — the thing they guard is *when* work
 /// starts, which no test of a queue's contents can see.
-pub(crate) async fn serve_with<A, Fut>(queue: Arc<DeviceQueue>, attempt: A)
+pub(crate) async fn serve_with<A, Fut, Z, ZFut>(queue: Arc<DeviceQueue>, attempt: A, authorized: Z)
 where
-    A: Fn(PushTarget, String, &'static str) -> Fut,
+    A: Fn(PushTarget, String, &'static str, Option<protocol::agent::AgentKind>) -> Fut,
     Fut: std::future::Future<Output = Result<Option<String>>>,
+    Z: Fn(String, protocol::agent::AgentKind) -> ZFut,
+    ZFut: std::future::Future<Output = bool>,
 {
     loop {
         if queue.is_closed() {
@@ -342,7 +507,43 @@ where
             continue;
         };
         let device = delivery.target.device_id.clone();
-        let outcome = attempt(delivery.target, delivery.payload, delivery.collapse).await;
+        // **Asked again here, and here is the only place it can be asked
+        // honestly.** Everything above this line happened earlier — possibly
+        // much earlier, since this loop finishes one attempt before starting the
+        // next — and the authorization it was decided under may since have been
+        // withdrawn. A push posted on a stale answer is a phone paid for and
+        // told about a run it can no longer open, which is the whole failure the
+        // per-device filter exists to prevent.
+        if let Some(agent) = &delivery.authorized_for {
+            if !authorized(device.clone(), agent.clone()).await {
+                crate::log_info!(
+                    "push: {device} is no longer a recipient for {}; the doorbell waiting \
+                     for it is dropped rather than posted",
+                    agent.as_str()
+                );
+                // A test push is never agent-scoped, so this arm cannot hold
+                // one. Answering anyway costs a line and removes the only way
+                // this could leave somebody waiting on a channel for ever.
+                if let Some(respond) = delivery.respond {
+                    let _ = respond.send(TestDelivery::NoToken);
+                }
+                continue;
+            }
+        }
+        // **The subject travels into the attempt as well as into the check
+        // above.** A transport that posts more than once for one delivery — the
+        // direct sender tries the other Apple host after a `BadDeviceToken` —
+        // makes a second hand-off to Apple that this loop never sees, and the
+        // check above cannot cover a post it does not order. What it can do is
+        // hand the transport the same question, so the answer is asked wherever
+        // a notification actually leaves.
+        let outcome = attempt(
+            delivery.target,
+            delivery.payload,
+            delivery.collapse,
+            delivery.authorized_for,
+        )
+        .await;
         // **Terminal for this worker.** A device leaves once, and a loop
         // that merely logged the failure would park forever on a phone that
         // is never coming back. Closing answers whatever else was waiting
@@ -410,6 +611,7 @@ mod tests {
             environment: ApnsEnvironment::Sandbox,
             device_id: device.into(),
             credential: None,
+            features: Default::default(),
         }
     }
 
@@ -463,12 +665,82 @@ mod tests {
         }
     }
 
+    /// **The subject reaches the transport, and not only the dequeue check.**
+    ///
+    /// A transport that posts more than once for one delivery makes hand-offs to
+    /// Apple this loop never orders — the direct sender tries the other Apple host
+    /// after a `BadDeviceToken` — so the check above cannot be the only place the
+    /// question is asked. What this loop owes the transport is the question
+    /// itself, carried down beside the work.
+    ///
+    /// Asserted here because it is the WIRING, and wiring is what a test of an
+    /// outcome cannot see: a loop that dropped the subject on the floor would pass
+    /// every ordering test and every dequeue test in this file, and the retry gate
+    /// two files away would then be handed `None` and check nothing, for ever.
+    ///
+    /// **Mutation:** pass `None` instead of `delivery.authorized_for` into
+    /// `attempt` and this reads `None` for a delivery that carries a subject.
+    #[tokio::test]
+    async fn the_attempt_is_handed_the_subject_the_delivery_carries() {
+        let queue = Arc::new(queue());
+        let (report, mut reported) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(serve_with_always_authorized(
+            Arc::clone(&queue),
+            move |_target, _payload, _collapse, subject| {
+                let report = report.clone();
+                async move {
+                    let _ = report.send(subject);
+                    Ok(None)
+                }
+            },
+        ));
+
+        queue.push(
+            Delivery {
+                authorized_for: Some(protocol::agent::AgentKind::Codex),
+                ..delivery("a doorbell about a Codex run")
+            },
+            "phone",
+        );
+        assert_eq!(
+            within("the subject of an agent-scoped delivery", reported.recv()).await,
+            Some(Some(protocol::agent::AgentKind::Codex)),
+            "a transport that posts twice has to be able to ask again, and it can \
+             only ask about a subject it was given"
+        );
+
+        // And a delivery that is about no run carries none — the test push, which
+        // is deliberately not agent-filtered anywhere.
+        queue.push(delivery("a test push"), "phone");
+        assert_eq!(
+            within("the subject of a test push", reported.recv()).await,
+            Some(None),
+            "nothing is invented for a delivery that was never agent-scoped"
+        );
+        worker.abort();
+    }
+
+    /// [`serve_with`] for the tests that are about ORDER rather than about
+    /// authorization: every delivery is admitted, so what the loop does with the
+    /// work is what is being read.
+    ///
+    /// The dequeue-time check has tests of its own, in the two senders, because
+    /// what it re-reads is a registry and neither of those lives here.
+    async fn serve_with_always_authorized<A, Fut>(queue: Arc<DeviceQueue>, attempt: A)
+    where
+        A: Fn(PushTarget, String, &'static str, Option<protocol::agent::AgentKind>) -> Fut,
+        Fut: std::future::Future<Output = Result<Option<String>>>,
+    {
+        serve_with(queue, attempt, |_device, _agent| std::future::ready(true)).await
+    }
+
     fn delivery(body: &str) -> Delivery {
         Delivery {
             target: target("phone"),
             payload: body.to_string(),
             collapse: COLLAPSE_ID,
             respond: None,
+            authorized_for: None,
         }
     }
 
@@ -504,9 +776,9 @@ mod tests {
             Arc::clone(&in_flight),
             Arc::clone(&release),
         );
-        let worker = tokio::spawn(serve_with(
+        let worker = tokio::spawn(serve_with_always_authorized(
             Arc::clone(&queue),
-            move |_target, payload, _collapse| {
+            move |_target, payload, _collapse, _subject| {
                 let (seen, busy, held, started) = (
                     Arc::clone(&seen),
                     Arc::clone(&busy),
@@ -573,6 +845,7 @@ mod tests {
                 payload: "test".into(),
                 collapse: TEST_COLLAPSE_ID,
                 respond: Some(respond),
+                authorized_for: None,
             },
             "phone",
         );
@@ -607,6 +880,7 @@ mod tests {
                 payload: "test".into(),
                 collapse: TEST_COLLAPSE_ID,
                 respond: Some(respond),
+                authorized_for: None,
             },
             "phone",
         );
@@ -662,15 +936,16 @@ mod tests {
                 payload: "test".into(),
                 collapse: TEST_COLLAPSE_ID,
                 respond: Some(respond),
+                authorized_for: None,
             },
             "phone",
         );
 
         let sent = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let seen = Arc::clone(&sent);
-        let worker = tokio::spawn(serve_with(
+        let worker = tokio::spawn(serve_with_always_authorized(
             Arc::clone(&queue),
-            move |_target, payload, _collapse| {
+            move |_target, payload, _collapse, _subject| {
                 let seen = Arc::clone(&seen);
                 async move {
                     seen.lock().unwrap().push(payload);
@@ -755,6 +1030,7 @@ mod tests {
                     payload: format!("test-{n}"),
                     collapse: TEST_COLLAPSE_ID,
                     respond: Some(respond),
+                    authorized_for: None,
                 },
                 "phone",
             );

@@ -9,7 +9,17 @@
 //! that installs the hooks, the environment fixes that keep transcripts alive,
 //! and a detached supervisor that connects out to `ccd`.
 
+mod codex;
+mod codex_coordinator;
+mod codex_custodian;
+mod codex_host;
+mod codex_launch;
 mod daemon;
+mod exec_gate;
+/// Test-only: the fence that proves the suite does not write into the operator's
+/// own `~/.codeconnect`. See the module's own docs for what it watches.
+#[cfg(test)]
+mod home_guard;
 mod launchd;
 mod pair;
 mod sessions;
@@ -45,6 +55,7 @@ fn main() -> Result<()> {
 
     match command {
         "claude" => start_claude(rest),
+        "codex" => codex::start(rest),
         "attach" => attach(rest),
         "ls" | "list" => list(),
         "sessions" => sessions::command(rest),
@@ -55,6 +66,41 @@ fn main() -> Result<()> {
         "daemon" => launchd::command(rest),
         // Hidden: spawned by `codeconnect claude`, never typed by a human.
         "supervise" => supervise(rest),
+        // Hidden: the D6 inert exec gate. Spawned by a launch actor to bring a
+        // child up inertly; it either execs its target on GO or _exits without
+        // ever touching it. Machinery, never typed by a human.
+        "internal-exec-gate" => exec_gate::run_gate(rest),
+        // Hidden: a test-only gated target that fires the D6 readiness fence and
+        // touches a marker, so the exec-gate tests can fence `execve` on a real
+        // target-side effect. Machinery, never typed by a human.
+        "internal-gate-ack-probe" => exec_gate::run_ack_probe(rest),
+        // Hidden: a test-only stand-in for the launcher's probe freeze. It takes a
+        // vnode freeze the way `codex::probe_codex` does and then blocks, so a test
+        // can interrupt it and read the flag. Machinery, never typed by a human.
+        "internal-freeze-probe" => codex::run_freeze_probe(rest),
+        // Hidden: a test-only stand-in for a freezer holding the executable's freeze
+        // lock, so a test can prove a second PROCESS is excluded from it. Carries its
+        // own deadline. Machinery, never typed by a human.
+        "internal-freeze-lock-hold" => codex::run_freeze_lock_hold(rest),
+        // Hidden: the D7 launch coordinator (the supervisor in launch mode).
+        // Spawned by the `codex` launcher before tmux exists; it owns the launch
+        // record and every forward mutation, and stays on as the session's
+        // supervisor once it commits `ready`. Machinery.
+        "internal-codex-coordinator" => codex_coordinator::run_coordinator(rest),
+        // Hidden: the D7 launch custodian. Armed before `tmux new-session` with
+        // independent cleanup authority. Machinery.
+        "internal-codex-custodian" => codex_custodian::run_custodian(rest),
+        // Hidden: one bounded D7 recovery sweep (stale pendings → failed;
+        // failed+incomplete+dead-custodian → replacement custodian). Machinery.
+        c if c == protocol::CODEX_SWEEP_SUBCOMMAND => codex_custodian::run_sweep(rest),
+        // Hidden: the D7 late-host preflight gate — validate the launch record +
+        // take a lease, or cleanup-only refuse. Machinery.
+        "internal-codex-host-preflight" => codex_custodian::run_host_preflight(rest),
+        // Hidden: the Codex session host (Phase 2e). Runs inside a tmux pane;
+        // launches the app-server, serves the broker in front of it, and spawns
+        // the interactive TUI against the broker. Machinery, never typed by a
+        // human — the coordinator spawns it (2e-2b).
+        "internal-codex-host" => codex_host::run_host(rest),
         // Hidden: the detached update checker `codeconnect claude` spawns.
         // Not in --help on purpose — it is machinery, not a command.
         "__update-check" => update_check::run_checker(),
@@ -103,6 +149,7 @@ fn usage_text() -> &'static str {
 cc — CodeConnect shim
 
   codeconnect claude [args…]      run claude in the private tmux server, attached here
+  codeconnect codex [args…]       run codex in the private tmux server, attached here
   codeconnect attach <name>       re-attach a session (e.g. after closing the tab)
   codeconnect ls                  list what tmux is running (works with ccd down)
   codeconnect sessions            list what the event log knows, with lifecycle
@@ -332,23 +379,34 @@ fn explain_retired(retired: RetiredCommand) -> ! {
     std::process::exit(RETIRED_EXIT_CODE);
 }
 
-fn start_claude(passthrough: &[String]) -> Result<()> {
-    let config = Config::load();
-    let claude_bin = resolve_claude_bin(&config)?;
-    let cwd = std::env::current_dir().context("reading the current directory")?;
-    let cwd = cwd.to_string_lossy().to_string();
+/// The agent-varying pieces of a launch: the resolved binary, the exact argv and
+/// env the tmux session runs. Built by an agent-specific planner so the pieces
+/// that differ between agents live in one place. The `claude` planner reproduces
+/// byte-for-byte what shipped — proven by the launcher test and the fixture
+/// replay — and it is the only planner today; another agent's launch path lands
+/// with that agent, not before.
+struct AgentLaunchPlan {
+    /// The resolved agent binary, passed on to the supervisor.
+    binary: PathBuf,
+    /// argv[0] is the binary; the rest is agent flags plus the caller's passthrough.
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+}
 
-    let session_id = tmux::next_session_name()?;
-    // Minted here, once, before anything else knows the session exists. The
-    // tmux name is reused as soon as this session exits; this is not, and it is
-    // what the event log, the tail cursor and the answers ledger are keyed by.
-    let session_uid = protocol::uid::new().context("minting a session uid")?;
-    let plan = settings::write_for_session(&session_id, &session_uid, &config)?;
-
+/// The exact argv and env a Claude session runs — a **pure** function, so the
+/// byte-identical guarantee is testable without touching the filesystem or tmux.
+/// Any change here changes what `claude` itself sees; the launcher test pins it.
+fn claude_argv_and_env(
+    binary: &std::path::Path,
+    settings_path: &std::path::Path,
+    session_id: &str,
+    session_uid: &str,
+    passthrough: &[String],
+) -> (Vec<String>, Vec<(String, String)>) {
     let mut argv = vec![
-        claude_bin.to_string_lossy().to_string(),
+        binary.to_string_lossy().to_string(),
         "--settings".to_string(),
-        plan.path.to_string_lossy().to_string(),
+        settings_path.to_string_lossy().to_string(),
     ];
     argv.extend(passthrough.iter().cloned());
 
@@ -365,22 +423,88 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
             "CLAUDE_CODE_FORCE_SESSION_PERSIST".to_string(),
             "1".to_string(),
         ),
-        (protocol::ENV_SESSION.to_string(), session_id.clone()),
-        (protocol::ENV_SESSION_UID.to_string(), session_uid.clone()),
+        (protocol::ENV_SESSION.to_string(), session_id.to_string()),
+        (
+            protocol::ENV_SESSION_UID.to_string(),
+            session_uid.to_string(),
+        ),
     ];
+    (argv, env)
+}
+
+/// Plan a Claude launch around an **already-resolved** binary: write the
+/// control-plane settings document and assemble the byte-identical argv/env. The
+/// binary is resolved separately and first (see `start_agent`), so a missing
+/// binary fails before any session state exists — the pre-seam ordering.
+fn plan_claude_launch(
+    config: &Config,
+    binary: &std::path::Path,
+    session_id: &str,
+    session_uid: &str,
+    passthrough: &[String],
+) -> Result<AgentLaunchPlan> {
+    let settings = settings::write_for_session(session_id, session_uid, config)?;
+    let (argv, env) =
+        claude_argv_and_env(binary, &settings.path, session_id, session_uid, passthrough);
+    Ok(AgentLaunchPlan {
+        binary: binary.to_path_buf(),
+        argv,
+        env,
+    })
+}
+
+fn start_claude(passthrough: &[String]) -> Result<()> {
+    start_agent(protocol::agent::AgentKind::Claude, passthrough)
+}
+
+/// Launch an agent session: mint the identity, plan the agent-varying pieces,
+/// create the tmux session, and hand ownership to the supervisor. Everything
+/// outside the plan — the identity, the tmux session, the advisories, the
+/// attach — is agent-agnostic; the plan is where an agent differs. Only Claude
+/// has a planner today; any other agent is refused before anything is spawned.
+fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Result<()> {
+    let config = Config::load();
+
+    // **Binary first.** Resolving the agent's executable is the first thing that
+    // can fail, and it must fail before a tmux name is taken or a session
+    // identity minted — exactly as the pre-seam launcher did, so a missing
+    // binary surfaces the same way it always has. This is the agent-varying
+    // binary-resolution step; a non-Claude agent is refused here, before any
+    // state exists.
+    let binary = match &agent {
+        protocol::agent::AgentKind::Claude => resolve_claude_bin(&config)?,
+        other => bail!("{} sessions cannot be launched yet", other.as_str()),
+    };
+
+    let cwd = std::env::current_dir().context("reading the current directory")?;
+    let cwd = cwd.to_string_lossy().to_string();
+
+    let session_id = tmux::next_session_name()?;
+    // Minted here, once, before anything else knows the session exists. The
+    // tmux name is reused as soon as this session exits; this is not, and it is
+    // what the event log, the tail cursor and the answers ledger are keyed by.
+    let session_uid = protocol::uid::new().context("minting a session uid")?;
+
+    let plan = match &agent {
+        protocol::agent::AgentKind::Claude => {
+            plan_claude_launch(&config, &binary, &session_id, &session_uid, passthrough)?
+        }
+        // Unreachable: a non-Claude agent already bailed at binary resolution.
+        other => bail!("{} sessions cannot be launched yet", other.as_str()),
+    };
 
     tmux::new_session(
         &session_id,
         &cwd,
-        &env,
-        &argv,
+        &plan.env,
+        &plan.argv,
         tmux::terminal_size(),
         config.tmux_status,
         config.tmux_history_limit,
     )
     .with_context(|| format!("creating tmux session {session_id}"))?;
 
-    spawn_supervisor(&session_id, &session_uid, &cwd, &claude_bin)?;
+    spawn_supervisor(&session_id, &session_uid, &cwd, &plan.binary)?;
 
     // After the session and supervisor exist, before the alternate screen:
     // the hold below delays only the *display*, never the session it is
@@ -780,8 +904,20 @@ fn supervise(args: &[String]) -> Result<()> {
             // would mint a second identity for a session that has one.
             session_uid: session_uid.filter(|uid| protocol::uid::is_well_formed(uid)),
             tmux_session,
+            // No flag, on purpose. `supervise` is spawned by `codeconnect
+            // claude` and by nothing else — the Codex launch supervises itself,
+            // in the coordinator process, so the seat and the socket travel as
+            // values rather than as argv. Adding `--agent` here would be a
+            // user-facing surface with no caller, on a parser that silently
+            // ignores what it does not recognise.
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
             cwd,
             claude_bin,
+            codex: None,
+            // A Claude run shares the fleet-wide tmux server with every other one,
+            // so there is no server whose death is this session's death, and no pin
+            // to hand over. `None` keeps the probe exactly as it was.
+            server_a: None,
         },
         &Config::load(),
     )
@@ -897,6 +1033,61 @@ fn is_same_file(candidate: &std::path::Path, current: Option<&std::path::Path>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The launcher byte-identical gate.** The agent-parameterised launcher
+    /// must leave the `claude` argv and env exactly as they shipped. This pins
+    /// the pure builder both planners flow through, so a refactor that reorders a
+    /// flag, drops an env var, or slips an agent-specific argument into the Claude
+    /// path fails here rather than in a session that behaves subtly differently.
+    #[test]
+    fn the_claude_argv_and_env_are_byte_identical() {
+        let (argv, env) = claude_argv_and_env(
+            std::path::Path::new("/usr/local/bin/claude"),
+            std::path::Path::new("/home/u/.codeconnect/sessions/cc-1-UID/settings.json"),
+            "cc-1",
+            "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            &[
+                "--resume".to_string(),
+                "--permission-mode".to_string(),
+                "default".to_string(),
+            ],
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "/usr/local/bin/claude",
+                "--settings",
+                "/home/u/.codeconnect/sessions/cc-1-UID/settings.json",
+                "--resume",
+                "--permission-mode",
+                "default",
+            ]
+        );
+        assert_eq!(
+            env,
+            vec![
+                (
+                    "CLAUDE_CODE_FORCE_SESSION_PERSIST".to_string(),
+                    "1".to_string()
+                ),
+                ("CODECONNECT_SESSION".to_string(), "cc-1".to_string()),
+                (
+                    "CODECONNECT_SESSION_UID".to_string(),
+                    "01K1B3XQ8ZC0DE5FGH7JKMNPQR".to_string()
+                ),
+            ]
+        );
+        // The passthrough is appended verbatim, in order, after the settings flag
+        // — never merged, deduplicated or reordered.
+        let (bare, _) = claude_argv_and_env(
+            std::path::Path::new("claude"),
+            std::path::Path::new("/s.json"),
+            "cc-2",
+            "UID",
+            &[],
+        );
+        assert_eq!(bare, vec!["claude", "--settings", "/s.json"]);
+    }
 
     /// Whether a bare command name resolves on this machine's `PATH`.
     ///
@@ -1505,6 +1696,7 @@ mod tests {
     /// about whether the flag scan reaches it.
     const LIVE_COMMANDS: &[&str] = &[
         "claude",
+        "codex",
         "attach",
         "ls",
         "list",

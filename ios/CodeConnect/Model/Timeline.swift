@@ -58,13 +58,27 @@ struct ApprovalItem: Sendable, Hashable, Identifiable {
     var sessionKey: String
     /// `nil` while nobody has answered. Silence is never consent.
     var outcome: AnswerOutcome?
+    /// What became of a **Codex** card, which the wire reports in an entirely
+    /// different shape — a bare `CodexResolution` carrying no decision, no
+    /// actor's transport and no timestamp on most arms.
+    ///
+    /// Kept beside `outcome` rather than mapped onto it, because the two say
+    /// different things and mapping would have to invent the difference: a
+    /// `cleared(turn_aborted)` is not "denied", an `answered(by: .local)` names
+    /// no decision at all, and `AnswerOutcome` has no way to express either
+    /// without claiming something. Both make the card non-actionable; only this
+    /// one is allowed to describe a Codex ending.
+    var codexResolution: CodexResolution?
     /// `capture-pane` text taken when Claude said the prompt was up — the only
     /// source for the exact option list.
     var paneSnapshot: String?
     /// The daemon's own classification, or nil on a daemon too old to send one.
     var risk: WireRisk?
 
-    var isPending: Bool { outcome == nil }
+    /// Whether this card is still waiting on a human. **Either** ending
+    /// retires it: a card the Mac already answered is not pending just because
+    /// the ending arrived in Codex's shape rather than Claude's.
+    var isPending: Bool { outcome == nil && codexResolution == nil }
 
     /// The run *and* the request, because a `request_id` is only unique within
     /// one run. Two runs of the same project can raise the same id — the daemon
@@ -112,7 +126,10 @@ struct NoticeItem: Sendable, Hashable {
 struct TimelineItem: Sendable, Hashable, Identifiable {
     enum Content: Sendable, Hashable {
         case userMessage(String, isCommand: Bool = false)
-        case agentMessage(String)
+        /// `isInterrupted` is the wire's own `interrupted` flag on a Codex
+        /// message item: the reply was cut short by an abort, and a row that
+        /// draws it as a finished thought is the phone contradicting the Mac.
+        case agentMessage(String, isInterrupted: Bool = false)
         case tool(ToolItem)
         case approval(ApprovalItem)
         case notice(NoticeItem)
@@ -145,6 +162,7 @@ enum TimelineBuilder {
 
         var resultsByToolUse: [String: ToolOutcome] = [:]
         var outcomesByRequest: [String: AnswerOutcome] = [:]
+        var codexResolutionsByRequest: [String: CodexResolution] = [:]
         var panesByPrompt: [String: String] = [:]
         var hookToolCallIDs: Set<String> = []
         var approvalPromptIDs: Set<String> = []
@@ -159,6 +177,16 @@ enum TimelineBuilder {
             case .approvalResolved:
                 if let outcome = event.approvalOutcome {
                     outcomesByRequest[outcome.requestID] = outcome
+                } else if let requestID = event.codexResolvedRequestID,
+                    let resolution = event.codexResolution
+                {
+                    // The second arm, and the order matters: Claude's shape is
+                    // tried first and wins where both could apply, so this phase
+                    // cannot change what a Claude session does. A Codex payload
+                    // fails the first read (it has no `request_id` *inside* an
+                    // `AnswerOutcome`, and none of that struct's other required
+                    // fields) and lands here.
+                    codexResolutionsByRequest[requestID] = resolution
                 }
             case .approvalRequest:
                 if let promptID = event.approvalCard?.promptID { approvalPromptIDs.insert(promptID) }
@@ -250,7 +278,8 @@ enum TimelineBuilder {
 
             case .agentMessage:
                 if let text = event.agentText {
-                    items.append(event.item(.agentMessage(text)))
+                    items.append(
+                        event.item(.agentMessage(text, isInterrupted: event.isInterruptedItem)))
                 }
                 // Only when the PreToolUse hook missed the call entirely.
                 for use in event.agentToolUses where !hookToolCallIDs.contains(use.id) {
@@ -331,6 +360,7 @@ enum TimelineBuilder {
                                 requestedAt: event.date,
                                 sessionKey: event.sessionKey,
                                 outcome: outcomesByRequest[card.requestID],
+                                codexResolution: codexResolutionsByRequest[card.requestID],
                                 paneSnapshot: card.promptID.flatMap { panesByPrompt[$0] },
                                 risk: card.risk ?? event.declaredRisk))))
 
@@ -425,6 +455,16 @@ enum TimelineBuilder {
             if !combined.isEmpty { outcome.text = combined }
             if outcome.text == nil, let plain = response.stringValue { outcome.text = plain }
         }
+        // **The Codex adapter's own result shape**, which is not the hook's:
+        // `tool_result_payload` writes `status`, `interrupted`, `exit_code` and
+        // `aggregated_output` at the top level, and there is no `tool_response`
+        // for the block above to read. Left unread, every Codex command in the
+        // daemon's own capture rendered as "done" — including a non-zero exit,
+        // which is the outcome a reader most needs the truth about.
+        if let codex = event.codexToolOutcome {
+            outcome.status = codex.status
+            if let text = codex.output, outcome.text == nil { outcome.text = text }
+        }
         if let duration = event.durationMS { outcome.durationMS = duration }
 
         if let transcript = event.transcriptToolResult {
@@ -443,16 +483,30 @@ enum TimelineBuilder {
         approvals: [String: AnswerOutcome], turnEnd: UInt64
     ) -> ToolStatus {
         if let outcome { return outcome.status }
-        if let toolUseID, let answer = approvals[toolUseID] {
-            switch answer.decision {
-            case .deny: return .denied
-            // An unrecognised decision from a newer daemon is not evidence the
-            // call was blocked, so it falls through to the timing-based verdict
-            // rather than claiming a denial that may not have happened.
-            case .allow, .option, .text, .unrecognised: break
-            }
+        if let fromApproval = statusFromApproval(toolUseID: toolUseID, approvals: approvals) {
+            return fromApproval
         }
         return eventSeq < turnEnd ? .unresolved : .running
+    }
+
+    /// The tool status an approval *alone* justifies, or `nil` when it justifies
+    /// none and the timing verdict should stand. Internal (not private) and free
+    /// of the private `ToolOutcome` type so the honesty rule is unit-testable.
+    ///
+    /// An indeterminate answer is one the daemon could not confirm reached the
+    /// agent, so it is no evidence the call was blocked and must never stamp a
+    /// definitive `denied` — it falls through exactly as an unrecognised decision
+    /// does.
+    static func statusFromApproval(
+        toolUseID: String?, approvals: [String: AnswerOutcome]
+    ) -> ToolStatus? {
+        guard let toolUseID, let answer = approvals[toolUseID], !answer.indeterminate else {
+            return nil
+        }
+        switch answer.decision {
+        case .deny: return .denied
+        case .allow, .option, .optionId, .text, .unrecognised: return nil
+        }
     }
 
     // MARK: Notices

@@ -222,6 +222,24 @@ final class SessionState {
     /// is the shape that defeats XCUITest's quiescence wait.
     private(set) var pendingApprovals: [ApprovalItem] = []
 
+    /// The current approval for `id`, exactly as the live timeline holds it now —
+    /// pending or resolved. `nil` when this session's log has no such card.
+    ///
+    /// **The live data source a still-open decision sheet re-derives from on
+    /// every render.** Holding the opened `ApprovalItem` *value* freezes it at
+    /// open-time, so a crash-recovery rebuild that resolves the card
+    /// (`approval_resolved`, often `indeterminate`) is never reflected: the sheet
+    /// keeps `outcome == nil`, renders a stale local attempt, and leaves the
+    /// action bar live on a card the log has already resolved. Looking the card
+    /// up here instead closes that staleness for *any* outcome, because
+    /// `timeline` is rebuilt in the one place the log can change.
+    func approval(id: String) -> ApprovalItem? {
+        for item in timeline {
+            if case .approval(let approval) = item.content, approval.id == id { return approval }
+        }
+        return nil
+    }
+
     // MARK: - Ingest
 
     func loadCached(_ cached: EventCache.CachedEvents) {
@@ -352,6 +370,11 @@ final class SessionState {
     private func reset(gap notice: GapNotice?) {
         events.removeAll()
         timeline.removeAll()
+        // Cleared with the timeline it is a projection of. Left behind, a
+        // rewound/reset log would keep feeding stale cards to the Deck
+        // (`AppModel.deck` flat-maps this) and to any open sheet's live lookup —
+        // an actionable card no daemon would accept an answer for.
+        pendingApprovals.removeAll()
         pendingMerge.removeAll()
         pendingSeqs.removeAll()
         missingRanges.removeAll()

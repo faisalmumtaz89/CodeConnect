@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use protocol::config::Config;
 use protocol::ipc::{
     ClientFrame, DaemonFrame, PromptFingerprint, PromptPresence, RegisterSession,
@@ -44,6 +44,51 @@ const LIVENESS_POLL: Duration = Duration::from_secs(2);
 const RECONNECT_MIN: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(10);
 
+/// How long a supervisor whose session has ended keeps trying to tell the daemon
+/// before giving up loudly.
+///
+/// **A bound, not a guarantee, and the difference is written down on purpose.**
+/// The report used to be a single attempt whose failure was discarded, so a run
+/// that started *and* ended while `ccd` was down was never registered and never
+/// ended — it simply never existed, which is the one thing the event log claims a
+/// kill cannot cost (see [`report_exit`]). Retrying is free in the sense that
+/// matters: the process has nothing else left to do, and the session it was
+/// supervising is already gone.
+///
+/// It is not free forever, and the cost was **measured rather than argued**. This
+/// process is the coordinator too, and the custodian reads a live coordinator on a
+/// `ready` record as "somebody is watching" — so every second spent retrying is a
+/// second the launch's own teardown and run-dir sweep are deferred. A first draft
+/// used sixty seconds and
+/// `codex_lifecycle_integration::a_ready_launch_runs_the_real_host_in_the_pane_and_commits_ready`
+/// went red on it: that gate kills the session and gives the supervisor 45s to
+/// notice and stop, and with no `ccd` in its sandbox the retry loop held the
+/// process past the window. The number is therefore chosen against what it delays,
+/// not against what it might catch.
+///
+/// Fifteen seconds covers the case the retry exists for — a daemon that is
+/// restarting, whether by `launchd` respawn or an upgrade swapping the binary
+/// underneath — while holding cleanup for less time than the launch's own bring-up
+/// budget. It does not cover a daemon that is down for the afternoon. That
+/// residual is real and is *not* closed by this: closing it needs a durable outbox
+/// with an owner that outlives this process, which is a design chunk. What this
+/// buys is that the failure is now bounded, reported in the run's own log, and no
+/// longer silent.
+const EXIT_REPORT_BUDGET: Duration = Duration::from_secs(15);
+
+/// Read/write bound on the exit-report connection.
+///
+/// The live connection is *published* so the liveness thread can shut it down
+/// from the outside and break a blocked read. This one cannot be: by the time it
+/// is opened the liveness thread has already seen the session go and returned, so
+/// nothing is left to interrupt it. A daemon that accepts the connection and then
+/// says nothing would otherwise park the supervisor — and therefore the merged
+/// coordinator — in `withhold_unless_hosted`'s `read_line` for ever, with the
+/// custodian's cleanup waiting on a process that is never coming back. Ten
+/// seconds is generous for what is being asked: the daemon answers the support
+/// negotiation out of a list it holds in memory.
+const EXIT_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct SupervisorArgs {
     pub session_id: String,
     /// The run's identity, minted by `codeconnect claude`. `None` only for a supervisor
@@ -51,8 +96,85 @@ pub struct SupervisorArgs {
     /// name, which is the behaviour that keeps an in-place upgrade seamless.
     pub session_uid: Option<String>,
     pub tmux_session: String,
+    /// The tmux server this session lives on.
+    ///
+    /// A constant everywhere until the Codex coordinator started supervising its
+    /// own launches: it is handed a `--tmux-socket` (the live gates put each
+    /// sandbox on its own server), and a supervisor that probed liveness on the
+    /// default socket instead would read `Gone` for a session that is running —
+    /// and, `Ready` being committed, hand the custodian a session-fatal teardown
+    /// of a healthy run. `codeconnect claude` passes
+    /// [`protocol::TMUX_SOCKET_NAME`], which is what was hardcoded here before,
+    /// so its behaviour is unchanged.
+    ///
+    /// **Scope, honestly.** This reaches the two places that decide whether the
+    /// session still exists — the liveness probe and the `tmux_socket` the
+    /// registration carries — and not the pane-actuation helpers
+    /// ([`handle_request`]'s capture and key injection), which still address
+    /// [`protocol::TMUX_SOCKET_NAME`] through [`crate::tmux`]. In production the
+    /// two agree: a Codex launch runs on the same private server Claude does, and
+    /// only the live harnesses pass anything else. They also cannot disagree in a
+    /// way anyone can reach — a capture or a keystroke arrives only through the
+    /// connection-scoped resolver, and no client advertises Codex — so widening
+    /// the plumb would be machinery for a request that cannot be made. It is
+    /// written down rather than left to be discovered.
+    pub tmux_socket: String,
     pub cwd: String,
     pub claude_bin: Option<String>,
+    /// The Codex identity this supervisor registers with, or `None` for Claude.
+    ///
+    /// One optional field rather than four, because the daemon refuses a Codex
+    /// registration that carries no control-link socket or no generation
+    /// (`ccd::codex_link::ControlLink::from_registration`) — a session it could
+    /// list but never observe. Making them non-optional *inside* the seat means
+    /// this producer cannot build that frame at all, rather than building it and
+    /// being refused a round trip later.
+    pub codex: Option<CodexSeat>,
+    /// The tmux server this session was resolved against, when the caller has
+    /// proven one.
+    ///
+    /// **What it buys, and why `None` is not the same answer.** Without it the
+    /// liveness probe asks `owned_liveness(socket, uid, None)`, and that call has
+    /// no way to turn "no server answers this socket" into anything but
+    /// `Unknown` — a server may be down for a moment, and a durable `SessionEnd`
+    /// may never be invented. But a tmux server exits when its **last** session
+    /// does, so for the private server a Codex launch creates, losing the session
+    /// and losing the server are the same event: the supervisor then reads
+    /// `Unknown` for ever, its absence streak resets on every poll, it never
+    /// reports the exit, and — because the coordinator IS the supervisor now — the
+    /// process the `ready` record names never exits, so the custodian's
+    /// session-fatal arm never fires either. One drained server wedges the whole
+    /// launch.
+    ///
+    /// With the pin in hand the same silence is answerable, by the argument the
+    /// custodian already makes about its own recorded server A
+    /// (`codex_custodian::server_gone_evidence`): a session cannot outlive the
+    /// process hosting it, so a pinned server proven dead by **kernel identity**
+    /// — pid *and* birth, never socket reachability — is proof the session is
+    /// gone. The pin is also handed to `owned_liveness` itself, so a *different*
+    /// server answering on the same socket cannot supply a stranger's session
+    /// under our uid.
+    ///
+    /// `codeconnect claude` passes `None` and keeps exactly the behaviour it had:
+    /// it shares the fleet-wide server with every other Claude run, so its socket
+    /// going quiet really is indeterminate.
+    pub server_a: Option<protocol::tmux::OwnedSession>,
+}
+
+/// What a Codex supervisor knows about the session it hosts.
+///
+/// Built by the coordinator at the moment it commits `Ready`, from facts it
+/// already holds — no new durable state, and nothing it has to go and read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSeat {
+    /// The resolved `codex` executable the launch ran, for `agent_bin`.
+    pub codex_bin: String,
+    /// The broker's ccd leg (`<run dir>/ccd.sock`) — the daemon's control link
+    /// dials exactly this path.
+    pub ccd_socket: String,
+    /// The thread visit this registration's frames are attributed to (D4). A
+    /// fresh launch is the first visit, so the coordinator sends 1.
+    pub generation: u64,
 }
 
 /// The connection `serve_once` is currently blocked on, so the liveness thread
@@ -74,6 +196,8 @@ pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
     // that ends while ccd is down is still reported the moment ccd returns.
     {
         let tmux_session = args.tmux_session.clone();
+        let tmux_socket = args.tmux_socket.clone();
+        let server_a = args.server_a.clone();
         // Carried by value so the thread can write to the run's own log without
         // borrowing the argument struct the main loop is using.
         let log_session_id = args.session_id.clone();
@@ -91,7 +215,12 @@ pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
                 let mut gone_streak = 0u32;
                 loop {
                     std::thread::sleep(LIVENESS_POLL);
-                    match tmux::session_presence(&tmux_session) {
+                    match probe_liveness(
+                        &tmux_socket,
+                        &tmux_session,
+                        log_session_uid.as_deref(),
+                        server_a.as_ref(),
+                    ) {
                         tmux::SessionPresence::Present => gone_streak = 0,
                         // We could not look. Emphatically not an exit — this is
                         // the case that used to be indistinguishable from one,
@@ -137,9 +266,7 @@ pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
     let mut backoff = RECONNECT_MIN;
     loop {
         if session_gone.load(Ordering::SeqCst) {
-            // Best effort: if ccd is down there is nobody to tell, and the
-            // daemon infers the exit from the lost connection anyway.
-            let _ = report_exit(&socket, &registration);
+            report_exit_within(&socket, &registration, &args, EXIT_REPORT_BUDGET);
             return Ok(());
         }
 
@@ -159,6 +286,71 @@ pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
     }
 }
 
+/// Liveness of this supervisor's own session.
+///
+/// When a well-formed `session_uid` is known, this resolves **by uid** on the
+/// private server (the UID-atomic primitive, `protocol::tmux::owned_liveness`):
+/// a `cc-N` name that a *different* run has since reused no longer resolves for
+/// our uid, so a name-reuse race reads `Gone` and the supervisor terminates its
+/// now-dead session — where the old name-addressed `has-session` would have seen
+/// the stranger under the reused name and reported `Present` indefinitely. For a
+/// healthy session both agree (`Live` ⇒ `Present`), and an unreachable server is
+/// `Unknown` either way, so Claude's observable behavior on the healthy path is
+/// **unchanged**; only the reuse race differs. A uid-less (legacy/adopted)
+/// session keeps the exact name-addressed check it always had.
+///
+/// **`server_a`, when the caller has one, answers the silence.** See
+/// [`SupervisorArgs::server_a`] for why a Codex launch must have it: its server
+/// is private and dies with its last session, so `Census::NoServer` — which
+/// `owned_liveness` can only ever call `Unknown` — is the *normal* reading of a
+/// session that ended. The pin turns that into evidence without inventing any:
+/// the answer is still `Unknown` unless the pinned server process is proven dead
+/// by pid **and** birth, which is a fact about a process, not about a socket. A
+/// live server that dropped and recreated its socket (`SIGUSR1`) is still
+/// `Unknown`, which is the whole reason the check is on the identity.
+///
+/// [`EXIT_CONFIRMATIONS`] still applies on top: this returning `Gone` once is not
+/// what reports an exit.
+fn probe_liveness(
+    tmux_socket: &str,
+    tmux_session: &str,
+    session_uid: Option<&str>,
+    server_a: Option<&protocol::tmux::OwnedSession>,
+) -> tmux::SessionPresence {
+    match session_uid {
+        Some(uid) if protocol::uid::is_well_formed(uid) => {
+            match protocol::tmux::owned_liveness(tmux_socket, uid, server_a) {
+                protocol::tmux::OwnedLiveness::Live => tmux::SessionPresence::Present,
+                protocol::tmux::OwnedLiveness::Gone => tmux::SessionPresence::Gone,
+                protocol::tmux::OwnedLiveness::Unknown(_)
+                    if server_a.is_some_and(server_is_proven_dead) =>
+                {
+                    tmux::SessionPresence::Gone
+                }
+                protocol::tmux::OwnedLiveness::Unknown(why) => tmux::SessionPresence::Unknown(why),
+            }
+        }
+        _ => protocol::tmux::session_presence_on(tmux_socket, tmux_session),
+    }
+}
+
+/// Whether the tmux server this session was resolved against is **provably** gone.
+///
+/// The same binding the custodian's own `server_gone_evidence` uses, and the same
+/// two refusals: a server whose birth identity was never captured proves nothing
+/// (`server_birth: None` ⇒ `false`), and a pid that exists but cannot be described
+/// proves nothing either — [`protocol::proc_identity::liveness`] answers `Unknown`
+/// for both, and only a positive `Gone` is read as death here.
+fn server_is_proven_dead(server_a: &protocol::tmux::OwnedSession) -> bool {
+    let Some(birth) = server_a.server_birth else {
+        return false;
+    };
+    protocol::proc_identity::liveness(&protocol::proc_identity::ProcessIdentity {
+        pid: server_a.server_pid as i32,
+        birth,
+    }) == protocol::proc_identity::Liveness::Gone
+}
+
 fn serve_once(
     socket: &std::path::Path,
     args: &SupervisorArgs,
@@ -172,15 +364,34 @@ fn serve_once(
         stream.try_clone().context("cloning the socket")?,
     ));
     // Published before the first read so the liveness thread can always reach
-    // it; cleared on the way out so a stale handle is never shut down twice.
-    *link.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-        Some(stream.try_clone().context("cloning the socket")?);
-    let reader = BufReader::new(stream);
+    // it, and unpublished by the guard's `Drop` on **every** way out. That is
+    // the whole reason it is a guard: this function returns early — a withheld
+    // registration, a failed heartbeat spawn — and each of those paths used to
+    // walk past the one manual `take()` at the bottom, leaving the clone
+    // published. A published clone is an open descriptor, so the daemon went on
+    // holding the connection and its bounded IPC permit for the whole reconnect
+    // backoff of a supervisor it had already refused.
+    let _link = LinkGuard::publish(link, stream.try_clone().context("cloning the socket")?);
+    let mut reader = BufReader::new(stream);
+
+    // **Withheld, not sent, when this daemon cannot host what we are.** Ordered
+    // after the link is published so the liveness thread can still break a
+    // blocked read out from the outside, and before the `Register` below so
+    // nothing has been introduced when the answer is no.
+    withhold_unless_hosted(&writer, &mut reader, registration)?;
 
     // The same frame `report_exit` replays. Built once, in one place, so a
     // registration that introduces a session cannot drift from the one that
     // reports it.
     send(&writer, &ClientFrame::Register(registration.clone()))?;
+    // **Wait for the Ack before calling the registration a success**.
+    // The daemon sends `Ack` the instant it accepts and a structured `Error` (then
+    // closes) the instant it refuses. Reading it here is what turns a refused
+    // registration — which used to look identical to a healthy one, because this log
+    // line was written before any answer and a pre-`Ack` EOF ended `read_frames` as
+    // `Ok(())` — into a failure the reconnect loop backs off on. Ordered before the
+    // heartbeat thread is spawned, so a refusal returns with nothing introduced.
+    await_registration_ack(&mut reader, args, config, &writer)?;
     log_line(args, "registered with ccd");
 
     // Heartbeats stop when the connection dies: the send fails, the thread ends,
@@ -212,15 +423,211 @@ fn serve_once(
             .context("spawning the heartbeat thread")?;
     }
 
-    let outcome = read_frames(reader, args, config, &writer);
-    // The handle is dropped whether the loop ended cleanly or not: leaving a
-    // closed socket published would make the liveness thread shut down a
-    // descriptor that the next connection may already have reused.
-    let _ = link
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
-    outcome
+    read_frames(reader, args, config, &writer)
+}
+
+/// Holds the published connection for exactly as long as `serve_once` is using
+/// it.
+///
+/// The handle has to be *published* so the liveness thread can shut the socket
+/// down from the outside and break a blocked read — without that, a session that
+/// ends while `ccd` is healthy is never reported. It has to be *unpublished* on
+/// the way out for two separate reasons, and only one of them was ever a
+/// question of tidiness:
+///
+///   * A closed socket left published would have the liveness thread shut down a
+///     descriptor number the next connection may already have reused.
+///   * The clone is a live descriptor. Left published across a return, the
+///     daemon still sees the connection open and still holds the permit its
+///     bounded accept limit hands out — so a supervisor that has been *refused*
+///     goes on occupying a connection slot for its whole reconnect backoff,
+///     starving hooks, Claude supervisors and CLI calls behind it. Measured at
+///     one connection per withheld supervisor rather than a growing pile: the
+///     next attempt's publish drops the previous clone, so what is held is the
+///     latest refused connection for the length of the backoff. One slot,
+///     permanently, per supervisor the daemon has told to go away.
+///
+/// A guard rather than a call at the bottom because the second reason turns
+/// every early return into that starvation, and `serve_once` returns early on
+/// purpose: [`withhold_unless_hosted`] is a `?` above the registration.
+struct LinkGuard<'a>(&'a Link);
+
+impl<'a> LinkGuard<'a> {
+    fn publish(link: &'a Link, stream: UnixStream) -> Self {
+        *link.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stream);
+        Self(link)
+    }
+}
+
+impl Drop for LinkGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
+/// Refuse to introduce this session to a daemon that cannot host its agent.
+///
+/// **What goes wrong without it, and it is not a refusal — it is silence.** A
+/// daemon that predates the agent seam has no `agent` column and no
+/// `deny_unknown_fields` on `RegisterSession`: it drops `agent`,
+/// `codex_thread_id` and `codex_socket` on the floor, registers the run as an
+/// ordinary Claude session, and answers `Ack`. The row it writes lands in the
+/// shared `sessions` table wearing that schema's `DEFAULT 'claude'` — beside the
+/// run's real row in `codex_sessions`, which it cannot see. Its liveness sweep
+/// then ends that shadow, its `sessions prune` deletes it and every event and
+/// answer keyed by the uid underneath it, and it records a uid tombstone the
+/// surviving Codex row now contradicts. So `Ack` is not evidence of support; it
+/// is precisely the failure. The introduction has to be withheld *before* it is
+/// made.
+///
+/// **The signal, and why it is a frame rather than a field.** Nothing in the
+/// registration handshake distinguishes the two daemons: both answer `Register`
+/// with the same fieldless `Ack`, and no version travels on that path.
+/// `ClientFrame` is internally tagged with no catch-all variant, though, so
+/// `negotiate_support` is a *variant* the older daemon cannot decode, and
+/// unknown variants — unlike unknown fields — fail loudly. Measured against the
+/// real v0.6.0 binary, one `negotiate_support` frame on a fresh connection:
+///
+/// ```text
+/// v0.6.0:  {"type":"error","message":"undecodable frame: unknown variant
+///           `negotiate_support`, expected one of `hook`, `register`, ..."}
+/// this build: {"type":"supported_agents","supported_agents":["claude"],"supported":false}
+/// ```
+///
+/// Both leave the connection open, so the ask costs one round trip and no
+/// reconnect. Every answer other than `supported: true` withholds, including the
+/// ones that are not answers at all — a closed connection, an undecodable line,
+/// some frame we did not ask for. Fail-closed is the only safe direction here:
+/// the cost of withholding wrongly is a session the daemon does not list until
+/// the next reconnect, and the cost of registering wrongly is deleted history.
+///
+/// **Asked only for a non-Claude agent, deliberately.** Claude is every build's
+/// floor — the daemon's own `supported_agents()` says so — and asking anyway
+/// would send a frame the older daemon logs as an error on every reconnect of
+/// every ordinary session, to learn something already known. The gate therefore
+/// reads the registration it is about to send rather than a separate flag, so it
+/// cannot be bypassed by a caller that forgets it: the day `registration_frame`
+/// names Codex is the day this starts asking.
+///
+/// A withheld registration returns `Err`, which puts the caller into the
+/// existing reconnect loop with its exponential backoff — the same state the
+/// supervisor is already in whenever `ccd` is down. The session stays alive and
+/// unregistered, the tmux pane is untouched, and the next upgraded daemon gets
+/// the introduction. Returning `Ok` would reset the backoff to 500ms and spin.
+fn withhold_unless_hosted(
+    writer: &Arc<Mutex<UnixStream>>,
+    reader: &mut BufReader<UnixStream>,
+    registration: &RegisterSession,
+) -> Result<()> {
+    let agent = &registration.agent;
+    if *agent == protocol::agent::AgentKind::Claude {
+        return Ok(());
+    }
+    send(
+        writer,
+        &ClientFrame::NegotiateSupport {
+            agent: agent.clone(),
+            agent_version: None,
+        },
+    )?;
+    let mut line = String::new();
+    if reader
+        .read_line(&mut line)
+        .context("reading ccd's support answer")?
+        == 0
+    {
+        bail!(
+            "withholding Register: ccd closed the connection without answering whether it hosts {}",
+            agent.as_str()
+        );
+    }
+    match serde_json::from_str::<DaemonFrame>(&line) {
+        Ok(DaemonFrame::SupportedAgents {
+            supported: true, ..
+        }) => Ok(()),
+        Ok(DaemonFrame::SupportedAgents {
+            supported_agents, ..
+        }) => bail!(
+            "withholding Register: this ccd does not host {}; it hosts {}",
+            agent.as_str(),
+            supported_agents
+                .iter()
+                .map(|a| a.as_str().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Ok(DaemonFrame::Error { message }) => bail!(
+            "withholding Register: this ccd could not read the support negotiation ({message}), \
+             so it predates the agent seam and cannot host {}",
+            agent.as_str()
+        ),
+        Ok(other) => bail!(
+            "withholding Register: ccd answered the support negotiation with {other:?}, which \
+             says nothing about {}",
+            agent.as_str()
+        ),
+        Err(err) => bail!(
+            "withholding Register: ccd's answer to the support negotiation was undecodable \
+             ({err}), so it cannot be read as hosting {}",
+            agent.as_str()
+        ),
+    }
+}
+
+/// **Read the daemon's answer to `Register`, up to and including its `Ack`.**
+///
+/// `Ack` is success; a structured `Error`, a pre-`Ack` EOF, an undecodable line, or a
+/// frame that is neither an `Ack` nor a request is a failed registration, returned as
+/// `Err` so the caller's reconnect loop backs off instead of spinning at 500 ms
+/// against a daemon that has already refused it. Empty keepalive lines are skipped.
+///
+/// **A legitimate `SupervisorRequest` can arrive before the `Ack`.** The daemon
+/// publishes this connection's sender the instant it stakes the claim — an instant
+/// before it enqueues the `Ack` — and a request dispatched in that window is
+/// serialized ahead of the `Ack` on the one socket both travel. Such a request is
+/// serviced here, exactly as the steady-state reader services it, and the wait for
+/// the `Ack` continues: a real registration must not be read as a failure by the
+/// arrival of the very traffic that proves it succeeded.
+fn await_registration_ack(
+    reader: &mut BufReader<UnixStream>,
+    args: &SupervisorArgs,
+    config: &Config,
+    writer: &Arc<Mutex<UnixStream>>,
+) -> Result<()> {
+    loop {
+        let mut line = String::new();
+        if reader
+            .read_line(&mut line)
+            .context("reading ccd's registration answer")?
+            == 0
+        {
+            bail!("registration failed: ccd closed the connection before acknowledging it");
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<DaemonFrame>(&line) {
+            Ok(DaemonFrame::Ack) => return Ok(()),
+            Ok(DaemonFrame::SupervisorRequest { id, request }) => {
+                let result = handle_request(args, config, request);
+                send(writer, &ClientFrame::SupervisorResponse { id, result })?;
+            }
+            Ok(DaemonFrame::Error { message }) => {
+                log_line(args, &format!("registration refused by ccd: {message}"));
+                bail!("registration refused by ccd: {message}")
+            }
+            Ok(other) => {
+                bail!("registration failed: ccd answered Register with {other:?} instead of an Ack")
+            }
+            Err(err) => {
+                bail!("registration failed: ccd's answer to Register was undecodable ({err})")
+            }
+        };
+    }
 }
 
 fn read_frames(
@@ -1230,13 +1637,48 @@ fn authorise(
 /// Idempotent by construction. A session that *was* registered normally is
 /// simply re-registered under the same uid, which is the same path a supervisor
 /// reconnecting after a daemon restart already takes.
-fn report_exit(socket: &std::path::Path, registration: &RegisterSession) -> Result<()> {
+fn report_exit(
+    socket: &std::path::Path,
+    registration: &RegisterSession,
+    timeout: Duration,
+) -> Result<()> {
     let stream = UnixStream::connect(socket)?;
+    // **Bounded, because nothing else can bound it.** See [`EXIT_REPORT_TIMEOUT`]:
+    // this connection is not published, the liveness thread that would have shut
+    // it down has already returned, and the read below is a blocking `read_line`.
+    // A parameter rather than the constant read inline, so the test that proves
+    // the bound exists does not have to wait out the production one.
+    stream
+        .set_read_timeout(Some(timeout))
+        .context("bounding the exit report's reads")?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .context("bounding the exit report's writes")?;
+    let mut reader = BufReader::new(stream.try_clone().context("cloning the socket")?);
     let writer = Arc::new(Mutex::new(stream));
+    // **The same withhold as the live path, because this is the same
+    // introduction.** The replay is a `Register`, and a daemon that cannot host
+    // this agent files it exactly as it would have filed the live one — so a
+    // supervisor that correctly withheld for its whole run would undo that work
+    // in its last act, creating the shadow row on the way out. Withholding here
+    // costs nothing that was not already lost: a daemon that was never told the
+    // session exists has nothing to end.
+    withhold_unless_hosted(&writer, &mut reader, registration)?;
     // Best-effort: a daemon that rejects the introduction may still accept the
     // exit for a session it already knows about, so a failure here must not
     // stop the news getting through.
-    if let Err(err) = send(&writer, &ClientFrame::Register(registration.clone())) {
+    // **Marked as the replay it is.** The frame is otherwise byte-identical to the
+    // one this supervisor sent when it was alive, which is what the daemon needs
+    // told: a registration it cannot tell from a live one is a registration it hands
+    // the session to, and this process is already dead. Saying so is what stops the
+    // replay taking the session away from whatever supervisor has resumed it in the
+    // meantime — and, one frame later, ending that supervisor's run instead of this
+    // one. See `RegisterSession::exit_replay`.
+    let replay = RegisterSession {
+        exit_replay: true,
+        ..registration.clone()
+    };
+    if let Err(err) = send(&writer, &ClientFrame::Register(replay)) {
         log_for(
             &registration.session_id,
             registration.session_uid.as_deref(),
@@ -1249,25 +1691,195 @@ fn report_exit(socket: &std::path::Path, registration: &RegisterSession) -> Resu
             session_id: registration.session_id.clone(),
             session_uid: registration.session_uid.clone(),
             exit_code: None,
+            reason: registration
+                .session_uid
+                .as_deref()
+                .and_then(unbound_exit_reason),
         },
     )
 }
 
+/// The host's recorded "TUI exited without ever binding a thread" account for `uid`,
+/// if it made one.
+///
+/// **Read here rather than reconstructed downstream.** The supervisor is the process
+/// that tells `ccd` a run ended, and the host — a different process, already gone by
+/// now — is the only one that knows WHY in the one case the exit code cannot express.
+/// The launch record is the seam between them, so this is a read of an assertion, not
+/// an inference from silence: `None` means the host asserted nothing, which is what a
+/// clean session, a `Fatal` host and a signalled teardown all leave behind.
+///
+/// Best-effort: an unreadable record costs the reason, never the exit report. The run
+/// still ends; it just ends without an explanation, which is exactly where this
+/// started.
+fn unbound_exit_reason(uid: &str) -> Option<String> {
+    crate::codex_launch::load(uid)
+        .ok()
+        .and_then(|record| record.codex_unbound_exit)
+}
+
+/// [`report_exit`], retried within [`EXIT_REPORT_BUDGET`], then given up loudly.
+///
+/// **What the single attempt cost, measured against its own doc.** `report_exit`
+/// exists because a session that starts *and* ends while `ccd` is down has no row
+/// to end — the replay is what introduces it. But the call site discarded the
+/// result, so the one case the replay was written for was exactly the case where
+/// it could not run: there was no daemon to connect to. The run then had no row,
+/// no events, and nothing anywhere saying an agent ran. One retry loop is what
+/// makes the replay's own argument true for longer than one instant.
+///
+/// The backoff is the reconnect loop's, for the reason that loop has it: a daemon
+/// that is starting up refuses connections for a few hundred milliseconds, and a
+/// tight loop against it is contention rather than progress.
+///
+/// **"Delivered" is stated at its real strength.** Success here means the
+/// connection was made, the support negotiation was answered yes, and both frames
+/// were written and flushed. It is not an acknowledgement — `SessionExited` is not
+/// answered — so a daemon that accepts the bytes and dies before committing them
+/// is indistinguishable from one that filed them. That is the same strength the
+/// live path's reporting has always had, and it is not what this is fixing.
+fn report_exit_within(
+    socket: &std::path::Path,
+    registration: &RegisterSession,
+    args: &SupervisorArgs,
+    budget: Duration,
+) {
+    if let Err(last) = report_exit_retrying(socket, registration, budget) {
+        log_line(
+            args,
+            &format!(
+                "gave up reporting this run's exit after {}s: {last}. The daemon was never \
+                 told the session ended; if it never saw the session at all, this run has no \
+                 record.",
+                budget.as_secs()
+            ),
+        );
+    }
+}
+
+/// The retry loop itself, returning **why** it gave up rather than logging it.
+///
+/// Split from [`report_exit_within`] for the same reason `report_exit` takes its
+/// timeout as a parameter: the give-up *reason* is a measurable property of the
+/// loop, and a test that can only read the log file cannot assert it without
+/// reaching for a process-global `CODECONNECT_HOME`. It is what distinguishes a
+/// loop that spent its budget talking to an unreachable daemon from one that
+/// finished by starting an attempt it had no budget for — see
+/// `the_exit_report_never_starts_an_attempt_at_or_after_its_deadline`.
+fn report_exit_retrying(
+    socket: &std::path::Path,
+    registration: &RegisterSession,
+    budget: Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + budget;
+    let mut backoff = RECONNECT_MIN;
+    let mut last = "the budget was spent before a single attempt could be made".to_string();
+    loop {
+        // **The budget is wall-clock, and these two lines are what make it one**
+        // (2e-7b round-2 F4). It used to be a per-attempt timeout stacked on a
+        // deadline checked only *after* the attempt, with the sleep deliberately
+        // capped to land ON the deadline — so the loop's last act was reliably to
+        // start a fresh full-length attempt at the moment its budget ran out. A
+        // daemon silent from the start took the budget plus one attempt; one that
+        // went silent at the final attempt took the budget plus a full attempt on
+        // top of the attempts already spent. At the production numbers that is
+        // ~20.5s and ~25s against a 15s budget, and this whole loop exists to keep
+        // the launch's cleanup below its own bring-up budget.
+        //
+        //   * no attempt is STARTED at or after the deadline; and
+        //   * an attempt may not outlive the budget it is spending — its timeout is
+        //     the smaller of the per-attempt default and what is left.
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match report_exit(socket, registration, EXIT_REPORT_TIMEOUT.min(remaining)) {
+            Ok(()) => return Ok(()),
+            Err(err) => last = format!("{err:#}"),
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        // Never sleep past the budget either: a backoff that overshot would spend
+        // budget the clamp above has already promised to an attempt.
+        //
+        // **And never sleep away more than HALF of what is left** (round-3 F4). The
+        // wall-clock bound above made the loop honest about when it stops; it did not
+        // make the schedule cover the window it claims. With instant failures the
+        // attempts fell at ~0, 0.5, 1.5, 3.5 and 7.5 seconds, and the next 8-second
+        // backoff then consumed the entire remainder of a 15-second budget — so a
+        // daemon that came back at 9 seconds was never tried at all, INSIDE the bound
+        // this loop advertises. The blind tail was the whole second half.
+        //
+        // Halving what is left is the smallest rule that closes it. Every sleep leaves
+        // at least as much budget as it spends, so an attempt starts in every remaining
+        // half-window and the last one begins within `RECONNECT_MIN` of the deadline;
+        // the floor is what stops the halving becoming a spin at the end. It scales
+        // with the budget rather than with a second constant, which is what lets the
+        // tests drive it in seconds instead of the production fifteen.
+        let cap = (remaining / 2).max(RECONNECT_MIN);
+        std::thread::sleep(backoff.min(cap).min(remaining));
+        backoff = (backoff * 2).min(RECONNECT_MAX);
+    }
+    Err(last)
+}
+
 /// What this supervisor tells the daemon about its run.
+///
+/// **The agent is read off the seat, never named twice.** A Claude run has no
+/// seat and carries no Codex field; a Codex run carries its identity and no
+/// `claude_bin`. All three halves matter to the daemon, which refuses a Claude
+/// registration carrying Codex identity fields, a Codex one missing them, and a
+/// Codex one carrying a Claude binary — so building this frame from one `Option`
+/// is what makes every one of those refusals unreachable from here rather than a
+/// round trip away. The third of them was documented before it existed; it is in
+/// `ccd::state::Daemon::register_supervisor` now, beside the other two.
+///
+/// **No thread id, deliberately.** The launch never learns one: the thread is
+/// created by the TUI after the app-server is up, is verified inside the broker
+/// (in the host process, which the coordinator does not talk to), and reaches
+/// disk only as a redacted line in a run dir that dies with the session. The
+/// daemon does not need it from here — its control link binds off the broker's
+/// own `thread/started` and treats a registration's claim as the oldest, lowest-
+/// priority fact it has (`ccd::state::Inner::seed_codex_carry`). Sending a hint
+/// this side cannot observe would be inventing evidence; `None` is what is true.
 fn registration_frame(args: &SupervisorArgs, started_at: &str) -> RegisterSession {
+    let (agent, agent_bin, claude_bin, codex_socket, codex_generation) = match &args.codex {
+        None => (
+            protocol::agent::AgentKind::Claude,
+            args.claude_bin.clone(),
+            args.claude_bin.clone(),
+            None,
+            None,
+        ),
+        Some(seat) => (
+            protocol::agent::AgentKind::Codex,
+            Some(seat.codex_bin.clone()),
+            None,
+            Some(seat.ccd_socket.clone()),
+            Some(seat.generation),
+        ),
+    };
     RegisterSession {
         session_id: args.session_id.clone(),
         session_uid: args.session_uid.clone(),
         tmux_session: args.tmux_session.clone(),
-        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+        tmux_socket: args.tmux_socket.clone(),
         cwd: args.cwd.clone(),
         supervisor_pid: std::process::id(),
-        claude_bin: args.claude_bin.clone(),
+        claude_bin,
+        agent,
+        agent_bin,
+        codex_thread_id: None,
+        codex_socket,
+        codex_generation,
         started_at: started_at.to_string(),
         // What this build can honour. The daemon uses it to decide whether an
         // approval may be actuated through us at all: a supervisor that
         // silently ignores the prompt fingerprint must not be handed one.
         protocol_minor: protocol::PROTOCOL_MINOR,
+        exit_replay: false,
     }
 }
 
@@ -1289,10 +1901,40 @@ fn log_line(args: &SupervisorArgs, message: &str) {
     log_for(&args.session_id, args.session_uid.as_deref(), message);
 }
 
+/// Where a supervisor log is written. `protocol::logs_dir()` in a real run, and a
+/// throwaway directory under a test binary.
+///
+/// **A test run observes; it does not supervise.** Left on the real root, every
+/// `cargo test -p codeconnect` appended to — and created files in — the operator's
+/// own `~/.codeconnect/logs`, because the tests that drive registration and exit
+/// handling drive the production logger with them. Measured: one suite run created
+/// four files and appended to two, and the accumulated litter was 292 of the 380
+/// files in that directory, from 71 test processes that had long since exited. A
+/// directory whose contents are mostly the artefacts of running the test suite is a
+/// directory nobody can read to find out why a session lost its link.
+///
+/// Split at compile time rather than on an environment variable, so nothing has to
+/// remember to set anything and no production path can reach the test branch — the
+/// same shape [`crate::tmux`] uses for the server conf and [`crate::codex_launch`]
+/// for the session root, for the same reason.
+#[cfg(not(test))]
+fn log_root() -> std::path::PathBuf {
+    protocol::logs_dir()
+}
+
+#[cfg(test)]
+fn log_root() -> std::path::PathBuf {
+    // Per process, not per test: several tests write here and the file is named by
+    // the session they claim to be, so they do not collide.
+    let dir = std::env::temp_dir().join(format!("cc-supervisor-log-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// The same, addressed by identity rather than by the whole argument struct, so
 /// a worker thread that only carries the session's name can still write to it.
 fn log_for(session_id: &str, session_uid: Option<&str>, message: &str) {
-    let dir = protocol::logs_dir();
+    let dir = log_root();
     // Owner-only: a supervisor log carries the session's name, its working
     // directory and whatever a refusal reason quoted off the pane.
     if protocol::fsperm::private_dir(&dir).is_err() {
@@ -1316,10 +1958,622 @@ fn log_for(session_id: &str, session_uid: Option<&str>, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The suite must not write into the operator's own `~/.codeconnect`.**
+    ///
+    /// The supervisor has no terminal, so everything it wants to say goes to a
+    /// per-run file under the real logs directory — and the tests that drive
+    /// registration, refusal and exit handling drive that logger with them. Measured
+    /// before this was split: one `cargo test -p codeconnect` created four files
+    /// there and appended to two, and the accumulated litter was 292 of the 380
+    /// files in the directory, from 71 test processes long since exited.
+    ///
+    /// Driven through the production logger rather than argued from the path, and
+    /// fenced by a recursive snapshot of the whole home, so a future writer that
+    /// reaches the real root by another route fails here too.
+    #[test]
+    fn logging_never_touches_the_operator_s_own_home() {
+        let before = crate::home_guard::snapshot_real_home();
+
+        // Both spellings the production logger produces: the per-run name, and the
+        // flat one an older build with no uid leaves behind.
+        let session = format!("cc-home-guard-{}", std::process::id());
+        log_for(
+            &session,
+            Some("01M0000000000000000000000"),
+            "a line a test wrote",
+        );
+        log_for(&session, None, "and the flat one an older build writes");
+
+        crate::home_guard::assert_real_home_unchanged(&before, "writing a supervisor log");
+
+        // And it really wrote something, somewhere: a logger that silently did
+        // nothing would pass the fence above for the wrong reason.
+        let scoped = log_root().join(format!("supervisor-{session}.log"));
+        let body = std::fs::read_to_string(&scoped).expect("the scoped log must exist");
+        assert!(
+            body.contains("the flat one an older build writes"),
+            "the scoped path must receive what a real run would have written: {body:?}"
+        );
+        let _ = std::fs::remove_file(&scoped);
+        let _ = std::fs::remove_file(log_root().join(format!(
+            "supervisor-{session}-01M0000000000000000000000.log"
+        )));
+    }
     use crate::tmux::{Keyboard, TmuxMode};
     use protocol::ipc::prompt_fingerprint;
     use std::os::unix::net::UnixListener;
     use std::process::Command;
+
+    /// A uid-less or malformed-uid session keeps the exact name-addressed
+    /// liveness check it always had (Claude's legacy/adopted path is
+    /// byte-for-byte unchanged). The uid-atomic path's *mechanism* — a reused
+    /// `cc-N` name reading `Gone` for the old uid, and an epoch change refusing —
+    /// is proven against real tmux in `protocol::tmux`'s `owned_liveness` tests;
+    /// here we only pin that the fallback is chosen when no well-formed uid is
+    /// present, using a name that resolves to `Gone` on any server.
+    #[test]
+    fn probe_liveness_falls_back_to_the_name_check_without_a_wellformed_uid() {
+        let ghost = "cc-nonexistent-supervisor-probe";
+        // No uid: name-addressed check. On a machine with no such session this
+        // is Gone (or Unknown if tmux is unreachable) — never a panic, and
+        // identical to calling `session_presence` directly.
+        let via_helper = probe_liveness(protocol::TMUX_SOCKET_NAME, ghost, None, None);
+        let via_name = tmux::session_presence(ghost);
+        assert_eq!(
+            std::mem::discriminant(&via_helper),
+            std::mem::discriminant(&via_name),
+            "uid-less probe must equal the plain name check"
+        );
+        // A malformed uid is not a routing tag, so it also falls back.
+        let via_bad_uid =
+            probe_liveness(protocol::TMUX_SOCKET_NAME, ghost, Some("not-a-ulid"), None);
+        assert_eq!(
+            std::mem::discriminant(&via_bad_uid),
+            std::mem::discriminant(&via_name),
+            "a malformed uid falls back to the name check"
+        );
+    }
+
+    /// A pinned server, on a socket nothing serves, with `server_birth` set to a
+    /// birth the pid does not have — the recycled-pid shape
+    /// [`protocol::proc_identity::liveness`] answers `Gone` for. Bound to THIS
+    /// process's pid, which certainly exists, so the answer comes from the birth
+    /// comparison rather than from a pid that happens to be free.
+    fn pin_on(
+        server_pid: i64,
+        server_birth: Option<protocol::proc_identity::BirthIdentity>,
+    ) -> protocol::tmux::OwnedSession {
+        protocol::tmux::OwnedSession {
+            socket: DRAINED_SOCKET.into(),
+            session_id: "$0".into(),
+            uid: DRAINED_UID.into(),
+            server_pid,
+            server_start_time: 2,
+            session_created: 3,
+            server_birth,
+        }
+    }
+
+    /// A tmux socket label no server in this test run binds, so the census can
+    /// only ever answer `NoServer` — the last-session-drained shape.
+    const DRAINED_SOCKET: &str = "cc-drained-server-probe";
+    const DRAINED_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+
+    /// **The last session drains the server, and the supervisor must not read that
+    /// as "cannot tell" for ever.**
+    ///
+    /// `owned_liveness` maps `Census::NoServer` to `Unknown`, correctly and
+    /// permanently: a server may be down for a moment and a reported exit cannot be
+    /// withdrawn. But a Codex launch owns its server, so the last session leaving
+    /// *is* the server leaving — and `Unknown` resets the absence streak on every
+    /// poll, so the exit is never reported, the merged coordinator-supervisor never
+    /// exits, and the custodian's `ready` arm never fires. One drained server wedges
+    /// the launch.
+    ///
+    /// **Mutation:** delete the `server_is_proven_dead` arm in `probe_liveness` and
+    /// the first assertion goes red — the wedge is exactly what it restores.
+    #[test]
+    fn a_pinned_server_proven_dead_makes_the_silence_gone_not_unknown() {
+        let me = std::process::id() as i64;
+        let wrong_birth = protocol::proc_identity::BirthIdentity {
+            start_sec: 1,
+            start_usec: 1,
+        };
+        assert!(
+            matches!(
+                protocol::tmux::owned_liveness(DRAINED_SOCKET, DRAINED_UID, None),
+                protocol::tmux::OwnedLiveness::Unknown(_)
+            ),
+            "the premise: an unserved socket is `Unknown` and nothing below is \
+             measuring a `Gone` that owned_liveness produced on its own"
+        );
+
+        assert_eq!(
+            probe_liveness(
+                DRAINED_SOCKET,
+                "cc-drained",
+                Some(DRAINED_UID),
+                Some(&pin_on(me, Some(wrong_birth))),
+            ),
+            tmux::SessionPresence::Gone,
+            "a pinned server proven dead by identity is proof its session is gone"
+        );
+
+        // The two refusals, each of which must keep the silence unreadable.
+        let real_birth = protocol::proc_identity::read_birth_identity(me as i32)
+            .expect("this process's own birth identity");
+        assert!(
+            matches!(
+                probe_liveness(
+                    DRAINED_SOCKET,
+                    "cc-drained",
+                    Some(DRAINED_UID),
+                    Some(&pin_on(me, Some(real_birth))),
+                ),
+                tmux::SessionPresence::Unknown(_)
+            ),
+            "a server that is ALIVE but unreachable proves nothing: a live tmux \
+             server can drop and recreate its socket"
+        );
+        assert!(
+            matches!(
+                probe_liveness(
+                    DRAINED_SOCKET,
+                    "cc-drained",
+                    Some(DRAINED_UID),
+                    Some(&pin_on(me, None)),
+                ),
+                tmux::SessionPresence::Unknown(_)
+            ),
+            "a pin with no captured birth cannot prove death either way"
+        );
+        assert!(
+            matches!(
+                probe_liveness(DRAINED_SOCKET, "cc-drained", Some(DRAINED_UID), None),
+                tmux::SessionPresence::Unknown(_)
+            ),
+            "and with no pin at all the answer is the one Claude has always had"
+        );
+    }
+
+    /// **The second silence, and the same two answers** (2e-7b round-2 F3).
+    ///
+    /// `owned_liveness` used to read a census lacking our uid as a durable `Gone`
+    /// whichever server answered, so a live server A that lost its address to a
+    /// stranger B could be declared exited. It is now `Unknown` — which is a NEW
+    /// shape of silence reaching `probe_liveness`, and the supervisor's contract has
+    /// to hold for it exactly as it does for `NoServer`: unreadable while A might be
+    /// alive, and an exit once A is proven dead.
+    ///
+    /// Driven against a real stranger server rather than argued from the arm's
+    /// pattern, because the claim is about what the census actually returns.
+    #[test]
+    fn a_stranger_answering_the_address_is_unreadable_until_our_server_is_proven_dead() {
+        let Some(bin) = protocol::tmux::tmux_bin() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("cc-sup-f3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock").to_string_lossy().into_owned();
+        // A real, healthy server that has simply never heard of our uid.
+        assert!(std::process::Command::new(&bin)
+            .args(["-S", &sock, "-f", "/dev/null"])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "stranger",
+                "-e",
+                &format!("{}=01K1B3XQ8ZC0DE5FGH7JKMNPZZ", protocol::ENV_SESSION_UID),
+                "--",
+                "/bin/sh",
+                "-c",
+                "while :; do sleep 1; done",
+            ])
+            .stdin(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+
+        let me = std::process::id() as i64;
+        let real_birth = protocol::proc_identity::read_birth_identity(me as i32)
+            .expect("this process's own birth identity");
+        let mut live_pin = pin_on(me, Some(real_birth));
+        live_pin.socket = sock.clone();
+        assert!(
+            matches!(
+                probe_liveness(&sock, "cc-drained", Some(DRAINED_UID), Some(&live_pin)),
+                tmux::SessionPresence::Unknown(_)
+            ),
+            "a stranger's complete census must not end a session whose own server is \
+             still alive — this is the false SessionEnd F3 names"
+        );
+
+        let mut dead_pin = pin_on(
+            me,
+            Some(protocol::proc_identity::BirthIdentity {
+                start_sec: 1,
+                start_usec: 1,
+            }),
+        );
+        dead_pin.socket = sock.clone();
+        assert_eq!(
+            probe_liveness(&sock, "cc-drained", Some(DRAINED_UID), Some(&dead_pin)),
+            tmux::SessionPresence::Gone,
+            "and once our own server is proven dead the same silence is an exit — the \
+             fix narrows the rule, it does not switch the exit off"
+        );
+
+        std::process::Command::new(&bin)
+            .args(["-S", &sock, "kill-server"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **A single attempt is not a report.** `report_exit`'s own doc says the
+    /// replay exists for a session that starts *and* ends while `ccd` is down —
+    /// the one case where the single attempt could not connect. This drives that
+    /// case: nothing is listening, so every attempt fails, and the loop must give
+    /// up on the budget rather than after one try or never.
+    ///
+    /// **Mutation:** drop the retry (call `report_exit` once) and the elapsed time
+    /// collapses below the budget; drop the deadline check and it never returns.
+    #[test]
+    fn the_exit_report_retries_within_its_budget_and_then_gives_up() {
+        let socket = std::env::temp_dir().join(format!(
+            "cc-exit-report-nothing-listens-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let args = SupervisorArgs {
+            session_id: format!("cc-exit-{}", std::process::id()),
+            session_uid: None,
+            tmux_session: "cc-exit".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/tmp".into(),
+            claude_bin: None,
+            codex: None,
+            server_a: None,
+        };
+        let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
+        // A budget the test can wait out, exercising the same loop production
+        // runs for sixty seconds.
+        let budget = Duration::from_millis(1_200);
+        let started = std::time::Instant::now();
+        report_exit_within(&socket, &registration, &args, budget);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= budget,
+            "a single attempt is what this replaces: the loop must still be trying \
+             at the end of its budget, not gone after the first failure ({elapsed:?})"
+        );
+        assert!(
+            elapsed < budget * 4,
+            "and it must give up rather than retry for ever ({elapsed:?})"
+        );
+    }
+
+    /// **An accepting-but-silent daemon must not hold the supervisor for ever.**
+    ///
+    /// The live connection is published so the liveness thread can shut it down
+    /// from the outside; this one is opened *after* that thread has returned, so
+    /// nothing can interrupt it. A listener that accepts and never answers the
+    /// support negotiation used to park `report_exit` in `read_line`
+    /// indefinitely — and with the coordinator and the supervisor now one
+    /// process, that is the launch's cleanup waiting on a process that never
+    /// returns.
+    ///
+    /// **Mutation:** remove the `set_read_timeout` and this hangs instead of
+    /// failing.
+    #[test]
+    fn an_accepting_but_silent_daemon_cannot_park_the_exit_report() {
+        let socket =
+            std::env::temp_dir().join(format!("cc-exit-report-silent-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).expect("bind the silent daemon");
+        // Accepts, holds the connection open, and says nothing. Held for the life
+        // of the test so the accepted stream is not dropped (which would EOF the
+        // read and let it return for the wrong reason).
+        //
+        // It waits for two connections and this test makes one, so it is still parked
+        // in `accept` at the end — see [`FakeDaemon`] for why that has to be released
+        // rather than detached (round-3 F8).
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut open = Vec::new();
+            while let Ok((stream, _)) = listener.accept() {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                open.push(stream);
+                if open.len() >= 2 {
+                    break;
+                }
+            }
+            open
+        });
+        let held = FakeDaemon { stop, handle };
+
+        let args = SupervisorArgs {
+            session_id: format!("cc-silent-{}", std::process::id()),
+            session_uid: None,
+            tmux_session: "cc-silent".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/tmp".into(),
+            claude_bin: None,
+            codex: Some(CodexSeat {
+                codex_bin: "/opt/homebrew/bin/codex".into(),
+                ccd_socket: "/tmp/s.sock".into(),
+                generation: 1,
+            }),
+            server_a: None,
+        };
+        let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
+        let started = std::time::Instant::now();
+        let bound = Duration::from_millis(400);
+        let outcome = report_exit(&socket, &registration, bound);
+        let elapsed = started.elapsed();
+        assert!(
+            outcome.is_err(),
+            "a daemon that never answers the support question has not hosted anything"
+        );
+        assert!(
+            elapsed < bound * 5,
+            "the read must be bounded by the budget it was given, not by the \
+             daemon ({elapsed:?})"
+        );
+        held.release(&socket);
+    }
+
+    /// A fake daemon still parked in `accept`, and the flag that lets it out.
+    ///
+    /// **Dropping a `JoinHandle` detaches a thread; it does not wake one** (round-3
+    /// F8). A test whose retry loop makes fewer connections than its fake daemon waits
+    /// for left that thread blocked in `accept` for the life of the test binary,
+    /// holding its listener, its socket file and any accepted streams. The schedule is
+    /// not something a teardown should depend on, so the release is explicit: set the
+    /// flag, make one connection to unpark the `accept`, and JOIN — the join is what
+    /// proves the listener is dropped before the socket file is removed.
+    struct FakeDaemon {
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        handle: std::thread::JoinHandle<Vec<std::os::unix::net::UnixStream>>,
+    }
+
+    impl FakeDaemon {
+        fn release(self, socket: &std::path::Path) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::os::unix::net::UnixStream::connect(socket);
+            let _ = self.handle.join();
+            let _ = std::fs::remove_file(socket);
+        }
+    }
+
+    /// A daemon on `socket` that EOFs its first `eof_first` connections instantly
+    /// and then accepts and says nothing for ever.
+    ///
+    /// The instant failures are what let the retry loop reach the end of its budget
+    /// cheaply; the silence is what makes the attempt that follows expensive. The
+    /// returned handle owns the silent stream, so releasing it is what frees the
+    /// daemon at the end of a test (an accepted stream that fell out of scope would
+    /// EOF the read and end the attempt for the wrong reason).
+    fn eof_then_silent_daemon(socket: &std::path::Path, eof_first: usize) -> FakeDaemon {
+        let _ = std::fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).expect("bind the daemon");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let mut seen = 0usize;
+            let mut open = Vec::new();
+            while let Ok((stream, _)) = listener.accept() {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    break; // teardown's unparking connection
+                }
+                if seen < eof_first {
+                    seen += 1;
+                    drop(stream); // instant EOF: this attempt fails at once
+                    continue;
+                }
+                open.push(stream); // and this one waits for ever
+                break;
+            }
+            open
+        });
+        FakeDaemon { stop, handle }
+    }
+
+    /// **The retry schedule must cover the window it claims** (round-3 F4).
+    ///
+    /// The wall-clock bound made the loop honest about when it STOPS. It said nothing
+    /// about where inside the budget it looks: with instant failures the attempts fell
+    /// at ~0, 0.5, 1.5, 3.5 and 7.5 seconds and the next 8-second backoff swallowed the
+    /// rest, so against the production 15-second budget a daemon that came back at 9
+    /// seconds was never tried — the run's introduction and its `SessionEnd` lost
+    /// inside the bound, not beyond it. That is not residual R1 (a daemon down for the
+    /// afternoon); it is the loop failing at the job it advertises.
+    ///
+    /// Driven at 3 seconds because the rule scales with the budget: the old schedule's
+    /// blind tail there is (1.5s, 3.0s), and this daemon appears at 1.8s — inside it.
+    ///
+    /// **Mutation:** remove the `remaining / 2` cap and the sleep after the third
+    /// attempt runs to the deadline; the report is never delivered and this fails at
+    /// the `expect`.
+    #[test]
+    fn the_exit_report_reaches_a_daemon_that_recovers_late_in_its_budget() {
+        let socket = std::env::temp_dir().join(format!(
+            "cc-exit-report-late-recovery-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let path = socket.clone();
+        // Nothing is listening for the first 1.8s: every attempt until then fails at
+        // `connect` instantly, which is exactly what makes the backoff the only thing
+        // deciding when the next one happens.
+        let daemon = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1_800));
+            let listener = UnixListener::bind(&path).expect("bind the recovered daemon");
+            let (stream, _) = listener
+                .accept()
+                .expect("the recovered daemon must be tried");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut ask = String::new();
+            reader.read_line(&mut ask).expect("the negotiation");
+            assert!(
+                ask.contains("negotiate_support"),
+                "the supervisor's first frame is the negotiation: {ask}"
+            );
+            let answer = serde_json::to_string(&DaemonFrame::SupportedAgents {
+                supported_agents: vec![protocol::agent::AgentKind::Codex],
+                supported: true,
+            })
+            .unwrap();
+            let mut w = stream;
+            writeln!(w, "{answer}").expect("answering the negotiation");
+            w.flush().expect("flushing the answer");
+            // Drain the replay and the exit so the writes cannot block.
+            let mut rest = String::new();
+            let _ = std::io::Read::read_to_string(&mut reader, &mut rest);
+            rest
+        });
+
+        let args = exit_report_args("exit-late");
+        let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
+        let budget = Duration::from_secs(3);
+        let started = std::time::Instant::now();
+        report_exit_retrying(&socket, &registration, budget).expect(
+            "a daemon answering inside the budget must be tried inside the budget: the \
+             schedule may not go blind for the second half of the window it claims",
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < budget,
+            "and it must be reached WITHIN the budget, not after it ({elapsed:?})"
+        );
+        let seen = daemon.join().expect("the fake daemon panicked");
+        assert!(
+            seen.contains("session_exited"),
+            "the exit itself has to arrive, not merely the connection: {seen}"
+        );
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A **Codex** run's args, because the withhold is what makes an attempt cost
+    /// anything: `withhold_unless_hosted` negotiates support only for a Codex
+    /// registration, and it is that `read_line` the silent daemon parks. With Claude
+    /// args the two writes succeed into a socket buffer nobody reads and the attempt
+    /// returns `Ok` in microseconds — which would let both budget tests below pass
+    /// against the very shape they exist to measure.
+    fn exit_report_args(tag: &str) -> SupervisorArgs {
+        SupervisorArgs {
+            session_id: format!("cc-{tag}-{}", std::process::id()),
+            session_uid: None,
+            tmux_session: format!("cc-{tag}"),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/tmp".into(),
+            claude_bin: None,
+            codex: Some(CodexSeat {
+                codex_bin: "/opt/homebrew/bin/codex".into(),
+                ccd_socket: "/tmp/s.sock".into(),
+                generation: 1,
+            }),
+            server_a: None,
+        }
+    }
+
+    /// **The budget is wall-clock: no attempt may START at or after the deadline**
+    /// (2e-7b round-2 F4).
+    ///
+    /// The deadline used to be checked only *after* an attempt, while the backoff
+    /// was capped to land exactly ON it — so the loop reliably began one more
+    /// full-length attempt at the instant its budget expired. Driven here: the first
+    /// two attempts fail instantly, the sleeps carry the loop to the deadline, and
+    /// the daemon then goes silent. Under the old shape that last attempt runs the
+    /// whole per-attempt timeout past a budget that is already spent.
+    ///
+    /// **Mutation:** move the `remaining.is_zero()` check back below the attempt and
+    /// the elapsed time jumps from the budget to the budget plus a full
+    /// `EXIT_REPORT_TIMEOUT`.
+    #[test]
+    fn the_exit_report_never_starts_an_attempt_at_or_after_its_deadline() {
+        let socket = std::env::temp_dir().join(format!(
+            "cc-exit-report-eof-then-silent-{}.sock",
+            std::process::id()
+        ));
+        let held = eof_then_silent_daemon(&socket, 2);
+        let args = exit_report_args("exit-wall");
+        let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
+
+        // 1.2s against a 500ms first backoff: attempt, sleep 500, attempt, sleep
+        // 500 (the round-3 F4 cap: never more than half of what is left) — and the
+        // silent connection is what the remaining ~200ms is then spent on.
+        let budget = Duration::from_millis(1_200);
+        let started = std::time::Instant::now();
+        let last = report_exit_retrying(&socket, &registration, budget)
+            .expect_err("nothing here ever answers the support question");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= budget,
+            "the loop must still spend its whole budget trying ({elapsed:?})"
+        );
+        assert!(
+            elapsed < budget * 2,
+            "and must not run one more full attempt on top of it: the budget is a \
+             wall-clock bound on this whole function, not a per-attempt one \
+             ({elapsed:?})"
+        );
+        // **What the loop gave up over.** With the deadline checked only after an
+        // attempt, the loop's last act is an attempt whose remaining budget is zero
+        // — and the clamp then hands it a zero timeout, which `set_read_timeout`
+        // rejects outright. It stays inside the wall clock, but the operator is
+        // told the run's record was lost because of a "0 duration timeout" instead
+        // of because the daemon never answered. Not starting the attempt is what
+        // keeps the reason the real one.
+        assert!(
+            !last.contains("0 duration"),
+            "the give-up reason must name the daemon, not an artifact of an attempt \
+             that should never have been started: {last}"
+        );
+        held.release(&socket);
+    }
+
+    /// **An attempt may not outlive the budget it is spending** (2e-7b round-2 F4,
+    /// the other half).
+    ///
+    /// A daemon silent from the very first connection: the per-attempt timeout has
+    /// to be the smaller of its default and what is left, or one attempt alone
+    /// overruns the budget by an order of magnitude.
+    ///
+    /// **Mutation:** pass `EXIT_REPORT_TIMEOUT` instead of the clamped value and the
+    /// elapsed time becomes the ten-second attempt.
+    #[test]
+    fn an_exit_report_attempt_is_bounded_by_the_budget_it_is_spending() {
+        let socket = std::env::temp_dir().join(format!(
+            "cc-exit-report-silent-from-the-start-{}.sock",
+            std::process::id()
+        ));
+        let held = eof_then_silent_daemon(&socket, 0);
+        let args = exit_report_args("exit-clamp");
+        let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
+
+        let budget = Duration::from_millis(1_200);
+        let started = std::time::Instant::now();
+        report_exit_within(&socket, &registration, &args, budget);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= budget,
+            "the attempt should have used the budget, not less ({elapsed:?})"
+        );
+        assert!(
+            elapsed < budget * 2,
+            "a single silent attempt must not spend the per-attempt default when the \
+             budget is smaller than it ({elapsed:?})"
+        );
+        held.release(&socket);
+    }
 
     // ------------------------------------------------- actuation phases
     //
@@ -1487,8 +2741,11 @@ mod tests {
             session_id: format!("cc-expired-{}", std::process::id()),
             session_uid: None,
             tmux_session: format!("cc-expired-{}", std::process::id()),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
             cwd: "/tmp".into(),
             claude_bin: None,
+            codex: None,
+            server_a: None,
         };
         let config = Config::load();
         let reader = BufReader::new(supervisor_side.try_clone().expect("clone"));
@@ -1569,8 +2826,11 @@ mod tests {
             session_id: format!("cc-none-{}", std::process::id()),
             session_uid: None,
             tmux_session: format!("cc-none-{}", std::process::id()),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
             cwd: "/tmp".into(),
             claude_bin: None,
+            codex: None,
+            server_a: None,
         };
         let config = Config::load();
         let reader = BufReader::new(supervisor_side.try_clone().expect("clone"));
@@ -1642,6 +2902,70 @@ mod tests {
         loop_thread
             .join()
             .expect("the loop ends when the daemon hangs up");
+    }
+
+    /// **A request that reaches the wire before the Ack does not fail the
+    /// registration — it is serviced, and the Ack is still awaited.**
+    ///
+    /// The daemon publishes this connection's sender the instant it stakes the claim,
+    /// a step before it enqueues the Ack, so a request dispatched in that window is
+    /// serialized ahead of the Ack on the one socket both travel. The registration
+    /// must survive it, and the raced request must be answered rather than dropped.
+    #[test]
+    fn a_request_that_precedes_the_ack_is_serviced_and_the_registration_still_succeeds() {
+        use std::io::{BufRead, Write};
+        let (daemon_side, supervisor_side) = UnixStream::pair().expect("socketpair");
+        let args = SupervisorArgs {
+            session_id: "cc-preack".into(),
+            session_uid: None,
+            tmux_session: "cc-preack".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/tmp".into(),
+            claude_bin: None,
+            codex: None,
+            server_a: None,
+        };
+        let config = Config::load();
+        let mut reader = BufReader::new(supervisor_side.try_clone().expect("clone"));
+        let writer = Arc::new(Mutex::new(supervisor_side));
+
+        // The daemon writes a legitimate request BEFORE the Ack, then the Ack.
+        let mut daemon_writer = daemon_side.try_clone().expect("clone");
+        for frame in [
+            DaemonFrame::SupervisorRequest {
+                id: "pre".into(),
+                request: SupervisorRequest::Ping,
+            },
+            DaemonFrame::Ack,
+        ] {
+            let mut line = serde_json::to_vec(&frame).unwrap();
+            line.push(b'\n');
+            daemon_writer.write_all(&line).unwrap();
+        }
+
+        // The registration succeeds despite the request that raced its Ack.
+        await_registration_ack(&mut reader, &args, &config, &writer)
+            .expect("a request that precedes the Ack does not fail the registration");
+
+        // And the raced request was serviced, not dropped: its response is on the wire.
+        daemon_side
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut answers = std::io::BufReader::new(daemon_side);
+        let mut line = String::new();
+        answers
+            .read_line(&mut line)
+            .expect("the pre-Ack request is answered");
+        match serde_json::from_str::<ClientFrame>(&line).unwrap() {
+            ClientFrame::SupervisorResponse { id, result } => {
+                assert_eq!(id, "pre", "the serviced request keeps its id");
+                assert!(
+                    matches!(result, SupervisorResult::Pong),
+                    "a Ping is answered Pong: {result:?}"
+                );
+            }
+            other => panic!("wrong frame: {other:?}"),
+        }
     }
 
     #[test]
@@ -3289,11 +4613,14 @@ means the full history gets re-read on your next message.
             session_id: "cc-7".into(),
             session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR".into()),
             tmux_session: "cc-7".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
             cwd: "/tmp/project".into(),
             claude_bin: None,
+            codex: None,
+            server_a: None,
         };
         let registration = registration_frame(&args, "2026-07-31T00:00:00Z");
-        report_exit(&path, &registration).unwrap();
+        report_exit(&path, &registration, EXIT_REPORT_TIMEOUT).unwrap();
 
         let frames = collected.join().unwrap();
         assert_eq!(frames.len(), 2, "expected register then exit: {frames:?}");
@@ -3306,10 +4633,470 @@ means the full history gets re-read on your next message.
         // merely name it: a row with no working directory is not a session.
         assert_eq!(frames[0]["cwd"], "/tmp/project");
         assert_eq!(frames[0]["tmux_session"], "cc-7");
+        // **And it says on the wire that it is a replay.** Everything else here
+        // is a copy of the live registration, which is the point and also the
+        // danger: a frame the daemon cannot tell from a supervisor arriving is
+        // one it hands the session to, and the process behind this one is
+        // already dead. A daemon that adopts it then ends whichever run has
+        // since resumed the uid instead of this one — measured, round-10 F1.
+        assert_eq!(
+            frames[0]["exit_replay"], true,
+            "the replay must identify itself: {frames:?}"
+        );
         assert_eq!(frames[1]["type"], "session_exited");
         assert_eq!(frames[1]["session_uid"], "01K1B3XQ8ZC0DE5FGH7JKMNPQR");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ------------------------------------------------- the withhold
+    //
+    // A registration is the only thing that makes a daemon create a session
+    // row, so these tests use the *daemon* as the observer: the scripted
+    // listener records every frame it was actually sent, and the claim is about
+    // what is absent from that list. Asserting on a return value, or on the
+    // supervisor's log, would leave the question of whether the frame went out
+    // before the refusal — and a `register` that reached a v0.6.0 daemon has
+    // already created the shadow row by the time anything refuses.
+
+    fn withhold_socket(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cc-supervisor-{tag}-{}-{}.sock",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// A daemon that answers the supervisor's first frame with one canned line
+    /// and then records everything else it is sent until the supervisor hangs
+    /// up. `answer: None` is a daemon that says nothing, which is what the
+    /// Claude path expects to be talking to.
+    fn scripted_daemon(
+        listener: UnixListener,
+        answer: Option<&'static str>,
+        then_read: usize,
+    ) -> std::thread::JoinHandle<Vec<serde_json::Value>> {
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut out = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut frames = Vec::new();
+            fn read_one(
+                reader: &mut BufReader<UnixStream>,
+                frames: &mut Vec<serde_json::Value>,
+            ) -> bool {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => false,
+                    Ok(_) => {
+                        if !line.trim().is_empty() {
+                            frames.push(serde_json::from_str(&line).unwrap());
+                        }
+                        true
+                    }
+                }
+            }
+            read_one(&mut reader, &mut frames);
+            if let Some(answer) = answer {
+                let _ = writeln!(out, "{answer}");
+                let _ = out.flush();
+            }
+            for _ in 0..then_read {
+                if !read_one(&mut reader, &mut frames) {
+                    break;
+                }
+            }
+            // **Once a registration has been received, the supervisor waits for the
+            // Ack before it treats itself as registered.** A scripted daemon that read
+            // the register frame must answer it, or `serve_once` now (correctly) reports
+            // a registration that was never acknowledged. Withhold cases never send a
+            // register, so no Ack is owed.
+            if frames
+                .iter()
+                .any(|f| f.get("type").and_then(|t| t.as_str()) == Some("register"))
+            {
+                let _ = writeln!(out, "{}", serde_json::to_string(&DaemonFrame::Ack).unwrap());
+                let _ = out.flush();
+            }
+            frames
+        })
+    }
+
+    /// The frame a real Codex supervisor sends.
+    ///
+    /// **Built by the producer now, not written by hand.** This used to be a
+    /// `RegisterSession` struct-update that pasted `agent: Codex` and a thread id
+    /// over a Claude frame, because nothing in the tree could make one — which
+    /// meant the withhold tests measured a frame no supervisor would ever send.
+    /// The seat makes it, so what these tests drive is the wire the coordinator
+    /// puts on the socket: a control-link socket, a generation, no `claude_bin`,
+    /// and no thread id (the launch never learns one — see `registration_frame`).
+    fn codex_registration() -> RegisterSession {
+        let args = SupervisorArgs {
+            session_id: "cx-1".into(),
+            session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPCX".into()),
+            tmux_session: "cx-1".into(),
+            tmux_socket: CODEX_TEST_TMUX_SOCKET.to_string(),
+            cwd: "/work".into(),
+            claude_bin: None,
+            codex: Some(CodexSeat {
+                codex_bin: "/opt/homebrew/bin/codex".into(),
+                ccd_socket: "/tmp/s.sock".into(),
+                generation: 1,
+            }),
+            server_a: None,
+        };
+        registration_frame(&args, "2026-08-28T00:00:00.000Z")
+    }
+
+    /// A tmux socket that is **not** [`protocol::TMUX_SOCKET_NAME`].
+    ///
+    /// `tmux_socket` was a constant in the two places a supervisor uses it until
+    /// the Codex coordinator started supervising its own launches on its own
+    /// server, and a fixture that spells it `protocol::TMUX_SOCKET_NAME` cannot
+    /// tell the plumbed field from the constant it replaced: reverting the
+    /// registration to the old literal leaves every assertion green. The sentinel
+    /// is what makes the wire assertion discriminating.
+    const CODEX_TEST_TMUX_SOCKET: &str = "cc-codex-sentinel";
+
+    fn drive_serve_once(path: &std::path::Path, registration: &RegisterSession) -> Result<()> {
+        drive_serve_once_on(path, registration, &Arc::new(Mutex::new(None)))
+    }
+
+    /// The same, with the caller's own `Link` — the one `run` holds for the life
+    /// of the supervisor, rather than a temporary that takes whatever was left
+    /// published down with it when the call returns.
+    fn drive_serve_once_on(
+        path: &std::path::Path,
+        registration: &RegisterSession,
+        link: &Link,
+    ) -> Result<()> {
+        let args = SupervisorArgs {
+            session_id: registration.session_id.clone(),
+            session_uid: registration.session_uid.clone(),
+            tmux_session: registration.tmux_session.clone(),
+            tmux_socket: registration.tmux_socket.clone(),
+            cwd: registration.cwd.clone(),
+            claude_bin: None,
+            codex: None,
+            server_a: None,
+        };
+        serve_once(
+            path,
+            &args,
+            registration,
+            &Config::load(),
+            &Arc::new(AtomicBool::new(false)),
+            link,
+        )
+    }
+
+    /// **The exact line the real v0.6.0 binary answers with**, captured from it
+    /// rather than imagined: `ClientFrame` is internally tagged with no
+    /// catch-all, so `negotiate_support` is a variant that build cannot decode,
+    /// and its read loop reports the failure and keeps the connection open.
+    const V060_ANSWER: &str = "{\"type\":\"error\",\"message\":\"undecodable frame: unknown \
+                               variant `negotiate_support`, expected one of `hook`, `register`, \
+                               `supervisor_response`, `heartbeat`, `session_exited`, \
+                               `list_sessions`, `prune_sessions`\"}";
+    const REFUSED: &str =
+        "{\"type\":\"supported_agents\",\"supported_agents\":[\"claude\"],\"supported\":false}";
+    const HOSTED: &str =
+        "{\"type\":\"supported_agents\",\"supported_agents\":[\"claude\",\"codex\"],\"supported\":true}";
+
+    /// A daemon that predates the agent seam is never told a Codex session
+    /// exists.
+    ///
+    /// This is the whole rollback producer, closed at its source. That daemon
+    /// would answer the registration `ack`, drop the three fields it has no
+    /// columns for, and file the run in the shared `sessions` table under
+    /// `DEFAULT 'claude'` — beside the real row in `codex_sessions` it cannot
+    /// see. Its sweep then ends that shadow, its prune deletes it *and* the
+    /// events, answers and cursors keyed by the uid underneath it, and it leaves
+    /// a tombstone the surviving Codex row contradicts. None of that is
+    /// recoverable afterwards, so the only place to stop it is before the frame
+    /// goes out — which is what the daemon-side observer here measures.
+    #[test]
+    fn a_codex_registration_is_withheld_from_a_daemon_that_predates_the_agent_seam() {
+        for (label, answer) in [("v0.6.0", V060_ANSWER), ("a daemon that says no", REFUSED)] {
+            let path = withhold_socket("withhold");
+            let listener = UnixListener::bind(&path).unwrap();
+            let daemon = scripted_daemon(listener, Some(answer), 1);
+
+            let err = drive_serve_once(&path, &codex_registration())
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("{label}: the registration must be withheld, not merely regretted")
+                });
+            assert!(
+                format!("{err:#}").contains("withholding Register"),
+                "{label}: {err:#}"
+            );
+
+            let frames = daemon.join().unwrap();
+            assert_eq!(
+                frames.len(),
+                1,
+                "{label}: the supervisor sent more than the question: {frames:?}"
+            );
+            assert_eq!(frames[0]["type"], "negotiate_support", "{label}");
+            assert_eq!(frames[0]["agent"], "codex", "{label}");
+            assert!(
+                !frames.iter().any(|f| f["type"] == "register"),
+                "{label}: a register frame reached the daemon — the shadow row already exists"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A withheld registration hands the connection back.
+    ///
+    /// The refusal is a `?` on the way out of `serve_once`, and the tests above
+    /// cannot see what that costs: they pass a `Link` that is created for the
+    /// call and dropped with it, so whatever was left published goes down with
+    /// the temporary. `run` holds one `Link` for the life of the supervisor, and
+    /// against *that* the leak is visible — the published clone is a live
+    /// descriptor, so the daemon goes on seeing an open connection, and holding
+    /// the permit its bounded accept limit handed out, for the whole of a
+    /// reconnect backoff that ends in another refusal. A handful of withheld
+    /// Codex supervisors would sit on connection slots that hooks, Claude
+    /// supervisors and CLI calls are queueing for.
+    ///
+    /// So the observer is the daemon, and what it observes is the **end** of the
+    /// connection: after answering the negotiation it reads again, and the only
+    /// acceptable answer is `EOF`. A read that times out instead is a descriptor
+    /// the supervisor is still holding. Driven for several reconnects, because
+    /// one refusal releasing tells you nothing about a loop of them.
+    ///
+    /// Measured against the leaking shape, so the size of it is on the record
+    /// rather than assumed: one connection, not a growing pile. Each attempt's
+    /// publish drops the previous clone, so what a withheld supervisor holds is
+    /// the *latest* refused connection, for as long as the backoff before its
+    /// next attempt — which is a permit denied to somebody else for that whole
+    /// time, once per withheld supervisor.
+    #[test]
+    fn a_withheld_registration_hands_back_the_connection_it_was_refused_on() {
+        const ATTEMPTS: usize = 3;
+        let path = withhold_socket("released");
+        let listener = UnixListener::bind(&path).unwrap();
+        // One verdict per attempt, and the main thread waits for it before
+        // starting the next. Without that handshake this measures far less than
+        // it looks like it does: the leaking shape releases attempt N's
+        // descriptor when attempt N+1 *publishes* over it, so a main thread that
+        // races ahead rescues the very connection the daemon is trying to catch
+        // being held. Serialised, every attempt is discriminating — and the
+        // healthy path never waits, because a released connection reports EOF at
+        // once.
+        let (verdict, verdicts) = std::sync::mpsc::channel();
+
+        let daemon = std::thread::spawn(move || {
+            for _ in 0..ATTEMPTS {
+                let (stream, _) = listener.accept().unwrap();
+                let mut out = stream.try_clone().unwrap();
+                // Generous, because it is only ever reached when the claim is
+                // already false: a supervisor that let go answers immediately,
+                // and one that did not is holding the descriptor for the whole
+                // of its reconnect backoff — `RECONNECT_MAX` is ten seconds.
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(20)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                writeln!(out, "{REFUSED}").unwrap();
+                out.flush().unwrap();
+                // Refused. The supervisor's end of this connection has to be
+                // gone, so the only acceptable answer is `EOF`; a read that
+                // blocks is a descriptor it is still holding, and a frame would
+                // be worse.
+                let mut rest = String::new();
+                let held = !matches!(reader.read_line(&mut rest), Ok(0));
+                if verdict.send(held).is_err() {
+                    return;
+                }
+            }
+        });
+
+        // The persistent link, exactly as `run` builds it.
+        let link: Link = Arc::new(Mutex::new(None));
+        for attempt in 0..ATTEMPTS {
+            assert!(
+                drive_serve_once_on(&path, &codex_registration(), &link).is_err(),
+                "attempt {attempt}: the registration must be withheld"
+            );
+            assert!(
+                link.lock().unwrap().is_none(),
+                "attempt {attempt}: the refused connection is still published, so it is still \
+                 open and the daemon is still holding its permit"
+            );
+            assert!(
+                !verdicts.recv().unwrap(),
+                "attempt {attempt}: the daemon was still holding the refused connection open \
+                 after the supervisor had given up on it, so its accept permit is spent on a \
+                 supervisor it has already turned away"
+            );
+        }
+        daemon.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// And it *is* sent to a daemon that says it can host the agent, on the same
+    /// connection, so the negotiation costs a round trip and not a reconnect.
+    #[test]
+    fn a_codex_registration_is_sent_once_the_daemon_says_it_hosts_codex() {
+        let path = withhold_socket("hosted");
+        let listener = UnixListener::bind(&path).unwrap();
+        let daemon = scripted_daemon(listener, Some(HOSTED), 1);
+
+        drive_serve_once(&path, &codex_registration())
+            .expect("a hosting daemon is registered with");
+
+        let frames = daemon.join().unwrap();
+        assert_eq!(
+            frames.len(),
+            2,
+            "expected question then register: {frames:?}"
+        );
+        assert_eq!(frames[0]["type"], "negotiate_support");
+        assert_eq!(frames[1]["type"], "register");
+        assert_eq!(frames[1]["agent"], "codex");
+        // The two facts the daemon refuses a Codex registration for missing
+        // (`ccd::codex_link::ControlLink::from_registration`): the broker leg it
+        // must dial to observe the run, and the visit its frames belong to.
+        // Asserted on the wire, because that is where they have to be.
+        assert_eq!(frames[1]["codex_socket"], "/tmp/s.sock");
+        assert_eq!(frames[1]["codex_generation"], 1);
+        assert_eq!(frames[1]["agent_bin"], "/opt/homebrew/bin/codex");
+        // **The server the supervisor follows, and provably not the default.** A
+        // Codex launch runs on the tmux server its coordinator was handed, and the
+        // registration is one of the two places that fact travels — the daemon
+        // stores it and every later reader of the row addresses it. Asserted
+        // against the sentinel rather than `protocol::TMUX_SOCKET_NAME`, because
+        // that is the literal this field replaced: see [`CODEX_TEST_TMUX_SOCKET`].
+        assert_eq!(frames[1]["tmux_socket"], CODEX_TEST_TMUX_SOCKET);
+        assert_ne!(frames[1]["tmux_socket"], protocol::TMUX_SOCKET_NAME);
+        // And no thread id, which is not an omission: this side never learns
+        // one. A launch-time claim would be evidence the launcher cannot have,
+        // and the daemon's link binds off the broker's own `thread/started`.
+        assert!(
+            frames[1].get("codex_thread_id").is_none(),
+            "a Codex registration must not claim a thread the launch never saw: {:?}",
+            frames[1]
+        );
+        // A Codex frame carries no `claude_bin`: a registration naming both is
+        // the internally-inconsistent shape the daemon's identity guard refuses.
+        assert!(
+            frames[1].get("claude_bin").is_none(),
+            "a Codex registration must not carry a Claude binary: {:?}",
+            frames[1]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A Claude session does not ask, and that is not an oversight.
+    ///
+    /// Claude is every build's floor — the daemon's own `supported_agents()`
+    /// says so — so the answer is known before the question. Asking anyway would
+    /// send a frame a v0.6.0 daemon logs as an undecodable-frame error on every
+    /// reconnect of every ordinary session, which is noise in the one log an
+    /// operator reads when something is wrong.
+    #[test]
+    fn a_claude_registration_does_not_negotiate_at_all() {
+        let path = withhold_socket("claude");
+        let listener = UnixListener::bind(&path).unwrap();
+        let daemon = scripted_daemon(listener, None, 0);
+
+        let args = SupervisorArgs {
+            session_id: "cc-7".into(),
+            session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR".into()),
+            tmux_session: "cc-7".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/tmp/project".into(),
+            claude_bin: None,
+            codex: None,
+            server_a: None,
+        };
+        let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
+        assert_eq!(registration.agent, protocol::agent::AgentKind::Claude);
+        drive_serve_once(&path, &registration).expect("the Claude path is unchanged");
+
+        let frames = daemon.join().unwrap();
+        assert_eq!(
+            frames.len(),
+            1,
+            "the Claude path sent extra frames: {frames:?}"
+        );
+        assert_eq!(
+            frames[0]["type"], "register",
+            "a Claude supervisor's first word is still its registration"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The exit replay is a `Register` too, so it is withheld by the same rule.
+    ///
+    /// Without this a supervisor that correctly withheld for its whole run would
+    /// create the shadow row in its last act — and an exit replay is the worst
+    /// moment for it, because the row it creates arrives already `exited` and
+    /// therefore immediately prunable by the old binary.
+    #[test]
+    fn the_exit_replay_is_withheld_from_a_daemon_that_cannot_host_the_agent() {
+        let path = withhold_socket("exit-withhold");
+        let listener = UnixListener::bind(&path).unwrap();
+        let daemon = scripted_daemon(listener, Some(V060_ANSWER), 2);
+
+        report_exit(&path, &codex_registration(), EXIT_REPORT_TIMEOUT)
+            .expect_err("the replay must be withheld like the live registration");
+
+        let frames = daemon.join().unwrap();
+        assert_eq!(
+            frames.len(),
+            1,
+            "the exit path sent more than the question: {frames:?}"
+        );
+        assert_eq!(frames[0]["type"], "negotiate_support");
+        assert!(
+            !frames.iter().any(|f| f["type"] == "register"),
+            "the replay reached the daemon: {frames:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Every answer that is not `supported: true` withholds — including the ones
+    /// that are not answers.
+    ///
+    /// Fail-closed is the only safe direction: withholding wrongly costs a
+    /// session the daemon does not list until the next reconnect, and
+    /// registering wrongly costs the run's history. So a daemon that hangs up, a
+    /// line that will not decode, and a frame nobody asked for are all treated
+    /// as "cannot host".
+    #[test]
+    fn a_non_answer_to_the_negotiation_withholds_like_a_refusal() {
+        for (label, answer, then_read) in [
+            // Hangs up without a word: nothing more to read, so the scripted
+            // daemon returns and drops the connection rather than deadlocking
+            // against a supervisor that is also waiting.
+            ("hung up", None, 0),
+            ("undecodable", Some("{\"type\":\"nonsense\"}"), 1),
+            ("not an answer", Some("{\"type\":\"ack\"}"), 1),
+        ] {
+            let path = withhold_socket("nonanswer");
+            let listener = UnixListener::bind(&path).unwrap();
+            let daemon = scripted_daemon(listener, answer, then_read);
+
+            if drive_serve_once(&path, &codex_registration()).is_ok() {
+                panic!("{label}: a non-answer must withhold");
+            }
+
+            let frames = daemon.join().unwrap();
+            assert!(
+                !frames.iter().any(|f| f["type"] == "register"),
+                "{label}: a register frame reached the daemon: {frames:?}"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     #[test]
@@ -3321,8 +5108,11 @@ means the full history gets re-read on your next message.
             session_id: "cc-3".into(),
             session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR".into()),
             tmux_session: "cc-3".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
             cwd: "/tmp".into(),
             claude_bin: Some("/usr/local/bin/claude".into()),
+            codex: None,
+            server_a: None,
         };
         let frame = registration_frame(&args, "2026-07-31T00:00:00Z");
         assert_eq!(frame.session_id, args.session_id);
@@ -3331,6 +5121,10 @@ means the full history gets re-read on your next message.
         assert_eq!(frame.claude_bin, args.claude_bin);
         assert_eq!(frame.tmux_socket, protocol::TMUX_SOCKET_NAME);
         assert_eq!(frame.protocol_minor, protocol::PROTOCOL_MINOR);
+        // The frame a *living* supervisor registers with. `report_exit` sets
+        // this on its copy and only there; a live registration that claimed to
+        // be a replay would be refused the session it is asking to host.
+        assert!(!frame.exit_replay);
     }
 
     #[test]

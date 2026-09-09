@@ -116,6 +116,7 @@ fn run_tmux(command: &mut Command, deadline: Duration, what: &str) -> Result<Vec
             status,
             stdout,
             stderr,
+            ..
         }) => {
             if status.success() {
                 Ok(stdout)
@@ -161,8 +162,44 @@ fn render_server_conf(history_limit: u32) -> String {
     )
 }
 
+/// Where the server conf is written. `protocol::root_dir()` in a real run, and a
+/// throwaway directory under a test binary.
+///
+/// A test run observes; it does not spawn. Left on the real root, the suite rewrote
+/// the operator's own `~/.codeconnect/tmux.conf` — with whatever history limit the
+/// test happened to pass — every time it exercised a spawn, so running the tests
+/// changed the state of the machine they were run on.
+///
+/// Split at compile time rather than on an environment variable, so nothing has to
+/// remember to set anything and no production path can reach the test branch. This
+/// is the same shape [`crate::codex_launch`] uses for the session root, and for the
+/// same reason.
+#[cfg(not(test))]
+fn conf_root() -> PathBuf {
+    protocol::root_dir()
+}
+
+#[cfg(test)]
+fn conf_root() -> PathBuf {
+    // **Per THREAD, not per process.** The conf is written to one fixed name, and
+    // two tests writing different history limits through this function raced over
+    // it: the guard test wrote 4,242 and read the file back while the live-tmux test
+    // was writing 50,000 to the same path. Nothing here is content-addressed — the
+    // name is `tmux.conf` in both cases — so the only thing that separates
+    // concurrent writers is the directory. A test runs on one thread, so a
+    // per-thread root gives each writer a path of its own and needs no serialisation
+    // anybody has to remember.
+    let dir = std::env::temp_dir().join(format!(
+        "cc-tmux-conf-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn write_server_conf(history_limit: u32) -> Result<PathBuf> {
-    let path = protocol::root_dir().join("tmux.conf");
+    let path = conf_root().join("tmux.conf");
     let body = render_server_conf(history_limit);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
@@ -758,13 +795,51 @@ mod tests {
         assert_eq!(target_pane("cc-1"), "=cc-1:");
     }
 
+    /// **The suite must not write into the operator's own `~/.codeconnect`.** A test
+    /// run is not a spawn, and a machine whose real config file is rewritten — with
+    /// a history limit some test picked — by `cargo test` has had its state changed
+    /// by an act that was supposed to observe it. Driven through the production
+    /// writer rather than argued from the path, so a future caller that reaches the
+    /// real root by a different route is caught here too.
+    #[test]
+    fn writing_the_server_conf_never_touches_the_operator_s_own_home() {
+        let real = protocol::root_dir().join("tmux.conf");
+        let contents_before = std::fs::read(&real).ok();
+        // **The whole home, recursively — not one filename.** Pinning `tmux.conf`
+        // alone proved a claim about `tmux.conf` and was read as a claim about
+        // `~/.codeconnect`, which was false: the supervisor's logger was writing
+        // into the real logs directory the entire time. The fence is now as wide as
+        // the sentence. See `crate::home_guard`.
+        let before = crate::home_guard::snapshot_real_home();
+
+        let written = write_server_conf(4_242).expect("the production writer");
+        assert!(
+            written != real,
+            "the suite wrote the operator's own config file at {}",
+            real.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&written).unwrap(),
+            render_server_conf(4_242),
+            "the scoped path must receive exactly what a spawn would have written"
+        );
+
+        crate::home_guard::assert_real_home_unchanged(&before, "writing the tmux server conf");
+        assert_eq!(
+            std::fs::read(&real).ok(),
+            contents_before,
+            "the real {} changed while the suite ran",
+            real.display()
+        );
+    }
+
     /// The conf is what makes the first pane correct, so its content is pinned:
     /// lose `mouse on` and scrolling regresses to arrow-key noise; lose
     /// `history-limit` and the first pane silently reverts to tmux's 2,000.
     #[test]
     fn the_server_conf_carries_the_scroll_contract() {
-        // The rendered string, not the file: the file's path is shared with the
-        // live-tmux test running in parallel, and reading it back raced.
+        // The rendered string, not the file: the path is shared with the live-tmux
+        // test running in parallel, and reading it back raced.
         let body = render_server_conf(12_345);
         for line in [
             "set -g mouse on",

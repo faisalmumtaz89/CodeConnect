@@ -222,6 +222,44 @@ where
     match message {
         // A second hello is harmless; treat it as a no-op rather than an error.
         ClientMessage::Hello { .. } => {}
+        // The demo daemon hosts scripted Claude runs only; compose is a Codex operation
+        // and is refused honestly rather than dropped, exactly as its sibling below is.
+        ClientMessage::Compose {
+            session_id,
+            request_id,
+            ..
+        } => {
+            send(
+                sink,
+                &ServerMessage::ComposeResult {
+                    session_id,
+                    request_id,
+                    result: protocol::ws::ComposeResult::Rejected {
+                        reason: "the demo daemon hosts Claude sessions only".into(),
+                    },
+                },
+            )
+            .await?;
+        }
+        // The demo daemon hosts scripted Claude runs only; interrupt is a Codex
+        // operation and is refused honestly rather than dropped.
+        ClientMessage::Interrupt {
+            session_id,
+            request_id,
+            ..
+        } => {
+            send(
+                sink,
+                &ServerMessage::InterruptResult {
+                    session_id,
+                    request_id,
+                    result: protocol::ws::InterruptResult::Rejected {
+                        reason: "the demo daemon hosts Claude sessions only".into(),
+                    },
+                },
+            )
+            .await?
+        }
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
         ClientMessage::Sessions => {
             send(
@@ -448,6 +486,14 @@ fn capabilities() -> Capabilities {
         command_catalog: false,
         slash_composer_recovery: false,
         terminal_pty: false,
+        // No Codex link and no turn to stop: an action this server cannot perform
+        // is not offered.
+        codex_interrupt: false,
+        codex_compose: false,
+        // Omitted while it would only name the Claude floor — same as ccd, so the
+        // demo does not make a phone render a diagnostic capability row that
+        // means nothing yet. An empty list is skipped on the wire.
+        supported_agents: Vec::new(),
     }
 }
 
@@ -756,6 +802,7 @@ mod tests {
         // `tls` true on a plaintext link, and would flap for ever.
         for withheld in [
             "terminal_pty",
+            "codex_interrupt",
             "push",
             "push_relay",
             "test_push",

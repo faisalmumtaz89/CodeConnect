@@ -70,3 +70,7 @@ Packages/
 # deliberately, which is the intended asymmetry.
 .claude/scheduled_tasks.lock
 .claude/settings.local.json
+# A code-index cache one tool rebuilds from the tree it indexes. Nothing here is
+# authored, nothing here is read by anything but that tool, and it is per-machine
+# by construction.
+/.codecompass/

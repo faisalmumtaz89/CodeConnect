@@ -37,9 +37,10 @@ struct TimelineRow: View {
         switch item.content {
         case .userMessage(let text, let isCommand):
             UserMessageRow(text: text, date: item.date, isCommand: isCommand)
-        case .agentMessage(let text):
+        case .agentMessage(let text, let isInterrupted):
             AgentMessageRow(
-                text: text, onCollapse: { onCollapse?(item.id) }, onExpand: onExpand)
+                text: text, isInterrupted: isInterrupted,
+                onCollapse: { onCollapse?(item.id) }, onExpand: onExpand)
         case .tool(let tool):
             ToolRow(tool: tool)
         case .approval(let approval):
@@ -144,6 +145,10 @@ struct UserMessageRow: View {
 /// grows downward from the button, never yanking the reader upward.
 struct AgentMessageRow: View {
     let text: String
+    /// The turn was aborted while this reply was being written — the wire's
+    /// `interrupted` flag, drawn rather than dropped. Silence here would let a
+    /// half-sentence read as the whole answer.
+    var isInterrupted: Bool = false
     /// Fired **before** the collapse, on a "Show less" tap. Collapsing removes
     /// a screen or more of height in place and the scroll view keeps its
     /// offset, which lands the reader in the blank where the text used to be.
@@ -225,6 +230,21 @@ struct AgentMessageRow: View {
                     }
                 }
             }
+            }
+            // **The abort, said once, under the words it applies to.** Not a
+            // banner and not a colour: an interrupted reply is still the
+            // agent's prose, and the fact that it stops early belongs where the
+            // stopping happened.
+            if isInterrupted {
+                HStack(spacing: CC.space.xxs) {
+                    CCIcon("stop.circle", size: 12, weight: .regular, relativeTo: .caption)
+                    Text("Interrupted")
+                        .ccType(CC.type.micro)
+                }
+                .foregroundStyle(CC.text.tertiary)
+                .padding(.top, CC.space.xs)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Interrupted — this reply was cut short")
             }
             if isLong {
                 CCButton(expanded ? "Show less" : "Show more", variant: .ghost, size: .sm) {
@@ -543,6 +563,13 @@ struct ApprovalRow: View {
         if let outcome = approval.outcome {
             return AgeClock(since: outcome.resolvedDate, scale: .age)
         }
+        // A Codex resolution carries no timestamp on any arm, so a card that
+        // ended that way has no age to tick — and the coarse scale is what stops
+        // a settled row waking the screen once a second for a clock it does not
+        // draw.
+        if approval.codexResolution != nil {
+            return AgeClock(since: approval.requestedAt, scale: .age)
+        }
         return AgeClock(since: approval.requestedAt, scale: .clock)
     }
 
@@ -578,7 +605,7 @@ struct ApprovalRow: View {
     /// the fleet's rows use.
     private var headerLine: some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
-            Text(approval.isPending ? "NEEDS YOU" : "RESOLVED")
+            Text(Self.headerTitle(for: approval))
                 .ccType(CC.type.micro.weight(.semibold))
                 .foregroundStyle(approval.isPending ? CC.color.warning : CC.text.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -633,6 +660,8 @@ struct ApprovalRow: View {
     private var footer: some View {
         if let outcome = approval.outcome {
             resolvedFooter(outcome)
+        } else if let resolution = approval.codexResolution {
+            codexResolvedFooter(resolution)
         } else {
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
                 CCWaitClock(since: approval.requestedAt, now: now, prefix: "waiting")
@@ -645,7 +674,7 @@ struct ApprovalRow: View {
     @ViewBuilder
     private func resolvedFooter(_ outcome: AnswerOutcome) -> some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
-            Text(resolutionText(outcome))
+            Text(Self.resolutionText(for: outcome))
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -657,7 +686,64 @@ struct ApprovalRow: View {
         }
     }
 
-    private func resolutionText(_ outcome: AnswerOutcome) -> String {
+    /// **What a Codex card ended as**, in its own vocabulary.
+    ///
+    /// A separate footer rather than a mapping onto `AnswerOutcome`, for the
+    /// same reason `ApprovalItem` keeps the two apart: a `cleared(turn_aborted)`
+    /// is not "Denied", an `answered(by: .local)` names no decision at all, and
+    /// `AnswerOutcome` cannot express either without claiming something.
+    ///
+    /// No timestamp. The Codex wire carries a `resolved_at` on **no arm at all**
+    /// — `AnswerOutcome`'s is what the age beside a Claude row is drawn from —
+    /// and an age computed from when this phone happened to receive the frame
+    /// would be a number about the phone dressed as a number about the Mac.
+    @ViewBuilder
+    private func codexResolvedFooter(_ resolution: CodexResolution) -> some View {
+        CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
+            Text(CodexProse.resolution(resolution).title)
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: CC.space.xs)
+            CCButton("View", variant: .ghost, size: .sm, action: onOpen)
+        }
+    }
+
+    /// The persisted approval row's header word. Pending is "NEEDS YOU";
+    /// otherwise the row carries a recorded outcome, and an `indeterminate` one —
+    /// which the daemon could not confirm reached the agent — reads "UNCONFIRMED",
+    /// never the definitive "RESOLVED". Static and pure so the string is testable
+    /// off the real `ApprovalItem` the builder produces, without rendering the row.
+    ///
+    /// **A Codex ending counts.** Read against `approval.outcome` alone this row
+    /// said `NEEDS YOU` — with a live `Review` button and a ticking wait clock —
+    /// on a card that had already been answered at the Mac. Caught by looking at
+    /// `codex-resolved-at-mac--L.png`; the builder's own tests were green,
+    /// because the defect was in a second reader that had not been told.
+    static func headerTitle(for approval: ApprovalItem) -> String {
+        if let outcome = approval.outcome {
+            return outcome.indeterminate ? "UNCONFIRMED" : "RESOLVED"
+        }
+        if let resolution = approval.codexResolution { return Self.codexHeader(for: resolution) }
+        return "NEEDS YOU"
+    }
+
+    /// One word for how a Codex card ended. `RETIRED` rather than `RESOLVED` for
+    /// the endings nobody answered: a question that timed out or went away with
+    /// its turn was not resolved by anyone, and saying so would credit a
+    /// decision that was never made.
+    static func codexHeader(for resolution: CodexResolution) -> String {
+        switch resolution {
+        case .answered: return "RESOLVED"
+        case .cleared, .timeout: return "RETIRED"
+        case .unknown, .unrecognisedStatus: return "UNCONFIRMED"
+        }
+    }
+
+    static func resolutionText(for outcome: AnswerOutcome) -> String {
+        // The daemon accepted the answer but never confirmed it reached the
+        // agent, so the footer must not state a decision or an actor as fact.
+        if outcome.indeterminate { return "Answer not confirmed" }
         // An inferred decision is the daemon noticing the prompt is gone, not
         // watching an answer happen. Rendering it as "Allowed" would put a fact
         // on screen that nobody observed.
@@ -672,9 +758,21 @@ struct ApprovalRow: View {
         return "\(outcome.decision.label) \(who)"
     }
 
+    /// The spoken label for a row carrying a recorded outcome. An unconfirmed
+    /// outcome is announced as such — never "Resolved approval", which would
+    /// speak a confirmation VoiceOver users cannot see is false.
+    static func resolvedAccessibilityLabel(for outcome: AnswerOutcome, toolName: String) -> String {
+        let lead = outcome.indeterminate ? "Unconfirmed approval" : "Resolved approval"
+        return "\(lead). \(resolutionText(for: outcome)). \(toolName)."
+    }
+
     private var accessibilityLabel: String {
         if let outcome = approval.outcome {
-            return "Resolved approval. \(resolutionText(outcome)). \(approval.card.toolName)."
+            return Self.resolvedAccessibilityLabel(for: outcome, toolName: approval.card.toolName)
+        }
+        if let resolution = approval.codexResolution {
+            let banner = CodexProse.resolution(resolution)
+            return "\(banner.oneLine) \(approval.card.toolName)."
         }
         return
             "Pending approval, risk \(risk.label), \(approval.card.toolName), waiting \(Format.spokenAge(now.timeIntervalSince(approval.requestedAt)))"

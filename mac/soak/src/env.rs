@@ -220,7 +220,10 @@ pub fn check_integrity(conn: &Connection) -> Result<Integrity> {
         }
     }
 
-    let runs: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
+    // `all_sessions`, not `sessions`: Claude runs and Codex runs live in
+    // separate physical tables (see ccd's `create_schema`), and a soak that
+    // counted only the first would report a fleet half its real size.
+    let runs: i64 = conn.query_row("SELECT COUNT(*) FROM all_sessions", [], |row| row.get(0))?;
     let events: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
     Ok(Integrity {
         gaps,
@@ -379,6 +382,7 @@ fn classify(outcome: std::io::Result<protocol::proc::RunOutcome>) -> TmuxAnswer 
             status,
             stdout,
             stderr,
+            ..
         }) => {
             if status.success() {
                 TmuxAnswer::Ok(String::from_utf8_lossy(&stdout).into_owned())
@@ -449,6 +453,7 @@ mod tests {
             status: std::process::ExitStatus::from_raw(code << 8),
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
+            truncated: false,
         })
     }
 

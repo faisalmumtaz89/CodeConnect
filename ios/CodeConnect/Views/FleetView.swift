@@ -368,7 +368,7 @@ struct FleetView: View {
             CCCard(padding: 0, border: bandBorder(band.status)) {
                 VStack(spacing: 0) {
                     ForEach(Array(band.rows.enumerated()), id: \.element.id) { index, row in
-                        rowView(row, in: band, isLast: index == band.rows.count - 1)
+                        rowWithStopOutcome(row, in: band, isLast: index == band.rows.count - 1)
                     }
                 }
             }
@@ -394,6 +394,56 @@ struct FleetView: View {
     /// a `ForEach` over a wrapper over a row over a trailing closure is more than
     /// it will infer in reasonable time. Splitting it is also the honest shape:
     /// the row and the gesture that can destroy it are two ideas.
+    /// The row, and whatever the daemon last said about a stop on it.
+    ///
+    /// **Directly under the row that produced it**, rather than in a screen-wide
+    /// banner slot: on a fleet of two dozen runs, "Nothing was sent" floating at
+    /// the top of the list is a sentence about a row the reader has to go and
+    /// find. The outcome belongs where the tap was.
+    @ViewBuilder
+    private func rowWithStopOutcome(_ row: FleetRow, in band: Band, isLast: Bool) -> some View {
+        VStack(spacing: 0) {
+            rowView(row, in: band, isLast: isLast)
+            stopOutcome(for: row)
+        }
+    }
+
+    @ViewBuilder
+    private func stopOutcome(for row: FleetRow) -> some View {
+        let controls = model.codexControls(for: row.summary.sessionKey)
+        switch controls.stop {
+        case .settled(let result):
+            let banner = CodexProse.interrupt(result)
+            CCBanner(
+                banner.title,
+                // **The daemon's sentence, verbatim.** Every one of the eleven
+                // refusals names which condition failed and what to do instead;
+                // they were written to be shown.
+                message: banner.message,
+                tone: banner.tone.ccTone, icon: banner.icon)
+                .padding(.horizontal, CC.space.md)
+                .padding(.bottom, CC.space.sm)
+        case .notSent(let reason):
+            // The app's own words, never dressed as the daemon's: nothing was
+            // sent, so the daemon has said nothing about it.
+            CCBanner(
+                "Nothing was sent", message: reason, tone: .warning,
+                icon: "exclamationmark.triangle.fill")
+                .padding(.horizontal, CC.space.md)
+                .padding(.bottom, CC.space.sm)
+        case .sentNoAnswer(let reason):
+            // **Not "nothing was sent".** The frame left; what became of it is
+            // the thing nobody knows.
+            CCBanner(
+                "Sent, no answer heard", message: reason, tone: .warning,
+                icon: "questionmark.circle")
+                .padding(.horizontal, CC.space.md)
+                .padding(.bottom, CC.space.sm)
+        case .idle, .inFlight:
+            EmptyView()
+        }
+    }
+
     private func rowView(_ row: FleetRow, in band: Band, isLast: Bool) -> some View {
         // **Derived once.** The gesture and the named accessibility action have
         // to agree about whether this row can be removed, and about what happens
@@ -426,7 +476,16 @@ struct FleetView: View {
                 separator: !isLast,
                 onOpenDiff: { diffRoute = DiffRoute(key: row.summary.sessionKey) },
                 onMarkReviewed: { model.states[row.summary.sessionKey]?.markReviewed() },
-                onRemove: remove
+                onRemove: remove,
+                // **Offered only when the phone genuinely holds a turn to name.**
+                // `stopUnavailable` returns nil exactly when this run is Codex,
+                // the daemon honours a stop, its control link is subscribed and
+                // an unterminated turn is in the log — and `runningTurn` is the
+                // one honest hide: with no turn there is nothing to stop, so the
+                // control is absent rather than dead.
+                onStop: stopAction(for: row),
+                stopBlockedReason: stopBlockedReason(for: row),
+                stopping: isStopping(row)
             ) {
                 // "Done, unreviewed" is exactly the moment the diff is what you
                 // want: the agent finished and you have not looked at what it did.
@@ -447,6 +506,49 @@ struct FleetView: View {
             }
         }
     }
+    /// The tap, or nil when this row cannot be stopped.
+    ///
+    /// **`stopUnavailable(for:)` is the only reader of the rule.** This used to
+    /// re-derive it — agent, capability, running turn, and deliberately *not*
+    /// the link state — while the session header re-derived it a third way and
+    /// the send path a fourth. They disagreed, and the disagreement shipped: an
+    /// `interrupt` left for sessions the phone already knew were `bound`,
+    /// `offline` or `none`, measured at the send stub.
+    private func stopAction(for row: FleetRow) -> (() -> Void)? {
+        let key = row.summary.sessionKey
+        guard model.stopUnavailable(for: key) == nil else { return nil }
+        return { Task { await model.stopCodexTurn(sessionKey: key) } }
+    }
+
+    /// Why the offered control is greyed, or nil when it is live.
+    ///
+    /// **Short, and only during the cooldown.** Two rules meet here and the
+    /// first render got both wrong:
+    ///
+    ///   * **Not the link state.** Decision D3 and A29a: the fleet cannot tell a
+    ///     subscribed link from a reconnecting one, so Stop is *offered* and the
+    ///     daemon's refusal — which always names which condition failed — is
+    ///     what the operator reads. Greying on a link state the summary reports
+    ///     but cannot act on would hide the button on the one signal that is
+    ///     genuinely informative.
+    ///   * **Not the daemon's sentence.** It is already drawn, verbatim, in the
+    ///     banner directly beneath this row. Handed to the button as well it
+    ///     rendered as a twelve-line orange column half the row wide, pushing the
+    ///     activity line down and printing the same refusal twice — "two
+    ///     identical warnings side by side read as two problems", which is the
+    ///     rule the decision card already states about Deny. Measured on
+    ///     `codex-stop-link-down--L.png`.
+    private func stopBlockedReason(for row: FleetRow) -> String? {
+        guard model.codexControls(for: row.summary.sessionKey).isStopGreyed(now: model.now)
+        else { return nil }
+        return "Try again in a moment."
+    }
+
+    private func isStopping(_ row: FleetRow) -> Bool {
+        if case .inFlight = model.codexControls(for: row.summary.sessionKey).stop { return true }
+        return false
+    }
+
     private func bandHeader(_ band: Band) -> some View {
         // **No dot.** `DONE` never had one, so `BLOCKED`'s was emphasis and not
         // state — a fourth encoding of a fact the band border, the label and
@@ -873,6 +975,27 @@ private struct FleetBanner: View {
         if model.sampleFleetActive {
             return [.sampleFleet(onLeave: { model.stopSampleFleet() })]
         }
+        // **G9: a message this build cannot read is never swallowed.**
+        //
+        // It outranks the link banner because it is a *different* problem and
+        // the louder one: the link is healthy, the Mac is working, and this
+        // phone is the thing that is behind. Rendered as what the reader can act
+        // on — update the app — with the type named, so the next engineer has
+        // the whole diagnosis rather than "an unreadable frame".
+        if let unreadable = model.connection.unreadableFrame {
+            return [
+                CCBannerItem(
+                    // Above `offline` and everything under it: this is a
+                    // problem with the app, not with the link, and a reader
+                    // hunting a missing feature must not be shown a freshness
+                    // note that says the connection is fine.
+                    .rejected,
+                    title: "Update CodeConnect on this iPhone",
+                    message: "\(unreadable) Some of what your Mac reports will be missing here.",
+                    tone: .warning,
+                    icon: "arrow.down.circle")
+            ]
+        }
         let link = model.pairing.isPaired || model.fixturesActive ? linkBannerItem : nil
         let stamp = cachedStamp
         // The decision is a value (`FleetFreshness.bannerChoice`) so the rule is
@@ -1016,6 +1139,19 @@ struct FleetRowView: View {
     /// invisible and unreachable by Switch Control.
     /// Returns `nil` when the run was removed, or the reason it was not.
     var onRemove: (() async -> String?)?
+    /// **Stop this Codex session's running turn**, or nil when there is nothing
+    /// to stop or nothing that could stop it.
+    ///
+    /// Passed in rather than derived here for the same reason `onRemove` is: the
+    /// row draws what it is given, and whether a mutation is offered is a
+    /// question about the fleet's state, which the screen above holds.
+    var onStop: (() -> Void)?
+    /// Why Stop is greyed, or nil when it is live. A greyed control **states its
+    /// reason** — a dead control with no explanation is the failure the
+    /// verification bar names.
+    var stopBlockedReason: String?
+    /// True from the tap until the daemon answers.
+    var stopping: Bool = false
     let action: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -1191,18 +1327,47 @@ struct FleetRowView: View {
         }
     }
 
+    /// **Which agent this run is.**
+    ///
+    /// Drawn only for a run that is *not* Claude. A badge on every row would be
+    /// a word repeated two dozen times that discriminates nothing — the fleet
+    /// is overwhelmingly Claude, and a label everything carries is a label
+    /// nobody reads. An unsupported agent is named verbatim, because the
+    /// daemon's own word is the only true thing the phone can say about it.
+    @ViewBuilder
+    private var agentBadge: some View {
+        switch row.summary.agent {
+        case .claude:
+            EmptyView()
+        case .codex:
+            CCBadge("Codex", tone: .info, accessibilityText: "Codex session")
+        case .unsupported(let raw):
+            CCBadge(raw, tone: .neutral, accessibilityText: "\(raw) session")
+        }
+    }
+
     @ViewBuilder
     private var metaBlock: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
-            if let activity {
-                activityLine(
+            // The agent leads the activity line rather than sitting beside the
+            // title: the title row already carries the risk badge and the wait
+            // clock, and a third chip there pushed the age out of line with
+            // every Claude neighbour — the alignment failure the verification
+            // bar names by name.
+            CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
+                agentBadge
+                if let activity {
+                    activityLine(
                     activity,
                     truncation: blocked?.truncation ?? .head,
                     // The tool name takes full contrast only where the row is
                     // asking for something. A Running row's activity is not
                     // urgent, so it stays one step down and the *face* — prose
                     // against monospace — is what carries the distinction.
-                    tone: blocked == nil ? CC.text.secondary : CC.text.primary)
+                        tone: blocked == nil ? CC.text.secondary : CC.text.primary)
+                }
+                Spacer(minLength: 0)
+                stopControl
             }
             if showsIdentity || showsCapability || row.blockedCount > 1 { exceptionLine }
         }
@@ -1249,6 +1414,36 @@ struct FleetRowView: View {
                 CCMonoBlock(inline: argument, truncation: truncation)
             }
             Spacer(minLength: 0)
+        }
+    }
+
+    /// **Stop, on the row.**
+    ///
+    /// On the activity line rather than beside the title, deliberately: the
+    /// title row already carries the risk badge and the wait clock, and a third
+    /// control there pushed this row's age out of line with every Claude
+    /// neighbour's — an alignment failure the HTML pass caught before any Swift
+    /// was written.
+    ///
+    /// Absent, not disabled, when there is nothing running: a control whose only
+    /// behaviour is refusing the tap is the item this product does not ship.
+    /// Present-and-greyed is for the bounded window after a link-state refusal,
+    /// where the daemon's own sentence has just said to try again shortly — and
+    /// there the reason is drawn, never merely hinted.
+    @ViewBuilder
+    private var stopControl: some View {
+        if let onStop {
+            CCButton(
+                stopping ? "Stopping…" : "Stop",
+                icon: stopping ? nil : "stop.fill",
+                variant: .secondary,
+                size: .sm,
+                isLoading: stopping,
+                disabledReason: CCDisabledReason(stopBlockedReason),
+                action: onStop
+            )
+            .accessibilityIdentifier("stop-\(row.summary.sessionKey)")
+            .accessibilityLabel("Stop the turn \(placeName) is running")
         }
     }
 
@@ -1583,6 +1778,14 @@ struct LinkHealthSheet: View {
                         // as "no", though it is exactly the daemon that does send.
                         capabilityRow("Push notifications", capabilities.pushMode != .none)
                         capabilityRow("Holds a certificate", capabilities.tls)
+                        // Named rows, not left to `extraAdvertised`'s raw
+                        // `codex_interrupt` / `codex_compose`: these two are the
+                        // difference between a Stop button that works and one
+                        // that is offered and guaranteed broken, and a reader
+                        // asking "why can't I stop this?" should find the answer
+                        // in the same words the control used.
+                        capabilityRow("Stop a Codex turn", capabilities.codexInterrupt)
+                        capabilityRow("Say something to Codex", capabilities.codexCompose)
                         capabilityRow(
                             "This connection encrypted", capabilities.tlsActive,
                             separator: !extraAdvertised.isEmpty)
@@ -1620,6 +1823,10 @@ struct LinkHealthSheet: View {
         let named: Set<String> = [
             "approve", "can_approve_reliably", "send_text", "capture", "push", "push_relay",
             "tls", "tls_active", "fail_mode", "answer_path", "hold_secs",
+            // Drawn above, in the words the controls themselves use. Left in
+            // this set they would appear twice: once as "Stop a Codex turn" and
+            // once as the raw `codex_interrupt`.
+            "codex_interrupt", "codex_compose",
         ]
         return (model.connection.capabilities?.advertisedRows ?? [])
             .filter { !named.contains($0.name) }

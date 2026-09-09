@@ -352,6 +352,90 @@ no relay push. `hello_ack.push_environment` is the daemon's authoritative APNs
 environment for the registered token; the app persists a correction rather than
 resending its cached value.
 
+## Codex sessions
+
+A Codex session is a second agent, not a second app. It arrives on the same socket,
+through the same event log, and every screen that names a run names it the same way.
+Three surfaces differ, and each is gated rather than assumed.
+[`docs/codex.md`](../docs/codex.md) is the operator page for the Mac side.
+
+**The approval card answers with Codex's own options.** Which answer surface a card
+gets is decided by the *session's agent*, never by the card's contents
+(`Views/DecisionCard.swift`): a Claude card gets Allow/Deny, a Codex card gets the
+option list the request carried, read verbatim from `tool_input.options[]`
+(`Model/CodexWire.swift`) under the header **Choose one**. An option whose label the
+daemon did not supply falls back to its id rather than to an invented word, and a card
+whose options this build cannot read is rendered **unanswerable** — never as Allow/Deny,
+which would be a decision nobody offered. *Deny with a reason* is withheld on a Codex
+card for the same reason: the card's own list is the only vocabulary it has. A
+`fileChange` card draws its patch **inline**, between the command and the consequence,
+because what would be written is part of the question — bounded by a row budget, folded
+past the fourth file, and always headed with the whole file count so a fold cannot hide
+one. A Codex card shows no raw wire: the `tool_input` / `request_id` / `payload_hash`
+disclosure is Claude-only.
+
+**Stop and the composer are gated by one rule, computed in one place.**
+`CodexLinkState.canActuate(_:)` in `Protocol/WireTypes.swift` is the single gate and
+nothing else in the app re-derives it; `CodexProse.stopUnavailable` and
+`CodexProse.composeUnavailable` turn a refusal into the sentence shown under the
+control. Both verbs require the daemon to have advertised the capability
+(`codex_interrupt`, `codex_compose`) **and** `agent == codex` **and** an actuatable
+`codex_link`. Where they differ:
+
+| | Advertised as | Link states that actuate | Also requires |
+|---|---|---|---|
+| Stop | `codex_interrupt` | `subscribed` | a known running turn — there is nothing honest to stop without one |
+| Composer | `codex_compose` | `subscribed`, `bound_not_started` | — |
+
+`bound_not_started` is compose-only on purpose: the daemon has proved that thread has
+never run a turn, so a first turn cannot collide with one, and there is correspondingly
+no turn to stop. The five words the app knows are `subscribed`, `bound`,
+`bound_not_started`, `offline` and `none`; a word it does not know is **kept verbatim
+and actuates nothing**, because the only safe reading of a value this build cannot
+interpret is "not offered". An absent field decodes as `none`. The capability is
+checked again in front of `send` rather than only on the button, so a control that
+should not have been drawn still cannot write.
+
+**Every outcome is named, and none is collapsed.** A compose answers with `started`,
+`steered`, `duplicate`, `rejected` or `indeterminate` — plus an arm for a status this
+build does not know — and `started` and `steered` are rendered as the different news
+they are: the first began a turn, the second joined the one already running. Stop
+answers with `aborted`, `duplicate`, `rejected` or `indeterminate`, and the same unknown
+arm. A `rejected` or `indeterminate` message is the daemon's own sentence, rendered
+verbatim and attributed to the Mac rather than paraphrased. The two enums are
+decode-only: nothing in the app constructs one. `Model/CodexControls.swift` holds what
+follows from each — an `indeterminate` spends its material so the same words can never
+be sent twice, and an unknown status deliberately spends nothing and keeps the request
+id open.
+
+### The fixtures it decodes
+
+Three Codex fixtures are **emitted by `ccd` and byte-pinned by a gate on the Mac side**,
+which is why the app is allowed to decode against them: a hand-written fixture agrees
+with its reader and neither agrees with the wire. That was not a hypothetical — the
+app's earlier Codex fixtures were written in *Claude's* payload shape, and a real phone
+drew a whole turn as a lone "Turn complete".
+
+| Fixture | Where it runs | What it pins |
+|---|---|---|
+| `fixtures/codex/phone-turn-stream-0.153.4.json` | app bundle, via `Model/Fixtures.swift` | The `ServerMessage` frames a subscribed phone is actually sent for a Codex turn, replayed in seq order. |
+| `fixtures/codex/refusal-sentences.json` | app bundle, via `Model/CodexRefusals.swift` | Every sentence the daemon can send when a Stop or a compose did not happen, with what the phone may conclude from each. `Rejected` carries a bare reason and no code, so the classifier matches on the sentence — and the file is what keeps that match honest. |
+| `fixtures/codex/minor-19-wire.json` | **test bundle only** | That the three fields minor 19 adds decode whole, against bytes the daemon emitted. |
+
+The rule is per-file and worth stating narrowly: those three are emitted, not written.
+The remaining Codex render states in the catalogue are constructed by the app's own
+fixture layer.
+
+### Render scenarios
+
+26 scenarios named `codex-*` in `CodeConnectRenderHarness/RenderCatalog.swift`, covering
+the card families (command, two options, a wide file change, the ceiling, the minimal
+case), every resolution the wire can carry (accepted, declined, answered at the Mac,
+cleared by a turn abort or completion, retired, timed out, written-outcome-unknown),
+each Stop state (offered, aborted, link down, refused late, indeterminate), each compose
+outcome (started, steered, duplicate, rejected, indeterminate), the replayed turn
+stream, and two older-daemon states that prove the controls hide rather than fail.
+
 ## Not built yet
 
 Live Activities are not implemented.

@@ -1,0 +1,105 @@
+{
+  "approval_request": {
+    "kind": "approval_request",
+    "payload": {
+      "card": {
+        "display_text": "command\n{\"command\":\"/bin/zsh -lc 'touch /tmp/marker.txt'\",\"cwd\":\"/tmp\",\"options\":[{\"id\":\"accept\",\"label\":\"Yes, proceed\"},{\"id\":\"acceptWithExecpolicyAmendment\",\"label\":\"Yes, and don't ask again for commands that start with `touch`\",\"payload\":{\"execpolicy_amendment\":[\"touch\"]}},{\"id\":\"cancel\",\"label\":\"No, and tell Codex what to do differently\"}],\"proposed_amendment\":[\"touch\"],\"reason\":\"May I create the requested probe file?\"}",
+        "generation": 1,
+        "identity_bound": false,
+        "payload_hash": "30f11962faf7f8cd1c7cc846a4183d77eb24276cd62870cd44affbcd9566e5b6",
+        "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE",
+        "risk": {
+          "class": "medium"
+        },
+        "tool_input": {
+          "command": "/bin/zsh -lc 'touch /tmp/marker.txt'",
+          "cwd": "/tmp",
+          "options": [
+            {
+              "id": "accept",
+              "label": "Yes, proceed"
+            },
+            {
+              "id": "acceptWithExecpolicyAmendment",
+              "label": "Yes, and don't ask again for commands that start with `touch`",
+              "payload": {
+                "execpolicy_amendment": [
+                  "touch"
+                ]
+              }
+            },
+            {
+              "id": "cancel",
+              "label": "No, and tell Codex what to do differently"
+            }
+          ],
+          "proposed_amendment": [
+            "touch"
+          ],
+          "reason": "May I create the requested probe file?"
+        },
+        "tool_name": "command"
+      }
+    },
+    "seq": 2,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "source_event_id": "perm:AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE",
+    "ts": "2026-09-07T00:00:00.000Z",
+    "turn_id": "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee"
+  },
+  "approval_resolved": {
+    "kind": "approval_resolved",
+    "payload": {
+      "by": "phone",
+      "decision": {
+        "option_id": "accept",
+        "type": "option_id"
+      },
+      "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE",
+      "status": "answered"
+    },
+    "seq": 3,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "source_event_id": "resolved:AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE",
+    "ts": "2026-09-07T00:00:00.000Z"
+  },
+  "sessions": [
+    {
+      "agent": "codex",
+      "blocked_on": [
+        "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE"
+      ],
+      "codex_link": "subscribed",
+      "codex_thread_id": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+      "created_at": "2026-09-07T00:00:00.000Z",
+      "cwd": "/tmp",
+      "last_seq": 2,
+      "lifecycle": "live",
+      "link": "attached",
+      "project_label": "tmp",
+      "session_id": "cc-1",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "tmux_session": "cc-1",
+      "updated_at": "2026-09-07T00:00:00.000Z"
+    },
+    {
+      "agent": "claude",
+      "blocked_on": [],
+      "codex_link": "none",
+      "created_at": "2026-09-07T00:00:00.000Z",
+      "cwd": "/tmp",
+      "last_seq": 1,
+      "lifecycle": "live",
+      "link": "attached",
+      "project_label": "tmp",
+      "session_id": "cc-2",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+      "tmux_session": "cc-2",
+      "updated_at": "2026-09-07T00:00:00.000Z"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+[package]
+name = "codex-broker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "In-wrapper WebSocket-over-UDS relay + refuse-by-default allowlist for the Codex app-server (security core; thread-switch machinery is a later sub-chunk)."
+
+[lib]
+name = "codex_broker"
+path = "src/lib.rs"
+
+[features]
+default = []
+# The verbatim frame recorder (`frame_tee`). OFF by default and off in every
+# shipping build: without it the module's env read is not compiled at all, so
+# `CC_CODEX_FRAME_TEE` names nothing a `codeconnect` a user runs can act on. A
+# capture build turns it on deliberately — see the module header.
+frame-tee = []
+
+# The security core (message shape classification, the allowlist, the refusal
+# matrix, ownership-fingerprint validation) is a PURE synchronous module with no
+# I/O — it is unit-testable against the captured Phase-0 frames with no runtime.
+# The relay transport (UDS listeners + the WS handshake + framing/reassembly) is
+# the only async surface; the upstream app-server connection sits behind a trait
+# so integration tests drive it against captured frames with no live infra.
+[dependencies]
+anyhow = { workspace = true }
+libc = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+# `std` adds StreamExt/SinkExt (the workspace default is `sink` only); additive.
+futures-util = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true }

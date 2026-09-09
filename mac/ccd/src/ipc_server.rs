@@ -201,11 +201,76 @@ async fn read_loop(
                 }
             }
             ClientFrame::Register(info) => {
-                let registration = daemon
+                match daemon
                     .register_supervisor(info, tx.clone(), Arc::clone(inflight))
-                    .await?;
-                *registered = Some(registration);
-                let _ = tx.send(DaemonFrame::Ack).await;
+                    .await
+                {
+                    Ok(registration) => {
+                        *registered = Some(registration);
+                        let _ = tx.send(DaemonFrame::Ack).await;
+                    }
+                    // **A refused registration is told, not silently dropped**
+                    //. Propagating with `?` closed the connection with no
+                    // frame at all, so the launcher — which read a bare EOF as success
+                    // — reset its reconnect classification as though it had registered.
+                    // The reason is sent as a structured `Error` and logged at error;
+                    // the writer task drains the channel after this loop returns
+                    // (`serve` does `drop(tx); writer.await`), so the frame reaches the
+                    // socket before it closes. Then the loop ends by returning the
+                    // error, exactly as `?` did, and the launcher treats a pre-`Ack`
+                    // `Error` (or EOF) as a failed registration eligible for backoff.
+                    Err(err) => {
+                        crate::log_error!("ipc: refused a session registration: {err:#}");
+                        let _ = tx
+                            .send(DaemonFrame::Error {
+                                message: format!("{err:#}"),
+                            })
+                            .await;
+                        return Err(err);
+                    }
+                }
+            }
+            // Pre-`Register` support negotiation. The daemon answers honestly
+            // with the agents it can host and the specific verdict for the asked
+            // agent. The negotiation *flow* (a supervisor withholding `Register`
+            // on a `false`) lands with the Codex launcher; a Claude supervisor
+            // has no reason to ask, and Claude is always supported.
+            ClientFrame::NegotiateSupport { agent, .. } => {
+                let supported_agents = daemon.supported_agents();
+                let supported = supported_agents.contains(&agent);
+                // **Logged because this answer is otherwise unobservable from
+                // outside the asking process** (2e-7b round-2 F5). The launcher
+                // refuses only on a decoded `false`, and treats an absent or
+                // undecodable answer exactly like a hosting one — so "the launcher
+                // got past the preflight" is not evidence that any daemon said yes.
+                // A harness could previously only ask on a SECOND connection of its
+                // own, which is a different round trip against a daemon that may
+                // have died in between. This is the daemon reporting what it told
+                // the connection that actually asked.
+                //
+                // **Logged AFTER the enqueue, and only if it succeeded** (round-3
+                // F6). Written first and with the result discarded, the line was an
+                // affirmative the harness could read while the answer was dropped on
+                // the floor — and a dropped answer is an EOF the launcher reads as
+                // `Indeterminate`, which reaches the same launch gate. The one thing
+                // the count assertion has to exclude was the one thing it could not
+                // see. Bound honestly at its real strength: this says the answer was
+                // handed to THIS connection's write queue, not that the bytes were
+                // flushed — a daemon killed between the two still logs it, the same
+                // strength the supervisor's own "delivered" has.
+                let answered = tx
+                    .send(DaemonFrame::SupportedAgents {
+                        supported_agents,
+                        supported,
+                    })
+                    .await
+                    .is_ok();
+                if answered {
+                    crate::log_info!(
+                        "ipc: negotiate_support for {} answered supported={supported}",
+                        agent.as_str()
+                    );
+                }
             }
             ClientFrame::SupervisorResponse { id, result } => {
                 let responder = inflight
@@ -239,9 +304,25 @@ async fn read_loop(
                 session_id,
                 session_uid,
                 exit_code,
+                reason,
             } => {
+                // **The registration this connection made is the identity the
+                // report is established against** (round-9 F3), on the same terms
+                // the heartbeat above uses it: it was resolved once, on this
+                // connection, and cannot drift. `report_exit` opens a fresh socket
+                // and replays its registration immediately before this frame, so
+                // in production there is one here — and it names the run that
+                // died, not whichever run owns the uid by the time the daemon gets
+                // to the frame. `None` is an older supervisor whose replay this
+                // daemon never saw; `session_exited` says what it falls back to.
                 daemon
-                    .session_exited(&session_id, session_uid.as_deref(), exit_code)
+                    .session_exited(
+                        &session_id,
+                        session_uid.as_deref(),
+                        exit_code,
+                        reason.as_deref(),
+                        registered.as_ref(),
+                    )
                     .await;
             }
             ClientFrame::ListSessions => {
@@ -518,6 +599,73 @@ mod tests {
         devices.into_iter().next().unwrap()
     }
 
+    /// A registration frame for `uid` running `agent`, built through the real type so
+    /// its shape cannot drift from what the launcher sends.
+    fn register_frame(uid: &str, name: &str, agent: protocol::agent::AgentKind) -> String {
+        let is_codex = matches!(agent, protocol::agent::AgentKind::Codex);
+        let frame = ClientFrame::Register(protocol::ipc::RegisterSession {
+            session_id: name.into(),
+            session_uid: Some(uid.into()),
+            tmux_session: name.into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+            cwd: "/tmp".into(),
+            supervisor_pid: 4242,
+            claude_bin: None,
+            agent,
+            agent_bin: None,
+            codex_thread_id: None,
+            codex_socket: is_codex.then(|| {
+                std::env::temp_dir()
+                    .join(format!("ccd-ipc-{uid}-nothing-listens.sock"))
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+            codex_generation: is_codex.then_some(1),
+            started_at: protocol::time::now_rfc3339(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        });
+        serde_json::to_string(&frame).unwrap()
+    }
+
+    /// **A refused registration is told over the socket, not silently closed**
+    ///. The `?`-propagation an earlier version used ended the connection
+    /// with no frame, which the launcher read as success. A Claude run claims the uid,
+    /// then a Codex run for the same uid is refused — a run does not change agents —
+    /// and the refusal must arrive as a structured `Error` on the wire.
+    ///
+    /// **Mutation:** restore `register_supervisor(...).await?` and this goes red — the
+    /// second `exchange` reads a closed connection instead of an `Error`.
+    #[tokio::test]
+    async fn a_refused_registration_is_told_over_the_socket_not_silently_closed() {
+        let (_daemon, socket) = served_daemon().await;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        // The Claude run claims the uid durably.
+        assert!(
+            matches!(
+                exchange(
+                    &socket,
+                    &register_frame(uid, "cc-1", protocol::agent::AgentKind::Claude)
+                )
+                .await,
+                DaemonFrame::Ack
+            ),
+            "the first registration is accepted"
+        );
+        // The Codex run for the same uid is refused, and the refusal is a frame.
+        let message = error_message(
+            exchange(
+                &socket,
+                &register_frame(uid, "cc-1", protocol::agent::AgentKind::Codex),
+            )
+            .await,
+        );
+        assert!(
+            message.contains("does not change agents"),
+            "the refusal must say why, over the wire: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn a_shim_asking_to_install_an_ssh_key_is_refused_instead_of_paired() {
         let (_daemon, socket) = served_daemon().await;
@@ -583,5 +731,259 @@ mod tests {
             other => panic!("expected a revocation, got {other:?}"),
         }
         assert!(!daemon.list_devices().await.unwrap()[0].is_active());
+    }
+
+    /// A supervisor's connection, held open the way a real one is.
+    ///
+    /// [`exchange`] is a round trip on a socket it then drops, and a dropped
+    /// connection is a *disconnect*: the registration it carried is gone before
+    /// the next frame is written. Everything below is about which registration a
+    /// connection is holding at the moment a later frame arrives, so the
+    /// connection has to outlive the frame that made it.
+    struct Supervisor {
+        write: tokio::net::unix::OwnedWriteHalf,
+        read: BufReader<tokio::net::unix::OwnedReadHalf>,
+    }
+
+    impl Supervisor {
+        async fn connect(socket: &Path) -> Self {
+            let (read, write) = UnixStream::connect(socket).await.unwrap().into_split();
+            Self {
+                write,
+                read: BufReader::new(read),
+            }
+        }
+
+        async fn send(&mut self, frame: &ClientFrame) {
+            let mut line = serde_json::to_vec(frame).unwrap();
+            line.push(b'\n');
+            self.write.write_all(&line).await.unwrap();
+            self.write.flush().await.unwrap();
+        }
+
+        async fn reply(&mut self) -> DaemonFrame {
+            let mut line = String::new();
+            self.read.read_line(&mut line).await.unwrap();
+            serde_json::from_str(&line)
+                .unwrap_or_else(|err| panic!("undecodable reply {line:?}: {err}"))
+        }
+
+        /// Send a frame the daemon does not answer, and wait for it to have been
+        /// handled.
+        ///
+        /// `SessionExited` produces no reply, so a test that asserted straight
+        /// after writing it would be asserting against a daemon that may not have
+        /// read the frame yet. `ListSessions` does reply, and the read loop handles
+        /// one frame at a time in arrival order — so the reply is proof the frame
+        /// before it is done, and it carries the fleet the assertion is about.
+        async fn send_then_list(
+            &mut self,
+            frame: &ClientFrame,
+        ) -> Vec<protocol::event::SessionSummary> {
+            self.send(frame).await;
+            self.send(&ClientFrame::ListSessions).await;
+            match self.reply().await {
+                DaemonFrame::Sessions { sessions } => sessions,
+                other => panic!("expected the fleet, got {other:?}"),
+            }
+        }
+    }
+
+    /// The frame a supervisor builds once at launch and holds for its whole life
+    /// — the same one `codeconnect`'s `report_exit` replays.
+    fn registration(
+        uid: &str,
+        supervisor_pid: u32,
+        started_at: &str,
+    ) -> protocol::ipc::RegisterSession {
+        protocol::ipc::RegisterSession {
+            session_id: "cc-1".to_string(),
+            session_uid: Some(uid.to_string()),
+            tmux_session: "cc-1".to_string(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/tmp".to_string(),
+            supervisor_pid,
+            claude_bin: None,
+            agent: protocol::agent::AgentKind::Claude,
+            agent_bin: None,
+            codex_thread_id: None,
+            codex_socket: None,
+            codex_generation: None,
+            started_at: started_at.to_string(),
+            protocol_minor: protocol::PROTOCOL_MINOR,
+            exit_replay: false,
+        }
+    }
+
+    /// A supervisor introducing itself, over its own connection, kept open.
+    async fn registered(
+        socket: &Path,
+        uid: &str,
+        supervisor_pid: u32,
+        started_at: &str,
+    ) -> Supervisor {
+        let mut supervisor = Supervisor::connect(socket).await;
+        supervisor
+            .send(&ClientFrame::Register(registration(
+                uid,
+                supervisor_pid,
+                started_at,
+            )))
+            .await;
+        match supervisor.reply().await {
+            DaemonFrame::Ack => supervisor,
+            other => panic!("expected the registration to be acked, got {other:?}"),
+        }
+    }
+
+    fn lifecycle(
+        sessions: &[protocol::event::SessionSummary],
+        uid: &str,
+    ) -> protocol::event::Lifecycle {
+        sessions
+            .iter()
+            .find(|session| session.session_uid == uid)
+            .unwrap_or_else(|| panic!("no row for {uid} in {sessions:?}"))
+            .lifecycle
+    }
+
+    /// **The replay must not end the run that replaced the one reporting.**
+    ///
+    /// The whole of `report_exit` over the wire, in the order production sends
+    /// it: a *fresh* connection, the registration the dead supervisor has held
+    /// since launch, then the exit. Nothing here reaches past the socket — which
+    /// is the point, because the identity the exit is established against is
+    /// minted by the very frame that precedes it, and a test that handed the
+    /// daemon a registration directly would never see that happen.
+    #[tokio::test]
+    async fn an_exit_replay_does_not_end_the_run_that_replaced_it() {
+        let (_daemon, socket) = served_daemon().await;
+        let uid = protocol::uid::new().unwrap();
+
+        // A runs, and dies. Its connection goes with its process.
+        let a = registered(&socket, &uid, 1111, "2026-08-01T00:00:00Z").await;
+        drop(a);
+
+        // B takes the session over under the same uid — a resume, or a
+        // reconnect after a crash — and is still running. Working somewhere
+        // else, so the row can say which of the two wrote it.
+        let mut b = Supervisor::connect(&socket).await;
+        b.send(&ClientFrame::Register(protocol::ipc::RegisterSession {
+            cwd: "/tmp/b".to_string(),
+            ..registration(&uid, 2222, "2026-08-02T00:00:00Z")
+        }))
+        .await;
+        assert!(matches!(b.reply().await, DaemonFrame::Ack));
+
+        // A's supervisor now reports the exit it witnessed, exactly as
+        // `report_exit` does: fresh socket, replayed registration, exit.
+        let mut reporter = Supervisor::connect(&socket).await;
+        reporter
+            .send(&ClientFrame::Register(protocol::ipc::RegisterSession {
+                exit_replay: true,
+                ..registration(&uid, 1111, "2026-08-01T00:00:00Z")
+            }))
+            .await;
+        assert!(matches!(reporter.reply().await, DaemonFrame::Ack));
+        let sessions = reporter
+            .send_then_list(&ClientFrame::SessionExited {
+                session_id: "cc-1".to_string(),
+                session_uid: Some(uid.clone()),
+                exit_code: None,
+                reason: None,
+            })
+            .await;
+
+        assert_eq!(
+            lifecycle(&sessions, &uid),
+            protocol::event::Lifecycle::Live,
+            "A's exit report ended B's run"
+        );
+        // **The exit is the second thing the replay would have done, not the
+        // first.** Adopting it means writing the row, so a replay that got as
+        // far as being compared had already overwritten the live run's working
+        // directory with the dead one's. The row is B's or the guard did not
+        // hold; the lifecycle above cannot see that on its own.
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|session| session.session_uid == uid)
+                .unwrap()
+                .cwd,
+            "/tmp/b",
+            "the replay overwrote B's row on its way to the exit"
+        );
+    }
+
+    /// The replay's own purpose, unbroken: a run whose end nobody else has
+    /// claimed is still ended by it.
+    ///
+    /// The guard above refuses a replay that would displace a *different* live
+    /// registration. This is the same path with nothing to displace — the
+    /// session that started and ended while `ccd` was down, which is the case
+    /// the replay exists for — and it must still land.
+    #[tokio::test]
+    async fn an_exit_replay_still_ends_the_run_that_reported_it() {
+        let (_daemon, socket) = served_daemon().await;
+        let uid = protocol::uid::new().unwrap();
+
+        // Nothing has ever registered: the daemon has no row at all, which is
+        // exactly the state a restart leaves behind.
+        let mut reporter = Supervisor::connect(&socket).await;
+        reporter
+            .send(&ClientFrame::Register(protocol::ipc::RegisterSession {
+                exit_replay: true,
+                ..registration(&uid, 1111, "2026-08-01T00:00:00Z")
+            }))
+            .await;
+        assert!(matches!(reporter.reply().await, DaemonFrame::Ack));
+        let sessions = reporter
+            .send_then_list(&ClientFrame::SessionExited {
+                session_id: "cc-1".to_string(),
+                session_uid: Some(uid.clone()),
+                exit_code: None,
+                reason: None,
+            })
+            .await;
+
+        assert_eq!(
+            lifecycle(&sessions, &uid),
+            protocol::event::Lifecycle::Exited,
+            "the replay is what gives a run that died with ccd down a row to end"
+        );
+    }
+
+    /// The ordinary shape: the supervisor that owns the session is the one
+    /// reporting, so its replay re-establishes its own claim and the exit lands.
+    #[tokio::test]
+    async fn an_exit_replay_from_the_standing_owner_still_ends_it() {
+        let (_daemon, socket) = served_daemon().await;
+        let uid = protocol::uid::new().unwrap();
+
+        let a = registered(&socket, &uid, 1111, "2026-08-01T00:00:00Z").await;
+        drop(a);
+
+        let mut reporter = Supervisor::connect(&socket).await;
+        reporter
+            .send(&ClientFrame::Register(protocol::ipc::RegisterSession {
+                exit_replay: true,
+                ..registration(&uid, 1111, "2026-08-01T00:00:00Z")
+            }))
+            .await;
+        assert!(matches!(reporter.reply().await, DaemonFrame::Ack));
+        let sessions = reporter
+            .send_then_list(&ClientFrame::SessionExited {
+                session_id: "cc-1".to_string(),
+                session_uid: Some(uid.clone()),
+                exit_code: None,
+                reason: None,
+            })
+            .await;
+
+        assert_eq!(
+            lifecycle(&sessions, &uid),
+            protocol::event::Lifecycle::Exited,
+            "the run's own supervisor reported its own end"
+        );
     }
 }

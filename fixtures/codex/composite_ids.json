@@ -1,0 +1,8 @@
+{
+  "_comment": "Rust-generated composite wire-id vectors (protocol::composite_id). A gen-1 and a gen-3 activation of ONE (session_uid, thread_id, server_request_id) are different opaque strings. The Swift client must treat these as opaque: correlate by exact-string equality, never parse. Generated and pinned by protocol/src/composite_id.rs::the_cross_generation_wire_vector_is_stable.",
+  "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+  "thread_id": "th_A",
+  "server_request_id_number": 0,
+  "generation_1": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIABHRoX0EAAAAAAAAAAAAAAAAAAAAAAQ",
+  "generation_3": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIABHRoX0EAAAAAAAAAAAAAAAAAAAAAAw"
+}

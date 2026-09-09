@@ -5,6 +5,7 @@ members = [
     "cc-hook",
     "ccd",
     "codeconnect",
+    "codex-broker",
     "demo-daemon",
     "push-core",
     "push-relay",
@@ -12,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 # CI pins this exact version so the floor is tested, not merely declared. 1.85 is
 # what the lockfile actually needs: `rustls` pulls `zeroize`, which is published
@@ -27,6 +28,16 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The reserved `codex` argv parser inspects `-c key=value` overrides the way
+# codex itself does — the value is parsed as TOML — so a structural override
+# (`-c 'features={hooks=false}'`) that reaches an ownership key cannot slip past
+# a naive text scan. Pinned to the SAME toml the codex 0.147 binary embeds
+# (toml-0.9.11, TOML spec 1.1) so our grammar matches codex's exactly: a TOML-1.1
+# form codex applies (a trailing comma in an inline table, a multiline inline
+# table) must not parse-fail here and get forwarded while codex acts on it. And a
+# structural value we still cannot parse is refused, never forwarded. **Exact**
+# version pin (not caret) so a patch bump cannot drift our grammar from codex's.
+toml = "=0.9.11"
 sha2 = "0.10"
 # One symbol: flock(2), for the update checker's cross-process throttle. The
 # kernel releases the lock when the holder dies, which is what deletes the

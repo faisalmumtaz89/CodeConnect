@@ -25,8 +25,34 @@ extension Event {
     // MARK: Hook facts
 
     var hookEventName: String? { payload["hook_event_name"]?.stringValue }
-    var toolName: String? { payload["tool_name"]?.stringValue }
-    var toolInput: JSONValue? { payload["tool_input"] }
+    /// The hook says `tool_name`; the Codex adapter says `tool`
+    /// (`tool_call_payload`: `command_execution` / `file_change`). Read through
+    /// the hook's spelling alone, every Codex tool row was labelled "tool".
+    ///
+    /// The two Codex families are spoken in the card's words rather than the
+    /// adapter's, because the same daemon already names them that way where a
+    /// human reads them: `codex_approval.rs` `Family::tool_name` is `command`
+    /// and `file change`. `ToolSummary` exists so "the timeline row, the
+    /// decision card and the fleet subtitle can never disagree about what a
+    /// call *is*" — a row saying `command_execution` above a card saying
+    /// `command` is that disagreement. Only these two, because only these two
+    /// exist: an item type this build does not model never reaches `tool_call`
+    /// at all (`on_item_started` returns nothing for it).
+    var toolName: String? {
+        if let name = payload["tool_name"]?.stringValue { return name }
+        switch payload["tool"]?.stringValue {
+        case "command_execution": return "command"
+        case "file_change": return "file change"
+        case let other: return other
+        }
+    }
+    /// The hook nests its arguments under `tool_input`; the Codex adapter puts
+    /// `command`, `cwd` and `changes` at the top level, so for those the
+    /// payload **is** the input.
+    var toolInput: JSONValue? {
+        if let input = payload["tool_input"] { return input }
+        return payload["tool"] == nil ? nil : payload
+    }
     /// Hook events carry it at the top level and also in `item_id`; a transcript
     /// `tool_result` hides it inside the message block. `item_id` is *not* a
     /// valid fallback for transcript events, where it holds the entry uuid.
@@ -36,6 +62,31 @@ extension Event {
         return itemID
     }
     var toolResponse: JSONValue? { payload["tool_response"] }
+
+    /// **What a Codex `tool_result` says became of the call.**
+    ///
+    /// Measured from `codex_adapter.rs` `tool_result_payload`, which is the
+    /// only shape that reaches this arm: `status` (`completed` when the item
+    /// ended normally, otherwise the item's own word, and `interrupted` when
+    /// the terminal was synthesized by an abort), `exit_code` for a command,
+    /// and `aggregated_output` for what it printed. Nothing here is inferred:
+    /// a status this build does not know leaves the verdict to the caller
+    /// rather than guessing at success.
+    var codexToolOutcome: (status: ToolStatus, output: String?)? {
+        guard kind == .toolResult, payload["tool"] != nil else { return nil }
+        let output = payload["aggregated_output"]?.stringValue
+        if payload["interrupted"]?.boolValue == true { return (.interrupted, output) }
+        // A command that ran and returned non-zero **failed**, whatever the
+        // item's own status says: the status describes the item's lifecycle,
+        // the exit code describes the work.
+        if let exit = payload["exit_code"]?.intValue, exit != 0 { return (.failed, output) }
+        switch payload["status"]?.stringValue {
+        case "completed": return (.succeeded, output)
+        case "failed": return (.failed, output)
+        case "interrupted": return (.interrupted, output)
+        default: return nil
+        }
+    }
     var durationMS: Int? { payload["duration_ms"]?.intValue }
     var permissionMode: String? { payload["permission_mode"]?.stringValue }
     var modelName: String? { payload["model"]?.stringValue }
@@ -45,6 +96,38 @@ extension Event {
 
     var approvalCard: ApprovalCard? { payload["card"]?.decoded(ApprovalCard.self) }
     var approvalOutcome: AnswerOutcome? { payload.decoded(AnswerOutcome.self) }
+
+    /// **What became of a Codex approval.**
+    ///
+    /// A Codex `approval_resolved` payload is a **bare `CodexResolution`** —
+    /// not an `AnswerOutcome`, not wrapped in one — so `approvalOutcome` reads
+    /// it as nil and a second accessor is the only way to see it at all. This is
+    /// the single most dangerous divergence in the phase: without it a Codex
+    /// card stays live and tappable after it has already been decided.
+    var codexResolution: CodexResolution? {
+        // `kind` is checked here rather than at the call site because a
+        // `CodexResolution` decoder is total by design — every unrecognised
+        // status has a case — so it would happily "decode" an unrelated
+        // payload's object into `.unrecognisedStatus`, and a tool result would
+        // start retiring cards.
+        guard kind == .approvalResolved else { return nil }
+        return payload.decoded(CodexResolution.self)
+    }
+
+    /// Which card a Codex resolution belongs to (decision D1).
+    ///
+    /// The daemon puts `request_id` in the payload additively, in the same
+    /// spelling and position as Claude's. **`source_event_id` is deliberately
+    /// not parsed**: it carries `"resolved:<request_id>"`, and prefix-parsing an
+    /// id-bearing string is precisely the kind of correlation that fails
+    /// silently — a rename, a second prefix, or an id that happens to contain a
+    /// colon all produce a wrong answer rather than no answer. A resolution with
+    /// no `request_id` correlates to nothing, and the card stays live, which is
+    /// the safe direction.
+    var codexResolvedRequestID: String? {
+        guard kind == .approvalResolved else { return nil }
+        return payload["request_id"]?.stringValue
+    }
 
     /// The daemon's risk block, wherever it put it.
     ///
@@ -130,10 +213,35 @@ extension Event {
         return LocalCommandLine.parse(content)
     }
 
+    /// **A message that is a flat `text`, which is how Codex sends one.**
+    ///
+    /// `ccd/src/codex_adapter.rs` `message_payload` builds exactly
+    /// `{"text": …, "interrupted": …}` for both `userMessage` and
+    /// `agentMessage` items — no `message`, no `content`, no blocks. Read
+    /// through Claude's shape it is nil, and a nil message draws no row: the
+    /// operator's phone showed a Codex turn as a lone "Turn complete" while
+    /// the daemon's log held both halves of the conversation.
+    ///
+    /// Empty is nil, not "": the adapter defaults `text` to the empty string
+    /// when an item carries none, and a blank row is a worse lie than no row.
+    private var flatText: String? {
+        guard let text = payload["text"]?.stringValue, !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// **Interrupted, as the wire states it.** The adapter synthesises a
+    /// terminal item with `interrupted: true` when a turn is aborted mid-item,
+    /// so a reply that was cut short says so on the row rather than being drawn
+    /// as a finished thought.
+    var isInterruptedItem: Bool { payload["interrupted"]?.boolValue == true }
+
     /// A user turn's prose. `message.content` is a bare string for typed
-    /// prompts and a block array when the CLI attaches context.
+    /// prompts and a block array when the CLI attaches context; Codex sends a
+    /// flat `text` instead. Exactly those two measured shapes — an unknown
+    /// third stays unknown.
     var userText: String? {
-        guard kind == .userMessage, let content = payload["message"]?["content"] else { return nil }
+        guard kind == .userMessage else { return nil }
+        guard let content = payload["message"]?["content"] else { return flatText }
         if let text = content.stringValue { return text }
         guard let blocks = content.arrayValue else { return nil }
         let joined =
@@ -148,8 +256,8 @@ extension Event {
     /// the PreToolUse hook already reported those as `tool_call` events with a
     /// daemon-assigned seq, and rendering both would double every tool call.
     var agentText: String? {
-        guard kind == .agentMessage, let blocks = payload["message"]?["content"]?.arrayValue
-        else { return nil }
+        guard kind == .agentMessage else { return nil }
+        guard let blocks = payload["message"]?["content"]?.arrayValue else { return flatText }
         let joined =
             blocks
             .filter { $0["type"]?.stringValue == "text" }
@@ -211,6 +319,15 @@ enum ToolSummary {
             return input.firstString("url", "query")
         case "Task", "Agent":
             return input.firstString("description", "prompt")
+        // **Codex's two families**, whose arguments are not where a Claude
+        // tool's are. A command carries `command` at the top level (the
+        // `default` arm below finds it); a file change carries no path at all
+        // except inside `changes[]`, so read through the default arm it drew a
+        // row naming a file it never named.
+        case "file change":
+            guard let changes = input["changes"]?.arrayValue, !changes.isEmpty else { return nil }
+            if changes.count == 1 { return changes[0]["path"]?.stringValue }
+            return "\(changes.count) files"
         case "TodoWrite":
             guard let todos = input["todos"]?.arrayValue else { return nil }
             return "\(todos.count) item\(todos.count == 1 ? "" : "s")"
@@ -235,6 +352,11 @@ enum ToolSummary {
         case "Grep": return "text.magnifyingglass"
         case "WebFetch", "WebSearch": return "globe"
         case "Task", "Agent": return "person.2"
+        // **Codex's two families.** Same glyphs as Claude's equivalents: a
+        // command is a terminal and a file change is an edit, whichever agent
+        // ran it, or the same act reads as two different kinds of thing.
+        case "command": return "terminal"
+        case "file change": return "pencil.line"
         case "TodoWrite": return "checklist"
         default: return "wrench.and.screwdriver"
         }

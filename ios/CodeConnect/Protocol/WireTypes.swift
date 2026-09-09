@@ -12,6 +12,10 @@ enum Wire {
     static let protocolVersion: UInt32 = 1
     /// Matches `MAX_CLIENT_MESSAGE_BYTES`; the daemon closes anything larger.
     static let maxClientMessageBytes = 1024 * 1024
+    /// `MAX_COMPOSE_BYTES` (`ws.rs`), enforced at the Mac on `text.len()` —
+    /// **bytes, not characters**. Mirrored here so the composer can refuse
+    /// before sending rather than learning it from a round trip.
+    static let maxComposeBytes = 8192
 
     /// The live terminal's flow control, mirroring `protocol/src/ws.rs`. Bytes
     /// ride as base64 inside the JSON frames and each direction is governed by a
@@ -73,12 +77,50 @@ enum PushMode: Equatable, Sendable {
     case relay
 }
 
-enum EventSource: String, Codable, Sendable, Hashable {
+/// Where an event came from — a *provenance*, so an unrecognised source must
+/// never inherit the trusted `.daemon` label. `.daemon` used to be the
+/// fallback, which meant a newer daemon's source this build had never heard of
+/// was silently attributed to the daemon itself. Modelled on `AnswerPath`: a
+/// tagged single-value string with the unknown retained in its own case.
+enum EventSource: Sendable, Hashable {
     case hook, transcript, daemon, pty
+    /// The Codex control link: every timeline event the adapter emits for a
+    /// Codex session carries it (`event.rs`). Named rather than left to
+    /// `.unknown` because provenance is read on screen — an unnamed source is
+    /// rendered as one this build cannot account for, which a Codex session's
+    /// entire timeline is not.
+    case codex
+    /// A source a newer daemon knows about and this build does not. Retained
+    /// rather than coerced, so nothing reads it as the trusted `.daemon`.
+    case unknown(String)
 
+    var rawValue: String {
+        switch self {
+        case .hook: return "hook"
+        case .transcript: return "transcript"
+        case .daemon: return "daemon"
+        case .pty: return "pty"
+        case .codex: return "codex"
+        case .unknown(let raw): return raw
+        }
+    }
+}
+
+extension EventSource: Codable {
     init(from decoder: Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(String.self)
-        self = EventSource(rawValue: raw) ?? .daemon
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "hook": self = .hook
+        case "transcript": self = .transcript
+        case "daemon": self = .daemon
+        case "pty": self = .pty
+        case "codex": self = .codex
+        case let other: self = .unknown(other)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -115,13 +157,250 @@ enum ResolvedBy: String, Codable, Sendable, Hashable {
     }
 }
 
-enum AnswerPath: String, Codable, Sendable, Hashable {
-    case hookReturn = "hook_return"
-    case sendKeys = "send_keys"
+/// Which agent is running in a session.
+///
+/// `protocol/src/agent.rs`: `#[derive(Default)] Claude` plus
+/// `#[serde(untagged)] Unsupported(String)`. Two consequences the phone must
+/// honour exactly, and they pull in opposite directions:
+///
+///   * an **absent** `agent` is `claude` — every daemon below minor 15 sends
+///     none, and every session it describes really is a Claude session;
+///   * an unknown *present* string is **retained**, never coerced. Reading
+///     `"gemini"` as Claude would offer a Claude session's whole vocabulary —
+///     `send_text`, the slash palette, Allow/Deny — to an agent that answers
+///     none of it.
+enum AgentKind: Sendable, Hashable {
+    case claude
+    case codex
+    /// An agent a newer daemon hosts and this build does not know how to drive.
+    case unsupported(String)
 
+    var rawValue: String {
+        switch self {
+        case .claude: return "claude"
+        case .codex: return "codex"
+        case .unsupported(let raw): return raw
+        }
+    }
+
+    /// What to call it on screen. An unsupported agent is named verbatim: the
+    /// daemon's own word is the only true thing the phone can say about it.
+    var displayName: String {
+        switch self {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .unsupported(let raw): return raw
+        }
+    }
+
+    init(wire raw: String) {
+        switch raw {
+        case "claude": self = .claude
+        case "codex": self = .codex
+        case let other: self = .unsupported(other)
+        }
+    }
+}
+
+extension AgentKind: Codable {
     init(from decoder: Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(String.self)
-        self = AnswerPath(rawValue: raw) ?? .sendKeys
+        self.init(wire: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+/// **Whether this Mac can actuate on this Codex session right now** — the one
+/// fact `codex_thread_id` could never carry, because a thread id reads the same
+/// whether the control link is subscribed, merely bound, or reconnecting.
+///
+/// Decision D3, and **cross-checked against the Rust that landed it**:
+/// `event.rs`'s `CodexLink` is
+/// `subscribed | bound | bound_not_started | offline | none`, spelled by hand in
+/// its own pinning test rather than trusted to `rename_all`, and
+/// `#[derive(Default)] None` — so an older daemon's summary, which carries no
+/// such field, decodes as `none`. The daemon's `Unbound` deliberately folds into
+/// `offline`: what separates them is *why* there is no addressee, and the answer
+/// a client has for both is the same one.
+///
+/// **The whole rule, in one line: `subscribed` actuates both verbs;
+/// `bound_not_started` actuates compose only; everything else neither.** The Mac
+/// has proved a `bound_not_started` thread has never run a turn, so a first one
+/// can be started on it and there is none to stop. Every other state greys Stop
+/// and Compose **with the reason**, and the daemon's own refusal sentence is what
+/// the operator reads if they ask anyway.
+///
+/// **`bound_not_started` is protocol minor 20**; the other four words are minor
+/// 19, which build 72 shipped on 2026-09-08. So this decoder reads a strictly
+/// newer daemon than that build does, and a daemon that predates the word simply
+/// never sends it. The `unknown` arm below is what makes the reverse direction —
+/// this build meeting a word a newer daemon adds — safe rather than lucky.
+///
+/// An unrecognised word is retained rather than read as `subscribed`: this enum
+/// gates two mutations, and the only safe direction for a value this build
+/// cannot interpret is "not offered".
+enum CodexLinkState: Sendable, Hashable {
+    /// Watching this session's thread. The only state that can actuate.
+    case subscribed
+    /// Connected to the session, not yet watching its thread.
+    case bound
+    /// **Bound to a thread the Mac has PROVED has never run a turn** (protocol
+    /// minor 20), and therefore the one un-subscribed state a first message may
+    /// be sent into.
+    ///
+    /// The daemon publishes it only when its own `thread/resume` for this
+    /// thread was refused with the measured "no rollout" answer. No rollout
+    /// means no turn has ever run, which means none is running, which means a
+    /// first turn cannot collide with one.
+    ///
+    /// It exists because of a dead end: on a fresh Codex session the thread has
+    /// no rollout until its first turn, so the link is stuck at `bound` — and a
+    /// composer gated on `subscribed` could never send the message that would
+    /// unstick it.
+    ///
+    /// **Compose, and only compose.** There is no turn to stop, so Stop is not
+    /// offered here — see `blockedReason(for:)`.
+    case boundNotStarted
+    /// The control link is down and reconnecting.
+    case offline
+    /// There is no Codex control link for this session — including every
+    /// Claude session and every daemon predating the field.
+    case none
+    /// A state a newer daemon names and this build does not.
+    case unknown(String)
+
+    var rawValue: String {
+        switch self {
+        case .subscribed: return "subscribed"
+        case .bound: return "bound"
+        case .boundNotStarted: return "bound_not_started"
+        case .offline: return "offline"
+        case .none: return "none"
+        case .unknown(let raw): return raw
+        }
+    }
+
+    /// **What is being asked of the link.** The two mutations this enum gates,
+    /// which stopped having one answer the moment `boundNotStarted` existed:
+    /// a first turn can be *started* on a thread that has never run one, and
+    /// there is nothing there to *stop*.
+    enum Ask: Sendable, Hashable {
+        /// Say something — the daemon decides at the write whether the words
+        /// start a turn or join one.
+        case compose
+        /// Stop the turn this session is running.
+        case stop
+    }
+
+    /// **The single gate. Nothing else in the app may re-derive it.**
+    ///
+    /// It takes the ask now, and that is the extension rather than a second
+    /// gate: the rule still lives in exactly one type, and a caller is made to
+    /// say which mutation it is asking about instead of guessing from a Bool
+    /// that no longer has one meaning.
+    func canActuate(_ ask: Ask) -> Bool { blockedReason(for: ask) == nil }
+
+    /// Why not, in the phone's own words, or nil when it can.
+    ///
+    /// Deliberately shorter than the daemon's sentence and deliberately not a
+    /// paraphrase of it: this is what a *disabled control* says before anything
+    /// has been sent, and the daemon's own sentences are what a *refusal* says
+    /// afterwards. Both are shown, in that order, and neither pretends to be
+    /// the other.
+    func blockedReason(for ask: Ask) -> String? {
+        switch self {
+        case .subscribed: return nil
+        // **The honest half of the new state.** It can be spoken to, and it
+        // cannot be stopped: a thread with no rollout has never run a turn, so
+        // there is no turn to name and the daemon would refuse one.
+        case .boundNotStarted:
+            switch ask {
+            case .compose: return nil
+            case .stop: return "This Codex session has not started a turn yet."
+            }
+        case .bound: return "This Mac has reached the Codex session but is not yet watching it."
+        case .offline: return "This Mac has lost its link to the Codex session and is reconnecting."
+        case .none: return "There is no live link to this Codex session."
+        case .unknown: return "This Mac reports a link state this app does not recognise."
+        }
+    }
+
+    init(wire raw: String) {
+        switch raw {
+        case "subscribed": self = .subscribed
+        case "bound": self = .bound
+        case "bound_not_started": self = .boundNotStarted
+        case "offline": self = .offline
+        case "none": self = .none
+        case let other: self = .unknown(other)
+        }
+    }
+}
+
+extension CodexLinkState: Codable {
+    init(from decoder: Decoder) throws {
+        self.init(wire: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+/// How an answer was actually applied — an *actuation claim*, so an unknown
+/// wire value must never collapse into one this build would read as "we typed
+/// it". `.sendKeys` used to be the fallback, which meant a newer daemon's path
+/// this build had never heard of was silently reported as keystrokes it never
+/// sent. Modelled on `AnswerDecision`: a tagged single-value string, with the
+/// unknown retained in its own case rather than folded into a known one.
+enum AnswerPath: Sendable, Hashable {
+    case hookReturn
+    case sendKeys
+    /// The Codex path (minor 16): the answer was written back as the response to
+    /// the app-server's own approval request. A **real** actuation, and it has
+    /// to be named — without the case every successful Codex answer decoded to
+    /// `.unknown`, whose whole contract is that it never claims one, so a
+    /// confirmed answer rendered as unvouchable.
+    case codexResponse
+    /// A path a newer daemon knows about and this build does not. Never claims
+    /// an actuation: a reader asking "did we type this?" must treat it as *not*
+    /// `send_keys`, because this build cannot vouch for how the answer landed.
+    case unknown(String)
+
+    var rawValue: String {
+        switch self {
+        case .hookReturn: return "hook_return"
+        case .sendKeys: return "send_keys"
+        case .codexResponse: return "codex_response"
+        case .unknown(let raw): return raw
+        }
+    }
+
+    /// Build from a wire string outside a decoder — used by `Capabilities`,
+    /// which reads `answer_path` out of its verbatim map. An unrecognised value
+    /// is retained, never coerced to `.sendKeys`.
+    init(wire raw: String) {
+        switch raw {
+        case "hook_return": self = .hookReturn
+        case "send_keys": self = .sendKeys
+        case "codex_response": self = .codexResponse
+        case let other: self = .unknown(other)
+        }
+    }
+}
+
+extension AnswerPath: Codable {
+    init(from decoder: Decoder) throws {
+        self.init(wire: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -296,6 +575,24 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// run, and a notification cannot derive anything at all, since the phone
     /// may not be running when it is composed.
     let projectLabel: String
+    /// **Which agent is running here** (minor 15). Absent ⇒ `.claude`, which is
+    /// what every daemon below minor 15 means by sending nothing.
+    ///
+    /// The first thing every Codex affordance is scoped by: the two agents share
+    /// a fleet, a timeline and a decision card, and almost nothing else. Sending
+    /// Claude's vocabulary to a Codex session is refused by name at the Mac, and
+    /// the reverse likewise — so this field, not a capability flag, is what
+    /// decides which controls a session gets.
+    let agent: AgentKind
+    /// The Codex thread this run is bound to. **Opaque** — for correlation and
+    /// for rendering, never parsed. Absent for a Claude session.
+    ///
+    /// It says nothing about whether the link can actuate: `codex_link` is that
+    /// field, and a thread id is present in three of its four states.
+    let codexThreadID: String?
+    /// Whether this Mac can stop or speak to this Codex session **right now**.
+    /// Defaulted to `.none` so a daemon predating the field still parses.
+    let codexLink: CodexLinkState
 
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
@@ -311,6 +608,9 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case updatedAt = "updated_at"
         case blockedOn = "blocked_on"
         case projectLabel = "project_label"
+        case agent
+        case codexThreadID = "codex_thread_id"
+        case codexLink = "codex_link"
     }
 
     init(from decoder: Decoder) throws {
@@ -328,7 +628,14 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         updatedAt = try c.decode(String.self, forKey: .updatedAt)
         blockedOn = try c.decodeIfPresent([String].self, forKey: .blockedOn) ?? []
         projectLabel = try c.decodeIfPresent(String.self, forKey: .projectLabel) ?? ""
+        agent = try c.decodeIfPresent(AgentKind.self, forKey: .agent) ?? .claude
+        codexThreadID = try c.decodeIfPresent(String.self, forKey: .codexThreadID)
+        codexLink = try c.decodeIfPresent(CodexLinkState.self, forKey: .codexLink) ?? .none
     }
+
+    /// Whether the Codex vocabulary applies here. The one place the question is
+    /// asked, so a future agent cannot accidentally inherit it.
+    var isCodex: Bool { agent == .codex }
 
     /// What this app files the run's events, subscriptions and marks under, and
     /// what it sends when it has to name the run on the wire. See
@@ -427,7 +734,7 @@ struct Capabilities: Codable, Sendable, Hashable {
         canApproveReliably = raw["can_approve_reliably"]?.boolValue ?? false
         failMode = raw["fail_mode"]?.stringValue ?? "unknown"
         answerPath =
-            raw["answer_path"]?.stringValue.flatMap(AnswerPath.init(rawValue:)) ?? .sendKeys
+            raw["answer_path"]?.stringValue.map(AnswerPath.init(wire:)) ?? .sendKeys
         holdSecs = (raw["hold_secs"]?.intValue).map { UInt64(max(0, $0)) } ?? 0
         sendText = raw["send_text"]?.boolValue ?? false
         capture = raw["capture"]?.boolValue ?? false
@@ -498,6 +805,30 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// there is, and two runs under one name will read as a single spliced
     /// timeline — which is exactly what this flag being true fixes.
     var scopesSessionsByUID: Bool { advertises(["session_uid", "session_uids"]) }
+    /// This daemon **honours** a stop for a Codex session whose control link is
+    /// subscribed (minor 17). A minor-15/16 daemon decodes `interrupt` and
+    /// answers a well-formed `Rejected` to every ask — legible, but guaranteed
+    /// — so an unflagged daemon gets the button offered-and-silently-broken,
+    /// which is why this gates the send and not only the control.
+    var codexInterrupt: Bool { advertises(["codex_interrupt"]) }
+    /// This daemon **understands `compose` at all** (minor 18).
+    ///
+    /// **The load-bearing one.** A minor-17 daemon cannot decode the message and
+    /// answers `Error{code:"bad_request"}` rather than a `ComposeResult`, so a
+    /// phone that sent one would wait on a typed reply that is never coming.
+    /// Hiding the button is not the same thing as not transmitting.
+    var codexCompose: Bool { advertises(["codex_compose"]) }
+    /// Which agents this daemon hosts. **Omitted entirely while it would only
+    /// name Claude** (`ws.rs`), so empty and absent both read as `["claude"]`.
+    var supportedAgents: [String] {
+        let named = advertised["supported_agents"]?.arrayValue?
+            .compactMap(\.stringValue) ?? []
+        return named.isEmpty ? ["claude"] : named
+    }
+    /// Whether this daemon says it hosts Codex sessions at all. Advisory: the
+    /// per-session `agent` is what actually scopes an affordance, and this is
+    /// the connection-wide fact the trust screen reports.
+    var hostsCodex: Bool { supportedAgents.contains("codex") }
 
     /// Everything advertised, sorted, for the trust screen. Boolean-valued keys
     /// come back as `(name, isOn)`; anything else is rendered as its value.
@@ -519,6 +850,10 @@ enum AnswerDecision: Sendable, Hashable {
     case deny
     /// Pick the nth option exactly as Claude numbered it (1-based).
     case option(index: UInt32)
+    /// Pick an option by its stable id rather than its ordinal — the agent-seam
+    /// shape, where Codex names options by id (`"acceptWithExecpolicyAmendment"`)
+    /// rather than position. Additive to `option`.
+    case optionId(String)
     case text(String)
     /// A decision kind a newer daemon knows about and this build does not.
     /// Never sent — only received, inside a recorded outcome. Throwing here
@@ -529,7 +864,10 @@ enum AnswerDecision: Sendable, Hashable {
 }
 
 extension AnswerDecision: Codable {
-    private enum CodingKeys: String, CodingKey { case type, index, text }
+    private enum CodingKeys: String, CodingKey {
+        case type, index, text
+        case optionId = "option_id"
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -537,6 +875,7 @@ extension AnswerDecision: Codable {
         case "allow": self = .allow
         case "deny": self = .deny
         case "option": self = .option(index: try c.decode(UInt32.self, forKey: .index))
+        case "option_id": self = .optionId(try c.decode(String.self, forKey: .optionId))
         case "text": self = .text(try c.decode(String.self, forKey: .text))
         case let other: self = .unrecognised(other)
         }
@@ -552,6 +891,9 @@ extension AnswerDecision: Codable {
         case .option(let index):
             try c.encode("option", forKey: .type)
             try c.encode(index, forKey: .index)
+        case .optionId(let id):
+            try c.encode("option_id", forKey: .type)
+            try c.encode(id, forKey: .optionId)
         case .text(let text):
             try c.encode("text", forKey: .type)
             try c.encode(text, forKey: .text)
@@ -565,6 +907,7 @@ extension AnswerDecision: Codable {
         case .allow: return "Allowed"
         case .deny: return "Denied"
         case .option(let index): return "Chose option \(index)"
+        case .optionId(let id): return "Chose option \(id)"
         case .text: return "Replied with text"
         case .unrecognised(let raw): return "Answered (\(raw))"
         }
@@ -586,6 +929,11 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
     /// answer — the local-resolution path, where all it truly knows is that the
     /// prompt is gone. The UI must not state an inferred decision as fact.
     let inferred: Bool
+    /// True when the daemon could not establish whether the answer landed at
+    /// all — the agent-seam case, parallel to `inferred` but weaker: `inferred`
+    /// still asserts the prompt is gone, this asserts nothing about the write.
+    /// Absent ⇒ false, mirroring the Rust `#[serde(default)]` bool.
+    let indeterminate: Bool
 
     enum CodingKeys: String, CodingKey {
         case requestID = "request_id"
@@ -596,11 +944,13 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         case resolvedAt = "resolved_at"
         case detail
         case inferred
+        case indeterminate
     }
 
     init(
         requestID: String, sessionID: String, decision: AnswerDecision, resolvedBy: ResolvedBy,
-        appliedVia: AnswerPath, resolvedAt: String, detail: String?, inferred: Bool
+        appliedVia: AnswerPath, resolvedAt: String, detail: String?, inferred: Bool,
+        indeterminate: Bool = false
     ) {
         self.requestID = requestID
         self.sessionID = sessionID
@@ -610,6 +960,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         self.resolvedAt = resolvedAt
         self.detail = detail
         self.inferred = inferred
+        self.indeterminate = indeterminate
     }
 
     init(from decoder: Decoder) throws {
@@ -622,6 +973,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         resolvedAt = try c.decode(String.self, forKey: .resolvedAt)
         detail = try c.decodeIfPresent(String.self, forKey: .detail)
         inferred = try c.decodeIfPresent(Bool.self, forKey: .inferred) ?? false
+        indeterminate = try c.decodeIfPresent(Bool.self, forKey: .indeterminate) ?? false
     }
 
     var resolvedDate: Date { ISO8601.parse(resolvedAt) ?? .distantPast }
@@ -679,6 +1031,256 @@ extension AnswerResult: Codable {
         case .rejected(let reason):
             try c.encode("rejected", forKey: .status)
             try c.encode(reason, forKey: .reason)
+        }
+    }
+}
+
+// MARK: - Codex resolution envelope
+
+/// Who a Codex prompt was resolved by. Decode-only, and an unrecognised actor
+/// is retained rather than coerced: nothing here may guess who acted.
+enum ResolutionActor: Decodable, Sendable, Hashable {
+    case phone, local
+    /// An actor a newer daemon names and this build does not.
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "phone": self = .phone
+        case "local": self = .local
+        case let other: self = .unknown(other)
+        }
+    }
+}
+
+/// Why a Codex prompt was cleared without an answer. `turnAborted` is
+/// load-bearing — it is how the app learns the turn itself went away — so it
+/// must decode and be retained, never folded into the unknown fallback.
+enum ClearCause: Decodable, Sendable, Hashable {
+    case turnAborted, turnCompleted, superseded
+    /// **The item finished, and the turn is still running.** Deliberately not
+    /// `turnCompleted` (`ws.rs`) — the two say opposite things about whether
+    /// there is anything left to stop, and folding this one into the unknown
+    /// bucket put it beside causes that mean the session is over.
+    case itemCompleted
+    /// A cause a newer daemon names and this build does not.
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "turn_aborted": self = .turnAborted
+        case "turn_completed": self = .turnCompleted
+        case "superseded": self = .superseded
+        case "item_completed": self = .itemCompleted
+        case let other: self = .unknown(other)
+        }
+    }
+}
+
+/// How far a write got before the daemon lost sight of it, on the
+/// `status:"unknown"` path. Each value is a strictly weaker claim than the
+/// last, and an unrecognised stage is retained rather than assumed to be any
+/// of them.
+enum WriteStage: Decodable, Sendable, Hashable {
+    case claimedNotEnqueued, brokerIngressAccepted, upstreamWriteUnconfirmed
+    /// A stage a newer daemon names and this build does not.
+    case unknown(String)
+
+    init(from decoder: Decoder) throws {
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "claimed_not_enqueued": self = .claimedNotEnqueued
+        case "broker_ingress_accepted": self = .brokerIngressAccepted
+        case "upstream_write_unconfirmed": self = .upstreamWriteUnconfirmed
+        case let other: self = .unknown(other)
+        }
+    }
+}
+
+/// What became of a Codex approval prompt at the agent seam, internally tagged
+/// by `status`. **Decode-only** — nothing in the app sends one — and an
+/// unrecognised status is kept in its own `unrecognisedStatus` case so a daemon
+/// ahead of this build never collapses into `timeout` or any other real
+/// outcome. Nothing renders these yet; they only need to decode and retain.
+enum CodexResolution: Decodable, Sendable, Hashable {
+    /// The prompt was answered. `decision` is omitted when the daemon recorded
+    /// no decision alongside the actor.
+    case answered(by: ResolutionActor, decision: AnswerDecision?)
+    /// The prompt went away without an answer. `cause` says why.
+    case cleared(cause: ClearCause)
+    /// The prompt aged out.
+    case timeout
+    /// The wire's own `status:"unknown"` — the daemon attempted a write and
+    /// could not confirm it. Distinct from an unrecognised status word.
+    case unknown(
+        attemptedBy: ResolutionActor, attemptedDecision: AnswerDecision?, writeStage: WriteStage,
+        cause: String)
+    /// A `status` word this build has never seen, retained verbatim. Kept apart
+    /// from every real outcome so a future status can never be read as one.
+    case unrecognisedStatus(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case status, by, decision, cause
+        case attemptedBy = "attempted_by"
+        case attemptedDecision = "attempted_decision"
+        case writeStage = "write_stage"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .status) {
+        case "answered":
+            self = .answered(
+                by: try c.decode(ResolutionActor.self, forKey: .by),
+                decision: try c.decodeIfPresent(AnswerDecision.self, forKey: .decision))
+        case "cleared":
+            self = .cleared(cause: try c.decode(ClearCause.self, forKey: .cause))
+        case "timeout":
+            self = .timeout
+        case "unknown":
+            self = .unknown(
+                attemptedBy: try c.decode(ResolutionActor.self, forKey: .attemptedBy),
+                attemptedDecision: try c.decodeIfPresent(
+                    AnswerDecision.self, forKey: .attemptedDecision),
+                writeStage: try c.decode(WriteStage.self, forKey: .writeStage),
+                cause: try c.decode(String.self, forKey: .cause))
+        case let other:
+            self = .unrecognisedStatus(other)
+        }
+    }
+}
+
+// MARK: - Codex mutations
+
+/// What became of an `interrupt` — **four genuinely different pieces of news**,
+/// and `ws.rs` says so in its own words: the turn reached its aborted boundary /
+/// this exact ask already did that / nothing was actuated and here is why / the
+/// stop was issued and this daemon did not live to see what it did.
+///
+/// Collapsing any pair of them would make the phone claim something it was not
+/// told. Tagged on **`status`**, like every other result on this wire.
+///
+/// **Decode-only.** Nothing in the app constructs one to send.
+enum InterruptResult: Decodable, Sendable, Hashable {
+    /// The turn reached its aborted boundary. `turnID` is the one the phone
+    /// itself named, so returning it discloses nothing.
+    case aborted(turnID: String)
+    /// This exact request already did that. Idempotence, reported honestly
+    /// rather than replayed as a fresh abort.
+    case duplicate(turnID: String)
+    /// Nothing was actuated, and `reason` says which condition failed. The
+    /// daemon writes these sentences to be shown verbatim.
+    case rejected(reason: String)
+    /// The stop was issued and the daemon never learned what it did. **Not a
+    /// refusal**: a refusal promises nothing happened, and this promises
+    /// nothing at all — so it must never be offered a retry that re-sends.
+    case indeterminate(reason: String)
+    /// **A status this build has never seen.**
+    ///
+    /// Its own case, and it took a review to get here: it used to decode as
+    /// `.indeterminate`, which is not a neutral fallback — `indeterminate`
+    /// asserts *the mutation was issued*. A future `cancelled_before_send`
+    /// would therefore have rendered "Sent, outcome unknown" and suppressed a
+    /// retry that was perfectly safe. This case claims neither actuation nor
+    /// non-actuation, which is the only honest reading of a word this build
+    /// cannot interpret.
+    case unknown(status: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case status, reason
+        case turnID = "turn_id"
+    }
+
+    /// The turn, on the two arms that carry one. `nil` on both refusal arms —
+    /// the redaction contract, as a property rather than as a comment.
+    var turnID: String? {
+        switch self {
+        case .aborted(let id), .duplicate(let id): return id
+        case .rejected, .indeterminate, .unknown: return nil
+        }
+    }
+
+    /// The daemon's own sentence, shown verbatim wherever it exists.
+    var reason: String? {
+        switch self {
+        case .rejected(let reason), .indeterminate(let reason): return reason
+        case .aborted, .duplicate, .unknown: return nil
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .status) {
+        case "aborted": self = .aborted(turnID: try c.decode(String.self, forKey: .turnID))
+        case "duplicate": self = .duplicate(turnID: try c.decode(String.self, forKey: .turnID))
+        case "rejected": self = .rejected(reason: try c.decode(String.self, forKey: .reason))
+        case "indeterminate":
+            self = .indeterminate(reason: try c.decode(String.self, forKey: .reason))
+        case let other:
+            self = .unknown(status: other)
+        }
+    }
+}
+
+/// What became of a `compose` — five arms, and `started` and `steered` must not
+/// be collapsed (`ws.rs`). Which one arrives is the answer to *"what did my
+/// words do"*, and it is decided by what the session was doing at the instant
+/// the daemon wrote, not by anything the phone could predict when it tapped.
+///
+/// **Decode-only.** Tagged on `status`.
+enum ComposeResult: Decodable, Sendable, Hashable {
+    /// Codex was idle: the words began the turn it is running now.
+    case started(turnID: String)
+    /// Codex was mid-turn: the words joined it. **The same turn**, not a new
+    /// one — a steer produces no `turn/started`.
+    case steered(turnID: String)
+    /// A replay of a request already claimed. `started` is **required** on the
+    /// wire, no default: the route is snapshotted at the claim, so a retry after
+    /// the session moved reports what actually happened rather than what would
+    /// happen now — and a defaulted flag would render a replay with the wrong
+    /// verb.
+    case duplicate(turnID: String, started: Bool)
+    /// Nothing was sent, and `reason` says why. Verbatim.
+    case rejected(reason: String)
+    /// Written, outcome unknown, **never retried automatically**.
+    case indeterminate(reason: String)
+    /// A status this build has never seen — see `InterruptResult.unknown`. It
+    /// claims neither that the words were said nor that they were not.
+    case unknown(status: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case status, reason, started
+        case turnID = "turn_id"
+    }
+
+    var turnID: String? {
+        switch self {
+        case .started(let id), .steered(let id), .duplicate(let id, _): return id
+        case .rejected, .indeterminate, .unknown: return nil
+        }
+    }
+
+    var reason: String? {
+        switch self {
+        case .rejected(let reason), .indeterminate(let reason): return reason
+        case .started, .steered, .duplicate, .unknown: return nil
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .status) {
+        case "started": self = .started(turnID: try c.decode(String.self, forKey: .turnID))
+        case "steered": self = .steered(turnID: try c.decode(String.self, forKey: .turnID))
+        case "duplicate":
+            self = .duplicate(
+                turnID: try c.decode(String.self, forKey: .turnID),
+                // Required, deliberately: `decode`, never `decodeIfPresent`.
+                started: try c.decode(Bool.self, forKey: .started))
+        case "rejected": self = .rejected(reason: try c.decode(String.self, forKey: .reason))
+        case "indeterminate":
+            self = .indeterminate(reason: try c.decode(String.self, forKey: .reason))
+        case let other:
+            self = .unknown(status: other)
         }
     }
 }
@@ -962,6 +1564,17 @@ enum ClientMessage: Sendable {
     case terminalCredit(attachmentID: String, bytes: UInt32)
     /// Close the terminal. The session and the agent are untouched.
     case terminalDetach(attachmentID: String)
+    /// **Stop a Codex session's running turn.** Minor 15 to decode, minor 17 to
+    /// honour. All four fields are required — none is defaulted at the Mac.
+    ///
+    /// `session` is the `session_uid`, always: `payloadHash` is computed over
+    /// *the string this field carries* (`state.rs` recomputes with the client's
+    /// own spelling), so alternating spellings under one request id is a
+    /// self-inflicted `stale payload_hash`.
+    case interrupt(session: String, requestID: String, turnID: String, payloadHash: String)
+    /// **Say something to a Codex session.** Minor 18, and the one message an
+    /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
+    case compose(session: String, requestID: String, text: String, payloadHash: String)
     case ping
 }
 
@@ -992,6 +1605,7 @@ extension ClientMessage: Encodable {
         case outputCredit = "output_credit"
         case bytes
         case data
+        case turnID = "turn_id"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1098,6 +1712,20 @@ extension ClientMessage: Encodable {
         case .terminalDetach(let attachmentID):
             try c.encode("terminal_detach", forKey: .type)
             try c.encode(attachmentID, forKey: .attachmentID)
+        case .interrupt(let session, let requestID, let turnID, let payloadHash):
+            try c.encode("interrupt", forKey: .type)
+            // All four required at the Mac, so all four are plain `encode` —
+            // an omitted key here is a frame the daemon rejects outright.
+            try c.encode(session, forKey: .sessionID)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(turnID, forKey: .turnID)
+            try c.encode(payloadHash, forKey: .payloadHash)
+        case .compose(let session, let requestID, let text, let payloadHash):
+            try c.encode("compose", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(text, forKey: .text)
+            try c.encode(payloadHash, forKey: .payloadHash)
         case .ping:
             try c.encode("ping", forKey: .type)
         }
@@ -1331,6 +1959,12 @@ enum ServerMessage: Sendable {
     /// The terminal ended. `code` is one of the `terminal_close` strings and
     /// `reason` is human text; terminal for this attachment id.
     case terminalClosed(attachmentID: String, code: String, reason: String)
+    /// The answer to one `interrupt`. `sessionID` and `requestID` are echoed
+    /// back as the phone sent them, so correlation is exact-string on the id
+    /// this end minted.
+    case interruptResult(sessionID: String, requestID: String, result: InterruptResult)
+    /// The answer to one `compose`, same correlation.
+    case composeResult(sessionID: String, requestID: String, result: ComposeResult)
     case error(code: String, message: String)
     case pong
     /// A message type this build does not know. Kept rather than thrown away so
@@ -1440,6 +2074,16 @@ extension ServerMessage: Decodable {
                 attachmentID: try c.decode(String.self, forKey: .attachmentID),
                 code: try c.decodeIfPresent(String.self, forKey: .code) ?? "",
                 reason: try c.decodeIfPresent(String.self, forKey: .reason) ?? "")
+        case "interrupt_result":
+            self = .interruptResult(
+                sessionID: try c.decode(String.self, forKey: .sessionID),
+                requestID: try c.decode(String.self, forKey: .requestID),
+                result: try c.decode(InterruptResult.self, forKey: .result))
+        case "compose_result":
+            self = .composeResult(
+                sessionID: try c.decode(String.self, forKey: .sessionID),
+                requestID: try c.decode(String.self, forKey: .requestID),
+                result: try c.decode(ComposeResult.self, forKey: .result))
         case "pong":
             self = .pong
         case let other:

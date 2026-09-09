@@ -37,8 +37,8 @@ use protocol::pairing::DeviceSummary;
 use protocol::ws::AnswerOutcome;
 
 use crate::store::{
-    AnswerClaim, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume, PendingApprovalRow,
-    PrunedSession, SessionRow, Store, TailCursor, TextClaim,
+    AnswerClaim, CodexPendingApprovalRow, DeviceLookup, DeviceRow, LedgerWrite, PairingConsume,
+    PendingApprovalRow, PrunedSession, SessionRow, Store, TailCursor, TextClaim,
 };
 
 #[derive(Clone)]
@@ -111,10 +111,22 @@ db_ops! {
     fn count_events_of_kind(session_uid: String, kind: EventKind) -> u64;
     fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;
+    /// The durable Codex generation high-water for one uid (plan A5.1), or
+    /// `None` when nothing provable has been adopted under it.
+    fn codex_generation(session_uid: String) -> Option<u64>;
     fn find_session(reference: String) -> Option<SessionRow>;
     fn list_sessions() -> Vec<SessionRow>;
     fn list_pending_approvals() -> Vec<PendingApprovalRow>;
     fn upsert_pending_approval(row: PendingApprovalRow) -> bool;
+    /// File one Codex approval card **and** the `ApprovalRequest` it stands
+    /// behind, in one commit. Idempotent on the item, so a re-delivered request
+    /// rebinds the card it already raised instead of minting a second.
+    fn raise_codex_pending_approval(
+        row: CodexPendingApprovalRow,
+        pending: PendingEvent,
+    ) -> crate::store::CodexCardRaise;
+    /// Every open Codex card for one run, with the identity retirement queries.
+    fn codex_pending_approvals(session_uid: String) -> Vec<CodexPendingApprovalRow>;
     fn name_is_tombstoned(session_id: String) -> bool;
     fn clear_name_tombstone(session_id: String) -> ();
     fn claim_answer(claim: AnswerClaim) -> ();
@@ -124,6 +136,15 @@ db_ops! {
     fn device_is_active(device_id: String) -> bool;
     /// Where this device's token is registered, or `None` when it has none.
     fn push_environment_for(device_id: String) -> Option<String>;
+    /// One device's push registration under this run's feature epoch, or `None`
+    /// when it has nothing to offer. The per-device form of
+    /// [`crate::store::Store::push_targets`], and the read behind the
+    /// authorization re-check a push worker makes before each transport attempt
+    /// — which is about one device id and must not pay for the whole fleet.
+    fn push_target_for(
+        device_id: String,
+        epoch: String,
+    ) -> Option<crate::store::PushRegistration>;
     fn recover_text_mutations(at: String) -> usize;
     fn orphan_event_count() -> u64;
 }
@@ -133,6 +154,22 @@ db_ops! {
 // value. Written out rather than bent into the macro, because a macro contorted
 // to fit every case is harder to read than the six functions it saves.
 impl Db {
+    /// Write a session row **and** the Codex generation its registration was
+    /// accepted at, in one statement (plan A5.1).
+    ///
+    /// Hand-written rather than a `db_ops!` entry because the macro passes every
+    /// argument to the store by reference, and the generation is a `Copy` scalar
+    /// the store takes by value — bending the macro to express one call's
+    /// argument kind is the contortion the note above declines.
+    pub async fn upsert_session_at_generation(
+        &self,
+        row: SessionRow,
+        codex_generation: Option<u64>,
+    ) -> Result<crate::store::SessionUpsert> {
+        self.run(move |store| store.upsert_session_at_generation(&row, codex_generation))
+            .await
+    }
+
     /// Append a transcript batch **and** advance its cursor, atomically.
     ///
     /// The batch is the reason this module exists: a cold backfill hands over
@@ -155,6 +192,22 @@ impl Db {
         limit: u32,
     ) -> Result<Vec<Event>> {
         self.run(move |store| store.events_after(&session_uid, after_seq, limit))
+            .await
+    }
+
+    /// Write down the thread the control link at `generation` has adopted. `false`
+    /// when nothing changed — already recorded, or a generation this link does not
+    /// speak for.
+    ///
+    /// Hand-written rather than declared in `db_ops!`, which passes every argument
+    /// to the store by reference: this one takes a `u64` by value.
+    pub async fn bind_codex_thread(
+        &self,
+        session_uid: String,
+        generation: u64,
+        thread_id: String,
+    ) -> Result<bool> {
+        self.run(move |store| store.bind_codex_thread(&session_uid, generation, &thread_id))
             .await
     }
 
@@ -250,6 +303,201 @@ impl Db {
     ) -> Result<()> {
         self.run(move |store| store.delete_pending_approval(&session_uid, &request_id))
             .await
+    }
+
+    /// Delete one Codex card, file its resolution **and** close any phone answer
+    /// claim on it, in one commit. The set is the terminal: a card whose row
+    /// outlived its own resolution is restored by recovery, a resolution with no
+    /// delete is a card that comes back, and a settled claim over a standing card
+    /// is a question nobody can answer again.
+    pub async fn retire_codex_pending_approval(
+        &self,
+        session_uid: String,
+        request_id: String,
+        pending: PendingEvent,
+        answer: Option<crate::store::AnswerTerminal>,
+    ) -> Result<Option<Event>> {
+        self.run(move |store| {
+            store.retire_codex_pending_approval(&session_uid, &request_id, &pending, answer)
+        })
+        .await
+    }
+
+    /// Take the one durable claim on answering a Codex card, in the generalized
+    /// mutation ledger every Codex mutation shares.
+    pub async fn claim_answer_mutation(
+        &self,
+        session_uid: String,
+        request_id: String,
+        claimed: crate::store::ClaimedMaterial,
+        now: String,
+    ) -> Result<crate::store::MutationClaim> {
+        self.run(move |store| {
+            store.claim_mutation(
+                crate::store::OPERATION_ANSWER,
+                &session_uid,
+                &request_id,
+                &claimed,
+                &now,
+            )
+        })
+        .await
+    }
+
+    /// Take durable ownership of one mutation of any kind, or find out who already
+    /// has.
+    ///
+    /// The general form of [`Db::claim_answer_mutation`]. Kept beside it rather than
+    /// replacing it: the answer path names its own kind in one place and this one
+    /// takes it, which is what lets a second producer share the primitive without
+    /// either being able to claim under the other's key by accident.
+    pub async fn claim_mutation(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+        claimed: crate::store::ClaimedMaterial,
+        now: String,
+    ) -> Result<crate::store::MutationClaim> {
+        self.run(move |store| {
+            store.claim_mutation(
+                operation_kind,
+                &session_uid,
+                &client_request_id,
+                &claimed,
+                &now,
+            )
+        })
+        .await
+    }
+
+    /// Record a mutation's terminal outcome, so a retry replays it rather than
+    /// actuating again. `false` when the claim was already terminal.
+    pub async fn settle_mutation(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+        // **An owned string, not a `&'static str`.** The interrupt's outcomes are a fixed
+        // vocabulary of three words; a compose's carries the turn that heard it, which is
+        // known only at runtime.
+        outcome: String,
+        settled_at: String,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.settle_mutation(
+                operation_kind,
+                &session_uid,
+                &client_request_id,
+                &outcome,
+                &settled_at,
+            )
+        })
+        .await
+    }
+
+    /// Make one claim terminal without being able to say what it did.
+    pub async fn settle_mutation_indeterminate(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+        settled_at: String,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.settle_mutation_indeterminate(
+                operation_kind,
+                &session_uid,
+                &client_request_id,
+                &settled_at,
+            )
+        })
+        .await
+    }
+
+    /// Record an answer's terminal outcome for a card that is not being retired —
+    /// a loss, where something else answered and its own terminal retires the
+    /// card. `false` when the claim was already terminal.
+    pub async fn settle_answer_mutation(
+        &self,
+        session_uid: String,
+        request_id: String,
+        outcome: &'static str,
+        now: String,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.settle_mutation(
+                crate::store::OPERATION_ANSWER,
+                &session_uid,
+                &request_id,
+                outcome,
+                &now,
+            )
+        })
+        .await
+    }
+
+    /// Make one answer claim terminal without being able to say what it did.
+    /// Reached only for a claim whose card is already gone; one that still has a
+    /// card is settled inside the retirement's own transaction.
+    pub async fn settle_answer_indeterminate(
+        &self,
+        session_uid: String,
+        request_id: String,
+        now: String,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.settle_mutation_indeterminate(
+                crate::store::OPERATION_ANSWER,
+                &session_uid,
+                &request_id,
+                &now,
+            )
+        })
+        .await
+    }
+
+    /// Where one phone answer's claim stands, durably.
+    pub async fn answer_status(
+        &self,
+        session_uid: String,
+        request_id: String,
+    ) -> Result<Option<crate::store::AnswerStatus>> {
+        self.run(move |store| store.answer_status(&session_uid, &request_id))
+            .await
+    }
+
+    /// Every mutation of one kind this daemon left mid-flight, for recovery.
+    pub async fn unsettled_claims(
+        &self,
+        operation_kind: &'static str,
+    ) -> Result<Vec<crate::store::MutationClaimRow>> {
+        self.run(move |store| store.unsettled_claims(operation_kind))
+            .await
+    }
+
+    /// The applying claims of one kind belonging to one session, for settling its
+    /// stranded claims at a handover rather than the whole store at a restart.
+    pub async fn unsettled_claims_for(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+    ) -> Result<Vec<crate::store::MutationClaimRow>> {
+        self.run(move |store| store.unsettled_claims_for(operation_kind, &session_uid))
+            .await
+    }
+
+    /// Where one claim of any kind stands, durably.
+    pub async fn mutation_status(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+    ) -> Result<Option<crate::store::MutationState>> {
+        self.run(move |store| {
+            store.mutation_status(operation_kind, &session_uid, &client_request_id)
+        })
+        .await
     }
 
     pub async fn claim_text_mutation(
@@ -348,6 +596,16 @@ impl Db {
             .await
     }
 
+    /// See [`crate::store::Store::turn_terminal_filed`].
+    pub async fn turn_terminal_filed(
+        &self,
+        session_uid: String,
+        terminal_source_event_id: String,
+    ) -> Result<bool> {
+        self.run(move |store| store.turn_terminal_filed(&session_uid, &terminal_source_event_id))
+            .await
+    }
+
     pub async fn revoke_device(&self, device_id: String, at: String) -> Result<bool> {
         self.run(move |store| store.revoke_device(&device_id, &at))
             .await
@@ -397,6 +655,9 @@ mod tests {
                 lifecycle: Lifecycle::Live,
                 created_at: now.clone(),
                 updated_at: now,
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
             })
             .unwrap()
             .assert_present();

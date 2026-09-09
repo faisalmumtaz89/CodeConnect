@@ -1,0 +1,40 @@
+codex 0.153.4 — what a turn/start and a turn/steer meet, per leg
+================================================================
+
+codex-cli 0.153.4, sha256 b973d440acac501fd2594a43e7ca9ce41e0a65b9dfb28d0d7a7837c99e1261e3.
+The 'as' rows are the app-server's OWN socket with no broker in between; the 'ccd'
+and 'tui' rows are the broker's two legs. Absolute paths scrubbed to /work/.
+
+--- the app-server itself ---
+leg=as     scenario=steer, no active turn              method=turn/steer     -> error code=-32600 message="no active turn to steer"
+leg=as     scenario=steer, thread names nothing        method=turn/steer     -> error code=-32600 message="thread not found: d06804e0-9174-48d2-8001-d29174d06804"
+leg=as     scenario=steer with EMPTY input             method=turn/steer     -> error code=-32600 message="no active turn to steer"
+leg=as     scenario=M3 byte-identical turn/start, idle thread, 2nd conn method=turn/start     -> result={"turn": {"id": "01a07b25-af6e-7821-b7c7-ee15046d55ab", "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": null, "startedAt": null, "completedAt": null, "durationMs": null}}
+leg=as     scenario=M4 steer, STALE expectedTurnId (names nothing) method=turn/steer     -> error code=-32600 message="expected active turn id `d067ed70-9174-48d2-8001-d29174d067ed` but found `01a07b25-af6e-7821-b7c7-ee15046d55ab`"
+leg=as     scenario=M5 steer, expectedTurnId of a turn that MOVED method=turn/steer     -> error code=-32600 message="expected active turn id `01a07b25-af6e-7821-b7c7-ee15046d55a0` but found `01a07b25-af6e-7821-b7c7-ee15046d55ab`"
+leg=as     scenario=steer, correct expectedTurnId, DIFFERENT connection method=turn/steer     -> result={"turnId": "01a07b25-af6e-7821-b7c7-ee15046d55ab"}
+leg=as     scenario=M4 turn/start while a turn is BUSY (implicit steer?) method=turn/start     -> result={"turn": {"id": "01a07b25-af6e-7821-b7c7-ee15046d55ab", "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": null, "startedAt": null, "completedAt": null, "durationMs": null}}
+leg=as     scenario=interrupt the probe turn                     method=turn/interrupt -> result={}
+leg=as     scenario=M5 steer AFTER the turn terminalised         method=turn/steer     -> error code=-32600 message="no active turn to steer"
+
+--- the broker's legs ---
+leg=ccd    scenario=M3 byte-identical turn/start       method=turn/start     -> error code=-32001 message="method refused: not permitted for this endpoint role"
+leg=ccd    scenario=turn/steer                         method=turn/steer     -> error code=-32001 message="method refused: not permitted for this connection"
+leg=ccd    scenario=turn/start WITHOUT serviceTier (23 keys) method=turn/start     -> error code=-32001 message="method refused: not permitted for this endpoint role"
+leg=ccd    scenario=turn/start (23 keys) naming a foreign thread method=turn/start     -> error code=-32001 message="method refused: not permitted for this endpoint role"
+leg=ccd    scenario=turn/start (23 keys) foreign cwd   method=turn/start     -> error code=-32001 message="method refused: not permitted for this endpoint role"
+leg=tui    scenario=M3 byte-identical turn/start       method=turn/start     -> error code=-32001 message="request refused by session policy"
+leg=tui    scenario=turn/steer                         method=turn/steer     -> error code=-32601 message="method not available yet through the broker"
+leg=tui    scenario=turn/start WITHOUT serviceTier (23 keys) method=turn/start     -> error code=-32001 message="turn refused: it does not run in the workspace bound at its thread's creation"
+leg=tui    scenario=turn/start (23 keys) naming a foreign thread method=turn/start     -> error code=-32001 message="turn refused: it does not name this session's bound thread"
+leg=tui    scenario=turn/start (23 keys) foreign cwd   method=turn/start     -> error code=-32001 message="turn refused: it does not run in the workspace bound at its thread's creation"
+
+--- the broker's own verdicts (broker.log lines naming a turn) ---
+"Ccd: refuse->synthetic error (turn/start: refused (RoleNotPermitted)) (conn 2)"
+"Ccd: refuse->synthetic error (turn/steer: refused (NotAllowlisted)) (conn 2)"
+"Tui: refuse->synthetic error (turn/start names thread d06804e0-9174-48d2-8001-d29174d06804 but this session's bound thread is 01a07b20-43da-79c0-8d19-234e29e10340) (conn 3)"
+"Tui: refuse->synthetic error (turn/start: fingerprint refused (Unprovable): turn/start params: unknown top-level parameter (1 of 24) — captured boundary: a top-level param outside the measured turn/start set has an authorization effect that was never observed and cannot be proven (widening requires a NEW capture, not an argument). Key names are withheld from the audit log.) (conn 1)"
+"Tui: refuse->synthetic error (turn/start: fingerprint refused (Unprovable): turn/start params: unknown top-level parameter (1 of 24) — captured boundary: a top-level param outside the measured turn/start set has an authorization effect that was never observed and cannot be proven (widening requires a NEW capture, not an argument). Key names are withheld from the audit log.) (conn 3)"
+"Tui: refuse->synthetic error (turn/start: params.cwd does not equal the cwd bound at this thread's                      creation (turn: string(len=14); bound: string(len=12)) — values withheld from the audit log) (conn 3)"
+"Tui: refuse->synthetic error (turn/start: params.runtimeWorkspaceRoots does not equal the roots                      bound at this thread's creation (turn: array(len=1); bound: array(len=1)) — values                      withheld from the audit log) (conn 3)"
+"Tui: refuse->synthetic error (turn/steer: disposition deferred to switch sub-chunk) (conn 3)"

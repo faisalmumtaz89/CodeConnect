@@ -10,13 +10,29 @@ description = "CodeConnect shim: hosts a real claude session in a private tmux s
 name = "codeconnect"
 path = "src/main.rs"
 
-# No tokio: the shim execs away within milliseconds and the supervisor is a
-# two-thread blocking loop. An async runtime would be pure startup cost.
+[features]
+default = []
+# Compiles the broker's verbatim frame recorder into the host. A capture build
+# only — `cargo build -p codeconnect --features frame-tee` — and never the
+# default, so the binary a user runs cannot record a session whatever its
+# environment says. See `codex_broker::frame_tee`.
+frame-tee = ["codex-broker/frame-tee"]
+
+# The shim/supervisor/coordinator/custodian are deliberately SYNC: they exec away
+# within milliseconds or run a blocking loop, so an async runtime would be pure
+# startup cost on those paths. The ONE exception is the `internal-codex-host`
+# subcommand (`codex_host.rs`) — a long-lived async orchestrator that drives the
+# broker's two UDS listeners and races two child processes. It builds a tokio
+# runtime *inside* `run_host` and nowhere else, so the fast-exec paths never pay
+# for it. `codex-broker` is the in-wrapper WS-over-UDS relay it serves.
 [dependencies]
 protocol = { workspace = true }
+codex-broker = { path = "../codex-broker" }
 anyhow = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 sha2 = { workspace = true }
 qrcode = { workspace = true }
+tokio = { workspace = true }

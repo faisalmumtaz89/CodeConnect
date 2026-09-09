@@ -18,7 +18,9 @@
 
 use std::path::PathBuf;
 
+pub mod agent;
 pub mod build_identity;
+pub mod composite_id;
 pub mod config;
 pub mod event;
 pub mod fsperm;
@@ -27,6 +29,7 @@ pub mod hook;
 pub mod ipc;
 pub mod pairing;
 pub mod proc;
+pub mod proc_identity;
 pub mod risk;
 pub mod secret;
 pub mod time;
@@ -281,7 +284,309 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         token's environment and corrects the daemon on an accepted send;
 ///         this is how that correction reaches the phone, which persists it
 ///         rather than resending the value it first cached.
-pub const PROTOCOL_MINOR: u32 = 14;
+///   * `15` — **the agent seam.** Everything here is additive and a client
+///     written against minor 14 needs none of it; it is the wire, storage and
+///     config groundwork for a second agent (Codex) whose *behaviour* lands in
+///     later work. A Claude session is byte-identical to minor 14 — the point
+///     of the number is that a peer can now *say* Codex without a Claude peer
+///     having to understand it.
+///       - [`agent::AgentKind`] (`claude` | `codex` | a preserved
+///         `Unsupported` name). Absent decodes as Claude; an **unrecognised**
+///         name never does — it fails closed. It rides
+///         [`ipc::RegisterSession::agent`], [`event::SessionSummary::agent`],
+///         and the session storage row.
+///       - additive [`ipc::RegisterSession`] fields — `agent`, `agent_bin`,
+///         `codex_thread_id`, `codex_socket`, `codex_generation` — all
+///         tolerated-absent by an older daemon, and a pre-`Register`
+///         support-negotiation pair ([`ipc::ClientFrame::NegotiateSupport`] /
+///         [`ipc::DaemonFrame::SupportedAgents`]). The daemon adopts a
+///         registration only when its `codex_generation` is not older than one
+///         it already holds, so a stale supervisor frame cannot overwrite newer
+///         adapter state.
+///       - [`ws::Capabilities::supported_agents`] (the daemon's honest list —
+///         `["claude"]` until Codex actuation ships), [`ws::ClientFeatures`] on
+///         the [`ws::ClientMessage::Hello`] and [`ws::ClientMessage::RegisterPush`]
+///         frames (a client that advertises no agents is Claude-only), and a
+///         per-session [`event::SessionSummary::agent`] fact. A per-session fact
+///         is authoritative; a missing one falls back to connection-global
+///         **only for Claude**, and Codex or an unknown agent fails closed.
+///       - the [`ws::CodexResolution`] envelope (a *separate* discriminated
+///         type, so Claude's [`ws::AnswerOutcome`]/[`ws::AnswerResult`] stay
+///         byte-identical), an additive opaque [`ws::AnswerDecision::OptionId`]
+///         variant, and an [`ws::ClientMessage::Interrupt`] operation
+///         (**defined here, and refused daemon-side at this minor**; honoured
+///         from minor 17).
+///       - the [`composite_id`] wire-id codec: a versioned, type-tagged,
+///         length-bounded base64url encoding of `(session_uid, thread_id,
+///         server_request_id, generation)`, opaque to the phone's request-id
+///         correlation.
+///
+///     [`ws::ClientFeatures`] stays wire-legal on `hello` and `register_push`
+///     and is **ignored**: no shipping client encodes it, so the daemon stores
+///     nothing and every device sits at the Claude-only floor. The read that
+///     authorizes a push is nonetheless already fail-closed — a stored set not
+///     confirmed under the running daemon's epoch authorizes nothing rather than
+///     falling back to the floor — which is what keeps a Codex doorbell from
+///     reaching a phone that cannot render one. The write arrives with the phone
+///     work that can advertise it.
+///
+///     [`ipc::RegisterSession::exit_replay`] rides here too, and it is the one
+///     addition that is not about agents at all: it marks the registration a
+///     supervisor replays on the way to reporting its own exit, so a daemon can
+///     tell a corpse's frame from a supervisor arriving. **The number is not
+///     bumped for it and must not be.** Nothing negotiates on it: absent decodes
+///     `false`, which is precisely the behaviour that shipped, and an older daemon
+///     ignores the field entirely. It only ever *withholds* an adoption — there is
+///     no peer that has to understand it in order to stay correct, which is the
+///     only thing the minor exists to say.
+///   * `16` — **a phone answer to a Codex approval, and an `applied_via` that can
+///     name what it did.** One addition, [`ws::AnswerPath::CodexResponse`]: the
+///     JSON-RPC response to the app-server's own `requestApproval`, written on the
+///     Codex link's socket. Neither of the two paths that had existed since minor
+///     0 can describe it, and the difference is not cosmetic — nothing is rendered
+///     and nothing is typed, so first-answer-wins is a property of the broker's
+///     arbiter rather than of a TTY, and the loser of that race is a fact the
+///     daemon is *told* rather than one it infers. A successful Codex answer that
+///     had to report `send_keys` would have claimed an actuation that never
+///     happened, at the Mac's keyboard, in a session Claude was not running.
+///
+///     **Additive, and a client written against minor 15 cannot even be shown it.**
+///     Claude's [`ws::AnswerPath`] serialization is byte-identical: no Claude
+///     answer takes this path. `answer_result` is a reply on the connection that
+///     sent the `answer`, so the only client that receives a `codex_response` is
+///     one that just answered a Codex approval — which a client below minor 15
+///     cannot do. What the variant does rely on is a property every decoder should
+///     already have had, because this is the *first* variant ever added to the
+///     enum: an unrecognised `applied_via` is retained and reported as
+///     unvouchable, never treated as a frame failure.
+///
+///     Nothing else in that work reached the wire. The durable answer claim, the
+///     broker's arbiter and the `responseDisposition` receipt it sends the daemon
+///     about its own write are Mac-side machinery; they change what the daemon
+///     *knows* before it speaks, not what it says, and the number records only the
+///     second.
+///   * `17` — **`interrupt` is honoured rather than refused.** Minor 15 put the
+///     [`ws::ClientMessage::Interrupt`] operation on the wire and the daemon
+///     answered [`ws::InterruptResult::Rejected`] to every one of them. From here
+///     the daemon actually aborts the turn a Codex session is running: the local
+///     gate binds the ask to the exact turn, thread and visit generation it holds,
+///     the broker binds it again to the session's own active turn, and the
+///     durable claim makes a retry replay a recorded outcome instead of stopping
+///     something twice. Two things a client must know, and a client written
+///     against minor 16 needs neither:
+///       - [`ws::Capabilities::interrupt`] — this daemon honours the operation.
+///         Advertised rather than assumed, because nothing else on the wire
+///         separates a daemon that stops the turn from one that refuses every
+///         ask: both accept the message and both answer an `interrupt_result`. A
+///         phone would otherwise have to tap a Stop button to discover it does
+///         nothing, and this app's rule is that an action the daemon cannot
+///         perform is not offered. Absent decodes `false`, which is exactly what
+///         an older daemon meant. The flag is a build fact and is *not* the whole
+///         test: interrupt exists only for Codex, so a client scopes the control
+///         by the session's [`event::SessionSummary::agent`] as well.
+///       - the other three statuses actually arrive. `aborted`, `duplicate` and
+///         `indeterminate` were wire-legal from minor 15 and never sent; they are
+///         sent now, and they carry different news — the turn stopped, it had
+///         already stopped, or a stop was issued whose outcome nobody can name.
+///         **Sent to every client**, for the reason minor 9 gives about
+///         `SendTextResult`: a `hello` carries no client minor to branch on, so a
+///         decoder that treats an unrecognised status as a decode failure rather
+///         than as indeterminate was always the thing that would break.
+///
+///     Nothing changed shape. [`ws::ClientMessage::Interrupt`]'s fields and
+///     [`ws::InterruptResult`]'s variants are byte-identical to minor 15; what
+///     changed is that the daemon now does the thing, which is precisely the kind
+///     of fact a minor exists to let a peer assume rather than probe for.
+///   * `18` — **`compose`: the phone says something to a Codex session.**
+///     [`ws::ClientMessage::Compose`] carries words and a ledger identity; the daemon
+///     decides what becomes of them from what the session is doing when it writes — a
+///     `turn/start` on an idle thread, a `turn/steer` into a running turn — and answers
+///     with a [`ws::ComposeResult`] that says which. Three things a client must know,
+///     and a client written against minor 17 needs all three:
+///       - [`ws::Capabilities::codex_compose`] — this daemon understands the message.
+///         Stronger than its interrupt sibling: `compose` is a NEW message, so a daemon
+///         below this minor decodes nothing and answers nothing, and a phone that sent
+///         one would wait for ever. Absent decodes `false`, which is what such a daemon
+///         meant. Compose exists only for Codex, so the affordance is scoped by the
+///         session's [`event::SessionSummary::agent`] as well.
+///       - **`started` and `steered` are different news and must not be collapsed.** The
+///         first says these words began a turn; the second says they joined one already
+///         running, whose id is the SAME turn — a steer produces no `turn/started` and
+///         the only terminal is the original turn's. A client that rendered both as
+///         "sent" would lose the one fact the operator asked for.
+///       - **the route is snapshotted, so a duplicate replays what happened rather than
+///         what would happen now.** A compose issued as a start is re-issued as a start;
+///         it never becomes a steer because the session has since become busy, which
+///         would put the words into a turn nobody composed them for.
+///
+///     Nothing existing changed shape. `send_text` is untouched and stays Claude's: it
+///     types at the Mac's TTY and shares no ledger, result type or failure vocabulary
+///     with this.
+///   * `19` — **a phone can drive a Codex session from the fleet without inferring
+///     anything.** Three additive fields, each closing a hole a client would
+///     otherwise have had to guess across, and a client written against minor 18
+///     needs all three:
+///       - [`ws::CodexResolutionPayload::request_id`] — the `approval_resolved`
+///         payload for a Codex card now names the card. It carried no id at all, so
+///         the only correlation was a `"resolved:"` prefix parse on the event's
+///         `source_event_id`: a string parse on an `Option<String>` whose failure is
+///         silent and whose symptom is an answered card standing on somebody's phone
+///         for ever. Claude's `AnswerOutcome` has carried `request_id` in the payload
+///         since minor 0; this is the same field in the same place, so one rule
+///         correlates both agents. Flattened onto the resolution, so every `status`
+///         arm is byte-identical and a minor-18 decoder still reads the payload.
+///       - **`turn_id` on the approval card's event envelope.** `interrupt` requires
+///         a turn id and the card gave the phone none, so a Stop offered from a card
+///         had to name a turn inferred from the last `tool_call` — an ordering the
+///         phone would have been relying on rather than a contract. The
+///         `*/requestApproval` frame carries `turnId` as a required field (a frame
+///         without it is refused, not carded), so the envelope now carries the turn
+///         the card's own request named. Same envelope field every other Codex event
+///         already uses.
+///       - [`event::SessionSummary::codex_link`] — `"subscribed" | "bound" |
+///         "offline" | "none"`, resolved from the same addressee
+///         `codex_thread_id` is resolved from.
+///
+///         The four words minor 19 shipped are exactly those. `"bound_not_started"`
+///         is minor 20's, and the entry below says why it could not stay here.
+///
+///         This is the limit `ws::Capabilities::codex_interrupt`'s doc named: the
+///         capability is build-shaped and connection-global, and `codex_thread_id`
+///         reads the same whether the link is subscribed, bound or reconnecting, so
+///         per-session actuatability was not computable from the fleet. It is now:
+///         `agent == codex` and `codex_link` is `subscribed`. Absent decodes `none`,
+///         which is exactly what an older daemon's fleet is to a client that cannot
+///         address any of it. A refusal is still the last word — a link can move
+///         between the summary and the tap.
+///
+///     Nothing existing changed shape, and no message was added. `CodexResolution`'s
+///     arms, `ApprovalCard`, and every other summary field are byte-identical to
+///     minor 18.
+///   * `20` — **`codex_link` gains a fifth word: `"bound_not_started"`.**
+///
+///     [`event::SessionSummary::codex_link`] is now `"subscribed" | "bound" |
+///     "bound_not_started" | "offline" | "none"`, and the rule a client scopes its two
+///     Codex controls by is, plainly:
+///
+///     > **`subscribed` actuates both verbs; `bound_not_started` actuates compose only;
+///     > everything else neither.**
+///
+///     The new word is a link bound to a thread the daemon has PROVED has never run a
+///     turn — its own `thread/resume` was refused `-32600 "no rollout found for thread
+///     id …"` — which is the one un-subscribed state a compose may be admitted in: no
+///     rollout means no turn has ever run, so a first `turn/start` cannot collide with
+///     one, and there is correspondingly no turn to stop. It exists to break a dead
+///     end: a fresh Codex thread has no rollout until its first turn, so a phone gated
+///     on `subscribed` could never send the message that would create one.
+///
+///     # Why it is a minor of its own, and why the argument that said otherwise expired
+///
+///     It was written into minor 19 on the ground that minor 19 had never shipped, so
+///     no client anywhere could know four of the words and not the fifth. **That
+///     premise died on 2026-09-08:** commit `66a03a3` "Version 1.1.0 (72): the
+///     TestFlight train for Codex support" — a descendant of `d9b719f`, the minor-19
+///     commit — put build 72 on TestFlight. Build 72 is a live consumer of minor 19, it
+///     knows exactly the four words above, and adding a fifth to a number it has
+///     already negotiated on is the one thing a minor exists to prevent. So the word
+///     takes 20, which is what an unreleased minor would have cost nothing and a
+///     released one costs by definition.
+///
+///     A minor-19 client meeting `"bound_not_started"` is not broken by it: the rule
+///     for a word a client does not know is "not actuatable", which greys both controls
+///     — the same answer it gives for `bound`, and strictly safe, because the only
+///     thing the new word ever widens is a compose. What that client loses is the
+///     affordance, not correctness. A minor-20 client gets the composer on a fresh
+///     thread; that is the whole of the difference.
+///
+///     Nothing changed shape and no message was added. Every other field of
+///     [`event::SessionSummary`] is byte-identical to minor 19, and a decoder that
+///     treats the field as an opaque string — which is what the phone's unrecognised
+///     arm does — reads both minors with one code path.
+pub const PROTOCOL_MINOR: u32 = 20;
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::PROTOCOL_MINOR;
+
+    /// The one shape a ledger entry is written in.
+    ///
+    /// Scanning the source is only honest if this prefix cannot match anything but a
+    /// top-level entry, and it cannot: every line nested inside an entry is indented
+    /// past this column, so a sub-bullet that happens to quote a number is not
+    /// mistaken for an entry about that number.
+    const ENTRY: &str = "///   * `";
+
+    /// The minors the ledger names, in the order it names them.
+    fn minors_the_ledger_names() -> Vec<u32> {
+        let source = include_str!("lib.rs");
+        // The scan is bounded by the two constants the ledger sits between, so it
+        // cannot wander into some other doc comment in this file that bullets a
+        // number. Both anchors appear exactly once in the file.
+        let start = source
+            .find("pub const PROTOCOL_VERSION")
+            .expect("the version constant opens the block the ledger sits in");
+        let end = source
+            .find("pub const PROTOCOL_MINOR")
+            .expect("the ledger documents the minor constant, so it ends at it");
+        source[start..end]
+            .lines()
+            .filter_map(|line| line.strip_prefix(ENTRY))
+            .filter_map(|rest| rest.split_once('`'))
+            .filter_map(|(number, _)| number.parse().ok())
+            .collect()
+    }
+
+    /// **Every minor from 0 to [`PROTOCOL_MINOR`] has an entry, and the ledger claims
+    /// no minor that does not exist.**
+    ///
+    /// Minor 16 shipped with no entry at all. Nothing caught it — the ledger is prose,
+    /// and prose has no compiler — so the gap was found by a human reading the file
+    /// during a release review, which is not a gate and does not run again. This is
+    /// the gate. It fails on a bump that forgets to say what it bought, and equally on
+    /// an entry written for a number the constant has not reached.
+    ///
+    /// It deliberately does **not** check order. The ledger runs `10, 13, 12, 11` for a
+    /// real reason — the terminal work landed before the two smaller additions it was
+    /// developed alongside — and the order entries are told in is the ledger's to
+    /// choose. What it may not do is skip.
+    #[test]
+    fn the_ledger_names_every_minor_from_zero_to_the_current_one() {
+        let named = minors_the_ledger_names();
+
+        let missing: Vec<u32> = (0..=PROTOCOL_MINOR)
+            .filter(|minor| !named.contains(minor))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "minor(s) {missing:?} have no entry in the ledger above `PROTOCOL_MINOR`. \
+             A minor nobody wrote down is one a client cannot negotiate on: say what \
+             it added, or do not bump the number."
+        );
+
+        let unshipped: Vec<u32> = named
+            .iter()
+            .copied()
+            .filter(|minor| *minor > PROTOCOL_MINOR)
+            .collect();
+        assert!(
+            unshipped.is_empty(),
+            "the ledger has entries for minor(s) {unshipped:?}, past `PROTOCOL_MINOR` = \
+             {PROTOCOL_MINOR} — either the constant was not bumped with the prose, or \
+             the prose describes work that has not shipped."
+        );
+
+        let mut sorted = named.clone();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(
+            before,
+            sorted.len(),
+            "the ledger names a minor twice ({named:?}); two entries for one number \
+             means one of them describes a bump that never happened."
+        );
+    }
+}
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";
@@ -307,14 +612,92 @@ pub const ENV_SESSION_UID: &str = "CODECONNECT_SESSION_UID";
 /// about which job they are talking about.
 pub const LAUNCHD_LABEL: &str = "com.codeconnect.ccd";
 
+/// The launcher subcommand that runs one bounded codex recovery pass.
+///
+/// **Here rather than in either crate that says it, because it is a seam between
+/// two binaries.** `ccd` cannot link the launcher — the launch records, their lock
+/// and the warrants for taking a `UF_IMMUTABLE` pin off a codex binary all live in
+/// a crate with no library — so the daemon asks for this pass by spawning
+/// `codeconnect` and naming it. A name spelled once in the dispatcher and again in
+/// the daemon is a seam that compiles either way and fails at run time, silently,
+/// as a recovery pass that never runs; spelled once it cannot come apart.
+pub const CODEX_SWEEP_SUBCOMMAND: &str = "internal-codex-sweep";
+
 /// Root of all CodeConnect state. `CODECONNECT_HOME` exists so tests never
 /// touch the real `~/.codeconnect`.
+///
+/// **Absolute whenever the cwd can be read** (A9.6(c)), and that is the whole point
+/// of the wrapper. Both sources here can be relative — `CODECONNECT_HOME` is
+/// whatever the operator exported, and the `$HOME`-less fallback is literally
+/// `./.codeconnect` — and a relative root is not a root at all: it names a different
+/// directory in every process that resolves it. The launcher, the pane's host and
+/// the sweep run with **different working directories** by construction (the
+/// coordinator hands tmux an explicit `-c`), so a process-relative root has them
+/// addressing different records for the same session. Absolutising HERE, where the
+/// root is first read, is what makes every consumer — `session_dir`, the launch
+/// lock, the `CODECONNECT_HOME` the coordinator forwards into the pane — name one
+/// directory.
+///
+/// `std::path::absolute` is prefix-only (it prepends the cwd and drops `.`
+/// components; it resolves no symlinks and no `..`), so it is idempotent: an
+/// already-absolute root is returned unchanged, and forwarding this value to a
+/// child that calls `root_dir()` again yields the same path (measured).
+///
+/// **When it cannot be made absolute, this FAILS CLOSED** (round-4 finding 5). The
+/// absolutisation can fail, and the previous revision returned the configured value
+/// when it did — which is relative — on an argument that is now measured false.
+///
+/// That argument was: `std::path::absolute` fails only via `getcwd`; `getcwd` fails
+/// only on a cwd unlinked out from under the process; and in that state every
+/// relative path operation fails `ENOENT` too, so a relative root addresses nothing
+/// rather than something else. The first two clauses are wrong on Darwin. Measured
+/// here (Darwin 25.5.0, non-root): `getcwd` **also** fails `EACCES` when any ancestor
+/// of the cwd loses its **search** bit — `chmod 0000`, `0400`, `0444`, `0666` on a
+/// single ancestor all reproduce it, while `0111` and `0555` do not, so it is the
+/// `x` bit and not the `r` bit — and in *that* state `stat(".")`, `mkdir("x")`,
+/// `open("y", O_CREAT)`, `fs::write` and `fs::read` from the held cwd **all
+/// succeed**. So a relative root does not address nothing; it addresses whatever
+/// directory each process happens to be sitting in, which is precisely the
+/// divergent-tree hazard this wrapper exists to prevent, and it does so while the
+/// process remains perfectly able to create and read the wrong tree.
+///
+/// The failure arm therefore returns [`UNAVAILABLE_ROOT`] instead: an **absolute**
+/// path under `/dev/null`. Three properties, all measured, are why that is a
+/// fail-closed answer and not another wrong value:
+///
+///   * every filesystem operation under it fails `ENOTDIR` (20) — `create_dir_all`,
+///     `metadata`, `write`, `read`, `read_dir`, `remove_dir` — because `/dev/null` is
+///     a character device, so no process can create this tree even by accident;
+///   * it is **absolute**, so it is byte-identical in every process regardless of
+///     cwd, and cannot reintroduce the divergence;
+///   * `std::path::absolute` is a no-op on it, so a `CODECONNECT_HOME` forwarded to
+///     a child resolves to the same unusable root there.
+///
+/// The result is that `private_dir`, the launch lock, `store_atomic` and the record
+/// read all fail, and the launch fails closed — which is what the old doc *claimed*
+/// the relative fallback achieved and did not.
+///
+/// Note the failure arm is only reachable for a **relative** configured root:
+/// measured, `std::path::absolute` on an already-absolute input never calls `getcwd`
+/// and succeeds in every condition that breaks it. An operator with an absolute
+/// `CODECONNECT_HOME` — and the `$HOME`-derived default whenever `$HOME` is absolute
+/// — can never reach it.
 pub fn root_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("CODECONNECT_HOME") {
-        return PathBuf::from(dir);
-    }
-    home_dir().join(".codeconnect")
+    let configured = match std::env::var_os("CODECONNECT_HOME") {
+        Some(dir) => PathBuf::from(dir),
+        None => home_dir().join(".codeconnect"),
+    };
+    std::path::absolute(&configured).unwrap_or_else(|_| PathBuf::from(UNAVAILABLE_ROOT))
 }
+
+/// The root returned when a **relative** configured root cannot be absolutised.
+///
+/// Not a placeholder to be special-cased: it is the fail-closed answer itself. Under
+/// `/dev/null` — a character device — every path operation fails `ENOTDIR`, so a
+/// process holding this root cannot create, read or delete any CodeConnect state.
+/// See [`root_dir`] for why an unusable absolute root is strictly safer than a usable
+/// relative one.
+pub const UNAVAILABLE_ROOT: &str = "/dev/null/codeconnect-root-unavailable";
 
 /// `$HOME`, falling back to the current directory so nothing panics in a
 /// launchd context with a stripped environment.
@@ -367,6 +750,164 @@ pub fn daemon_stderr_log() -> PathBuf {
     logs_dir().join("ccd.err.log")
 }
 
+/// Where a Codex session's **broker decision log** is kept after the session is
+/// over, beside the supervisor and coordinator logs.
+///
+/// The broker writes that log into its host's run dir, which is disposable by
+/// design — three unix sockets and two log files under `/tmp`, removed on every
+/// exit path the host has. Measured: a launch whose first `thread/start` is
+/// refused says so in exactly one place, that file, and the sweep then deletes it
+/// before anyone can read it, so the user is left with an empty pane and no
+/// account of why. The host copies the file here on the way out
+/// (`codeconnect::codex_host`), and `ccd` names this path in the `session_end`
+/// reason it files for a session that never bound a thread — which is why the
+/// spelling lives here rather than in either of them.
+pub fn codex_broker_log(session_name: &str, session_uid: &str) -> PathBuf {
+    logs_dir().join(format!("broker-{session_name}-{session_uid}.log"))
+}
+
+/// Keep only the `keep` most recently modified `~/.codeconnect/logs/<prefix>*`
+/// files; delete the rest. Returns how many were removed.
+///
+/// **Written as one policy over a named family rather than as a rule about broker
+/// logs**, because the problem is not the broker's: every per-session log in this
+/// directory is minted per uid and none of them has ever been pruned. Measured on a
+/// working install before this existed — 2542 files, 10 MB, of which 2487 were
+/// `supervisor-*` — so "one file per session, for ever" is the directory's existing
+/// habit and the broker family would simply have joined it. A family-agnostic helper
+/// is what lets the other families adopt the same bound without a second, differently
+/// argued implementation.
+///
+/// Newest-first by mtime, and a file whose mtime cannot be read sorts oldest so it is
+/// a candidate for removal rather than an immortal one — an unreadable timestamp must
+/// not be a way to pin a file in place for ever.
+///
+/// Best-effort throughout: this runs on the way out of a session that has already
+/// ended, and a directory that cannot be read or a file that cannot be removed is not
+/// worth failing a teardown over. It never touches a name outside the prefix, so the
+/// daemon's own `ccd.err.log` and anything an operator has put here by hand are out of
+/// its reach by construction.
+pub fn prune_session_logs(prefix: &str, keep: usize) -> usize {
+    prune_logs_in_dir(&logs_dir(), prefix, keep)
+}
+
+/// [`prune_session_logs`] with the directory passed in rather than read from
+/// process-global state.
+///
+/// Split out so the policy can be tested against a directory of its own.
+/// `logs_dir()` resolves `CODECONNECT_HOME`, and a test that set that variable to
+/// exercise this would be mutating state every other test in the process shares —
+/// which is not a hypothetical: this module already has three tests that set it, and
+/// the first version of the retention test raced them into a failure. A function that
+/// takes its directory cannot have that bug, and the public wrapper above is then the
+/// only thing that needs to know where the logs live.
+pub fn prune_logs_in_dir(dir: &std::path::Path, prefix: &str, keep: usize) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut matching: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(prefix))
+                && e.file_type().is_ok_and(|t| t.is_file())
+        })
+        .map(|e| {
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (mtime, e.path())
+        })
+        .collect();
+    if matching.len() <= keep {
+        return 0;
+    }
+    matching.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+    matching
+        .into_iter()
+        .skip(keep)
+        .filter(|(_, path)| std::fs::remove_file(path).is_ok())
+        .count()
+}
+
+#[cfg(test)]
+mod log_retention_tests {
+    /// **The pruner keeps `keep` files and touches nothing outside its family.**
+    ///
+    /// Both halves matter. The count is the bound the review asked for; the prefix
+    /// confinement is what makes it safe to run from a session teardown at all — the
+    /// daemon's own `ccd.err.log` and anything an operator has put in this directory
+    /// must be out of reach by construction, not by luck of ordering.
+    ///
+    /// Runs against a directory of its own and never touches `CODECONNECT_HOME`: three
+    /// other tests in this module set that variable, and the first version of this one
+    /// set it too and raced them into a failure. `prune_logs_in_dir` takes its directory
+    /// precisely so this test needs no process-global state.
+    #[test]
+    fn it_keeps_the_newest_and_never_leaves_its_prefix() {
+        let logs = std::env::temp_dir().join(format!("cc-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&logs);
+        std::fs::create_dir_all(&logs).unwrap();
+
+        // Ten in the family, written oldest-first, plus two files that are not.
+        for i in 0..10 {
+            let p = logs.join(format!("broker-cc-1-{i:02}.log"));
+            std::fs::write(&p, format!("log {i}")).unwrap();
+            // Distinct mtimes, so "newest" is a fact and not a tie.
+            let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000 + i);
+            filetime_set(&p, t);
+        }
+        std::fs::write(logs.join("ccd.err.log"), "daemon").unwrap();
+        std::fs::write(logs.join("supervisor-cc-1-x.log"), "other family").unwrap();
+
+        let removed = super::prune_logs_in_dir(&logs, "broker-", 3);
+        assert_eq!(removed, 7, "ten in the family, three kept");
+
+        let mut left: Vec<String> = std::fs::read_dir(&logs)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "broker-cc-1-07.log".to_string(),
+                "broker-cc-1-08.log".to_string(),
+                "broker-cc-1-09.log".to_string(),
+                "ccd.err.log".to_string(),
+                "supervisor-cc-1-x.log".to_string(),
+            ],
+            "the three NEWEST of the family survive, and neither the daemon's log nor \
+             another family is touched"
+        );
+
+        // Under the bound is a no-op, not a rewrite.
+        assert_eq!(super::prune_logs_in_dir(&logs, "broker-", 50), 0);
+        let _ = std::fs::remove_dir_all(&logs);
+    }
+
+    /// `utimes(2)` through libc, so the test can make mtimes deterministic without
+    /// pulling a crate in for three lines.
+    fn filetime_set(path: &std::path::Path, t: std::time::SystemTime) {
+        let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let times = [
+            libc::timeval {
+                tv_sec: secs,
+                tv_usec: 0,
+            },
+            libc::timeval {
+                tv_sec: secs,
+                tv_usec: 0,
+            },
+        ];
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) }, 0);
+    }
+}
+
 pub fn config_path() -> PathBuf {
     root_dir().join("config.json")
 }
@@ -377,10 +918,74 @@ mod tests {
 
     #[test]
     fn root_honours_override() {
-        // Serialised implicitly: this is the only test touching the var.
+        // Serialised implicitly: this is the only test touching the var, and it
+        // stays the only one — everything about the override is asserted here.
         std::env::set_var("CODECONNECT_HOME", "/tmp/cc-test-home");
         assert_eq!(root_dir(), PathBuf::from("/tmp/cc-test-home"));
         assert_eq!(socket_path(), PathBuf::from("/tmp/cc-test-home/ccd.sock"));
+
+        // A9.6(c): a RELATIVE override is absolutised, because the launcher, the
+        // pane's host and the sweep do not share a working directory — a
+        // process-relative root has them addressing different records.
+        std::env::set_var("CODECONNECT_HOME", "rel-cc-home");
+        let root = root_dir();
+        assert!(
+            root.is_absolute(),
+            "a relative CODECONNECT_HOME must not stay relative: {}",
+            root.display()
+        );
+        assert_eq!(root, std::env::current_dir().unwrap().join("rel-cc-home"));
+        // Every consumer inherits it, so nothing downstream has to re-normalise.
+        assert!(sessions_dir().is_absolute());
+        assert!(socket_path().is_absolute());
+        // Idempotent: this value is forwarded to the pane as `CODECONNECT_HOME`,
+        // and the child resolves it again in a DIFFERENT working directory. Only
+        // a fixed point makes both processes name one record.
+        std::env::set_var("CODECONNECT_HOME", &root);
+        assert_eq!(root_dir(), root);
+
         std::env::remove_var("CODECONNECT_HOME");
+    }
+
+    /// Round-4 finding 5: the arm reached when a **relative** root cannot be
+    /// absolutised must be fail-CLOSED, not merely honest.
+    ///
+    /// The condition itself — `getcwd` failing `EACCES` because an ancestor of the
+    /// cwd lost its search bit — is measured (see [`root_dir`]) but cannot be staged
+    /// in-process: `set_current_dir` and the ancestor's mode are both process-global,
+    /// and this crate's tests run in parallel, so reproducing it here would corrupt
+    /// every other test's filesystem view. What IS asserted here is the property the
+    /// whole fix rests on, and it is the property that would silently rot: that the
+    /// value the arm returns cannot address anything.
+    #[test]
+    fn the_unavailable_root_addresses_nothing() {
+        let root = PathBuf::from(UNAVAILABLE_ROOT);
+        // Absolute — so it is byte-identical in every process and cannot
+        // reintroduce the divergence a relative root causes.
+        assert!(root.is_absolute(), "{}", root.display());
+        // …and a fixed point, so a child that resolves a forwarded
+        // `CODECONNECT_HOME` lands on the same unusable root.
+        assert_eq!(std::path::absolute(&root).unwrap(), root);
+
+        // Every operation CodeConnect performs on its root fails, and fails with
+        // `ENOTDIR` — the parent is a character device, so no process can create
+        // this tree even by accident. This is what makes `private_dir`, the launch
+        // lock and `store_atomic` fail the launch closed.
+        let enotdir = |err: std::io::Error| {
+            assert_eq!(
+                err.raw_os_error(),
+                Some(libc::ENOTDIR),
+                "expected ENOTDIR, got {err}"
+            );
+        };
+        enotdir(std::fs::create_dir_all(&root).unwrap_err());
+        enotdir(std::fs::metadata(&root).unwrap_err());
+        enotdir(std::fs::read_dir(&root).unwrap_err());
+        enotdir(std::fs::remove_dir(&root).unwrap_err());
+        enotdir(std::fs::write(root.join("token"), b"x").unwrap_err());
+        enotdir(std::fs::read(root.join("token")).unwrap_err());
+        // And the private-dir boundary — the one the launch path actually calls —
+        // refuses too, which is the sentence "the launch fails closed" in code.
+        assert!(fsperm::private_dir(&root).is_err());
     }
 }

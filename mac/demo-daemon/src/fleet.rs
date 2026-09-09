@@ -294,6 +294,21 @@ impl Fleet {
             };
         }
 
+        // `option_id` is a **Codex-only** decision. The demo daemon hosts scripted
+        // Claude runs only (every run identifies as Claude), so it must refuse it
+        // exactly as the real `ccd` does — *before* any resolution. Without this,
+        // the additive `AnswerDecision::OptionId` variant (newly decodable this
+        // branch) would slip past the old decode-time bounce, remove the card,
+        // record `Applied`, and advance the tool-call path — a cross-agent
+        // decision the demo has no business honouring.
+        if matches!(decision, AnswerDecision::OptionId { .. }) {
+            return AnswerResult::Rejected {
+                reason: "option_id is a Codex-only decision; this demo daemon hosts Claude \
+                         sessions only"
+                    .into(),
+            };
+        }
+
         let card = run.cards.remove(position);
         let outcome = AnswerOutcome {
             request_id: request_id.to_string(),
@@ -611,6 +626,14 @@ impl Run {
                 .map(|card| card.request_id.clone())
                 .collect(),
             project_label: script::project_label(&self.cwd).to_string(),
+            agent: protocol::agent::AgentKind::Claude,
+            codex_thread_id: None,
+            // The demo fleet is Claude to the last row, and a Claude run has no
+            // Codex control link to be in any state — the same `none` the real
+            // daemon reports for one. Nothing here may be stopped or composed to
+            // over a Codex link, and the phone reads that off this field rather
+            // than off the demo's silence.
+            codex_link: protocol::event::CodexLink::None,
         }
     }
 
@@ -888,6 +911,41 @@ mod tests {
         }
     }
 
+    /// **Every demo row says it hosts Claude and has no Codex link.**
+    ///
+    /// The demo fleet is what the App Store reviewer and every screenshot sees, and
+    /// `codex_link` is what a phone scopes Stop and Compose by. A row that said
+    /// anything but `none` here would offer the reviewer a control that cannot
+    /// work — there is no Codex app-server behind this server at all — which is the
+    /// "offered and silently broken" affordance the product rule forbids.
+    ///
+    /// Asserted on the wire rather than on the struct: the field is `#[serde(default)]`
+    /// and a client reads what is sent, so the encoded row is the thing that has to
+    /// say it.
+    #[test]
+    fn every_demo_row_hosts_claude_and_advertises_no_codex_link() {
+        let (fleet, _) = blocked_fleet();
+        let sessions = fleet.sessions();
+        assert!(
+            !sessions.is_empty(),
+            "the premise: there is a fleet to check"
+        );
+        for summary in sessions {
+            assert_eq!(summary.agent, protocol::agent::AgentKind::Claude);
+            assert_eq!(
+                summary.codex_link,
+                protocol::event::CodexLink::None,
+                "{} claims a Codex control link this server does not have",
+                summary.session_id
+            );
+            let encoded = serde_json::to_string(&summary).unwrap();
+            assert!(
+                encoded.contains(r#""codex_link":"none""#),
+                "the field is never skipped — no link is news a client acts on: {encoded}"
+            );
+        }
+    }
+
     #[test]
     fn a_blocked_run_reports_the_card_it_is_holding_in_blocked_on() {
         let (fleet, _) = blocked_fleet();
@@ -1014,6 +1072,55 @@ mod tests {
             "a refused answer must leave no resolution behind"
         );
         // Nothing was typed, so the card is still the one on screen.
+        assert!(matches!(
+            fleet.answer(
+                &card.request_id,
+                &card.payload_hash,
+                AnswerDecision::Allow,
+                Some(&uid),
+                clock.step(),
+            ),
+            AnswerResult::Applied { .. }
+        ));
+    }
+
+    /// `option_id` is a Codex-only decision; the Claude-only demo daemon refuses
+    /// it before any resolution, exactly as the real `ccd` does. The additive
+    /// `AnswerDecision::OptionId` variant is newly decodable this branch, so
+    /// without the guard it would slip past the old decode-time bounce and
+    /// advance the tool-call path. It must remove nothing and advance nothing.
+    #[test]
+    fn an_option_id_decision_is_refused_and_advances_nothing() {
+        let (fleet, mut clock) = blocked_fleet();
+        let uid = uid_of(&fleet, "cc-2");
+        let card = card_on_the_wire(&fleet, &uid);
+
+        match fleet.answer(
+            &card.request_id,
+            &card.payload_hash,
+            AnswerDecision::OptionId {
+                option_id: "acceptWithExecpolicyAmendment".into(),
+            },
+            Some(&uid),
+            clock.step(),
+        ) {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("Codex-only"), "got: {reason}")
+            }
+            other => panic!("a Codex-only decision must be refused; got {other:?}"),
+        }
+        // No resolution and no tool call: the refusal happened before card
+        // removal, so nothing was appended and the turn did not advance.
+        let events = fleet.events_after(&uid, 0, 1000);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind != EventKind::ApprovalResolved
+                    && event.kind != EventKind::ToolCall),
+            "a refused Codex decision must leave no resolution and no tool call"
+        );
+        // The card is still the one on screen, and a real Claude decision still
+        // works — the refusal did not consume it.
         assert!(matches!(
             fleet.answer(
                 &card.request_id,

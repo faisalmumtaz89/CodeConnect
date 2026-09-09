@@ -156,6 +156,36 @@ impl PushGate {
         )
     }
 
+    /// **A turn ended, and that is both the movement and the news — one
+    /// transition.**
+    ///
+    /// The completion signal a run gets from watching its wire, rather than from a
+    /// hook that re-fires: it arrives exactly once per turn, so there is no
+    /// repetition for the ambient latch to absorb and the latch must be *reopened*
+    /// by the same event that then closes it on `Done`. Two things follow, both
+    /// wanted — a quiet-state push still sitting out its dispatch grace is
+    /// describing a wait this terminal has ended, and the moved epoch kills it; and
+    /// the next turn to finish is news again rather than a repeat of this one.
+    ///
+    /// Taken under one guard for the reason [`admit_decision`](Self::admit_decision)
+    /// is: read apart, a `note_progress` from some other transition landing between
+    /// the bump and the admission folds into this ticket, so the progress that
+    /// exists to cancel this push arrives just too early to.
+    ///
+    /// Returns a [`Ticket`] rather than an `Option`, because reopening the latch
+    /// and then consulting it can have only one answer. What the ticket does *not*
+    /// promise is that this push will ring: a later turn ending inside the dispatch
+    /// grace bumps the epoch again and supersedes it, which is the same coalescing
+    /// every quiet-state push on either agent's path is subject to — see
+    /// [`crate::state::Daemon::push_codex_turn_complete`].
+    pub fn admit_turn_end(&self, session_uid: &str) -> Ticket {
+        let mut epochs = self.epochs.lock().unwrap();
+        let mut ambient = self.ambient.lock().unwrap();
+        epochs.entry(session_uid.to_string()).or_default().1 += 1;
+        ambient.insert(session_uid.to_string(), Ambient::Done);
+        ticket_under_lock(&epochs, session_uid)
+    }
+
     /// **A decision arrived, and the run moved to meet it — one transition.**
     ///
     /// Recording progress and claiming the prompt are the same event and are
