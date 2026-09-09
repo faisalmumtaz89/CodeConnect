@@ -12687,6 +12687,14 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        // **Counted BEFORE the compose is written, not after it is answered.** The link
+        // re-arms the attach in the same pass that answers the compose, so on a loaded
+        // machine the re-armed `thread/resume` can reach the leg before this task has
+        // run again — a count taken after the answer would already include it, and the
+        // re-ask would then look like it never happened (measured once, on a two-core
+        // CI runner). `after_resumes` has put the ladder's next step seconds ahead, so
+        // any resume beyond this count is the re-arm.
+        let resumes_before = leg.requests("thread/resume").len();
         let report = match aimed {
             Some((state, visit)) => {
                 let thread = state.thread_id().expect("the awaited state names a thread");
@@ -12710,10 +12718,9 @@ mod tests {
         };
         // **How long the link waited before asking again.** Measured from the moment the
         // compose was answered, which is the moment the rollout exists — see the re-arm
-        // at the compose settle. `after_resumes` has already put a large ladder step
-        // ahead of the link, so a small number here can only be the re-arm.
+        // at the compose settle. A resume that landed between the write and the answer
+        // reads as zero, which is the truth: it went out at the settle.
         let answered_at = Instant::now();
-        let resumes_before = leg.requests("thread/resume").len();
         let mut re_asked = None;
         let waiting_until = Instant::now() + Duration::from_secs(3);
         while Instant::now() < waiting_until {
