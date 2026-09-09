@@ -1958,7 +1958,16 @@ enum Settlement {
     /// The write failed. Nothing may claim the record says anything, in either
     /// direction: the row is still `applying`, so a retry is refused rather than
     /// re-actuated, but "already stopped" is a promise this Mac cannot keep.
-    Unrecorded(String),
+    ///
+    /// **It carries nothing, and that is the point.** It used to carry the store's
+    /// own `Display` — an anyhow chain whose open paths name absolute filesystem
+    /// locations — and the interrupt reporting arm interpolated it straight into a
+    /// phone's `Indeterminate` reason. The compose arm had already stopped doing so
+    /// and its producers were passing an empty string to say as much, which is a rule
+    /// each new caller has to be told about. A payloadless variant is the same rule
+    /// enforced by the type: the failure is logged with `{err:#}` where it happens,
+    /// on the machine entitled to read it, and there is nothing left to carry.
+    Unrecorded,
 }
 
 /// **What a recorded interrupt outcome means, in one place.**
@@ -2792,12 +2801,12 @@ pub(crate) async fn settle_open_interrupts(
                     "codex link for {}: could not record that the interrupt {} was left \
                      unsettled: {err:#}",
                     session.name,
-                    pending.client_request_id
+                    crate::state::logged_request_id(&pending.client_request_id)
                 );
-                InterruptReport::Unknown(crate::codex_refusals::interrupt_settled_unrecorded(
-                    cause,
-                    &err.to_string(),
-                ))
+                // Logged just above and not carried: a store `Display` is an anyhow
+                // chain whose open paths name absolute filesystem locations, and the
+                // compose twin of this arm has never carried one.
+                InterruptReport::Unknown(crate::codex_refusals::interrupt_settled_unrecorded(cause))
             }
         };
         pending.tell(report);
@@ -6323,6 +6332,23 @@ impl Connection<'_> {
             );
             return Ok(());
         }
+        // **The generation is the visit, and a card from a visit this link has left is
+        // not the card the phone was looking at.** [`interrupt_refusal`]'s rule, in the
+        // same position — after the thread, before anything durable — because a thread
+        // revisited after a `/new` and back again wears the same id under a different
+        // visit, so the thread gate above cannot tell the two apart. The window is
+        // [`Connection::retire_codex_cards`]'s: a retirement whose transaction fails
+        // deliberately KEEPS the wire mapping, because dropping it would strand a
+        // request the app-server is still waiting on — so this connection really can
+        // hold a live wire id for a card raised under a generation it has moved past.
+        if self.visit.generation != ask.claimed.generation {
+            refuse(
+                ask,
+                "this Codex session has moved on since that card was shown, so nothing \
+                 was sent; open the run again",
+            );
+            return Ok(());
+        }
         if self.switch_candidate.is_some() {
             refuse(
                 ask,
@@ -6586,11 +6612,17 @@ impl Connection<'_> {
                 refuse(ask, crate::codex_refusals::INTERRUPT_RUN_IS_GONE);
                 return Ok(());
             }
+            // **The error is logged here and not sent**, which is the rule the compose
+            // claim a few hundred lines down already keeps: a store `Display` is an
+            // anyhow chain whose open paths name absolute filesystem locations, and the
+            // phone is told what happened and what to do, which is all it can act on.
             Err(err) => {
-                refuse(
-                    ask,
-                    &crate::codex_refusals::interrupt_claim_unrecorded(&err.to_string()),
+                crate::log_error!(
+                    "codex link for {}: could not claim the interrupt {}: {err:#}",
+                    self.session.name,
+                    crate::state::logged_request_id(&ask.client_request_id)
                 );
+                refuse(ask, crate::codex_refusals::INTERRUPT_CLAIM_UNRECORDED);
                 return Ok(());
             }
         }
@@ -6772,7 +6804,7 @@ impl Connection<'_> {
                 crate::log_error!(
                     "codex link for {}: could not claim the compose {}: {err:#}",
                     self.session.name,
-                    ask.client_request_id
+                    crate::state::logged_request_id(&ask.client_request_id)
                 );
                 refuse(ask, crate::codex_refusals::COMPOSE_CLAIM_UNRECORDED);
                 return Ok(());
@@ -7068,19 +7100,17 @@ impl Connection<'_> {
         {
             Ok(true) => Settlement::Recorded,
             Ok(false) => Settlement::Superseded,
-            // Logged here, not carried: `Settlement::Unrecorded`'s string reaches the
-            // phone through [`Connection::report_settled_compose`], and a store error is
-            // an anyhow chain whose open paths name absolute filesystem locations.
+            // Logged here, and nowhere else: a store error is an anyhow chain whose
+            // open paths name absolute filesystem locations, and what
+            // [`Connection::report_settled_compose`] tells a phone is assembled from
+            // [`Settlement::Unrecorded`], which carries none of it.
             Err(err) => {
                 crate::log_error!(
                     "codex link for {}: could not settle the compose {}: {err:#}",
                     self.session.name,
-                    held.client_request_id
+                    crate::state::logged_request_id(&held.client_request_id)
                 );
-                // The variant is shared with the answer and interrupt paths, so it keeps
-                // its string; what this passes is fixed public text rather than the
-                // error's own.
-                Settlement::Unrecorded(String::new())
+                Settlement::Unrecorded
             }
         }
     }
@@ -7100,19 +7130,17 @@ impl Connection<'_> {
         {
             Ok(true) => Settlement::Recorded,
             Ok(false) => Settlement::Superseded,
-            // Logged here, not carried: `Settlement::Unrecorded`'s string reaches the
-            // phone through [`Connection::report_settled_compose`], and a store error is
-            // an anyhow chain whose open paths name absolute filesystem locations.
+            // Logged here, and nowhere else: a store error is an anyhow chain whose
+            // open paths name absolute filesystem locations, and what
+            // [`Connection::report_settled_compose`] tells a phone is assembled from
+            // [`Settlement::Unrecorded`], which carries none of it.
             Err(err) => {
                 crate::log_error!(
                     "codex link for {}: could not settle the compose {}: {err:#}",
                     self.session.name,
-                    held.client_request_id
+                    crate::state::logged_request_id(&held.client_request_id)
                 );
-                // The variant is shared with the answer and interrupt paths, so it keeps
-                // its string; what this passes is fixed public text rather than the
-                // error's own.
-                Settlement::Unrecorded(String::new())
+                Settlement::Unrecorded
             }
         }
     }
@@ -7154,11 +7182,11 @@ impl Connection<'_> {
                     crate::codex_refusals::COMPOSE_SETTLED_ELSEWHERE_UNREADABLE.into(),
                 ),
             },
-            // **Fixed text, and the error is not in it.** The compose helpers log the
-            // store's own `Display` — an anyhow chain whose open paths name absolute
-            // filesystem locations — and hand this arm an empty string, so there is
-            // nothing local to interpolate even by accident.
-            Settlement::Unrecorded(_) => {
+            // **Fixed text, and there is nothing else it could be.** The compose
+            // helpers log the store's own `Display` — an anyhow chain whose open paths
+            // name absolute filesystem locations — where it happens, and
+            // [`Settlement::Unrecorded`] carries nothing at all.
+            Settlement::Unrecorded => {
                 ComposeReport::Unknown(crate::codex_refusals::COMPOSE_OUTCOME_UNRECORDED.into())
             }
         };
@@ -7234,7 +7262,7 @@ impl Connection<'_> {
                     "codex link for {}: could not read the interrupt ledger for {} \
                      ({err:#}); the claim decides it",
                     self.session.name,
-                    ask.client_request_id
+                    crate::state::logged_request_id(&ask.client_request_id)
                 );
                 return None;
             }
@@ -7392,7 +7420,7 @@ impl Connection<'_> {
                      {outcome} arrived; the earlier terminal stands and is what the caller \
                      is told",
                     self.session.name,
-                    held.client_request_id
+                    crate::state::logged_request_id(&held.client_request_id)
                 );
                 Settlement::Superseded
             }
@@ -7400,9 +7428,9 @@ impl Connection<'_> {
                 crate::log_error!(
                     "codex link for {}: could not settle the interrupt claim {}: {err:#}",
                     self.session.name,
-                    held.client_request_id
+                    crate::state::logged_request_id(&held.client_request_id)
                 );
-                Settlement::Unrecorded(format!("{err}"))
+                Settlement::Unrecorded
             }
         }
     }
@@ -7424,8 +7452,13 @@ impl Connection<'_> {
         let report = match settlement {
             Settlement::Recorded => ordinary,
             Settlement::Superseded => self.winning_interrupt_terminal(held).await,
-            Settlement::Unrecorded(err) => {
-                InterruptReport::Unknown(crate::codex_refusals::interrupt_outcome_unrecorded(&err))
+            // **Fixed text, and there is nothing else it could be.** This arm
+            // interpolated the store's own `Display` — an anyhow chain whose open paths
+            // name absolute filesystem locations — into what a phone reads. The helpers
+            // log it where it happens and [`Settlement::Unrecorded`] now carries
+            // nothing, so the leak is closed by the type rather than by this line.
+            Settlement::Unrecorded => {
+                InterruptReport::Unknown(crate::codex_refusals::INTERRUPT_OUTCOME_UNRECORDED.into())
             }
         };
         held.tell(report);
@@ -7912,7 +7945,7 @@ impl Connection<'_> {
                     "codex link for {}: the interrupt claim {} was already terminal when \
                      its turn ended unrecorded; the earlier terminal stands",
                     self.session.name,
-                    held.client_request_id
+                    crate::state::logged_request_id(&held.client_request_id)
                 );
                 Settlement::Superseded
             }
@@ -7921,9 +7954,9 @@ impl Connection<'_> {
                     "codex link for {}: could not record the interrupt claim {} as \
                      unknown: {err:#}",
                     self.session.name,
-                    held.client_request_id
+                    crate::state::logged_request_id(&held.client_request_id)
                 );
-                Settlement::Unrecorded(format!("{err}"))
+                Settlement::Unrecorded
             }
         }
     }
@@ -9866,6 +9899,9 @@ mod tests {
         // test-only sink closes that gap: this is the real `log_error!` line.
         let frame = populated_answer();
         let salt = a_salt();
+        // The sink is process-global; see [`crate::state::ONE_LOG_CAPTURE_AT_A_TIME`].
+        // `blocking_lock` because this is a plain `#[test]` with no runtime under it.
+        let _capture = crate::state::ONE_LOG_CAPTURE_AT_A_TIME.blocking_lock();
         for (mode, salt) in both_modes(&salt) {
             crate::log::capture::install();
             crate::log_error!("{}", report_with_salt(salt, &frame, 0));
@@ -15301,7 +15337,7 @@ mod tests {
             vec![
                 format!("{LIFECYCLE_THREAD}:item:01a0127a-dbdd-7d11-b925-5bb0c2dac319"),
                 format!(
-                    "{LIFECYCLE_THREAD}:item:msg_0903e096e1c759f8016a83b4f7c4a481918c11f878e92d0c37"
+                    "{LIFECYCLE_THREAD}:item:msg_c921ccb3f74b889c96bf267badbdd72321ca438096df07f714"
                 ),
                 format!("{LIFECYCLE_THREAD}:thread_started"),
                 format!("{LIFECYCLE_THREAD}:turn:01a0127a-d9cd-7461-84d7-6eea6d0b98a5"),
@@ -15590,6 +15626,13 @@ mod tests {
         // thread nothing else names. Same idiom as
         // `an_ingest_failure_fails_the_attach_rather_than_attaching_anyway`.
         const REASK_THREAD: &str = "th_UNREADABLE_REASK";
+        // **And the sink itself is held, not merely selected from.** Naming a thread
+        // nothing else uses picks this link's lines OUT of the buffer; it does nothing
+        // about another test CLEARING or DRAINING that buffer mid-drive, which is what
+        // made this test fail on an empty capture under default threads. See
+        // [`crate::state::ONE_LOG_CAPTURE_AT_A_TIME`]. Taken before `drive`, which takes
+        // [`ONE_LEG_AT_A_TIME`] inside — that order is the same at every capture site.
+        let _capture = crate::state::ONE_LOG_CAPTURE_AT_A_TIME.lock().await;
         crate::log::capture::install();
         let (events, connections, resumes, _) = drive(
             ResumeAnswer::MidTurnThenAnUnreadableReAsk,
@@ -15642,11 +15685,24 @@ mod tests {
             "and what it actually cost — the items of the turn this ask was paying \
              for, which nothing else can name: {report}"
         );
-        // **The reconnecting sentence is ABSENT**, on this thread and in the whole
-        // capture. Both halves matter: the wrong report must not be emitted beside the
-        // right one, and it must not be emitted instead of it.
+        // **The reconnecting sentence is ABSENT from this link's lines.** Both halves of
+        // that still matter — the wrong report must not be emitted beside the right one,
+        // and it must not be emitted instead of it — and `reports.len() == 1` above is
+        // the second half.
+        //
+        // **Scoped to this thread, where it used to scan the whole capture.** That wider
+        // form was never sound; it only looked sound because every other capture user in
+        // this binary was DRAINING the process-global sink out from under this one, so
+        // their lines usually happened not to be here. Holding the sink
+        // ([`crate::state::ONE_LOG_CAPTURE_AT_A_TIME`]) is what makes this test's own
+        // lines reliably present — and it also, correctly, leaves every other link's
+        // lines in the buffer beside them. A perfectly ordinary STOP-AND-AMEND from
+        // another test's leg is not evidence about this one. The claim is about the
+        // disposition THIS link took, and the report names the thread it is about, so
+        // the thread is what identifies it.
         let reconnecting: Vec<&String> = captured
             .iter()
+            .filter(|line| line.contains(REASK_THREAD))
             .filter(|line| line.contains("Reconnecting.") || line.contains("STOP-AND-AMEND"))
             .collect();
         assert!(
@@ -17367,6 +17423,10 @@ mod tests {
         // A key whose uid no append can accept.
         let session = SessionKey::new("", "cc-1");
         let (daemon, _db) = linked_daemon(&SessionKey::new(protocol::uid::new().unwrap(), "cc-1"));
+        // See [`crate::state::ONE_LOG_CAPTURE_AT_A_TIME`]: selecting by thread id picks
+        // these lines out of the buffer, and holding the sink is what keeps the buffer
+        // from being emptied by another test while this drive is filling it.
+        let _capture = crate::state::ONE_LOG_CAPTURE_AT_A_TIME.lock().await;
         crate::log::capture::install();
         let task = tokio::spawn(run(
             Arc::clone(&daemon),
@@ -17504,6 +17564,143 @@ mod tests {
                 ]
             }
         })
+    }
+
+    /// **[`command_approval`] is the frame the wire really sent, and this is what says
+    /// so.**
+    ///
+    /// Around fifteen card and answer tests are built on that hand-written literal, and
+    /// until now nothing tied it to reality: a field could be renamed here, dropped here
+    /// or invented here, and every one of those tests would go on passing about a frame
+    /// the app-server has never sent. `fixtures/codex/command-execution.jsonl` is the
+    /// capture the literal was copied from, so the capture is what it is compared
+    /// against — the same shape [`a_daemon_bounce_rebinds_one_card_and_a_redelivery_does_not_add_a_second`]
+    /// already uses for the rebind frames.
+    ///
+    /// # Nothing whose value is an OpenAI item id is compared by BYTES
+    ///
+    /// `rs_` and `msg_` ids — a prefix and then **50** lowercase hex digits, MEASURED
+    /// across every occurrence in `fixtures/codex/` rather than assumed — are rewritten
+    /// to synthetic ids of the same shape whenever a capture is re-published, because
+    /// they are the one part of a captured frame that belongs to an account rather than
+    /// to a protocol. Pinning one would make this gate fail on that housekeeping instead
+    /// of on drift, which is the opposite of what a drift gate is for. So a captured
+    /// value of that shape is compared by SHAPE and by nothing else.
+    ///
+    /// The captured approval frame carries none today — its `itemId` is an
+    /// `exec-<uuid>`, which is structural and IS compared byte for byte. The branch is
+    /// there so a future capture that does carry one imposes no new obligation on
+    /// whoever re-publishes it.
+    ///
+    /// # Two fields are in the literal and not in the capture, deliberately
+    ///
+    /// `kind` and `reason`, which codex 0.153 populates on the stable wire and the
+    /// capture this file replays does not — measured in
+    /// `fixtures/codex/approval-0.153.jsonl` and by the live probes in
+    /// [`crate::codex_link_live`]. They are named here rather than waved through by a
+    /// subset comparison, so a THIRD invented field cannot hide behind them.
+    ///
+    /// **Mutation:** change the `cwd`, the command, or any option id in
+    /// [`command_approval`] and this goes red naming the field that moved.
+    #[test]
+    fn the_hand_built_command_approval_is_the_frame_the_wire_sent() {
+        const CAPTURE: &str = include_str!("../../../fixtures/codex/command-execution.jsonl");
+        let captured: Value = CAPTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<Value>(line).expect("each line is one captured frame")
+            })
+            .find(|frame| frame["method"] == json!("item/commandExecution/requestApproval"))
+            .expect("the capture holds the request this literal was copied from");
+
+        /// A `params` value that belongs to an account rather than to the protocol:
+        /// `rs_`/`msg_` and then 50 lowercase hex. See this test's doc for the width.
+        fn is_an_openai_item_id(value: &Value) -> bool {
+            value.as_str().is_some_and(|text| {
+                text.strip_prefix("rs_")
+                    .or_else(|| text.strip_prefix("msg_"))
+                    .is_some_and(|hex| {
+                        hex.len() == 50
+                            && hex
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || b"abcdef".contains(&b))
+                    })
+            })
+        }
+
+        let captured_params = captured["params"]
+            .as_object()
+            .expect("the captured request carries a params object");
+        let thread = captured_params["threadId"]
+            .as_str()
+            .expect("the capture names its thread");
+        let wire_id = captured["id"]
+            .as_i64()
+            .expect("a per-connection integer id");
+        let built = command_approval(thread, wire_id);
+        let built_params = built["params"]
+            .as_object()
+            .expect("and so does the literal");
+
+        assert_eq!(built["method"], captured["method"]);
+        assert_eq!(built["id"], captured["id"]);
+
+        // **The premise, so the loop below cannot pass by being empty.** These are the
+        // fields the card is built out of: what was asked, where, and what may be
+        // answered. A capture that lost one would make every comparison vacuous.
+        for key in [
+            "threadId",
+            "turnId",
+            "itemId",
+            "command",
+            "cwd",
+            "commandActions",
+            "availableDecisions",
+        ] {
+            assert!(
+                captured_params.contains_key(key),
+                "the capture must still carry `{key}`, or there is nothing to compare"
+            );
+        }
+
+        for (key, want) in captured_params {
+            let got = &built["params"][key];
+            if is_an_openai_item_id(want) {
+                assert!(
+                    is_an_openai_item_id(got),
+                    "`{key}` is an account-scoped item id, so only its shape is pinned — \
+                     and the literal's is not one: {got}"
+                );
+                continue;
+            }
+            assert_eq!(
+                got, want,
+                "`{key}` in `command_approval` is not what the wire sent"
+            );
+        }
+
+        // Nothing invented: the only keys the literal adds are the two 0.153 populates.
+        let mut added: Vec<&str> = built_params
+            .keys()
+            .filter(|key| !captured_params.contains_key(*key))
+            .map(String::as_str)
+            .collect();
+        added.sort_unstable();
+        assert_eq!(
+            added,
+            ["kind", "reason"],
+            "the literal may carry the two fields 0.153 added to this frame and nothing \
+             else this daemon made up"
+        );
+        assert_eq!(built["params"]["kind"], json!("command"));
+        assert!(
+            built["params"]["reason"]
+                .as_str()
+                .is_some_and(|why| !why.is_empty()),
+            "`reason` is the 0.153 addition the card actually shows, so it must say \
+             something"
+        );
     }
 
     fn file_change_started(thread: &str) -> Value {
@@ -19027,60 +19224,454 @@ mod tests {
         }
     }
 
-    /// **F3: a store error is logged here and never sent to the phone.**
+    /// **F3: a store error is logged on this Mac and never sent to the phone — on the
+    /// compose, on the interrupt AND on the answer.**
     ///
     /// A `Display` on this daemon's store is an anyhow chain whose open paths name
-    /// absolute filesystem locations, and the compose paths interpolated it into
-    /// `Rejected`/`Indeterminate` reasons. The wire-refusal path already had this rule —
-    /// [`wire_refusal_reason`] passes the numeric code and nothing else — and this is the
-    /// same rule applied to the other source of text on the same wire.
+    /// absolute filesystem locations, and three of this daemon's phone-facing verbs
+    /// interpolated one into a `Rejected`/`Indeterminate` reason. The operator got a
+    /// sentence with nothing in it they could act on; anybody the card was forwarded to
+    /// got this Mac's directory layout. The wire-refusal path already had the rule —
+    /// [`wire_refusal_reason`] passes the numeric code and nothing else — and this is
+    /// that rule applied to the other source of text on the same wire.
     ///
-    /// Asserted over the sentences themselves, which is where the leak would be: the
-    /// settlement helpers hand [`Settlement::Unrecorded`] an EMPTY string, so there is
-    /// nothing local to interpolate even by accident.
+    /// It is asserted three ways, because the leak had three shapes and no one of them
+    /// would have caught the others:
+    ///
+    ///   * **The catalogue, totally.** No sentence [`crate::codex_refusals::catalogue`]
+    ///     can produce is assembled from a local error — which is why the emitted fixture
+    ///     no longer documents an `{err}` token at all. Total over every row present and
+    ///     future, so a sentence added with an error in it fails here rather than on
+    ///     somebody's phone.
+    ///   * **The two settlement paths, driven against a store that really is broken.**
+    ///     [`Settlement::Unrecorded`] no longer carries anything a report could
+    ///     interpolate, so a hand-built one would prove nothing but its own emptiness.
+    ///     These take the whole path instead — a claim whose ledger has been renamed
+    ///     out from under it, settled and then reported — and require the store's own
+    ///     `Display`, captured from the same fault, to be absent from the sentence.
+    ///   * **The answer path, driven against a store that really is broken.** Its five
+    ///     reasons are built inline with `format!` and have no catalogue row to read off,
+    ///     so the only honest assertion is over the sentence a real failing read
+    ///     produces — with that read's own `Display` captured from the same fault and
+    ///     required to be absent from what the phone is told.
+    ///
+    /// **The local log is the point of the rule, not a consolation for it.** Every site
+    /// that drops the error writes it first with `{err:#}`, so an operator diagnosing a
+    /// bad disk still has the whole anyhow chain on the machine entitled to read it.
+    ///
+    /// **Mutation:** put `({err})` back into any one of the five catalogued formatters
+    /// and the first block goes red; put it back into any of the five answer-path
+    /// `format!`s and the last block does.
     #[tokio::test]
-    async fn a_store_error_never_reaches_the_phone_from_a_compose() {
-        let session = SessionKey {
-            uid: "01JQXV9K7B0000000000000C05".into(),
-            name: "cc-1".into(),
-        };
-        let (daemon, _db) = linked_daemon(&session);
-        let mut adapter = CodexAdapter::new(session.clone());
-        let mut amend = AmendThrottle::default();
-        let conn = visiting(
-            &daemon,
-            &session,
-            &mut adapter,
-            &mut amend,
-            LIFECYCLE_THREAD,
-            1,
-        );
-        // A compose that was written and whose settle could not be recorded. The held
-        // entry names no ledger row, so `settle_mutation` reports it did not win and the
-        // report path reads the record back — the shape a real unrecorded settle takes.
-        let mut held = PendingCompose::for_tests(
-            "req-unrecorded",
-            LIFECYCLE_THREAD,
-            crate::store::COMPOSE_ROUTE_START,
-            None,
-        );
-        let secret = "/Users/someone/Library/Application Support/private.sqlite";
-        conn.report_settled_compose(
-            &mut held,
-            Settlement::Unrecorded(secret.to_string()),
-            ComposeReport::Started {
-                turn_id: "01a0-t".into(),
-            },
-        )
-        .await;
-        let ComposeReport::Unknown(reason) = held.told_for_tests() else {
-            panic!("an unrecorded settle is unknown")
-        };
+    async fn a_store_error_never_reaches_the_phone_from_a_compose_an_interrupt_or_an_answer() {
+        /// What a phone was told repeats none of the words this Mac's disk used, and
+        /// names no place on it. The first catches the leak as it was; the second
+        /// catches one that reworded the error on the way out.
+        fn tells_the_phone_nothing_local(verb: &str, reason: &str, secret: &str) {
+            assert!(
+                !reason.contains(secret),
+                "the {verb} refusal repeated this Mac's own store error to the phone: \
+                 {reason}"
+            );
+            assert!(
+                !reason.contains("/Users/"),
+                "the {verb} refusal named a place on this Mac's disk: {reason}"
+            );
+        }
+
+        // ---- 1. No catalogued sentence is built from a local error at all --------
+        for row in crate::codex_refusals::catalogue() {
+            assert!(
+                !row.text.contains("{err}"),
+                "the refusal `{}` is still assembled from this Mac's own store error, \
+                 which is an anyhow chain naming absolute filesystem paths: {}",
+                row.id,
+                row.text
+            );
+        }
         assert!(
-            !reason.contains(secret) && !reason.contains("/Users/"),
-            "a local path reached the phone: {reason}"
+            crate::codex_refusals::fixture()["tokens"]
+                .get("{err}")
+                .is_none(),
+            "and the emitted fixture must stop documenting a token no sentence carries, \
+             or the phone keeps a splitter for something that can never appear"
         );
-        assert!(reason.contains("Check the Mac"), "{reason}");
+
+        // ---- 2 and 3. The two settlements, over a ledger renamed out from under --
+        // them. `settle_mutation` is the write that fails; the report path is what a
+        // phone then reads.
+        {
+            let session = SessionKey {
+                uid: "01JQXV9K7B0000000000000C05".into(),
+                name: "cc-1".into(),
+            };
+            let (daemon, _db) = linked_daemon(&session);
+            let mut adapter = CodexAdapter::new(session.clone());
+            let mut amend = AmendThrottle::default();
+            let conn = visiting(
+                &daemon,
+                &session,
+                &mut adapter,
+                &mut amend,
+                LIFECYCLE_THREAD,
+                1,
+            );
+            daemon.store.break_answer_ledger_for_tests(true);
+            // What the broken ledger says, in its own words — the exact string the two
+            // sentences below used to carry.
+            let secret = daemon
+                .db
+                .answer_status(session.uid.clone(), "req-unrecorded".into())
+                .await
+                .expect_err("the mutation ledger is gone")
+                .to_string();
+
+            let mut held = PendingCompose::for_tests(
+                "req-unrecorded",
+                LIFECYCLE_THREAD,
+                crate::store::COMPOSE_ROUTE_START,
+                None,
+            );
+            let settlement = conn
+                .settle_compose_claim(&held, &crate::store::compose_outcome(held.route, "01a0-t"))
+                .await;
+            assert!(
+                matches!(settlement, Settlement::Unrecorded),
+                "the ledger is gone, so the settle cannot have been recorded: {settlement:?}"
+            );
+            conn.report_settled_compose(
+                &mut held,
+                settlement,
+                ComposeReport::Started {
+                    turn_id: "01a0-t".into(),
+                },
+            )
+            .await;
+            let ComposeReport::Unknown(reason) = held.told_for_tests() else {
+                panic!("an unrecorded settle is unknown")
+            };
+            tells_the_phone_nothing_local("compose", &reason, &secret);
+            assert!(
+                reason.contains("Check the Mac"),
+                "and it still says what to do: {reason}"
+            );
+
+            // The interrupt's twin, through a real waiter because a `PendingInterrupt`
+            // keeps no test-only record of what it said.
+            let (reply, told) = tokio::sync::oneshot::channel();
+            let mut stop = PendingInterrupt {
+                client_request_id: "req-unrecorded".into(),
+                thread_id: LIFECYCLE_THREAD.into(),
+                turn_id: "01a0-t".into(),
+                deadline: tokio::time::Instant::now() + INTERRUPT_BUDGET,
+                replies: vec![reply],
+                _gates: Vec::new(),
+            };
+            let settlement = conn
+                .settle_interrupt_claim(&stop, crate::store::INTERRUPT_ABORTED)
+                .await;
+            assert!(
+                matches!(settlement, Settlement::Unrecorded),
+                "the ledger is gone here too: {settlement:?}"
+            );
+            conn.report_settled_interrupt(
+                &mut stop,
+                settlement,
+                InterruptReport::Aborted {
+                    turn_id: "01a0-t".into(),
+                },
+            )
+            .await;
+            let InterruptReport::Unknown(reason) = told.await.expect("the waiter is told") else {
+                panic!("an unrecorded settle is unknown")
+            };
+            tells_the_phone_nothing_local("interrupt", &reason, &secret);
+            assert!(
+                reason.contains("Check the Mac"),
+                "and it still says what to do: {reason}"
+            );
+        }
+
+        // ---- 4. Every reason the answer path builds from a failing read ----------
+        //
+        // One fault per drive, and a fresh store for each: the first read to fail is
+        // the one that answers, so a single broken table can only ever reach a single
+        // one of these sentences.
+        let answer = protocol::ws::AnswerDecision::OptionId {
+            option_id: "accept".into(),
+        };
+
+        // (a) `approval_target`'s session lookup, on a uid.
+        {
+            let (daemon, _db, session) = answering_daemon("C06", "cc-a");
+            daemon.store.break_session_reads_for_tests(true);
+            let err = daemon
+                .db
+                .get_session(session.uid.clone())
+                .await
+                .expect_err("the fleet view is gone")
+                .to_string();
+            let reason = rejected(
+                daemon
+                    .answer("req-a", "h", answer.clone(), Some(&session.uid))
+                    .await,
+            );
+            tells_the_phone_nothing_local("answer session lookup", &reason, &err);
+        }
+
+        // (b) The card's own answer ledger, read before anything else.
+        {
+            let (daemon, _db, session) = answering_daemon("C07", "cc-b");
+            daemon.store.break_answer_ledger_for_tests(true);
+            let err = daemon
+                .db
+                .answer_status(session.uid.clone(), "req-b".into())
+                .await
+                .expect_err("the mutation ledger is gone")
+                .to_string();
+            let reason = rejected(
+                daemon
+                    .answer("req-b", "h", answer.clone(), Some(&session.uid))
+                    .await,
+            );
+            tells_the_phone_nothing_local("answer ledger read", &reason, &err);
+        }
+
+        // (c) The run's open cards, read once the ledger has said nothing.
+        {
+            let (daemon, _db, session) = answering_daemon("C08", "cc-c");
+            daemon.store.break_codex_card_writes_for_tests();
+            let err = daemon
+                .db
+                .codex_pending_approvals(session.uid.clone())
+                .await
+                .expect_err("the card table is gone")
+                .to_string();
+            let reason = rejected(
+                daemon
+                    .answer("req-c", "h", answer.clone(), Some(&session.uid))
+                    .await,
+            );
+            tells_the_phone_nothing_local("answer card read", &reason, &err);
+        }
+
+        // (d) `approval_target`'s replay arm, whose row this build cannot decode.
+        {
+            let (daemon, db, session) = answering_daemon("C09", "cc-d");
+            seed_answer_row(&db, &session.uid, "req-d", "this is not an outcome");
+            let err = daemon
+                .db
+                .find_answer_by_request("req-d".into())
+                .await
+                .expect_err("the stored outcome does not decode")
+                .to_string();
+            let reason = rejected(daemon.answer("req-d", "h", answer.clone(), None).await);
+            tells_the_phone_nothing_local("answer replay read", &reason, &err);
+        }
+
+        // (e) The agent gate's own lookup, reached only once a replayed row has named
+        //     the run — which is why this one needs a seeded answer AND a broken view.
+        {
+            let (daemon, db, session) = answering_daemon("C10", "cc-e");
+            let outcome = serde_json::to_string(&protocol::ws::AnswerOutcome {
+                request_id: "req-e".into(),
+                session_id: session.name.clone(),
+                decision: answer.clone(),
+                resolved_by: protocol::ws::ResolvedBy::Phone,
+                applied_via: protocol::ws::AnswerPath::CodexResponse,
+                resolved_at: "2026-01-01T00:00:00.000Z".into(),
+                detail: None,
+                inferred: false,
+                indeterminate: false,
+            })
+            .expect("an outcome encodes");
+            seed_answer_row(&db, &session.uid, "req-e", &outcome);
+            daemon.store.break_session_reads_for_tests(true);
+            let err = daemon
+                .db
+                .get_session(session.uid.clone())
+                .await
+                .expect_err("the fleet view is gone")
+                .to_string();
+            let reason = rejected(daemon.answer("req-e", "h", answer.clone(), None).await);
+            tells_the_phone_nothing_local("answer agent gate", &reason, &err);
+        }
+    }
+
+    /// **A phone-chosen `request_id` cannot forge a line in `ccd.log`.**
+    ///
+    /// The id on an `Answer`, an `Interrupt` or a `Compose` frame is chosen entirely by
+    /// the phone, is bounded by nothing, and is interpolated into this daemon's log at
+    /// eleven sites — two in [`crate::state`] and nine here. A newline in it writes a
+    /// second line into the file operators and the live gates read, and that line greps
+    /// exactly like a real one: `"x\n<timestamp> ERROR codex recovery: ownership
+    /// asserted"` is a complete, well-formed, entirely fictional statement about this
+    /// Mac.
+    ///
+    /// **The grammar is `mac/codex-broker/src/redact.rs`'s**, which is the source of
+    /// truth for it and already defends `broker.log` this way.
+    /// [`crate::state::logged_request_id`] is a copy of the rule rather than a call into
+    /// it, because `codex-broker` is a **dev-dependency** of this crate and deliberately
+    /// so — see `ccd/Cargo.toml`, where it is marked TEST-ONLY.
+    ///
+    /// Asserted twice over: the grammar directly, on everything an identifier is not —
+    /// which is total in a way a handful of drives could never be — and then one real
+    /// drive per verb against a broken store, because the sites are eleven separate
+    /// `format!`s and the only proof that a site was routed is a line it wrote.
+    ///
+    /// **Mutation:** unroute any one site and its drive below produces a captured entry
+    /// carrying a newline.
+    #[tokio::test]
+    async fn a_phone_chosen_request_id_cannot_forge_a_line_in_the_log() {
+        // A newline, a carriage return and a bare control byte, wrapped around something
+        // that reads exactly like a line this daemon writes about itself.
+        const FORGED: &str = "2026-09-09T00:00:00.000Z ERROR codex recovery: ownership asserted";
+        let hostile = format!("req-1\n{FORGED}\r\u{0007}");
+
+        // ---- the grammar, over everything a plain identifier is not --------------
+        for hostile_id in [
+            hostile.as_str(),
+            "req\nid",
+            "req\rid",
+            "req\u{0}id",
+            "req\u{7}id",
+            "req id",
+            "req\"id",
+            "req/id",
+            "",
+            &"x".repeat(crate::state::MAX_LOGGED_CLIENT_ID_BYTES + 1),
+        ] {
+            for logged in [
+                crate::state::logged_request_id(hostile_id),
+                crate::state::logged_session_ref(hostile_id),
+            ] {
+                assert!(
+                    logged.starts_with("<non-conforming "),
+                    "{hostile_id:?} is not a plain identifier and must be reported by \
+                     shape alone: {logged}"
+                );
+                assert!(
+                    !logged.contains(|c: char| c.is_control()),
+                    "and a shape carries no byte of what it is a shape OF: {logged:?}"
+                );
+            }
+        }
+        // And every id form the wire actually carries survives intact, or an operator
+        // cannot find the ask they are diagnosing.
+        for real in [
+            "req-7",
+            "0",
+            "startup-thread-start-01a0127a-c6f4-70d1-b3a3-0742f8fd0d86",
+            LIFECYCLE_THREAD,
+            "01JQXV9K7B0000000000000C05",
+            "cc-1",
+            "a.b:c_d",
+        ] {
+            assert_eq!(crate::state::logged_request_id(real), real);
+            assert_eq!(crate::state::logged_session_ref(real), real);
+        }
+
+        // ---- and the real paths, against the real log ---------------------------
+        // See [`crate::state::ONE_LOG_CAPTURE_AT_A_TIME`]: the sink is process-global,
+        // and a test that only READS it is as easily robbed as one that fills it.
+        let _capture = crate::state::ONE_LOG_CAPTURE_AT_A_TIME.lock().await;
+        crate::log::capture::install();
+        let (daemon, _db, session) = answering_daemon("C12", "cc-log");
+        daemon.store.break_answer_ledger_for_tests(true);
+        let _ = daemon
+            .answer(
+                &hostile,
+                "h",
+                protocol::ws::AnswerDecision::OptionId {
+                    option_id: "accept".into(),
+                },
+                Some(&session.uid),
+            )
+            .await;
+        let turn = "01a0-t";
+        let _ = daemon
+            .interrupt(
+                &session.uid,
+                &hostile,
+                turn,
+                &protocol::hash::interrupt_hash(&session.uid, turn),
+            )
+            .await;
+        // The compose and interrupt session-reference sites, where the hostile bytes
+        // arrive in the OTHER phone-chosen field. Broken session reads, so both reach
+        // the lookup failure that names it.
+        daemon.store.break_session_reads_for_tests(true);
+        let _ = daemon.compose(&hostile, "req-2", "hello".into(), "h").await;
+        let _ = daemon.interrupt(&hostile, "req-3", turn, "h").await;
+        let lines = crate::log::capture::drain();
+        crate::log::capture::uninstall();
+
+        // Selected by content, because the capture sink is process-global and this test
+        // binary runs many tests at once — see [`crate::log::capture`].
+        let ours: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("non-conforming") || line.contains(&session.uid))
+            .collect();
+        assert!(
+            ours.len() >= 4,
+            "each drive must have written a line, or this proves nothing about the site \
+             it was aimed at: {lines:?}"
+        );
+        for line in &ours {
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "a phone-chosen id forged a line of this daemon's log: {line:?}"
+            );
+            assert!(
+                !line.contains(FORGED),
+                "and none of its text survived at all: {line:?}"
+            );
+        }
+    }
+
+    /// A daemon holding one Codex run and nothing else, for the answer-path drives
+    /// above: they need a run whose agent reads `Codex` and a store they may break,
+    /// and nothing that a scripted leg provides.
+    fn answering_daemon(tail: &str, name: &str) -> (Arc<Daemon>, TempDb, SessionKey) {
+        // A well-formed uid, because `approval_target` branches on exactly that: a
+        // 27-character stand-in takes the tmux-name path instead and every drive below
+        // passes vacuously on "unknown or already-resolved request".
+        let uid = format!("01JQXV9K7B0000000000000{tail}");
+        assert!(
+            protocol::uid::is_well_formed(&uid),
+            "the drives below depend on this being a uid: {uid}"
+        );
+        let session = SessionKey {
+            uid,
+            name: name.into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        (daemon, db, session)
+    }
+
+    /// The sentence an [`protocol::ws::AnswerResult`] refuses with.
+    fn rejected(result: protocol::ws::AnswerResult) -> String {
+        match result {
+            protocol::ws::AnswerResult::Rejected { reason } => reason,
+            other => panic!("this answer must be refused, and was not: {other:?}"),
+        }
+    }
+
+    /// Put one row straight into `answers`.
+    ///
+    /// There is no store writer that leaves a replayable row without also leaving the
+    /// session and the card that produced it, and the two reads under test happen
+    /// AFTER that row is found — so the fault has to be armed around a row that is
+    /// simply there. A raw connection to the same file, which is what the store's own
+    /// probes do.
+    fn seed_answer_row(db: &TempDb, session_uid: &str, request_id: &str, outcome: &str) {
+        let conn = rusqlite::Connection::open(db.path()).expect("the test database opens");
+        conn.execute(
+            "INSERT INTO answers(session_uid, request_id, payload_hash, outcome, created_at)
+             VALUES (?1, ?2, 'h', ?3, '2026-01-01T00:00:00.000Z')",
+            rusqlite::params![session_uid, request_id, outcome],
+        )
+        .expect("the replayable row is written");
     }
 
     /// **The claim and the frame are the same statement about one actuation.**
@@ -20976,6 +21567,104 @@ mod tests {
         );
     }
 
+    /// **A card from a visit this link has LEFT is not answered on the visit it is on
+    /// now.**
+    ///
+    /// The interrupt asks this in [`interrupt_refusal`] and the compose asks it in
+    /// [`compose_route`], both by comparing the live `visit.generation` against the one
+    /// snapshotted in the claim. The answer takes the same
+    /// [`crate::store::ClaimedMaterial`], carrying the same field, and did not ask at
+    /// all — so the one gate the broker structurally cannot make (it has no notion of a
+    /// visit) was made on two of the three verbs.
+    ///
+    /// **The window is real, and it is [`Connection::retire_codex_cards`]'s.** A visit
+    /// that moves retires the cards it left; when that retirement transaction fails, the
+    /// wire mapping in `outstanding` is deliberately KEPT, because dropping it would
+    /// strand a request the app-server is still waiting on. So this connection can hold a
+    /// live wire id for a card raised under a generation it has since moved past — and
+    /// the thread gate above cannot catch it, because a thread revisited after a `/new`
+    /// and back again wears the same id under a different visit.
+    ///
+    /// Driven through the real `answer_approval` on a real socket, because the refusal
+    /// this is about happens between two things a helper would hide: the thread gate that
+    /// passes and the durable claim that must not be taken.
+    ///
+    /// **Mutation:** delete the generation comparison from `answer_approval`. The
+    /// sentence assertion and the no-claim assertion go red together — the answer is
+    /// claimed and the response written on a question from another visit.
+    #[tokio::test]
+    async fn an_answer_from_a_visit_this_link_has_left_is_refused() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C11".into(),
+            name: "cc-gen".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        // The link is on generation 2. The card below was raised under generation 1, on
+        // this same thread — the `/new`-and-back shape.
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            2,
+        );
+        let (mut ws, _server) = a_socket_pair().await;
+        // The wire mapping a failed retirement leaves behind, which is what makes the
+        // stale card addressable at all.
+        conn.outstanding.insert(7, "req-stale".to_string());
+
+        let (reply, told) = tokio::sync::oneshot::channel();
+        conn.answer_approval(
+            &mut ws,
+            AnswerRequest {
+                request_id: "req-stale".into(),
+                decision: json!("accept"),
+                claimed: crate::store::ClaimedMaterial {
+                    thread_id: LIFECYCLE_THREAD.into(),
+                    generation: 1,
+                    route: "accept".into(),
+                    target_turn_id: Some(APPROVAL_TURN.into()),
+                    claimed_hash: "h".into(),
+                },
+                reply,
+                gate: a_gate_guard().await,
+            },
+        )
+        .await
+        .expect("a refusal is not a connection error");
+
+        // **Bounded, because the failure mode without the gate is silence rather than a
+        // wrong answer.** An accepted ask is written and parked in `open_answers` to wait
+        // for a disposition that this test never sends, so an ungated build leaves the
+        // caller waiting for ever. A timeout turns that into a legible red.
+        let report = tokio::time::timeout(Duration::from_secs(5), told)
+            .await
+            .expect(
+                "the ask must be refused before the claim; an ungated build writes it \
+                 and parks the caller waiting for a disposition instead",
+            )
+            .expect("the caller is told");
+        let AnswerReport::NotApplied(why) = report else {
+            panic!("a refusal taken before the claim is `NotApplied`, got {report:?}")
+        };
+        assert!(
+            why.contains("moved on") && why.contains("nothing was sent"),
+            "the refusal must say the visit moved and that nothing was written: {why}"
+        );
+        assert_eq!(
+            daemon
+                .store
+                .answer_status(&session.uid, "req-stale")
+                .expect("the ledger reads"),
+            None,
+            "every reason an answer might not be written is established BEFORE the \
+             durable claim, so a refused ask leaves nothing for recovery to find"
+        );
+    }
+
     /// **A socket for a test that has to call the write path itself.**
     ///
     /// [`Connection::interrupt_turn`] is the production function the link's select arm
@@ -22041,6 +22730,8 @@ mod tests {
                 "startedAtMs": 1787016966353i64
             }
         });
+        // See [`crate::state::ONE_LOG_CAPTURE_AT_A_TIME`].
+        let _capture = crate::state::ONE_LOG_CAPTURE_AT_A_TIME.lock().await;
         crate::log::capture::install();
         conn.observe_notification(&profile).await;
         conn.observe_notification(&future).await;

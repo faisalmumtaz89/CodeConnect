@@ -3585,14 +3585,22 @@ mod tests {
             !leg_is_serving(&plain),
             "a REGULAR FILE at the leg's name must never be accepted as a bound socket"
         );
-        // Retried within a small window rather than asserted on one probe. A single
-        // connect is bounded by LEG_CONNECT_BUDGET, and on a loaded machine a local
-        // connect can genuinely exceed it — which production handles by looking
-        // again on the next poll, so a test that demands one-shot success is
-        // asserting something the system never promises. (Observed: one failure
-        // here across ~30 suite runs, only while the machine was saturated.)
+        // Retried until the condition holds rather than asserted on one probe. A
+        // single connect is bounded by LEG_CONNECT_BUDGET (250ms), and on a loaded
+        // machine a local connect can genuinely exceed it — which production handles
+        // by looking again on the next poll, so a test that demands one-shot success
+        // is asserting something the system never promises.
+        //
+        // The window is deliberately generous, and generosity is free here: the loop
+        // returns on the first probe that succeeds, so an idle machine pays one
+        // connect and the ceiling is never approached. The five seconds this used to
+        // allow were still short enough for saturation to beat — it failed one of two
+        // whole-crate parallel runs, and the repo's own preflight (default threads)
+        // saw it too. Thirty seconds is past anything a local `connect(2)` to a bound
+        // listener can plausibly cost, and still finite, so a leg that never serves is
+        // a failure rather than a hang.
         let serving_soon = |path: &std::path::Path| -> bool {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             loop {
                 if leg_is_serving(path) {
                     return true;

@@ -42,6 +42,23 @@ extension ApprovalCard {
             renderMatchesDisplayText: "\(toolName)\n\(toolInput.canonicalJSONString)" == displayText)
     }
 
+    /// **The pending card's promise, and the one card that must not make it.**
+    ///
+    /// "Nothing decides this but you. There is no timer on this card." is the
+    /// card's standing promise and it survives every redesign — on a card that
+    /// can be answered. On one that cannot, it is false in the most misleading
+    /// direction available: something other than the reader has already decided
+    /// that the reader does not decide, and a reader who believes the sentence
+    /// waits at a control that is never coming. It was drawn directly above
+    /// "it cannot be answered from here", so the card said both at once.
+    ///
+    /// A function rather than a `let`, so the condition is stated once, next to
+    /// the words, and can be asserted without standing up a `View`.
+    static func pendingPromise(isAnswerable: Bool) -> String? {
+        guard isAnswerable else { return nil }
+        return "Nothing decides this but you. There is no timer on this card."
+    }
+
     /// What a Codex card says when the phone cannot vouch for its rendering.
     /// One sentence, and never the daemon's `tool\n{JSON}`.
     static let unverifiableCodexLine =

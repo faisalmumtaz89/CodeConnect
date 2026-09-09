@@ -116,7 +116,9 @@ pub enum Disposition {
     /// conflict, or an absent ownership field on a policy-setting method, is refused.
     ///
     /// The **executor** adds two state-level rules this static table deliberately does not
-    /// encode (so the golden matrix does not move):
+    /// encode, because the table is also the definition of the guarded wire surface and a
+    /// refusing cell drops a method out of it (see [`executor_refusal`]). The matrix does
+    /// not lose them: it restates [`effective_disposition`], which composes the two.
     /// * `thread/start` additionally claims the session's single creation slot at the
     ///   moment it is admitted, and is refused when that slot is closed (one thread bound
     ///   or one creation already pending — [`crate::session`]).
@@ -344,6 +346,84 @@ pub fn disposition(role: Role, kind: JsonRpcKind, method: &str) -> Disposition {
     }
 }
 
+/// A method whose **cell is not a refusal but whose every frame is refused anyway**,
+/// unconditionally, by the executor rather than by the table above.
+///
+/// # Why such a thing exists at all, instead of just being a `Refuse` cell
+///
+/// [`disposition`] is not read only to decide a frame's fate. It is also the definition of
+/// the **guarded surface**: [`crate::guarded_surface::is_guarded_as`] asks it which methods
+/// the launch gate must pin the wire shape of, and a method whose cell refuses is dropped
+/// from that projection because a refused method's shape cannot hurt anyone. `thread/fork`
+/// is the one method for which both of those are true at once — it must be refused, and its
+/// shape must stay pinned, because the refusal is a **pre-2e-4c deferral and not a verdict
+/// on the method**. When the fork lineage rule becomes provable, the executor's branch goes
+/// away and the cell is already correct; if the cell had been flipped to `Refuse` in the
+/// meantime, `thread/fork` would have silently left the vendored `guarded-wire-*.json`
+/// references and its shape would have gone unwatched for exactly the releases in which it
+/// was going to change.
+///
+/// So the cell stays, the executor refuses, and this function is where those two facts are
+/// reconciled — read by [`crate::refusal`] to *perform* the refusal and by
+/// [`effective_disposition`] to *state* it, so neither can drift from the other.
+///
+/// The reason returned is the one whose wire form the executor already emitted before this
+/// function existed: `thread/fork` is refused with `E_POLICY_REFUSED` and the message
+/// `"request refused by session policy"`, which is byte-for-byte what
+/// `refuse_message(RefuseReason::Fingerprint)` produces — and `Fingerprint` is documented as
+/// the reason "produced by the fingerprint validator at runtime, not by the static table",
+/// which is precisely this refusal's provenance. The audit detail travels with the reason so
+/// the executor's branch is entirely data-driven: there is no second place to edit, and no
+/// way for the matrix to claim a refusal the executor does not actually perform.
+pub fn executor_refusal(method: &str) -> Option<(RefuseReason, &'static str)> {
+    match method {
+        // A fork's lineage rule is that its SOURCE thread must itself be session-bound, and
+        // the wire capture contains NO fork frame — there is no measured source-thread field
+        // to read, so the rule is unenforceable and the method is unprovable.
+        //
+        // Belt-and-braces: the single-thread rule makes the refusal unconditional anyway — a
+        // fork needs an existing thread, and the creation slot closes the moment one is
+        // bound — so the fork of a bound thread would already be refused as a second
+        // creation.
+        "thread/fork" => Some((
+            RefuseReason::Fingerprint,
+            "refused pre-2e-4c — a fork must prove its SOURCE thread is session-bound, and \
+             no fork frame exists in the wire capture, so the source-thread field is \
+             unprovable",
+        )),
+        _ => None,
+    }
+}
+
+/// What the broker **actually does** to a `(role, kind, method)` — the table's cell composed
+/// with the [`executor_refusal`] overrides.
+///
+/// This is the function `schema-0.147/disposition-matrix.tsv` restates, and the distinction
+/// from [`disposition`] is the whole reason it exists. The matrix is the file a reviewer
+/// reads to learn where the boundary is; a row saying `FingerprintAssert` for a method whose
+/// every frame is refused overstates the surface in the one direction a security document
+/// must never overstate it — it advertises an admitted method that is not admitted. The
+/// matrix therefore pins this function, `tests/exhaustiveness.rs` proves the equality in both
+/// directions, and a second test in that file drives the real classifier over every row where
+/// the two functions disagree, so the override cannot be deleted without the gate saying so.
+///
+/// **Callers that want the guarded surface want [`disposition`], not this.** The distinction
+/// is stated at length on [`executor_refusal`]: a method the executor refuses may still need
+/// its shape pinned.
+///
+/// An override applies only where the table has not already refused — on ccd's leg
+/// `thread/fork` is `Refuse(RoleNotPermitted)` and never reaches the executor branch at all,
+/// and that is the reason the matrix must keep reporting for that cell.
+pub fn effective_disposition(role: Role, kind: JsonRpcKind, method: &str) -> Disposition {
+    let table = disposition(role, kind, method);
+    if kind == JsonRpcKind::Request && !matches!(table, Disposition::Refuse(_)) {
+        if let Some((reason, _)) = executor_refusal(method) {
+            return Disposition::Refuse(reason);
+        }
+    }
+    table
+}
+
 /// tui.sock request dispositions. Grounded in the TUI bootstrap census
 /// (INTERCEPTION-FINDINGS: 11 distinct bootstrap methods) plus the switch/turn
 /// affordances observed in full runs.
@@ -353,8 +433,9 @@ fn tui_request(method: &str) -> Disposition {
     match method {
         // Ownership-carrying: thread creation/attach is fingerprint-asserted; a turn
         // additionally head-checks against the session's verified thread. (`thread/fork`
-        // keeps its cell but is refused in the executor pre-2e-4c — see the disposition
-        // docs; keeping the cell keeps the golden matrix stable.)
+        // keeps its cell so its wire shape stays pinned by the launch gate, and is refused
+        // unconditionally by the executor pre-2e-4c — see [`executor_refusal`]. The
+        // disposition matrix reports the refusal, not this cell.)
         "thread/start" | "thread/resume" | "thread/fork" => FingerprintAssert,
         "turn/start" => FingerprintThenHeadCheck,
 

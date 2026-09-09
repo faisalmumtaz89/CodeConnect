@@ -509,3 +509,108 @@ final class CodexProseTests: XCTestCase {
         XCTAssertTrue(named.contains("never confirmed"), named)
     }
 }
+
+
+/// **The read-only card's prose** — the card a daemon below minor 19 puts a
+/// reader in front of, and the one card state no render reached until now.
+///
+/// A card that cannot be answered from the phone was saying two things at once:
+/// the pending card's standing promise, *"Nothing decides this but you. There is
+/// no timer on this card."*, sat directly above the action bar's *"it cannot be
+/// answered from here"*. Both were photographed, at L and at AX5. The first is
+/// simply false on such a card — something other than you has already decided
+/// that you do not decide — and a reader who believes it will wait at a control
+/// that is never coming.
+///
+/// Asserted as pure functions, the way this file's header says: what the render
+/// pass adds is what these sentences look like at AX5; what it cannot do is tell
+/// you one of them is a lie.
+@MainActor
+final class ReadOnlyCardProseTests: XCTestCase {
+
+    private let promise = "Nothing decides this but you"
+
+    private func profile(minor: UInt32) -> DaemonProfile {
+        DaemonProfile(protocolVersion: Wire.protocolVersion, protocolMinor: minor, capabilities: nil)
+    }
+
+    /// **The promise is not made on a card that cannot be answered here.**
+    func testAnUnanswerableCardMakesNoPromiseAboutWhoDecides() {
+        XCTAssertNil(
+            ApprovalCard.pendingPromise(isAnswerable: false),
+            "a card the phone cannot answer must not promise that nothing decides it but you")
+        XCTAssertEqual(
+            ApprovalCard.pendingPromise(isAnswerable: true),
+            "Nothing decides this but you. There is no timer on this card.",
+            "an answerable card keeps the promise verbatim — it survives every redesign")
+    }
+
+    /// **One sentence, and it is true.** It says what is wrong, what to do now,
+    /// and what to do about it — in that order, because the reader's next action
+    /// is at the Mac and the update is the fix, not the workaround.
+    func testTheReadOnlyCaveatIsOneTrueSentenceAndSaysWhereToAnswer() throws {
+        let caveat = try XCTUnwrap(
+            profile(minor: 18).codexAnswerCaveat,
+            "a minor-18 daemon cannot retire an answered Codex card, so the card is read-only")
+        XCTAssertFalse(
+            caveat.contains(promise),
+            "the caveat must not restate the promise it contradicts: \(caveat)")
+        XCTAssertTrue(
+            caveat.contains("answer it at the Mac"),
+            "a read-only card must say where the question CAN be answered: \(caveat)")
+        XCTAssertTrue(
+            caveat.contains("Update the Mac"),
+            "and what makes it answerable here: \(caveat)")
+        // **Short enough to survive AX5.** Measured, not guessed: the previous
+        // wording ran to four lines in the pinned action bar on a 6.9" phone at
+        // AX5 and clipped "Update it." off the bottom edge of the screen.
+        XCTAssertLessThanOrEqual(
+            caveat.count, 120,
+            "the caveat is \(caveat.count) characters; it clips at AX5 past ~120")
+    }
+
+    /// **One home, never both and never none.**
+    ///
+    /// The sentence moved out of the pinned bar at accessibility sizes because
+    /// a pinned footer is capped at 45% of the screen: at AX5 it covered the
+    /// EXACT COMMAND block and still clipped its own last word off the bottom.
+    /// A bar of controls has to stay reachable and earns that cap; a sentence
+    /// saying there is nothing to tap does not. The risk of moving it is
+    /// drawing it twice or losing it, so that is what this asserts.
+    func testTheReadOnlyNoteHasExactlyOneHomeAtEverySize() {
+        for accessibility in [false, true] {
+            let inDocument = DecisionCardView.readOnlyNoteInDocument(
+                isAccessibilitySize: accessibility, isActionable: true, isAnswerable: false)
+            let inBar = DecisionCardView.readOnlyNoteInPinnedBar(
+                isAccessibilitySize: accessibility, isActionable: true, isAnswerable: false)
+            XCTAssertNotEqual(
+                inDocument, inBar,
+                "at \(accessibility ? "AX" : "reading") sizes the read-only note is drawn "
+                    + "\(inDocument && inBar ? "twice" : "nowhere")")
+        }
+        XCTAssertTrue(
+            DecisionCardView.readOnlyNoteInDocument(
+                isAccessibilitySize: true, isActionable: true, isAnswerable: false),
+            "at accessibility sizes it belongs in the document, where it can scroll")
+        XCTAssertTrue(
+            DecisionCardView.readOnlyNoteInPinnedBar(
+                isAccessibilitySize: false, isActionable: true, isAnswerable: false),
+            "at reading sizes the bar fits and keeps its place")
+        // An answerable card has no such note in either home.
+        for accessibility in [false, true] {
+            XCTAssertFalse(
+                DecisionCardView.readOnlyNoteInDocument(
+                    isAccessibilitySize: accessibility, isActionable: true, isAnswerable: true))
+            XCTAssertFalse(
+                DecisionCardView.readOnlyNoteInPinnedBar(
+                    isAccessibilitySize: accessibility, isActionable: true, isAnswerable: true))
+        }
+    }
+
+    /// A daemon that CAN retire a Codex card offers no caveat at all, so the
+    /// promise stands and the card is answerable.
+    func testAMinor19DaemonHasNoCaveatAndKeepsThePromise() {
+        XCTAssertNil(profile(minor: 19).codexAnswerCaveat)
+        XCTAssertNotNil(ApprovalCard.pendingPromise(isAnswerable: true))
+    }
+}

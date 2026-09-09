@@ -130,6 +130,114 @@ final class CodexFixtureTests: XCTestCase {
             "the real composite id, verbatim from approval-card-0.153.json")
     }
 
+    /// **The composite id is the card fixture's own id, not a look-alike.**
+    ///
+    /// `compositeRequestID` is a literal in the app target — `approval-card
+    /// -0.153.json` ships only in the test bundle, and bundling a test fixture
+    /// into the shipped app to read one string from it would be the worse
+    /// trade. So the literal is pinned here instead, and this is the assertion
+    /// the length check could not make: when the card fixture was rebuilt from
+    /// the real `approval-0.153.jsonl` frames, the new id was **also** 159
+    /// characters, so `count == 159` stayed green over an id belonging to a
+    /// card that no longer existed.
+    func testTheCompositeIdIsTheCardFixturesOwn() throws {
+        let object = try XCTUnwrap(
+            try JSONDecoder()
+                .decode(JSONValue.self, from: Self.bundledCardFixture())
+                .objectValue,
+            "approval-card-0.153.json did not decode as an object")
+        let ids = object.keys.sorted().compactMap { object[$0]?["request_id"]?.stringValue }
+        XCTAssertEqual(
+            ids.count, object.keys.count,
+            "every card in approval-card-0.153.json must carry a request_id: \(object.keys.sorted())")
+        XCTAssertTrue(
+            ids.contains(CodexFixtures.compositeRequestID),
+            """
+            CodexFixtures.compositeRequestID is not any card's id in \
+            approval-card-0.153.json. The fixture was regenerated and the \
+            literal was not. Its ids are: \(ids)
+            """)
+    }
+
+    private static func bundledCardFixture() throws -> Data {
+        let bundle = Bundle(for: CodexFixtureTests.self)
+        guard let url = bundle.url(forResource: "approval-card-0.153", withExtension: "json"),
+            let data = try? Data(contentsOf: url)
+        else {
+            XCTFail("approval-card-0.153.json is not in the test bundle")
+            throw CocoaError(.fileNoSuchFile)
+        }
+        return data
+    }
+
+    /// **Every refusal sentence the corpus shows a reader is one the daemon
+    /// really sends.**
+    ///
+    /// The fixtures stage `InterruptResult.rejected` and `ComposeResult
+    /// .indeterminate` with sentences typed here, and those sentences are what
+    /// the render pass photographs. A typed approximation is the same defect as
+    /// a stale bundled fixture wearing different clothes: `compose-indeterminate`
+    /// carried "that message was written and what became of it is not known",
+    /// which is no row the daemon has ever had. It classified the same way by
+    /// luck — the row it approximates is `permanent` too, and an unmatched
+    /// sentence also declines to grey — so nothing in the suite noticed.
+    ///
+    /// Matched against `fixtures/codex/refusal-sentences.json`, the source, for
+    /// the same reason `CodexRefusalClassifierTests` reads the source: a copy
+    /// compared with a copy proves nothing.
+    func testEveryStagedRefusalIsASentenceTheDaemonReallySends() throws {
+        struct Wire: Decodable {
+            struct Row: Decodable {
+                let id: String
+                let text: String
+            }
+            let sentences: [Row]
+        }
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let url = repoRoot.appendingPathComponent("fixtures/codex/refusal-sentences.json")
+        guard let data = try? Data(contentsOf: url) else {
+            throw XCTSkip("fixtures/codex/refusal-sentences.json is not reachable from this bundle")
+        }
+        let rows = try JSONDecoder().decode(Wire.self, from: data).sentences
+        // Only rows with no token can be compared verbatim; a template is not a
+        // sentence, and the fixtures stage sentences.
+        let verbatim = Dictionary(
+            rows.filter { !$0.text.contains("{") }.map { ($0.text, $0.id) },
+            uniquingKeysWith: { first, _ in first })
+
+        var checked = 0
+        for state in CodexFixtures.State.allCases {
+            var staged: [(what: String, sentence: String)] = []
+            if case .rejected(let reason)? = CodexFixtures.interruptResult(state) {
+                staged.append(("interrupt rejected", reason))
+            }
+            if case .indeterminate(let reason)? = CodexFixtures.interruptResult(state) {
+                staged.append(("interrupt indeterminate", reason))
+            }
+            if case .rejected(let reason)? = CodexFixtures.composeResult(state) {
+                staged.append(("compose rejected", reason))
+            }
+            if case .indeterminate(let reason)? = CodexFixtures.composeResult(state) {
+                staged.append(("compose indeterminate", reason))
+            }
+            for one in staged {
+                checked += 1
+                XCTAssertNotNil(
+                    verbatim[one.sentence],
+                    """
+                    \(state.rawValue)'s \(one.what) sentence is not one the \
+                    daemon sends: "\(one.sentence)". Every refusal a render \
+                    photographs must be a row of \
+                    fixtures/codex/refusal-sentences.json, verbatim.
+                    """)
+            }
+        }
+        // A positive control: this must have had something to check.
+        XCTAssertGreaterThanOrEqual(
+            checked, 4, "only \(checked) staged refusals found; this test is not looking at them")
+    }
+
     /// A staged card is in `blocked_on` only while it is still unanswered — a
     /// resolved card counted as blocking would put the run in the wrong band and
     /// make the fleet's headline count wrong.
@@ -391,5 +499,85 @@ final class CodexFixtureTests: XCTestCase {
                     "\(state.rawValue) presses send with no answer staged, so the gate must stop it")
             }
         }
+    }
+}
+
+
+/// **Every fixture the iOS side duplicates, tied to the one it was copied from.**
+///
+/// Five files under `fixtures/codex/` exist in two or three places — the daemon
+/// emits or captures them, the app bundles some of them because a phone has no
+/// repo, and the test bundle carries the rest. Nothing compared any copy to its
+/// source: not Rust, not Swift, not the `.pbxproj` (the targets use
+/// file-system-synchronized groups, so a resource is included by *sitting in the
+/// directory* — there is no copy phase to hang a check on), and not CI.
+///
+/// That is not a hypothetical. It is how `refusal-sentences.json` sat two rows
+/// behind the daemon in both iOS copies while `CodexRefusalClassifierTests`
+/// compared one copy to the other and stayed green — leaving the composer live
+/// against a link `compose_start_in_flight` was refusing. And it is why
+/// `compose-0.153.4.jsonl` was found carrying a *different capture's* item id
+/// from the source's, which nobody had noticed either.
+///
+/// So this walks the directories rather than naming files: a sixth duplicated
+/// fixture is covered the day it is added, without anyone remembering to add it
+/// here. Skipped, not failed, where the repo is unreachable — the same rule
+/// `CodexRefusalClassifierTests` and `AgentSeamRenderingTests` already follow.
+final class CodexFixtureProvenanceTests: XCTestCase {
+
+    /// The iOS directories that hold copies, and what each one is for.
+    private static let mirrors: [(path: String, why: String)] = [
+        ("CodeConnect/Resources", "the app bundle — the phone reads these with no repo to check"),
+        ("CodeConnectTests/Resources", "the test bundle — the unit tests' evidence base"),
+    ]
+
+    func testEveryDuplicatedFixtureIsByteIdenticalToItsSource() throws {
+        let repoRoot = try Self.repoRootOrSkip()
+        let source = repoRoot.appendingPathComponent("fixtures/codex")
+        var compared: [String] = []
+
+        for mirror in Self.mirrors {
+            let directory = repoRoot.appendingPathComponent("ios/\(mirror.path)")
+            let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            for name in names.sorted() where !name.hasPrefix(".") {
+                let origin = source.appendingPathComponent(name)
+                guard let expected = try? Data(contentsOf: origin) else { continue }
+                let copy = try Data(contentsOf: directory.appendingPathComponent(name))
+                compared.append("\(mirror.path)/\(name)")
+                XCTAssertEqual(
+                    copy, expected,
+                    """
+                    ios/\(mirror.path)/\(name) has drifted from \
+                    fixtures/codex/\(name), which is where it is generated or \
+                    captured. This copy is \(mirror.why), so a stale one is a \
+                    phone reasoning about a wire the daemon no longer speaks. \
+                    Run: cp fixtures/codex/\(name) ios/\(mirror.path)/\(name)
+                    """)
+            }
+        }
+
+        // **A positive control.** A wrong repo root, a renamed directory or a
+        // moved fixtures tree would compare nothing at all and report success,
+        // which is the same silent pass this test exists to end.
+        XCTAssertTrue(
+            compared.contains("CodeConnect/Resources/refusal-sentences.json"),
+            """
+            this check compared \(compared.count) files and not the app's \
+            refusal-sentences.json, so it is not looking where it thinks it is: \
+            \(compared)
+            """)
+        XCTAssertGreaterThanOrEqual(
+            compared.count, 5, "only \(compared.count) duplicated fixtures found: \(compared)")
+    }
+
+    /// `#filePath` is `<repo>/ios/CodeConnectTests/<thisfile>.swift` → up 3.
+    private static func repoRootOrSkip() throws -> URL {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: root.appendingPathComponent("fixtures/codex").path)
+        else {
+            throw XCTSkip("fixtures/codex is not reachable from this bundle; this gate needs a checkout")
+        }
+        return root
     }
 }

@@ -316,12 +316,19 @@ final class CodexControls {
     /// **Which refusals are worth waiting out** — the daemon's own answer.
     ///
     /// This matched three English phrases and was wrong the day the shared
-    /// fixture landed: 8 of the daemon's 18 link-state refusals, ten missed. The
-    /// classification now comes from `fixtures/codex/refusal-sentences.json`,
+    /// fixture landed: 8 of the daemon's 20 link-state refusals, twelve missed.
+    /// The classification now comes from `fixtures/codex/refusal-sentences.json`,
     /// which the daemon emits from the one place each sentence is written and
     /// keeps byte-identical to its build — so a reword changes the file, the
     /// file changes the app, and `CodexRefusalClassifierTests` fails if the two
     /// ever disagree.
+    ///
+    /// That last clause is only true because the test reads the **source**
+    /// fixture out of the repo and compares this app's bundled copy to it byte
+    /// for byte. It used to compare the app's copy to the test bundle's copy —
+    /// two derivatives of one `cp` — and both sat two rows behind the daemon,
+    /// so `compose_start_in_flight` left this composer live against a link that
+    /// was mid-first-turn with every test green.
     ///
     /// An unmatched sentence does **not** grey: a control the reader could act
     /// on now, held dead for ten seconds, is the worse of the two errors.

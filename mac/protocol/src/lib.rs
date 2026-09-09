@@ -339,6 +339,32 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     ignores the field entirely. It only ever *withholds* an adoption — there is
 ///     no peer that has to understand it in order to stay correct, which is the
 ///     only thing the minor exists to say.
+///   * `16` — **a phone answer to a Codex approval, and an `applied_via` that can
+///     name what it did.** One addition, [`ws::AnswerPath::CodexResponse`]: the
+///     JSON-RPC response to the app-server's own `requestApproval`, written on the
+///     Codex link's socket. Neither of the two paths that had existed since minor
+///     0 can describe it, and the difference is not cosmetic — nothing is rendered
+///     and nothing is typed, so first-answer-wins is a property of the broker's
+///     arbiter rather than of a TTY, and the loser of that race is a fact the
+///     daemon is *told* rather than one it infers. A successful Codex answer that
+///     had to report `send_keys` would have claimed an actuation that never
+///     happened, at the Mac's keyboard, in a session Claude was not running.
+///
+///     **Additive, and a client written against minor 15 cannot even be shown it.**
+///     Claude's [`ws::AnswerPath`] serialization is byte-identical: no Claude
+///     answer takes this path. `answer_result` is a reply on the connection that
+///     sent the `answer`, so the only client that receives a `codex_response` is
+///     one that just answered a Codex approval — which a client below minor 15
+///     cannot do. What the variant does rely on is a property every decoder should
+///     already have had, because this is the *first* variant ever added to the
+///     enum: an unrecognised `applied_via` is retained and reported as
+///     unvouchable, never treated as a frame failure.
+///
+///     Nothing else in that work reached the wire. The durable answer claim, the
+///     broker's arbiter and the `responseDisposition` receipt it sends the daemon
+///     about its own write are Mac-side machinery; they change what the daemon
+///     *knows* before it speaks, not what it says, and the number records only the
+///     second.
 ///   * `17` — **`interrupt` is honoured rather than refused.** Minor 15 put the
 ///     [`ws::ClientMessage::Interrupt`] operation on the wire and the daemon
 ///     answered [`ws::InterruptResult::Rejected`] to every one of them. From here
@@ -477,6 +503,90 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     treats the field as an opaque string — which is what the phone's unrecognised
 ///     arm does — reads both minors with one code path.
 pub const PROTOCOL_MINOR: u32 = 20;
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::PROTOCOL_MINOR;
+
+    /// The one shape a ledger entry is written in.
+    ///
+    /// Scanning the source is only honest if this prefix cannot match anything but a
+    /// top-level entry, and it cannot: every line nested inside an entry is indented
+    /// past this column, so a sub-bullet that happens to quote a number is not
+    /// mistaken for an entry about that number.
+    const ENTRY: &str = "///   * `";
+
+    /// The minors the ledger names, in the order it names them.
+    fn minors_the_ledger_names() -> Vec<u32> {
+        let source = include_str!("lib.rs");
+        // The scan is bounded by the two constants the ledger sits between, so it
+        // cannot wander into some other doc comment in this file that bullets a
+        // number. Both anchors appear exactly once in the file.
+        let start = source
+            .find("pub const PROTOCOL_VERSION")
+            .expect("the version constant opens the block the ledger sits in");
+        let end = source
+            .find("pub const PROTOCOL_MINOR")
+            .expect("the ledger documents the minor constant, so it ends at it");
+        source[start..end]
+            .lines()
+            .filter_map(|line| line.strip_prefix(ENTRY))
+            .filter_map(|rest| rest.split_once('`'))
+            .filter_map(|(number, _)| number.parse().ok())
+            .collect()
+    }
+
+    /// **Every minor from 0 to [`PROTOCOL_MINOR`] has an entry, and the ledger claims
+    /// no minor that does not exist.**
+    ///
+    /// Minor 16 shipped with no entry at all. Nothing caught it — the ledger is prose,
+    /// and prose has no compiler — so the gap was found by a human reading the file
+    /// during a release review, which is not a gate and does not run again. This is
+    /// the gate. It fails on a bump that forgets to say what it bought, and equally on
+    /// an entry written for a number the constant has not reached.
+    ///
+    /// It deliberately does **not** check order. The ledger runs `10, 13, 12, 11` for a
+    /// real reason — the terminal work landed before the two smaller additions it was
+    /// developed alongside — and the order entries are told in is the ledger's to
+    /// choose. What it may not do is skip.
+    #[test]
+    fn the_ledger_names_every_minor_from_zero_to_the_current_one() {
+        let named = minors_the_ledger_names();
+
+        let missing: Vec<u32> = (0..=PROTOCOL_MINOR)
+            .filter(|minor| !named.contains(minor))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "minor(s) {missing:?} have no entry in the ledger above `PROTOCOL_MINOR`. \
+             A minor nobody wrote down is one a client cannot negotiate on: say what \
+             it added, or do not bump the number."
+        );
+
+        let unshipped: Vec<u32> = named
+            .iter()
+            .copied()
+            .filter(|minor| *minor > PROTOCOL_MINOR)
+            .collect();
+        assert!(
+            unshipped.is_empty(),
+            "the ledger has entries for minor(s) {unshipped:?}, past `PROTOCOL_MINOR` = \
+             {PROTOCOL_MINOR} — either the constant was not bumped with the prose, or \
+             the prose describes work that has not shipped."
+        );
+
+        let mut sorted = named.clone();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(
+            before,
+            sorted.len(),
+            "the ledger names a minor twice ({named:?}); two entries for one number \
+             means one of them describes a bump that never happened."
+        );
+    }
+}
 
 /// Private tmux server name. Never the user's default server.
 pub const TMUX_SOCKET_NAME: &str = "codeconnect";

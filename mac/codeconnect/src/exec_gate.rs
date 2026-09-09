@@ -59,18 +59,57 @@ const GO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A test-only env override for [`GO_TIMEOUT`], in milliseconds, so the
 /// gate-timeout⇒`_exit` path can be exercised in well under a second instead of
-/// waiting the 30-second production default. Unset in production ⇒ [`GO_TIMEOUT`]
-/// is used unchanged, so real launches behave identically.
+/// waiting the 30-second production default.
+///
+/// **It exists only in a build with debug assertions**, and so does the read of
+/// it: a shipped binary has no code path that consults the environment for this
+/// number. Calling it "test-only" in a comment was never a guarantee — the
+/// release binary read it too, and `CC_GATE_GO_TIMEOUT_MS=0` in the environment
+/// of whatever launches CodeConnect would have expired every gate before its
+/// owner could write GO, aborting every gated launch on a machine nobody was
+/// testing on. The knob had to stop being reachable, not merely be documented as
+/// unreachable.
+///
+/// **`cfg(debug_assertions)`, deliberately not `cfg(test)`.** The tests that need
+/// this knob re-exec `CARGO_BIN_EXE_codeconnect` as a *separate process* — the
+/// gate is a subcommand of the real binary, which is the only way to exercise the
+/// gate side at all — and that process is not compiled with `cfg(test)`. Gating on
+/// `test` would therefore make the knob invisible to exactly the tests it exists
+/// for, while leaving them green in a way that proves nothing. `debug_assertions`
+/// is on for `cargo test`'s binaries and off for the `--release` build that ships,
+/// which is the line actually being drawn.
+///
+/// Making the *name* debug-only is the part that enforces this: the release twin
+/// below cannot regrow an environment read without failing to compile, so
+/// `cargo check --release -p codeconnect` is the pin.
+#[cfg(debug_assertions)]
 const GO_TIMEOUT_ENV: &str = "CC_GATE_GO_TIMEOUT_MS";
 
-/// The effective GO timeout: the env override if present and parseable, else the
-/// production [`GO_TIMEOUT`].
+/// The effective GO timeout in a debug build: the env override if present and
+/// parseable, else the production [`GO_TIMEOUT`].
+#[cfg(debug_assertions)]
 fn go_timeout() -> Duration {
-    std::env::var(GO_TIMEOUT_ENV)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
+    go_timeout_from(std::env::var(GO_TIMEOUT_ENV).ok())
+}
+
+/// The override's semantics, separated from *reading* the environment so a test
+/// can pin them without mutating a process-global the rest of the test binary
+/// shares. Absent, unparseable, or out of `u64` range all mean [`GO_TIMEOUT`]:
+/// the knob may shorten the wait for a test, never corrupt it into something the
+/// production default would not have been.
+#[cfg(debug_assertions)]
+fn go_timeout_from(raw: Option<String>) -> Duration {
+    raw.and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_millis)
         .unwrap_or(GO_TIMEOUT)
+}
+
+/// The effective GO timeout in a shipped build: [`GO_TIMEOUT`], always. Nothing
+/// in the environment can move it. See [`GO_TIMEOUT`]'s debug-only sibling above
+/// for why the two bodies exist.
+#[cfg(not(debug_assertions))]
+fn go_timeout() -> Duration {
+    GO_TIMEOUT
 }
 
 /// How long the owner waits, **after** `GO`, for the target to confirm it has
@@ -686,6 +725,48 @@ impl Drop for OwnedFd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The GO-timeout knob is a debug-build affordance and nothing else.**
+    ///
+    /// Two halves, each compiled only into the profile it describes. In a debug
+    /// build the override is honoured — that is what
+    /// `tests/exec_gate_integration.rs` relies on to exercise the
+    /// timeout⇒`_exit` path in 300 ms instead of 30 s — and the degenerate
+    /// inputs fall back to the production default rather than to something
+    /// shorter, so a malformed value can never shorten a real launch's window.
+    /// In a release build there is no override to honour at all.
+    ///
+    /// The release half compiles under `cargo check --release -p codeconnect
+    /// --all-targets` and would fail to compile if [`go_timeout`]'s release twin
+    /// grew an environment read back, because the env-var name does not exist in
+    /// that profile.
+    #[test]
+    fn the_go_timeout_override_is_debug_only() {
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(
+                go_timeout_from(Some("300".to_string())),
+                Duration::from_millis(300),
+                "a debug build honours the override"
+            );
+            assert_eq!(
+                go_timeout_from(None),
+                GO_TIMEOUT,
+                "absent means the default"
+            );
+            assert_eq!(
+                go_timeout_from(Some("not a number".to_string())),
+                GO_TIMEOUT,
+                "unparseable means the default, never zero"
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        assert_eq!(
+            go_timeout(),
+            GO_TIMEOUT,
+            "a shipped build reads nothing from the environment"
+        );
+    }
 
     #[test]
     fn parse_ready_reads_all_five_fields() {

@@ -1179,6 +1179,47 @@ enum RenderCatalog {
                     driver.text(containing: "1 file", in: app), "the single-file header")
             }),
 
+        // **The card that may be read and must not be answered.** Below minor
+        // 19 an answered card can never be retired, so `DecisionCard` returns
+        // `.noneAnswerable` and says why on the card itself. Any un-updated Mac
+        // puts a reader here, and it was the one card state no render reached:
+        // `daemon-minor16` and `daemon-minor17` photograph a dead composer, not
+        // a card.
+        //
+        // **Reached through the Deck, not the timeline**, and that is the
+        // finding this scenario turned up rather than a convenience: a card
+        // from a pre-minor-19 daemon carries no D2 turn envelope — `turn_id` is
+        // a minor-19 field — so it has no turn to hang a timeline row on and
+        // does not appear in the session's timeline at all. The Deck is where
+        // such a card is readable, which is also the honest reader path: it is
+        // a thing that needs you and that you cannot act on from here.
+        //
+        // The subject is the caveat AND the absence of the option list, so both
+        // are required — a render that merely failed to draw the options would
+        // otherwise pass as a read-only card.
+        codexScenario(
+            "card-read-only",
+            purpose: "the read-only card: card-two-options on a minor-17 Mac, with no answer to give",
+            reach: { app, driver in
+                try driver.openDeck(app)
+                try driver.require(
+                    driver.element(containing: "answer it at the Mac", in: app),
+                    "the card's own reason, and where the question can be answered")
+                guard !driver.element(containing: "Choose one", in: app).exists else {
+                    throw RenderFailure.unreachable(
+                        "a read-only card must not draw an option list to tap")
+                }
+                // **The promise this card must not make.** It is asserted here
+                // as well as in `ReadOnlyCardProseTests` because the unit test
+                // proves the sentence is not produced and this proves it is not
+                // on screen — the two are different claims, and it was on
+                // screen, at both sizes, in the pass before this one.
+                guard !driver.element(containing: "Nothing decides this but you", in: app).exists
+                else {
+                    throw RenderFailure.unreachable(
+                        "a read-only card must not promise that nothing decides it but you")
+                }
+            }),
         // ---- R-series: how a card ends ---------------------------------
         codexScenario(
             "resolved-accepted", purpose: "answered from this phone, on the Codex link",

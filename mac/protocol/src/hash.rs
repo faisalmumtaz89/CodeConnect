@@ -1402,6 +1402,43 @@ mod tests {
     // `st_flags` is on the macOS extension trait; `super::*` brings the unix one.
     use std::os::macos::fs::MetadataExt as _;
 
+    /// **One process, one signal, one armed freeze — so the tests that assert on that
+    /// slot cannot run concurrently.**
+    ///
+    /// [`release_armed_freeze`] is the stand-in for a `SIGINT` handler, and the thing it
+    /// releases is a single process-global slot. That is the invariant, not an
+    /// implementation detail to work around: a second slot would mean a second freeze
+    /// the one signal could not give back. Every test below that takes a freeze *arms*
+    /// that slot — `arm_then_freeze` does it inside the primitive, which is the point of
+    /// the design — so any two of them running at once are writing one `AtomicU64`. The
+    /// symptom is a test asserting on what the armed release did to *its* file and
+    /// finding `UF_IMMUTABLE` still set, because another test's freeze had displaced its
+    /// entry. That is not a race in the primitive; it is two tests using the one slot
+    /// there is.
+    ///
+    /// **The membership is derived, not guessed.** It is every test whose body reaches
+    /// `freeze_and_hash{,_holding,_recording}`, `arm_then_freeze`, `arm_freeze_slot`,
+    /// `disarm_freeze_slot`, `clear_held_freeze` or `release_armed_freeze` — the six
+    /// production functions that touch `ARMED_FREEZE`, plus the two wrappers. Fitting
+    /// only the tests that happened to go red left the others free to displace them,
+    /// and the suite stayed flaky; a test that queues needlessly costs a few
+    /// milliseconds, one that does not queue costs a false red.
+    ///
+    /// So they queue. This is the same turnstile, and the same reasoning, as `ccd`'s
+    /// `state::ONE_LOG_CAPTURE_AT_A_TIME` around its process-global log sink.
+    ///
+    /// **Never poisoned into a panic.** A failing assertion inside the lock must fail
+    /// its own test and no others; a `PoisonError` propagated here would turn one red
+    /// into three and hide which one broke.
+    static ONE_ARMED_FREEZE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the turnstile for the rest of the test, poison and all.
+    fn one_armed_freeze_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        ONE_ARMED_FREEZE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn known_vector() {
         // NIST/RFC-6234 canonical vector for "abc".
@@ -1908,6 +1945,7 @@ mod tests {
     /// are refused `EPERM` by the OS. Dropping the guard restores the file.
     #[test]
     fn freezing_refuses_every_write_and_swap_until_the_guard_is_dropped() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("frozen");
         let (target, replacement) = (dir.join("codex"), dir.join("codex.new"));
         let bytes = long_bytes(200_000);
@@ -1966,6 +2004,7 @@ mod tests {
     /// it set, never a flag that was already there.
     #[test]
     fn drop_restores_exactly_the_prior_flags() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("restore");
         let target = dir.join("codex");
         std::fs::write(&target, b"x").unwrap();
@@ -2021,6 +2060,7 @@ mod tests {
     /// now survives a launch, which the previous rule spent.
     #[test]
     fn a_freeze_the_guard_did_not_set_is_adopted_and_never_cleared_on_release() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("preheld");
         let target = dir.join("codex");
         let bytes = b"already frozen when we arrived";
@@ -2073,6 +2113,7 @@ mod tests {
     /// failure is the signal to go strengthen the claims above, not to delete it.
     #[test]
     fn the_freeze_is_owner_revocable_and_blind_to_a_pre_opened_writer() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("limits");
 
         // (1) A same-uid peer can simply take the flag off again.
@@ -2132,6 +2173,7 @@ mod tests {
     /// with the freeze in front of it.
     #[test]
     fn freeze_and_hash_matches_contents_and_refuses_an_absent_path() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("frozen-digest");
         let target = dir.join("codex");
         let bytes = long_bytes(150_000);
@@ -2179,6 +2221,7 @@ mod tests {
     /// write.
     #[test]
     fn a_flag_word_that_does_not_match_the_record_is_refused_rather_than_cleared() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("clear-mismatch");
         let target = dir.join("codex");
         std::fs::write(&target, b"pinned bytes").unwrap();
@@ -2227,6 +2270,7 @@ mod tests {
     /// to. It pins the outcome; the refusal above is what pins the safety.
     #[test]
     fn the_clear_removes_the_immutable_bit_and_preserves_the_flags_it_found() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("clear-bit-only");
         let target = dir.join("codex");
         std::fs::write(&target, b"pinned bytes").unwrap();
@@ -2274,6 +2318,7 @@ mod tests {
     /// rather than acted on, and the claim is kept so the refusal is visible.
     #[test]
     fn a_saved_word_that_carries_the_immutable_bit_is_refused_as_impossible() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("clear-impossible");
         let target = dir.join("codex");
         std::fs::write(&target, b"pinned bytes").unwrap();
@@ -2364,6 +2409,7 @@ mod tests {
     /// janitor claiming an act it did not perform.
     #[test]
     fn a_flag_that_is_already_clear_is_reported_as_owing_nothing() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("clear-already-gone");
         let target = dir.join("codex");
         std::fs::write(&target, b"pinned bytes").unwrap();
@@ -2388,6 +2434,7 @@ mod tests {
     /// the holder is dead cannot know whether clearing revokes a live launch's guard.
     #[test]
     fn a_record_names_the_process_and_the_boot_that_took_the_freeze() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("clear-holder");
         let target = dir.join("codex");
         std::fs::write(&target, b"pinned bytes").unwrap();
@@ -2416,6 +2463,7 @@ mod tests {
     /// The callback runs with the flag already set and the digest not yet taken.
     #[test]
     fn the_freeze_is_recorded_before_the_hash_is_taken() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("record-first");
         let target = dir.join("codex");
         let bytes = long_bytes(400_000);
@@ -2477,6 +2525,7 @@ mod tests {
     /// the slot itself, and *before* it sets the flag.
     #[test]
     fn every_freeze_is_armed_for_the_signal_handler_that_replaces_the_drop() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("signal-release");
         let target = dir.join("codex");
         std::fs::write(&target, b"pinned bytes").unwrap();
@@ -2517,6 +2566,7 @@ mod tests {
     /// fresh freeze returns, and really is not for an adoption.
     #[test]
     fn the_freeze_arms_the_release_after_it_adopts_and_before_it_sets_the_flag() {
+        let _turn = one_armed_freeze_at_a_time();
         let source = include_str!("hash.rs");
         let at = source
             .find("fn arm_then_freeze(file: &std::fs::File) -> Option<FreezeOwn> {")
@@ -2585,6 +2635,7 @@ mod tests {
     /// that cannot hurt anybody.
     #[test]
     fn a_launch_that_finds_the_bit_already_set_adopts_it_and_leaves_it_set() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("adopt");
         let target = dir.join("codex");
         std::fs::write(&target, b"pinned bytes").unwrap();
@@ -2650,6 +2701,7 @@ mod tests {
     /// custodian's later pass takes off.
     #[test]
     fn with_two_live_holders_only_the_setter_s_release_clears_the_bit() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("two-holders");
         let target = dir.join("codex");
         std::fs::write(&target, b"one binary, two sessions").unwrap();
@@ -2701,6 +2753,7 @@ mod tests {
     /// the slot when it goes.
     #[test]
     fn an_adoption_arms_nothing_and_leaves_the_setters_armed_release_alone() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("adopt-signal");
 
         // (1) A stranded bit, adopted. The handler's work is a no-op, because the
@@ -2765,6 +2818,7 @@ mod tests {
     /// launch aborts, legibly.
     #[test]
     fn a_freeze_that_cannot_be_recorded_is_given_back_and_the_call_fails() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("record-fails");
         let target = dir.join("codex");
         std::fs::write(&target, b"pinned bytes").unwrap();
@@ -2844,6 +2898,7 @@ mod tests {
     /// and concerns no other participant.
     #[test]
     fn the_freeze_holds_the_lock_across_the_record_and_lets_go_before_the_hash() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("freezer-holds");
         let target = dir.join("codex");
         std::fs::write(&target, long_bytes(200_000)).unwrap();
@@ -2888,6 +2943,7 @@ mod tests {
     /// clear cannot happen, and a custodian that cannot take it defers and comes back.
     #[test]
     fn a_freeze_that_records_nothing_holds_the_lock_until_its_guard_is_released() {
+        let _turn = one_armed_freeze_at_a_time();
         let dir = scratch("probe-holds");
         let target = dir.join("codex");
         std::fs::write(&target, long_bytes(200_000)).unwrap();

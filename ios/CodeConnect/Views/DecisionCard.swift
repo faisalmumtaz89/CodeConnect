@@ -269,6 +269,32 @@ struct DecisionCardView: View {
                 if !distinctOptions.isEmpty, isActionable { exactOptions }
                 disclosures
                 verificationLine
+                // **The read-only note leaves the pinned bar at accessibility
+                // sizes**, for the same measured reason the subordinate controls
+                // do — and it is the same trap, one surface along.
+                //
+                // A pinned footer is capped at 45% of the screen
+                // (`ccScrollCap`), because a bar that owns the screen leaves the
+                // command unreadable. That cap is right for a bar of controls,
+                // which must stay reachable however far the reader scrolls. This
+                // footer has no controls: it is one sentence saying there is
+                // nothing to tap. Pinned, it bought nothing and cost twice —
+                // measured at AX5 on a 6.9" phone, it covered the EXACT COMMAND
+                // block and still clipped its own last word off the bottom of
+                // the screen.
+                //
+                // In the document it scrolls with the card it is about, so it
+                // can neither cover the command nor be cut off. Below
+                // accessibility sizes the bar fits comfortably and keeps its
+                // place, so the card's geometry — and the read gate that
+                // measures against it — are unchanged there.
+                if Self.readOnlyNoteInDocument(
+                    isAccessibilitySize: typeSize.isAccessibilitySize,
+                    isActionable: isActionable, isAnswerable: isAnswerable)
+                {
+                    unanswerableNote
+                        .padding(.top, CC.rhythm.textSurface)
+                }
                 // The status banner is **not** here any more; it is pinned above
                 // the action bar. See `pinnedFooter`.
                 //
@@ -400,18 +426,19 @@ struct DecisionCardView: View {
                     .accessibilityLabel("Working directory, \(cwd)")
             }
 
-            if approval.isPending {
-                // The promise, stated where the decision is made. Verbatim,
-                // and it survives every redesign.
-                //
-                // The running clock that used to sit above it is gone. It answered
-                // a question this screen does not ask: how long a card has waited
-                // cannot make a command safer or more dangerous, so the only thing
-                // a ticking number adds at the moment of deciding is pressure — on
-                // a card whose next line promises there is no timer. Age is real
-                // triage information and it still exists, on Fleet and on the deck,
-                // where choosing *which* card to open is the actual question.
-                Text("Nothing decides this but you. There is no timer on this card.")
+            // The promise, stated where the decision is made. Verbatim, and it
+            // survives every redesign — but only on a card there is a decision
+            // to make on. `ApprovalCard.pendingPromise` holds that condition.
+            //
+            // The running clock that used to sit above it is gone. It answered
+            // a question this screen does not ask: how long a card has waited
+            // cannot make a command safer or more dangerous, so the only thing
+            // a ticking number adds at the moment of deciding is pressure — on
+            // a card whose next line promises there is no timer. Age is real
+            // triage information and it still exists, on Fleet and on the deck,
+            // where choosing *which* card to open is the actual question.
+            if approval.isPending, let promise = ApprovalCard.pendingPromise(isAnswerable: isAnswerable) {
+                Text(promise)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1376,16 +1403,42 @@ struct DecisionCardView: View {
         return true
     }
 
+    /// **Where the "nothing to tap here" sentence is drawn.** In the pinned bar
+    /// at reading sizes, in the card's own document at accessibility sizes —
+    /// never both, and never nowhere. Static and pure so the choice can be
+    /// asserted without a `View`, exactly like `subordinateControlsShown`.
+    static func readOnlyNoteInDocument(
+        isAccessibilitySize: Bool, isActionable: Bool, isAnswerable: Bool
+    ) -> Bool {
+        isAccessibilitySize && isActionable && !isAnswerable
+    }
+
+    static func readOnlyNoteInPinnedBar(
+        isAccessibilitySize: Bool, isActionable: Bool, isAnswerable: Bool
+    ) -> Bool {
+        !isAccessibilitySize && isActionable && !isAnswerable
+    }
+
+    /// The sentence itself, drawn the same way in either home.
+    private var unanswerableNote: some View {
+        Text(unanswerableReason)
+            .ccType(CC.type.footnote)
+            .foregroundStyle(CC.text.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     @ViewBuilder
     private var actionBar: some View {
-        if isActionable, !isAnswerable {
-            CCActionBar {
-                Text(unanswerableReason)
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+        if Self.readOnlyNoteInPinnedBar(
+            isAccessibilitySize: typeSize.isAccessibilitySize,
+            isActionable: isActionable, isAnswerable: isAnswerable)
+        {
+            CCActionBar { unanswerableNote }
+        } else if isActionable, !isAnswerable {
+            // Accessibility sizes: the sentence is in the document above, and
+            // the bar draws nothing rather than an empty chrome strip.
+            EmptyView()
         } else if isActionable, isCodexCard {
             // **A Codex card gets no Allow and no Deny**, at any option count.
             // Both are refused by name at the Mac, so a bar offering them would

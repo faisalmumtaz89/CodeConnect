@@ -1,0 +1,100 @@
+NOTICE — third-party material in `codex-broker`
+===============================================
+
+This crate is part of CodeConnect and is licensed MIT (see the repository root
+`LICENSE`). It also carries ~2.1 MB of vendored material under `schema-0.147/` and
+`schema-0.153/` that is DERIVED FROM a third-party project. This file names that
+project, states what is known about its licence, and — because a provenance note that
+guesses is worse than one that admits a gap — says exactly which of those facts could
+not be established from the artifacts the material was actually taken from.
+
+
+The upstream project
+--------------------
+
+    Codex CLI  (`codex-cli`, distributed on npm as `@openai/codex`)
+    OpenAI
+    https://github.com/openai/codex
+
+Established from, in order of directness:
+
+  * The vendored artifacts' own source binaries. The standalone codex releases the
+    bundles were extracted from —
+    `~/.codex/packages/standalone/releases/{0.147.0,0.153.4}-aarch64-apple-darwin/bin/codex`
+    — carry `https://github.com/openai/codex` and `npm install -g @openai/codex` in
+    their embedded strings, so the standalone distribution self-identifies as that
+    repository and points its own users at that npm package.
+  * `mac/codex-broker/schema-0.147/PROVENANCE.md`, which names the upstream as
+    "codex-cli 0.147.0" and records the exact release path the bundle was extracted
+    from.
+  * The binary's own version banner: `codex --version` prints `codex-cli 0.153.4`.
+
+
+The licence
+-----------
+
+    Apache License, Version 2.0
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Established from the package manifest of the npm distribution of the same project,
+present on the grounding machine:
+
+    /opt/homebrew/lib/node_modules/@openai/codex/package.json
+      "name":    "@openai/codex"
+      "version": "0.145.0"
+      "license": "Apache-2.0"
+      "repository": { "type": "git",
+                      "url": "git+https://github.com/openai/codex.git",
+                      "directory": "codex-cli" }
+
+WHAT COULD NOT BE ESTABLISHED, stated plainly
+---------------------------------------------
+
+The licence above was read from version **0.145.0** of the npm distribution. It was
+NOT read from either of the two builds this crate's material was actually extracted
+from, and that gap is real rather than pedantic:
+
+  * The standalone release directories for 0.147.0 and 0.153.4 ship **no `LICENSE`
+    and no `NOTICE` file at all** (verified by listing the whole of each release
+    tree: each contains `bin/`, `codex-package.json`, `codex-path/`,
+    `codex-resources/`, a `codex -> bin/codex` symlink, and nothing else), and
+    `codex-package.json` carries only `layoutVersion`,
+    `version`, `target`, `variant`, `entrypoint`, `resourcesDir` and `pathDir` — no
+    licence field.
+  * The vendored JSON and the completion-derived argv census carry no headers of any
+    kind; they are machine output.
+  * No file anywhere in this repository states an upstream licence, and
+    `schema-0.147/PROVENANCE.md` — otherwise the most detailed record of where this
+    material came from — does not mention licensing at all.
+
+So the chain is: the 0.147.0/0.153.4 binaries identify themselves as
+`github.com/openai/codex` and as the `@openai/codex` npm package; that npm package,
+at the one version available here, declares Apache-2.0. That is a sound inference
+about the project and it is an inference across versions about the artifacts. If the
+exact licence of a specific release matters — for a redistribution question, say —
+re-check it against the `LICENSE` file in `github.com/openai/codex` at the tag for
+that release rather than trusting this note.
+
+
+What is and is not derived from upstream
+----------------------------------------
+
+**No upstream source code is vendored here.** What is vendored is upstream's own
+machine-generated self-description, further processed by CodeConnect's code:
+
+  * `schema-{0.147,0.153}/guarded-wire-{stable,experimental}.json` — a *projection*,
+    computed by `codex_broker::guarded_surface`, of the JSON Schema bundle emitted by
+    `codex app-server generate-json-schema`. Only the methods the broker guards are
+    kept; the rest of the schema is discarded.
+  * `schema-{0.147,0.153}/guarded-argv.json` — the root subcommand and flag tokens
+    parsed out of the `opts="…"` line of `codex completion bash`.
+  * `schema-0.147/methods-{stable,experimental}.json` — the list of method *names* in
+    those same bundles.
+
+Everything else in the crate — `schema-0.147/disposition-matrix.tsv`, both
+`PROVENANCE.md` files, this NOTICE, and all of `src/` — is CodeConnect's own work
+under the repository's MIT licence.
+
+Full regeneration recipes, and the reasoning about why these files exist and are
+never re-derived from the binary being checked, are in
+`schema-0.147/PROVENANCE.md` and `schema-0.153/PROVENANCE.md`.

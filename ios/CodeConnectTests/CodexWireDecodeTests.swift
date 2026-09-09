@@ -54,7 +54,18 @@ final class CodexWireDecodeTests: XCTestCase {
 
     // MARK: The captured cards
 
-    /// Both real cards, straight out of the capture, through `ApprovalCard`.
+    /// **Both real cards, straight out of the capture**, through `ApprovalCard`
+    /// — and now literally so.
+    ///
+    /// This sentence was once a claim about a hand-authored file: the fixture
+    /// was emitted from a `command_params()` literal in `codex_approval.rs`,
+    /// and its `"reason"` appeared in no capture anywhere in the corpus. It is
+    /// true as written now because the daemon's gate re-derives
+    /// `approval-card-0.153.json` from the `approval-0.153.jsonl` frames and
+    /// requires the result to be byte-identical to the checked-in file — so
+    /// these two cards are the capture's own bytes, parsed, not prose about
+    /// them. `CodexFixtureProvenanceTests` carries that guarantee across the
+    /// copy into this bundle.
     private func capturedCards() throws -> [(key: String, card: ApprovalCard)] {
         let object = try XCTUnwrap(
             try JSONDecoder().decode(JSONValue.self, from: fixture("approval-card-0.153.json"))

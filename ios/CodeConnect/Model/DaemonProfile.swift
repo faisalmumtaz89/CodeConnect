@@ -117,10 +117,18 @@ struct DaemonProfile: Sendable, Hashable {
     }
 
     /// Why a Codex card cannot be answered from this phone, or nil when it can.
+    ///
+    /// **What is wrong, what to do now, what to do about it** — in that order,
+    /// because the reader's next action is at the Mac and the update is the fix
+    /// rather than the workaround. It replaces a longer sentence that explained
+    /// the daemon's bookkeeping ("too old to report when a Codex question has
+    /// been answered") and then left the reader with nowhere to go; measured at
+    /// AX5 on a 6.9" phone, that one ran to four lines in the pinned action bar
+    /// and clipped its own last two words off the bottom of the screen.
     var codexAnswerCaveat: String? {
         guard !resolvesCodexCards else { return nil }
-        return "This Mac's CodeConnect is too old to report when a Codex question has been "
-            + "answered, so it cannot be answered from here. Update it."
+        return "This Mac's CodeConnect is too old for answers from the phone; answer it at "
+            + "the Mac. Update the Mac to answer here."
     }
 
     /// Why Codex's controls are absent on a daemon that is otherwise working,

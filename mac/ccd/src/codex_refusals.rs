@@ -53,9 +53,17 @@ pub(crate) fn unknown_session(session_ref: &str) -> String {
     format!("unknown session {session_ref}")
 }
 
-pub(crate) fn session_lookup_failed(err: &str) -> String {
-    format!("session lookup failed: {err}")
-}
+/// **The lookup failed, and the failure's own words stay on this Mac.**
+///
+/// A `Display` on this daemon's store is an anyhow chain whose open paths name
+/// absolute filesystem locations, and this sentence used to interpolate one — so a
+/// phone learned where this Mac keeps its database from a bad disk day. A const
+/// rather than a formatter for [`COMPOSE_OUTCOME_UNRECORDED`]'s reason: with nothing
+/// to interpolate there is nothing to leak by accident, and the rule is enforced by
+/// the shape of the item rather than by every caller remembering it. Each caller logs
+/// the error itself with `{err:#}` before saying this, which is where an operator is
+/// entitled to read it.
+pub(crate) const SESSION_LOOKUP_FAILED: &str = "session lookup failed";
 
 pub(crate) fn interrupt_on_claude(uid: &str) -> String {
     format!(
@@ -82,9 +90,9 @@ pub(crate) const INTERRUPT_ID_REUSED: &str =
     "this request id was used to stop a different turn, so nothing \
     was sent; ask again under a new one";
 
-pub(crate) fn interrupt_ledger_unreadable(err: &str) -> String {
-    format!("could not read this run's interrupt ledger ({err}); nothing was sent")
-}
+/// The interrupt twin of [`SESSION_LOOKUP_FAILED`], and a const for its reason.
+pub(crate) const INTERRUPT_LEDGER_UNREADABLE: &str =
+    "could not read this run's interrupt ledger; nothing was sent";
 
 pub(crate) const INTERRUPT_ALREADY_SENT_UNKNOWN: &str =
     "this interrupt was already sent and what became of it \
@@ -175,9 +183,12 @@ pub(crate) fn interrupt_settled_unknown(cause: &str) -> String {
     )
 }
 
-pub(crate) fn interrupt_settled_unrecorded(cause: &str, err: &str) -> String {
+/// [`compose_settled_unrecorded`]'s twin, and it takes the same one argument for the
+/// same reason: the `cause` is this build's own fixed vocabulary, and the store error
+/// that made the record unwritable is logged at the call site and never carried here.
+pub(crate) fn interrupt_settled_unrecorded(cause: &str) -> String {
     format!(
-        "{cause}, and this Mac could not record that either ({err}), so it \
+        "{cause}, and this Mac could not record that either, so it \
         cannot say what became of it. Check the Mac."
     )
 }
@@ -301,12 +312,10 @@ pub(crate) const INTERRUPT_ID_REUSED_ON_LINK: &str =
 
 pub(crate) const INTERRUPT_RUN_IS_GONE: &str = "this run is gone, so its turn cannot be stopped";
 
-pub(crate) fn interrupt_claim_unrecorded(err: &str) -> String {
-    format!(
-        "could not record that this interrupt is being sent ({err}); \
-        nothing was sent"
-    )
-}
+/// [`COMPOSE_CLAIM_UNRECORDED`]'s twin, and a const for the same reason: the claim
+/// failed on this Mac's own disk, and the words the disk used are this Mac's to read.
+pub(crate) const INTERRUPT_CLAIM_UNRECORDED: &str =
+    "could not record that this interrupt is being sent; nothing was sent";
 
 pub(crate) const COMPOSE_RUN_IS_GONE: &str = "this run is gone, so nothing can be said to it";
 
@@ -356,12 +365,12 @@ pub(crate) fn interrupt_turn_ended_itself(status: &str) -> String {
     )
 }
 
-pub(crate) fn interrupt_outcome_unrecorded(err: &str) -> String {
-    format!(
-        "this Mac could not record what became of that request to stop the turn \
-        ({err}), so it cannot say; it will not be sent again. Check the Mac."
-    )
-}
+/// [`COMPOSE_OUTCOME_UNRECORDED`]'s twin, and a const for the same reason. The
+/// settlement that failed logged the store's own `Display` where it failed; what
+/// crosses the wire is the fact and the remedy.
+pub(crate) const INTERRUPT_OUTCOME_UNRECORDED: &str =
+    "this Mac could not record what became of that request to stop the turn, so it \
+    cannot say; it will not be sent again. Check the Mac.";
 
 pub(crate) const INTERRUPT_SETTLED_ELSEWHERE: &str =
     "this request to stop the turn was already settled elsewhere and what \
@@ -464,9 +473,16 @@ pub(crate) struct Refusal {
 /// **Every sentence, assembled the way production assembles it.**
 ///
 /// The interpolated ones are called with the fixture's own tokens as their
-/// arguments — `"{uid}"`, `"{n}"`, `"{err}"` — so a row's text is produced by
-/// the very formatter the daemon uses. The template in the fixture therefore
-/// cannot drift from the code: there is no second copy of it to drift.
+/// arguments — `"{uid}"`, `"{n}"` — so a row's text is produced by the very
+/// formatter the daemon uses. The template in the fixture therefore cannot drift
+/// from the code: there is no second copy of it to drift.
+///
+/// **No row is built from a local error.** There is no `{err}` token, because a
+/// `Display` on this daemon's store is an anyhow chain whose open paths name
+/// absolute filesystem locations and a phone is entitled to none of them. Five
+/// sentences carried one and no longer do; the invariant is pinned by
+/// [`crate::codex_link`]'s
+/// `a_store_error_never_reaches_the_phone_from_a_compose_an_interrupt_or_an_answer`.
 #[cfg(test)]
 pub(crate) fn catalogue() -> Vec<Refusal> {
     fn row(
@@ -497,7 +513,7 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "both",
             "rejected",
             "transient_local",
-            session_lookup_failed("{err}"),
+            SESSION_LOOKUP_FAILED.to_string(),
         ),
         row(
             "interrupt_on_claude",
@@ -539,7 +555,7 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "interrupt",
             "rejected",
             "transient_local",
-            interrupt_ledger_unreadable("{err}"),
+            INTERRUPT_LEDGER_UNREADABLE.to_string(),
         ),
         row(
             "interrupt_already_sent_unknown",
@@ -693,7 +709,7 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "interrupt",
             "indeterminate",
             "permanent",
-            interrupt_settled_unrecorded(INTERRUPT_CONNECTION_ENDED, "{err}"),
+            interrupt_settled_unrecorded(INTERRUPT_CONNECTION_ENDED),
         ),
         row(
             "compose_link_went_away",
@@ -826,7 +842,7 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "interrupt",
             "rejected",
             "transient_local",
-            interrupt_claim_unrecorded("{err}"),
+            INTERRUPT_CLAIM_UNRECORDED.to_string(),
         ),
         row(
             "compose_id_reused",
@@ -882,7 +898,7 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "interrupt",
             "indeterminate",
             "permanent",
-            interrupt_outcome_unrecorded("{err}"),
+            INTERRUPT_OUTCOME_UNRECORDED.to_string(),
         ),
         row(
             "interrupt_settled_elsewhere",
@@ -1029,7 +1045,6 @@ pub(crate) fn fixture() -> serde_json::Value {
             "{agent}": "the name of an agent kind this build does not support",
             "{n}": "a number — the size of the thing asked about, or a wire error code",
             "{max}": "a ceiling this build enforces (today only MAX_COMPOSE_BYTES)",
-            "{err}": "a local store error, rendered by this Mac and never by Codex",
             "{status}": "a turn terminal's own status word from the wire",
             "{word}": "an outcome word read back from the ledger that this build \
                        has no vocabulary for"

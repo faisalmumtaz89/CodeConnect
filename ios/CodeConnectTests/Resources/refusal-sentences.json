@@ -6,9 +6,9 @@
     "wire_code": "the app-server or the broker refused the write; the sentence carries their numeric code and never their message"
   },
   "counts": {
-    "link_state": 18,
+    "link_state": 20,
     "permanent": 43,
-    "total": 68,
+    "total": 70,
     "transient_local": 5,
     "wire_code": 2
   },
@@ -24,7 +24,7 @@
       "category": "transient_local",
       "id": "session_lookup_failed",
       "outcome": "rejected",
-      "text": "session lookup failed: {err}",
+      "text": "session lookup failed",
       "verb": "both"
     },
     {
@@ -66,7 +66,7 @@
       "category": "transient_local",
       "id": "interrupt_ledger_unreadable",
       "outcome": "rejected",
-      "text": "could not read this run's interrupt ledger ({err}); nothing was sent",
+      "text": "could not read this run's interrupt ledger; nothing was sent",
       "verb": "interrupt"
     },
     {
@@ -155,6 +155,20 @@
     },
     {
       "category": "link_state",
+      "id": "compose_start_in_flight",
+      "outcome": "rejected",
+      "text": "the first turn on this Codex thread was just started from a phone and this Mac has not caught up with it yet, so nothing was said; try again shortly",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_no_turn_to_steer",
+      "outcome": "rejected",
+      "text": "this Codex thread has not run a turn yet, so there is nothing for that message to join; nothing was said, and it can be sent again once the thread is running",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
       "id": "compose_link_reconnecting",
       "outcome": "rejected",
       "text": "this Mac has lost its control link to the Codex session and is reconnecting, so nothing was sent; try again shortly, or say it at the Mac",
@@ -206,7 +220,7 @@
       "category": "permanent",
       "id": "interrupt_settled_unrecorded",
       "outcome": "indeterminate",
-      "text": "the link's connection to Codex ended while this request to stop the turn was in flight, and this Mac could not record that either ({err}), so it cannot say what became of it. Check the Mac.",
+      "text": "the link's connection to Codex ended while this request to stop the turn was in flight, and this Mac could not record that either, so it cannot say what became of it. Check the Mac.",
       "verb": "interrupt"
     },
     {
@@ -339,7 +353,7 @@
       "category": "transient_local",
       "id": "interrupt_claim_unrecorded",
       "outcome": "rejected",
-      "text": "could not record that this interrupt is being sent ({err}); nothing was sent",
+      "text": "could not record that this interrupt is being sent; nothing was sent",
       "verb": "interrupt"
     },
     {
@@ -395,7 +409,7 @@
       "category": "permanent",
       "id": "interrupt_outcome_unrecorded",
       "outcome": "indeterminate",
-      "text": "this Mac could not record what became of that request to stop the turn ({err}), so it cannot say; it will not be sent again. Check the Mac.",
+      "text": "this Mac could not record what became of that request to stop the turn, so it cannot say; it will not be sent again. Check the Mac.",
       "verb": "interrupt"
     },
     {
@@ -492,7 +506,6 @@
   ],
   "tokens": {
     "{agent}": "the name of an agent kind this build does not support",
-    "{err}": "a local store error, rendered by this Mac and never by Codex",
     "{max}": "a ceiling this build enforces (today only MAX_COMPOSE_BYTES)",
     "{n}": "a number — the size of the thing asked about, or a wire error code",
     "{ref}": "the session reference the caller used (a uid or a tmux name)",

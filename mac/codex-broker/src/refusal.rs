@@ -94,7 +94,9 @@
 
 use serde_json::json;
 
-use crate::allowlist::{disposition, Disposition, JsonRpcKind, RefuseReason, Role};
+use crate::allowlist::{
+    disposition, executor_refusal, Disposition, JsonRpcKind, RefuseReason, Role,
+};
 use crate::fingerprint::{
     assert_fingerprint, is_launch_workspace_roots, FpVerdict, LaunchFingerprint,
 };
@@ -591,25 +593,21 @@ fn classify_request_disposition(
             note: "request allowlisted",
         },
         Disposition::FingerprintAssert => {
-            // `thread/fork` is refused OUTRIGHT pre-2e-4c. A fork's lineage rule is
-            // that its SOURCE thread must itself be session-bound, and the wire capture
-            // contains NO fork frame: there is no measured source-thread field to read, so
-            // the rule is unenforceable and the method is unprovable. Refused here in the
-            // executor, not in the table, so the golden matrix does not move.
-            //
-            // Belt-and-braces: the single-thread rule makes this unconditional anyway — a
-            // fork needs an existing thread, and the creation slot closes the moment one is
-            // bound — so the fork of a bound thread would already be refused as a second
-            // creation.
-            if method == "thread/fork" {
+            // A method whose cell is not a refusal but whose every frame is refused anyway,
+            // unconditionally, here in the executor rather than in the table — today that is
+            // `thread/fork` and nothing else. The cell stays non-refusing because the table
+            // is also the definition of the guarded wire surface and a refusing cell drops a
+            // method out of the launch gate's projection; the reason and the audit detail
+            // both come from `allowlist::executor_refusal` so that the disposition matrix's
+            // claim about this row and the refusal actually performed here cannot drift
+            // apart. See that function, and `effective_disposition` beside it.
+            if let Some((reason, detail)) = executor_refusal(method) {
+                let (code, msg) = refuse_message(reason);
                 return refuse_request(
                     id,
-                    E_POLICY_REFUSED,
-                    "request refused by session policy",
-                    "thread/fork: refused pre-2e-4c — a fork must prove its SOURCE thread is \
-                     session-bound, and no fork frame exists in the wire capture, so the \
-                     source-thread field is unprovable"
-                        .to_string(),
+                    code,
+                    msg,
+                    format!("{}: {detail}", redact::method(method)),
                 );
             }
             // `thread/resume` must target a thread bound to this session before its
@@ -4398,8 +4396,28 @@ mod tests {
     /// thread this session did not create, or a workspace other than the one bound at that
     /// thread's creation each forwards zero bytes. These are the rows a widening mutation
     /// turns green.
+    ///
+    /// The HEAD assertion is the positive control, and it is the row a *narrowing* mutation
+    /// turns red. Every other assertion here says "this is refused", so a mutation that makes
+    /// the classifier refuse ccd's `turn/start` unconditionally — deleting the
+    /// `FingerprintThenIdleTurn` arm, or fusing the whole leg into a blanket policy refusal —
+    /// satisfies all of them while breaking the phone completely. The captured phone turn on
+    /// this session's own bound idle thread, in the bound workspace, MUST forward; that is
+    /// the mutation this row catches.
     #[test]
     fn the_phones_turn_is_fingerprinted_head_checked_and_workspace_bound() {
+        // The positive control. It gets its OWN binding because admitting a turn marks that
+        // thread busy, and a busy thread would answer the rows below with the wrong refusal
+        // — each of those is aimed at one rule and must not be satisfied by another.
+        let admitted = bound_session("01a0-head");
+        let forwarded = go_env(Role::Ccd, &admitted, &phone_turn("01a0-head"));
+        assert!(
+            matches!(forwarded, RelayAction::Forward { .. }),
+            "the phone's own captured turn, on its own bound idle thread and in the bound \
+             workspace, must forward — without this row a blanket refusal satisfies every \
+             assertion below: {forwarded:?}"
+        );
+
         let threads = bound_session("01a0-head");
         // A foreign fingerprint: the turn names an approval policy this session was not
         // launched with.

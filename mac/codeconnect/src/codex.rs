@@ -1857,18 +1857,31 @@ struct ScratchDir(std::path::PathBuf);
 impl ScratchDir {
     fn new() -> Result<ScratchDir> {
         use std::os::unix::fs::DirBuilderExt;
+        // A process-local counter, because **a clock is not a unique-name source.**
+        // `SystemTime::now()` is coarser than the nanoseconds it is formatted in, so
+        // two callers inside one tick produced the same string, the same hash and the
+        // same path — and the second `create` failed `EEXIST`. Sequential calls never
+        // showed it (the clock advances between them), which is why every
+        // single-threaded run of this suite was green while a parallel one went red on
+        // a test that merely wanted a directory. The error arm made it worse: a
+        // `duration_since` failure hashed the EMPTY STRING, a constant.
+        //
+        // The counter makes the name unique BY CONSTRUCTION within a process, which is
+        // the whole of the observed failure. The pid separates live processes, and the
+        // clock stays in so a reused pid cannot land on a directory an earlier process
+        // of the same number left behind.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
             "codeconnect-codex-schema-{}-{}",
             std::process::id(),
-            protocol::hash::sha256_hex(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos().to_string())
-                    .unwrap_or_default()
-                    .as_bytes()
-            )
-            .get(..16)
-            .unwrap_or("scratch")
+            protocol::hash::sha256_hex(format!("{seq}-{nanos}").as_bytes())
+                .get(..16)
+                .unwrap_or("scratch")
         ));
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -4264,9 +4277,32 @@ web_search                               stable             true
     #[test]
     fn a_probe_that_hangs_or_floods_is_refused_rather_than_waited_on() {
         use std::os::unix::fs::PermissionsExt;
-        // Short, because what is being observed is that the wait ENDS — paying the
-        // production budget to watch a clock run out would only make the suite slower.
-        const BUDGET: Duration = Duration::from_secs(2);
+        // Two budgets, by a single rule: **the budget may be short only in the arm
+        // where the budget expiring is itself the mechanism under test.**
+        //
+        // That is the hang arm and nowhere else. A descendant holds the write end
+        // open, so EOF never arrives and the deadline is the only thing that can end
+        // the wait — which makes this arm load-immune, and makes paying the production
+        // budget to watch a clock run out pure suite latency.
+        const HANG_BUDGET: Duration = Duration::from_secs(2);
+        // Every other arm gets a generous one, because in those the budget is not what
+        // is being tested and must not become the binding constraint on what is:
+        //
+        //   * the well-behaved arm claims a good probe is READ TO COMPLETION;
+        //   * the flood arm claims a flood is refused BY THE CEILING — the whole point
+        //     of "a prefix of a flood is not a shorter answer" — which requires the
+        //     flooder to actually exceed `PROBE_STDOUT_LIMIT` (8 MiB) first.
+        //
+        // Both failed under a saturated machine while sharing the short budget, in the
+        // repo's own preflight and in a whole-crate parallel run: the good probe was
+        // not scheduled in time, and the flooder was preempted before it reached the
+        // ceiling, so the arm asserting the CEILING refusal got the pipe-close refusal
+        // instead. Neither was a defect in the probe; both were the test measuring the
+        // machine. Headroom is free here — a ceiling costs nothing when it is not
+        // reached, and these two arms end on their own condition, not on the clock —
+        // and ten seconds is still finite, so a genuinely unbounded read remains a
+        // failure rather than a hang.
+        const AMPLE_BUDGET: Duration = Duration::from_secs(10);
         let dir = ScratchDir::new().expect("scratch dir");
         let write = |name: &str, body: &str| {
             let p = dir.0.join(name);
@@ -4279,7 +4315,7 @@ web_search                               stable             true
         // pass this test.
         let good = write("good", "#!/bin/sh\necho hello\n");
         assert_eq!(
-            run_bounded(&good, &[], BUDGET).expect("a well-behaved probe is read normally"),
+            run_bounded(&good, &[], AMPLE_BUDGET).expect("a well-behaved probe is read normally"),
             b"hello\n"
         );
 
@@ -4287,14 +4323,20 @@ web_search                               stable             true
         // `output()` would block past any deadline above it.
         let forker = write("forker", "#!/bin/sh\necho hello\nsleep 600 &\nexit 0\n");
         let started = Instant::now();
-        let why = run_bounded(&forker, &[], BUDGET).expect_err("a held pipe must be refused");
+        let why = run_bounded(&forker, &[], HANG_BUDGET).expect_err("a held pipe must be refused");
         assert!(
             why.to_string().contains("did not close its"),
             "expected a pipe-close refusal, got: {why:#}"
         );
+        // The claim is BOUNDED versus UNBOUNDED — a 300x gap between the budget and
+        // the sleeper's 600 seconds — so the ceiling is set far above the one and far
+        // below the other. A tight margin here would be measuring the machine's load
+        // under the name of the probe's behaviour, which is the mistake the arm above
+        // was making.
         assert!(
-            started.elapsed() < BUDGET + PROBE_REAP_BUDGET + Duration::from_secs(5),
-            "the probe must cost its budget, not the sleeper's lifetime"
+            started.elapsed() < Duration::from_secs(60),
+            "the probe must cost its budget, not the sleeper's lifetime (took {:?})",
+            started.elapsed()
         );
 
         // A flood: valid-looking first line, then more bytes than the ceiling allows.
@@ -4302,7 +4344,7 @@ web_search                               stable             true
             "flooder",
             "#!/bin/sh\necho hello\nyes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
         );
-        let why = run_bounded(&flooder, &[], BUDGET).expect_err("a flood must be refused");
+        let why = run_bounded(&flooder, &[], AMPLE_BUDGET).expect_err("a flood must be refused");
         assert!(
             why.to_string().contains("wrote more than"),
             "expected an output-ceiling refusal, got: {why:#}"
@@ -4337,6 +4379,46 @@ web_search                               stable             true
             "swapping which bundle a surface came from must change the digest"
         );
         assert_eq!(base.len(), 64);
+    }
+
+    /// **Two scratch trees alive at once have different names.**
+    ///
+    /// The name used to be `pid` plus a hash of the clock, and a clock is not a
+    /// unique-name source: `SystemTime::now()` on macOS is coarser than the
+    /// nanoseconds it is formatted in, so two calls inside one tick hash to the same
+    /// string and the second `create` fails `EEXIST`. It cost a parallel run of this
+    /// crate a red — `a_shipping_build_cannot_enable_the_frame_tee`, which merely
+    /// wanted a directory — and it is a production path, not a test one: the schema
+    /// gate is what allocates these.
+    ///
+    /// Concurrent callers are the case, and the case this crate's own test runner
+    /// creates: a `--test-threads` default of "one per core" means several tests can
+    /// be inside `ScratchDir::new` at the same instant. Sequential calls do NOT show
+    /// it — the clock advances between them — which is why the defect survived every
+    /// single-threaded run of this suite.
+    #[test]
+    fn two_scratch_trees_never_collide() {
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let hands: Vec<_> = (0..16)
+            .map(|_| {
+                let ready = std::sync::Arc::clone(&ready);
+                // Every thread is released at once, so they read the clock together.
+                std::thread::spawn(move || {
+                    ready.wait();
+                    ScratchDir::new()
+                })
+            })
+            .collect();
+        let held: Vec<_> = hands
+            .into_iter()
+            .map(|h| h.join().expect("no thread may panic"))
+            .map(|d| d.expect("each scratch tree must get a name of its own"))
+            .collect();
+        let mut names: Vec<_> = held.iter().map(|d| d.0.clone()).collect();
+        names.sort();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "two live scratch trees shared a path");
     }
 
     /// The scratch tree is created exclusively, so the gate never generates into — or

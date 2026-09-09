@@ -4624,7 +4624,16 @@ impl Daemon {
             return match self.db.get_session(uid.to_string()).await {
                 Ok(Some(row)) => Ok(row.session_uid),
                 Ok(None) => Err(format!("unknown session {uid}")),
-                Err(err) => Err(format!("session lookup failed: {err}")),
+                // **Logged here, not carried.** This `Err` becomes an
+                // `AnswerResult::Rejected` reason verbatim in [`Daemon::answer`], and a
+                // store `Display` is an anyhow chain whose open paths name absolute
+                // filesystem locations. Same rule as
+                // [`crate::codex_refusals::SESSION_LOOKUP_FAILED`], which is the
+                // catalogued twin of this sentence on the other two verbs.
+                Err(err) => {
+                    crate::log_error!("answer for {uid}: session lookup failed: {err:#}");
+                    Err("session lookup failed".to_string())
+                }
             };
         }
 
@@ -4685,7 +4694,14 @@ impl Daemon {
         match self.db.find_answer_by_request(request_id.to_string()).await {
             Ok(Some((uid, _, _))) => Ok(uid),
             Ok(None) => Err("unknown or already-resolved request".into()),
-            Err(err) => Err(format!("ledger read failed: {err}")),
+            // Logged here, not carried, for the session lookup's reason above.
+            Err(err) => {
+                crate::log_error!(
+                    "answer for {}: the answers ledger could not be read: {err:#}",
+                    logged_request_id(request_id)
+                );
+                Err("ledger read failed".to_string())
+            }
         }
     }
 
@@ -4773,12 +4789,18 @@ impl Daemon {
             // per-approval gate above means it cannot be for this card. Left to the
             // link's own claim, which is the one that decides.
             Ok(_) => {}
+            // Logged here, not carried: a store `Display` is an anyhow chain whose open
+            // paths name absolute filesystem locations. The phone is told the fact and
+            // the consequence, which is all it can act on.
             Err(err) => {
+                crate::log_error!(
+                    "answer for {}: could not read the answer ledger for {}: {err:#}",
+                    session.uid,
+                    logged_request_id(request_id)
+                );
                 return AnswerResult::Rejected {
-                    reason: format!(
-                        "could not read this card's answer ledger ({err}); nothing was sent"
-                    ),
-                }
+                    reason: "could not read this card's answer ledger; nothing was sent".into(),
+                };
             }
         }
 
@@ -4787,12 +4809,16 @@ impl Daemon {
         //    app-server proposed, and the hash below is what ties the two together.
         let cards = match self.db.codex_pending_approvals(session.uid.clone()).await {
             Ok(cards) => cards,
+            // Logged here, not carried. See the ledger read above.
             Err(err) => {
+                crate::log_error!(
+                    "answer for {}: could not read the open cards for {}: {err:#}",
+                    session.uid,
+                    logged_request_id(request_id)
+                );
                 return AnswerResult::Rejected {
-                    reason: format!(
-                        "could not read this run's open cards ({err}); nothing was sent"
-                    ),
-                }
+                    reason: "could not read this run's open cards; nothing was sent".into(),
+                };
             }
         };
         let Some(held) = cards.into_iter().find(|card| card.request_id == request_id) else {
@@ -4943,10 +4969,16 @@ impl Daemon {
         let row = match self.resolve_optional(session_ref).await {
             Ok(Some(row)) => row,
             Ok(None) => return refuse(crate::codex_refusals::unknown_session(session_ref)),
+            // **Logged here, not carried.** A store `Display` is an anyhow chain whose
+            // open paths name absolute filesystem locations, and the phone is told the
+            // fact rather than this Mac's directory layout. The operator diagnosing the
+            // disk reads the chain here, where they are entitled to it.
             Err(err) => {
-                return refuse(crate::codex_refusals::session_lookup_failed(
-                    &err.to_string(),
-                ))
+                crate::log_error!(
+                    "interrupt for {}: session lookup failed: {err:#}",
+                    logged_session_ref(session_ref)
+                );
+                return refuse(crate::codex_refusals::SESSION_LOOKUP_FAILED.to_string());
             }
         };
         match row.agent {
@@ -5038,10 +5070,14 @@ impl Daemon {
                 }
             }
             Ok(None) => {}
+            // Logged here, not carried, for the session lookup's reason above.
             Err(err) => {
-                return refuse(crate::codex_refusals::interrupt_ledger_unreadable(
-                    &err.to_string(),
-                ))
+                crate::log_error!(
+                    "interrupt for {}: could not read the interrupt ledger for {}: {err:#}",
+                    session.uid,
+                    logged_request_id(request_id)
+                );
+                return refuse(crate::codex_refusals::INTERRUPT_LEDGER_UNREADABLE.to_string());
             }
         }
 
@@ -5194,10 +5230,13 @@ impl Daemon {
         let row = match self.resolve_optional(session_ref).await {
             Ok(Some(row)) => row,
             Ok(None) => return refuse(crate::codex_refusals::unknown_session(session_ref)),
+            // Logged here, not carried. See [`Daemon::interrupt`]'s twin of this arm.
             Err(err) => {
-                return refuse(crate::codex_refusals::session_lookup_failed(
-                    &err.to_string(),
-                ))
+                crate::log_error!(
+                    "compose for {}: session lookup failed: {err:#}",
+                    logged_session_ref(session_ref)
+                );
+                return refuse(crate::codex_refusals::SESSION_LOOKUP_FAILED.to_string());
             }
         };
         match row.agent {
@@ -5992,10 +6031,13 @@ impl Daemon {
             // The same shape `approval_target` uses for a failed session lookup.
             // Unreadable is not evidence of Claude, and this gate is the one
             // check on this path that may not be skipped on a bad day.
+            // Logged here, not carried, for `approval_target`'s reason — this is the
+            // same shape and it says the same sentence.
             Err(err) => {
+                crate::log_error!("answer for {session_uid}: session lookup failed: {err:#}");
                 return AnswerResult::Rejected {
-                    reason: format!("session lookup failed: {err}"),
-                }
+                    reason: "session lookup failed".into(),
+                };
             }
         };
 
@@ -6097,7 +6139,8 @@ impl Daemon {
         {
             Ok(Some(claim)) => {
                 crate::log_warn!(
-                    "{request_id} carries an unsettled claim from {}; refusing to type again",
+                    "{} carries an unsettled claim from {}; refusing to type again",
+                    logged_request_id(request_id),
                     claim.started_at
                 );
                 self.settle_indeterminate(&claim).await;
@@ -6180,7 +6223,10 @@ impl Daemon {
             started_at: protocol::time::now_rfc3339(),
         };
         if let Err(err) = self.db.claim_answer(claim.clone()).await {
-            crate::log_error!("could not claim {request_id} durably: {err:#}");
+            crate::log_error!(
+                "could not claim {} durably: {err:#}",
+                logged_request_id(request_id)
+            );
             let mut inner = self.inner.lock().await;
             if let Some(entry) = inner.pending.get_mut(&id) {
                 entry.claimed = false;
@@ -10182,6 +10228,117 @@ pub(crate) struct CodexSweep {
     failed: Option<String>,
 }
 
+/// **One test at a time may own the process-global log sink.**
+///
+/// [`crate::log::capture`] is a single process-wide buffer by construction — `emit` is
+/// process-wide, so anything mirroring it must be — and its `install`/`drain`/
+/// `uninstall` carry no notion of an owner. Two tests using it at once do not interleave
+/// harmlessly: `install` CLEARS the buffer, `drain` EMPTIES it, and `uninstall` stops
+/// recording altogether, so whichever test is midway through its drive silently loses
+/// the very lines it is about to assert on. The victim then fails on an EMPTY capture,
+/// which reads like a daemon that said nothing rather than like a test that was robbed.
+///
+/// **Measured, not surmised.** Under default threads,
+/// `cargo test -p ccd --bin ccd codex_link::tests` failed the same two tests on every
+/// run — `an_unreadable_re_ask_keeps_the_link_and_is_reported_once` with `left: 0,
+/// right: 1` and `a_phone_chosen_request_id_cannot_forge_a_line_in_the_log` with an
+/// empty line list — while both pass single-threaded, three runs out of three. The
+/// throttle those reports go through is per-connection (`&mut AmendThrottle`, owned by
+/// one link task), so nothing about the daemon is shared here; only the sink is.
+///
+/// **A turnstile rather than an owner token inside `log::capture`.** The buffer is
+/// test-only scaffolding, and giving it an ownership protocol would be new surface in a
+/// production module for a hazard that exists only in the test binary. This is
+/// `state::tests::captured`'s own `TURN` mutex, widened from one module's two callers to
+/// every user in the binary — which is what it should always have been, because the
+/// thing it protects was never local to one module.
+///
+/// **Take it BEFORE any scripted leg.** `codex_link::tests::ONE_LEG_AT_A_TIME` is taken
+/// inside `drive`, so a capture user that drives a leg holds this one on the outside;
+/// no user takes the leg first, so the order is total and there is no cycle.
+///
+/// `blocking_lock` from a plain `#[test]`, `lock().await` from a `#[tokio::test]` — one
+/// mutex either way, because two would be two turnstiles and no order between them.
+#[cfg(test)]
+pub(crate) static ONE_LOG_CAPTURE_AT_A_TIME: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
+/// **The cap on a client-chosen identifier this daemon will write to `ccd.log`.**
+///
+/// MEASURED by `codex-broker`, whose `session::MAX_REQUEST_ID_BYTES` is this same
+/// number for this same reason: real request ids run 1–59 bytes, the longest being
+/// `"startup-thread-start-<uuid>"`. 128 is more than twice the measured maximum, so it
+/// cannot refuse a real one, while making the length of a log line a property of this
+/// build rather than of whatever a phone chose to send.
+pub(crate) const MAX_LOGGED_CLIENT_ID_BYTES: usize = 128;
+
+/// Is this client-chosen string a plain identifier — safe to write out as it is?
+///
+/// **The grammar is `mac/codex-broker/src/redact.rs`'s, which is the source of truth
+/// for it**, and this is a COPY rather than a call. `codex-broker` is a
+/// **dev-dependency** of this crate and deliberately so: `ccd/Cargo.toml` marks it
+/// TEST-ONLY, so that `codex_link_live`'s "is the installed codex one this build is
+/// grounded against?" question has exactly one answer. Production code here cannot
+/// reach it, and promoting the dependency so that one log helper could would undo a
+/// decision taken for a different and better reason.
+///
+/// The rule, unchanged: ASCII alphanumerics plus `-`, `_`, `.` and `:`, non-empty, and
+/// within [`MAX_LOGGED_CLIENT_ID_BYTES`]. A string matching it can hold no newline, no
+/// carriage return, no control byte and no quote — which is exactly why it cannot forge
+/// a line — and it covers every id form measured on the wire, every session uid (a
+/// ULID) and every ordinary tmux session name.
+fn is_a_plain_client_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LOGGED_CLIENT_ID_BYTES
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+}
+
+/// **A phone-chosen `request_id`, rendered safe to write to `ccd.log`.**
+///
+/// The id on an `Answer`, an `Interrupt` or a `Compose` frame is chosen entirely by the
+/// phone and is interpolated into this daemon's log at eleven sites. A newline in it
+/// forges a whole line into the file operators and the live gates read: an id of
+/// `"x\n2026-09-09T00:00:00.000Z ERROR codex recovery: ownership asserted"` writes a
+/// second line that greps exactly like a real one, and nothing downstream can tell the
+/// two apart.
+///
+/// A conforming id is written AS IT IS, because an operator diagnosing a refusal needs
+/// to know *which* ask; anything else is written as its byte count and nothing more.
+/// See [`is_a_plain_client_id`] for the grammar and where it comes from.
+///
+/// **One deliberate difference from `redact.rs`:** a conforming id is written bare
+/// rather than through `{:?}`. The broker's audit lines use the quoting to tell an
+/// echoed id from a rendered shape; `ccd.log` is prose whose lines already interpolate
+/// the id bare, and the grammar has already excluded every byte the quoting would be
+/// protecting against.
+pub(crate) fn logged_request_id(id: &str) -> std::borrow::Cow<'_, str> {
+    if is_a_plain_client_id(id) {
+        std::borrow::Cow::Borrowed(id)
+    } else {
+        std::borrow::Cow::Owned(format!("<non-conforming request id, {} bytes>", id.len()))
+    }
+}
+
+/// **A phone-chosen session reference, rendered safe to write to `ccd.log`.**
+///
+/// [`logged_request_id`]'s twin, and it exists because a `session_id` on the wire is a
+/// uid OR a bare tmux name — so, unlike a resolved `session_uid` read back out of the
+/// store, it is client-chosen text and is a log-injection channel in exactly the same
+/// way. Same grammar; a different noun, so a shape in the log says which field could
+/// not be written.
+pub(crate) fn logged_session_ref(reference: &str) -> std::borrow::Cow<'_, str> {
+    if is_a_plain_client_id(reference) {
+        std::borrow::Cow::Borrowed(reference)
+    } else {
+        std::borrow::Cow::Owned(format!(
+            "<non-conforming session reference, {} bytes>",
+            reference.len()
+        ))
+    }
+}
+
 /// The `codeconnect` launcher this daemon runs the recovery pass through.
 ///
 /// **Why a subprocess and not a function call.** The launch records are the
@@ -10198,7 +10355,85 @@ pub(crate) fn codex_launcher() -> Result<std::path::PathBuf, String> {
         std::env::var(LAUNCHER_BIN_ENV).ok(),
         std::env::current_exe().ok(),
         protocol::root_dir(),
+        state_dir_owner(),
     )
+}
+
+/// **The uid a launcher override has to belong to**, or `None` when this daemon
+/// cannot establish one.
+///
+/// `~/.codeconnect` rather than `getuid(2)`: `ccd` carries no `libc` dependency, and
+/// adding one for a single symbol would buy a weaker anchor than this. The state
+/// directory holds this daemon's database, its TLS material and its device tokens —
+/// everything the process already trusts absolutely — so "owned by whoever owns
+/// that" is the ownership the whole daemon rests on rather than a proxy for it. On a
+/// machine where the two differ, the override is not the operator's to choose.
+fn state_dir_owner() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(protocol::root_dir())
+        .ok()
+        .map(|meta| meta.uid())
+}
+
+/// **Is this override a program this daemon may spawn?**
+///
+/// `CODECONNECT_LAUNCHER_BIN` was `is_file()` and nothing else, and what it selects
+/// is executed every five minutes by a launchd job holding the APNs signing key and
+/// this Mac's tailnet identity. Its sibling `CODECONNECT_CODEX_BIN` is canonicalised,
+/// read exactly once, checked for a Mach-O header and pinned by SHA-256 — see
+/// `resolve_codex_bin` in `mac/codeconnect/src/codex.rs`, where that discipline is
+/// written down — because the file an environment variable names is the file that
+/// ends up running.
+///
+/// Three conditions, and each is a different way the override stops being the
+/// operator's own choice:
+///
+///   * **a regular file.** A directory, a fifo or a device is not a program. This is
+///     the question `is_file()` was already asking; it is asked here so all three
+///     answers come from one read of one file rather than from three separate ones.
+///   * **owned by the uid that owns this daemon's state.** Another user's file is
+///     another user's decision about what this daemon runs.
+///   * **writable by nobody but its owner.** A group- or other-writable path can be
+///     rewritten between this check and the spawn — and between two ticks of a sweep
+///     that runs every five minutes — so a file that passed is not necessarily the
+///     file that runs. `mode & 0o022`, which is both bits and no others: the execute
+///     and read bits say nothing about who can revise it.
+///
+/// **Deliberately NOT `codex.rs`'s digest pin.** The launcher is this build's own
+/// binary and every install replaces it, so a hash would refuse the ordinary upgrade
+/// and stop the recovery sweep on exactly the machines that had just been updated.
+/// What is borrowed is the shape of the question, not its strictness.
+///
+/// `metadata` and not `symlink_metadata`: a symlink is an ordinary way to name an
+/// installed launcher, and the thing that gets executed is the target — so the target
+/// is what has to answer for itself.
+///
+/// **`owner` is `None` when this daemon could not read its own state directory.** The
+/// ownership question is then unanswerable, and it is skipped rather than guessed at
+/// in either direction; the other two conditions still apply, so the check degrades
+/// to a narrower one rather than to none.
+fn launcher_is_spawnable(path: &std::path::Path, owner: Option<u32>) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).map_err(|err| format!("it cannot be examined ({err})"))?;
+    if !meta.is_file() {
+        return Err("it is not a regular file".to_string());
+    }
+    if let Some(owner) = owner {
+        if meta.uid() != owner {
+            return Err(format!(
+                "it belongs to uid {}, and this daemon's own state belongs to uid {owner}",
+                meta.uid()
+            ));
+        }
+    }
+    let mode = meta.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Err(format!(
+            "it is writable by its group or by everyone (mode {mode:04o}), so what runs \
+             need not be what was checked"
+        ));
+    }
+    Ok(())
 }
 
 /// The candidate list, given its three inputs rather than reading them: the override,
@@ -10223,19 +10458,28 @@ fn launcher_among(
     named: Option<String>,
     exe: Option<std::path::PathBuf>,
     root: std::path::PathBuf,
+    owner: Option<u32>,
 ) -> Result<std::path::PathBuf, String> {
     let mut looked = Vec::new();
-    // An override that names nothing is REPORTED and then passed, not obeyed: an
-    // operator who mistyped the path should learn that from the log rather than from a
-    // recovery pass that quietly stopped running. Said at startup by
-    // [`warn_about_an_ignored_launcher_override`], because a fallback that works would
-    // otherwise swallow it here.
+    // An override this daemon will not spawn is REPORTED and then passed, not obeyed:
+    // an operator who mistyped the path — or who left it somewhere anyone can rewrite —
+    // should learn that from the log rather than from a recovery pass that quietly
+    // stopped running. Said at startup by [`warn_about_an_ignored_launcher_override`],
+    // because a fallback that works would otherwise swallow it here, and the reason is
+    // carried into `looked` so the no-launcher error names it too.
+    //
+    // **The candidates BESIDE this daemon and in the install prefix are not checked
+    // this way, and the asymmetry is the point.** Those two are wherever this binary
+    // was installed; an operator who can write there can replace `ccd` itself, so a
+    // guard on them would be theatre. The override is the one candidate a *caller* —
+    // an environment variable on a launchd job, a shell that started this by hand —
+    // gets to choose, which is the only place the choice can be somebody else's.
     if let Some(named) = named.filter(|value| !value.is_empty()) {
         let path = std::path::PathBuf::from(named);
-        if path.is_file() {
-            return Ok(path);
+        match launcher_is_spawnable(&path, owner) {
+            Ok(()) => return Ok(path),
+            Err(why) => looked.push(format!("{} ({LAUNCHER_BIN_ENV}: {why})", path.display())),
         }
-        looked.push(format!("{} ({LAUNCHER_BIN_ENV})", path.display()));
     }
     if let Some(beside) = exe.as_deref().and_then(std::path::Path::parent) {
         let beside = beside.join("codeconnect");
@@ -10264,7 +10508,9 @@ fn launcher_among(
 /// than per tick because it is a condition of the environment this process was started
 /// in and cannot change under it.
 pub(crate) fn warn_about_an_ignored_launcher_override() {
-    if let Some(why) = an_ignored_launcher_override(std::env::var(LAUNCHER_BIN_ENV).ok()) {
+    if let Some(why) =
+        an_ignored_launcher_override(std::env::var(LAUNCHER_BIN_ENV).ok(), state_dir_owner())
+    {
         crate::log_warn!("codex recovery: {why}");
     }
 }
@@ -10274,14 +10520,14 @@ pub(crate) fn warn_about_an_ignored_launcher_override() {
 /// is a daemon with live tasks in it, so a test that set the variable would be racing
 /// every other test in the binary and the failure mode of losing that race is a green
 /// test.
-fn an_ignored_launcher_override(named: Option<String>) -> Option<String> {
+fn an_ignored_launcher_override(named: Option<String>, owner: Option<u32>) -> Option<String> {
     let named = named.filter(|value| !value.is_empty())?;
-    if std::path::Path::new(&named).is_file() {
-        return None;
-    }
+    // The same predicate [`launcher_among`] passes the override through, so the
+    // complaint cannot describe a different rule from the one that was applied.
+    let why = launcher_is_spawnable(std::path::Path::new(&named), owner).err()?;
     Some(format!(
-        "{LAUNCHER_BIN_ENV} names {named}, which is not a file; it is ignored and the \
-         launcher is looked for in the usual places"
+        "{LAUNCHER_BIN_ENV} names {named}, which this daemon will not spawn because \
+         {why}; it is ignored and the launcher is looked for in the usual places"
     ))
 }
 
@@ -10724,9 +10970,17 @@ mod tests {
     /// other test's line arriving in its window. Held across install…uninstall, and
     /// never poisoned into a panic, so a failing assertion inside the lock does not
     /// take every other test down with it.
-    fn captured(body: impl FnOnce()) -> Vec<String> {
-        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _turn = TURN.lock().unwrap_or_else(|p| p.into_inner());
+    /// **Async, because the turnstile is.** Both callers are `#[tokio::test]`, so a
+    /// `blocking_lock` here blocks the very thread that would have to release it and
+    /// tokio refuses outright. `body` stays synchronous: what it runs is a sweep report,
+    /// and the sink must not be shared with anything that could yield inside it.
+    ///
+    /// The turnstile is [`crate::state::ONE_LOG_CAPTURE_AT_A_TIME`] and no longer a
+    /// mutex private to this module: the sink it protects is process-global, so a
+    /// turnstile only two callers in one file respect protects nothing from the capture
+    /// users in the others.
+    async fn captured(body: impl FnOnce()) -> Vec<String> {
+        let _turn = crate::state::ONE_LOG_CAPTURE_AT_A_TIME.lock().await;
         crate::log::capture::install();
         body();
         let logged = crate::log::capture::drain();
@@ -10950,7 +11204,8 @@ mod tests {
             report_codex_sweep(&bad, &mut latch);
             report_codex_sweep(&good, &mut latch);
             report_codex_sweep(&good, &mut latch);
-        });
+        })
+        .await;
 
         let complaints = logged
             .iter()
@@ -11039,7 +11294,8 @@ mod tests {
             for tick in &ticks {
                 report_codex_sweep(tick, &mut latch);
             }
-        });
+        })
+        .await;
 
         assert_eq!(
             logged
@@ -11109,7 +11365,7 @@ mod tests {
         ));
         assert!(!missing.is_file(), "the fixture path must not exist");
 
-        let why = an_ignored_launcher_override(Some(missing.display().to_string()))
+        let why = an_ignored_launcher_override(Some(missing.display().to_string()), None)
             .expect("an override that names nothing must be reported");
         assert!(
             why.contains(LAUNCHER_BIN_ENV) && why.contains(&missing.display().to_string()),
@@ -11118,19 +11374,152 @@ mod tests {
         );
 
         assert_eq!(
-            an_ignored_launcher_override(None),
+            an_ignored_launcher_override(None, None),
             None,
             "no override is not a complaint"
         );
         assert_eq!(
-            an_ignored_launcher_override(Some(String::new())),
+            an_ignored_launcher_override(Some(String::new()), None),
             None,
             "and an empty one is not an override"
         );
+        // **A file the running user owns and only they can write.** It used to be
+        // `/bin/sh`, which stopped being an example of an obeyed override the moment
+        // the override began to be checked the way a spawned binary is: `/bin/sh`
+        // belongs to root, and this daemon does not. See
+        // [`a_launcher_override_that_anyone_could_rewrite_is_not_obeyed`].
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let ours = std::env::temp_dir().join(format!(
+            "cc-launcher-obeyed-{}-{}",
+            std::process::id(),
+            thread_tag()
+        ));
+        std::fs::write(&ours, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&ours, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let owner = std::fs::metadata(&ours).unwrap().uid();
         assert_eq!(
-            an_ignored_launcher_override(Some("/bin/sh".into())),
+            an_ignored_launcher_override(Some(ours.display().to_string()), Some(owner)),
             None,
-            "an override that names a real file is obeyed, not complained about"
+            "an override that names a binary this daemon may spawn is obeyed, not \
+             complained about"
+        );
+        std::fs::remove_file(&ours).ok();
+    }
+
+    /// **The override names a binary this daemon will SPAWN, so it is asked what a
+    /// binary is asked.**
+    ///
+    /// `CODECONNECT_LAUNCHER_BIN` was `is_file()` and nothing else, and the file it
+    /// selects is executed every five minutes by a launchd job holding the APNs signing
+    /// key and this Mac's tailnet identity. A world-writable path was obeyed: anybody who
+    /// could write it owned that job's next tick.
+    ///
+    /// Each condition is asserted on its own, because each is a different way the
+    /// override stops being the operator's choice and a person told "ignored" without
+    /// being told which one cannot fix it. Then the whole thing is asserted through
+    /// [`launcher_among`], which is where it matters: a loose override is passed over for
+    /// the launcher beside this daemon rather than obeyed, and
+    /// [`an_ignored_launcher_override`] says so at startup rather than letting the
+    /// working fallback swallow it.
+    ///
+    /// **Mutation:** delete any one of the three tests in [`launcher_is_spawnable`] and
+    /// the leg naming it goes green.
+    #[test]
+    fn a_launcher_override_that_anyone_could_rewrite_is_not_obeyed() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!(
+            "cc-launcher-guard-{}-{}",
+            std::process::id(),
+            thread_tag()
+        ));
+        struct Tree(std::path::PathBuf);
+        impl Drop for Tree {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).ok();
+            }
+        }
+        let _tree = Tree(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        // Whoever owns this tree is whoever is running the test, which is exactly the
+        // relationship production asserts between the override and `~/.codeconnect`.
+        // Taken from the filesystem rather than from a syscall for the reason
+        // [`state_dir_owner`] gives: this crate has no `libc`.
+        let owner = std::fs::metadata(&dir).unwrap().uid();
+        let write = |path: &std::path::Path, mode: u32| {
+            std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        // The one shape that is admitted: a regular file, ours, and ours alone to write.
+        let beside = dir.join("beside");
+        std::fs::create_dir_all(&beside).unwrap();
+        let good = beside.join("codeconnect");
+        write(&good, 0o755);
+        assert_eq!(
+            launcher_is_spawnable(&good, Some(owner)),
+            Ok(()),
+            "an ordinary 0755 binary this user owns is what the override is FOR"
+        );
+
+        // Writable by everyone: rewritable between the check and the spawn.
+        let loose = dir.join("loose");
+        write(&loose, 0o666);
+        let why = launcher_is_spawnable(&loose, Some(owner))
+            .expect_err("a world-writable binary must be refused");
+        assert!(
+            why.contains("writable by its group or by everyone") && why.contains("0666"),
+            "and the refusal must name the mode, or an operator cannot fix it: {why}"
+        );
+        // Group-writable alone is the same fault: `0o022` and not `0o002`.
+        let group = dir.join("group");
+        write(&group, 0o775);
+        assert!(
+            launcher_is_spawnable(&group, Some(owner)).is_err(),
+            "a group-writable binary is rewritable by everyone in that group"
+        );
+
+        // Not a program at all.
+        let a_directory = dir.join("adir");
+        std::fs::create_dir_all(&a_directory).unwrap();
+        let why = launcher_is_spawnable(&a_directory, Some(owner))
+            .expect_err("a directory must be refused");
+        assert!(why.contains("not a regular file"), "{why}");
+
+        // Somebody else's file, asserted by moving the EXPECTATION rather than the
+        // file: a test cannot chown, and the comparison is the thing under test.
+        let why = launcher_is_spawnable(&good, Some(owner.wrapping_add(1)))
+            .expect_err("another user's binary must be refused");
+        assert!(
+            why.contains("belongs to uid"),
+            "and it must name both uids: {why}"
+        );
+
+        // An owner this daemon could not establish leaves the other two conditions
+        // standing rather than admitting everything.
+        assert_eq!(launcher_is_spawnable(&good, None), Ok(()));
+        assert!(
+            launcher_is_spawnable(&loose, None).is_err(),
+            "an unreadable state directory must not turn the mode check off too"
+        );
+
+        // And the whole of it where it acts: the loose override is passed over for the
+        // launcher beside this daemon, and the pass-over says why.
+        assert_eq!(
+            launcher_among(
+                Some(loose.display().to_string()),
+                Some(beside.join("ccd")),
+                dir.join("prefix"),
+                Some(owner),
+            ),
+            Ok(good),
+            "an override anyone in the group can rewrite is not this daemon's to spawn"
+        );
+        let why = an_ignored_launcher_override(Some(loose.display().to_string()), Some(owner))
+            .expect("a rewritable override must be reported at startup");
+        assert!(
+            why.contains(LAUNCHER_BIN_ENV) && why.contains("writable"),
+            "or the daemon runs a launcher the operator did not choose and never says so: \
+             {why}"
         );
     }
 
@@ -11170,29 +11559,42 @@ mod tests {
         }
         let exe = beside.join("ccd");
         let root = dir.join("prefix");
+        // The uid the override is required to belong to. See
+        // [`a_launcher_override_that_anyone_could_rewrite_is_not_obeyed`] for what else
+        // it is asked; here it is only the precedence that is under test.
+        let owner = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&dir).unwrap().uid()
+        };
 
         assert_eq!(
             launcher_among(
                 Some(named.join("codeconnect").display().to_string()),
                 Some(exe.clone()),
-                root.clone()
+                root.clone(),
+                Some(owner),
             ),
             Ok(named.join("codeconnect")),
             "the override outranks everything"
         );
         assert_eq!(
-            launcher_among(None, Some(exe.clone()), root.clone()),
+            launcher_among(None, Some(exe.clone()), root.clone(), Some(owner)),
             Ok(beside.join("codeconnect")),
             "the launcher beside this daemon is the one of this build"
         );
         assert_eq!(
-            launcher_among(Some(String::new()), Some(exe.clone()), root.clone()),
+            launcher_among(
+                Some(String::new()),
+                Some(exe.clone()),
+                root.clone(),
+                Some(owner)
+            ),
             Ok(beside.join("codeconnect")),
             "an empty override is not an override"
         );
         std::fs::remove_file(beside.join("codeconnect")).unwrap();
         assert_eq!(
-            launcher_among(None, Some(exe.clone()), root.clone()),
+            launcher_among(None, Some(exe.clone()), root.clone(), Some(owner)),
             Ok(prefix.join("codeconnect")),
             "and the install prefix is the fallback"
         );
@@ -11202,6 +11604,7 @@ mod tests {
             Some(named.join("gone").display().to_string()),
             Some(exe),
             root,
+            Some(owner),
         )
         .expect_err("nothing is there");
         for expected in [
@@ -26468,9 +26871,18 @@ mod tests {
     ///
     /// **Nothing is normalised, because nothing in it is read from anything.**
     /// The interpolated sentences are assembled by calling the very formatters
-    /// production calls, with the fixture's own `{uid}`/`{n}`/`{err}` tokens as
-    /// their arguments — so a template here cannot drift from the code, there
-    /// being no second copy of it to drift.
+    /// production calls, with the fixture's own `{uid}`/`{n}` tokens as their
+    /// arguments — so a template here cannot drift from the code, there being no
+    /// second copy of it to drift.
+    ///
+    /// **There is no `{err}` token, and there must never be one again.** Five
+    /// sentences were assembled from this Mac's own store error — an anyhow chain
+    /// whose open paths name absolute filesystem locations — and a phone read the
+    /// lot. The rule is pinned on the sentences themselves by
+    /// [`crate::codex_link`]'s
+    /// `a_store_error_never_reaches_the_phone_from_a_compose_an_interrupt_or_an_answer`;
+    /// what this file adds is that the phone's own splitter stops carrying a token
+    /// that can no longer appear.
     ///
     /// **Mutation:** edit one sentence in the checked-in file and the byte
     /// comparison fails, naming the file and the command that regenerates it.

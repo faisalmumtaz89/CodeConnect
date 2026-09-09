@@ -6,9 +6,9 @@ import Foundation
 /// `ComposeResult.rejected` are bare human sentences — so the phone has to
 /// decide from the text whether a refusal is one to wait out. It did that by
 /// matching three English phrases, and the shared fixture proved that wrong the
-/// day it landed: the daemon writes **18** link-state refusals and those three
-/// clauses caught 8. Ten sentences that say the link is coming back would have
-/// left the control live against a link that was reconnecting.
+/// day it landed: the daemon writes **20** link-state refusals and those three
+/// clauses caught 8. Twelve sentences that say the link is coming back would
+/// have left the control live against a link that was reconnecting.
 ///
 /// Guessing at prose is the whole defect, so this stops guessing. The daemon
 /// emits every sentence it can send, with its own category, from the one place

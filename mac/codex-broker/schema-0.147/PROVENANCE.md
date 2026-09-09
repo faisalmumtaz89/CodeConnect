@@ -51,7 +51,7 @@ resolution — and there are **two sets of them**: this directory holds the 0.14
 **baseline**, and `../schema-0.153/` holds the **grounded ceiling** that
 `guarded_surface::ADJUDICATED_WIRE` bridges to. See "Two references, one bridge" below.
 
-- `guarded-wire-stable.json` (19 entries) / `guarded-wire-experimental.json` (21) —
+- `guarded-wire-stable.json` (29 entries) / `guarded-wire-experimental.json` (32) —
   each **guarded** method's resolved `params` schema, its JSON-RPC envelope, and the
   transitive closure of definitions those reach. Guarded means `allowlist::disposition`
   does something other than refuse it on at least one `(role, kind)` cell; the set is

@@ -1174,8 +1174,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The real 0.153 command request, from `fixtures/codex/command-execution.jsonl`
-    /// with the `reason` 0.153 adds.
+    /// **A unit input, not a recording.** The `params` of
+    /// `fixtures/codex/command-execution.jsonl` frame 18 verbatim, plus two
+    /// fields that frame does not carry: `kind`, and a `reason` string
+    /// (`"the sandbox is read-only"`) that was written here and appears nowhere
+    /// in the corpus. Both additions are deliberate — they let the tests below
+    /// exercise the populated-`reason` path against a capture family that
+    /// predates it — but they are why this must never be mistaken for evidence
+    /// of what a 0.153 daemon sends. The card fixture the phone decodes is built
+    /// from the real frames instead; see
+    /// [`the_card_contract_from_the_real_frames`].
     fn command_params() -> Value {
         json!({
             "threadId": "01a01282-ba87-7660-9f8d-05e2219cd505",
@@ -2438,28 +2446,114 @@ mod tests {
         );
     }
 
-    /// Regenerate `fixtures/codex/approval-card-0.153.json`. Run with
+    /// The uid every card in this module's fixtures is bound to. One constant
+    /// because the composite `request_id` hashes it in: two spellings of the
+    /// same intent would silently produce two different ids and the byte
+    /// comparison below would blame the wrong thing.
+    const FIXTURE_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPCX";
+
+    /// **The 0.153 approval capture, parsed once, for everyone who replays it.**
+    ///
+    /// Returns the capture's frames and, for every `requestApproval` in it, the
+    /// triple `(family, params, card)` that a live observer would have produced.
+    ///
+    /// The `item/started` join is the reason this is not two lines. A
+    /// `fileChange` request carries no content — no path, no diff, no options —
+    /// so [`Approval::read`] can only card it when the preceding `item/started`
+    /// snapshot for the same `itemId` is handed in alongside. Keying that
+    /// snapshot by id is exactly what the observer does, so replaying it here
+    /// exercises the join instead of stepping around it, and a build that broke
+    /// the join fails here rather than shipping a phone a contentless card.
+    fn replay_the_live_0_153_capture(
+    ) -> (Vec<Value>, Vec<(Family, Value, protocol::ws::ApprovalCard)>) {
+        const CAPTURE: &str = include_str!("../../../fixtures/codex/approval-0.153.jsonl");
+        let rows: Vec<Value> = CAPTURE
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("each line is one JSON frame"))
+            .collect();
+
+        // The `item/started` snapshots, keyed the way the observer keys them.
+        let started: std::collections::HashMap<String, Value> = rows
+            .iter()
+            .filter(|row| row["frame"]["method"] == "item/started")
+            .filter_map(|row| {
+                let item = row["frame"].pointer("/params/item")?;
+                Some((item["id"].as_str()?.to_string(), item.clone()))
+            })
+            .collect();
+
+        let mut carded = Vec::new();
+        for row in &rows {
+            let frame = &row["frame"];
+            let Some(method) = frame["method"].as_str() else {
+                continue;
+            };
+            let Some(family) = Family::of_method(method) else {
+                continue;
+            };
+            let params = &frame["params"];
+            let item = params["itemId"].as_str().and_then(|id| started.get(id));
+            let approval = Approval::read(family, params, item)
+                .unwrap_or_else(|why| panic!("the live {method} must read: {why}"));
+            let request_id = approval.request_id(FIXTURE_UID, 1).unwrap();
+            let card = approval.card(request_id, 1);
+            carded.push((family, params.clone(), card));
+        }
+        (rows, carded)
+    }
+
+    /// **The committed card fixture's one source of truth — the real frames.**
+    ///
+    /// `fixtures/codex/approval-card-0.153.json` was, until this was written,
+    /// emitted from [`command_params`] and [`file_change_params`]: hand-written
+    /// unit inputs, one of which carries a `reason` string
+    /// (`"the sandbox is read-only"`) that appears in no capture in the corpus.
+    /// Three doc comments nevertheless described the file as coming straight out
+    /// of the capture. That is the kind of error relabelling cannot fix, because
+    /// the phone's own tests lean on the file as *evidence* of what a real 0.153
+    /// daemon sends — `CodexWireDecodeTests` decodes it as the wire's own bytes,
+    /// and `Fixtures.swift` stages its `request_id` as "the real composite id".
+    /// A hand-written string cannot be that evidence however it is captioned.
+    ///
+    /// So the fixture is now built from `fixtures/codex/approval-0.153.jsonl` —
+    /// two real `codeconnect codex` sessions driven to a real approval and
+    /// tapped on the ccd leg — and the claim of provenance is simply true.
+    ///
+    /// The generator and the byte comparison both call this, so the file and the
+    /// build that checks it cannot drift into disagreeing about how the card was
+    /// made. The hand-written params keep their jobs as *unit* inputs elsewhere
+    /// in this module, where an invented field is the point of the test; what
+    /// they no longer do is stand in for a recording.
+    fn the_card_contract_from_the_real_frames() -> Value {
+        let (_, carded) = replay_the_live_0_153_capture();
+        let card = |want: Family| {
+            let mut found = carded.iter().filter(|(family, _, _)| *family == want);
+            let (_, _, card) = found
+                .next()
+                .unwrap_or_else(|| panic!("the capture holds one {want:?} approval"));
+            assert!(
+                found.next().is_none(),
+                "the capture holds exactly one {want:?} approval, and the fixture \
+                 names one card per family — a second would be silently dropped"
+            );
+            card.clone()
+        };
+        json!({
+            "command": card(Family::Command),
+            "file_change": card(Family::FileChange),
+        })
+    }
+
+    /// Regenerate `fixtures/codex/approval-card-0.153.json` from the real 0.153
+    /// frames. Run with
     /// `cargo test -p ccd --bin ccd -- --ignored --nocapture regenerate_the`.
     #[test]
     #[ignore = "generator, not a gate"]
     fn regenerate_the_approval_card_fixture() {
-        const UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPCX";
-        let approval = Approval::read(Family::Command, &command_params(), None).unwrap();
-        let command = approval.card(approval.request_id(UID, 1).unwrap(), 1);
-        let approval = Approval::read(
-            Family::FileChange,
-            &file_change_params(),
-            Some(&file_change_started()),
-        )
-        .unwrap();
-        let file_change = approval.card(approval.request_id(UID, 1).unwrap(), 1);
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({
-                "command": command,
-                "file_change": file_change,
-            }))
-            .unwrap()
+            serde_json::to_string_pretty(&the_card_contract_from_the_real_frames()).unwrap()
         );
     }
 
@@ -2474,12 +2568,21 @@ mod tests {
     /// the card with a banner and kills both actions.
     ///
     /// So this test asserts the app's own two gates against a **committed**
-    /// fixture, and then re-derives that fixture from the real 0.153 frames and
-    /// requires the two to be byte-identical. Either half alone would be weak:
-    /// a fixture nobody re-derives goes stale silently, and a re-derivation with
-    /// no committed artefact leaves Phase 5 nothing to build against. Together
-    /// they mean a change to the card shape must change the file, in the diff,
-    /// where a reviewer sees it.
+    /// fixture, and then re-derives that fixture from the real 0.153 frames —
+    /// [`the_card_contract_from_the_real_frames`], replaying
+    /// `fixtures/codex/approval-0.153.jsonl` — and requires the two to be
+    /// byte-identical. Either half alone would be weak: a fixture nobody
+    /// re-derives goes stale silently, and a re-derivation with no committed
+    /// artefact leaves Phase 5 nothing to build against. Together they mean a
+    /// change to the card shape must change the file, in the diff, where a
+    /// reviewer sees it.
+    ///
+    /// The re-derivation is also what keeps the *provenance* honest. This
+    /// comment, its sibling on the generator, and
+    /// `ios/CodeConnectTests/CodexWireDecodeTests.swift` all describe the file
+    /// as coming out of the capture; while it was emitted from hand-written
+    /// params that was three claims and no mechanism. Now the only way to change
+    /// the file is to change the capture or the card builder.
     ///
     /// **Mutation:** rename any of the five keys, or drop `options` from
     /// `tool_input`, and the byte comparison fails naming the file to
@@ -2530,19 +2633,9 @@ mod tests {
         }
 
         // The fixture is what this build produces, from the real 0.153 frames.
-        const UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPCX";
-        let approval = Approval::read(Family::Command, &command_params(), None).unwrap();
-        let command = approval.card(approval.request_id(UID, 1).unwrap(), 1);
-        let approval = Approval::read(
-            Family::FileChange,
-            &file_change_params(),
-            Some(&file_change_started()),
-        )
-        .unwrap();
-        let file_change = approval.card(approval.request_id(UID, 1).unwrap(), 1);
-        let derived = json!({"command": command, "file_change": file_change});
         assert_eq!(
-            derived, committed,
+            the_card_contract_from_the_real_frames(),
+            committed,
             "the committed card contract no longer matches what this build produces. \
              Regenerate it: cargo test -p ccd --bin ccd -- --ignored --nocapture \
              regenerate_the_approval_card_fixture > fixtures/codex/approval-card-0.153.json"
@@ -2563,53 +2656,20 @@ mod tests {
     /// its card must be joined against the preceding `item/started`.
     #[test]
     fn the_live_0_153_capture_replays_into_cards_the_phone_can_verify() {
-        const CAPTURE: &str = include_str!("../../../fixtures/codex/approval-0.153.jsonl");
-        let rows: Vec<Value> = CAPTURE
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line).expect("each line is one JSON frame"))
-            .collect();
+        let (rows, carded) = replay_the_live_0_153_capture();
 
-        // The `item/started` snapshots, keyed the way the observer keys them.
-        let started: std::collections::HashMap<String, Value> = rows
-            .iter()
-            .filter(|row| row["frame"]["method"] == "item/started")
-            .filter_map(|row| {
-                let item = row["frame"].pointer("/params/item")?;
-                Some((item["id"].as_str()?.to_string(), item.clone()))
-            })
-            .collect();
-
-        let mut carded = Vec::new();
-        for row in &rows {
-            let frame = &row["frame"];
-            let Some(method) = frame["method"].as_str() else {
-                continue;
-            };
-            let Some(family) = Family::of_method(method) else {
-                continue;
-            };
-            let params = &frame["params"];
-            let item = params["itemId"].as_str().and_then(|id| started.get(id));
-            let approval = Approval::read(family, params, item)
-                .unwrap_or_else(|why| panic!("the live {method} must read: {why}"));
-            let request_id = approval
-                .request_id("01K1B3XQ8ZC0DE5FGH7JKMNPCX", 1)
-                .unwrap();
-            let card = approval.card(request_id, 1);
-
-            // The phone's own two gates, on a card built from a real frame.
+        // The phone's own two gates, on cards built from real frames.
+        for (family, _, card) in &carded {
             assert_eq!(
                 card.payload_hash,
                 protocol::hash::sha256_hex(card.display_text.as_bytes()),
-                "{method}: a card that does not hash to its own display text is a \
+                "{family:?}: a card that does not hash to its own display text is a \
                  banner on the phone, not a card"
             );
             assert_eq!(
                 card.display_text,
                 format!("{}\n{}", card.tool_name, card.tool_input)
             );
-            carded.push((family, params.clone(), card));
         }
         assert_eq!(
             carded.len(),

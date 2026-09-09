@@ -769,8 +769,18 @@ fn diagnose(sb: &Sandbox, uid: &str) -> String {
 }
 
 /// Poll `f` until it is true or `within` elapses.
+/// Every wait in this harness ends on its own condition; the ceiling only decides how
+/// long a genuinely stuck bring-up is allowed to hold the suite. The ceilings below
+/// were tuned on a quiet machine; under the repo's parallel preflight — eight of these
+/// tests alongside a full workspace build — a 30 s arm-and-create wait was measured
+/// losing the race (one of two hosts recorded when it expired) while the same test is
+/// green alone and single-threaded. So a wait scales its ceiling by this factor: a
+/// bring-up that is going to happen still happens in the same wall time on an idle
+/// machine, and a bring-up that never happens is still refused, only later.
+const WAIT_CEILING_SCALE: u32 = 3;
+
 fn wait_until(within: Duration, mut f: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + within;
+    let deadline = Instant::now() + within * WAIT_CEILING_SCALE;
     while Instant::now() < deadline {
         if f() {
             return true;

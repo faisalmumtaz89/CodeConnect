@@ -630,12 +630,27 @@ enum CodexFixtures {
     static let longAmendmentLabel =
         "Yes, and don't ask again for commands that start with `touch '/tmp/cc-label-d.0000000000000000000 spaced.txt'`"
 
-    /// **The real composite id, 159 characters**, verbatim from
-    /// `approval-card-0.153.json`. The true width worst case for any id a card
-    /// can disclose — and its whole job in a fixture is to prove that nothing
-    /// renders it.
+    /// **The real composite id, 159 characters** — the `command` card's, from
+    /// `fixtures/codex/approval-card-0.153.json`. The true width worst case for
+    /// any id a card can disclose, and its whole job in a fixture is to prove
+    /// that nothing renders it.
+    ///
+    /// It is a literal because this is the **app** target and that file ships
+    /// only in the test bundle: sourcing it here would mean bundling a test
+    /// fixture into the shipped app to read one string out of it. So the
+    /// literal is pinned instead —
+    /// `CodexFixtureTests.testTheCompositeIdIsTheCardFixturesOwn` fails if it
+    /// stops equalling the bundled card's `request_id`, and
+    /// `CodexFixtureProvenanceTests` fails if that bundled card stops equalling
+    /// the daemon's. The two together are the chain a literal cannot rot
+    /// through: literal → bundled card → `fixtures/codex/` → the real
+    /// `approval-0.153.jsonl` frames the Rust gate re-derives it from.
+    ///
+    /// It rotted exactly once, which is why the pin exists: the card fixture was
+    /// rebuilt from the real frames and this stayed on the hand-authored card's
+    /// id, still 159 characters, so the length check stayed green.
     static let compositeRequestID =
-        "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gAJDAxYTAxMjgyLWJhODctNzY2MC05ZjhkLTA1ZTIyMTljZDUwNQEAKWV4ZWMtY2Y3YjY3YzctM2ExOS00ZGQ4LWE5YTYtNmYyNDNkYjMzYmQ0AAAAAAAAAAE"
+        "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE"
 
     /// The turn the interrupt capture really aborted.
     static let turnID = "01a073f6-2004-7750-a697-a6c12004ca48"
@@ -653,6 +668,20 @@ enum CodexFixtures {
         /// Mac's own bounds allow. Nothing smaller exercises what a valid card
         /// can actually cost the decision surface.
         case cardCeiling = "card-ceiling"
+        /// **The card that may be read and must not be answered.**
+        ///
+        /// Below minor 19 a Codex `approval_resolved` carries no `request_id`,
+        /// so an answered card can never be retired — `DaemonProfile
+        /// .resolvesCodexCards` is false and `DecisionCard` returns
+        /// `.noneAnswerable`. That is a real shipping state on any Mac a user
+        /// has not updated, and it was the one card state no render reached:
+        /// `daemon-minor16` and `daemon-minor17` stage a dead **composer**, not
+        /// a card, so the caveat above an unanswerable option list had never
+        /// been photographed at any type size.
+        ///
+        /// Same card as `card-two-options`, on a minor-17 daemon — so what the
+        /// render isolates is the read-only treatment and nothing else.
+        case cardReadOnly = "card-read-only"
         // Resolutions (R-series)
         case resolvedAccepted = "resolved-accepted"
         case resolvedDeclined = "resolved-declined"
@@ -715,7 +744,7 @@ enum CodexFixtures {
         var protocolMinor: UInt32 {
             switch self {
             case .daemonMinor16: return 16
-            case .daemonMinor17: return 17
+            case .daemonMinor17, .cardReadOnly: return 17
             default: return 19
             }
         }
@@ -724,7 +753,10 @@ enum CodexFixtures {
         var capabilities: (interrupt: Bool, compose: Bool) {
             switch self {
             // Minor 17 honours a stop and cannot decode a compose at all.
-            case .daemonMinor17: return (true, false)
+            // `card-read-only` is the same Mac, so it advertises the same thing:
+            // a fixture that is old enough to refuse the card but modern enough
+            // to compose would be a daemon that does not exist.
+            case .daemonMinor17, .cardReadOnly: return (true, false)
             // Minor 16 does neither. The composer is dead **with a sentence**,
             // which is the state the verification bar warns reads as scolding
             // if it is not looked at on first open.
@@ -777,7 +809,7 @@ enum CodexFixtures {
             case .retiredItemCompleted: return true
             // A pending card is a running turn's own question.
             case .cardCommandWorst, .cardTwoOptions, .cardFileChangeWide, .cardMinimal,
-                .cardCeiling,
+                .cardCeiling, .cardReadOnly,
                 .stopOffered, .stopAborted, .stopLinkDown, .stopRefusedLate, .stopIndeterminate:
                 return true
             // An answer, a timeout or an unconfirmed write says nothing about
@@ -1061,7 +1093,11 @@ enum CodexFixtures {
         // entirely when its argv contains a line break rather than shortening a
         // label it cannot shorten honestly. This is the card that was
         // unanswerable before this phase.
-        case .cardTwoOptions:
+        //
+        // `card-read-only` is deliberately the SAME bytes on an older daemon:
+        // the only difference between the two renders is the read-only
+        // treatment, so the photograph isolates it.
+        case .cardTwoOptions, .cardReadOnly:
             return card(
                 toolName: "command",
                 input: """
@@ -1282,10 +1318,17 @@ enum CodexFixtures {
                 reason:
                     "this Mac is connected to the Codex session but is not yet watching its thread, "
                     + "so a message cannot be confirmed; nothing was sent")
+        // **`compose_already_sent_unknown`, verbatim.** This was a hand-written
+        // approximation — "that message was written and what became of it is
+        // not known" — which is no row the daemon has ever had, so the render
+        // showed a reader a sentence no Mac sends. Same category and so the
+        // same greying, which is why nothing failed;
+        // `testEveryStagedRefusalIsASentenceTheDaemonReallySends` is what fails
+        // now.
         case .composeIndeterminate:
             return .indeterminate(
                 reason:
-                    "that message was written and what became of it is not known; "
+                    "this message was already sent and what became of it is not known; "
                     + "it will not be sent again. Check the Mac.")
         default: return nil
         }
@@ -1339,7 +1382,7 @@ extension CodexFixtures {
     fileprivate static func isUnresolved(_ state: State) -> Bool {
         switch state {
         case .cardCommandWorst, .cardTwoOptions, .cardFileChangeWide, .cardMinimal,
-            .cardCeiling,
+            .cardCeiling, .cardReadOnly,
             .stopOffered, .stopAborted, .stopLinkDown, .stopRefusedLate, .stopIndeterminate:
             return true
         default: return false
