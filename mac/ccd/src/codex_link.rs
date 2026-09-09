@@ -20933,27 +20933,42 @@ mod tests {
         sampler.abort();
         task.abort();
         let states = published.lock().unwrap().clone();
-        // **Entered once.** The resumes after the write are all answered not-ready, and
+        // **Entered once** is already proven: the aim above read the provable state off
+        // the link before writing. It is not re-proven from the sampled sequence, because
+        // the write replaces that state at once and a sampler starved for a few
+        // milliseconds misses it (measured on a two-core runner: the sequence read
+        // `[Offline, StartInFlight]`). What the sampler CAN see is a re-minted proof: the
+        // mutant puts it back on a not-ready answer and holds it until the next attach
+        // step, hundreds of milliseconds on the ladder by then.
+        //
+        // The state the proof was spent into really was published, or "never again"
+        // below would be satisfied by a link that never wrote a start at all.
+        let spent = states
+            .iter()
+            .position(|state| matches!(state, CodexAddressee::StartInFlight { .. }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the spent proof is a state of its own, and it is what the second \
+                     compose is refused from: {states:?}"
+                )
+            });
+        // **Never again.** The resumes after the write are all answered not-ready, and
         // each of those answers is the one that used to put the proof back.
-        assert_eq!(
-            states
+        assert!(
+            !states[spent..]
                 .iter()
-                .filter(|state| matches!(state, CodexAddressee::BoundNotStarted { .. }))
-                .count(),
-            1,
+                .any(|state| matches!(state, CodexAddressee::BoundNotStarted { .. })),
             "a not-ready answer is stale about the one thing this connection knows \
              better than the wire does — that it has already written a start — so it \
              may not re-mint the proof it spent: {states:?}"
         );
-        // And the state it spent it into really was published, or the count above would
-        // be satisfied by a link that never reached the proof twice for some other
-        // reason.
         assert!(
             states
                 .iter()
-                .any(|state| matches!(state, CodexAddressee::StartInFlight { .. })),
-            "the spent proof is a state of its own, and it is what the second compose is \
-             refused from: {states:?}"
+                .filter(|state| matches!(state, CodexAddressee::BoundNotStarted { .. }))
+                .count()
+                <= 1,
+            "the provable state is entered at most once on a connection: {states:?}"
         );
     }
 
