@@ -149,9 +149,25 @@ fn walk(dir: &Path, root: &Path, into: &mut Snapshot) -> Result<(), String> {
 /// reason that should have failed the test. A home this process cannot fully read is a
 /// fence that cannot do its job, and saying so is the job.
 pub fn snapshot_real_home() -> Snapshot {
-    let root = protocol::root_dir();
+    snapshot_home_at(&protocol::root_dir())
+}
+
+/// [`snapshot_real_home`] over a named root.
+///
+/// **A home that does not exist is an empty home, not an unreadable one.** A machine
+/// that has never run the daemon — every CI runner, a fresh account — has no
+/// `~/.codeconnect` at all, and "nothing is under it" is a complete answer the
+/// comparison can use: a test that goes on to create the directory is then reported
+/// as having created every file it put there. Only the root is allowed to be absent;
+/// a directory that vanishes deeper in the walk is still the walk failing to see
+/// what it set out to see.
+fn snapshot_home_at(root: &Path) -> Snapshot {
     let mut out = Snapshot::new();
-    if let Err(why) = walk(&root, &root, &mut out) {
+    match std::fs::symlink_metadata(root) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return out,
+        _ => {}
+    }
+    if let Err(why) = walk(root, root, &mut out) {
         panic!(
             "the operator's home at {} could not be fully read, so no test can claim to \
              have left it unchanged: {why}",
@@ -232,6 +248,37 @@ mod tests {
         assert!(
             why.contains("closed"),
             "the failure must name the directory it could not read: {why}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A home that is not there is an empty home.** A CI runner has never run the
+    /// daemon and has no `~/.codeconnect`; the fence must still stand there, and
+    /// stand in the direction that matters: a test that brings the directory into
+    /// existence is reported for every file it put in it.
+    #[test]
+    fn an_absent_home_snapshots_as_empty_and_its_creation_is_reported() {
+        let root = scratch("absent");
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(!root.exists());
+
+        let before = snapshot_home_at(&root);
+        assert!(
+            before.is_empty(),
+            "nothing is under a home that does not exist"
+        );
+
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::write(root.join("logs/run.log"), b"x").unwrap();
+        let after = snapshot_home_at(&root);
+        assert_eq!(
+            after.len(),
+            1,
+            "the file the test created is seen: {after:?}"
+        );
+        assert!(
+            after.contains_key(Path::new("logs/run.log")),
+            "and it is named relative to the home: {after:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
