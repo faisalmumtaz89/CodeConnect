@@ -252,7 +252,12 @@ struct SessionDetailView: View {
     /// this body. See `TailWatch` for the measured limit cycle that scoping
     /// prevents.
     @State private var tailWatch = TailWatch()
-    @State private var didAutoOpen = false
+    /// The decision a deep link or a route asked to land on, held until the
+    /// card exists. `pendingApprovals` is filled by ingest after the frames
+    /// arrive, so the id is routinely consumed before its card is there — on
+    /// every launch, not only a slow one. Spent when the sheet opens, or when
+    /// the screen goes; never on a miss.
+    @State private var wantedRequestID: String?
     @State private var ownSurface: Surface = .timeline
     /// Whether the Terminal surface has ever been selected on this screen. The
     /// emulator is kept alive once built, and this is what keeps it in the view
@@ -495,13 +500,20 @@ struct SessionDetailView: View {
             // Arrived from a "Done, unreviewed" row: what you came for is the
             // diff, so it opens without a second tap.
             if route.openDiff { showDiff = true }
+            if let requestID = route.openRequestID { wantedRequestID = requestID }
             consumeDeepLink()
+            openWantedApproval()
         }
         .onDisappear {
             state?.markReviewed()
             composeResultClearTask?.cancel()
+            wantedRequestID = nil
         }
         .onChange(of: model.pendingDeepLink) { _, _ in consumeDeepLink() }
+        // The card the link named arriving is the moment to open it.
+        .onChange(of: state?.pendingApprovals.map(\.card.requestID) ?? []) { _, _ in
+            openWantedApproval()
+        }
     }
 
     /// One line of who this is, for while the keyboard owns the screen: the
@@ -750,12 +762,22 @@ struct SessionDetailView: View {
             showDiff = true
         case .session(let reference, let requestID) where addresses(reference):
             _ = model.consumeDeepLink()
-            if let requestID, let state {
-                openApproval = state.pendingApprovals.first { $0.card.requestID == requestID }
-            }
+            if let requestID { wantedRequestID = requestID }
+            openWantedApproval()
         default:
             break
         }
+    }
+
+    /// Open the decision a link or a route asked for, if its card is here.
+    /// A miss keeps the request standing; `pendingApprovals` changing is what
+    /// asks again.
+    private func openWantedApproval() {
+        guard let requestID = wantedRequestID, let state,
+            let approval = state.pendingApprovals.first(where: { $0.card.requestID == requestID })
+        else { return }
+        wantedRequestID = nil
+        openApproval = approval
     }
 
     /// Does this link mean *this* run? A link carries a reference — a uid or a
@@ -896,7 +918,7 @@ struct SessionDetailView: View {
             }
             .onAppear {
                 proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
-                autoOpenIfRequested(state)
+                openWantedApproval()
             }
     }
 
@@ -955,12 +977,6 @@ struct SessionDetailView: View {
                 proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
             }
         }
-    }
-
-    private func autoOpenIfRequested(_ state: SessionState) {
-        guard !didAutoOpen, let requestID = route.openRequestID else { return }
-        didAutoOpen = true
-        openApproval = state.pendingApprovals.first { $0.card.requestID == requestID }
     }
 
     // MARK: Compose

@@ -3,6 +3,18 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Deep links land on the decision — iPhone app
+
+A tapped notification resolves to `codeconnect://session/<id>?request=<rid>`, whose
+whole promise is that the reader lands on the decision, not on the timeline above
+it. It landed on the timeline: the request id was spent the moment the session
+opened, and the card is filed a beat later, when the history has been read — on
+every launch, not only a slow one. The app now keeps the requested decision until
+its card exists and opens it then, at reading size and at the largest accessibility
+size alike. Proven in the render harness with the approval arriving both before and
+after the link, and the decision-sheet scenario now reaches its sheet through the
+link alone.
+
 ## Codex sessions — protocol minor 20
 
 OpenAI's Codex CLI runs under CodeConnect and is drivable from the phone. Codex has

@@ -864,7 +864,30 @@ final class AppModel {
                 }
             }
             connection.simulateConnectedForTesting()
-            for message in Fixtures.frames(variant: variant) {
+            // **`-CC_FIXTURE_LATE_APPROVALS_MS <n>` is a socket still catching
+            // up.** A cold launch from a notification tap consumes its deep
+            // link before the history that carries the decision has arrived.
+            // The stream is split at the first approval and the tail delivered
+            // `n` ms later, in order — held back whole rather than approvals
+            // alone, because a fixture that skips ahead reads as a gap.
+            // `DeepLinkTests` is what drives it.
+            let lateApprovalsMS = UserDefaults.standard.integer(
+                forKey: "CC_FIXTURE_LATE_APPROVALS_MS")
+            var frames = Fixtures.frames(variant: variant)
+            if lateApprovalsMS > 0,
+                let first = frames.firstIndex(where: {
+                    if case .event(let event) = $0 { return event.kind == .approvalRequest }
+                    return false
+                })
+            {
+                let held = Array(frames[first...])
+                frames.removeSubrange(first...)
+                Task { @MainActor [weak connection] in
+                    try? await Task.sleep(for: .milliseconds(lateApprovalsMS))
+                    for message in held { connection?.injectForTesting(message) }
+                }
+            }
+            for message in frames {
                 connection.injectForTesting(message)
             }
             if let diff = Fixtures.diff() {
