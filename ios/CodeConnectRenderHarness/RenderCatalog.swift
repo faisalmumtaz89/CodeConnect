@@ -573,25 +573,15 @@ enum RenderCatalog {
         RenderScenario(
             name: "session-decision-sheet",
             purpose: "the approval card presented as a sheet, where its height is tightest",
-            // The deep link is here to *scroll* the timeline to the card, not
-            // to open it: at AX5 the Review button is otherwise far below the
-            // fold and a tap route photographs this at reading size only —
-            // the gap `session-tool-rows` records.
-            //
-            // It is not relied on to open the sheet. `?request=` opens the
-            // card at `L` and not at AX5, because the route is consumed once
-            // and never retried: a slower launch resolves it before the
-            // approval has arrived and the request is spent on nothing. That
-            // is a defect in the deep link, not in this scenario, so the
-            // button is what this drives.
+            // The deep link opens the card: the same route a tapped
+            // notification takes, proven at both sizes by `DeepLinkTests`.
+            // Nothing here taps Review, so a link that stopped opening the
+            // sheet fails this scenario rather than being papered over.
             arguments: [
                 "-CC_FIXTURE", "deck",
                 "-CC_DEEPLINK", "codeconnect://session/fx-1?request=toolu_fixture_high",
             ],
             reach: { app, driver in
-                if !app.staticTexts["Decision"].waitForExistence(timeout: 5) {
-                    try driver.tapRow(app, "Review")
-                }
                 try driver.require(driver.text(containing: "Decision", in: app), "the sheet title")
             }),
 

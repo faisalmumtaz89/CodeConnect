@@ -121,31 +121,6 @@ final class CodexBehaviourTests: XCTestCase {
         app.terminate()
     }
 
-    /// **The `deeplink-request-race` defect, named rather than quietly omitted.**
-    ///
-    /// `codeconnect://session/<id>?request=<rid>` should open a session with its
-    /// decision card already showing. It opens it at `L` and **not** at AX5,
-    /// because the route is consumed once and never retried: `consumeDeepLink`
-    /// spends the link before `state.pendingApprovals` is read, so a slower
-    /// launch resolves the route before the approval has arrived and the request
-    /// is spent on nothing — and `.onChange(of: model.pendingDeepLink)` cannot
-    /// re-fire, because the value was just cleared.
-    ///
-    /// It is **pre-existing**, it is not a Codex defect, and Phase 5 Step 2 was
-    /// told explicitly not to fix it. So this skips, with the defect named in
-    /// the skip reason — the test plan's own rule, because a test quietly
-    /// omitted is a defect quietly forgotten. When somebody fixes
-    /// `SessionDetailView`'s `case .session(let reference, let requestID)` arm,
-    /// delete the skip and this is the proof.
-    func testTheDeepLinkOpensTheCardWhenTheApprovalArrivesLate() throws {
-        throw XCTSkip(
-            """
-            deeplink-request-race, open and unfixed: `?request=` is consumed \
-            before `pendingApprovals` is read, so a slower launch spends the \
-            request id on nothing and nothing retries when the approval lands. \
-            Filed, pre-existing, and out of scope for this phase — the Codex \
-            card scenarios reach the sheet through its own Review button, which \
-            is why they render at both sizes.
-            """)
-    }
+    // The `?request=` deep link is proven in `DeepLinkTests`, at both sizes and
+    // with the approval arriving both before and after the link is consumed.
 }
