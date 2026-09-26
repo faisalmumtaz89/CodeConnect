@@ -1,13 +1,12 @@
 //! The composite wire id for a Codex approval.
 //!
-//! A Codex `serverRequest` id is a per-thread small integer that restarts from
-//! zero and is shared across request families (A2). It cannot be the phone's
-//! `request_id` directly: two threads, two sessions resuming one thread, and the
-//! same thread revisited (A→B→A) all reuse the same small integers, and the
-//! phone correlates answers by that string alone
-//! (`DaemonConnection.swift:784`). So the wire id is a composite of everything
-//! that makes an activation unique — `(session_uid, thread_id,
-//! server_request_id, generation)` — encoded opaquely.
+//! A Codex `serverRequest` id comes from one monotonic counter per app-server
+//! process, shared across request families and threads and not reused across
+//! threads. It cannot be the phone's `request_id` directly: every app-server
+//! process counts from zero, so two sessions issue the same small integers, and
+//! the phone correlates answers by that string alone (`DaemonConnection.swift:784`).
+//! So the wire id is a composite of everything that makes an activation unique —
+//! `(session_uid, thread_id, server_request_id, generation)` — encoded opaquely.
 //!
 //! Two properties are load-bearing and are what the property tests pin:
 //!   * **Type-tagged.** A JSON-RPC id may be a number *or* a string, and the
@@ -58,7 +57,7 @@ pub struct CompositeId {
     pub session_uid: String,
     pub thread_id: String,
     pub server_request_id: ServerRequestId,
-    /// The **visit** generation (D4) — not the thread. An A→B→A revisit reuses
+    /// The **visit** generation — not the thread. An A→B→A revisit reuses
     /// the thread id but not the generation, so a stale gen-1 answer cannot pose
     /// as gen-3 traffic.
     pub generation: u64,

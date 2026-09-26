@@ -2,14 +2,14 @@ import XCTest
 
 @testable import CodeConnect
 
-/// **Gap G9 — a message this build cannot read is never swallowed.**
+/// **A message this build cannot read is never swallowed.**
 ///
-/// Before this phase both inbound paths dropped it silently:
+/// Both inbound paths once dropped it silently:
 /// `DaemonConnection.handle` had `case .pong, .sessions, .event, .unknown: break`,
 /// and an *undecodable* frame collapsed to one generic string with no type name
 /// at all — `"Ignored an unreadable frame from the daemon"`.
 ///
-/// During a phase that adds four message types that is the difference between a
+/// Whenever the Mac adds message types that is the difference between a
 /// five-minute fix and a day, and it is worse than a debugging problem: a reader
 /// hunting a feature their Mac says it has gets no signal that this phone cannot
 /// hear it. The connection is healthy and the daemon is working; the app is the
@@ -49,10 +49,10 @@ final class CodexLegibilityTests: XCTestCase {
             "the daemon said nothing; this is the app's own account")
     }
 
-    /// **Every frame this phase adds is readable**, which is the other half of
+    /// **The Codex result frames are readable**, which is the other half of
     /// the same guarantee: the row above must fire for a genuinely unknown type
     /// and never for one this build handles.
-    func testTheFramesThisPhaseAddsAreNotUnreadable() {
+    func testTheCodexResultFramesAreNotUnreadable() {
         let connection = connected()
         connection.injectForTesting(
             .interruptResult(sessionID: "u-1", requestID: "s-1", result: .aborted(turnID: "t-1")))
@@ -84,7 +84,7 @@ final class CodexLegibilityTests: XCTestCase {
 final class CodexSlashPolicyTests: XCTestCase {
 
     /// The policy itself is unchanged and still classifies Claude's built-ins.
-    /// What this phase adds is the branch in front of it.
+    /// What a Codex session adds is the branch in front of it.
     func testTheClaudePolicyStillClassifiesItsOwnCommands() {
         guard case .nativeModel = ClaudeCommandPolicy.action(
             for: "/model", recoversComposer: true)

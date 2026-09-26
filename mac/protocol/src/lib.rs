@@ -626,7 +626,7 @@ pub const CODEX_SWEEP_SUBCOMMAND: &str = "internal-codex-sweep";
 /// Root of all CodeConnect state. `CODECONNECT_HOME` exists so tests never
 /// touch the real `~/.codeconnect`.
 ///
-/// **Absolute whenever the cwd can be read** (A9.6(c)), and that is the whole point
+/// **Absolute whenever the cwd can be read**, and that is the whole point
 /// of the wrapper. Both sources here can be relative — `CODECONNECT_HOME` is
 /// whatever the operator exported, and the `$HOME`-less fallback is literally
 /// `./.codeconnect` — and a relative root is not a root at all: it names a different
@@ -643,7 +643,7 @@ pub const CODEX_SWEEP_SUBCOMMAND: &str = "internal-codex-sweep";
 /// already-absolute root is returned unchanged, and forwarding this value to a
 /// child that calls `root_dir()` again yields the same path (measured).
 ///
-/// **When it cannot be made absolute, this FAILS CLOSED** (round-4 finding 5). The
+/// **When it cannot be made absolute, this FAILS CLOSED.** The
 /// absolutisation can fail, and the previous revision returned the configured value
 /// when it did — which is relative — on an argument that is now measured false.
 ///
@@ -924,7 +924,7 @@ mod tests {
         assert_eq!(root_dir(), PathBuf::from("/tmp/cc-test-home"));
         assert_eq!(socket_path(), PathBuf::from("/tmp/cc-test-home/ccd.sock"));
 
-        // A9.6(c): a RELATIVE override is absolutised, because the launcher, the
+        // A RELATIVE override is absolutised, because the launcher, the
         // pane's host and the sweep do not share a working directory — a
         // process-relative root has them addressing different records.
         std::env::set_var("CODECONNECT_HOME", "rel-cc-home");
@@ -947,7 +947,7 @@ mod tests {
         std::env::remove_var("CODECONNECT_HOME");
     }
 
-    /// Round-4 finding 5: the arm reached when a **relative** root cannot be
+    /// The arm reached when a **relative** root cannot be
     /// absolutised must be fail-CLOSED, not merely honest.
     ///
     /// The condition itself — `getcwd` failing `EACCES` because an ancestor of the

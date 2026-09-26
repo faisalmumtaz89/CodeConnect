@@ -1,14 +1,13 @@
-//! The **coordinator** and the launcher's record-wait (D7 launch coordination).
+//! The **coordinator** and the launcher's record-wait (launch coordination).
 //!
-//! `codeconnect codex` (the launcher, gated in this chunk) spawns the
-//! coordinator **before tmux exists** and then only *waits on the launch
-//! record*. The coordinator performs **every forward launch mutation itself** —
-//! it arms the custodian, runs `tmux new-session`, brings the wrapper up, and
-//! drives the record `pending → ready | failed`. The launcher never mutates, so
-//! launcher death at any point changes nothing (CODEX-PLAN.md §Launch
-//! coordination, steps 3–4).
+//! `codeconnect codex` (the launcher) spawns the coordinator **before tmux
+//! exists** and then only *waits on the launch record*. The coordinator
+//! performs **every forward launch mutation itself** — it arms the custodian,
+//! runs `tmux new-session`, brings the wrapper up, and drives the record
+//! `pending → ready | failed`. The launcher never mutates, so launcher death at
+//! any point changes nothing.
 //!
-//! ## The ordering that matters (D7)
+//! ## The ordering that matters
 //!
 //!   1. Write the `pending` record (the coordinator owns it from birth).
 //!   2. Arm the custodian **before** `tmux new-session` — and immediately verify
@@ -28,7 +27,7 @@
 //! `internal-codex-host` ([`crate::codex_host`]), and bring-up is proven from the
 //! host's own evidence rather than asserted.
 //!
-//! ## What "the wrapper is up" means here (2e-2b)
+//! ## What "the wrapper is up" means here
 //!
 //! The coordinator chooses a fresh, SUN_LEN-safe **run dir**, records it durably,
 //! and passes it to the host, which creates it itself with one exclusive
@@ -42,7 +41,7 @@
 //!     The host binds both legs before it spawns the TUI, so this is the last
 //!     moment at which a failure is still the wrapper's rather than the user's.
 //!   * **The pane's session is still ours** — `owned_liveness` against the
-//!     persisted server A, i.e. the 2c UID-atomic census, not a name-addressed
+//!     persisted server A, i.e. the UID-atomic census, not a name-addressed
 //!     `has-session`. Sockets on disk say nothing about whether the pane that made
 //!     them still exists.
 //!
@@ -139,7 +138,7 @@ pub enum BringUp {
 /// The forward-launch operations the coordinator performs. A trait so the state
 /// machine can be exercised at every boundary with fakes.
 pub trait CoordinatorDeps {
-    /// Spawn the custodian (through the D6 exec gate) for `uid`, **arming it into
+    /// Spawn the custodian (through the exec gate) for `uid`, **arming it into
     /// the launch record** (the CAS into the custodian slot), and return its
     /// identity. The uid is passed so the arm targets the right record; the real
     /// impl arms inside the gate's `on_ready` (atomic with recording the child).
@@ -186,11 +185,11 @@ pub enum CoordinateOutcome {
 
 /// Drive one launch from `pending` to a terminal record state.
 ///
-/// This is the whole D7 forward path as a linear, fail-closed sequence. Every
-/// exit writes a terminal record (`ready` or `failed`) so the launcher's wait
-/// always resolves; the only thing that can leave the record `pending` is the
-/// coordinator dying, which is exactly what the custodian's deadline/identity
-/// monitor exists to convert into `failed`.
+/// This is the whole launch-coordination forward path as a linear, fail-closed
+/// sequence. Every exit writes a terminal record (`ready` or `failed`) so the
+/// launcher's wait always resolves; the only thing that can leave the record
+/// `pending` is the coordinator dying, which is exactly what the custodian's
+/// deadline/identity monitor exists to convert into `failed`.
 pub fn coordinate<D: CoordinatorDeps>(
     setup: CoordinateSetup,
     deps: &mut D,
@@ -263,18 +262,18 @@ pub fn coordinate<D: CoordinatorDeps>(
 ///   * A persistent failure is a **hard error**: a record that cannot
 ///     be driven terminal is never reported as a clean `Ok(Failed)`.
 ///
-/// **The cleanup disposition is derived from the record, never assumed (A9.3).**
-/// It used to be hard-coded `Pending` for every error on this path, including the
-/// ones raised before tmux was ever touched (a failed custodian spawn, a record
+/// **The cleanup disposition is derived from the record, never assumed.**
+/// A hard-coded `Pending` for every error on this path would include the ones
+/// raised before tmux was ever touched (a failed custodian spawn, a record
 /// re-load, the pre-mutation lock/record_run_dir/mark_new_session_starting block).
-/// That wrote `Failed{Pending}` on a record with no session, no server A, and no
+/// That would write `Failed{Pending}` on a record with no session, no server A, and no
 /// host — and the sweep would then rearm a custodian for it forever: an unpinned
 /// `destroy()` returns `Unavailable`, and the retry path's escapes need either
 /// server-gone evidence (there is no server to be gone) or a boot change. Armed
 /// until reboot, for a session that never existed.
 ///
-/// The rule is **total**, because since A9.1 the two fields it reads partition
-/// every durable record this path can observe: `server_a.is_some()` is exactly "a
+/// The rule is **total**, because the two fields it reads partition every durable
+/// record this path can observe: `server_a.is_some()` is exactly "a
 /// session was created" (A is persisted in the *same* write that records the
 /// creation, so there is no window where one holds without the other), and
 /// `new_session_indeterminate` is exactly "a mutation may be in flight". Neither
@@ -406,8 +405,7 @@ fn after_pending<D: CoordinatorDeps>(
 
     // Step 2: arm the custodian BEFORE any tmux mutation (the CAS into the
     // record happens inside `spawn_custodian`), then require it **proven Live**
-    // — an `Unknown` custodian is not proof of an independent cleanup owner
-    // (Principle D).
+    // — an `Unknown` custodian is not proof of an independent cleanup owner.
     let custodian = deps
         .spawn_custodian(&uid)
         .context("spawning the launch custodian")?;
@@ -429,14 +427,14 @@ fn after_pending<D: CoordinatorDeps>(
         }
     }
 
-    // Step 3: the forward mutation. **Durable-before-mutation** (Principle B):
+    // Step 3: the forward mutation. **Durable-before-mutation**:
     // mark the new-session as in-flight and fsync it BEFORE issuing it, so a
     // coordinator death mid-`new-session` leaves a record that already says
     // "indeterminate" and the custodian stays armed.
     let prepared = (|| -> Result<()> {
         let lock = LaunchLock::acquire(&uid)?;
         // The run dir goes into the record under the SAME lock, and before the
-        // mutation, for the same Principle-B reason: the host that will own the
+        // mutation, for the same durable-before-mutation reason: the host that will own the
         // directory is about to be started by tmux, so a coordinator killed from
         // here on must leave a record that already names what has to be swept.
         if let Some(run_dir) = deps.run_dir() {
@@ -445,7 +443,7 @@ fn after_pending<D: CoordinatorDeps>(
         }
         codex_launch::mark_new_session_starting(&lock, &uid)
     })();
-    // **A9.3: this block's failures are pinned HERE, not left to the catch-all.**
+    // **This block's failures are pinned HERE, not left to the catch-all.**
     //
     // `terminalize` derives the disposition from the record, which is right for
     // every error it cannot attribute — but this one it does not have to guess at.
@@ -477,11 +475,11 @@ fn after_pending<D: CoordinatorDeps>(
             // from whatever server owns the socket later. A session without a proven
             // server birth is fail-closed.
             //
-            // ONE durable write for both (A9.1): clearing the flag and recording A
-            // used to be two `store_atomic`s, and a crash between them left a
+            // ONE durable write for both: clearing the flag and recording A as two
+            // `store_atomic`s would let a crash between them leave a
             // created-but-unpinned record — `new_session_indeterminate: false` with
-            // `server_a: null` — which is exactly the shape A9.3's disposition rule
-            // must be able to read as "a session exists".
+            // `server_a: null` — a shape the cleanup-disposition rule reads as "no
+            // session" although one exists.
             let a = codex_launch::ServerA::from_owned(&session)
                 .context("recording server A from the created session")?;
             let lock = LaunchLock::acquire(&uid)?;
@@ -552,7 +550,7 @@ fn after_pending<D: CoordinatorDeps>(
 
     // Step 4: bring the wrapper up and commit. `to_ready` itself re-checks,
     // under the lock at commit time, that the deadline still holds and the
-    // custodian is still live (Principle A).
+    // custodian is still live.
     match deps.bring_up_wrapper() {
         BringUp::Ready => {
             // Commit `ready` with a **bounded retry** so it PROVES durability
@@ -605,13 +603,13 @@ fn fail(uid: &str, reason: &str, cleanup: CleanupState) -> Result<CoordinateOutc
 
 /// What the launcher's wait resolved to.
 ///
-/// `LaunchWait`/[`wait_on_record`] are the **launcher** half of D7, consumed by
-/// [`crate::codex::launch`]: `codeconnect codex` spawns the coordinator and then
-/// only waits here, because the coordinator owns every forward mutation and the
-/// record owns the outcome.
+/// `LaunchWait`/[`wait_on_record`] are the **launcher** half of launch
+/// coordination, consumed by [`crate::codex::launch`]: the coordinator owns session
+/// creation and the record owns the launch outcome. Interactive launchers also own
+/// an attached terminal client while observing this record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchWait {
-    /// `ready` — the launcher attaches.
+    /// `ready` — the launch succeeded; an interactive client may already be attached.
     Ready,
     /// `failed` — the launcher prints this sanitized reason and exits non-zero.
     Failed(String),
@@ -635,7 +633,7 @@ pub fn wait_on_record(
         if let Ok(record) = codex_launch::load(uid) {
             match record.state {
                 LaunchState::Ready => {
-                    // The reader's half of the durability handoff (A9.6a).
+                    // The reader's half of the durability handoff.
                     // `store_atomic` makes the Ready visible at the rename and only
                     // then fsyncs the directory, and `commit_ready` cannot
                     // un-publish a rename whose dir-fsync afterwards failed — so a
@@ -832,24 +830,28 @@ pub struct RealCoordinatorDeps {
     pub session_name: String,
     pub cwd: String,
     pub tmux_socket: String,
+    pub tmux_status: bool,
+    pub terminal_size: Option<(u16, u16)>,
+    pub wait_for_terminal: bool,
     /// This `codeconnect` binary. It is both the exec-gate program the custodian
     /// is launched through and the `internal-codex-host` the pane runs — one
     /// executable wearing two hats, so it is resolved once
     /// (`std::env::current_exe`) and fails the launch closed when it cannot be.
     pub self_exe: std::path::PathBuf,
     pub custodian_nonce: String,
-    /// The launch nonce, carried into the pane so the host can prove to the D7
-    /// gate that it is the host THIS launch invited.
+    /// The launch nonce, carried into the pane so the host can prove to the
+    /// launch-coordination gate that it is the host THIS launch invited.
     pub launch_nonce: String,
     pub coordinator: ProcessIdentity,
-    /// The resolved, version-pinned `codex` executable the host execs for BOTH the
+    /// The resolved, identity-pinned `codex` executable the host execs for BOTH the
     /// app-server and the TUI. The coordinator does not re-resolve it: resolution
-    /// and the version pin are the launcher's (`codex::start`), and passing the
+    /// and the identity pin are the launcher's (`codex::start`), and passing the
     /// single canonicalised path through is what keeps the recorded, checked and
     /// executed binaries the same file.
     pub codex: String,
-    /// The SHA-256 of that executable as the launcher inspected it (A7.1), carried
-    /// to the host as `--codex-sha256` and re-verified there before each exec.
+    /// The SHA-256 of that executable as the launcher inspected it (the
+    /// executable-identity pin), carried to the host as `--codex-sha256` and
+    /// re-verified there before each exec.
     ///
     /// **Carried, never computed here.** A path is not a file, so a digest is only
     /// worth anything if it comes from the process that did the inspecting: hashing
@@ -868,32 +870,16 @@ pub struct RealCoordinatorDeps {
     pub codex_sha256: String,
     /// The isolated `CODEX_HOME` for this session.
     pub codex_home: String,
-    /// The four launch-policy dimensions the broker enforces, carried verbatim to
-    /// the host. The coordinator applies no default to any of them, for the same
-    /// reason the host does not: a default here is a silent disagreement with
-    /// whatever the record says was enforced.
-    pub approval_policy: String,
-    pub approvals_reviewer: String,
-    pub sandbox: String,
-    pub hooks_enabled: bool,
-    /// The FIFTH launch-policy dimension: the workspace this session is launched in,
-    /// **already canonicalized**, carried to the host as `--launch-cwd` and from there into
-    /// the broker's `LaunchFingerprint`.
-    ///
-    /// It is the workspace anchor the client cannot choose. Everything else the broker can
-    /// see about a workspace is client-supplied — `thread/start`'s `cwd` comes from the
-    /// TUI, and the creation response's `cwd` is the app-server echoing that ask back — so
-    /// without this a client could name any directory and the thread binding would follow
-    /// it there.
+    /// The session folder, **already canonicalized**: the cwd the session is registered
+    /// under, handed to the supervisor.
     ///
     /// ## Canonicalization happens HERE, exactly once
     ///
     /// Measured: with `--cwd /tmp` the app-server reports the resolved `/private/tmp`
     /// (macOS `/tmp` is a symlink). Exact equality of those two strings is FALSE; `realpath`
     /// equality is TRUE. The coordinator is the authority that owns the launch cwd, so it
-    /// resolves the path ONCE, before it enters the argv. The broker then does pure exact
-    /// string equality and needs no filesystem access at all — deliberately, since it
-    /// compares paths a client controls. Do not add a normalizer downstream.
+    /// resolves the path ONCE, and everything downstream carries that spelling verbatim. Do
+    /// not add a normalizer downstream.
     pub launch_cwd: String,
     /// The user's vetted TUI passthrough, appended after `--`.
     pub tui_args: Vec<String>,
@@ -907,7 +893,7 @@ pub struct RealCoordinatorDeps {
     /// census the pane bound to **this exact** server rather than to whatever
     /// currently answers the socket.
     pub session_a: Option<OwnedSession>,
-    /// Test-only (Principle B): hang **inside** `new_session`, after the tmux
+    /// Test-only (durable-before-mutation): hang **inside** `new_session`, after the tmux
     /// session is created and resolved but **before returning** — so the
     /// integration test can SIGKILL the coordinator while it is literally still
     /// in the new-session call, with `new_session_indeterminate` durably set. A
@@ -1040,23 +1026,16 @@ impl RealCoordinatorDeps {
                 false => NewSessionOutcome::Indeterminate,
             };
         }
-        // A11.3: make the premise cleanup rests on TRUE, rather than assuming it.
-        //
-        // A user's own `~/.tmux.conf` can set `remain-on-exit on` — no bug of ours
-        // required — and then a pane, and its session, outlive the command. Asserted
-        // here against the birth-pinned handle, which is what binds the mutation to
-        // the server this session was actually created on.
-        //
-        // Not fatal-with-no-cleanup: the session exists either way, so the outcome is
-        // `CreatedThenFailed` — determinate, pinned, and owed cleanup.
-        if let Err(why) = self.assert_remain_on_exit(&resolved) {
+        // Apply session options only after persisting its server identity. Any
+        // failure still owes cleanup of this created session to the custodian.
+        if let Err(why) = self.configure_session(&resolved) {
             eprintln!(
-                "codeconnect: could not clear remain-on-exit on {} ({why}); \
+                "codeconnect: could not configure session {} ({why}); \
                  handing the launch to the custodian",
                 resolved.session_id
             );
             return NewSessionOutcome::CreatedThenFailed(format!(
-                "remain-on-exit could not be cleared on {}: {why}",
+                "session {} could not be configured: {why}",
                 resolved.session_id
             ));
         }
@@ -1081,13 +1060,12 @@ impl RealCoordinatorDeps {
         NewSessionOutcome::Created(Box::new(resolved))
     }
 
-    /// The epoch-pinned `remain-on-exit off` assertion, behind a test seam.
-    fn assert_remain_on_exit(&self, resolved: &OwnedSession) -> std::result::Result<(), String> {
+    fn configure_session(&self, resolved: &OwnedSession) -> std::result::Result<(), String> {
         #[cfg(test)]
         if let Some(why) = take_assert_fault() {
             return Err(why);
         }
-        protocol::tmux::assert_remain_on_exit_off(&self.tmux_socket, resolved)
+        protocol::tmux::configure_created_session(&self.tmux_socket, resolved, self.tmux_status)
     }
 
     /// The durable note that the assertion held, behind a test seam.
@@ -1100,12 +1078,14 @@ impl RealCoordinatorDeps {
             .and_then(|lock| codex_launch::note_remain_on_exit_asserted(&lock, &self.uid))
     }
 
-    /// The full `tmux new-session` argv, including the pane command.
+    /// The full `tmux new-session` argv, including the pane command, which first
+    /// takes on the caller's environment from `caller_env` (see
+    /// [`crate::caller_env`]).
     ///
     /// Split out as a pure function of `self` so the exact argv — the one thing
     /// that decides what actually runs in the pane — is asserted in a unit test
     /// rather than inferred from a live session.
-    fn new_session_argv(&self) -> Vec<String> {
+    fn new_session_argv(&self, caller_env: &std::path::Path) -> Vec<String> {
         let mut argv = self.server_args();
         argv.extend(
             [
@@ -1115,37 +1095,55 @@ impl RealCoordinatorDeps {
                 &self.session_name,
                 "-c",
                 &self.cwd,
-                "-e",
             ]
             .iter()
             .map(|s| s.to_string()),
         );
-        argv.push(format!("{}={}", protocol::ENV_SESSION_UID, self.uid));
+        for (name, value) in self.pane_env() {
+            argv.push("-e".into());
+            argv.push(format!("{name}={value}"));
+        }
+        if let Some((cols, rows)) = self.terminal_size {
+            argv.extend(["-x".into(), cols.to_string(), "-y".into(), rows.to_string()]);
+        }
+        argv.push("--".into());
+        argv.extend(
+            crate::caller_env::pane_prefix(&self.self_exe, caller_env)
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        );
+        argv.extend(self.host_argv());
+        argv
+    }
+
+    /// The variables CodeConnect sets for the pane. Each wins over the caller's
+    /// value of the same name.
+    fn pane_env(&self) -> Vec<(String, String)> {
+        let mut env = vec![(protocol::ENV_SESSION_UID.to_string(), self.uid.clone())];
         // Pin the launch-record root into the pane as well.
         //
-        // The host now reads the launch record to present itself to the D7 gate,
-        // so it and this coordinator have to agree on WHERE that record lives —
-        // and without this they need not. A pane inherits the **tmux server's**
-        // environment, and the server was started by whichever client happened to
-        // reach it first, which may be a process with a different (or absent)
+        // The host reads the launch record to present itself to the launch-coordination
+        // gate, so it and this coordinator have to agree on WHERE that record lives —
+        // and without this they need not. A pane's environment comes from outside this
+        // process — the caller's, or the **tmux server's**, started by whichever client
+        // happened to reach it first — and may carry a different (or absent)
         // `CODECONNECT_HOME`. The uid stamp beside it has been passed this way all
-        // along; this is the same idea applied to the other thing the pane must
-        // not have to guess.
+        // along; this is the same idea applied to the other thing the pane must not
+        // have to guess.
         //
         // In production both resolve to `~/.codeconnect` and this changes nothing.
         // It is load-bearing exactly where the override is in play — tests, and any
         // operator running against a non-default root.
-        argv.push("-e".into());
-        argv.push(format!(
-            "CODECONNECT_HOME={}",
-            protocol::root_dir().display()
+        env.push((
+            "CODECONNECT_HOME".to_string(),
+            protocol::root_dir().display().to_string(),
         ));
         // The frame tee, FORWARDED and never originated.
         //
-        // `tmux new-session` gives the pane an explicit `-e` allowlist rather than this
-        // process's whole environment, so without this the measurement instrument
-        // (`codex_broker::frame_tee`) can never reach the host that builds the broker —
-        // which made it unusable for the live harnesses it exists to serve.
+        // The measurement instrument (`codex_broker::frame_tee`) has to reach the host
+        // that builds the broker, or it is unusable for the live harnesses it exists to
+        // serve. Named here, as a variable CodeConnect sets, so the pane gets it from
+        // this read however the caller's environment is carried.
         //
         // Forwarded only when it is ALREADY set here: this is a pass-through, not a
         // switch. The shipping launcher never sets it and offers no way to — no config
@@ -1158,12 +1156,9 @@ impl RealCoordinatorDeps {
         // which the shipping build is not. A capture build gets a capture; the binary a
         // user runs gets nothing from it.
         if let Ok(path) = std::env::var(codex_broker::FRAME_TEE_ENV) {
-            argv.push("-e".into());
-            argv.push(format!("{}={path}", codex_broker::FRAME_TEE_ENV));
+            env.push((codex_broker::FRAME_TEE_ENV.to_string(), path));
         }
-        argv.push("--".into());
-        argv.extend(self.host_argv());
-        argv
+        env
     }
 
     /// The pane command: this binary re-invoked as `internal-codex-host`.
@@ -1175,9 +1170,10 @@ impl RealCoordinatorDeps {
         let mut argv = vec![
             self.self_exe.to_string_lossy().into_owned(),
             "internal-codex-host".into(),
-            // The launch identity the host presents to the D7 gate before it
-            // creates anything. Without these a pane started late by a frozen
-            // tmux server could not tell that its launch had already failed.
+            // The launch identity the host presents to the launch-coordination
+            // gate before it creates anything. Without these a pane started late
+            // by a frozen tmux server could not tell that its launch had already
+            // failed.
             "--uid".into(),
             self.uid.clone(),
             "--nonce".into(),
@@ -1186,7 +1182,7 @@ impl RealCoordinatorDeps {
             self.tmux_socket.clone(),
             "--codex".into(),
             self.codex.clone(),
-            // A7.1: the path's identity travels beside the path. The host refuses
+            // The path's identity travels beside the path. The host refuses
             // without it rather than falling back to trusting the name.
             "--codex-sha256".into(),
             self.codex_sha256.clone(),
@@ -1194,19 +1190,10 @@ impl RealCoordinatorDeps {
             self.run_dir.to_string_lossy().into_owned(),
             "--codex-home".into(),
             self.codex_home.clone(),
-            "--approval-policy".into(),
-            self.approval_policy.clone(),
-            "--approvals-reviewer".into(),
-            self.approvals_reviewer.clone(),
-            "--sandbox".into(),
-            self.sandbox.clone(),
-            "--hooks-enabled".into(),
-            self.hooks_enabled.to_string(),
-            // The fifth fingerprint dimension, plumbed exactly like the four
-            // above. Already canonicalized — see `launch_cwd`.
-            "--launch-cwd".into(),
-            self.launch_cwd.clone(),
         ];
+        if self.wait_for_terminal {
+            argv.push("--wait-for-terminal".into());
+        }
         if !self.tui_args.is_empty() {
             argv.push("--".into());
             argv.extend(self.tui_args.iter().cloned());
@@ -1251,7 +1238,7 @@ enum BringupStep {
 ///     census proved the session is still ours. An `Unknown` census is a reason to
 ///     keep waiting, never a reason to commit — the coordinator is about to write
 ///     a durable `ready` that a launcher will attach to.
-///   * `Failed` is only returned on a **proven** loss: `Gone` is the 2c census's
+///   * `Failed` is only returned on a **proven** loss: `Gone` is the census's
 ///     positive absence (a successful listing without our uid, or a server
 ///     identity that no longer matches A), not a probe that failed to answer.
 ///     Everything else waits for the deadline, which the caller owns.
@@ -1295,10 +1282,10 @@ fn bringup_step(obs: &BringupObservation) -> BringupStep {
 /// Everything [`bringup_step`] checks — both broker legs serving under a run dir
 /// this uid owns, a live host lease, both children past `execve` and alive, the
 /// tmux session `Live` — is true of a pane that is about to die. From a directory
-/// the owner's `~/.codex` marks `trust_level = "trusted"`, the TUI's first
-/// `thread/start` is refused by the launch fingerprint and codex 0.153 exits
-/// immediately; for the whole ~2 s before it does, every one of those facts holds.
-/// So `Ready` committed, `codeconnect codex` `exec`ed into `tmux attach-session`,
+/// the owner's `~/.codex` marks `trust_level = "trusted"`, a TUI whose first
+/// `thread/start` fails exits immediately on codex 0.153; for the whole ~2 s before
+/// it does, every one of those facts holds.
+/// So `Ready` committed, `codeconnect codex` attached the terminal to the session,
 /// and the user got a pane that flickered to `[exited]` with nothing said anywhere
 /// they could see it. The legs prove the HOST came up. Only a bound thread proves
 /// the session did, and that is what the launcher is actually waiting for.
@@ -1538,9 +1525,9 @@ fn leg_is_serving(path: &std::path::Path) -> bool {
 /// Whether the launch record names a host whose process is **proven live**.
 ///
 /// Read from the record rather than passed in, because the host writes it: the
-/// lease is CAS'd by the host process itself at the D7 gate, so it names the
-/// process actually running in the pane. `Unknown` liveness is not proof and does
-/// not commit — the same fail-closed rule the custodian applies.
+/// lease is CAS'd by the host process itself at the launch-coordination gate, so it
+/// names the process actually running in the pane. `Unknown` liveness is not proof
+/// and does not commit — the same fail-closed rule the custodian applies.
 fn host_lease_is_live(uid: &str) -> bool {
     match codex_launch::load(uid) {
         Ok(record) => {
@@ -1563,7 +1550,7 @@ fn host_lease_is_live(uid: &str) -> bool {
 
 impl CoordinatorDeps for RealCoordinatorDeps {
     fn spawn_custodian(&mut self, _uid: &str) -> Result<ProcessIdentity> {
-        // Bring the custodian up inertly through the D6 gate; its identity is
+        // Bring the custodian up inertly through the exec gate; its identity is
         // CAS'd into the record (atomic with the child entry) before it is
         // released to run. Shared with the recovery sweep's rearm. (`_uid` equals
         // `self.uid`; the real arm reads it from `self`.)
@@ -1584,7 +1571,15 @@ impl CoordinatorDeps for RealCoordinatorDeps {
         let Some(bin) = protocol::tmux::tmux_bin() else {
             return NewSessionOutcome::Failed("tmux not found".into());
         };
-        let argv = self.new_session_argv();
+        let caller_env = match crate::caller_env::write(
+            &codex_launch::session_dir(&self.uid),
+            std::env::vars_os(),
+            &self.pane_env(),
+        ) {
+            Ok(path) => path,
+            Err(why) => return NewSessionOutcome::Failed(format!("{why:#}")),
+        };
+        let argv = self.new_session_argv(&caller_env);
         match protocol::proc::run_deadlined(
             std::process::Command::new(&bin)
                 .args(&argv)
@@ -1593,19 +1588,24 @@ impl CoordinatorDeps for RealCoordinatorDeps {
         ) {
             Ok(protocol::proc::RunOutcome::Completed { status, stderr, .. }) => {
                 if !status.success() {
+                    let _ = std::fs::remove_file(&caller_env);
                     return NewSessionOutcome::Failed(
                         String::from_utf8_lossy(&stderr).trim().to_string(),
                     );
                 }
             }
             // A timed-out mutation is indeterminate (tmux.rs:42), never a clean
-            // failure — hand to the custodian.
+            // failure — hand to the custodian, whose cleanup removes the file if the
+            // pane never took it.
             Ok(protocol::proc::RunOutcome::TimedOut { .. }) => {
                 return NewSessionOutcome::Indeterminate
             }
-            Err(err) => return NewSessionOutcome::Failed(format!("could not run tmux: {err}")),
+            Err(err) => {
+                let _ = std::fs::remove_file(&caller_env);
+                return NewSessionOutcome::Failed(format!("could not run tmux: {err}"));
+            }
         }
-        // Test-only Principle B window, and it has to be HERE.
+        // Test-only durable-before-mutation window, and it has to be HERE.
         //
         // "tmux in flight" means: the session exists and the record does not yet know
         // which one it is — `new_session_indeterminate` still set, `server_a` still
@@ -1748,12 +1748,11 @@ pub fn run_coordinator(args: &[String]) -> ! {
 
 /// Everything the launcher hands the coordinator on the command line.
 ///
-/// The seven host dimensions are **required and defaulted nowhere**, parsed with
-/// [`crate::codex_host`]'s own `value_of`/`set_once`/`parse_hooks_enabled` rather
-/// than a second copy of them. That is the point: the coordinator's only job with
-/// these values is to hand them to the host, so a coordinator that accepted a
-/// value the host will reject would turn a legible charter error into a pane that
-/// flashes and dies.
+/// The host dimensions are **required and defaulted nowhere**, parsed with
+/// [`crate::codex_host`]'s own `value_of`/`set_once` rather than a second copy of
+/// them. That is the point: the coordinator's only job with these values is to hand
+/// them to the host, so a coordinator that accepted a value the host will reject
+/// would turn a legible charter error into a pane that flashes and dies.
 #[derive(Debug)]
 struct Charter {
     uid: String,
@@ -1763,13 +1762,11 @@ struct Charter {
     cwd: String,
     tmux_socket: String,
     deadline_ms: u64,
+    terminal_size: Option<(u16, u16)>,
+    wait_for_terminal: bool,
     codex: String,
     codex_sha256: String,
     codex_home: String,
-    approval_policy: String,
-    approvals_reviewer: String,
-    sandbox: String,
-    hooks_enabled: bool,
     tui_args: Vec<String>,
     hang_in_new_session: bool,
     hang_in_bringup: bool,
@@ -1781,18 +1778,14 @@ const DEFAULT_DEADLINE_MS: u64 = 30_000;
 /// Resolve the launch cwd to the SAME spelling the app-server will report.
 ///
 /// This is the single canonicalization in the whole chain. It lives here, at the authority
-/// that owns the launch cwd, so that everything downstream — the host argv, the broker's
-/// `LaunchFingerprint`, the creation-response check, the turn workspace check — is plain
-/// exact string equality with no filesystem access.
+/// that owns the launch cwd, and the supervisor carries its result verbatim.
 ///
 /// MEASURED: the coordinator is given `--cwd /tmp`; the app-server (which inherits the
 /// pane's cwd) reports `/private/tmp`, because macOS `/tmp` is a symlink. `"/tmp" ==
-/// "/private/tmp"` is FALSE, and `realpath` equality is TRUE — so without this the broker
-/// would refuse every real turn of a session launched anywhere under a symlinked path.
+/// "/private/tmp"` is FALSE, and `realpath` equality is TRUE.
 ///
 /// Fails closed: a cwd that cannot be canonicalized (missing, unreadable, not a directory)
-/// aborts the launch. Starting anyway would produce a session whose broker can never verify
-/// a thread creation, i.e. a TUI that opens and then refuses the user's first turn.
+/// is not a workspace, and the launch does not start.
 fn canonical_launch_cwd(cwd: &str) -> Result<String> {
     let resolved = std::fs::canonicalize(cwd)
         .with_context(|| format!("resolving the launch cwd {cwd:?} to its canonical path"))?;
@@ -1806,7 +1799,7 @@ fn canonical_launch_cwd(cwd: &str) -> Result<String> {
 }
 
 fn parse_charter(args: &[String]) -> Result<Charter> {
-    use crate::codex_host::{parse_hooks_enabled, set_once, value_of};
+    use crate::codex_host::{set_once, value_of};
 
     let mut uid = None;
     let mut launch_nonce = None;
@@ -1815,13 +1808,11 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
     let mut cwd = None;
     let mut tmux_socket = None;
     let mut deadline_ms: Option<u64> = None;
+    let mut terminal_size = None;
+    let mut wait_for_terminal = None;
     let mut codex = None;
     let mut codex_sha256 = None;
     let mut codex_home = None;
-    let mut approval_policy = None;
-    let mut approvals_reviewer = None;
-    let mut sandbox = None;
-    let mut hooks_enabled = None;
     let mut tui_args = Vec::new();
     let mut hang_in_new_session = false;
     let mut hang_in_bringup = false;
@@ -1836,6 +1827,19 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
             "--session-name" => set_once(&mut session_name, flag, value_of(&mut it, flag)?)?,
             "--cwd" => set_once(&mut cwd, flag, value_of(&mut it, flag)?)?,
             "--tmux-socket" => set_once(&mut tmux_socket, flag, value_of(&mut it, flag)?)?,
+            "--wait-for-terminal" => set_once(&mut wait_for_terminal, flag, true)?,
+            "--terminal-size" => {
+                let raw = value_of(&mut it, flag)?;
+                let (cols, rows) = raw
+                    .split_once('x')
+                    .context("--terminal-size requires COLSxROWS")?;
+                let size = (cols.parse::<u16>()?, rows.parse::<u16>()?);
+                anyhow::ensure!(
+                    size.0 > 0 && size.1 > 0,
+                    "--terminal-size dimensions must be positive"
+                );
+                set_once(&mut terminal_size, flag, size)?;
+            }
             "--deadline-ms" => {
                 let raw = value_of(&mut it, flag)?;
                 let parsed = raw.parse::<u64>().with_context(|| {
@@ -1844,24 +1848,16 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
                 set_once(&mut deadline_ms, flag, parsed)?;
             }
             "--codex" => set_once(&mut codex, flag, value_of(&mut it, flag)?)?,
-            // A7.1, checked against `crate::codex`'s grammar — the same one the
-            // launcher writes it with and the host reads it back with.
+            // The executable-identity digest, checked against `crate::codex`'s
+            // grammar — the same one the launcher writes it with and the host
+            // reads it back with.
             "--codex-sha256" => {
                 let parsed = crate::codex::parse_codex_sha256(&value_of(&mut it, flag)?)
                     .with_context(|| flag.to_string())?;
                 set_once(&mut codex_sha256, flag, parsed)?;
             }
             "--codex-home" => set_once(&mut codex_home, flag, value_of(&mut it, flag)?)?,
-            "--approval-policy" => set_once(&mut approval_policy, flag, value_of(&mut it, flag)?)?,
-            "--approvals-reviewer" => {
-                set_once(&mut approvals_reviewer, flag, value_of(&mut it, flag)?)?
-            }
-            "--sandbox" => set_once(&mut sandbox, flag, value_of(&mut it, flag)?)?,
-            "--hooks-enabled" => {
-                let parsed = parse_hooks_enabled(&value_of(&mut it, flag)?)?;
-                set_once(&mut hooks_enabled, flag, parsed)?;
-            }
-            // Test-only (Principle B): hang at one of the two kill boundaries.
+            // Test-only (durable-before-mutation): hang at one of the two kill boundaries.
             // Only `hang` is a value either flag accepts — there is no spelling
             // that makes bring-up *succeed* without the host's evidence.
             "--test-newsession" | "--test-bringup" => {
@@ -1891,12 +1887,13 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
     crate::codex::validate_codex_argv(&tui_args)
         .map_err(|refusal| anyhow::anyhow!("refused passthrough TUI argument: {refusal}"))?;
 
-    // A7.1's other charter rule, applied by the same function the host applies —
-    // `crate::codex` owns both the digest grammar and this one so the two parsers
-    // cannot drift. Checked HERE and not only at the host because this process is the
-    // one that mints a run directory and opens a tmux pane: a relative or bare
-    // `--codex` used to survive parsing, acquire all of that, and only then die in a
-    // pane the operator never sees. The refusal now lands before anything exists.
+    // The executable-identity charter's other rule (an absolute `--codex`), applied by
+    // the same function the host applies — `crate::codex` owns both the digest grammar
+    // and this one so the two parsers cannot drift. Checked HERE and not only at the
+    // host because this process is the one that mints a run directory and opens a tmux
+    // pane: a relative or bare `--codex` used to survive parsing, acquire all of that,
+    // and only then die in a pane the operator never sees. The refusal now lands before
+    // anything exists.
     let codex = codex.context("--codex <path> is required (the coordinator resolves nothing)")?;
     crate::codex::require_absolute_codex(std::path::Path::new(&codex))?;
 
@@ -1908,19 +1905,14 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
         cwd: cwd.unwrap_or_else(|| "/".into()),
         tmux_socket: tmux_socket.unwrap_or_else(|| protocol::TMUX_SOCKET_NAME.to_string()),
         deadline_ms: deadline_ms.unwrap_or(DEFAULT_DEADLINE_MS),
+        terminal_size,
+        wait_for_terminal: wait_for_terminal.unwrap_or(false),
         codex,
         codex_sha256: codex_sha256.context(
             "--codex-sha256 <hex> is required (the coordinator inspects nothing, so the \
              identity of the binary it hands the host has to come from whoever did)",
         )?,
         codex_home: codex_home.context("--codex-home <path> is required")?,
-        approval_policy: approval_policy
-            .context("--approval-policy <value> is required (no default is applied)")?,
-        approvals_reviewer: approvals_reviewer
-            .context("--approvals-reviewer <value> is required (no default is applied)")?,
-        sandbox: sandbox.context("--sandbox <value> is required (no default is applied)")?,
-        hooks_enabled: hooks_enabled
-            .context("--hooks-enabled true|false is required (no default is applied)")?,
         tui_args,
         hang_in_new_session,
         hang_in_bringup,
@@ -1952,9 +1944,8 @@ fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
             )
         })?;
     let run_dir = choose_run_dir(&charter.uid, &charter.launch_nonce)?;
-    // The workspace anchor, canonicalized ONCE here (see `RealCoordinatorDeps::launch_cwd`).
-    // Fail closed: a launch cwd that cannot be resolved is a launch whose broker could never
-    // prove a thread binding, so it must not start rather than start un-anchored.
+    // The launch cwd, canonicalized ONCE here (see `RealCoordinatorDeps::launch_cwd`).
+    // Fail closed: a launch cwd that cannot be resolved is not a workspace.
     let launch_cwd = canonical_launch_cwd(&charter.cwd)?;
     let mut deps = RealCoordinatorDeps {
         uid: charter.uid.clone(),
@@ -1962,6 +1953,9 @@ fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
         cwd: charter.cwd,
         launch_cwd,
         tmux_socket: charter.tmux_socket,
+        tmux_status: protocol::config::Config::load().tmux_status,
+        terminal_size: charter.terminal_size,
+        wait_for_terminal: charter.wait_for_terminal,
         // Fail closed: a coordinator that cannot name its own executable cannot
         // put a host in the pane, and must not create a session it cannot fill.
         self_exe: std::env::current_exe().context("locating this binary")?,
@@ -1971,10 +1965,6 @@ fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
         codex: charter.codex,
         codex_sha256: charter.codex_sha256,
         codex_home: charter.codex_home,
-        approval_policy: charter.approval_policy,
-        approvals_reviewer: charter.approvals_reviewer,
-        sandbox: charter.sandbox,
-        hooks_enabled: charter.hooks_enabled,
         tui_args: charter.tui_args,
         run_dir,
         deadline_monotonic_nanos: deadline,
@@ -2022,8 +2012,8 @@ fn run_coordinator_inner(args: &[String]) -> Result<CoordinateOutcome> {
 /// proved is serving — so they travel as values. No flag, no parse, nothing a
 /// caller can forget.
 ///
-/// The cwd registered is the **canonical** one, the same string the broker
-/// fingerprints and the app-server reports, not the launcher's spelling of it: a
+/// The cwd registered is the **canonical** one, the same string the app-server reports,
+/// not the launcher's spelling of it: a
 /// session launched under a symlinked path would otherwise be listed at a path
 /// that disagrees with every other record of the same run.
 fn supervise_ready_session(deps: &RealCoordinatorDeps) -> Result<()> {
@@ -2039,7 +2029,7 @@ fn supervise_ready_session(deps: &RealCoordinatorDeps) -> Result<()> {
                 codex_bin: deps.codex.clone(),
                 ccd_socket: ccd_leg(&deps.run_dir).to_string_lossy().into_owned(),
                 // A launch creates the thread it runs on, so this is the first
-                // visit (D4). A later visit is a `/new` inside the TUI, which
+                // visit. A later visit is a `/new` inside the TUI, which
                 // this side never learns and never needs to: the daemon's link
                 // counts visits off the broker's own stream.
                 generation: 1,
@@ -2065,6 +2055,29 @@ fn supervise_ready_session(deps: &RealCoordinatorDeps) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_wait_is_explicit_and_reaches_the_host() {
+        let mut argv = full_charter();
+        assert!(!parse_charter(&argv).unwrap().wait_for_terminal);
+        argv.insert(0, "--wait-for-terminal".into());
+        assert!(parse_charter(&argv).unwrap().wait_for_terminal);
+        argv.insert(0, "--wait-for-terminal".into());
+        assert!(parse_charter(&argv).is_err());
+
+        let mut deps = real_deps("/tmp/terminal-charter");
+        assert!(!deps.host_argv().contains(&"--wait-for-terminal".into()));
+        deps.wait_for_terminal = true;
+        deps.tui_args = vec!["a prompt".into()];
+        let argv = deps.host_argv();
+        assert!(
+            argv.iter()
+                .position(|arg| arg == "--wait-for-terminal")
+                .unwrap()
+                < argv.iter().position(|arg| arg == "--").unwrap()
+        );
+        crate::codex_host::parse_host_args(&argv[2..]).unwrap();
+    }
     use protocol::proc_identity::{boot_identity, current_identity, monotonic_now_nanos};
 
     // Coordinator tests write launch records through `codex_launch`'s
@@ -2083,7 +2096,7 @@ mod tests {
         new_session: Option<NewSessionOutcome>,
         bring_up: Option<BringUp>,
         spawn_custodian_fails: bool,
-        /// A9.3: arm the one-shot post-rename fsync failure just before the
+        /// Arm the one-shot post-rename fsync failure just before the
         /// coordinator's pre-mutation block, so `mark_new_session_starting`
         /// publishes the in-flight flag and then returns `Err`.
         fail_the_pre_mutation_write: bool,
@@ -2214,7 +2227,7 @@ mod tests {
         }
     }
 
-    /// **A11.1, readiness half: confirmed-once is not alive-now.**
+    /// **The spawn fence, readiness half: confirmed-once is not alive-now.**
     ///
     /// `exec_confirmed` records that the host proved a child got past `execve`. It is
     /// never rewritten, so on its own it certifies `Ready` for a session whose TUI or
@@ -2392,7 +2405,7 @@ mod tests {
         let record = codex_launch::load(&uid).unwrap();
         assert!(
             record.server_a.is_some(),
-            "THE GATE (finding 5): the session tmux created is written down BEFORE \
+            "THE GATE: the session tmux created is written down BEFORE \
              anything else can fail — cleanup has nothing to bind to otherwise"
         );
         assert!(
@@ -2459,7 +2472,7 @@ mod tests {
     /// indeterminate.**
     ///
     /// `store_atomic` publishes with the rename and makes it durable with the
-    /// directory fsync after it, and A9.3's injected fault is exactly the gap
+    /// directory fsync after it, and the injected post-rename fault is exactly the gap
     /// between them: `{server_a: Some(A), new_session_indeterminate: false}` is on
     /// disk and readable by everyone, and the call that put it there returns `Err`.
     ///
@@ -2502,7 +2515,7 @@ mod tests {
         let record = codex_launch::load(&uid).unwrap();
         assert!(
             record.server_a.is_some(),
-            "the premise the whole finding rests on: the rename really did publish A"
+            "the premise this test rests on: the rename really did publish A"
         );
         assert!(
             !record.new_session_indeterminate,
@@ -2688,8 +2701,8 @@ mod tests {
             matches!(rec.state, LaunchState::Failed { .. }),
             "the record must be terminalized, not left Pending"
         );
-        // A9.3: and the disposition is NotRequired, not the old hard-coded
-        // Pending. The spawn failed BEFORE any tmux mutation, so no session can
+        // And the disposition is NotRequired, not a blanket Pending. The
+        // spawn failed BEFORE any tmux mutation, so no session can
         // exist — A is unrecorded and the in-flight flag was never set. A
         // `Failed{Pending}` here is the wedge: the sweep rearms a custodian, whose
         // unpinned `destroy()` returns Unavailable forever, with no server-gone
@@ -2701,18 +2714,17 @@ mod tests {
 
     #[test]
     fn a_pre_mutation_failure_that_published_the_flag_still_pins_cleanup_not_required() {
-        // A9.3, the case the derived rule cannot see. `store_atomic` publishes by
-        // rename and fsyncs afterwards, so `mark_new_session_starting` can leave
-        // `new_session_indeterminate: true` VISIBLE and still return `Err`. The
-        // error stops the coordinator before `deps.new_session()` is called at all
-        // — no session, no server A, no host — but the catch-all's rule reads that
-        // published flag as "a mutation may be in flight" and writes
-        // `Failed{Pending}`. The custodian then has nothing to prove absence
-        // against: an unpinned `destroy()` answers `Unavailable`/`Absent`,
-        // `server_gone_evidence` has no identity, and the late-session rule refuses
-        // one absence as proof. Armed until reboot for a session that never
-        // existed. So the disposition is pinned by the caller that KNOWS tmux was
-        // never invoked.
+        // The case the derived cleanup-disposition rule cannot see. `store_atomic`
+        // publishes by rename and fsyncs afterwards, so `mark_new_session_starting` can
+        // leave `new_session_indeterminate: true` VISIBLE and still return `Err`. The
+        // error stops the coordinator before `deps.new_session()` is called at all — no
+        // session, no server A, no host — but the catch-all's rule reads that published
+        // flag as "a mutation may be in flight" and writes `Failed{Pending}`. The
+        // custodian then has nothing to prove absence against: an unpinned `destroy()`
+        // answers `Unavailable`/`Absent`, `server_gone_evidence` has no identity, and
+        // the late-session rule refuses one absence as proof. Armed until reboot for a
+        // session that never existed. So the disposition is pinned by the caller that
+        // KNOWS tmux was never invoked.
         let mut deps = FakeDeps {
             fail_the_pre_mutation_write: true,
             ..Default::default()
@@ -2748,14 +2760,14 @@ mod tests {
 
     #[test]
     fn a_coordinator_error_after_the_session_was_created_still_terminalizes_to_pending() {
-        // The symmetric half of A9.3: the derived rule must not slide the other
-        // way. `ServerA::from_owned` fails closed on a session with no proven
+        // The symmetric half of the derived cleanup-disposition rule: it must not slide
+        // the other way. `ServerA::from_owned` fails closed on a session with no proven
         // server birth — an error raised AFTER tmux created the session — and the
         // record the disposition is derived from still carries
-        // `mark_new_session_starting`'s in-flight flag, so a mutation may well
-        // have landed. Cleanup is owed: Pending. (The write itself then disarms
-        // the flag, as every determinate coordinator failure does — the flag is
-        // the *input* to the rule, not its output.)
+        // `mark_new_session_starting`'s in-flight flag, so a mutation may well have
+        // landed. Cleanup is owed: Pending. (The write itself then disarms the flag, as
+        // every determinate coordinator failure does — the flag is the *input* to the
+        // rule, not its output.)
         let mut unproven = fake_owned();
         unproven.server_birth = None;
         let mut deps = FakeDeps {
@@ -2956,7 +2968,7 @@ mod tests {
 
     #[test]
     fn a_ready_whose_entry_cannot_be_proven_durable_is_not_reported_ready() {
-        // A9.6(a): `store_atomic` renames (Ready becomes visible) and only THEN
+        // `store_atomic` renames (Ready becomes visible) and only THEN
         // fsyncs the directory, and `commit_ready` cannot un-publish a rename
         // whose dir-fsync afterwards failed. So the consumer re-proves the entry
         // before acting on it. A session dir stripped of read permission (search
@@ -3189,19 +3201,11 @@ mod tests {
             "45000",
             "--codex",
             "/opt/codex/bin/codex",
-            // A7.1: the identity of those bytes, as the launcher inspected them.
+            // The identity of those bytes, as the launcher inspected them.
             "--codex-sha256",
             "1111111111111111111111111111111111111111111111111111111111111111",
             "--codex-home",
             "/tmp/cch.home",
-            "--approval-policy",
-            "untrusted",
-            "--approvals-reviewer",
-            "user",
-            "--sandbox",
-            "read-only",
-            "--hooks-enabled",
-            "true",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -3225,19 +3229,10 @@ mod tests {
 
     #[test]
     fn the_charter_requires_every_host_dimension_and_never_defaults_one() {
-        // The eight values the host itself refuses to default. The coordinator
-        // must refuse them too: it is the process a human is looking at, so a
-        // missing dimension has to fail here rather than inside a pane.
-        for flag in [
-            "--uid",
-            "--codex",
-            "--codex-sha256",
-            "--codex-home",
-            "--approval-policy",
-            "--approvals-reviewer",
-            "--sandbox",
-            "--hooks-enabled",
-        ] {
+        // The values the host itself refuses to default. The coordinator must refuse
+        // them too: it is the process a human is looking at, so a missing dimension
+        // has to fail here rather than inside a pane.
+        for flag in ["--uid", "--codex", "--codex-sha256", "--codex-home"] {
             let err = parse_charter(&charter_with(flag, None))
                 .expect_err(&format!("{flag} must be required, never defaulted"))
                 .to_string();
@@ -3254,12 +3249,48 @@ mod tests {
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
         assert_eq!(charter.codex_home, "/tmp/cch.home");
-        assert_eq!(charter.approval_policy, "untrusted");
-        assert_eq!(charter.approvals_reviewer, "user");
-        assert_eq!(charter.sandbox, "read-only");
-        assert!(charter.hooks_enabled);
         assert_eq!(charter.deadline_ms, 45_000);
         assert!(!charter.hang_in_new_session && !charter.hang_in_bringup);
+    }
+
+    #[test]
+    fn the_charter_validates_optional_terminal_size() {
+        assert_eq!(parse_charter(&full_charter()).unwrap().terminal_size, None);
+        for (raw, expected) in [
+            ("131x43", (131, 43)),
+            ("1x1", (1, 1)),
+            ("65535x65535", (65535, 65535)),
+        ] {
+            let mut args = full_charter();
+            args.extend(["--terminal-size".into(), raw.into()]);
+            assert_eq!(parse_charter(&args).unwrap().terminal_size, Some(expected));
+            args.extend(["--terminal-size".into(), raw.into()]);
+            assert!(parse_charter(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("more than once"));
+        }
+        for raw in [
+            "0x43",
+            "131x0",
+            "65536x43",
+            "131x65536",
+            "-1x43",
+            "131x-1",
+            "131",
+            "x43",
+            "131x",
+            "131x43x2",
+            "131X43",
+            "1;statusx2",
+        ] {
+            let mut args = full_charter();
+            args.extend(["--terminal-size".into(), raw.into()]);
+            assert!(parse_charter(&args).is_err(), "accepted {raw:?}");
+        }
+        let mut args = full_charter();
+        args.push("--terminal-size".into());
+        assert!(parse_charter(&args).is_err());
     }
 
     /// The coordinator applies the host's `--codex` rule, at the charter, before it
@@ -3302,8 +3333,7 @@ mod tests {
         for (flag, second) in [
             ("--codex", "/other/codex"),
             ("--run-dir-is-not-a-flag-here", "x"),
-            ("--sandbox", "danger-full-access"),
-            ("--hooks-enabled", "false"),
+            ("--codex-home", "/tmp/other.home"),
             ("--uid", "01JQXV9K7B8N4M2P6R3T5W9YQE"),
         ] {
             if flag == "--run-dir-is-not-a-flag-here" {
@@ -3335,12 +3365,12 @@ mod tests {
     fn the_charter_refuses_empty_flag_shaped_and_unknown_arguments() {
         // Empty and control-character values, and a value that is itself a flag —
         // the swallowing hole `value_of` exists to close.
-        assert!(parse_charter(&charter_with("--sandbox", Some(""))).is_err());
+        assert!(parse_charter(&charter_with("--codex-home", Some(""))).is_err());
         assert!(parse_charter(&charter_with("--codex-home", Some("a\nb"))).is_err());
-        assert!(parse_charter(&charter_with("--codex", Some("--sandbox"))).is_err());
+        assert!(parse_charter(&charter_with("--codex", Some("--codex-home"))).is_err());
         // A dangling flag with no value at all.
         let mut dangling = full_charter();
-        dangling.push("--sandbox".into());
+        dangling.push("--codex-home".into());
         assert!(parse_charter(&dangling).is_err());
         // An unknown flag is refused rather than silently ignored, so a typo
         // cannot quietly drop a dimension the launch depends on.
@@ -3349,13 +3379,6 @@ mod tests {
         unknown.push("100".into());
         let err = parse_charter(&unknown).unwrap_err().to_string();
         assert!(err.contains("--poll-ms"), "got {err:?}");
-        // `--hooks-enabled` takes exactly true|false; nothing else is guessed.
-        for bad in ["yes", "1", "True", ""] {
-            assert!(
-                parse_charter(&charter_with("--hooks-enabled", Some(bad))).is_err(),
-                "--hooks-enabled {bad:?} must be refused, never defaulted"
-            );
-        }
         // The test-only hang injections accept ONLY "hang": there is no spelling
         // of either flag that makes bring-up report ready without evidence.
         for flag in ["--test-bringup", "--test-newsession"] {
@@ -3388,7 +3411,11 @@ mod tests {
         // A flag CodeConnect owns is refused here as well as at the host — the
         // coordinator is the process whose stderr a human can actually read.
         let mut owned = full_charter();
-        owned.extend(["--", "--cd", "/elsewhere"].iter().map(|s| s.to_string()));
+        owned.extend(
+            ["--", "--remote", "unix:///elsewhere"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
         let err = parse_charter(&owned).unwrap_err().to_string();
         assert!(
             err.contains("refused passthrough TUI argument"),
@@ -3797,6 +3824,9 @@ mod tests {
             session_name: "cc-1".into(),
             cwd: "/work".into(),
             tmux_socket: "/tmp/t.sock".into(),
+            tmux_status: protocol::config::Config::default().tmux_status,
+            terminal_size: None,
+            wait_for_terminal: false,
             self_exe: std::path::PathBuf::from("/opt/cc/codeconnect"),
             custodian_nonce: "cust".into(),
             launch_nonce: "0123456789abcdef0123456789abcdef".into(),
@@ -3804,10 +3834,6 @@ mod tests {
             codex: "/opt/codex/bin/codex".into(),
             codex_sha256: "1111111111111111111111111111111111111111111111111111111111111111".into(),
             codex_home: "/tmp/cch.home".into(),
-            approval_policy: "untrusted".into(),
-            approvals_reviewer: "user".into(),
-            sandbox: "read-only".into(),
-            hooks_enabled: true,
             // Already canonicalized by `run_coordinator_inner` before it lands here.
             launch_cwd: "/work".into(),
             tui_args: vec![],
@@ -3819,10 +3845,283 @@ mod tests {
         }
     }
 
+    struct SessionOptionsServer {
+        bin: std::path::PathBuf,
+        dir: std::path::PathBuf,
+        socket: String,
+    }
+
+    impl SessionOptionsServer {
+        fn new() -> Self {
+            let bin =
+                protocol::tmux::tmux_bin().expect("tmux is required for session option tests");
+            let dir = std::path::PathBuf::from("/tmp")
+                .join(format!("cc-status-{}", protocol::uid::new().unwrap()));
+            std::fs::create_dir(&dir).unwrap();
+            let socket = dir.join("s").to_string_lossy().into_owned();
+            Self { bin, dir, socket }
+        }
+
+        fn run(&self, args: &[&str]) -> String {
+            let mut command = std::process::Command::new(&self.bin);
+            command.args(["-S", &self.socket]).args(args);
+            match protocol::proc::run_deadlined(&mut command, std::time::Duration::from_secs(5))
+                .unwrap()
+            {
+                protocol::proc::RunOutcome::Completed {
+                    status,
+                    stdout,
+                    stderr,
+                    truncated,
+                } => {
+                    assert!(
+                        status.success(),
+                        "tmux {args:?}: {}",
+                        String::from_utf8_lossy(&stderr)
+                    );
+                    assert!(!truncated);
+                    String::from_utf8(stdout).unwrap().trim().to_string()
+                }
+                outcome => panic!("tmux {args:?}: {outcome:?}"),
+            }
+        }
+
+        fn create_session(&self) -> (RealCoordinatorDeps, OwnedSession) {
+            let mut deps = real_deps(self.dir.to_str().unwrap());
+            deps.uid = protocol::uid::new().unwrap();
+            deps.tmux_socket = self.socket.clone();
+            self.run(&[
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                &deps.session_name,
+                "-e",
+                &format!("{}={}", protocol::ENV_SESSION_UID, deps.uid),
+                "--",
+                "/bin/sleep",
+                "60",
+            ]);
+            let resolved = protocol::tmux::resolve_owned_session(&self.socket, &deps.uid).unwrap();
+            pending_for(&deps);
+            (deps, resolved)
+        }
+    }
+
+    impl Drop for SessionOptionsServer {
+        fn drop(&mut self) {
+            let mut command = std::process::Command::new(&self.bin);
+            command.args(["-S", &self.socket, "kill-server"]);
+            let _ = protocol::proc::run_deadlined(&mut command, std::time::Duration::from_secs(1));
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn the_pane_sees_the_callers_environment_not_the_servers() {
+        let server = SessionOptionsServer::new();
+        let fresh = format!("CC_PANE_FRESH_{}", std::process::id());
+        let stale = format!("CC_PANE_STALE_{}", std::process::id());
+        let started = protocol::proc::run_deadlined(
+            std::process::Command::new(&server.bin)
+                .args(["-S", &server.socket, "-f", "/dev/null", "new-session", "-d"])
+                .args(["-s", "older", "--", "/bin/sleep", "60"])
+                .env(&stale, "old")
+                .env_remove(&fresh),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(
+            matches!(started, protocol::proc::RunOutcome::Completed { status, .. } if status.success())
+        );
+
+        let mut deps = real_deps(server.dir.to_str().unwrap());
+        deps.tmux_socket = server.socket.clone();
+        deps.session_name = "cc-env".into();
+        deps.self_exe = crate::caller_env::built_binary();
+        // Over 64 KB of caller environment: four times what tmux accepts in a command.
+        let big = "b".repeat(70_000);
+        let mut caller: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
+            .filter(|(name, _)| name != stale.as_str())
+            .collect();
+        caller.extend([
+            (fresh.clone().into(), "new".into()),
+            ("CC_PANE_BIG".into(), big.clone().into()),
+            (protocol::ENV_SESSION_UID.into(), "the caller's".into()),
+        ]);
+        let handed =
+            crate::caller_env::write(&server.dir.join("session"), caller, &deps.pane_env())
+                .unwrap();
+        let mut argv = deps.new_session_argv(&handed);
+        let host = argv
+            .iter()
+            .position(|arg| arg == "internal-codex-host")
+            .unwrap();
+        let out = server.dir.join("pane.env");
+        argv.truncate(host - 1);
+        argv.extend([
+            "/bin/sh".into(),
+            "-c".into(),
+            r#"/usr/bin/env -0 > "$0.tmp" && mv "$0.tmp" "$0"; sleep 60"#.into(),
+            out.to_string_lossy().into_owned(),
+        ]);
+        let created = protocol::proc::run_deadlined(
+            std::process::Command::new(&server.bin).args(&argv),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(
+            matches!(created, protocol::proc::RunOutcome::Completed { status, .. } if status.success())
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !out.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let seen = std::fs::read(&out).expect("the pane wrote its environment");
+        let records: Vec<&[u8]> = seen.split(|&b| b == 0).collect();
+        let sees_fresh = records.contains(&format!("{fresh}=new").as_bytes());
+        let sees_stale = records
+            .iter()
+            .any(|r| r.starts_with(format!("{stale}=").as_bytes()));
+        assert_eq!(
+            (sees_fresh, sees_stale),
+            (true, false),
+            "(caller's FRESH reached the pane, server's STALE reached the pane)"
+        );
+        assert!(records.contains(&format!("CC_PANE_BIG={big}").as_bytes()));
+        assert!(records.contains(&format!("{}={}", protocol::ENV_SESSION_UID, deps.uid).as_bytes()));
+        assert!(
+            !handed.exists(),
+            "the pane deleted the caller's environment"
+        );
+    }
+
+    #[test]
+    fn codex_session_hides_status_by_default() {
+        let server = SessionOptionsServer::new();
+        let (mut deps, resolved) = server.create_session();
+        assert!(!deps.tmux_status);
+        let status_args = ["show-options", "-Av", "-t", &resolved.session_id, "status"];
+        assert_eq!(
+            server.run(&status_args),
+            "on",
+            "control: tmux starts with a visible bar"
+        );
+        assert!(matches!(
+            deps.finish_new_session(resolved.clone()),
+            NewSessionOutcome::Created(_)
+        ));
+        assert_eq!(server.run(&status_args), "off");
+        let record = codex_launch::load(&deps.uid).unwrap();
+        assert!(record.server_a.is_some());
+        assert!(record.remain_on_exit_asserted);
+        assert!(!record.new_session_indeterminate);
+    }
+
+    #[test]
+    fn codex_session_can_show_status_without_changing_other_sessions() {
+        let server = SessionOptionsServer::new();
+        let (mut deps, resolved) = server.create_session();
+        deps.tmux_status = true;
+        server.run(&["set-option", "-g", "status", "off"]);
+        let other = server.run(&[
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}",
+            "-s",
+            "other",
+            "--",
+            "/bin/sleep",
+            "60",
+        ]);
+        let status_args = ["show-options", "-Av", "-t", &resolved.session_id, "status"];
+        assert_eq!(server.run(&status_args), "off");
+        assert!(matches!(
+            deps.finish_new_session(resolved.clone()),
+            NewSessionOutcome::Created(_)
+        ));
+        assert_eq!(server.run(&status_args), "on");
+        assert_eq!(
+            server.run(&["show-options", "-Av", "-t", &other, "status"]),
+            "off"
+        );
+        assert_eq!(server.run(&["show-options", "-gv", "status"]), "off");
+        protocol::tmux::assert_remain_on_exit_off(&server.socket, &resolved).unwrap();
+        assert_eq!(
+            server.run(&status_args),
+            "on",
+            "remain-only API preserves status"
+        );
+    }
+
+    #[test]
+    fn codex_session_option_failure_keeps_cleanup_ownership() {
+        let server = SessionOptionsServer::new();
+        let (mut deps, resolved) = server.create_session();
+        server.run(&["new-session", "-d", "-s", "other", "--", "/bin/sleep", "60"]);
+        server.run(&["kill-session", "-t", &resolved.session_id]);
+        assert!(matches!(
+            deps.finish_new_session(resolved),
+            NewSessionOutcome::CreatedThenFailed(_)
+        ));
+        let record = codex_launch::load(&deps.uid).unwrap();
+        assert!(record.server_a.is_some());
+        assert!(!record.remain_on_exit_asserted);
+        assert!(!record.new_session_indeterminate);
+        assert!(deps.session_a.is_none());
+        assert_eq!(
+            server.run(&["show-options", "-Av", "-t", "=other:", "status"]),
+            "on"
+        );
+    }
+
+    #[test]
+    fn codex_session_option_note_failure_keeps_cleanup_ownership() {
+        let server = SessionOptionsServer::new();
+        let (mut deps, resolved) = server.create_session();
+        fail_next_remain_note();
+        let outcome = deps.finish_new_session(resolved.clone());
+        assert!(matches!(outcome, NewSessionOutcome::CreatedThenFailed(why)
+            if why.contains("could not be recorded")));
+        assert_eq!(
+            server.run(&["show-options", "-Av", "-t", &resolved.session_id, "status"]),
+            "off"
+        );
+        let record = codex_launch::load(&deps.uid).unwrap();
+        assert!(record.server_a.is_some());
+        assert!(!record.remain_on_exit_asserted);
+        assert!(!record.new_session_indeterminate);
+        assert!(deps.session_a.is_none());
+    }
+
+    #[test]
+    fn codex_session_options_refuse_a_different_server_epoch() {
+        let server = SessionOptionsServer::new();
+        let (mut deps, mut resolved) = server.create_session();
+        resolved.server_start_time -= 1;
+        assert!(matches!(
+            deps.finish_new_session(resolved.clone()),
+            NewSessionOutcome::CreatedThenFailed(_)
+        ));
+        assert_eq!(
+            server.run(&["show-options", "-Av", "-t", &resolved.session_id, "status"]),
+            "on"
+        );
+        assert!(
+            !codex_launch::load(&deps.uid)
+                .unwrap()
+                .remain_on_exit_asserted
+        );
+    }
+
     #[test]
     fn the_pane_runs_the_real_host_with_an_exact_argv() {
         let deps = real_deps("/tmp/cch.01JQXV9K7B.0123456789abcdef");
-        let argv = deps.new_session_argv();
+        let argv = deps.new_session_argv(std::path::Path::new("/tmp/cch.home/environment"));
         // Resolved, not hardcoded: the root is whatever this process's
         // `CODECONNECT_HOME`/`$HOME` resolve to, and the pane must be told exactly
         // that.
@@ -3839,12 +4138,15 @@ mod tests {
                 "-c",
                 "/work",
                 "-e",
-                // The uid stamp is injected exactly as before this chunk: an
-                // `-e` ENV VAR on the session, not an @-option.
+                // The uid stamp is injected as an `-e` ENV VAR on the
+                // session, not an @-option.
                 "CODECONNECT_SESSION_UID=01JQXV9K7B8N4M2P6R3T5W9YQD",
                 "-e",
                 &home_env,
                 "--",
+                "/opt/cc/codeconnect",
+                "internal-caller-environment",
+                "/tmp/cch.home/environment",
                 "/opt/cc/codeconnect",
                 "internal-codex-host",
                 "--uid",
@@ -3855,7 +4157,7 @@ mod tests {
                 "/tmp/t.sock",
                 "--codex",
                 "/opt/codex/bin/codex",
-                // A7.1: the identity travels beside the path, in the exact place
+                // The identity travels beside the path, in the exact place
                 // the host's parser expects it.
                 "--codex-sha256",
                 "1111111111111111111111111111111111111111111111111111111111111111",
@@ -3863,21 +4165,9 @@ mod tests {
                 "/tmp/cch.01JQXV9K7B.0123456789abcdef",
                 "--codex-home",
                 "/tmp/cch.home",
-                "--approval-policy",
-                "untrusted",
-                "--approvals-reviewer",
-                "user",
-                "--sandbox",
-                "read-only",
-                "--hooks-enabled",
-                "true",
-                // The fifth fingerprint dimension: the CANONICAL launch cwd,
-                // resolved once by the coordinator so the broker only ever compares strings.
-                "--launch-cwd",
-                "/work",
             ]
         );
-        // A9.6(c): what the pane is told must be resolvable FROM THE PANE, and the
+        // What the pane is told must be resolvable FROM THE PANE, and the
         // pane's cwd is the `-c` above — not this process's. A relative root would
         // make the two address different records; `protocol::root_dir()` is what
         // guarantees it cannot be relative, so this asserts the property rather
@@ -3887,17 +4177,20 @@ mod tests {
             "the pane must be handed an absolute launch-record root: {home_env}"
         );
 
-        // A label socket (no slash) still uses -L, unchanged by this chunk.
+        // A label socket (no slash) uses -L.
         let mut labelled = real_deps("/tmp/cch.a.b");
         labelled.tmux_socket = "codeconnect".into();
-        assert_eq!(&labelled.new_session_argv()[..2], &["-L", "codeconnect"]);
+        assert_eq!(
+            &labelled.new_session_argv(std::path::Path::new("/e"))[..2],
+            &["-L", "codeconnect"]
+        );
     }
 
     // The ONE canonicalization in the chain, and the measurement that forced
     // its placement. `/tmp` is a symlink on macOS, so the app-server resolves and reports
     // `/private/tmp`; exact equality of the raw strings is FALSE and realpath equality is
-    // TRUE. Canonicalizing HERE — at the authority that owns the launch cwd, before the
-    // path enters the host argv — is what lets the broker stay a pure string comparator.
+    // TRUE. Canonicalizing HERE — at the authority that owns the launch cwd — is what makes
+    // the registered cwd the same string every other record of the run carries.
     #[test]
     fn the_launch_cwd_is_canonicalized_once_here() {
         let raw = "/tmp";
@@ -3909,18 +4202,16 @@ mod tests {
             .to_string();
         assert_eq!(
             canonical, reported_by_app_server,
-            "the coordinator must hand the broker the SAME spelling the app-server reports"
+            "the coordinator must register the SAME spelling the app-server reports"
         );
-        // The measurement itself: on this platform the raw and resolved spellings differ,
-        // so a broker doing exact equality against the RAW path would refuse every turn.
+        // The measurement itself: on this platform the raw and resolved spellings differ.
         if canonical != raw {
             assert_ne!(
                 canonical, raw,
                 "measured: /tmp resolves to a different path ({canonical})"
             );
         }
-        // Fail closed: a launch cwd that cannot be resolved aborts the launch rather than
-        // producing a session whose broker can never verify a thread creation.
+        // Fail closed: a launch cwd that cannot be resolved aborts the launch.
         assert!(canonical_launch_cwd("/definitely/not/a/real/dir/xyzzy").is_err());
         let file = std::env::temp_dir().join("cc-launch-cwd-probe");
         std::fs::write(&file, b"x").unwrap();
@@ -3949,7 +4240,7 @@ mod tests {
         let none = real_deps("/tmp/cch.a.b");
         assert!(!none.host_argv().contains(&"--".to_string()));
         let mut owned = real_deps("/tmp/cch.a.b");
-        owned.tui_args = vec!["--cd".into(), "/elsewhere".into()];
+        owned.tui_args = vec!["--remote".into(), "unix:///elsewhere".into()];
         assert!(
             crate::codex_host::parse_host_args(&owned.host_argv()[2..]).is_err(),
             "an owned flag must be refused by the host even if it reached the argv"

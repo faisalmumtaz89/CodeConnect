@@ -6,19 +6,19 @@ import XCTest
 ///
 /// Every assertion here is on frames that actually left, recorded by
 /// `DaemonConnection.sendStub`. That is the only kind of evidence that
-/// distinguishes a real gate from a hidden control — and the round-1 review
-/// found two blockers precisely because the existing tests asked the *offering*
-/// path ("would the button be shown?") rather than the *transmission* path
-/// ("did a frame leave?").
+/// distinguishes a real gate from a hidden control: a test that asks the
+/// *offering* path ("would the button be shown?") rather than the
+/// *transmission* path ("did a frame leave?") passes over a control that is
+/// hidden but still transmits.
 ///
-/// Both blockers are pinned here, and each of them was measured leaving the
+/// Two such defects are pinned here, and each of them was measured leaving the
 /// socket before the fix:
 ///
-///   * **F1** — `codex_link` was checked when deciding whether to draw a
+///   * `codex_link` was checked when deciding whether to draw a
 ///     control and not when deciding whether to transmit, so an `interrupt`
 ///     and a `compose` both left for a session the phone already knew was
 ///     `bound` / `offline` / `none`.
-///   * **F2** — an `indeterminate` outcome retired its request id, so tapping
+///   * an `indeterminate` outcome retired its request id, so tapping
 ///     Send again on the *same words* minted a new id and said the same thing
 ///     to Codex a second time.
 @MainActor
@@ -123,7 +123,7 @@ final class CodexSendPathTests: XCTestCase {
 
     private func key(_ uid: String = "01K1B3XQ8ZC0DE5FGH7JKMNPQR") -> String { uid }
 
-    // MARK: F1 — the link state is enforced on the SEND path
+    // MARK: The link state is enforced on the SEND path
 
     /// **Measured leaving the socket before this fix**, for all three states:
     /// `framesSent=["compose","subscribe"]`.
@@ -172,7 +172,7 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertEqual(reason, CodexLinkState.offline.blockedReason(for: .compose))
     }
 
-    // MARK: F2 — an indeterminate mutation is never re-sent
+    // MARK: An indeterminate mutation is never re-sent
 
     /// **The blocker, as a two-call wire count.** Send `deploy`, receive
     /// `indeterminate`, tap Send again without editing: the second call must put
@@ -246,7 +246,7 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertEqual(wire.codexTypes, ["interrupt"])
     }
 
-    // MARK: F3 — sent-but-unanswered is not "nothing was sent"
+    // MARK: Sent-but-unanswered is not "nothing was sent"
 
     /// **The daemon took the frame and the answer never came back.** Recorded as
     /// not-sent, that is a promise the phone cannot keep: the words may well
@@ -288,7 +288,7 @@ final class CodexSendPathTests: XCTestCase {
         }
     }
 
-    // MARK: F7 — D4, the uid or nothing
+    // MARK: The uid or nothing
 
     /// **Fail closed on an empty uid.** The tmux name is handed to the next run,
     /// so hashing and sending it can aim a mutation at a session the reader
@@ -300,7 +300,7 @@ final class CodexSendPathTests: XCTestCase {
             return XCTFail("expected a typed not-sent for the stop")
         }
         // **Then the compose**, and in that order: one slot, one question, so
-        // the second attempt's answer replaces the first's (G9). Asserting both
+        // the second attempt's answer replaces the first's. Asserting both
         // at once would be asserting the bug the ordered rule removed.
         _ = await model.composeToCodex(sessionKey: "cc-1", text: "hello")
         XCTAssertEqual(wire.codexTypes, [], "no uid, no mutation")
@@ -325,7 +325,7 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertEqual(hash, CodexHash.compose(sessionRef: session, text: "hello"))
     }
 
-    // MARK: F5 — the answer vocabulary follows the session, not the card
+    // MARK: The answer vocabulary follows the session, not the card
 
     /// A Claude session never transmits `option_id`, whatever `tool_input`
     /// happens to contain — `tool_input` is agent-authored content, not an
@@ -348,7 +348,7 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertFalse(wire.types.contains("answer"))
     }
 
-    // MARK: G5 — the interlock outlives the process
+    // MARK: The interlock outlives the process
 
     /// **Quitting the app is not evidence about what the Mac did.**
     ///
@@ -411,7 +411,7 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertFalse(ledger.isSpent(.stop, session: "s-0", material: "m-0"), "the oldest go")
     }
 
-    // MARK: G3 — an unreadable status is not an actuation claim
+    // MARK: An unreadable status is not an actuation claim
 
     /// **`.unknown` must not spend the material.**
     ///
@@ -529,7 +529,7 @@ final class CodexSendPathTests: XCTestCase {
         XCTAssertFalse(wire.types.contains("answer"))
     }
 
-    /// **F4 on the send path.** Below minor 19 a Codex resolution carries no
+    /// **Old daemons, on the send path.** Below minor 19 a Codex resolution carries no
     /// `request_id`, so an answered card can never be retired: it stays live and
     /// tappable for ever. The view already refuses to draw the options; this is
     /// the path itself refusing, so a deep link or a stale sheet cannot answer.

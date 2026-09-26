@@ -1,5 +1,5 @@
-//! GATED live end-to-end integration for the **coordinator → pane → host** seam
-//! (Phase 2e-2b), validated against a real `codex` (0.147).
+//! GATED live end-to-end integration for the **coordinator → pane → host** seam,
+//! validated against a real `codex` (0.147).
 //!
 //! `live_codex_host.rs` proves the host works when something hands it a charter.
 //! This proves the thing that actually ships: the **coordinator** chooses the run
@@ -55,8 +55,7 @@
 //! `cargo test` must never run it. Two independent guards: `#[ignore]`, and
 //! `CC_CODEX_LIVE=1`. With the flag SET, a missing `codex` is a **failure**, not a
 //! skip — an operator who demanded a live run must never be handed a vacuous
-//! green — and so is a `codex` that is not the native 0.147 binary the whole
-//! chunk is grounded against.
+//! green — and so is a `codex` that is not a native executable.
 //!
 //! Run it deliberately:
 //! ```text
@@ -68,16 +67,16 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// The A7.1 digest of the codex binary under test: the identity resolution pins,
-/// which the host re-verifies immediately before each of its two execs. Computed
-/// here rather than written down because these harnesses build (or copy) their
-/// codex at run time.
+/// The executable-identity digest of the codex binary under test: the identity
+/// resolution pins, which the host re-verifies immediately before each of its two
+/// execs. Computed here rather than written down because these harnesses build (or
+/// copy) their codex at run time.
 ///
 /// **Derived locally, deliberately, and now that is a choice rather than the only
-/// option.** Until 2e-7d nothing could pin a digest: `codeconnect codex` refused
-/// before it would have spawned a coordinator, so every harness composed the
-/// charter a launcher would have written. The launcher exists now and its own path
-/// is gated end to end by `the_codex_command_launches_a_real_session_end_to_end`
+/// option.** Before the launcher could spawn a coordinator, nothing could pin a
+/// digest, so every harness composed the charter a launcher would have written. The
+/// launcher exists now and its own path is gated end to end by
+/// `the_codex_command_launches_a_real_session_end_to_end`
 /// (`live_codex_coordinator.rs`). This file still derives its own, because:
 ///
 /// **the coordinator gates in this file inject test-only charter flags** —
@@ -283,22 +282,6 @@ fn live_gate() -> Option<PathBuf> {
             codex.display()
         ),
     };
-    // The premise is the gate's own verdict, not a version literal — see the same
-    // change in `live_codex_host.rs` for why a literal here was the launcher's defect
-    // reproduced in the suite.
-    match codex_broker::guarded_surface::unadjudicated_against_baseline(&codex) {
-        Ok(changes) if changes.is_empty() => {}
-        Ok(changes) => panic!(
-            "CC_CODEX_LIVE=1 resolved {} reporting codex {version}, whose guarded surface \
-             CodeConnect is NOT grounded against:\n  {}",
-            codex.display(),
-            changes.join("\n  ")
-        ),
-        Err(why) => panic!(
-            "CC_CODEX_LIVE=1 resolved {} but its guarded surface could not be read: {why}.",
-            codex.display()
-        ),
-    }
     assert!(
         tmux_bin().is_some(),
         "CC_CODEX_LIVE=1 was set but no tmux was found; the coordinator puts the host in a \
@@ -395,12 +378,13 @@ struct LiveSandbox {
     /// reach.
     ///
     /// Every gate above spawns the coordinator itself, so `uid` above *is* the
-    /// launch and `Drop`'s identity sweep finds its record. The ungate gate does
-    /// not: `codeconnect codex` mints its own uid, which is the whole point, so
-    /// its record lives at a path this sandbox cannot predict and its coordinator
-    /// — which stays on as the session's supervisor for the life of the run —
-    /// would survive a failed assertion with nothing to kill it. A launcher-driven
-    /// test adopts the uid it discovers, and `Drop` sweeps that record too.
+    /// launch and `Drop`'s identity sweep finds its record. The launcher-driven
+    /// gate does not: `codeconnect codex` mints its own uid, which is the whole
+    /// point, so its record lives at a path this sandbox cannot predict and its
+    /// coordinator — which stays on as the session's supervisor for the life of
+    /// the run — would survive a failed assertion with nothing to kill it. A
+    /// launcher-driven test adopts the uid it discovers, and `Drop` sweeps that
+    /// record too.
     adopted: std::sync::Mutex<Vec<String>>,
 }
 
@@ -525,8 +509,8 @@ fn collide_on_the_run_dir(uid: &str, nonce: &str, salt: u8) -> (String, String) 
 /// The owner marker a run dir carries: `(uid, launch_nonce)`, one per line.
 ///
 /// `None` while the directory or its marker is not there — which for a published
-/// run dir is only the window before the host's atomic publish, since A11.4 puts
-/// the marker inside the directory *before* the `rename` that names it.
+/// run dir is only the window before the host's atomic publish, since the host
+/// puts the marker inside the directory *before* the `rename` that names it.
 fn marker_owner(run_dir: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(run_dir.join("owner")).ok()?;
     let mut lines = text.lines();
@@ -559,8 +543,8 @@ impl LiveSandbox {
     /// Its `CODECONNECT_HOME`, `CODEX_HOME`, `TMUX_TMPDIR` and base directory are
     /// its own, exactly as any other sandbox's are, so the two launches share no
     /// launch record, no tmux server and no credential. What they share is one
-    /// derived path, which is precisely what A11.7 asks two real hosts to race
-    /// for.
+    /// derived path, which is precisely what the run-dir claim gate asks two real
+    /// hosts to race for.
     ///
     /// `salt` distinguishes CONTENDERS: a name can be derived by any number of
     /// launches, and this gate uses two of them against one directory, so the
@@ -733,33 +717,11 @@ impl LiveSandbox {
             .args(["--tmux-socket", protocol::TMUX_SOCKET_NAME])
             .args(["--deadline-ms", "60000"])
             .args(["--codex", codex.to_str().expect("codex path is utf-8")])
-            // A7.1: the identity the launcher pins at resolution and the host
+            // The identity the launcher pins at resolution and the host
             // re-verifies before each exec. Required — a coordinator with no
             // digest refuses rather than handing the host a bare pathname.
             .args(["--codex-sha256", &codex_sha256(codex)])
             .args(["--codex-home", self.codex_home.to_str().unwrap()])
-            // The host applies no policy default; the coordinator carries these
-            // four dimensions verbatim into the pane command.
-            //
-            // **`on-request`, because that is what the real TUI asserts.** A codex
-            // 0.147 `codex --remote` sends `approvalPolicy:"on-request"` on its
-            // `thread/start`, and the broker's fingerprint validator refuses any
-            // present ownership value that disagrees with the launch fingerprint.
-            // Launching with `untrusted` therefore produces
-            //
-            //   Tui: refuse->synthetic error (thread/start: fingerprint refused
-            //   (Conflict): params.approvalPolicy: "on-request" but fingerprint is
-            //   "untrusted")
-            //
-            // whereupon the TUI exits fatally and the session dies about two
-            // seconds in, having never created a thread. The broker is behaving
-            // exactly as designed; the fingerprint it was handed was the wrong one.
-            // `assert_session_survives_the_thread_start` below is what keeps this
-            // value honest — see the note there on what a passing gate used to hide.
-            .args(["--approval-policy", "on-request"])
-            .args(["--approvals-reviewer", "user"])
-            .args(["--sandbox", "read-only"])
-            .args(["--hooks-enabled", "true"])
             .args(extra)
             .env("CODECONNECT_HOME", &self.home)
             .env("CODECONNECT_TMUX", &self.tmux)
@@ -817,7 +779,7 @@ impl LiveSandbox {
     }
 
     /// The launch record of an arbitrary uid under this sandbox's home — used by
-    /// the ungate gate, whose uid is the launcher's rather than this sandbox's.
+    /// the launcher-driven gate, whose uid is the launcher's rather than this sandbox's.
     fn record_text_for(&self, uid: &str) -> Option<String> {
         std::fs::read_to_string(self.home.join("sessions").join(uid).join("launch.json")).ok()
     }
@@ -889,8 +851,8 @@ impl LiveSandbox {
             .map(str::to_string)
     }
 
-    /// Whether a real `internal-codex-host` reached this launch's D7 gate, and
-    /// which process it was.
+    /// Whether a real `internal-codex-host` reached this launch's
+    /// launch-coordination gate, and which process it was.
     ///
     /// **Not the lease.** `host_lease` answers "who holds this launch right now"
     /// and `to_failed` drops it, so a failed launch's lease is always `null`
@@ -1055,16 +1017,16 @@ fn the_coordinator_commits_ready_on_the_hosts_evidence_and_teardown_leaves_nothi
     // against real codex, because they are exactly the kind of claim a unit test
     // can only stage.
     let text = sb.record_text().unwrap_or_default();
-    // A11.3: the premise the no-server-A cleanup escape rests on — a pane dies with
+    // The premise the no-server-A cleanup escape rests on — a pane dies with
     // its command — was established on THIS session, and the coordinator wrote it
     // down between asserting it and recording server A.
     assert!(
         text.contains("\"remain_on_exit_asserted\": true"),
         "a committed Ready must carry the proof that remain-on-exit was cleared: {text}"
     );
-    // A11.1, readiness half: both host children are past `execve`. The fence records
-    // them BEFORE they can exec, so without this the record would name two processes
-    // that had not yet become the programs it claims they are.
+    // The spawn fence, readiness half: both host children are past `execve`. The fence
+    // records them BEFORE they can exec, so without this the record would name two
+    // processes that had not yet become the programs it claims they are.
     assert_eq!(
         text.matches("\"exec_confirmed\": true").count(),
         2,
@@ -1301,91 +1263,52 @@ fn a_real_codex_tui_attaches_through_the_broker_from_inside_the_pane() {
 
 /// The session is **still there** after the TUI has asked for its thread.
 ///
-/// # What a passing gate used to hide
-///
 /// `Tui: forward` is the first thing a codex client does, and every assertion above
-/// it lands within a second or two of the pane coming up. `thread/start` comes
-/// later — and when the launch fingerprint disagrees with what the TUI asserts, the
-/// broker refuses it, the TUI exits fatally, and the pane, the tmux server and the
-/// run dir all go with it about two seconds in. Every assertion in this test would
-/// still have passed, because every one of them had already run. The gate was green
-/// against a session that no longer existed.
+/// it lands within a second or two of the pane coming up. `thread/start` comes later,
+/// and a TUI whose thread/start fails exits fatally, taking the pane, the tmux server
+/// and the run dir with it. Every assertion above would still have passed, so this
+/// waits past that window and asks whether the session is still alive.
 ///
-/// So this waits past that window and asks two questions the CRUX cannot:
+/// # Why it waits for the request rather than for a clock
 ///
-///   1. **Is the session still alive?** A dead tmux session is the observable end
-///      state of a fatal TUI exit, whatever caused it.
-///   2. **Did the broker refuse a `thread/start`?** The cause, named. Asserted
-///      separately from (1) because a refusal that somehow did *not* kill the
-///      session is still a launch whose thread never existed — and because a bare
-///      "the session died" would send the next reader hunting.
-///
-/// # Why it waits for the decision rather than for a clock
-///
-/// `thread/start` is not the first thing the TUI sends — a bootstrap census of
-/// reads comes first, and how long that takes depends on the machine and on what
-/// else the suite is running. So this waits for the broker to **decide** the
-/// request, either way, and only then sleeps out the window in which a refusal
-/// takes the session down. Sleeping a fixed interval from the CRUX instead would
-/// be a guess about someone else's timing, and a green one would prove nothing.
+/// `thread/start` is not the first thing the TUI sends — a bootstrap census of reads
+/// comes first, and how long that takes depends on the machine and on what else the
+/// suite is running. So this waits for the broker to log the keyboard's `thread/start`
+/// (`codex-broker/src/relay.rs`, the keyboard's forward note is its method), and only
+/// then sleeps out the window in which a failure takes the session down.
 fn assert_session_survives_the_thread_start(sb: &LiveSandbox) {
     /// How long the TUI may take to get around to asking for its thread.
     const THREAD_START_BUDGET: Duration = Duration::from_secs(45);
     /// How long after that request the session must still be standing. The failure
-    /// this guards against is measured at ~2 s from the refusal; holding a real
-    /// codex session open longer buys the suite no further evidence.
+    /// this guards against is measured at ~2 s; holding a real codex session open
+    /// longer buys the suite no further evidence.
     const VIABILITY_WAIT: Duration = Duration::from_secs(3);
+    /// The broker's note for the keyboard's `thread/start`.
+    const THREAD_START_FORWARD: &str = "Tui: forward (thread/start)";
 
     let broker_log = || read_file(&sb.run_dir.join("broker.log"));
-    let decided = wait_until(THREAD_START_BUDGET, || {
-        let log = broker_log();
-        log.contains("Tui: forward (ownership request: fingerprint asserted)")
-            || log.contains("refuse->synthetic error (thread/start")
+    let asked = wait_until(THREAD_START_BUDGET, || {
+        broker_log().contains(THREAD_START_FORWARD)
     });
-    // Captured while the run dir still exists. A refused thread/start kills the
-    // TUI, the pane, the tmux server and the run dir together, so a log read
-    // *after* the wait below reports `<unreadable>` — the one moment the evidence
-    // matters is the one moment it is gone.
-    let at_decision = broker_log();
+    // Captured while the run dir still exists: a TUI that exits takes the run dir with
+    // it, so a log read after the wait below may report `<unreadable>`.
+    let at_request = broker_log();
     assert!(
-        decided,
+        asked,
         "the TUI never asked for a thread within {THREAD_START_BUDGET:?}, so this gate \
          cannot say whether the launch is viable. It parks like this when its \
-         CODEX_HOME has no credentials. broker.log:\n{at_decision}"
+         CODEX_HOME has no credentials. broker.log:\n{at_request}"
     );
     std::thread::sleep(VIABILITY_WAIT);
-
-    // The cause first: it is the sentence that explains the symptom after it.
-    assert!(
-        !at_decision.contains("refuse->synthetic error (thread/start"),
-        "the broker refused the TUI's thread/start, so this launch's fingerprint \
-         disagrees with what a real codex client asserts and no thread was ever \
-         created. broker.log at the refusal:\n{at_decision}"
-    );
     assert!(
         sb.has_session(),
         "the session was gone {VIABILITY_WAIT:?} after the TUI attached — it did not \
-         survive its own thread/start. broker.log at the request:\n{at_decision}"
-    );
-    // The session lived, so the log is still readable and can be re-read — and it
-    // is re-checked for a refusal, not just for the positive signal. A refusal that
-    // lands DURING the survival window is exactly as fatal as one that lands before
-    // it, and `at_decision` is by definition blind to it.
-    let broker_log = broker_log();
-    assert!(
-        !broker_log.contains("refuse->synthetic error (thread/start"),
-        "the broker refused a thread/start during the survival window. \
-         broker.log:\n{broker_log}"
-    );
-    assert!(
-        broker_log.contains("Tui: forward (ownership request: fingerprint asserted)"),
-        "the TUI's thread/start must be FORWARDED, not merely un-refused: a launch \
-         whose ownership request never reached the app-server has no thread. \
-         broker.log:\n{broker_log}"
+         survive its own thread/start. broker.log at the request:\n{at_request}"
     );
     println!(
         "VIABILITY PASS — thread/start forwarded and the session is still alive \
-         {VIABILITY_WAIT:?} after the TUI attached. broker.log:\n{broker_log}"
+         {VIABILITY_WAIT:?} after the TUI attached. broker.log:\n{}",
+        broker_log()
     );
 }
 
@@ -1484,13 +1407,12 @@ fn assert_torn_down_clean(sb: &LiveSandbox, tag: &str) {
 
 // ============================ THE REGISTRATION GATE ============================
 //
-// A9.2: until 2e-7b there was no producer of a Codex registration at all —
-// `registration_frame` named Claude as a literal, no Codex launch ran a
-// supervisor, and so `ccd` had nothing to admit, `codeconnect ls` rendered a
-// Codex pane's uid as `—`, and every Codex row any test ever saw had been staged
-// into the store by hand. This is the gate for the producer, driven end to end
-// with real binaries: a real `ccd`, a real coordinator, a real codex TUI in a
-// real tmux pane, and the real CLI reading it back.
+// A Codex launch is the producer of its own registration: its coordinator runs
+// the supervisor that registers it with `ccd`, so `codeconnect ls` renders the
+// Codex pane's uid rather than `—`, and no test has to stage a Codex row into the
+// store by hand. This is the gate for the producer, driven end to end with real
+// binaries: a real `ccd`, a real coordinator, a real codex TUI in a real tmux
+// pane, and the real CLI reading it back.
 
 /// Build `ccd` and return the binary this tree just produced.
 ///
@@ -1604,7 +1526,7 @@ impl LiveSandbox {
     //
     // Every helper above is keyed by the uid THIS sandbox minted, because every
     // gate above spawns the coordinator itself. `codeconnect codex` mints its own,
-    // so the ungate gate has to discover the launch instead of naming it.
+    // so the launcher-driven gate has to discover the launch instead of naming it.
 
     /// The single launch under this sandbox's home, as `(uid, record)`.
     ///
@@ -1672,9 +1594,8 @@ impl LiveSandbox {
 
     /// Type into the pane's tty.
     ///
-    /// The only way to drive a session: the broker refuses `turn/start` to the ccd
-    /// role by design, so a turn can only ever be started by the real TUI, by
-    /// somebody typing. Addressed by NAME under this sandbox's `TMUX_TMPDIR`, like
+    /// How this gate drives a session: a turn started by the real TUI, by somebody
+    /// typing. Addressed by NAME under this sandbox's `TMUX_TMPDIR`, like
     /// everything else here.
     fn send_keys(&self, session: &str, keys: &[&str]) {
         let out = self
@@ -1769,7 +1690,7 @@ impl LiveSandbox {
     }
 }
 
-/// **A9.2, end to end: a real Codex launch registers itself with a real daemon,
+/// **End to end: a real Codex launch registers itself with a real daemon,
 /// the fleet shows it, and a daemon bounce neither loses it nor churns it.**
 ///
 /// Every previous live gate here had to hold the coordinator at `--test-bringup
@@ -1995,14 +1916,13 @@ fn a_real_codex_launch_registers_with_the_real_daemon_and_survives_a_bounce() {
     // (`codex_broker::relay::deliver_head`). The reconnecting link is
     // therefore handed the same frame an early one would have received.
     //
-    // Note what this is NOT: it is not durable evidence. It lives as long as the
-    // broker does, which is as long as the session does, and that is exactly the
-    // lifetime the question has — a session whose host is gone has no thread to be
-    // on. The alternative that WAS refuted stays refuted and must not be reached
-    // for: seeding a replacement from the event log was MEASURED wrong in 2e-4c
-    // (the log's newest `SessionStart` can name a thread the link demonstrably
-    // could not read, and the log has no representation of the fallback that
-    // rescued it).
+    // Note what this is NOT: it is not durable evidence. It lives as long as the broker
+    // does, which is as long as the session does, and that is exactly the lifetime the
+    // question has — a session whose host is gone has no thread to be on. The
+    // alternative that WAS refuted stays refuted and must not be reached for: seeding a
+    // replacement from the event log was MEASURED wrong (the log's newest
+    // `SessionStart` can name a thread the link demonstrably could not read, and the
+    // log has no representation of the fallback that rescued it).
     //
     // **This is also the strongest re-registration evidence this gate has.** A
     // thread id can only reappear here if a new registration was accepted, built a
@@ -2048,34 +1968,32 @@ fn a_real_codex_launch_registers_with_the_real_daemon_and_survives_a_bounce() {
     let _ = daemon.wait();
 }
 
-// ============================== THE UNGATE GATE ==============================
+// ========================== THE LAUNCHER-DRIVEN GATE ==========================
 //
-// 2e-7d. Every gate above spawns `internal-codex-coordinator` itself, because for
-// the whole of Phase 2 there was no launcher to spawn it: `codeconnect codex`
-// resolved, version-pinned, argv-validated, preflighted — and then refused. So the
-// charter those gates hand the coordinator is one the harness composed, including
-// the `--codex-sha256` each of them derives locally, standing in for a producer
-// that did not exist.
+// Every gate above spawns `internal-codex-coordinator` itself, so the charter
+// those gates hand the coordinator is one the harness composed, including the
+// `--codex-sha256` each of them derives locally, standing in for the launcher.
 //
-// This is that producer's gate. It types the command a person types, and asserts
+// This is the launcher's gate. It types the command a person types, and asserts
 // the launch it produces is the same launch every gate above proved out: one that
 // registers, renders, adopts a thread on the ccd leg, runs a turn, survives a
 // daemon bounce, and leaves nothing behind when it ends.
 
-/// **THE UNGATE: `codeconnect codex`, run for real, launches a real Codex session.**
+/// **THE LAUNCHER-DRIVEN GATE: `codeconnect codex`, run for real, launches a real
+/// Codex session.**
 ///
 /// The command is driven under a pty (`script`), because on `Ready` it does what
-/// `codeconnect claude` does — `exec`s into `tmux attach-session` — and a launcher
+/// `codeconnect claude` does — attaches the terminal as a tmux client — and a launcher
 /// that only *claims* to attach would pass a test that never gave it a terminal.
 /// The attached client is asserted for the same reason.
 ///
-/// **What this gate adds over the coordinator gate above** is precisely the wiring
-/// 2e-7d built, and each of these is a thing the harness used to do FOR the
-/// launcher: the uid is minted by the command (so it is discovered here, not
-/// named), the session name comes from the same `cc-N` sequence `codeconnect
-/// claude` draws from (not the coordinator's `cc-codex` fallback), the cwd is the
-/// directory the command was run in, and the digest on the charter is the one
-/// resolution pinned rather than one this file hashed.
+/// **What this gate adds over the coordinator gate above** is precisely the
+/// launcher's own wiring, and each of these is a thing the other gates' harness
+/// does FOR the launcher: the uid is minted by the command (so it is discovered
+/// here, not named), the session name comes from the same `cc-N` sequence
+/// `codeconnect claude` draws from (not the coordinator's `cc-codex` fallback), the
+/// cwd is the directory the command was run in, and the digest on the charter is
+/// the one resolution pinned rather than one this file hashed.
 ///
 /// **Deliberately NOT asserted here, for the reason the gate above states:**
 /// anything about a phone. No device is paired in this sandbox and none could
@@ -2087,7 +2005,7 @@ fn a_real_codex_launch_registers_with_the_real_daemon_and_survives_a_bounce() {
 fn the_codex_command_launches_a_real_session_end_to_end() {
     let Some(codex) = live_gate() else { return };
     let ccd = resolve_ccd();
-    let sb = LiveSandbox::new("ungate");
+    let sb = LiveSandbox::new("launcher");
     let mut daemon = sb.spawn_daemon(&ccd);
     assert!(
         sb.fleet().is_empty(),
@@ -2110,8 +2028,8 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
         .into_owned();
 
     // **THE COMMAND.** `script -q /dev/null` gives it a controlling terminal, so
-    // the `exec tmux attach-session` it ends with is a real attach. stdin is a
-    // pipe this test holds OPEN: an attached tmux client that reads EOF detaches,
+    // the attach it ends with is a real attach. stdin is a pipe this test holds
+    // OPEN: the attached client detaches when its terminal input reaches EOF,
     // and the client staying is the evidence.
     let out_path = sb.base.join("codex-command.out");
     let out = std::fs::File::create(&out_path).expect("the command's output file");
@@ -2192,7 +2110,7 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
         "a Ready launch must have a live tmux session called {session_name}"
     );
 
-    // **It attached.** The command's last act is `exec tmux attach-session`, and a
+    // **It attached.** The command's last act is the attach, and a
     // client on this session is the only thing that proves it rather than merely
     // having exited quietly.
     assert!(
@@ -2299,9 +2217,10 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
     assert_eq!(phone_view.agent, protocol::agent::AgentKind::Codex);
     assert_eq!(phone_view.session_uid, uid);
 
-    // Printed, not just asserted. This gate is the evidence the ungate rests on, so
-    // a run of it has to leave behind what a reader would otherwise have to take on
-    // trust: what the command produced, what the fleet says, and what `ls` renders.
+    // Printed, not just asserted. This gate is the evidence that `codeconnect codex`
+    // launches a real session, so a run of it has to leave behind what a reader
+    // would otherwise have to take on trust: what the command produced, what the
+    // fleet says, and what `ls` renders.
     println!(
         "--- `codeconnect codex` output (pty) ---\n{}",
         read_file(&out_path)
@@ -2310,15 +2229,14 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
     println!("--- codeconnect sessions list ---\n{sessions}");
     println!("--- the daemon's row ---\n{row:#?}");
     println!(
-        "UNGATE PASS (launch) — `codeconnect codex` in {canonical_cwd} produced {session_name} \
+        "LAUNCHER PASS (launch) — `codeconnect codex` in {canonical_cwd} produced {session_name} \
          uid {uid}, filed as codex on thread {thread}, attached, and rendered by `ls`"
     );
 
     // ------------------------------------------------------------------ a turn
     //
-    // The session is only worth launching if it can be used. Typed into the pane,
-    // because nothing else may start a turn: the broker refuses `turn/start` to the
-    // ccd role, so a turn is by construction the real TUI's, driven by a keystroke.
+    // The session is only worth launching if it can be used. Typed into the pane, so
+    // the turn is the real TUI's, driven by a keystroke.
     assert!(
         wait_until(Duration::from_secs(60), || sb.tui_running(&run_dir)),
         "the host never launched the real codex TUI. broker.log:\n{}",
@@ -2336,20 +2254,16 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
     std::thread::sleep(Duration::from_millis(600));
     sb.send_keys(&session_name, &["Enter"]);
 
-    // **The broker forwarded it.** A turn that the broker refused would leave the
-    // pane looking similar and prove the opposite of what this gate claims.
+    // **The broker forwarded it** (`codex-broker/src/relay.rs`: the keyboard's forward
+    // note is its method).
     let forwarded = wait_until(Duration::from_secs(120), || {
-        read_file(&run_dir.join("broker.log")).contains("Tui: forward (turn/start")
+        read_file(&run_dir.join("broker.log")).contains("Tui: forward (turn/start)")
     });
     let broker_log = read_file(&run_dir.join("broker.log"));
     assert!(
         forwarded,
         "the broker never forwarded the TUI's turn/start. broker.log:\n{broker_log}\npane:\n{}",
         sb.capture_pane(&session_name)
-    );
-    assert!(
-        !broker_log.contains("refuse->synthetic error (turn/start"),
-        "the broker refused a turn on a session this launch created. broker.log:\n{broker_log}"
     );
 
     // **And it completed, in the pane a person is looking at.** The `•` is
@@ -2380,7 +2294,7 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
     );
     println!("--- the pane after the turn ---\n{pane}");
     println!(
-        "UNGATE PASS (turn) — a turn typed into {session_name}'s real TUI pane was forwarded by \
+        "LAUNCHER PASS (turn) — a turn typed into {session_name}'s real TUI pane was forwarded by \
          the broker, completed in the pane, and reached the daemon (last_seq {} > {seq_before})",
         sb.run_of(&uid).expect("the row after the turn").last_seq
     );
@@ -2452,7 +2366,7 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
         "and it must have come from the broker's replay rather than a second live \
          announcement this test cannot tell apart"
     );
-    println!("UNGATE PASS (bounce) — {session_name} survived a daemon restart unchanged");
+    println!("LAUNCHER PASS (bounce) — {session_name} survived a daemon restart unchanged");
 
     // -------------------------------------------------------------- teardown
     //
@@ -2516,14 +2430,14 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
     let _ = daemon.kill();
     let _ = daemon.wait();
     println!(
-        "UNGATE PASS (teardown) — {session_name} ended with no leaked process, run dir or pane"
+        "LAUNCHER PASS (teardown) — {session_name} ended with no leaked process, run dir or pane"
     );
 }
 
 // ============================= THE COLLISION GATE =============================
 //
-// A11.7: "Marker tests build fixtures by hand rather than two real hosts racing
-// for one derived name. Closes when: a live two-launch collision harness exists."
+// The run-dir claim gate, driven by two real hosts racing for one derived name
+// rather than by marker fixtures built by hand.
 //
 // Every marker-isolation test before this one staged its competitor inside a
 // single process — `codex_host.rs`'s teardown test calls `write_owner_marker`
@@ -2600,20 +2514,19 @@ fn assert_refused_without_adopting(sb: &LiveSandbox, who: &str, coord: &mut Chil
     );
     // ---- the STAGE, not merely a death before readiness ---------------------
     //
-    // The assertions around this one all pass under the reviewer's counterexample
-    // (finding 11): a host that treats `EEXIST` as SUCCESS, ADOPTS the winner's
-    // directory, and then dies on an already-existing log satisfies the shape
-    // check, the inode check, the marker check, the no-`Ready` check and the
-    // cleanup check — every one of them, measured. What it CANNOT do is get past
-    // the run-dir claim without recording that it did. This bit is written by the
-    // host in `orchestrate`, on the one line after
-    // `create_run_dir_atomically` returns Ok, so a loser whose record says the
-    // claim was made was NOT refused at the fence — it adopted, and this gate would
-    // otherwise be green for exactly the wrong reason.
+    // The assertions around this one all pass under a counterexample: a host that
+    // treats `EEXIST` as SUCCESS, ADOPTS the winner's directory, and then dies on an
+    // already-existing log satisfies the shape check, the inode check, the marker
+    // check, the no-`Ready` check and the cleanup check — every one of them, measured.
+    // What it CANNOT do is get past the run-dir claim without recording that it did.
+    // This bit is written by the host in `orchestrate`, on the one line after
+    // `create_run_dir_atomically` returns Ok, so a loser whose record says the claim
+    // was made was NOT refused at the fence — it adopted, and this gate would otherwise
+    // be green for exactly the wrong reason.
     //
     // Fence-agnostic on purpose. The bit says "past the claim", not "refused by the
     // staging `mkdir`" or "refused by the `RENAME_EXCL` publish", so it holds the
-    // same for the simultaneous loser (which meets either fence — see the phase-6
+    // same for the simultaneous loser (which meets either fence — see the section-6
     // note) and the late contender (which always meets the publish). A message
     // match would have to enumerate both sentences and would still say nothing about
     // the adoption case, whose sentence is a LATER stage's, not the claim's.
@@ -2732,19 +2645,19 @@ fn assert_run_dir_untouched(winner: &LiveSandbox, identity: (u64, u64), marker: 
     );
 }
 
-/// **A11.7: two real launches race for ONE derived run dir; exactly one wins,
-/// and the loser cannot touch what it lost.**
+/// **The run-dir claim gate: two real launches race for ONE derived run dir;
+/// exactly one wins, and the loser cannot touch what it lost.**
 ///
 /// # Why a collision is possible at all
 ///
 /// `codex_coordinator::choose_run_dir` names `/tmp/cch.<uid's LAST TEN
-/// alphanumerics>.<nonce's FIRST SIXTEEN>`, and its doc comment says outright
-/// that the mapping is **many-to-one**: "Uniqueness is therefore NOT a property
-/// of this function, and no caller may treat the name as an identity." That is
-/// the whole reason the owner marker exists, and it is the "one derived name"
-/// A11.7 means. So this test does not simulate a collision — it *derives* one,
-/// with [`collide_on_the_run_dir`], and then asserts the two paths are equal so
-/// the premise is checked rather than assumed.
+/// alphanumerics>.<nonce's FIRST SIXTEEN>`, and its doc comment says outright that
+/// the mapping is **many-to-one**: "Uniqueness is therefore NOT a property of this
+/// function, and no caller may treat the name as an identity." That is the whole
+/// reason the owner marker exists, and it is the "one derived name" the run-dir
+/// claim gate means. So this test does not simulate a collision — it *derives* one,
+/// with [`collide_on_the_run_dir`], and then asserts the two paths are equal so the
+/// premise is checked rather than assumed.
 ///
 /// # What is contended, and what deliberately is not
 ///
@@ -2777,15 +2690,15 @@ fn assert_run_dir_untouched(winner: &LiveSandbox, identity: (u64, u64), marker: 
 ///      It terminalized `Failed`, never `Ready`, with no session and no host left.
 ///   4. **No cross-contamination, across the loser's whole life including its
 ///      teardown.** The winner's directory keeps its **inode** (a name is not an
-///      identity: a loser that removed the winner's dir and published its own
-///      would leave a perfectly good directory at that path), its marker bytes,
-///      its 0700 mode, its bound legs and its live session — and the loser's
-///      custodian, which is armed with the loser's uid and the *recorded* run-dir
-///      name, settles its cleanup without deleting a directory whose marker names
-///      somebody else. That last clause is the A11.5 fd-bound-delete property
-///      observed under a real race instead of a hand-written marker.
+///      identity: a loser that removed the winner's dir and published its own would
+///      leave a perfectly good directory at that path), its marker bytes, its 0700
+///      mode, its bound legs and its live session — and the loser's custodian,
+///      which is armed with the loser's uid and the *recorded* run-dir name,
+///      settles its cleanup without deleting a directory whose marker names
+///      somebody else. That last clause is the fd-bound-delete property observed
+///      under a real race instead of a hand-written marker.
 ///   5. **And again, against a launch that arrives LATE.** See the third
-///      contender in phase 6 and the note on the two fences beside it: the
+///      contender in section 6 and the note on the two fences beside it: the
 ///      simultaneous pair meets the staging `mkdir`, a later launch meets the
 ///      `RENAME_EXCL` publish, and both are the same derived name.
 ///
@@ -2806,10 +2719,10 @@ fn assert_run_dir_untouched(winner: &LiveSandbox, identity: (u64, u64), marker: 
 ///
 /// The same sentence is asserted against a real host process in
 /// `codex_host_fatal.rs::an_existing_run_dir_is_refused`, which is a hand-built
-/// fixture and openly is one. What A11.7 asked for and what this adds is that the
-/// *collision* is real; what stands in for the text here is the refusal's complete
-/// filesystem signature — the contender published nothing, left no
-/// `<run_dir>.tmp` residue, and the winner's inode never changed.
+/// fixture and openly is one. What the run-dir claim gate needs and what this adds
+/// is that the *collision* is real; what stands in for the text here is the
+/// refusal's complete filesystem signature — the contender published nothing, left
+/// no `<run_dir>.tmp` residue, and the winner's inode never changed.
 ///
 /// **Which line of the coordinator notices.** The refusal lands within
 /// milliseconds of the pane's `execve`, inside the window in which that
@@ -2839,14 +2752,14 @@ fn assert_run_dir_untouched(winner: &LiveSandbox, identity: (u64, u64), marker: 
 ///     drops it. Arrival evidence has to come from `host_reached_gate` /
 ///     `host_identity`, which are written before the verdict and never cleared;
 ///   * `renamex_np` with `RENAME_EXCL` and a plain `rename(2)` are
-///     indistinguishable here, because A11.4 puts the marker INSIDE the directory
-///     before publishing it, so the target is never empty and a plain rename gets
-///     `ENOTEMPTY` (measured directly: onto an empty directory it succeeds and
-///     replaces, onto a non-empty one it fails). `RENAME_EXCL`'s distinguishing
-///     power is against an empty squatted name, which a collision cannot produce.
-///     What this gate does bind is the publish's EXCLUSIVITY: made non-exclusive
-///     (remove-then-rename), the late contender adopted the winner's live
-///     directory and committed `Ready` on it, and phase 6 went red.
+///     indistinguishable here, because the host puts the marker INSIDE the
+///     directory before publishing it, so the target is never empty and a plain
+///     rename gets `ENOTEMPTY` (measured directly: onto an empty directory it
+///     succeeds and replaces, onto a non-empty one it fails). `RENAME_EXCL`'s
+///     distinguishing power is against an empty squatted name, which a collision
+///     cannot produce. What this gate does bind is the publish's EXCLUSIVITY: made
+///     non-exclusive (remove-then-rename), the late contender adopted the winner's
+///     live directory and committed `Ready` on it, and section 6 went red.
 #[test]
 #[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
 fn two_real_launches_racing_for_one_derived_run_dir_leave_exactly_one_winner() {
@@ -2900,9 +2813,10 @@ fn two_real_launches_racing_for_one_derived_run_dir_leave_exactly_one_winner() {
 
     // --- 1. The name is claimed exactly once, and the marker says by whom -----
     //
-    // The marker is inside the directory before the `rename` that publishes it
-    // (A11.4), so a directory observed at the final name always has one — which is
-    // why "the dir exists" and "who owns it" are one observation here, not two.
+    // The marker is inside the directory before the `rename` that publishes it (the run
+    // dir is created atomically), so a directory observed at the final name always has
+    // one — which is why "the dir exists" and "who owns it" are one observation here,
+    // not two.
     let claimed = wait_until(Duration::from_secs(90), || marker_owner(&run_dir).is_some());
     assert!(
         claimed,
@@ -3003,13 +2917,13 @@ fn two_real_launches_racing_for_one_derived_run_dir_leave_exactly_one_winner() {
     // a record bit rather than on which sentence the host printed.
     //
     // A third launch is still worth having because it pins the publish fence
-    // DETERMINISTICALLY. Two launches SECONDS apart can derive the same name just
-    // as easily as two at once, and that one always arrives at a directory already
-    // published and serving: its staging name is free, so it stages, writes its
-    // marker, and meets the publish fence — 20/20 in the same measurement. Both
-    // fences belong to A11.7's "one derived name", and a gate that leaned on the
-    // simultaneous pair alone would leave the exclusivity of the publish — the
-    // thing `RENAME_EXCL` is there for — exercised only by chance, not on every run.
+    // DETERMINISTICALLY. Two launches SECONDS apart can derive the same name just as
+    // easily as two at once, and that one always arrives at a directory already
+    // published and serving: its staging name is free, so it stages, writes its marker,
+    // and meets the publish fence — 20/20 in the same measurement. Both fences belong
+    // to the run-dir claim gate's "one derived name", and a gate that leaned on the
+    // simultaneous pair alone would leave the exclusivity of the publish — the thing
+    // `RENAME_EXCL` is there for — exercised only by chance, not on every run.
     //
     // The `host_claimed_run_dir` assertion in `assert_refused_without_adopting` is
     // FENCE-AGNOSTIC across all of this: it asserts the host did not get past the
@@ -3053,7 +2967,7 @@ fn two_real_launches_racing_for_one_derived_run_dir_leave_exactly_one_winner() {
     let _ = winner_coord.wait();
     assert_torn_down_clean(winner, &tag);
     println!(
-        "A11.7 PASS — two real launches raced for {}; uid {} won it and uid {} was \
+        "run-dir claim gate PASS — two real launches raced for {}; uid {} won it and uid {} was \
          refused without adopting, mutating or deleting it",
         run_dir.display(),
         winner.uid,

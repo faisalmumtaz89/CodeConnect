@@ -2,14 +2,14 @@ import XCTest
 
 @testable import CodeConnect
 
-/// **K4 — the phone's greying rule, decided by the daemon's own categories.**
+/// **The phone's greying rule, decided by the daemon's own categories.**
 ///
 /// The wire carries no refusal code, so the phone reads the sentence. It used to
 /// read it by matching three English phrases, and the shared fixture proved that
-/// wrong on the day it landed: the daemon writes 20 link-state refusals today
-/// and those three clauses matched 8. Twelve sentences saying the link was
-/// coming back would have left the control live against a link that was
-/// reconnecting — with every test in the suite still green.
+/// wrong on the day it landed: the daemon wrote 18 link-state refusals and
+/// those three clauses matched 8. Ten sentences saying the link was coming back
+/// would have left the control live against a link that was reconnecting — with
+/// every test in the suite still green.
 ///
 /// `fixtures/codex/refusal-sentences.json` is emitted by `ccd` from the one
 /// place each sentence is written, and `ccd`'s own gate test keeps it
@@ -98,8 +98,8 @@ final class CodexRefusalClassifierTests: XCTestCase {
     /// test can go stale, and a fixture whose `counts` block disagrees with its
     /// own `sentences` array (a hand-edited copy, a truncated write) fails
     /// before any classification is asserted. Today that is
-    /// `link_state: 20, permanent: 43, transient_local: 5, wire_code: 2,
-    /// total: 70`; tomorrow it is whatever the daemon emits.
+    /// `link_state: 19, permanent: 43, transient_local: 5, wire_code: 2,
+    /// total: 69`; tomorrow it is whatever the daemon emits.
     func testTheFilesOwnCountsMatchItsOwnRows() throws {
         let wire = try Self.repoFixture()
         var tally: [String: Int] = ["total": wire.sentences.count]
@@ -189,7 +189,7 @@ final class CodexRefusalClassifierTests: XCTestCase {
                     + "was sent; stop the turn at the Mac — but that was yesterday"))
     }
 
-    /// **G7 — a template that ends in literal text must end the sentence.**
+    /// **A template that ends in literal text must end the sentence.**
     ///
     /// Matching was "these literal segments appear in this order", start-
     /// anchored when the template opens with a literal. Nothing held the tail:

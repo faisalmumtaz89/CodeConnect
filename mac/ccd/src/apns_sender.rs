@@ -1129,8 +1129,8 @@ mod tests {
         vec![
             // The legacy shape: advertised nothing at all, which is the Claude
             // floor. It is what a widened Codex filter would sweep in, and what a
-            // narrowed Claude filter would drop — and in this phase, where nothing
-            // writes the column, it is the shape every real phone has.
+            // narrowed Claude filter would drop — and today, when nothing in
+            // production writes the column, it is the shape every real phone has.
             target("claude-floor-phone"),
             advertising("claude-only-phone", vec![CLAUDE]),
             advertising("codex-only-phone", vec![codex.clone()]),
@@ -1988,11 +1988,11 @@ mod tests {
     /// **And the same seam in the direction that carries the traffic: a Claude
     /// doorbell reaches the ordinary fleet.**
     ///
-    /// Round-8 found the test above is one-sided, and a one-sided test of a filter
-    /// masks the failure that costs more. Hard-code `&AgentKind::Codex` in place of
+    /// The test above alone is one-sided, and a one-sided test of a filter masks
+    /// the failure that costs more. Hard-code `&AgentKind::Codex` in place of
     /// `&hint.agent` at this sender's call to [`recipients`] and that test passes
     /// unchanged — while every ordinary Claude push is authorized to Codex-capable
-    /// phones only. Nothing writes the features column in this phase, so every real
+    /// phones only. Nothing in production writes the features column, so every real
     /// row is the `NULL` Claude floor: the whole fleet stops ringing, silently,
     /// because a suppression produces no error anywhere — it produces a phone that
     /// does not buzz, which nothing but an assertion about *inclusion* can see.

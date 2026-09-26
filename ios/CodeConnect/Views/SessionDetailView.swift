@@ -698,7 +698,7 @@ struct SessionDetailView: View {
     ///
     /// **Short, and only during the cooldown** — the same rule the fleet row
     /// follows, and for the same two reasons. Not the link state: the summary
-    /// cannot tell a subscribed link from a reconnecting one (A29a), so Stop is
+    /// cannot tell a subscribed link from a reconnecting one, so Stop is
     /// offered and the daemon's refusal is what the operator reads. And not the
     /// daemon's sentence: the composer's own standing note is already printing
     /// it verbatim, and handing it to the button as well prints the same refusal

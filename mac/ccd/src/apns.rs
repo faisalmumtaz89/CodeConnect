@@ -101,8 +101,8 @@ impl PushHint {
             // they have no way to open to phones that cannot see it, and skipping
             // the phones that can answer it.
             //
-            // So all four fields describe one subject — and as of Phase 3 that
-            // subject is **always the ringing run's own agent**.
+            // So all four fields describe one subject — and that subject is
+            // **always the ringing run's own agent**.
             //
             // **What this line used to do, and why it stopped.** It re-described
             // the doorbell as Claude's whenever any card was open, because the
@@ -590,9 +590,10 @@ mod tests {
     /// `agent` is not copy — it is the authorization subject the fan-out narrows
     /// on — so it has to agree with the sentence. It used to be forced to Claude
     /// whenever a card was open, because the decision deck could only be
-    /// Claude's: no Codex card could be raised. Phase 3 raises them, and that
-    /// hardcode would now do the very thing it was written to prevent, pointing
-    /// the other way — a Codex turn ringing while a Codex card waits, described
+    /// Claude's: no Codex card could be raised. The Codex approval observer
+    /// raises them now, and that hardcode would now do the very thing it was
+    /// written to prevent, pointing the other way — a Codex turn ringing while
+    /// a Codex card waits, described
     /// and authorized as Claude, offered to phones that cannot open it and
     /// withheld from the ones that can.
     ///
@@ -601,8 +602,8 @@ mod tests {
     /// only runs of that same agent, so the deck can never be somebody else's.
     ///
     /// **Mutation:** restore `if blocked > 0 { Claude }` and the Codex arms
-    /// below go red at one card and at several — the two legs round-9 F5 found
-    /// were separately reachable.
+    /// below go red at one card and at several — two legs that are separately
+    /// reachable.
     #[test]
     fn a_doorbell_is_authorized_as_the_agent_that_rang() {
         let codex = protocol::agent::AgentKind::Codex;
@@ -624,7 +625,7 @@ mod tests {
         );
 
         // The several-card leg, which is a different arm of the same expression
-        // (round-9 F5) and was separately reachable under the old hardcode.
+        // and was separately reachable under the old hardcode.
         let deck = rang.describing(2, None);
         assert_eq!(deck.kind, PushKind::Approval);
         assert_eq!(
@@ -651,10 +652,10 @@ mod tests {
     ///
     /// The re-description only ever moves the subject *towards* Claude, so the test
     /// above — which asks a Codex hint what it becomes — cannot see the unblocked
-    /// arm return a constant. Round-8 found that gap by mutation: hard-code
+    /// arm return a constant. Mutation shows the gap: hard-code
     /// `AgentKind::Codex` in that arm and every test above stays green while every
     /// ordinary Claude doorbell in the build is authorized to Codex-capable phones
-    /// only. Nothing writes the features column in this phase, so every row is the
+    /// only. Nothing in production writes the features column, so every row is the
     /// `NULL` Claude floor — a Codex subject is refused for all of them in
     /// [`crate::push_queue::recipients`] and the whole fleet goes quiet, which is
     /// the failure no assertion about `kind` or `alert` can reach: those three
@@ -678,7 +679,7 @@ mod tests {
                 protocol::agent::AgentKind::Claude,
                 "{rang:?}: with no decision waiting the run that rang is the subject, and \
                  a Claude run's doorbell must stay authorized to the phones that can open \
-                 one — which, in this phase, is every phone there is"
+                 one — which, today, is every phone there is"
             );
         }
     }

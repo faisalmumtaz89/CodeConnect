@@ -302,10 +302,6 @@ pub(crate) const COMPOSE_START_IN_FLIGHT: &str =
     "the first turn on this Codex thread was just started from a phone and this Mac \
     has not caught up with it yet, so nothing was said; try again shortly";
 
-pub(crate) const COMPOSE_LAUNCH_UNREAD: &str =
-    "this Mac has not yet read what this Codex thread runs under, so it \
-    cannot start a turn on it; try again shortly, or say it at the Mac";
-
 pub(crate) const INTERRUPT_ID_REUSED_ON_LINK: &str =
     "this request id has already been used for a different stop on this \
     run, so nothing was sent; ask again under a new one";
@@ -815,13 +811,6 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "rejected",
             "link_state",
             COMPOSE_THREAD_SWITCHING.to_string(),
-        ),
-        row(
-            "compose_launch_unread",
-            "compose",
-            "rejected",
-            "link_state",
-            COMPOSE_LAUNCH_UNREAD.to_string(),
         ),
         row(
             "interrupt_id_reused_on_link",

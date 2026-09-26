@@ -605,7 +605,7 @@ enum Fixtures {
 ///     the operator's default was quota-refused;
 ///   * the file-change diffs are the captured ones, `/work/hello.txt` included.
 ///
-/// `changes_omitted` is the one shape with **no capture** (contract §4.6): the
+/// `changes_omitted` is the one shape with **no capture**: the
 /// daemon emits it only past 32 files and the corpus never crossed that line. It
 /// is constructed from the daemon's source and labelled as constructed wherever
 /// it is rendered, so nobody mistakes it for a measurement.
@@ -702,7 +702,8 @@ enum CodexFixtures {
         /// **The refusal after the fact.** The summary said `subscribed`, so the
         /// send path let it go, and the Mac answered that its link to Codex had
         /// gone down in between — which is the only way that sentence can ever
-        /// reach a phone, and what D7 greys the control for ten seconds about.
+        /// reach a phone, and is the link-state refusal that greys the control for
+        /// ten seconds.
         case stopRefusedLate = "stop-refused-late"
         case stopIndeterminate = "stop-indeterminate"
         // Compose (C-series)
@@ -780,8 +781,8 @@ enum CodexFixtures {
 
         /// **Whether the card, when it was raised, had a turn.**
         ///
-        /// D2 puts the approval's own turn on its envelope, and that is a fact
-        /// about the moment the question was asked — not about the state the
+        /// Minor 19 puts the approval's own turn on its envelope, and that is a
+        /// fact about the moment the question was asked — not about the state the
         /// render ends in, and not about what later retired it. It was
         /// `stagesACard || resolutionRetiresTheTurn`, which left answered,
         /// timed-out, unknown-write and `item_completed` cards with no
@@ -988,7 +989,7 @@ enum CodexFixtures {
                 ))
         }
         if let card = cardJSON(state) {
-            // **D2: the card carries its own turn on the envelope.** Minor 19
+            // **The card carries its own turn on the envelope.** Minor 19
             // added it, so Stop on a card needs no inference at all — the
             // derivation from preceding item events stays as the fallback for
             // cards raised by a daemon that predates the field.
@@ -1031,7 +1032,7 @@ enum CodexFixtures {
         if state.stagesACompose {
             // **No turn on the envelope.** These are the exchange the compose
             // produced, and the phone learns which turn it landed in from the
-            // `ComposeResult` itself — that is the whole point of F6. Putting
+            // `ComposeResult` itself — that is what it is for. Putting
             // the turn here too would preload the fact the mutation is supposed
             // to deliver, and for `started` it would contradict the arm being
             // staged: `started` means Codex was idle when the words arrived.
@@ -1091,8 +1092,9 @@ enum CodexFixtures {
 
         // **Two options is a real shape**: the daemon withholds the amendment
         // entirely when its argv contains a line break rather than shortening a
-        // label it cannot shorten honestly. This is the card that was
-        // unanswerable before this phase.
+        // label it cannot shorten honestly. This card must stay answerable:
+        // Claude's `> 2` rule would suppress its option list and leave only
+        // Allow and Deny, the two decisions a Codex card refuses.
         //
         // `card-read-only` is deliberately the SAME bytes on an older daemon:
         // the only difference between the two renders is the read-only

@@ -9,6 +9,8 @@
 //! that installs the hooks, the environment fixes that keep transcripts alive,
 //! and a detached supervisor that connects out to `ccd`.
 
+mod attach;
+mod caller_env;
 mod codex;
 mod codex_coordinator;
 mod codex_custodian;
@@ -37,6 +39,16 @@ use anyhow::{bail, Context, Result};
 use protocol::config::Config;
 
 fn main() -> Result<()> {
+    // Hidden: the pane-command prefix that gives an agent the caller's
+    // environment. Dispatched before the UTF-8 argument read below, because the
+    // pane command it execs carries the caller's raw bytes. Machinery.
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if raw
+        .first()
+        .is_some_and(|command| command == caller_env::SUBCOMMAND)
+    {
+        return caller_env::run(&raw[1..]);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = args
         .split_first()
@@ -66,11 +78,11 @@ fn main() -> Result<()> {
         "daemon" => launchd::command(rest),
         // Hidden: spawned by `codeconnect claude`, never typed by a human.
         "supervise" => supervise(rest),
-        // Hidden: the D6 inert exec gate. Spawned by a launch actor to bring a
+        // Hidden: the inert exec gate. Spawned by a launch actor to bring a
         // child up inertly; it either execs its target on GO or _exits without
         // ever touching it. Machinery, never typed by a human.
         "internal-exec-gate" => exec_gate::run_gate(rest),
-        // Hidden: a test-only gated target that fires the D6 readiness fence and
+        // Hidden: a test-only gated target that fires the readiness fence and
         // touches a marker, so the exec-gate tests can fence `execve` on a real
         // target-side effect. Machinery, never typed by a human.
         "internal-gate-ack-probe" => exec_gate::run_ack_probe(rest),
@@ -82,24 +94,24 @@ fn main() -> Result<()> {
         // lock, so a test can prove a second PROCESS is excluded from it. Carries its
         // own deadline. Machinery, never typed by a human.
         "internal-freeze-lock-hold" => codex::run_freeze_lock_hold(rest),
-        // Hidden: the D7 launch coordinator (the supervisor in launch mode).
+        // Hidden: the launch coordinator (the supervisor in launch mode).
         // Spawned by the `codex` launcher before tmux exists; it owns the launch
         // record and every forward mutation, and stays on as the session's
         // supervisor once it commits `ready`. Machinery.
         "internal-codex-coordinator" => codex_coordinator::run_coordinator(rest),
-        // Hidden: the D7 launch custodian. Armed before `tmux new-session` with
+        // Hidden: the launch custodian. Armed before `tmux new-session` with
         // independent cleanup authority. Machinery.
         "internal-codex-custodian" => codex_custodian::run_custodian(rest),
-        // Hidden: one bounded D7 recovery sweep (stale pendings → failed;
+        // Hidden: one bounded launch recovery sweep (stale pendings → failed;
         // failed+incomplete+dead-custodian → replacement custodian). Machinery.
         c if c == protocol::CODEX_SWEEP_SUBCOMMAND => codex_custodian::run_sweep(rest),
-        // Hidden: the D7 late-host preflight gate — validate the launch record +
+        // Hidden: the late-host preflight gate — validate the launch record +
         // take a lease, or cleanup-only refuse. Machinery.
         "internal-codex-host-preflight" => codex_custodian::run_host_preflight(rest),
-        // Hidden: the Codex session host (Phase 2e). Runs inside a tmux pane;
+        // Hidden: the Codex session host. Runs inside a tmux pane;
         // launches the app-server, serves the broker in front of it, and spawns
         // the interactive TUI against the broker. Machinery, never typed by a
-        // human — the coordinator spawns it (2e-2b).
+        // human — the coordinator spawns it.
         "internal-codex-host" => codex_host::run_host(rest),
         // Hidden: the detached update checker `codeconnect claude` spawns.
         // Not in --help on purpose — it is machinery, not a command.
@@ -391,6 +403,8 @@ struct AgentLaunchPlan {
     /// argv[0] is the binary; the rest is agent flags plus the caller's passthrough.
     argv: Vec<String>,
     env: Vec<(String, String)>,
+    /// The session's private directory, where the settings document lives.
+    session_dir: PathBuf,
 }
 
 /// The exact argv and env a Claude session runs — a **pure** function, so the
@@ -416,8 +430,8 @@ fn claude_argv_and_env(
     //   * CODECONNECT_SESSION / _UID — a fallback identity for hooks; the
     //     generated settings also pass both explicitly.
     // CLAUDE_CODE_CHILD_SESSION is unset inside the session by the `sh -c`
-    // wrapper in tmux::new_session, because the tmux *server* may have inherited
-    // it before we ever ran.
+    // wrapper in tmux::new_session, because the pane carries the caller's
+    // environment, which may hold it.
     let env = vec![
         (
             "CLAUDE_CODE_FORCE_SESSION_PERSIST".to_string(),
@@ -446,10 +460,16 @@ fn plan_claude_launch(
     let settings = settings::write_for_session(session_id, session_uid, config)?;
     let (argv, env) =
         claude_argv_and_env(binary, &settings.path, session_id, session_uid, passthrough);
+    let session_dir = settings
+        .path
+        .parent()
+        .context("the settings document has a directory")?
+        .to_path_buf();
     Ok(AgentLaunchPlan {
         binary: binary.to_path_buf(),
         argv,
         env,
+        session_dir,
     })
 }
 
@@ -498,6 +518,7 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
         &cwd,
         &plan.env,
         &plan.argv,
+        &plan.session_dir,
         tmux::terminal_size(),
         config.tmux_status,
         config.tmux_history_limit,
@@ -506,7 +527,7 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
 
     spawn_supervisor(&session_id, &session_uid, &cwd, &plan.binary)?;
 
-    // After the session and supervisor exist, before the alternate screen:
+    // After the session and supervisor exist, before the attach:
     // the hold below delays only the *display*, never the session it is
     // promising is unaffected — Claude is already running while this is
     // read. One hold however many notes apply; reachability first, because
@@ -535,10 +556,9 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
                 std::io::stdin().is_terminal(),
                 std::env::var("TERM").ok().as_deref(),
             ) {
-                let skip = update_check::spawn_line_listener(std::io::stdin());
                 update_check::hold_for_reading(
                     std::time::Duration::from_secs(10),
-                    &skip,
+                    |wait| update_check::returned_within(libc::STDIN_FILENO, wait),
                     &mut std::io::stderr(),
                     std::time::Instant::now,
                 );
@@ -552,18 +572,11 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
         update_check::spawn_checker_if_due();
     }
 
-    // **Nothing is printed here.**
-    //
-    // This line used to name the session and how to detach, and no reader ever saw
-    // it: the tmux client takes the terminal's alternate screen microseconds later
-    // and the banner is erased with everything else on the tab. Verified by
-    // capturing the host pane, which starts at Claude's first frame.
-    //
-    // Even if it survived, it would be product output on a command whose whole
-    // promise is that the session is unchanged. `codeconnect --help` carries
-    // `attach`, which is where a durable answer belongs.
-    tmux::exec_attach(&session_id)?;
-    unreachable!("exec replaces the process")
+    // **Nothing is printed here.** Anything printed would be product output on a
+    // command whose whole promise is that the session is unchanged.
+    // `codeconnect --help` carries `attach`, which is where a durable answer
+    // belongs.
+    tmux::attach(&session_id)
 }
 
 /// The "your phone cannot reach this Mac" note, or `None` while it can —
@@ -589,9 +602,8 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
 ///
 /// The session itself is untouched: it is already running when this prints,
 /// everything is recorded, and the hold delays only the attach. A warning
-/// with no pause is a warning nobody has ever seen — the tmux client erases
-/// the terminal microseconds after `exec_attach` (measured; see the note
-/// there).
+/// with no pause is a warning nobody has ever seen — the attach paints the
+/// session over the terminal's rows microseconds later.
 fn phone_unreachable_note(style: update_check::Style) -> Option<String> {
     // No daemon, no claim: a daemon that is not running is a different
     // conversation, and its absence already has its own surfaces. The
@@ -828,8 +840,8 @@ fn asciify(text: &str) -> String {
 /// Launch the supervisor so it outlives this process *and* the terminal tab.
 ///
 /// `process_group(0)` puts it in its own process group, so the SIGHUP/SIGINT
-/// that reach the tab's foreground group never reach it. When `codeconnect` execs into
-/// the tmux client and that client later dies, the supervisor is reparented to
+/// that reach the tab's foreground group never reach it. When `codeconnect` attaches
+/// the terminal and that client later dies, the supervisor is reparented to
 /// launchd and keeps running. This is the standard daemonisation shape, and it
 /// is reachable from safe Rust.
 fn spawn_supervisor(
@@ -936,8 +948,7 @@ fn attach(args: &[String]) -> Result<()> {
     if !tmux::has_session(name)? {
         bail!("no session named {name}; `codeconnect ls` shows what is running");
     }
-    tmux::exec_attach(name)?;
-    unreachable!("exec replaces the process")
+    tmux::attach(name)
 }
 
 fn list() -> Result<()> {

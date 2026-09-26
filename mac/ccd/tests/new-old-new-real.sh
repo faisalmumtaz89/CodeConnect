@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real new -> old -> new rollback gate for the agent seam (Phase 1).
+# Real new -> old -> new rollback gate for the agent seam.
 #
 # Builds the ACTUAL previous-release ccd from a git worktree and drives a real
 # rollback with both binaries: the new binary migrates a DB (adding the additive
@@ -8,14 +8,13 @@
 # the new binary reopens and confirms no data loss and that the old write left
 # the agent-seam columns intact.
 #
-# WHAT THIS PROVES. Two things, and the second one is the Phase-2 pre-exposure
-# gate A5 always pointed at:
+# WHAT THIS PROVES. Two things:
 #
 #   * **Additive-column round-trip.** The seam columns the new binary writes
 #     (`sessions.agent`, `codex_thread_id`, `codex_socket`, `codex_generation`;
 #     `devices.features`, `features_epoch`) come back byte-for-byte through the
 #     real old daemon's own write, because it names none of them.
-#     `codex_generation` is the A5.1 durable high-water — the number a Codex
+#     `codex_generation` is the durable generation high-water — the number a Codex
 #     registration is refused against — so its round-trip is not just data
 #     preservation: a blanked value would let a stale supervisor re-adopt a
 #     session at any generation on the way back up.
@@ -101,14 +100,14 @@ NEW="$TARGET_DIR/debug/ccd"
 NEWCC="$TARGET_DIR/debug/codeconnect"
 WT="$(mktemp -d)/cc-old"
 H="$(mktemp -d)"
-# The Codex run used by phase 3b. A ULID ending CX so it is obvious in a log.
+# The Codex run seeded below. A ULID ending CX so it is obvious in a log.
 CX=01K1B3XQ8ZC0DE5FGH7JKMNPCX
 # Its thread id, in a variable for the same reason the uid is: the seed below
 # and the non-enumeration regexes must be the SAME literal. Hardcoding it twice
 # lets the seed change while the regex goes on searching for a string nothing
 # ever writes — a check that can no longer fail.
 CX_THREAD=th_ABC123
-# The Codex approval identity a real card carries (chunk 3a). `CX_REQ` is a real
+# The Codex approval identity a real card carries. `CX_REQ` is a real
 # `protocol::composite_id` value — the opaque id the phone would answer by — and
 # is what the non-enumeration greps look for, because a short fake would match
 # nothing and prove nothing.
@@ -153,7 +152,7 @@ cleanup() {
   # started it, and whatever else shares that group. An unset variable here
   # means the process was never started, so there is nothing to kill.
   local pid
-  # `NEWPID` included (round-2 F8): a failure after step 7(g) spawns the sandbox
+  # `NEWPID` included: a failure after step 7(g) spawns the sandbox
   # daemon and before its explicit kill would otherwise leak it, and it is the one
   # child here holding the home directory this script removes.
   for pid in "${SUPPID:-}" "${SUPXPID:-}" "${OLDPID:-}" "${NEWPID:-}"; do
@@ -279,7 +278,7 @@ OLD_UV=""
 # The authoritative list of columns the agent-seam migration adds
 # (store.rs COLUMN_ADDITIONS / create_schema): every one must round-trip.
 #
-# `codex_generation` is the A5.1 durable high-water and joins this list for a
+# `codex_generation` is the durable generation high-water and joins this list for a
 # reason the other three do not have. The other three are identity a rollback
 # merely has to leave alone; this one is the number a Codex registration is
 # REFUSED against (`Daemon::register_supervisor`). If a trip through the old
@@ -310,13 +309,12 @@ session_seam() {
 }
 # The DEVICE seam columns, pipe-joined. They round-trip byte-for-byte through
 # BOTH binaries: the old one because it does not know the columns, the new one
-# because **nothing in this phase writes them at all**. This harness was written
-# in Phase 1, when a startup *fail-closed invalidation* cleared a set not stamped
-# by the current run, and it asserted that clearing; Phase 2e-5 deleted the whole
-# device-feature write side — machinery for an input no shipping client can send
-# — so `Store::set_device_features` is `allow(dead_code)` outside tests and no
-# production path can clear anything. Asserting the clearing outlived the code
-# that did it, and this harness has been failing on that line since.
+# because **nothing in production writes them at all**. There is no device-feature
+# write side — it would be machinery for an input no shipping client can send —
+# so `Store::set_device_features` is `allow(dead_code)` outside tests and no
+# production path can clear anything, including a startup *fail-closed
+# invalidation* of a set not stamped by the current run. There is no clearing
+# to assert.
 #
 # The fail-closed property did not go away, it moved to the READ: a set stamped
 # with another run's epoch decodes as `DeviceFeatures::Unconfirmable` and
@@ -369,7 +367,7 @@ q "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cw
    VALUES('$CX','cx-1','cx-1','codeconnect','/work/codex',NULL,NULL,'live','t','t','codex','$CX_THREAD','/tmp/cch.x/ccd.sock',7);
    INSERT INTO events(session_uid,session_id,seq,ts,kind,payload,source,source_event_id)
    VALUES('$CX','cx-1',1,'t','tool_call','{}','hook','x1'),('$CX','cx-1',2,'t','tool_call','{}','hook','x2');"
-# **And an OPEN APPROVAL CARD for that run** (chunk 3a). This is the row the
+# **And an OPEN APPROVAL CARD for that run.** This is the row the
 # approval observer now produces, and it is the second half of the same
 # rollback question the `codex_sessions` seed asks. `pending_approvals` is one
 # of the four tables v0.6.0 reads GLOBALLY — its recovery does not walk a
@@ -389,8 +387,8 @@ q "INSERT INTO codex_pending_approvals(session_uid,session_id,request_id,card,ge
 [ "$(q "SELECT COUNT(*) FROM all_pending_approvals WHERE session_uid='$CX';")" = "1" ] \
   || { echo "FAIL: all_pending_approvals does not see the scoped card"; exit 1; }
 
-# The ANSWER to that card, in the generalized Codex mutation ledger Phase 1
-# built for exactly this ("answer, compose, interrupt"). `answers` and
+# The ANSWER to that card, in the generalized Codex mutation ledger built for
+# exactly this ("answer, compose, interrupt"). `answers` and
 # `answer_claims` are two more of the four tables v0.6.0 reads globally — its
 # recovery sweeps `answer_claims` into `answers` without walking a session row —
 # so a Codex claim in either is a row the old daemon would settle as its own, for
@@ -495,7 +493,7 @@ assert_uv 5 "after new reopen"
   || { echo "FAIL: a Codex row is in the shared sessions table"; exit 1; }
 # Session seam columns still round-trip byte-for-byte.
 [ "$(session_seam)" = "$SESSION_SEAM_EXPECT" ] || { echo "FAIL: a session seam column did not survive the round-trip: $(session_seam)"; exit 1; }
-# And so do the device seam columns: nothing in this phase writes them, and the
+# And so do the device seam columns: nothing in production writes them, and the
 # foreign-epoch stamp is what makes the surviving set authorize nothing.
 [ "$(device_seam)" = "$DEVICE_SEAM_SEEDED" ] || { echo "FAIL: a device seam column did not survive the round-trip: $(device_seam)"; exit 1; }
 echo "  after new reopen: session seam intact=$(session_seam); device seam intact=$(device_seam) (foreign epoch ⇒ Unconfirmable ⇒ authorizes nothing)"
@@ -975,8 +973,8 @@ echo "  (d) the new binary reopened with nothing to repair and put no Codex uid 
 # **Why this half is still a hand-written frame, and what changed under it.**
 # The reason used to be that nothing that ships could send a Codex `Register` at
 # all: `registration_frame` wrote `agent: AgentKind::Claude` as a literal. That
-# is no longer true — 2e-7b built the producer, and `registration_frame` now
-# reads the agent off a Codex seat. What is deliberately still absent is an
+# is no longer true — `registration_frame` now reads the agent off a Codex
+# seat. What is deliberately still absent is an
 # *argv* path to it: the producer is the Codex coordinator, which supervises its
 # own launch in-process and hands the seat across as values, so there is no
 # `--agent` flag on `codeconnect supervise` for a harness to reach for. Reaching
@@ -1227,31 +1225,17 @@ echo "      connection at a time through the whole reconnect backoff, and none l
 # show, and no error anywhere.
 #
 # **Why a stub codex, and what it does not stand in for.** The launcher resolves
-# and version-pins its binary before it asks the daemon anything, so reaching the
+# its binary and reads its version before it asks the daemon anything, so reaching the
 # preflight at all needs *a* codex on the path — and a native one: a `#!` script
 # is refused as a wrapper by design. It stands in for the binary, never for the
 # daemon: both daemons below are real, and the answers they give are their own.
 # `cc` is present by construction — cargo linked the binaries this harness is
 # running a few hundred lines above.
 #
-# **The stub replays a real codex's answers, and it has to.** It used to be four
-# lines that printed a version string, which was everything the launcher asked
-# before it asked the daemon. That stopped being true when the launch grew its
-# guarded-surface gate: the launcher now also reads the binary's root command
-# surface, BOTH app-server schema bundles, and the effective value of the one
-# feature the launch pins off, and projects the first three onto the surface
-# CodeConnect is grounded against. Those answers cannot be invented and cannot be
-# lifted from `schema-0.153/guarded-wire-*.json` either — the vendored files are
-# the gate's own PROJECTION of a bundle, not a bundle, so nothing can hand them
-# back to it. With a version-only stub the arm died reading a `ClientRequest.json`
-# nobody had written, hundreds of lines before the refusal it exists to assert.
-#
-# So the answers are recorded once, here, from the installed codex — five local
-# invocations that print or write files and start nothing (`--version`,
-# `completion bash`, `features list`, and both `generate-json-schema` bundles);
-# none of them opens a network connection or spends account quota — and the stub
-# hands them back. That makes it a more faithful prop than the hand-written one
-# ever was: what the gate reads is what a real codex says. It is still not a codex.
+# **The stub replays a real codex's answer.** The launcher asks the binary one
+# thing before it asks the daemon — `codex --version` — so the answer is recorded
+# once, here, from the installed codex (a local invocation that starts nothing and
+# spends no account quota), and the stub hands it back. It is still not a codex.
 # It cannot serve `app-server`, which is exactly why the falsifiability arm below
 # gets a launch that fails fast instead of a session.
 #
@@ -1260,20 +1244,16 @@ echo "      connection at a time through the whole reconnect backoff, and none l
 # store and the wire, and requiring codex for all of them made a machine without one
 # unable to run any of the gate.
 command -v codex >/dev/null 2>&1 \
-  || { echo "FAIL: step 7(g) needs \`codex\` on PATH to record the answers its stub replays, and it is not there."; exit 1; }
+  || { echo "FAIL: step 7(g) needs \`codex\` on PATH to record the answer its stub replays, and it is not there."; exit 1; }
 STUB="$H/stub"
 ANS="$H/stub-answers"
 mkdir -p "$STUB" "$ANS"
 codex --version > "$ANS/version.txt" 2>"$H/stub-answers.log" \
-  && codex completion bash > "$ANS/completion.bash" 2>>"$H/stub-answers.log" \
-  && codex features list -c features.request_permissions_tool=false > "$ANS/features.txt" 2>>"$H/stub-answers.log" \
-  && codex app-server generate-json-schema --out "$ANS/stable" 2>>"$H/stub-answers.log" \
-  && codex app-server generate-json-schema --out "$ANS/experimental" --experimental 2>>"$H/stub-answers.log" \
-  || { echo "FAIL: could not record the installed codex's answers, so the preflight arm cannot run"; cat "$H/stub-answers.log"; exit 1; }
-# The answers directory is baked in at compile time rather than read from the
+  || { echo "FAIL: could not record the installed codex's answer, so the preflight arm cannot run"; cat "$H/stub-answers.log"; exit 1; }
+# The answer's directory is baked in at compile time rather than read from the
 # environment: the launcher spawns this binary with an environment of its own
 # choosing, and a prop that depended on a variable the launcher does not set would
-# fail in a way that looks like the gate refusing it.
+# fail in a way that looks like the launcher refusing it.
 cat > "$STUB/codex.c" <<'STUBC'
 #include <string.h>
 #include <stdio.h>
@@ -1301,25 +1281,6 @@ static int replay(const char *name) {
 
 int main(int argc, char **argv) {
   if (argc >= 2 && strcmp(argv[1], "--version") == 0) return replay("version.txt");
-  if (argc >= 2 && strcmp(argv[1], "completion") == 0) return replay("completion.bash");
-  if (argc >= 3 && strcmp(argv[1], "features") == 0 && strcmp(argv[2], "list") == 0)
-    return replay("features.txt");
-  if (argc >= 3 && strcmp(argv[1], "app-server") == 0
-      && strcmp(argv[2], "generate-json-schema") == 0) {
-    const char *out = 0;
-    const char *which = "stable";
-    for (int i = 3; i < argc; i++) {
-      if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) out = argv[++i];
-      else if (strcmp(argv[i], "--experimental") == 0) which = "experimental";
-    }
-    if (!out) return 1;
-    char src[4096];
-    snprintf(src, sizeof src, "%s/%s/.", ANSWERS, which);
-    char *mk[] = { (char *)"/bin/mkdir", (char *)"-p", (char *)out, 0 };
-    if (run(mk) != 0) return 1;
-    char *cp[] = { (char *)"/bin/cp", (char *)"-R", src, (char *)out, 0 };
-    return run(cp);
-  }
   /* Everything else — `app-server --listen` above all — succeeds at nothing and
      exits, which is what makes the launch below fail fast and honestly. */
   return 0;
@@ -1329,10 +1290,8 @@ cc -DANSWERS="\"$ANS\"" -o "$STUB/codex" "$STUB/codex.c" 2>"$H/stub-cc.log" \
   || { echo "FAIL: could not build the stub codex, so the preflight arm cannot run"; cat "$H/stub-cc.log"; exit 1; }
 # **The recording has to still describe the installed codex.** A package update that
 # lands between the recording above and the arm below would leave the stub replaying
-# one build's answers while the guarded-surface gate is grounded against another —
-# and the arm would fail on a mismatch that is nothing to do with what it tests,
-# reported as a rollback regression. Asked of the cheapest answer that changes when
-# the install does.
+# a build that is no longer there. Asked of the answer that changes when the install
+# does.
 [ "$(codex --version 2>/dev/null)" = "$(cat "$ANS/version.txt")" ] \
   || { echo "FAIL: the installed codex changed after its answers were recorded, so the step 7(g) stub replays a build that is no longer there. Re-run the harness."; \
        echo "      recorded: $(cat "$ANS/version.txt")"; echo "      installed: $(codex --version 2>/dev/null)"; exit 1; }
@@ -1357,11 +1316,9 @@ CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" \
   "$NEWCC" codex > "$H/preflight-old.log" 2>&1 || PRE_RC=$?
 [ "$PRE_RC" -ne 0 ] \
   || { echo "FAIL: the launcher started a Codex session against a daemon that cannot host one"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
-# **Discriminating, because "refusing to launch" no longer is.** The launcher has a
-# second producer of that prefix upstream of this preflight — the effective-config
-# postcheck for the feature it pins off — so a refusal for an operator's `config.toml`
-# would satisfy a bare grep for it and be reported as the daemon-support refusal this
-# arm exists to prove. The tail below belongs to the daemon-support refusal alone.
+# **Discriminating, because "refusing to launch" is only a prefix.** The tail below
+# belongs to the daemon-support refusal alone, so a refusal for any other reason
+# cannot be reported as the one this arm exists to prove.
 grep -q "this daemon could never be told about it" "$H/preflight-old.log" \
   || { echo "FAIL: the launcher refused, but not with the daemon-support preflight's refusal — this arm proves nothing about the daemon:"; cat "$H/preflight-old.log"; kill $OLDPID 2>/dev/null; exit 1; }
 grep -q "predates the agent seam" "$H/preflight-old.log" \
@@ -1380,7 +1337,7 @@ grep -q "predates the agent seam" "$H/preflight-old.log" \
 # its absence is the evidence: a preflight that ran too late would leave one behind
 # for a session this daemon can never be told about.
 #
-# **Round-4 finding 3: what this does NOT prove.** An absent record says no launch
+# **What this does NOT prove.** An absent record says no launch
 # was recorded. It does not say no uid was minted and no `cc-N` was taken — those
 # happen inside `codex::launch`, leave nothing on disk of their own, and a mutation
 # moving either in front of `refuse_unless_hostable` would still pass this arm. That
@@ -1398,11 +1355,10 @@ kill $OLDPID 2>/dev/null; wait $OLDPID 2>/dev/null
 # WHICH DAEMON IS LISTENING, and it must get further: past the preflight, into the
 # launch itself. Same binary, same stub, same home; a different answer on the wire.
 #
-# **Ungate (2e-7d): what "further" means here changed, and so did the isolation.**
-# This arm used to assert the gate's own "not yet enabled" line, which was a
-# dependency on the refusal existing; the refusal is gone, so the marker is now the
+# **What "further" means here, and the isolation it needs.** The marker is the
 # first durable artifact of a real launch — a launch record the launcher spawned a
-# coordinator to write and then waited on. `TMUX_TMPDIR` is set for the same reason:
+# coordinator to write and then waited on — not any refusal line, so the arm does
+# not depend on a refusal existing. `TMUX_TMPDIR` is set for the same reason:
 # a live launcher takes a `cc-N` name and creates a tmux session, and it must take
 # them on this arm's own throwaway server rather than on the operator's fleet.
 GTMUX="$H/tmux-g"
@@ -1420,10 +1376,10 @@ kill -0 $NEWPID 2>/dev/null || { echo "FAIL: the new daemon did not come up for 
 # same line. That would make this arm's whole claim ("a different answer on the
 # wire") true of no answer at all.
 #
-# Round-2 F5: asking on a SECOND connection of the harness's own did not fix that.
-# The probe's `supported:true` came back on a different round trip, so killing or
-# wedging the daemon between the probe and the launcher left this arm passing on
-# an answer the launcher never received. The observation has to be of the
+# Asking on a SECOND connection of the harness's own does not fix that. The
+# probe's `supported:true` comes back on a different round trip, so killing or
+# wedging the daemon between the probe and the launcher would leave this arm passing
+# on an answer the launcher never received. The observation has to be of the
 # launcher's own negotiation, and the only party that sees that is the daemon.
 #
 # So the harness asks NOTHING here, and afterwards reads what the daemon logged.
@@ -1433,8 +1389,8 @@ kill -0 $NEWPID 2>/dev/null || { echo "FAIL: the new daemon did not come up for 
 CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" TMUX_TMPDIR="$GTMUX" \
   timeout 150 "$NEWCC" codex > "$H/preflight-new.log" 2>&1 || true
 # The daemon writes its line once the answer is ON the connection's write queue
-# (round-3 F6: written before the enqueue and with the result discarded, this line
-# was an affirmative that a DROPPED answer could still produce). The enqueue and the
+# (written before the enqueue and with the result discarded, this line would be
+# an affirmative that a DROPPED answer could still produce). The enqueue and the
 # log file write race for a moment; give the line a bounded chance to land rather
 # than reading an empty file and calling it a failure.
 for _ in $(seq 1 40); do
@@ -1493,13 +1449,13 @@ grep -q '"Failed"' "$GREC" \
 # three have been observed. Pinning any one of them would make this arm flaky for a
 # reason that has nothing to do with what it asserts — which is only that the
 # terminal shows what the record holds.
-# **Compared COMPLETE and EXACT** (round-4 finding 2). This used to `sed` the value
-# out and `grep -F` its first 40 characters, which was two holes at once. The prefix
-# was an unanchored substring, so a launcher that printed `different preface: <reason>`,
-# or appended a story of its own after the reason, or emitted the reason buried in
-# unrelated output, all passed. And the `sed`'d value is the JSON-ESCAPED spelling
-# while the terminal carries the decoded one, so any reason containing a character
-# JSON escapes was being compared against a string the launcher could never print.
+# **Compared COMPLETE and EXACT.** A `sed` of the value and a `grep -F` of its first
+# 40 characters would be two holes at once. The prefix would be an unanchored
+# substring, so a launcher that printed `different preface: <reason>`, or appended a
+# story of its own after the reason, or emitted the reason buried in unrelated
+# output, would pass. And the `sed`'d value is the JSON-ESCAPED spelling while the
+# terminal carries the decoded one, so any reason containing a character JSON
+# escapes would be compared against a string the launcher could never print.
 #
 # So: parse the record as JSON, and require the launcher's WHOLE output to be
 # anyhow's own `Error: <reason>` presentation and nothing else. That is the exact
@@ -1552,7 +1508,7 @@ if [ -n "$GRUN" ]; then
   [ ! -e "$GRUN" ] \
     || { echo "FAIL: the failed launch left its run dir behind at $GRUN"; ls -la "$GRUN"; exit 1; }
 fi
-# **And no PROCESS survives it either** (round-4 finding 4). The two checks above are
+# **And no PROCESS survives it either.** The two checks above are
 # about resources; "nothing survives" is also a claim about the two processes that
 # own them. A coordinator or custodian that wrote `Failed`, swept the session and the
 # run dir, and then simply kept running would satisfy every assertion above while

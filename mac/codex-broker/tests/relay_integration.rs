@@ -18,15 +18,21 @@ use tokio_tungstenite::WebSocketStream;
 
 use codex_broker::relay::Broker;
 use codex_broker::upstream::{ConnectFuture, UpstreamChannels, UpstreamFactory, UpstreamWrite};
-use codex_broker::{LaunchFingerprint, COMMAND_EXEC_APPROVAL};
+use codex_broker::COMMAND_EXEC_APPROVAL;
 
 // ---------------------------------------------------------------------------
 // Fake upstream + broker harness
 // ---------------------------------------------------------------------------
 
+/// The reply-table trigger for a frame that follows the reply before it. See
+/// [`FakeState::replies`].
+const FOLLOWS: &str = "&";
+
 #[derive(Default)]
 struct FakeState {
     recorded: Mutex<Vec<String>>,
+    /// Every binary frame the broker forwarded, byte for byte.
+    recorded_binary: Mutex<Vec<Vec<u8>>>,
     /// One scripted s2c frame list **per upstream connection**, popped front-first as each
     /// leg connects. This models the approval fanout: the same `serverRequest` is scripted
     /// onto each leg's own upstream, so every leg observes (and registers) its own copy.
@@ -34,12 +40,14 @@ struct FakeState {
     /// One scripted **reply** table per upstream connection: `(trigger, frame)` pairs. When
     /// an admitted c2s message contains `trigger`, the fake emits `frame` s2c. A connect-time
     /// script cannot model a RESPONSE — a response only exists *because* a request was
-    /// admitted, which is exactly the correlation the thread binding now requires.
+    /// admitted, which is exactly the correlation the thread binding now requires. An entry
+    /// whose trigger is [`FOLLOWS`] is sent straight after the reply before it, so one
+    /// request can put several frames on the leg's upstream in order.
     replies: Mutex<VecDeque<Vec<(String, Message)>>>,
     /// One flag per upstream connection, popped front-first: `true` makes that connection's
     /// **upstream write side dead on arrival** (the receiver is dropped immediately), so the
     /// relay's `to_upstream.send` fails for the first message it tries to forward. This is
-    /// how the round-2 P3 "proven send" test produces a real write failure. The read side is
+    /// how the failed-send tests produce a real write failure. The read side is
     /// deliberately kept alive (its sender is parked in `parked_senders`), because a closed
     /// read side would close the leg before any client message was even classified.
     dead_upstreams: Mutex<VecDeque<bool>>,
@@ -162,16 +170,26 @@ impl UpstreamFactory for FakeFactory {
                     // The fake IS the pump: it writes the message, then acknowledges the
                     // write. Recording it is this harness's stand-in for the bytes
                     // reaching the app-server.
-                    if let Message::Text(t) = m.msg {
-                        // Answer the FIRST matching trigger, once (a real app-server answers
-                        // each request exactly once).
-                        if let Some(i) = replies.iter().position(|(trig, _)| t.contains(trig)) {
-                            let (_, frame) = replies.remove(i);
-                            if from_tx.send(frame).await.is_err() {
-                                return;
+                    match m.msg {
+                        Message::Text(t) => {
+                            // Answer the FIRST matching trigger, once (a real app-server
+                            // answers each request exactly once).
+                            if let Some(i) = replies.iter().position(|(trig, _)| t.contains(trig)) {
+                                let (_, frame) = replies.remove(i);
+                                if from_tx.send(frame).await.is_err() {
+                                    return;
+                                }
+                                while replies.get(i).is_some_and(|(t, _)| t == FOLLOWS) {
+                                    let (_, more) = replies.remove(i);
+                                    if from_tx.send(more).await.is_err() {
+                                        return;
+                                    }
+                                }
                             }
+                            recorded.recorded.lock().unwrap().push(t);
                         }
-                        recorded.recorded.lock().unwrap().push(t);
+                        Message::Binary(b) => recorded.recorded_binary.lock().unwrap().push(b),
+                        _ => {}
                     }
                     if let Some(ack) = m.ack {
                         let _ = ack.send(true);
@@ -207,10 +225,16 @@ impl UpstreamFactory for FakeFactory {
 /// `queue` is the capacity of the c2s channel in front of that parked pump — production's
 /// is 64. Narrowing it to one is how a test reaches the *second* fault on the same path:
 /// a queue that is full while the pump is stuck, so the answer cannot even be handed over.
+///
+/// The FIRST connection's peer is the one exception to "never reads": it reads one frame
+/// and answers it with `creation_response("th-A")`, so a keyboard leg can make `th-A` the
+/// head that the phone's approval has to be on.
 struct StalledUpstreamFactory {
     /// The far ends, kept alive so the writes block instead of erroring.
     parked: Arc<Mutex<Vec<WebSocketStream<tokio::io::DuplexStream>>>>,
     queue: usize,
+    /// Whether the first connection has been made.
+    connected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for StalledUpstreamFactory {
@@ -218,6 +242,7 @@ impl Default for StalledUpstreamFactory {
         Self {
             parked: Arc::default(),
             queue: 64,
+            connected: Arc::default(),
         }
     }
 }
@@ -233,6 +258,7 @@ impl UpstreamFactory for StalledUpstreamFactory {
     fn connect(&self) -> ConnectFuture {
         let parked = Arc::clone(&self.parked);
         let queue = self.queue;
+        let first = !self.connected.swap(true, Ordering::SeqCst);
         Box::pin(async move {
             use tokio_tungstenite::tungstenite::protocol::Role as WsRole;
             let (near, far) = tokio::io::duplex(1);
@@ -248,8 +274,18 @@ impl UpstreamFactory for StalledUpstreamFactory {
             peer.send(approval(COMMAND_EXEC_APPROVAL, "th-A", 0))
                 .await
                 .expect("the parked peer can still write");
-            // …and from here it reads nothing, ever.
-            parked.lock().unwrap().push(peer);
+            if first {
+                tokio::spawn(async move {
+                    let _ = peer.next().await;
+                    peer.send(creation_response("th-A"))
+                        .await
+                        .expect("the peer answers the keyboard's move");
+                    parked.lock().unwrap().push(peer);
+                });
+            } else {
+                // …and from here it reads nothing, ever.
+                parked.lock().unwrap().push(peer);
+            }
             Ok(UpstreamChannels {
                 to_upstream: to_tx,
                 from_upstream: from_rx,
@@ -259,19 +295,8 @@ impl UpstreamFactory for StalledUpstreamFactory {
     }
 }
 
-/// The workspace the coordinator launched this session in — already canonicalized, and the
-/// anchor every creation response must match (round-2 P4).
+/// The workspace the fake app-server reports a created thread in.
 const LAUNCH_CWD: &str = "/work/proj";
-
-fn fingerprint() -> LaunchFingerprint {
-    LaunchFingerprint {
-        approval_policy: "untrusted".into(),
-        approvals_reviewer: "user".into(),
-        sandbox: "read-only".into(),
-        hooks_enabled: true,
-        launch_cwd: LAUNCH_CWD.into(),
-    }
-}
 
 struct Harness {
     tui_sock: String,
@@ -296,7 +321,7 @@ impl Harness {
     }
 
     /// Make the **next** upstream connection's write side dead on arrival, so the relay's
-    /// first `to_upstream.send` on that leg fails (round-2 P3).
+    /// first `to_upstream.send` on that leg fails.
     fn push_dead_upstream(&self, dead: bool) {
         self.state.dead_upstreams.lock().unwrap().push_back(dead);
     }
@@ -378,7 +403,7 @@ fn start_broker_with<H: HarnessFactory>(
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
-    // Short paths: SUN_LEN caps a UDS path at 103 bytes (A1/D7), so /tmp, not the long
+    // Short paths: SUN_LEN caps a UDS path at 103 bytes, so /tmp, not the long
     // scratchpad path.
     let tui_sock = format!("/tmp/ccb-{pid}-{n}-t.sock");
     let ccd_sock = format!("/tmp/ccb-{pid}-{n}-c.sock");
@@ -388,7 +413,7 @@ fn start_broker_with<H: HarnessFactory>(
     let state = Arc::new(FakeState::default());
     let factory = which.build(&state);
     let events = Arc::new(Mutex::new(Vec::new()));
-    let mut broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), fingerprint(), factory);
+    let mut broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), factory);
     if let Some(budget) = budget {
         broker = broker.with_upstream_write_budget(budget);
     }
@@ -487,12 +512,12 @@ async fn frames_until_closed(ws: &mut WebSocketStream<UnixStream>) -> (Vec<Strin
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn allowlisted_forwards_bypass_is_zero_bytes_with_synthetic_error() {
+async fn the_phone_leg_forwards_an_allowlisted_read_and_refuses_a_bypass_with_zero_bytes() {
     let h = start_broker();
-    let mut ws = connect(&h.tui_sock).await;
+    let mut ws = connect(&h.ccd_sock).await;
 
     ws.send(Message::Text(
-        r#"{"method":"app/list","id":1,"params":{}}"#.into(),
+        r#"{"method":"thread/loaded/list","id":1,"params":{}}"#.into(),
     ))
     .await
     .unwrap();
@@ -503,15 +528,14 @@ async fn allowlisted_forwards_bypass_is_zero_bytes_with_synthetic_error() {
     .unwrap();
 
     // The refused bypass produces exactly one frame back to the client: a synthetic error.
-    let reply = ws.next().await.unwrap().unwrap();
-    let v: serde_json::Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    let v = next_frame(&mut ws).await;
     assert_eq!(v["id"], 2);
     assert_eq!(v["error"]["code"], -32001);
 
     settle().await;
     let rec = h.state.recorded.lock().unwrap().clone();
-    assert_eq!(rec.len(), 1, "only the allowlisted app/list forwards");
-    assert!(rec[0].contains("app/list"));
+    assert_eq!(rec.len(), 1, "only the allowlisted read forwards");
+    assert!(rec[0].contains("thread/loaded/list"));
     assert!(
         !rec.iter().any(|m| m.contains("command/exec")),
         "command/exec must reach zero upstream bytes",
@@ -519,107 +543,36 @@ async fn allowlisted_forwards_bypass_is_zero_bytes_with_synthetic_error() {
 }
 
 #[tokio::test]
-async fn ownership_conflict_and_ccd_role_refused_zero_bytes() {
+async fn the_phone_may_not_create_a_thread() {
     let h = start_broker();
-
-    // TUI: thread/start with a conflicting approvalPolicy -> policy error.
-    let mut tui = connect(&h.tui_sock).await;
-    tui.send(Message::Text(
-        r#"{"method":"thread/start","id":"a","params":{"approvalPolicy":"never","approvalsReviewer":"user","sandbox":"read-only"}}"#.into(),
-    ))
-    .await
-    .unwrap();
-    let r1 = tui.next().await.unwrap().unwrap();
-    let v1: serde_json::Value = serde_json::from_str(r1.to_text().unwrap()).unwrap();
-    assert_eq!(v1["id"], "a");
-    assert_eq!(v1["error"]["code"], -32001);
-
-    // ccd: thread/start is role-refused (attach-only), even fingerprint-clean.
     let mut ccd = connect(&h.ccd_sock).await;
     ccd.send(Message::Text(
         r#"{"method":"thread/start","id":7,"params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#.into(),
     ))
     .await
     .unwrap();
-    let r2 = ccd.next().await.unwrap().unwrap();
-    let v2: serde_json::Value = serde_json::from_str(r2.to_text().unwrap()).unwrap();
-    assert_eq!(v2["id"], 7);
-    assert_eq!(v2["error"]["code"], -32001);
-
+    let v = next_frame(&mut ccd).await;
+    assert_eq!(v["id"], 7);
+    assert_eq!(v["error"]["code"], -32001);
     settle().await;
-    assert!(
-        h.state.recorded.lock().unwrap().is_empty(),
-        "no refused ownership request forwards on either leg",
-    );
-}
-
-#[tokio::test]
-async fn ownership_matching_thread_start_forwards() {
-    let h = start_broker();
-    let mut ws = connect(&h.tui_sock).await;
-    ws.send(Message::Text(
-        r#"{"method":"thread/start","id":3,"params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only","config":{"model_reasoning_effort":"high"}}}"#.into(),
-    ))
-    .await
-    .unwrap();
-    let rec = recorded_after(&h.state, 1).await;
-    assert_eq!(rec.len(), 1);
-    assert!(rec[0].contains("thread/start"));
+    assert!(h.state.recorded.lock().unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
-// The correlated-creation thread binding (review findings P1/P3), end to end over the relay.
+// The head the phone acts on follows the keyboard, end to end over the relay.
 // ---------------------------------------------------------------------------
-
-/// The captured `turn/start` shape (P4/P6), naming `thread` in the bound workspace.
-fn turn_frame(thread: &str) -> String {
-    turn_frame_in(thread, LAUNCH_CWD)
-}
-
-/// The same shape with an explicit `cwd`, so a test can make the TURN agree with a binding
-/// that should never have been installed — which is what isolates the round-2 P4 anchor
-/// from the (also-present) turn-vs-binding equality check.
-fn turn_frame_in(thread: &str, cwd: &str) -> String {
-    serde_json::json!({
-        "method": "turn/start",
-        "id": 3,
-        "params": {
-            "threadId": thread,
-            "approvalPolicy": "untrusted",
-            "approvalsReviewer": "user",
-            "sandboxPolicy": null,
-            "cwd": cwd,
-            "runtimeWorkspaceRoots": [LAUNCH_CWD],
-            "permissions": null,
-            "environments": null,
-            "multiAgentMode": null,
-            "responsesapiClientMetadata": null,
-            "additionalContext": null,
-            "outputSchema": null,
-            "collaborationMode": null
-        }
-    })
-    .to_string()
-}
 
 const CREATION_REQUEST: &str = r#"{"method":"thread/start","id":"start-1","params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#;
 
-/// The creation RESPONSE the fake app-server answers `CREATION_REQUEST` with: the three
-/// proofs the binding requires (`result.thread.id`, `result.cwd`,
-/// `result.runtimeWorkspaceRoots`) in the shape measured off a real codex 0.147 server.
+/// The answer the fake app-server gives `CREATION_REQUEST`, in the shape measured off a
+/// real codex 0.147 server.
 fn creation_response(thread: &str) -> Message {
-    creation_response_in(thread, LAUNCH_CWD)
-}
-
-/// A creation response naming an explicit `cwd` — used to prove the round-2 P4 anchor: a
-/// response outside the coordinator-owned launch cwd binds nothing.
-fn creation_response_in(thread: &str, cwd: &str) -> Message {
     Message::Text(
         serde_json::json!({
             "id": "start-1",
             "result": {
                 "thread": {"id": thread, "path": "/x"},
-                "cwd": cwd,
+                "cwd": LAUNCH_CWD,
                 "runtimeWorkspaceRoots": [LAUNCH_CWD]
             }
         })
@@ -627,8 +580,8 @@ fn creation_response_in(thread: &str, cwd: &str) -> Message {
     )
 }
 
-/// Drive one leg through the admitted creation and await its correlated response, so the
-/// binding is installed before the caller's next message.
+/// Drive one keyboard leg through its `thread/start` and await the answer, so the head
+/// has moved before the caller's next message.
 async fn create_thread(ws: &mut WebSocketStream<UnixStream>, thread: &str) -> serde_json::Value {
     ws.send(Message::Text(CREATION_REQUEST.into()))
         .await
@@ -641,34 +594,38 @@ async fn create_thread(ws: &mut WebSocketStream<UnixStream>, thread: &str) -> se
     v
 }
 
-#[tokio::test]
-async fn turn_start_without_a_bound_thread_fails_closed() {
-    // The relay has admitted no creation, so nothing is bound: the turn is policy-refused
-    // and forwards zero upstream bytes.
-    let h = start_broker();
+/// Bind `thread` as the head through a keyboard leg of its own, then clear what that
+/// setup recorded, so the caller counts only its own traffic.
+///
+/// **Call it before pushing any other script or reply table**: this leg is the next
+/// upstream connection, and it takes the next of each.
+async fn keyboard_on(h: &Harness, thread: &str) -> WebSocketStream<UnixStream> {
+    h.push_script(vec![]);
+    h.push_replies(vec![("thread/start".into(), creation_response(thread))]);
     let mut ws = connect(&h.tui_sock).await;
-    ws.send(Message::Text(turn_frame("01a0-ours")))
-        .await
-        .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(
-        v["error"]["code"], -32001,
-        "a turn naming no bound thread is policy-refused"
-    );
-    settle().await;
-    assert!(
-        h.state.recorded.lock().unwrap().is_empty(),
-        "an unbound turn/start must reach zero upstream bytes",
-    );
+    create_thread(&mut ws, thread).await;
+    recorded_after(&h.state, 1).await;
+    h.state.recorded.lock().unwrap().clear();
+    ws
 }
 
 #[tokio::test]
-async fn a_bare_thread_started_binds_nothing_over_the_relay() {
-    // P1 ROOT FIX, end to end. The creation IS admitted (so a creation is pending and the
-    // s2c observer is fully armed — the cheap guard is NOT what refuses here), but the
-    // server answers with a `thread/started` ANNOUNCEMENT instead of a creation response.
-    // An announcement binds NOTHING, so a turn naming that thread is refused and reaches
-    // zero upstream bytes. In the rejected first cut this exact frame bound the thread.
+async fn a_phone_turn_with_no_head_is_refused() {
+    let h = start_broker();
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(
+        phone_turn_outcome(&h, &mut ccd, "01a0-ours", 3)
+            .await
+            .as_deref(),
+        Some(NOT_THE_HEAD)
+    );
+    assert!(h.state.recorded.lock().unwrap().is_empty());
+}
+
+/// An announcement is not an answer: a `thread/started` naming a thread moves nothing,
+/// even while the keyboard's own creation is in flight.
+#[tokio::test]
+async fn a_bare_thread_started_moves_nothing_over_the_relay() {
     let h = start_broker();
     h.push_replies(vec![(
         "thread/start".into(),
@@ -681,78 +638,22 @@ async fn a_bare_thread_started_binds_nothing_over_the_relay() {
     ws.send(Message::Text(CREATION_REQUEST.into()))
         .await
         .unwrap();
-    let started = ws.next().await.unwrap().unwrap();
-    assert!(started.to_text().unwrap().contains("thread/started"));
+    assert_eq!(next_frame(&mut ws).await["method"], "thread/started");
 
-    ws.send(Message::Text(turn_frame("01a0-ours")))
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert!(phone_turn_outcome(&h, &mut ccd, "01a0-ours", 3)
         .await
-        .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["error"]["code"], -32001, "receipt is not lineage");
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().clone(),
-        vec![CREATION_REQUEST.to_string()],
-        "an announcement-only thread must never authorize a turn",
-    );
+        .is_some());
 }
 
-#[tokio::test]
-async fn turn_start_on_the_verified_thread_forwards_original_bytes() {
-    // Script the upstream to answer the admitted `thread/start` with its creation RESPONSE
-    // (not a bare `thread/started`), then send the MEASURED turn shape and assert the
-    // original bytes reach upstream.
-    let h = start_broker();
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response("01a0-ours"),
-    )]);
-    let mut ws = connect(&h.tui_sock).await;
-    create_thread(&mut ws, "01a0-ours").await;
-
-    let turn = turn_frame("01a0-ours");
-    ws.send(Message::Text(turn.clone())).await.unwrap();
-
-    let rec = recorded_after(&h.state, 2).await;
-    assert_eq!(rec.len(), 2);
-    assert_eq!(rec[0], CREATION_REQUEST);
-    assert_eq!(rec[1], turn, "the head-checked turn forwards byte-exact");
-}
-
-#[tokio::test]
-async fn turn_start_in_a_different_workspace_is_refused() {
-    // P5, end to end: the thread is verified, but the turn names a cwd other than the one
-    // bound from its creation response.
-    let h = start_broker();
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response("01a0-ours"),
-    )]);
-    let mut ws = connect(&h.tui_sock).await;
-    create_thread(&mut ws, "01a0-ours").await;
-
-    let mut turn: serde_json::Value = serde_json::from_str(&turn_frame("01a0-ours")).unwrap();
-    turn["params"]["cwd"] = serde_json::json!("/somewhere/else");
-    ws.send(Message::Text(turn.to_string())).await.unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["error"]["code"], -32001);
-
-    settle().await;
-    let rec = h.state.recorded.lock().unwrap().clone();
-    assert_eq!(rec, vec![CREATION_REQUEST.to_string()], "zero turn bytes");
-}
-
-/// The measured `/new` switch, END TO END over the relay: unsubscribe ×2 → a second
-/// `thread/start` → the head follows to B, the retired A is resumable but unturnable.
-///
-/// 2e-4c replaces the old `a_second_thread_start_is_refused_over_the_relay`, which pinned
-/// the pre-switch rule ("once one thread is bound the creation slot stays closed") — the
-/// rule that made a real user unable to press `/new`.
+/// The measured `/new` switch, end to end: unsubscribe ×2, a second `thread/start`, and
+/// the head follows to B; the phone may start a turn there, and not on the thread the
+/// keyboard left.
 #[tokio::test]
 async fn the_new_switch_flows_end_to_end_over_the_relay() {
     let h = start_broker();
     h.push_replies(vec![
-        ("thread/start".into(), creation_response("01a0-a")),
+        ("\"start-1\"".into(), creation_response("01a0-a")),
         (
             "thread/unsubscribe".into(),
             Message::Text(r#"{"id":7,"result":{"status":"unsubscribed"}}"#.into()),
@@ -762,25 +663,15 @@ async fn the_new_switch_flows_end_to_end_over_the_relay() {
             Message::Text(r#"{"id":8,"result":{"status":"unsubscribed"}}"#.into()),
         ),
         (
-            "thread/start".into(),
+            "\"start-2\"".into(),
             Message::Text(
-                serde_json::json!({
-                    "id": "start-2",
-                    "result": {
-                        "thread": {"id": "01a0-b", "path": "/x"},
-                        "cwd": LAUNCH_CWD,
-                        "runtimeWorkspaceRoots": [LAUNCH_CWD]
-                    }
-                })
-                .to_string(),
+                serde_json::json!({"id": "start-2", "result": {"thread": {"id": "01a0-b"}}})
+                    .to_string(),
             ),
         ),
     ]);
     let mut ws = connect(&h.tui_sock).await;
     create_thread(&mut ws, "01a0-a").await;
-
-    // The marker, twice, naming the active head — exactly what `/new` sends. Both forward:
-    // the switch behind them is admissible (round-1 P4).
     for id in [7, 8] {
         ws.send(Message::Text(
             serde_json::json!({"method":"thread/unsubscribe","id":id,
@@ -789,498 +680,122 @@ async fn the_new_switch_flows_end_to_end_over_the_relay() {
         ))
         .await
         .unwrap();
-        let v = next_frame(&mut ws).await;
         assert_eq!(
-            v["result"]["status"], "unsubscribed",
-            "unsubscribe #{id} must reach the server and be answered — the real TUI AWAITS \
-             this response before sending the next frame, which is why the prefix cannot be \
-             held"
+            next_frame(&mut ws).await["result"]["status"],
+            "unsubscribed"
         );
     }
-
-    // The switch.
     ws.send(Message::Text(
         CREATION_REQUEST.replace("start-1", "start-2"),
     ))
     .await
     .unwrap();
-    let v = next_frame(&mut ws).await;
     assert_eq!(
-        v["result"]["thread"]["id"], "01a0-b",
-        "the switch must be admitted and its response relayed"
+        next_frame(&mut ws).await["result"]["thread"]["id"],
+        "01a0-b"
     );
 
-    // The head FOLLOWED: a turn on B forwards...
-    ws.send(Message::Text(turn_frame("01a0-b"))).await.unwrap();
-    settle().await;
-    let rec = h.state.recorded.lock().unwrap().clone();
-    assert!(
-        rec.contains(&turn_frame("01a0-b")),
-        "a turn on the new head must reach the server; recorded: {rec:?}"
-    );
-
-    // ...and a turn on the RETIRED thread is policy-refused with zero upstream bytes.
-    let before = h.state.recorded.lock().unwrap().len();
-    ws.send(Message::Text(turn_frame("01a0-a"))).await.unwrap();
-    let v = next_frame(&mut ws).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(phone_turn_outcome(&h, &mut ccd, "01a0-b", 21).await, None);
     assert_eq!(
-        v["error"]["code"], -32001,
-        "a turn on a retired thread is refused"
-    );
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().len(),
-        before,
-        "zero bytes upstream for the refused turn"
+        phone_turn_outcome(&h, &mut ccd, "01a0-a", 22)
+            .await
+            .as_deref(),
+        Some(NOT_THE_HEAD)
     );
 }
 
-/// **P4 end to end: the prefix is refused rather than dropping the subscription.**
-///
-/// The defect: `unsubscribe, unsubscribe, thread/start` where the start is doomed leaves
-/// the TUI on the old thread and UNSUBSCRIBED from it — silently blind. Here the switch is
-/// doomed because a creation is already in flight, so the unsubscribe that would have begun
-/// it is refused with ZERO upstream bytes and the subscription is never touched.
+/// A TUI launched as `codex resume` or `codex fork` opens with that request, not a
+/// `thread/start`: its answer binds the head, and the phone may start a turn there.
 #[tokio::test]
-async fn a_switch_prefix_is_refused_when_the_switch_behind_it_cannot_be_admitted() {
-    let h = start_broker();
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response("01a0-ours"),
-    )]);
-    let mut ws = connect(&h.tui_sock).await;
-    create_thread(&mut ws, "01a0-ours").await;
-
-    // Put a switch in flight and leave it unanswered.
-    ws.send(Message::Text(
-        CREATION_REQUEST.replace("start-1", "start-2"),
-    ))
-    .await
-    .unwrap();
-    settle().await;
-    let before = h.state.recorded.lock().unwrap().clone();
-
-    // Now the prefix of ANOTHER switch. It must refuse, not unsubscribe.
-    ws.send(Message::Text(
-        serde_json::json!({"method":"thread/unsubscribe","id":9,
-                           "params":{"threadId":"01a0-ours"}})
-        .to_string(),
-    ))
-    .await
-    .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(
-        v["error"]["code"], -32001,
-        "the prefix is policy-refused: {v}"
-    );
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().clone(),
-        before,
-        "a refused prefix must send ZERO upstream bytes — the whole point is that the \
-         subscription survives a switch that was never going to happen"
-    );
-}
-
-/// **ROUND-3 P4a, end to end: the prefix RESERVES, and a turn cannot slip in behind it.**
-///
-/// The reservation is claimed inside the prefix's own atomic admission (A16.1). This is the
-/// only test that exercises the CLASSIFIER's half of that wiring: the session-level tests
-/// call `try_admit_prefix` directly, so a classifier that stopped routing the prefix into it
-/// would leave them green while the window between the prefix and the start stood wide open.
-#[tokio::test]
-async fn the_prefix_reserves_the_switch_and_fences_turns_behind_it() {
-    let h = start_broker();
-    h.push_replies(vec![
-        ("thread/start".into(), creation_response("01a0-ours")),
-        (
-            "thread/unsubscribe".into(),
-            Message::Text(r#"{"id":7,"result":{"status":"unsubscribed"}}"#.into()),
-        ),
-    ]);
-    let mut ws = connect(&h.tui_sock).await;
-    create_thread(&mut ws, "01a0-ours").await;
-
-    // The prefix of a `/new`.
-    ws.send(Message::Text(
-        serde_json::json!({"method":"thread/unsubscribe","id":7,
-                           "params":{"threadId":"01a0-ours"}})
-        .to_string(),
-    ))
-    .await
-    .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["result"]["status"], "unsubscribed", "the prefix forwards");
-
-    // Now a turn must be REFUSED: the prefix has already had a wire effect and the switch
-    // behind it is expected next, so this turn would be authorized against a head that is
-    // about to move.
-    let before = h.state.recorded.lock().unwrap().len();
-    ws.send(Message::Text(turn_frame("01a0-ours")))
+async fn a_tui_that_opens_with_resume_or_fork_binds_the_head() {
+    for method in ["thread/resume", "thread/fork"] {
+        let h = start_broker();
+        h.push_replies(vec![(
+            method.into(),
+            Message::Text(
+                serde_json::json!({"id": "open-1", "result": {"thread": {"id": "01a0-old"}}})
+                    .to_string(),
+            ),
+        )]);
+        let mut ws = connect(&h.tui_sock).await;
+        ws.send(Message::Text(
+            serde_json::json!({"method": method, "id": "open-1",
+                               "params": {"threadId": "01a0-old"}})
+            .to_string(),
+        ))
         .await
         .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(
-        v["error"]["code"], -32001,
-        "a turn admitted between the prefix and the start is the exact window the \
-         reservation exists to close: {v}"
-    );
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().len(),
-        before,
-        "and it forwards zero bytes"
-    );
+        assert_eq!(
+            next_frame(&mut ws).await["result"]["thread"]["id"],
+            "01a0-old"
+        );
+
+        let mut ccd = connect(&h.ccd_sock).await;
+        assert_eq!(
+            phone_turn_outcome(&h, &mut ccd, "01a0-old", 31).await,
+            None,
+            "{method}: the phone follows the thread the TUI opened"
+        );
+    }
 }
 
-/// One switch at a time, end to end: a second `thread/start` while the first switch is
-/// still in flight is refused with zero upstream bytes. This is the half of the old P3 rule
-/// that 2e-4c KEPT, and it is what stops two creations racing to re-point the head.
+/// Correlation is by connection: another keyboard connection's frame carrying the first
+/// one's request id settles nothing.
 #[tokio::test]
-async fn a_second_switch_while_one_is_in_flight_is_refused_over_the_relay() {
-    let h = start_broker();
-    // Only the FIRST creation is answered; the switch stays pending for the whole test.
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response("01a0-ours"),
-    )]);
-    let mut ws = connect(&h.tui_sock).await;
-    create_thread(&mut ws, "01a0-ours").await;
-
-    ws.send(Message::Text(
-        CREATION_REQUEST.replace("start-1", "start-2"),
-    ))
-    .await
-    .unwrap();
-    settle().await;
-    let after_switch = h.state.recorded.lock().unwrap().clone();
-    assert_eq!(after_switch.len(), 2, "the switch itself forwarded");
-
-    ws.send(Message::Text(
-        CREATION_REQUEST.replace("start-1", "start-3"),
-    ))
-    .await
-    .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["error"]["code"], -32001);
-
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().clone(),
-        after_switch,
-        "a second switch while one is pending forwards zero bytes"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// ROUND-2 P1 / P3 / P4, end to end over the relay.
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn a_second_tui_connection_cannot_answer_the_first_ones_creation() {
-    // ROUND-2 P1, THE VULNERABILITY. Two connections of the SAME role — exactly what the
-    // TUI's `/resume` picker opens. Connection A's `thread/start` is admitted (pending on
-    // A). Connection B then delivers a perfectly-shaped creation RESPONSE carrying A's
-    // request id and a thread of B's choosing. Under the old `(Role, RequestId)` key that
-    // installed a binding; under the connection-scoped key it correlates to nothing, so no
-    // turn on that thread is ever authorized.
+async fn a_second_tui_connection_cannot_answer_the_first_ones_move() {
     let h = start_broker();
     h.push_script(vec![]); // connection A's upstream: silent
     h.push_script(vec![creation_response("attacker-thread")]); // connection B's upstream
-    h.push_replies(vec![]); // A's thread/start is never answered on A's own leg
 
     let mut a = connect(&h.tui_sock).await;
     a.send(Message::Text(CREATION_REQUEST.into()))
         .await
         .unwrap();
-    let rec = recorded_after(&h.state, 1).await;
-    assert_eq!(rec.len(), 1, "the creation was admitted on connection A");
-
-    // B connects; its scripted frame is the forged answer to A's id.
+    recorded_after(&h.state, 1).await;
     let mut b = connect(&h.tui_sock).await;
     let forged = b.next().await.unwrap().unwrap();
     assert!(forged.to_text().unwrap().contains("attacker-thread"));
     settle().await;
 
-    // Neither connection may now turn on that thread.
-    for ws in [&mut a, &mut b] {
-        ws.send(Message::Text(turn_frame("attacker-thread")))
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert!(
+        phone_turn_outcome(&h, &mut ccd, "attacker-thread", 3)
             .await
-            .unwrap();
-        let v = next_frame(ws).await;
-        assert_eq!(
-            v["error"]["code"], -32001,
-            "a sibling connection's response must bind nothing"
-        );
-    }
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().clone(),
-        vec![CREATION_REQUEST.to_string()],
-        "zero turn bytes after a cross-connection forgery",
+            .is_some(),
+        "a sibling connection's response must move nothing"
     );
 }
 
+/// **A keyboard move whose bytes never left puts the head back.** Without the rollback,
+/// the dead leg's close would find the move in flight and leave no head.
 #[tokio::test]
-async fn a_failed_upstream_send_rolls_the_creation_claim_back() {
-    // ROUND-2 P3. The first leg's upstream write side is dead, so the admitted
-    // `thread/start` claims the creation slot and then provably sends ZERO bytes. The claim
-    // must be rolled back, or the session's one creation slot is burned for ever and the
-    // real TUI can never create its thread.
+async fn a_failed_upstream_send_rolls_the_move_back() {
     let h = start_broker();
-    h.push_dead_upstream(true); // leg 1: writes fail
-    h.push_dead_upstream(false); // leg 2: healthy
-    h.push_replies(vec![]); // (leg 1 has no reply table)
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response("01a0-ours"),
-    )]);
+    h.push_dead_upstream(false); // the keyboard that binds A
+    h.push_dead_upstream(true); // a keyboard whose writes fail
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-a"))]);
+    let mut live = connect(&h.tui_sock).await;
+    create_thread(&mut live, "01a0-a").await;
 
     let mut dead = connect(&h.tui_sock).await;
-    dead.send(Message::Text(CREATION_REQUEST.into()))
-        .await
-        .unwrap();
-    // The leg closes (upstream gone) and nothing was recorded.
-    let closed = loop {
-        match dead.next().await {
-            None => break true,
-            Some(Ok(Message::Close(_))) | Some(Err(_)) => break true,
-            Some(Ok(_)) => continue,
-        }
-    };
-    assert!(closed, "a dead upstream closes the leg");
-    assert!(
-        h.state.recorded.lock().unwrap().is_empty(),
-        "zero bytes reached the upstream",
-    );
-    settle().await;
-
-    // A fresh connection must still be able to create the session's thread…
-    let mut live = connect(&h.tui_sock).await;
-    create_thread(&mut live, "01a0-ours").await;
-    // …and turn on it.
-    let turn = turn_frame("01a0-ours");
-    live.send(Message::Text(turn.clone())).await.unwrap();
-    let rec = recorded_after(&h.state, 2).await;
-    assert_eq!(rec.len(), 2);
-    assert_eq!(rec[1], turn, "the rolled-back claim did not burn the slot");
-}
-
-#[tokio::test]
-async fn a_disconnect_with_a_pending_creation_closes_the_slot_terminally() {
-    // ROUND-2 P3. The owning connection vanishes while its creation is in flight. The
-    // request DID reach the server, so the slot goes to the indeterminate CLOSED state:
-    // never reopened, never bound — a later creation is REFUSED, which is the fail-closed
-    // choice that cannot produce a second thread.
-    let h = start_broker();
-    h.push_replies(vec![]); // leg 1: the creation is never answered
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response("01a0-late"),
-    )]);
-
-    let mut first = connect(&h.tui_sock).await;
-    first
-        .send(Message::Text(CREATION_REQUEST.into()))
-        .await
-        .unwrap();
-    let rec = recorded_after(&h.state, 1).await;
-    assert_eq!(rec.len(), 1, "the creation was admitted and forwarded");
-    first.close(None).await.unwrap();
-    drop(first);
-    settle().await;
-
-    let mut second = connect(&h.tui_sock).await;
-    second
-        .send(Message::Text(
-            CREATION_REQUEST.replace("start-1", "start-2"),
-        ))
-        .await
-        .unwrap();
-    let v = next_frame(&mut second).await;
-    assert_eq!(
-        v["error"]["code"], -32001,
-        "a creation left indeterminate by a disconnect must not reopen"
-    );
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().clone(),
-        vec![CREATION_REQUEST.to_string()],
-        "the second creation reaches zero upstream bytes",
-    );
-}
-
-#[tokio::test]
-async fn a_creation_response_outside_the_launch_cwd_binds_nothing_over_the_relay() {
-    // ROUND-2 P4. The response is perfectly shaped, but names a workspace other than the
-    // coordinator-owned launch cwd — i.e. the server echoing back a cwd the CLIENT chose.
-    // Nothing binds, so the turn that response would have authorized is refused.
-    let h = start_broker();
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response_in("01a0-elsewhere", "/somewhere/else"),
-    )]);
-    let mut ws = connect(&h.tui_sock).await;
-    ws.send(Message::Text(CREATION_REQUEST.into()))
-        .await
-        .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["result"]["thread"]["id"], "01a0-elsewhere");
-
-    // The turn names the SAME foreign workspace the response did, so the turn-vs-binding
-    // equality check cannot be what refuses: only the launch-cwd anchor can.
-    ws.send(Message::Text(turn_frame_in(
-        "01a0-elsewhere",
-        "/somewhere/else",
-    )))
-    .await
-    .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["error"]["code"], -32001, "the workspace anchor holds");
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().clone(),
-        vec![CREATION_REQUEST.to_string()],
-        "zero turn bytes",
-    );
-}
-
-#[tokio::test]
-async fn thread_start_naming_a_foreign_cwd_is_refused_over_the_relay() {
-    // ROUND-2 P4, request side: a creation may not name a workspace other than the launch
-    // cwd. The measured real TUI sends `cwd: null` here, which must keep passing.
-    let h = start_broker();
-    let mut ws = connect(&h.tui_sock).await;
-    let mut start: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
-    start["params"]["cwd"] = serde_json::json!("/somewhere/else");
-    ws.send(Message::Text(start.to_string())).await.unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["error"]["code"], -32001);
-    settle().await;
-    assert!(h.state.recorded.lock().unwrap().is_empty(), "zero bytes");
-
-    // The measured shape still forwards (and the refused one did not burn the slot).
-    let mut null_cwd: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
-    null_cwd["params"]["cwd"] = serde_json::Value::Null;
-    let text = null_cwd.to_string();
-    ws.send(Message::Text(text.clone())).await.unwrap();
-    let rec = recorded_after(&h.state, 1).await;
-    assert_eq!(rec, vec![text], "cwd: null is the measured shape");
-}
-
-#[tokio::test]
-async fn a_creation_response_with_foreign_workspace_roots_binds_nothing_over_the_relay() {
-    // A10 FOLLOW-ON (2e-7c), response side — the sibling of the launch-cwd test above.
-    //
-    // The response is perfectly shaped AND carries the correct launch `cwd`; only its
-    // `runtimeWorkspaceRoots` name a workspace the coordinator did not launch. That is the
-    // realistic attack, because the app-server echoes this field back VERBATIM from the
-    // request (MEASURED): the client chooses it, the server repeats it. Before the anchor
-    // this bound successfully and every later turn was then checked against the client's
-    // choice. Now nothing binds, so the turn it would have authorized is refused.
-    let h = start_broker();
-    h.push_replies(vec![(
-        "thread/start".into(),
-        Message::Text(
-            serde_json::json!({
-                "id": "start-1",
-                "result": {
-                    "thread": {"id": "01a0-wide", "path": "/x"},
-                    "cwd": LAUNCH_CWD,
-                    "runtimeWorkspaceRoots": ["/"]
-                }
-            })
-            .to_string(),
-        ),
-    )]);
-    let mut ws = connect(&h.tui_sock).await;
-    ws.send(Message::Text(CREATION_REQUEST.into()))
-        .await
-        .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["result"]["thread"]["id"], "01a0-wide");
-
-    // The turn names the SAME wide roots the response did, so the turn-vs-binding equality
-    // check cannot be what refuses: only the launch-workspace anchor can.
-    let mut turn: serde_json::Value = serde_json::from_str(&turn_frame("01a0-wide")).unwrap();
-    turn["params"]["runtimeWorkspaceRoots"] = serde_json::json!(["/"]);
-    ws.send(Message::Text(turn.to_string())).await.unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(
-        v["error"]["code"], -32001,
-        "the workspace-roots anchor holds"
-    );
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().clone(),
-        vec![CREATION_REQUEST.to_string()],
-        "zero turn bytes",
-    );
-}
-
-#[tokio::test]
-async fn thread_start_naming_foreign_workspace_roots_is_refused_over_the_relay() {
-    // A10 FOLLOW-ON, request side: a creation may not name workspace ROOTS other than the
-    // session's one launch workspace, and the refusal costs ZERO upstream bytes. The measured
-    // real TUI sends `[<its own cwd>]` here — which in production is the launch cwd — and
-    // that must keep passing.
-    let h = start_broker();
-    let mut ws = connect(&h.tui_sock).await;
-    for roots in [
-        serde_json::json!(["/somewhere/else"]),
-        serde_json::json!([LAUNCH_CWD, "/somewhere/else"]),
-        serde_json::json!([]),
-    ] {
-        let mut start: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
-        start["params"]["runtimeWorkspaceRoots"] = roots.clone();
-        ws.send(Message::Text(start.to_string())).await.unwrap();
-        let v = next_frame(&mut ws).await;
-        assert_eq!(v["error"]["code"], -32001, "roots {roots}");
-        settle().await;
-        assert!(
-            h.state.recorded.lock().unwrap().is_empty(),
-            "zero bytes for roots {roots}"
-        );
-    }
-
-    // The measured shape still forwards (and none of the refusals burned the creation slot).
-    let mut ok: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
-    ok["params"]["runtimeWorkspaceRoots"] = serde_json::json!([LAUNCH_CWD]);
-    let text = ok.to_string();
-    ws.send(Message::Text(text.clone())).await.unwrap();
-    let rec = recorded_after(&h.state, 1).await;
-    assert_eq!(rec, vec![text], "[launch cwd] is the measured shape");
-}
-
-#[tokio::test]
-async fn thread_fork_is_refused_over_the_relay() {
-    // P2: no fork frame exists in the wire capture, so a fork's source-thread lineage is
-    // unprovable — refused pre-2e-4c, zero upstream bytes.
-    let h = start_broker();
-    let mut ws = connect(&h.tui_sock).await;
-    ws.send(Message::Text(
-        r#"{"method":"thread/fork","id":9,"params":{"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}"#.into(),
+    dead.send(Message::Text(
+        CREATION_REQUEST.replace("start-1", "start-2"),
     ))
     .await
     .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["id"], 9);
-    assert_eq!(v["error"]["code"], -32001);
+    let (_, closed) = frames_until_closed(&mut dead).await;
+    assert!(closed, "a dead upstream closes the leg");
     settle().await;
-    assert!(h.state.recorded.lock().unwrap().is_empty());
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(phone_turn_outcome(&h, &mut ccd, "01a0-a", 3).await, None);
 }
 
 #[tokio::test]
 async fn ccd_resume_bound_to_session_thread() {
     let h = start_broker();
-    // The TUI leg creates the thread; its own upstream answers with the creation response,
-    // which is what binds the SESSION-wide thread the ccd leg may then resume.
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response("01a0-ours"),
-    )]);
-    let mut tui = connect(&h.tui_sock).await;
-    create_thread(&mut tui, "01a0-ours").await;
+    let _keyboard = keyboard_on(&h, "01a0-ours").await;
 
     let mut ccd = connect(&h.ccd_sock).await;
     // Resume of an UNKNOWN thread -> refused, zero bytes.
@@ -1299,150 +814,17 @@ async fn ccd_resume_bound_to_session_thread() {
     ))
     .await
     .unwrap();
-    let rec = recorded_after(&h.state, 2).await;
-    assert_eq!(rec.len(), 2);
-    assert!(rec[1].contains("01a0-ours"));
-}
-
-#[tokio::test]
-async fn a_resume_that_re_points_or_substitutes_the_bound_thread_costs_zero_upstream_bytes() {
-    // ROUND-5 FINDING 6, over the real relay. Every frame below names the session's OWN bound
-    // thread, so `check_resume_binding` — the only thing a resume used to be checked against —
-    // passes on all of them. What refuses is the SHAPE, and the refusal must be free: a
-    // client-side test cannot see upstream bytes, but the fake upstream here records every
-    // frame it is handed, so `recorded` staying at its pre-resume length IS the zero-byte
-    // proof.
-    let h = start_broker();
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response("01a0-ours"),
-    )]);
-    let mut tui = connect(&h.tui_sock).await;
-    create_thread(&mut tui, "01a0-ours").await;
-    let after_creation = h.state.recorded.lock().unwrap().len();
-
-    let mut ccd = connect(&h.ccd_sock).await;
-    for (id, extra) in [
-        // MEASURED live: `result.runtimeWorkspaceRoots` came back `["/"]` for this frame.
-        (1, serde_json::json!({"runtimeWorkspaceRoots": ["/"]})),
-        (2, serde_json::json!({"cwd": "/"})),
-        // MEASURED live: the same resume that errors WITHOUT history answers WITH it, naming
-        // a brand-new thread id whose preview is the injected text.
-        (
-            3,
-            serde_json::json!({"history": [{"type": "message", "role": "user",
-                "content": [{"type": "input_text", "text": "INJECTED"}]}]}),
-        ),
-        // MEASURED live A/B: with `path` set the server resolves the PATH's rollout and the
-        // requested threadId appears nowhere in its own answer.
-        (4, serde_json::json!({"path": "/work/rollout-other.jsonl"})),
-        // Neither is a `ThreadResumeParams` property at all in the real 0.147 schema.
-        (
-            5,
-            serde_json::json!({"selectedCapabilityRoots": [{"id": "r",
-                "location": {"type": "environment", "environmentId": "e", "path": "/"}}]}),
-        ),
-        (
-            6,
-            serde_json::json!({"environments": [{"environmentId": "e", "cwd": "/"}]}),
-        ),
-    ] {
-        let mut frame = serde_json::json!({
-            "method": "thread/resume", "id": id,
-            "params": {"threadId": "01a0-ours"}
-        });
-        for (k, v) in extra.as_object().unwrap() {
-            frame["params"][k] = v.clone();
-        }
-        ccd.send(Message::Text(frame.to_string())).await.unwrap();
-        let v = next_frame(&mut ccd).await;
-        assert_eq!(v["id"], id, "{frame}");
-        assert_eq!(v["error"]["code"], -32001, "{frame}");
-        settle().await;
-        assert_eq!(
-            h.state.recorded.lock().unwrap().len(),
-            after_creation,
-            "zero upstream bytes for {frame}"
-        );
-    }
-
-    // And the ccd's own legitimate resume — the exact frame `mac/ccd/src/codex_link.rs`
-    // builds — still forwards on the same leg, unchanged.
-    let ok = r#"{"method":"thread/resume","id":9,"params":{"threadId":"01a0-ours"}}"#;
-    ccd.send(Message::Text(ok.into())).await.unwrap();
-    let rec = recorded_after(&h.state, after_creation + 1).await;
-    assert_eq!(
-        rec.last().map(String::as_str),
-        Some(ok),
-        "the real ccd resume must forward BYTE-EXACT after all those refusals"
-    );
-}
-
-#[tokio::test]
-async fn a_creation_carrying_a_capability_channel_costs_zero_upstream_bytes() {
-    // ROUND-5 FINDING 5, over the real relay. Each frame satisfies the 2e-7c workspace anchor
-    // (`runtimeWorkspaceRoots: [LAUNCH_CWD]`) and the full launch fingerprint — the only thing
-    // wrong with it is a populated capability channel. Two of these three were MEASURED being
-    // ACCEPTED by a live codex 0.147 app-server, which created a real thread.
-    let h = start_broker();
-    let mut ws = connect(&h.tui_sock).await;
-    for (id, key, value) in [
-        (
-            1,
-            "selectedCapabilityRoots",
-            serde_json::json!([{"id": "probe-root",
-                "location": {"type": "environment", "environmentId": "e", "path": "/"}}]),
-        ),
-        (
-            2,
-            "dynamicTools",
-            serde_json::json!([{"type": "function", "name": "probe_tool",
-                "description": "probe", "inputSchema": {"type": "object"}}]),
-        ),
-        (
-            3,
-            "environments",
-            serde_json::json!([{"environmentId": "e", "cwd": "/",
-                "runtimeWorkspaceRoots": ["/"]}]),
-        ),
-    ] {
-        let mut start: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
-        start["id"] = serde_json::json!(id);
-        start["params"]["runtimeWorkspaceRoots"] = serde_json::json!([LAUNCH_CWD]);
-        start["params"][key] = value;
-        ws.send(Message::Text(start.to_string())).await.unwrap();
-        let v = next_frame(&mut ws).await;
-        assert_eq!(v["error"]["code"], -32001, "{key}");
-        settle().await;
-        assert!(
-            h.state.recorded.lock().unwrap().is_empty(),
-            "zero upstream bytes for a populated {key}"
-        );
-    }
-
-    // …and none of them burned the single creation slot, so the measured shape still forwards.
-    let mut ok: serde_json::Value = serde_json::from_str(CREATION_REQUEST).unwrap();
-    ok["params"]["runtimeWorkspaceRoots"] = serde_json::json!([LAUNCH_CWD]);
-    ok["params"]["environments"] = serde_json::Value::Null;
-    ok["params"]["selectedCapabilityRoots"] = serde_json::Value::Null;
-    ok["params"]["dynamicTools"] = serde_json::Value::Null;
-    let text = ok.to_string();
-    ws.send(Message::Text(text.clone())).await.unwrap();
     let rec = recorded_after(&h.state, 1).await;
-    assert_eq!(
-        rec,
-        vec![text],
-        "the measured null shape is what the real TUI sends, and it must forward"
-    );
+    assert_eq!(rec.len(), 1);
+    assert!(rec[0].contains("01a0-ours"));
 }
 
 #[tokio::test]
 async fn the_audit_log_carries_connection_scoped_open_and_close_markers() {
-    // ROUND-2 P1 (observability half). Every accepted connection announces itself with a
-    // conn-scoped OPEN marker and reports its end with the same id, so a `broker.log` reader
-    // (and the later gate) can attribute lines to one connection. The pre-existing markers
-    // live gates assert on — `Tui: forward (`, `broker: listening on tui.sock and ccd.sock`,
-    // `Ccd leg ended` — are ADDED TO, never rewritten.
+    // Every accepted connection announces itself with a conn-scoped OPEN marker and reports
+    // its end with the same id, so a `broker.log` reader can attribute lines to one
+    // connection. The markers live gates assert on — `Tui: forward (`,
+    // `broker: listening on tui.sock and ccd.sock`, `Ccd leg ended` — are kept.
     let h = start_broker_with_events();
     let mut tui = connect(&h.tui_sock).await;
     tui.send(Message::Text(
@@ -1463,21 +845,17 @@ async fn the_audit_log_carries_connection_scoped_open_and_close_markers() {
             .any(|e| e == "broker: listening on tui.sock and ccd.sock"),
         "the listening marker is unchanged: {events:?}"
     );
+    for opened in ["Tui: leg opened (conn ", "Ccd: leg opened (conn "] {
+        assert!(
+            events.iter().any(|e| e.starts_with(opened)),
+            "a conn-scoped OPEN marker: {events:?}"
+        );
+    }
     assert!(
         events
             .iter()
-            .any(|e| e.starts_with("Tui: leg opened (conn ")),
-        "a conn-scoped OPEN marker: {events:?}"
-    );
-    assert!(
-        events
-            .iter()
-            .any(|e| e.starts_with("Ccd: leg opened (conn ")),
-        "a conn-scoped OPEN marker for the ccd leg: {events:?}"
-    );
-    assert!(
-        events.iter().any(|e| e.starts_with("Tui: forward (")),
-        "the forward marker keeps its exact live-gate substring: {events:?}"
+            .any(|e| e.starts_with("Tui: forward (app/list) (conn ")),
+        "the keyboard's forward marker names its method: {events:?}"
     );
     assert!(
         events
@@ -1488,42 +866,35 @@ async fn the_audit_log_carries_connection_scoped_open_and_close_markers() {
 }
 
 // ---------------------------------------------------------------------------
-// ROUND-3 P1 — the total outstanding-request-id ledger, end to end over the relay.
+// The phone leg's outstanding-request-id ledger, end to end over the relay.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn a_request_reusing_an_in_flight_id_forwards_zero_bytes_and_keeps_the_leg_open() {
     // A client that pipelines two live requests under ONE id has made its own responses
-    // uncorrelatable — and, before round 3, could have had an ordinary answer read as a
-    // creation answer. The frame is DROPPED (zero upstream bytes), the leg stays OPEN, and
+    // uncorrelatable. The frame is DROPPED (zero upstream bytes), the leg stays OPEN, and
     // the event is logged for the failure-containment seam.
     let h = start_broker_with_events();
-    let mut ws = connect(&h.tui_sock).await;
+    let mut ws = connect(&h.ccd_sock).await;
     ws.send(Message::Text(
-        r#"{"method":"app/list","id":1,"params":{"tag":"first"}}"#.into(),
+        r#"{"method":"thread/loaded/list","id":1,"params":{"tag":"first"}}"#.into(),
     ))
     .await
     .unwrap();
     let rec = recorded_after(&h.state, 1).await;
     assert_eq!(rec.len(), 1, "the first request forwards");
 
-    // Nothing has answered id 1, so it is still outstanding.
     ws.send(Message::Text(
-        r#"{"method":"model/list","id":1,"params":{"tag":"second"}}"#.into(),
+        r#"{"method":"thread/loaded/list","id":1,"params":{"tag":"second"}}"#.into(),
     ))
     .await
     .unwrap();
     settle().await;
     let rec = h.state.recorded.lock().unwrap().clone();
     assert_eq!(rec.len(), 1, "a reused in-flight id forwards zero bytes");
-    assert!(
-        !rec.iter().any(|m| m.contains("second")),
-        "the colliding frame must be absent from upstream: {rec:?}"
-    );
 
-    // The leg is still open and fully usable under a fresh id.
     ws.send(Message::Text(
-        r#"{"method":"app/list","id":2,"params":{"tag":"third"}}"#.into(),
+        r#"{"method":"thread/loaded/list","id":2,"params":{"tag":"third"}}"#.into(),
     ))
     .await
     .unwrap();
@@ -1531,10 +902,9 @@ async fn a_request_reusing_an_in_flight_id_forwards_zero_bytes_and_keeps_the_leg
     assert_eq!(rec.len(), 2);
     assert!(rec[1].contains("third"), "{rec:?}");
 
-    // The drop is audited, and the line is scoped to the connection that made it (M8).
     assert!(
         h.events().iter().any(|e| {
-            e.starts_with("Tui: drop, keep open (")
+            e.starts_with("Ccd: drop, keep open (")
                 && e.contains("already outstanding")
                 && e.contains("(conn ")
         }),
@@ -1545,26 +915,21 @@ async fn a_request_reusing_an_in_flight_id_forwards_zero_bytes_and_keeps_the_leg
 
 #[tokio::test]
 async fn an_answered_id_is_usable_again_over_the_relay() {
-    // The other half of the rule: a RESPONSE releases its entry, so a client that reuses an
-    // id AFTER it has been answered — which every real client's per-connection counter makes
-    // unnecessary, but which the rule must not forbid retroactively — still forwards.
     let h = start_broker();
     h.push_replies(vec![(
         r#""tag":"first""#.into(),
         Message::Text(r#"{"id":1,"result":{"data":[]}}"#.into()),
     )]);
-    let mut ws = connect(&h.tui_sock).await;
+    let mut ws = connect(&h.ccd_sock).await;
     ws.send(Message::Text(
-        r#"{"method":"app/list","id":1,"params":{"tag":"first"}}"#.into(),
+        r#"{"method":"thread/loaded/list","id":1,"params":{"tag":"first"}}"#.into(),
     ))
     .await
     .unwrap();
-    // Await the answer, so the release has provably happened.
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["id"], 1);
+    assert_eq!(next_frame(&mut ws).await["id"], 1);
 
     ws.send(Message::Text(
-        r#"{"method":"app/list","id":1,"params":{"tag":"second"}}"#.into(),
+        r#"{"method":"thread/loaded/list","id":1,"params":{"tag":"second"}}"#.into(),
     ))
     .await
     .unwrap();
@@ -1574,74 +939,12 @@ async fn an_answered_id_is_usable_again_over_the_relay() {
 }
 
 #[tokio::test]
-async fn a_non_creation_request_holding_the_creation_id_binds_nothing_over_the_relay() {
-    // ROUND-3 P1, THE CROSS-METHOD COLLISION, end to end. `app/list` takes the id
-    // `start-1` first; the `thread/start` that wanted that id is therefore DROPPED with zero
-    // upstream bytes, so no creation is ever pending. The upstream then answers `start-1`
-    // with a perfectly-shaped creation RESPONSE — the exact frame that, under a ledger which
-    // tracked only creations, would have matched a pending entry. Nothing binds, so the turn
-    // it would have authorized is refused.
-    let h = start_broker();
-    // The creation-shaped answer for id `start-1` is emitted when the THIRD message is
-    // admitted, so the ordering is deterministic: the collision is decided before any
-    // response can release the id.
-    h.push_replies(vec![("model/list".into(), creation_response("smuggled"))]);
-    let mut ws = connect(&h.tui_sock).await;
-
-    ws.send(Message::Text(
-        r#"{"method":"app/list","id":"start-1","params":{}}"#.into(),
-    ))
-    .await
-    .unwrap();
-    let rec = recorded_after(&h.state, 1).await;
-    assert_eq!(rec.len(), 1, "the non-creation request took the id");
-
-    // The creation cannot take an in-flight id: zero bytes, no reply, leg open.
-    ws.send(Message::Text(CREATION_REQUEST.into()))
-        .await
-        .unwrap();
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().len(),
-        1,
-        "the colliding thread/start must forward zero bytes"
-    );
-
-    // Now let the creation-shaped answer for `start-1` arrive.
-    ws.send(Message::Text(
-        r#"{"method":"model/list","id":2,"params":{}}"#.into(),
-    ))
-    .await
-    .unwrap();
-    let smuggled = next_frame(&mut ws).await;
-    assert_eq!(smuggled["result"]["thread"]["id"], "smuggled");
-
-    // Nothing bound: a turn naming that thread is policy-refused and forwards zero bytes.
-    ws.send(Message::Text(turn_frame("smuggled")))
-        .await
-        .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(
-        v["error"]["code"], -32001,
-        "a response to a NON-creation request must never install a binding"
-    );
-    settle().await;
-    let rec = h.state.recorded.lock().unwrap().clone();
-    assert_eq!(rec.len(), 2, "zero thread/start bytes and zero turn bytes");
-    assert!(!rec.iter().any(|m| m.contains("thread/start")));
-    assert!(!rec.iter().any(|m| m.contains("turn/start")));
-}
-
-#[tokio::test]
 async fn an_over_long_request_id_forwards_zero_bytes() {
-    // ROUND-3 P6. The measured maximum on the wire is 59 bytes; anything past the cap is
-    // refused before it is stored, so it can neither grow the ledger nor burn the creation
-    // slot. The leg stays open and a normal request still works.
     let h = start_broker_with_events();
-    let mut ws = connect(&h.tui_sock).await;
+    let mut ws = connect(&h.ccd_sock).await;
     let long = "x".repeat(4096);
     ws.send(Message::Text(format!(
-        r#"{{"method":"app/list","id":"{long}","params":{{}}}}"#
+        r#"{{"method":"thread/loaded/list","id":"{long}","params":{{}}}}"#
     )))
     .await
     .unwrap();
@@ -1650,7 +953,6 @@ async fn an_over_long_request_id_forwards_zero_bytes() {
         h.state.recorded.lock().unwrap().is_empty(),
         "an over-long id must forward zero bytes",
     );
-    // The audit line must not echo the id.
     let drop_line = h
         .events()
         .into_iter()
@@ -1659,7 +961,7 @@ async fn an_over_long_request_id_forwards_zero_bytes() {
     assert!(!drop_line.contains(&long), "the id leaked: {drop_line}");
 
     ws.send(Message::Text(
-        r#"{"method":"app/list","id":1,"params":{}}"#.into(),
+        r#"{"method":"thread/loaded/list","id":1,"params":{}}"#.into(),
     ))
     .await
     .unwrap();
@@ -1669,22 +971,10 @@ async fn an_over_long_request_id_forwards_zero_bytes() {
 
 #[tokio::test]
 async fn every_forward_note_is_scoped_to_its_connection() {
-    // M8 — a gate must be able to pair a forward with the connection that made it, by real
-    // connection identity. The EXACT substrings the live gates assert are unchanged and the
-    // conn id is APPENDED after the closing paren of the note, never spliced into it.
+    // A gate must be able to pair a forward with the connection that made it. The EXACT
+    // substrings the live gates assert are kept and the conn id is APPENDED after the
+    // closing paren of the note, never spliced into it.
     let h = start_broker_with_events();
-    h.push_replies(vec![]); // tui leg
-    h.push_replies(vec![(
-        "thread/start".into(),
-        creation_response("01a0-ours"),
-    )]);
-    // Leg 1: a plain allowlisted read and an allowlisted notification on the ccd leg.
-    //
-    // `thread/loaded/list` rather than `thread/read`: this test only needs SOME
-    // unscoped forward on the ccd leg to prove the note is per-connection, and the
-    // thread-scoped reads are no longer unscoped — they bind to a session thread
-    // (`Disposition::ReadSessionThread`). `thread/loaded/list` carries no threadId at
-    // all, so it is the honest "plain allowlisted read" the comment describes.
     let mut ccd = connect(&h.ccd_sock).await;
     ccd.send(Message::Text(
         r#"{"method":"thread/loaded/list","id":1,"params":{}}"#.into(),
@@ -1698,42 +988,35 @@ async fn every_forward_note_is_scoped_to_its_connection() {
     .unwrap();
     let _ = recorded_after(&h.state, 2).await;
 
-    // Leg 2: the ownership creation and a head-checked turn on the TUI leg.
     let mut tui = connect(&h.tui_sock).await;
-    create_thread(&mut tui, "01a0-ours").await;
-    tui.send(Message::Text(turn_frame("01a0-ours")))
+    tui.send(Message::Text(CREATION_REQUEST.into()))
         .await
         .unwrap();
-    let _ = recorded_after(&h.state, 4).await;
+    let _ = recorded_after(&h.state, 3).await;
     settle().await;
 
     let events = h.events();
-    // The gate-asserted substrings, verbatim.
     for marker in [
         "Ccd: forward (request allowlisted)",
         "Ccd: forward (notification allowlisted)",
-        "Tui: forward (ownership request: fingerprint asserted)",
-        "Tui: forward (turn/start: head-checked; sandbox deferral discharged by the verified \
-         thread binding)",
+        "Tui: forward (thread/start)",
     ] {
         assert!(
             events.iter().any(|e| e.contains(marker)),
             "the live-gate substring {marker:?} must survive verbatim: {events:?}"
         );
     }
-    // …and every forward line ENDS with its connection id, appended after the note.
     let forwards: Vec<&String> = events
         .iter()
         .filter(|e| e.contains(": forward ("))
         .collect();
-    assert!(forwards.len() >= 4, "{events:?}");
+    assert!(forwards.len() >= 3, "{events:?}");
     for line in &forwards {
         assert!(
             line.ends_with(')') && line.contains(") (conn "),
             "a forward note must carry its conn id, appended: {line}"
         );
     }
-    // The two legs report DIFFERENT connection ids, which is what makes pairing real.
     let conn_of = |prefix: &str| -> String {
         forwards
             .iter()
@@ -1767,7 +1050,7 @@ async fn s2c_passthrough_is_byte_exact() {
 async fn multi_mb_message_relays_whole_and_exact() {
     let h = start_broker();
     let mut ws = connect(&h.tui_sock).await;
-    // ~6 MB allowlisted message (the plugin/list worst case class from A4/D8).
+    // ~6 MB message (the plugin/list worst-case class).
     let big = "A".repeat(6 * 1024 * 1024);
     let msg = format!(r#"{{"method":"app/list","id":1,"params":{{"pad":"{big}"}}}}"#);
     ws.send(Message::Text(msg.clone())).await.unwrap();
@@ -1779,25 +1062,17 @@ async fn multi_mb_message_relays_whole_and_exact() {
 }
 
 #[tokio::test]
-async fn duplicate_key_frame_forwards_zero_bytes_and_closes() {
+async fn a_duplicate_key_frame_from_the_phone_forwards_zero_bytes_and_closes() {
     let h = start_broker();
-    let mut ws = connect(&h.tui_sock).await;
-    // A frame with a duplicated typed ownership key: our parse keeps one, the app-server
-    // might keep the other. Reject: zero upstream bytes, leg closed.
+    let mut ws = connect(&h.ccd_sock).await;
+    // A frame with a duplicated key: our parse keeps one, the app-server might keep the
+    // other. Reject: zero upstream bytes, leg closed.
     ws.send(Message::Text(
-        r#"{"method":"thread/start","id":1,"approvalPolicy":"untrusted","approvalPolicy":"never"}"#
-            .into(),
+        r#"{"method":"thread/resume","id":1,"params":{"threadId":"a","threadId":"b"}}"#.into(),
     ))
     .await
     .unwrap();
-    // The leg closes (malformed/hostile), and nothing is forwarded.
-    let closed = loop {
-        match ws.next().await {
-            None => break true,
-            Some(Ok(Message::Close(_))) | Some(Err(_)) => break true,
-            Some(Ok(_)) => continue,
-        }
-    };
+    let (_, closed) = frames_until_closed(&mut ws).await;
     assert!(closed, "duplicate-key frame must close the leg");
     assert!(
         h.state.recorded.lock().unwrap().is_empty(),
@@ -1805,36 +1080,38 @@ async fn duplicate_key_frame_forwards_zero_bytes_and_closes() {
     );
 }
 
+/// The phone's role is anchored to its socket: a second `initialize` closes its leg. The
+/// keyboard's second `initialize` is its own business and goes through.
 #[tokio::test]
-async fn reinitialization_closes_the_leg() {
+async fn reinitialization_closes_the_phone_leg_only() {
     let h = start_broker();
-    let mut ws = connect(&h.tui_sock).await;
+    let mut ws = connect(&h.ccd_sock).await;
     ws.send(Message::Text(
-        r#"{"method":"initialize","id":1,"params":{"capabilities":{"experimentalApi":true}}}"#
+        r#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"x","version":"1"}}}"#
             .into(),
     ))
     .await
     .unwrap();
-    // First initialize forwards.
     let rec = recorded_after(&h.state, 1).await;
     assert!(rec[0].contains("initialize"));
-
-    // Second initialize on the same connection -> fail closed (leg closes).
     ws.send(Message::Text(
         r#"{"method":"initialize","id":2,"params":{}}"#.into(),
     ))
     .await
     .unwrap();
-    // The stream must end (close/EOF) rather than deliver a normal message.
-    let closed = loop {
-        match ws.next().await {
-            None => break true,
-            Some(Ok(Message::Close(_))) => break true,
-            Some(Err(_)) => break true,
-            Some(Ok(_)) => continue,
-        }
-    };
-    assert!(closed, "reinitialization must close the leg");
+    let (_, closed) = frames_until_closed(&mut ws).await;
+    assert!(closed, "reinitialization must close the phone's leg");
+
+    let mut tui = connect(&h.tui_sock).await;
+    for id in [1, 2] {
+        tui.send(Message::Text(format!(
+            r#"{{"method":"initialize","id":{id},"params":{{}}}}"#
+        )))
+        .await
+        .unwrap();
+    }
+    let rec = recorded_after(&h.state, 3).await;
+    assert_eq!(rec.len(), 3, "both keyboard initializes forward: {rec:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1869,242 +1146,20 @@ async fn drain_approval(ws: &mut WebSocketStream<UnixStream>) {
     );
 }
 
-/// A COLLIDING second request at an id that is already occupied is **not delivered**: the
-/// broker answers it upstream instead, because the client could never answer it.
-///
-/// Before the interception, both frames reached the client and neither was answerable —
-/// which left the user looking at an approval prompt whose answer went nowhere, and the
-/// app-server waiting on a request that would never be resolved. This waits for the
-/// upstream answer, which is what now marks the collision as processed.
-async fn drain_collided(h: &Harness, before: usize) {
-    let rec = recorded_after(&h.state, before + 1).await;
-    let answered: serde_json::Value = serde_json::from_str(rec.last().unwrap()).unwrap();
-    assert_eq!(answered["id"], 0, "the collision is answered upstream");
-    assert_eq!(answered["error"]["code"], -32601);
+/// A notification scripted after a withheld request: the leg receiving it proves the
+/// broker has finished with every frame scripted before it.
+fn barrier() -> Message {
+    Message::Text(r#"{"method":"thread/status/changed","params":{"threadId":"th-A"}}"#.into())
 }
 
-const PERMISSIONS_APPROVAL: &str = "item/permissions/requestApproval";
-
-/// One `item/tool/call` s2c frame, in the shape MEASURED off a real 0.153 session.
-fn tool_call(namespace: &str, thread: &str, id: i64) -> Message {
-    Message::Text(format!(
-        r#"{{"id":{id},"method":"item/tool/call","params":{{"arguments":{{"limit":5}},"callId":"exec-1","namespace":"{namespace}","threadId":"{thread}","tool":"list_threads","turnId":"{TOOL_TURN}"}}}}"#
-    ))
-}
-
-/// The turn id the fake app-server answers the scripted `turn/start` with.
-const TOOL_TURN: &str = "01a0-turn";
-
-/// A creation carrying the ADMITTED `codex_tui` bundle, read from the same fixture the
-/// fingerprint pins — so the session this opens is one where the model really was handed
-/// the tools a dispatch will claim to come from.
-fn creation_request_with_tools() -> String {
-    let bundle: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../fixtures/codex/dynamic-tools-0.153.json"
-    ))
-    .expect("the captured bundle parses");
-    serde_json::json!({
-        "method": "thread/start",
-        "id": "start-1",
-        "params": {"approvalPolicy": "untrusted", "approvalsReviewer": "user",
-                   "sandbox": "read-only", "dynamicTools": bundle}
-    })
-    .to_string()
-}
-
-/// Open the session an `item/tool/call` arrives in: the bundle admitted at creation, a
-/// bound thread, and one ACTIVE turn.
-///
-/// Driven entirely through the relay, so the state under test is the state a live session
-/// reaches rather than one assembled beside it.
-async fn tool_session(h: &Harness, thread: &str, dispatch: Message) -> WebSocketStream<UnixStream> {
-    // The fake answers one scripted frame per c2s message it admits, so the ORDER is
-    // driven from the client side: the creation binds, the turn goes active, and only then
-    // is the dispatch released — by the harmless `thread/loaded/list` the pump sends. That
-    // ordering is the point: a dispatch arriving before its turn exists is exactly what
-    // must NOT be answerable, so a test of the admitted path has to reach the admitted
-    // state first.
-    h.push_replies(vec![
-        ("thread/start".into(), creation_response(thread)),
-        (
-            "turn/start".into(),
-            Message::Text(
-                serde_json::json!({"id": 3, "result": {"turn": {"id": TOOL_TURN}}}).to_string(),
-            ),
-        ),
-        ("thread/loaded/list".into(), dispatch),
-    ]);
-    let mut ws = connect(&h.tui_sock).await;
-    ws.send(Message::Text(creation_request_with_tools()))
-        .await
-        .unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(v["result"]["thread"]["id"], thread, "the creation binds");
-    ws.send(Message::Text(turn_frame(thread))).await.unwrap();
-    let v = next_frame(&mut ws).await;
-    assert_eq!(
-        v["result"]["turn"]["id"], TOOL_TURN,
-        "the turn is active; got {v}"
-    );
-    ws
-}
-
-/// Release the scripted dispatch: one allowlisted, thread-free read whose only job is to
-/// give the fake upstream a message to answer with.
-///
-/// Returns the upstream byte count once the pump's OWN forward has landed, so a test
-/// counts only what the dispatch causes.
-async fn pump_dispatch(h: &Harness, ws: &mut WebSocketStream<UnixStream>) -> usize {
-    ws.send(Message::Text(
-        r#"{"id":"pump","method":"thread/loaded/list","params":{"limit":1}}"#.into(),
-    ))
-    .await
-    .unwrap();
-    settle().await;
-    h.state.recorded.lock().unwrap().len()
-}
-
-/// The TUI's answer to a tool call whose underlying method the broker refused: a
-/// well-formed FAILURE result, which is exactly what the real TUI produces.
-fn tool_result(id: i64, success: bool) -> Message {
-    Message::Text(format!(
-        r#"{{"id":{id},"result":{{"contentItems":[{{"text":"thread/list failed: method refused","type":"inputText"}}],"success":{success}}}}}"#
-    ))
-}
-
-/// **The hang, closed at the root, over the real relay.**
-///
-/// The admitted `codex_tui` bundle advertises tools to the MODEL, so it calls them
-/// unprompted. The broker refuses the cross-session method underneath — correctly — and
-/// the TUI turns that refusal into a well-formed `success:false` tool result. If that
-/// result does not reach the app-server, the tool call never closes: the turn hangs at
-/// "Working…" and `turn/interrupt` is a deferred disposition that refuses, so the user
-/// cannot escape and has to kill the session.
-///
-/// Both halves are asserted here: the refusal still forwards zero bytes, and the ANSWER
-/// forwards byte-exact so the exchange completes.
-#[tokio::test]
-async fn a_refused_tool_call_still_returns_its_failure_so_the_turn_completes() {
-    let h = start_broker_with_events();
-    let mut tui = tool_session(&h, "01a0-ours", tool_call("codex_tui", "01a0-ours", 0)).await;
-    let before = pump_dispatch(&h, &mut tui).await;
-    let f = tui.next().await.unwrap().unwrap();
-    assert!(f.to_text().unwrap().contains("item/tool/call"));
-
-    // The tool's underlying method is refused: zero upstream bytes, leg stays usable.
-    tui.send(Message::Text(
-        r#"{"id":"t1","method":"thread/list","params":{}}"#.into(),
-    ))
-    .await
-    .unwrap();
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().len(),
-        before,
-        "the cross-session read must still forward zero bytes"
-    );
-
-    // …and the TUI's failure result for the tool call DOES forward, byte-exact, so the
-    // app-server learns the call finished and the turn ends.
-    let answer = tool_result(0, false);
-    tui.send(answer.clone()).await.unwrap();
-    let rec = recorded_after(&h.state, before + 1).await;
-    assert_eq!(
-        rec.last().unwrap(),
-        answer.to_text().unwrap(),
-        "the tool result must reach the app-server, byte-exact"
-    );
-    assert!(
-        h.events()
-            .iter()
-            .any(|e| e.contains("capability won: winner=Tui")),
-        "events: {:?}",
-        h.events()
-    );
-}
-
-/// The legitimate half: a tool the model uses INSIDE its own session succeeds, and its
-/// success result flows back the same way. Admitting the answer must not depend on the
-/// answer being a failure.
-#[tokio::test]
-async fn a_successful_tool_call_returns_its_result_too() {
-    let h = start_broker_with_events();
-    let mut tui = tool_session(&h, "01a0-ours", tool_call("codex_tui", "01a0-ours", 0)).await;
-    let before = pump_dispatch(&h, &mut tui).await;
-    let _ = tui.next().await.unwrap().unwrap();
-    let answer = tool_result(0, true);
-    tui.send(answer.clone()).await.unwrap();
-    let rec = recorded_after(&h.state, before + 1).await;
-    assert_eq!(rec.last().unwrap(), answer.to_text().unwrap());
-}
-
-/// A tool call from a namespace this broker never admitted stays unanswerable, so its
-/// answer forwards zero bytes.
-#[tokio::test]
-async fn a_tool_call_from_an_unadmitted_namespace_cannot_be_answered() {
-    let h = start_broker_with_events();
-    let mut tui = tool_session(
-        &h,
-        "01a0-ours",
-        tool_call("some_other_bundle", "01a0-ours", 0),
-    )
-    .await;
-    let before = h.state.recorded.lock().unwrap().len();
-    pump_dispatch(&h, &mut tui).await;
-    // It is not DELIVERED at all — the broker answers it upstream instead, which is what
-    // stops an unanswerable request stranding the exchange.
-    settle().await;
-    let rec = h.state.recorded.lock().unwrap().clone();
-    assert_eq!(
-        rec.len(),
-        before + 2,
-        "the pump forwarded, and the broker answered the dispatch upstream"
-    );
-    let answered: serde_json::Value = serde_json::from_str(rec.last().unwrap()).unwrap();
-    assert_eq!(answered["id"], 0);
-    assert_eq!(answered["error"]["code"], -32601);
-
-    // …and a client answer to it forwards zero bytes, because it was never bound.
-    tui.send(tool_result(0, true)).await.unwrap();
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().len(),
-        before + 2,
-        "an unadmitted namespace's tool result must forward zero bytes"
-    );
-}
-
-/// The phone is never granted a tool call's answer — a tool result is handed to the MODEL
-/// as tool output, so answering one is a text-injection capability, not an approval.
-#[tokio::test]
-async fn the_phone_cannot_answer_a_tool_call_but_the_tui_still_can() {
-    let h = start_broker_with_events();
-    let mut tui = tool_session(&h, "01a0-ours", tool_call("codex_tui", "01a0-ours", 0)).await;
-    let before = pump_dispatch(&h, &mut tui).await;
-    let _ = tui.next().await.unwrap().unwrap();
-    // Scripted AFTER the TUI leg exists, so it lands on the ccd upstream and not the one
-    // the session was opened on.
-    h.push_script(vec![tool_call("codex_tui", "01a0-ours", 0)]);
-    let mut ccd = connect(&h.ccd_sock).await;
-    let _ = ccd.next().await.unwrap().unwrap();
-
-    ccd.send(tool_result(0, true)).await.unwrap();
-    settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().len(),
-        before,
-        "ccd must not be able to answer a tool call"
-    );
-    // …and the phone's refused attempt did not consume the slot the TUI needs.
-    let answer = tool_result(0, false);
-    tui.send(answer.clone()).await.unwrap();
-    let rec = recorded_after(&h.state, before + 1).await;
-    assert_eq!(rec.last().unwrap(), answer.to_text().unwrap());
+async fn drain_barrier(ws: &mut WebSocketStream<UnixStream>) {
+    assert_eq!(next_frame(ws).await["method"], "thread/status/changed");
 }
 
 #[tokio::test]
 async fn fanout_phone_family_ccd_wins_tui_sibling_revoked() {
     let h = start_broker_with_events();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     // Same approval fans out onto both legs' upstreams (tui connects first, then ccd).
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
@@ -2138,6 +1193,7 @@ async fn fanout_phone_family_ccd_wins_tui_sibling_revoked() {
 #[tokio::test]
 async fn fanout_phone_family_tui_wins_ccd_sibling_revoked() {
     let h = start_broker_with_events();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
     let mut tui = connect(&h.tui_sock).await;
@@ -2166,47 +1222,9 @@ async fn fanout_phone_family_tui_wins_ccd_sibling_revoked() {
 }
 
 #[tokio::test]
-async fn observe_only_family_refuses_ccd_authorizes_tui() {
-    let h = start_broker();
-    // A permissions approval grants ONLY the TUI (ccd can never answer it).
-    h.push_script(vec![approval(PERMISSIONS_APPROVAL, "th-P", 0)]);
-    h.push_script(vec![approval(PERMISSIONS_APPROVAL, "th-P", 0)]);
-    let mut tui = connect(&h.tui_sock).await;
-    drain_approval(&mut tui).await;
-    let mut ccd = connect(&h.ccd_sock).await;
-    drain_approval(&mut ccd).await;
-
-    // ccd answers → zero bytes (never granted).
-    ccd.send(answer(0, "ccd")).await.unwrap();
-    settle().await;
-    assert!(
-        h.state.recorded.lock().unwrap().is_empty(),
-        "ccd cannot answer an observe-only family",
-    );
-
-    // The TUI answer to the same request forwards.
-    tui.send(answer(0, "tui")).await.unwrap();
-    let rec = recorded_after(&h.state, 1).await;
-    assert_eq!(rec.len(), 1);
-    assert!(rec[0].contains(r#""by":"tui""#));
-}
-
-#[tokio::test]
-async fn unsolicited_response_forwards_zero_bytes() {
-    let h = start_broker();
-    // No serverRequest was ever observed on this leg.
-    let mut tui = connect(&h.tui_sock).await;
-    tui.send(answer(99, "ghost")).await.unwrap();
-    settle().await;
-    assert!(
-        h.state.recorded.lock().unwrap().is_empty(),
-        "an unsolicited response has no live capability",
-    );
-}
-
-#[tokio::test]
 async fn duplicate_response_on_same_leg_is_one_use() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await;
@@ -2238,6 +1256,7 @@ async fn duplicate_response_on_same_leg_is_one_use() {
 #[tokio::test]
 async fn a_ccd_answer_that_forwards_is_told_it_was_delivered() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await;
@@ -2271,6 +1290,7 @@ async fn a_ccd_answer_that_forwards_is_told_it_was_delivered() {
 #[tokio::test]
 async fn a_ccd_answer_that_loses_the_race_is_told_it_was_not_delivered() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
     let mut tui = connect(&h.tui_sock).await;
@@ -2330,6 +1350,7 @@ async fn a_ccd_answer_that_loses_the_race_is_told_it_was_not_delivered() {
 #[tokio::test]
 async fn a_ccd_answer_whose_upstream_write_never_completed_is_told_it_was_not_delivered() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_discard_upstream(true);
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
     let mut ccd = connect(&h.ccd_sock).await;
@@ -2369,6 +1390,7 @@ async fn a_ccd_answer_whose_upstream_write_never_completed_is_told_it_was_not_de
 #[tokio::test]
 async fn a_write_the_socket_refused_releases_the_slot_for_the_keyboard() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     // The ccd leg connects first, so the failed-write upstream is its own.
     h.push_failed_write(true);
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
@@ -2428,6 +1450,7 @@ async fn a_write_the_socket_refused_releases_the_slot_for_the_keyboard() {
 #[tokio::test]
 async fn a_write_the_channel_refused_releases_the_slot_for_the_keyboard() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     // The ccd leg connects first, so the dead write side is its own.
     h.push_dead_upstream(true); // ccd leg: the hand-off fails
     h.push_dead_upstream(false); // tui leg: healthy
@@ -2478,6 +1501,7 @@ async fn a_write_the_channel_refused_releases_the_slot_for_the_keyboard() {
 #[tokio::test]
 async fn a_dropped_receipt_is_unconfirmed_and_keeps_the_slot_consumed() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_discard_upstream(true);
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
@@ -2521,6 +1545,7 @@ async fn a_dropped_receipt_is_unconfirmed_and_keeps_the_slot_consumed() {
 #[tokio::test]
 async fn a_confirmed_win_stays_consumed_and_names_its_winner() {
     let h = start_broker_with_events();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
     let mut tui = connect(&h.tui_sock).await;
@@ -2584,6 +1609,9 @@ async fn a_confirmed_win_stays_consumed_and_names_its_winner() {
 #[tokio::test]
 async fn an_upstream_write_that_never_completes_is_bounded_and_closes_the_leg() {
     let h = start_broker_stalled(Duration::from_millis(300));
+    let mut keyboard = connect(&h.tui_sock).await;
+    drain_approval(&mut keyboard).await;
+    create_thread(&mut keyboard, "th-A").await;
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await;
 
@@ -2639,6 +1667,9 @@ async fn an_upstream_write_that_never_completes_is_bounded_and_closes_the_leg() 
 #[tokio::test]
 async fn an_upstream_write_that_cannot_be_handed_over_is_bounded_and_closes_the_leg() {
     let h = start_broker_stalled_behind_a_full_queue(Duration::from_millis(300), 1);
+    let mut keyboard = connect(&h.tui_sock).await;
+    drain_approval(&mut keyboard).await;
+    create_thread(&mut keyboard, "th-A").await;
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await;
 
@@ -2695,6 +1726,7 @@ async fn an_upstream_write_that_cannot_be_handed_over_is_bounded_and_closes_the_
 #[tokio::test]
 async fn an_upstream_frame_in_the_brokers_namespace_is_dropped_and_closes_the_leg() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![
         approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
         Message::Text(
@@ -2726,6 +1758,7 @@ async fn an_upstream_frame_in_the_brokers_namespace_is_dropped_and_closes_the_le
 #[tokio::test]
 async fn a_losing_ccd_answer_names_the_keyboard_that_won() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
     let mut tui = connect(&h.tui_sock).await;
@@ -2761,6 +1794,7 @@ async fn a_losing_ccd_answer_names_the_keyboard_that_won() {
 #[tokio::test]
 async fn a_losing_ccd_answer_names_the_other_phone_leg_that_won() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
     let mut first = connect(&h.ccd_sock).await;
@@ -2859,6 +1893,7 @@ async fn an_unsolicited_ccd_response_is_told_nothing() {
 #[tokio::test]
 async fn per_thread_id_reuse_resolves_to_the_correct_slot() {
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-B").await;
     // Both legs see the SAME bare id=0, but for DIFFERENT threads — the per-leg view
     // disambiguates id→thread, so the two arbiter slots are independent and answering one
     // leaves the other live.
@@ -2882,7 +1917,9 @@ async fn per_thread_id_reuse_resolves_to_the_correct_slot() {
 // ---------------------------------------------------------------------------
 // Tombstone regressions (the CRITICAL bare-id ambiguity routes)
 //
-// Server-request ids are per-thread small ints reused from 0. A bare Response frame
+// Server-request ids come from one monotonic counter per app-server process and are not
+// reused across threads, so a second observation
+// of an id on a leg comes only from a broken or hostile upstream. A bare Response frame
 // carries no provenance, so the instant an id is observed twice on a leg the broker can
 // no longer prove which request a `{id}` response answers. Each bare id is a per-leg
 // 3-state (Unseen → Bound → Tombstoned): the first observation binds, ANY second
@@ -2898,22 +1935,23 @@ async fn reverse_alias_original_unanswerable_after_collision() {
     // reuses id=0 for th-B. The collision tombstones id=0, so th-A — never answered before
     // the collision — is now unanswerable: an id=0 response forwards ZERO bytes.
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![
         approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
         approval(COMMAND_EXEC_APPROVAL, "th-B", 0),
+        barrier(),
     ]);
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await; // th-A binds id=0
-    drain_collided(&h, 0).await; // th-B reuses id=0 ⇒ collision ⇒ tombstone
+    drain_barrier(&mut ccd).await; // th-B reuses id=0 ⇒ collision ⇒ tombstone, withheld
 
     ccd.send(answer(0, "would-be-A")).await.unwrap();
     settle().await;
     let rec = h.state.recorded.lock().unwrap().clone();
-    assert_eq!(
-        rec.len(),
-        1,
-        "after a collision the original binding is unanswerable; the only upstream byte \
-         is the broker's own refusal of the colliding request, got {rec:?}"
+    assert!(
+        rec.is_empty(),
+        "after a collision the original binding is unanswerable, and nobody answered the \
+         colliding request on this leg, got {rec:?}"
     );
 }
 
@@ -2924,32 +1962,34 @@ async fn late_duplicate_after_same_id_reuse_forwards_zero_bytes() {
     // attacker means for th-B nor a late one for th-A. (Under the old never-rebind form
     // th-A stayed answerable once; that was the reverse-alias defect.)
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![
         approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
         approval(COMMAND_EXEC_APPROVAL, "th-B", 0),
+        barrier(),
     ]);
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await; // th-A
-    drain_collided(&h, 0).await; // th-B reuse ⇒ tombstone, answered upstream
+    drain_barrier(&mut ccd).await; // th-B reuse ⇒ tombstone, withheld
 
     ccd.send(answer(0, "first")).await.unwrap();
     ccd.send(answer(0, "stale")).await.unwrap();
     settle().await;
     let rec = h.state.recorded.lock().unwrap().clone();
-    assert_eq!(
-        rec.len(),
-        1,
-        "every id=0 ANSWER after a collision forwards zero bytes; the only upstream byte \
-         is the broker's own refusal of the colliding request, got {rec:?}"
+    assert!(
+        rec.is_empty(),
+        "every id=0 ANSWER after a collision forwards zero bytes, got {rec:?}"
     );
 }
 
 #[tokio::test]
 async fn losing_sibling_after_same_id_reuse_forwards_zero_bytes() {
     // Fanout to both legs at id=0 (th-A), each leg ALSO reuses id=0 for th-B. On EACH leg
-    // the reuse is a collision that tombstones id=0, so neither leg can answer id=0 — no
-    // aliasing to th-A or th-B on either side.
+    // the reuse is a collision that tombstones id=0, so the phone cannot answer id=0 and the
+    // keyboard's answer takes no slot: it forwards, as native codex would, and the
+    // app-server decides which request it answers.
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     h.push_script(vec![
         approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
         approval(COMMAND_EXEC_APPROVAL, "th-B", 0),
@@ -2957,55 +1997,25 @@ async fn losing_sibling_after_same_id_reuse_forwards_zero_bytes() {
     h.push_script(vec![
         approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
         approval(COMMAND_EXEC_APPROVAL, "th-B", 0),
+        barrier(),
     ]);
     let mut tui = connect(&h.tui_sock).await;
     drain_approval(&mut tui).await;
-    drain_collided(&h, 0).await;
-    let mut ccd = connect(&h.ccd_sock).await;
-    drain_approval(&mut ccd).await;
-    drain_collided(&h, 1).await;
-
-    ccd.send(answer(0, "ccd")).await.unwrap();
-    tui.send(answer(0, "tui")).await.unwrap();
-    settle().await;
-    let rec = h.state.recorded.lock().unwrap().clone();
-    assert_eq!(
-        rec.len(),
-        2,
-        "both legs tombstoned id=0; no sibling ANSWER forwards — the two upstream bytes \
-         are the broker's own refusals of the two colliding requests, got {rec:?}"
-    );
-}
-
-#[tokio::test]
-async fn observe_only_then_phone_same_bare_id_tombstones_both_legs() {
-    // A TUI-only permissions request at id=0, then a phone-family request reuses id=0, on
-    // both legs. The reuse is a collision that tombstones id=0, so BOTH ccd and the
-    // original tui answer forward zero bytes (no phone upgrade AND no original tui answer).
-    let h = start_broker();
-    h.push_script(vec![
-        approval(PERMISSIONS_APPROVAL, "th-P", 0),
-        approval(COMMAND_EXEC_APPROVAL, "th-C", 0),
-    ]);
-    h.push_script(vec![
-        approval(PERMISSIONS_APPROVAL, "th-P", 0),
-        approval(COMMAND_EXEC_APPROVAL, "th-C", 0),
-    ]);
-    let mut tui = connect(&h.tui_sock).await;
     drain_approval(&mut tui).await;
-    drain_collided(&h, 0).await;
     let mut ccd = connect(&h.ccd_sock).await;
     drain_approval(&mut ccd).await;
-    drain_collided(&h, 1).await;
+    drain_barrier(&mut ccd).await;
 
     ccd.send(answer(0, "ccd")).await.unwrap();
-    tui.send(answer(0, "tui")).await.unwrap();
     settle().await;
-    assert_eq!(
-        h.state.recorded.lock().unwrap().len(),
-        2,
-        "a collision tombstones id=0 on both legs — no answer forwards",
+    assert!(
+        h.state.recorded.lock().unwrap().is_empty(),
+        "the phone cannot answer a tombstoned id"
     );
+    tui.send(answer(0, "tui")).await.unwrap();
+    let rec = recorded_after(&h.state, 1).await;
+    assert_eq!(rec.len(), 1, "{rec:?}");
+    assert!(rec[0].contains(r#""by":"tui""#));
 }
 
 #[tokio::test]
@@ -3019,6 +2029,7 @@ async fn divergent_legs_same_bare_id_different_threads_are_independent() {
     // by the fanout tests. There is no under-refusal to produce here: a per-leg tombstone
     // fires only on a same-leg reuse, which this scenario does not contain.
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-B").await;
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
     h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-B", 0)]); // ccd leg
     let mut tui = connect(&h.tui_sock).await;
@@ -3040,6 +2051,7 @@ async fn escaped_request_approval_method_is_observed_end_to_end() {
     // The size-only observe gate parses it, so the capability IS registered and a matching
     // response forwards — proving the escape is not silently skipped.
     let h = start_broker();
+    let _keyboard = keyboard_on(&h, "th-A").await;
     // The final `l` of the method is JSON-escaped (l), so the raw bytes carry no literal
     // "requestApproval" marker but decode to item/commandExecution/requestApproval. Built
     // at runtime so the source has no fragile literal escape (`"\\u006c"` == `l`).
@@ -3073,13 +2085,9 @@ async fn escaped_request_approval_method_is_observed_end_to_end() {
 #[tokio::test]
 async fn a_duplicate_member_approval_frame_closes_the_leg() {
     // An s2c approval frame with a duplicate `id` member is ambiguous
-    // (parser-differential): it registers no capability, so any answer to it would forward
-    // zero bytes. It used to be relayed anyway, byte-exact — which handed the client an
-    // approval prompt whose answer was guaranteed to be discarded, and poisoned the leg so
-    // that every LATER clean approval had the same fate.
-    //
-    // The leg closes instead. There is nothing to answer upstream either: the id is
-    // exactly what could not be read.
+    // (parser-differential): it registers no capability, so any phone answer to it would
+    // forward zero bytes, and it poisons the phone's view so that every LATER approval
+    // would have the same fate. The phone's leg closes rather than deliver it.
     let h = start_broker();
     h.push_script(vec![Message::Text(format!(
         r#"{{"method":"{COMMAND_EXEC_APPROVAL}","id":0,"id":1,"params":{{"threadId":"th-A","itemId":"x"}}}}"#
@@ -3194,7 +2202,7 @@ async fn fragmented_message_reassembled_into_one_forward() {
 
 /// The announcement the app-server broadcasts when a thread starts, in the shape
 /// measured off a real codex 0.147 server — and written **deliberately
-/// noncanonically** (round-2 F6).
+/// noncanonically**.
 ///
 /// Every byte here is chosen to differ from what `serde_json` would emit for the
 /// same value: space before a colon and a newline inside the object (whitespace),
@@ -3221,7 +2229,7 @@ const CCD_INITIALIZE: &str = r#"{"id":1,"method":"initialize","params":{"clientI
 /// Await one frame **as the bytes it arrived in**, or prove none came. `None` ⇒ the
 /// broker sent nothing.
 ///
-/// Raw text and not `serde_json::Value` (round-2 F6): the claim under test is that
+/// Raw text and not `serde_json::Value`: the claim under test is that
 /// the replay is the app-server's own frame repeated, and a parsed comparison is
 /// satisfied by any reserialization of it — different whitespace, different key
 /// order, `7.0` where the server wrote `7e0`. Only the bytes can say "repeated".
@@ -3273,7 +2281,7 @@ async fn a_late_ccd_subscriber_is_replayed_the_announcement_it_missed() {
     let replayed = text_within(&mut ccd, Duration::from_secs(5))
         .await
         .expect("a late ccd subscriber must be told the session's head");
-    // **Byte-for-byte, against a deliberately noncanonical original** (round-2 F6).
+    // **Byte-for-byte, against a deliberately noncanonical original**.
     // A parsed comparison passes for any reserialization; this one fails for a
     // changed space, a reordered key or `7.0` in place of `7e0`.
     assert_eq!(
@@ -3287,6 +2295,49 @@ async fn a_late_ccd_subscriber_is_replayed_the_announcement_it_missed() {
     assert_eq!(
         parsed["params"]["thread"]["id"], "01a0-a",
         "and it must be the thread this launch is actually on"
+    );
+}
+
+/// **An `ephemeral` thread's announcement does not displace the head's.** Measured on
+/// 0.153.4, the TUI announces two such threads on its own — the title thread of the first
+/// user turn and a `/side` fork (`fixtures/codex/title-thread-0.153.4.jsonl`,
+/// `fixtures/codex/side-fork-0.153.4.jsonl`) — and neither becomes the head. A `ccd` leg
+/// that connects after both is still owed the head's announcement.
+#[tokio::test]
+async fn a_late_ccd_subscriber_is_replayed_the_head_past_ephemeral_announcements() {
+    let h = start_broker();
+    h.push_script(vec![started_announcement("01a0-a")]);
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-a"))]);
+    let mut tui = connect(&h.tui_sock).await;
+    next_frame(&mut tui).await;
+    create_thread(&mut tui, "01a0-a").await;
+
+    let ephemeral = |thread: &str| {
+        Message::Text(
+            serde_json::json!({"method": "thread/started",
+                   "params": {"thread": {"id": thread, "ephemeral": true, "path": null}}})
+            .to_string(),
+        )
+    };
+    h.push_script(vec![ephemeral("01a0-title"), ephemeral("01a0-side")]);
+    let mut other = connect(&h.tui_sock).await;
+    assert_eq!(
+        next_frame(&mut other).await["params"]["thread"]["id"],
+        "01a0-title"
+    );
+    assert_eq!(
+        next_frame(&mut other).await["params"]["thread"]["id"],
+        "01a0-side"
+    );
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        text_within(&mut ccd, Duration::from_secs(5)).await,
+        Some(started_announcement_text("01a0-a")),
+        "the head's own announcement, replayed to the late leg"
     );
 }
 
@@ -3311,7 +2362,8 @@ async fn a_ccd_subscriber_with_no_bound_head_is_replayed_nothing() {
 /// **The head comparison is load-bearing, not decoration.** An announcement this
 /// broker forwarded but never verified — a thread that is not the session's head —
 /// is not evidence about where the session is, and replaying it would hand the
-/// observer a thread to chase that the broker itself refused to bind.
+/// observer a thread to chase that the broker itself refused to bind. The head it did
+/// bind, which nothing announced, is told in the broker's own word.
 #[tokio::test]
 async fn an_announcement_that_is_not_the_head_is_not_replayed() {
     let h = start_broker();
@@ -3333,17 +2385,21 @@ async fn an_announcement_that_is_not_the_head_is_not_replayed() {
     ccd.send(Message::Text(CCD_INITIALIZE.into()))
         .await
         .unwrap();
+    assert_eq!(
+        frame_within(&mut ccd, Duration::from_secs(5)).await,
+        Some(head_notice("01a0-a")),
+        "the last announcement does not name the head, so it is not repeated; the head \
+         itself is what the leg is told"
+    );
     assert!(
-        frame_within(&mut ccd, Duration::from_millis(300))
+        text_within(&mut ccd, Duration::from_millis(300))
             .await
             .is_none(),
-        "the last announcement does not name the head, so there is nothing this \
-         broker can honestly say"
+        "and the stranger never follows it"
     );
 }
 
-/// **A leg that initializes DURING a creation is served when the head binds**
-/// (round-2 F1).
+/// **A leg that initializes DURING a creation is served when the head binds.**
 ///
 /// Replaying once, at subscribe time, left this hole open. The measured `/new`
 /// interleave puts the `thread/started` broadcast BEFORE the `thread/start`
@@ -3398,19 +2454,11 @@ async fn a_ccd_leg_that_initializes_mid_creation_is_served_when_the_head_binds()
     );
 }
 
-/// **A leg already on the broadcast stream is not sent a second copy** — which is
-/// also what keeps the repair from ever walking the reader backwards (round-2 F1,
-/// the D4 interaction).
+/// **A leg already on the broadcast stream is not sent a second copy.**
 ///
-/// Once a leg has forwarded a `thread/started` of its own, the app-server has it in
-/// the broadcast set and every later announcement arrives live; it is not late any
-/// more and there is nothing to repair. That matters beyond tidiness: `ccd`'s visit
-/// filter reads an announcement naming neither the bound thread nor the held
-/// candidate as a person pressing `/new`, so a leg that has seen a successor
-/// announced must never afterwards be handed the head it is leaving.
-/// (`ccd::codex_link`'s `a_re_announcement_of_the_bound_thread_is_not_a_switch`
-/// pins the other half: the head arriving late while a candidate is held is
-/// `Passed`, and the candidate stands.)
+/// A leg that carried a thread's announcement live has been told that thread; when the
+/// thread binds there is nothing to repeat, and a duplicate would be the broker
+/// re-announcing a thread the reader already has.
 ///
 /// Driven on the ordinary launch's own ordering: the observer is up first, the
 /// announcement reaches it live, and the head binds afterwards.
@@ -3446,7 +2494,7 @@ async fn a_leg_already_on_the_broadcast_stream_is_not_replayed_the_head_it_saw_l
     );
 }
 
-/// **The `ccd` role is the authorization, and it is load-bearing** (round-2 F7).
+/// **The `ccd` role is the authorization, and it is load-bearing.**
 ///
 /// The head fan-out delivers the app-server's own frame to a connection that was
 /// not there to receive it. Who may be that connection is a security question, not
@@ -3509,8 +2557,8 @@ async fn a_tui_leg_is_neither_replayed_a_head_nor_able_to_trigger_one() {
 /// hard block on the kernel, not a scheduling hope. It is what lets the tests below
 /// hold a `ccd` leg still while the head moves underneath it.
 ///
-/// Deliberately NOT a `thread/started`: this must not mark the leg `live_seen`, which
-/// would retire it from the repair and make the tests pass for the wrong reason.
+/// Deliberately NOT a `thread/started`: that would record the leg as told a thread, and
+/// make the tests pass for the wrong reason.
 fn parking_frame() -> Message {
     Message::Text(
         serde_json::json!({"method": "x/noise", "params": {"blob": "z".repeat(2 * 1024 * 1024)}})
@@ -3568,25 +2616,20 @@ fn unsubscribed(id: u32) -> (String, Message) {
     )
 }
 
-/// **A replay queued for the old head is dropped rather than sent once the head has
-/// moved** (round-3 F1).
+/// **The head a leg is sent is the head when it is sent, not when it moved.**
 ///
-/// Enqueueing is not sending. The replay arm is the last of three in the leg's
-/// `select!`, so between "A is owed to this leg" and "A leaves this socket" the leg can
-/// pass a whole `/new`. Sending A then is not a harmless duplicate: `ccd`'s reader takes
-/// an announcement naming neither its visit nor its candidate as a person pressing
-/// `/new`, so the repair would walk the link BACK to a thread the session has left.
-/// `live_seen` does not cover it — it stops future enqueues, not one already written.
+/// The head arm is the last of three in the leg's `select!`, so between "A binds" and
+/// "the leg can speak" the leg can pass a whole `/new`. Sending A then is not a harmless
+/// duplicate: `ccd`'s reader takes an announcement naming neither its visit nor its
+/// candidate as a person pressing `/new`, so the repair would walk the link BACK to a
+/// thread the session has left.
 ///
 /// **Staged, not raced.** The leg is parked inside `ws.send` on a 2 MB frame that
 /// nothing is reading, which is a kernel-level block: while it is held, the TUI legs
-/// bind A (queueing A to this leg), announce B and switch to B (queueing B behind it),
-/// all deterministically. Only then does the client start reading.
-///
-/// **Mutation:** drop the `head_is` guard from the replay arm and the first frame after
-/// the parking frame is `01a0-a` — the switch back the reader must never see.
+/// bind A (waking this leg), announce B and switch to B, all deterministically. Only then
+/// does the client start reading.
 #[tokio::test]
-async fn a_queued_replay_is_dropped_when_the_head_moves_before_it_is_sent() {
+async fn a_head_that_moves_before_the_leg_can_speak_is_sent_as_it_now_is() {
     let h = start_broker_with_events();
 
     // The observer subscribes with NOTHING bound, so it is owed nothing yet — and its
@@ -3638,27 +2681,29 @@ async fn a_queued_replay_is_dropped_when_the_head_moves_before_it_is_sent() {
     assert_eq!(
         next,
         started_announcement_text("01a0-b"),
-        "the queued predecessor must be dropped at the send, not sent: this reader \
-         would take a late 01a0-a for a `/new` back onto a thread the session left"
+        "the predecessor must never be sent: this reader would take a late 01a0-a for \
+         a `/new` back onto a thread the session left"
     );
     assert!(
         text_within(&mut ccd, Duration::from_millis(300))
             .await
             .is_none(),
-        "and nothing follows it — the stale entry is dropped, not merely reordered"
+        "and nothing follows it"
     );
     let events = h.events();
     assert!(
         events
             .iter()
-            .any(|e| e.contains("dropped a stale head replay for 01a0-a")),
-        "the drop is stated in the log, so an operator can tell it from a delivery \
-         that never happened: {events:?}"
+            .any(|e| e.contains("replayed thread/started for 01a0-b")),
+        "the delivery is stated in the log: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e.contains("for 01a0-a")),
+        "and no delivery of the thread the session left: {events:?}"
     );
 }
 
-/// **A leg descheduled across a `/new` cannot deny the new head to later subscribers**
-/// (round-3 F2).
+/// **A leg descheduled across a `/new` cannot deny the new head to later subscribers.**
 ///
 /// The app-server broadcasts once, to every connection; each broker leg reads its copy
 /// off its own upstream socket, so cross-leg the order is scheduling. A single
@@ -3719,5 +2764,1173 @@ async fn a_delayed_leg_replaying_an_old_announcement_cannot_strand_the_head() {
         Some(started_announcement_text("01a0-b").as_str()),
         "the head's own announcement must survive a delayed leg re-presenting its \
          predecessor's"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A head the app-server never announces: the keyboard's `/resume`.
+// ---------------------------------------------------------------------------
+
+/// The broker's own word that the head bound to `thread`.
+fn head_notice(thread: &str) -> serde_json::Value {
+    serde_json::json!({"method": "codeconnect/head", "params": {"threadId": thread}})
+}
+
+/// A `ccd` leg that heard `thread`'s announcement live, on its own upstream, with a
+/// keyboard leg that then binds `thread` — the ordinary launch. Returns both legs.
+///
+/// The keyboard's further replies are `replies`, answered on its leg after the creation.
+async fn live_leg_on(
+    h: &Harness,
+    thread: &str,
+    ccd_replies: Vec<(String, Message)>,
+    replies: Vec<(String, Message)>,
+) -> (WebSocketStream<UnixStream>, WebSocketStream<UnixStream>) {
+    let mut ccd_table = vec![("initialize".to_string(), started_announcement(thread))];
+    ccd_table.extend(ccd_replies);
+    h.push_replies(ccd_table);
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        text_within(&mut ccd, Duration::from_secs(5)).await,
+        Some(started_announcement_text(thread)),
+        "the premise: the leg hears the announcement live"
+    );
+    h.push_script(vec![]);
+    let mut table = vec![("thread/start".to_string(), creation_response(thread))];
+    table.extend(replies);
+    h.push_replies(table);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, thread).await;
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "the premise: a head the leg heard announced is not told again"
+    );
+    (ccd, tui)
+}
+
+/// **A keyboard `/resume` reaches the phone's leg as the broker's own word.**
+///
+/// The app-server announces a thread it creates and never one it resumes
+/// (`fixtures/codex/thread-switch.jsonl`: resume, answer, unsubscribe, no
+/// `thread/started`). The head follows the resume, so without this the daemon's link
+/// stays on the thread the keyboard left and every phone turn is refused.
+#[tokio::test]
+async fn a_ccd_leg_is_told_the_thread_a_keyboard_resume_moves_the_head_to() {
+    let h = start_broker();
+    let (resume, resumed) = keyboard_resume("01a0-b", "r1");
+    let (mut ccd, mut tui) = live_leg_on(
+        &h,
+        "01a0-a",
+        vec![],
+        vec![("thread/resume".into(), resumed)],
+    )
+    .await;
+
+    tui.send(Message::Text(resume)).await.unwrap();
+    assert_eq!(
+        next_frame(&mut tui).await["result"]["thread"]["id"],
+        "01a0-b"
+    );
+    assert_eq!(
+        frame_within(&mut ccd, Duration::from_secs(5)).await,
+        Some(head_notice("01a0-b")),
+        "the leg must be told the thread the keyboard resumed"
+    );
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "once"
+    );
+    assert_eq!(phone_turn_outcome(&h, &mut ccd, "01a0-b", 21).await, None);
+    assert_eq!(
+        phone_turn_outcome(&h, &mut ccd, "01a0-a", 22)
+            .await
+            .as_deref(),
+        Some(NOT_THE_HEAD)
+    );
+}
+
+/// **A resume of the thread the head is already on tells nobody anything.**
+#[tokio::test]
+async fn a_keyboard_resume_of_the_head_itself_is_not_told_again() {
+    let h = start_broker();
+    let (resume, resumed) = keyboard_resume("01a0-a", "r1");
+    let (mut ccd, mut tui) = live_leg_on(
+        &h,
+        "01a0-a",
+        vec![],
+        vec![("thread/resume".into(), resumed)],
+    )
+    .await;
+
+    tui.send(Message::Text(resume)).await.unwrap();
+    assert_eq!(
+        next_frame(&mut tui).await["result"]["thread"]["id"],
+        "01a0-a"
+    );
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "the leg already follows this head"
+    );
+}
+
+/// **A resume the app-server refuses moved nothing, so nothing is said.**
+#[tokio::test]
+async fn a_keyboard_resume_the_server_refuses_is_not_told() {
+    let h = start_broker();
+    let (resume, _) = keyboard_resume("01a0-b", "r1");
+    let refused = Message::Text(r#"{"id":"r1","error":{"code":-32600,"message":"no"}}"#.into());
+    let (mut ccd, mut tui) = live_leg_on(
+        &h,
+        "01a0-a",
+        vec![],
+        vec![("thread/resume".into(), refused)],
+    )
+    .await;
+
+    tui.send(Message::Text(resume)).await.unwrap();
+    assert_eq!(next_frame(&mut tui).await["error"]["code"], -32600);
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "the head is back where it was, and the leg already follows it"
+    );
+    assert_eq!(phone_turn_outcome(&h, &mut ccd, "01a0-a", 21).await, None);
+}
+
+/// **Two moves before the leg can speak: it is told the last one, and only that.**
+///
+/// Staged with the parking frame: the leg is held inside `ws.send` while the keyboard
+/// binds A and resumes B and then C. Released, it must say C — telling it B, or A, would
+/// walk the link through threads the session has already left.
+#[tokio::test]
+async fn a_leg_held_across_two_keyboard_moves_is_told_only_the_last() {
+    let h = start_broker();
+    h.push_replies(vec![("initialize".into(), parking_frame())]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    settle().await;
+
+    let (to_b, to_b_answer) = keyboard_resume("01a0-b", "r1");
+    let (to_c, to_c_answer) = keyboard_resume("01a0-c", "r2");
+    h.push_script(vec![started_announcement("01a0-a")]);
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("01a0-a")),
+        ("\"r1\"".into(), to_b_answer),
+        ("\"r2\"".into(), to_c_answer),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    next_frame(&mut tui).await;
+    create_thread(&mut tui, "01a0-a").await;
+    for resume in [to_b, to_c] {
+        tui.send(Message::Text(resume)).await.unwrap();
+        next_frame(&mut tui).await;
+    }
+
+    let parked = text_within(&mut ccd, Duration::from_secs(10))
+        .await
+        .expect("the parking frame");
+    assert!(parked.contains("x/noise"), "the premise: the leg was held");
+    assert_eq!(
+        frame_within(&mut ccd, Duration::from_secs(10)).await,
+        Some(head_notice("01a0-c")),
+        "the head at the moment the leg speaks, and no thread it passed through"
+    );
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "and nothing after it"
+    );
+}
+
+/// **A leg that connects after a resume is told the resumed thread, once.**
+///
+/// No announcement names it, so the replay of the app-server's bytes has nothing to
+/// repeat; the broker's own word is what the late leg hears.
+#[tokio::test]
+async fn a_ccd_leg_that_connects_after_a_keyboard_resume_is_told_it_once() {
+    let h = start_broker();
+    let (resume, resumed) = keyboard_resume("01a0-b", "r1");
+    h.push_script(vec![started_announcement("01a0-a")]);
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("01a0-a")),
+        ("thread/resume".into(), resumed),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    next_frame(&mut tui).await;
+    create_thread(&mut tui, "01a0-a").await;
+    tui.send(Message::Text(resume)).await.unwrap();
+    next_frame(&mut tui).await;
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        frame_within(&mut ccd, Duration::from_secs(5)).await,
+        Some(head_notice("01a0-b"))
+    );
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "once"
+    );
+}
+
+/// **Past the session's memory of the threads it left, a late announcement still owes the
+/// head.** The session remembers 64 retired threads; the leg's debt must not depend on
+/// that list. Sixty-four resumes first, then the slow-leg staging above.
+#[tokio::test]
+async fn a_late_left_thread_owes_the_head_past_sixty_four_moves() {
+    let h = start_broker();
+    h.push_replies(vec![
+        ("initialize".into(), parking_frame()),
+        (FOLLOWS.into(), started_announcement("01a0-a")),
+    ]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    settle().await;
+
+    let mut replies = Vec::new();
+    let mut requests = Vec::new();
+    for i in 0..64 {
+        let (request, answer) = keyboard_resume(&format!("01a0-x{i}"), &format!("q{i}"));
+        replies.push((format!("\"q{i}\""), answer));
+        requests.push(request);
+    }
+    replies.push(("thread/start".into(), creation_response("01a0-a")));
+    let (to_b, to_b_answer) = keyboard_resume("01a0-b", "r1");
+    replies.push(("\"r1\"".into(), to_b_answer));
+    h.push_script(vec![started_announcement("01a0-a")]);
+    h.push_replies(replies);
+    let mut tui = connect(&h.tui_sock).await;
+    next_frame(&mut tui).await;
+    for request in requests {
+        tui.send(Message::Text(request)).await.unwrap();
+        next_frame(&mut tui).await;
+    }
+    create_thread(&mut tui, "01a0-a").await;
+    tui.send(Message::Text(to_b)).await.unwrap();
+    next_frame(&mut tui).await;
+
+    assert_eq!(
+        frames_until_quiet(&mut ccd).await,
+        vec![
+            "<parking>".to_string(),
+            started_announcement_text("01a0-a"),
+            head_notice("01a0-b").to_string(),
+        ]
+    );
+}
+
+/// **A thread announced and never bound owes the head the same way.** A keyboard's `/new`
+/// is announced and its leg closes before the answer, so the thread never becomes the
+/// head; another keyboard then resumes H. A slow leg hearing the orphan late must hear H
+/// behind it.
+#[tokio::test]
+async fn a_late_announcement_of_a_thread_that_never_bound_owes_the_head() {
+    let h = start_broker();
+    h.push_replies(vec![
+        ("initialize".into(), parking_frame()),
+        (FOLLOWS.into(), started_announcement("01a0-s")),
+    ]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    settle().await;
+
+    h.push_script(vec![]);
+    h.push_replies(vec![(
+        "thread/start".into(),
+        started_announcement("01a0-s"),
+    )]);
+    let mut orphaned = connect(&h.tui_sock).await;
+    orphaned
+        .send(Message::Text(CREATION_REQUEST.into()))
+        .await
+        .unwrap();
+    next_frame(&mut orphaned).await;
+    drop(orphaned);
+    settle().await;
+
+    let (to_h, to_h_answer) = keyboard_resume("01a0-h", "r1");
+    h.push_script(vec![]);
+    h.push_replies(vec![("\"r1\"".into(), to_h_answer)]);
+    let mut tui = connect(&h.tui_sock).await;
+    tui.send(Message::Text(to_h)).await.unwrap();
+    next_frame(&mut tui).await;
+
+    assert_eq!(
+        frames_until_quiet(&mut ccd).await,
+        vec![
+            "<parking>".to_string(),
+            started_announcement_text("01a0-s"),
+            head_notice("01a0-h").to_string(),
+        ]
+    );
+}
+
+/// **A fork is announced, so the leg that heard it is not told it again.**
+///
+/// Staged in the measured order (`fixtures/codex/thread-switch.jsonl`: the request at line
+/// 30, the broadcasts at 31 and 33, the answer at 32): the keyboard's fork goes out, the
+/// leg hears the new thread announced on its own upstream, and only then does the answer
+/// bind it. The keyboard leg is held on the parking frame with the answer queued behind
+/// it, so the announcement provably lands inside the move.
+#[tokio::test]
+async fn a_keyboard_fork_the_leg_heard_announced_is_not_told_again() {
+    let h = start_broker();
+    let forked = Message::Text(
+        serde_json::json!({"id": "f1", "result": {"thread": {"id": "01a0-f"}}}).to_string(),
+    );
+    let (mut ccd, mut tui) = live_leg_on(
+        &h,
+        "01a0-a",
+        vec![("thread/loaded/list".into(), started_announcement("01a0-f"))],
+        vec![
+            ("thread/fork".into(), parking_frame()),
+            (FOLLOWS.into(), forked),
+        ],
+    )
+    .await;
+
+    tui.send(Message::Text(
+        r#"{"method":"thread/fork","id":"f1","params":{"threadId":"01a0-a"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    settle().await;
+    ccd.send(Message::Text(
+        r#"{"method":"thread/loaded/list","id":2,"params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        text_within(&mut ccd, Duration::from_secs(5)).await,
+        Some(started_announcement_text("01a0-f")),
+        "the premise: the fork's announcement reaches the leg live, mid-move"
+    );
+    assert!(
+        text_within(&mut tui, Duration::from_secs(10))
+            .await
+            .is_some_and(|t| t.contains("x/noise")),
+        "the premise: the keyboard leg was held with the answer behind it"
+    );
+    assert_eq!(
+        next_frame(&mut tui).await["result"]["thread"]["id"],
+        "01a0-f"
+    );
+    assert!(
+        text_within(&mut ccd, Duration::from_millis(300))
+            .await
+            .is_none(),
+        "the leg already follows the fork"
+    );
+    assert_eq!(phone_turn_outcome(&h, &mut ccd, "01a0-f", 21).await, None);
+}
+
+/// Every frame a leg says until it falls quiet, the parking frame abbreviated.
+async fn frames_until_quiet(ws: &mut WebSocketStream<UnixStream>) -> Vec<String> {
+    let mut seen = Vec::new();
+    while let Some(t) = text_within(ws, Duration::from_secs(2)).await {
+        seen.push(if t.contains("x/noise") {
+            "<parking>".into()
+        } else {
+            t
+        });
+    }
+    seen
+}
+
+/// **A leg that hears a thread the session has left, after the head moved, is told the
+/// head again.**
+///
+/// A slow leg's own copy of A's broadcast can reach it only after the keyboard has moved
+/// on to B by a `/resume`. The reader follows what it heard last, so the leg is left on A
+/// unless the broker repeats the head behind it. Staged: the leg is parked on the 2 MB
+/// frame with A's broadcast queued behind it while the keyboard creates A and resumes B.
+#[tokio::test]
+async fn a_leg_that_hears_a_left_thread_late_is_told_the_head_after_it() {
+    let h = start_broker();
+    h.push_replies(vec![
+        ("initialize".into(), parking_frame()),
+        (FOLLOWS.into(), started_announcement("01a0-a")),
+    ]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    settle().await;
+
+    let (to_b, to_b_answer) = keyboard_resume("01a0-b", "r1");
+    h.push_script(vec![started_announcement("01a0-a")]);
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("01a0-a")),
+        ("\"r1\"".into(), to_b_answer),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    next_frame(&mut tui).await;
+    create_thread(&mut tui, "01a0-a").await;
+    tui.send(Message::Text(to_b)).await.unwrap();
+    next_frame(&mut tui).await;
+
+    assert_eq!(
+        frames_until_quiet(&mut ccd).await,
+        vec![
+            "<parking>".to_string(),
+            started_announcement_text("01a0-a"),
+            head_notice("01a0-b").to_string(),
+        ],
+        "the late announcement of the thread left behind, and then the head"
+    );
+}
+
+/// **The same, after the leg was already told the head**: its own late copy of the
+/// predecessor's broadcast would otherwise be the last word.
+#[tokio::test]
+async fn a_leg_told_the_head_then_hearing_a_left_thread_is_told_the_head_again() {
+    let h = start_broker();
+    h.push_replies(vec![(
+        "thread/loaded/list".into(),
+        started_announcement("01a0-c"),
+    )]);
+    let mut ccd = connect(&h.ccd_sock).await;
+    ccd.send(Message::Text(CCD_INITIALIZE.into()))
+        .await
+        .unwrap();
+    settle().await;
+
+    let (to_b, to_b_answer) = keyboard_resume("01a0-b", "r1");
+    h.push_script(vec![started_announcement("01a0-c")]);
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("01a0-c")),
+        ("\"r1\"".into(), to_b_answer),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    next_frame(&mut tui).await;
+    create_thread(&mut tui, "01a0-c").await;
+    assert_eq!(
+        text_within(&mut ccd, Duration::from_secs(5)).await,
+        Some(started_announcement_text("01a0-c")),
+        "the premise: C is replayed to the leg"
+    );
+    tui.send(Message::Text(to_b)).await.unwrap();
+    next_frame(&mut tui).await;
+    assert_eq!(
+        frame_within(&mut ccd, Duration::from_secs(5)).await,
+        Some(head_notice("01a0-b")),
+        "the premise: the leg is told B"
+    );
+
+    ccd.send(Message::Text(
+        r#"{"method":"thread/loaded/list","id":2,"params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        frames_until_quiet(&mut ccd).await,
+        vec![
+            started_announcement_text("01a0-c"),
+            head_notice("01a0-b").to_string(),
+        ],
+        "the leg's own late copy of C, and then the head again"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The keyboard leg is a passthrough: the TUI's frames reach the app-server as they are,
+// and the broker only watches them to keep the phone's head, busy mark and approval
+// arbitration true.
+// ---------------------------------------------------------------------------
+
+/// A captured `interrupt-0.153.jsonl` frame, verbatim: its line `line` (1-based), with the
+/// recorder's envelope removed.
+fn captured_interrupt_frame(line: usize) -> String {
+    const CAPTURE: &str = include_str!("../../../fixtures/codex/interrupt-0.153.jsonl");
+    let row: serde_json::Value =
+        serde_json::from_str(CAPTURE.lines().nth(line - 1).expect("the line exists")).unwrap();
+    row["frame"].to_string()
+}
+
+/// The thread the captured interrupt session ran on.
+const CAPTURED_THREAD: &str = "01a073f6-09c8-7c10-8212-4d369b80140b";
+
+/// The turn/start a phone's daemon writes: fourteen keys, twelve of them null.
+fn phone_turn(thread: &str, id: i64) -> String {
+    serde_json::json!({
+        "method": "turn/start",
+        "id": id,
+        "params": {
+            "threadId": thread,
+            "input": [{"type": "text", "text": "hello from the phone", "text_elements": []}],
+            "clientUserMessageId": null,
+            "approvalPolicy": null,
+            "approvalsReviewer": null,
+            "sandboxPolicy": null,
+            "cwd": null,
+            "permissions": null,
+            "environments": null,
+            "multiAgentMode": null,
+            "responsesapiClientMetadata": null,
+            "additionalContext": null,
+            "outputSchema": null,
+            "collaborationMode": null
+        }
+    })
+    .to_string()
+}
+
+/// A keyboard `thread/resume` of `thread` under request id `id`, and the app-server's
+/// success answer to it.
+fn keyboard_resume(thread: &str, id: &str) -> (String, Message) {
+    let request = serde_json::json!({
+        "method": "thread/resume",
+        "id": id,
+        "params": {"threadId": thread, "cwd": null, "runtimeWorkspaceRoots": ["/elsewhere"]}
+    })
+    .to_string();
+    let answer = Message::Text(
+        serde_json::json!({
+            "id": id,
+            "result": {"thread": {"id": thread}, "cwd": "/elsewhere", "runtimeWorkspaceRoots": ["/elsewhere"]}
+        })
+        .to_string(),
+    );
+    (request, answer)
+}
+
+/// Send a phone `turn/start` and return what the broker did with it: `None` when it
+/// forwarded (the upstream recorded it), or the refusal's message.
+async fn phone_turn_outcome(
+    h: &Harness,
+    ccd: &mut WebSocketStream<UnixStream>,
+    thread: &str,
+    id: i64,
+) -> Option<String> {
+    let frame = phone_turn(thread, id);
+    let before = h.state.recorded.lock().unwrap().len();
+    ccd.send(Message::Text(frame.clone())).await.unwrap();
+    match tokio::time::timeout(Duration::from_millis(500), ccd.next()).await {
+        Ok(Some(Ok(m))) => {
+            let v: serde_json::Value = serde_json::from_str(m.to_text().unwrap()).unwrap();
+            assert_eq!(v["id"], id, "the refusal answers this turn: {v}");
+            Some(
+                v["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        }
+        _ => {
+            let rec = recorded_after(&h.state, before + 1).await;
+            assert_eq!(
+                rec.last(),
+                Some(&frame),
+                "a turn that is not refused forwards"
+            );
+            None
+        }
+    }
+}
+
+const NOT_THE_HEAD: &str = "turn refused: it does not name this session's bound thread";
+const ALREADY_BUSY: &str = "turn refused: this session is already running a turn";
+
+/// **Every keyboard frame reaches the app-server as it was sent.** Methods
+/// the phone's leg refuses, a notification, a malformed frame and a binary frame, one
+/// after another on one open leg.
+#[tokio::test]
+async fn every_keyboard_frame_reaches_upstream_byte_identical() {
+    let h = start_broker();
+    let mut tui = connect(&h.tui_sock).await;
+    let texts = [
+        r#"{"method":"collaborationMode/list","id":1,"params":{}}"#,
+        r#"{"method":"config/read","id":2,"params":{"includeLayers":false}}"#,
+        r#"{"method":"thread/list","id":3,"params":{"limit":25}}"#,
+        r#"{"method":"command/exec","id":4,"params":{"command":["ls"]}}"#,
+        r#"{"method":"thread/settings/update","id":5,"params":{"threadId":"t","approvalPolicy":"never"}}"#,
+        r#"{"method":"thread/fork","id":6,"params":{"threadId":"t"}}"#,
+        r#"{"method":"some/notification","params":{"x":1}}"#,
+        r#"{"method":"x","id":7,"id":8}"#,
+        "not json at all",
+    ];
+    for t in texts {
+        tui.send(Message::Text(t.into())).await.unwrap();
+    }
+    tui.send(Message::Binary(vec![0, 159, 146, 150]))
+        .await
+        .unwrap();
+
+    let rec = recorded_after(&h.state, texts.len()).await;
+    assert_eq!(rec, texts.map(str::to_string).to_vec());
+    for _ in 0..200 {
+        if !h.state.recorded_binary.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        h.state.recorded_binary.lock().unwrap().clone(),
+        vec![vec![0u8, 159, 146, 150]]
+    );
+}
+
+/// **The head follows the keyboard.** A keyboard `/resume` of a thread the
+/// session never created moves the head there, so the phone may start a turn on it and
+/// not on the thread the keyboard left.
+#[tokio::test]
+async fn the_head_follows_a_keyboard_resume() {
+    let h = start_broker();
+    let (resume, resumed) = keyboard_resume("01a0-x", "r1");
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("01a0-a")),
+        ("thread/resume".into(), resumed),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "01a0-a").await;
+    tui.send(Message::Text(resume)).await.unwrap();
+    assert_eq!(
+        next_frame(&mut tui).await["result"]["thread"]["id"],
+        "01a0-x"
+    );
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(phone_turn_outcome(&h, &mut ccd, "01a0-x", 21).await, None);
+    assert_eq!(
+        phone_turn_outcome(&h, &mut ccd, "01a0-a", 22)
+            .await
+            .as_deref(),
+        Some(NOT_THE_HEAD)
+    );
+}
+
+/// **A keyboard move the app-server refuses leaves the head where it was.**
+#[tokio::test]
+async fn a_keyboard_move_that_errors_restores_the_head() {
+    let h = start_broker();
+    h.push_replies(vec![
+        ("\"start-1\"".into(), creation_response("01a0-a")),
+        (
+            "\"start-2\"".into(),
+            Message::Text(r#"{"id":"start-2","error":{"code":-32600,"message":"no"}}"#.into()),
+        ),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "01a0-a").await;
+    tui.send(Message::Text(
+        CREATION_REQUEST.replace("start-1", "start-2"),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_frame(&mut tui).await["error"]["code"], -32600);
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(phone_turn_outcome(&h, &mut ccd, "01a0-a", 21).await, None);
+}
+
+/// **A keyboard leg that closes with a move in flight leaves the phone
+/// with no head** until the keyboard binds one again.
+#[tokio::test]
+async fn a_keyboard_leg_that_closes_mid_move_leaves_no_head() {
+    let h = start_broker();
+    h.push_replies(vec![("\"start-1\"".into(), creation_response("01a0-a"))]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "01a0-a").await;
+    tui.send(Message::Text(
+        CREATION_REQUEST.replace("start-1", "start-2"),
+    ))
+    .await
+    .unwrap();
+    recorded_after(&h.state, 2).await;
+    tui.close(None).await.unwrap();
+    drop(tui);
+    settle().await;
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(
+        phone_turn_outcome(&h, &mut ccd, "01a0-a", 21)
+            .await
+            .as_deref(),
+        Some(NOT_THE_HEAD)
+    );
+}
+
+/// **A keyboard that unsubscribes from the head takes the phone off it**
+/// until the keyboard's next thread binds.
+#[tokio::test]
+async fn a_keyboard_unsubscribe_of_the_head_keeps_the_phone_off_it_until_the_next_bind() {
+    let h = start_broker();
+    h.push_replies(vec![
+        ("\"start-1\"".into(), creation_response("01a0-a")),
+        (
+            "thread/unsubscribe".into(),
+            Message::Text(r#"{"id":7,"result":{"status":"unsubscribed"}}"#.into()),
+        ),
+        (
+            "\"start-2\"".into(),
+            Message::Text(
+                serde_json::json!({"id": "start-2", "result": {"thread": {"id": "01a0-b"}}})
+                    .to_string(),
+            ),
+        ),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "01a0-a").await;
+    tui.send(Message::Text(
+        r#"{"method":"thread/unsubscribe","id":7,"params":{"threadId":"01a0-a"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_frame(&mut tui).await["id"], 7);
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    let refused = phone_turn_outcome(&h, &mut ccd, "01a0-a", 21).await;
+    assert!(
+        refused.is_some(),
+        "the phone may not start a turn on a thread the keyboard left"
+    );
+
+    tui.send(Message::Text(
+        CREATION_REQUEST.replace("start-1", "start-2"),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        next_frame(&mut tui).await["result"]["thread"]["id"],
+        "01a0-b"
+    );
+    assert_eq!(phone_turn_outcome(&h, &mut ccd, "01a0-b", 22).await, None);
+}
+
+/// **A keyboard turn in flight makes the thread busy for the phone**, even
+/// when it is a shape no rule of the broker's ever vetted: the phone cannot become an
+/// implicit steer into it.
+#[tokio::test]
+async fn a_keyboard_turn_in_flight_keeps_the_phone_from_starting_one() {
+    let h = start_broker();
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-a"))]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "01a0-a").await;
+    let keyboard_turn = serde_json::json!({
+        "method": "turn/start",
+        "id": 30,
+        "params": {
+            "threadId": "01a0-a",
+            "input": [{"type": "text", "text": "from the keyboard", "text_elements": []}],
+            "model": "gpt-5.5",
+            "effort": "high",
+            "cwd": "/anywhere"
+        }
+    })
+    .to_string();
+    tui.send(Message::Text(keyboard_turn.clone()))
+        .await
+        .unwrap();
+    let rec = recorded_after(&h.state, 2).await;
+    assert_eq!(
+        rec.last(),
+        Some(&keyboard_turn),
+        "the keyboard's turn forwards as sent"
+    );
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(
+        phone_turn_outcome(&h, &mut ccd, "01a0-a", 21)
+            .await
+            .as_deref(),
+        Some(ALREADY_BUSY)
+    );
+}
+
+/// **A turn the server announces while the keyboard is moving the head is kept**, so
+/// when the move fails and the old head comes back, the phone sees it busy. Captured
+/// frames from `fixtures/codex/interrupt-0.153.jsonl`.
+#[tokio::test]
+async fn a_turn_announced_during_a_move_is_busy_when_the_move_fails() {
+    let h = start_broker();
+    h.push_replies(vec![
+        ("\"start-1\"".into(), creation_response(CAPTURED_THREAD)),
+        (
+            "\"start-2\"".into(),
+            Message::Text(captured_interrupt_frame(2)),
+        ),
+        (
+            "thread/loaded/list".into(),
+            Message::Text(r#"{"id":"start-2","error":{"code":-32600,"message":"no"}}"#.into()),
+        ),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, CAPTURED_THREAD).await;
+    tui.send(Message::Text(
+        CREATION_REQUEST.replace("start-1", "start-2"),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_frame(&mut tui).await["method"], "turn/started");
+    tui.send(Message::Text(
+        r#"{"method":"thread/loaded/list","id":9,"params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_frame(&mut tui).await["id"], "start-2");
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(
+        phone_turn_outcome(&h, &mut ccd, CAPTURED_THREAD, 21)
+            .await
+            .as_deref(),
+        Some(ALREADY_BUSY)
+    );
+}
+
+/// **A turn whose end the broker has seen can never be marked running again.** The
+/// captured `turn/completed` arrives first, then a lagging leg's `turn/started` for the
+/// same turn; the thread stays idle.
+#[tokio::test]
+async fn a_late_announcement_of_a_turn_that_already_ended_marks_nothing() {
+    let h = start_broker();
+    h.push_replies(vec![
+        ("\"start-1\"".into(), creation_response(CAPTURED_THREAD)),
+        (
+            "\"first\"".into(),
+            Message::Text(captured_interrupt_frame(8)),
+        ),
+        (
+            "\"second\"".into(),
+            Message::Text(captured_interrupt_frame(2)),
+        ),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, CAPTURED_THREAD).await;
+    tui.send(Message::Text(
+        r#"{"method":"thread/loaded/list","id":"first","params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_frame(&mut tui).await["method"], "turn/completed");
+    tui.send(Message::Text(
+        r#"{"method":"thread/loaded/list","id":"second","params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next_frame(&mut tui).await["method"], "turn/started");
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(
+        phone_turn_outcome(&h, &mut ccd, CAPTURED_THREAD, 21).await,
+        None
+    );
+}
+
+/// The three server requests a phone cannot answer, as the app-server sends them.
+fn non_phone_requests(thread: &str) -> Vec<Message> {
+    [
+        ("item/tool/call", 40),
+        ("item/tool/requestUserInput", 41),
+        ("mcpServer/elicitation/request", 42),
+    ]
+    .iter()
+    .map(|(method, id)| {
+        Message::Text(
+            serde_json::json!({
+                "method": method,
+                "id": id,
+                "params": {"threadId": thread, "turnId": "01a0-turn", "itemId": "x"}
+            })
+            .to_string(),
+        )
+    })
+    .collect()
+}
+
+/// **A server request the phone cannot answer is the
+/// keyboard's.** The keyboard is handed it and its answer reaches the app-server; the
+/// phone's leg is handed nothing and answers nothing, because an answer from it — even
+/// the broker's refusal — would settle the keyboard's question for it.
+#[tokio::test]
+async fn a_request_the_phone_cannot_answer_is_the_keyboards_alone() {
+    let h = start_broker();
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-a"))]);
+    h.push_script(vec![]);
+    h.push_script(non_phone_requests("01a0-a"));
+    h.push_script(non_phone_requests("01a0-a"));
+    let mut binder = connect(&h.tui_sock).await;
+    create_thread(&mut binder, "01a0-a").await;
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    let mut tui = connect(&h.tui_sock).await;
+    for want in [
+        "item/tool/call",
+        "item/tool/requestUserInput",
+        "mcpServer/elicitation/request",
+    ] {
+        assert_eq!(
+            next_frame(&mut tui).await["method"],
+            want,
+            "the keyboard is handed it"
+        );
+    }
+    assert_eq!(
+        text_within(&mut ccd, Duration::from_millis(300)).await,
+        None,
+        "the phone is handed none of them"
+    );
+    assert_eq!(
+        h.state.recorded.lock().unwrap().clone(),
+        vec![CREATION_REQUEST.to_string()],
+        "and nobody answered any of them upstream"
+    );
+
+    for id in [40, 41, 42] {
+        let answer = format!(r#"{{"id":{id},"result":{{"answers":{{}}}}}}"#);
+        tui.send(Message::Text(answer.clone())).await.unwrap();
+        let rec = recorded_after(&h.state, (id - 38) as usize).await;
+        assert_eq!(
+            rec.last(),
+            Some(&answer),
+            "the keyboard's answer reaches the app-server"
+        );
+    }
+}
+
+/// **Phone first: the keyboard's late answer to an approval the phone
+/// already won never reaches the app-server**, and the phone hears nothing more about it.
+#[tokio::test]
+async fn the_keyboards_late_answer_to_an_approval_the_phone_won_is_dropped() {
+    let h = start_broker();
+    h.push_replies(vec![("thread/start".into(), creation_response("th-A"))]);
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]);
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    create_thread(&mut tui, "th-A").await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let rec = recorded_after(&h.state, 2).await;
+    assert!(rec[1].contains(r#""by":"phone""#));
+    assert_eq!(next_frame(&mut ccd).await["params"]["delivered"], true);
+
+    tui.send(answer(0, "keyboard")).await.unwrap();
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        2,
+        "zero keyboard bytes"
+    );
+    assert_eq!(
+        text_within(&mut ccd, Duration::from_millis(300)).await,
+        None
+    );
+}
+
+/// **A phone may answer only an approval on the thread the keyboard is on.** One
+/// raised on a thread that is not the head is never handed to the phone, and an approval
+/// the phone was handed stops being answerable from it when the keyboard moves away.
+#[tokio::test]
+async fn a_phone_answers_approvals_only_on_the_current_head() {
+    let h = start_broker();
+    let (resume, resumed) = keyboard_resume("01a0-b", "r1");
+    h.push_replies(vec![
+        ("thread/start".into(), creation_response("th-A")),
+        ("thread/resume".into(), resumed),
+    ]);
+    h.push_script(vec![]);
+    h.push_script(vec![
+        approval(COMMAND_EXEC_APPROVAL, "01a0-other", 1),
+        approval(COMMAND_EXEC_APPROVAL, "th-A", 0),
+    ]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "th-A").await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    let handed = next_frame(&mut ccd).await;
+    assert_eq!(
+        handed["params"]["threadId"], "th-A",
+        "the approval on a thread that is not the head is not handed to the phone"
+    );
+
+    tui.send(Message::Text(resume)).await.unwrap();
+    assert_eq!(
+        next_frame(&mut tui).await["result"]["thread"]["id"],
+        "01a0-b"
+    );
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["params"]["delivered"], false);
+    settle().await;
+    assert!(
+        !h.state
+            .recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.contains(r#""by":"phone""#)),
+        "the phone's answer to an approval on a thread the keyboard left forwards zero bytes"
+    );
+}
+
+/// **A keyboard turn in flight makes the thread busy for the phone** — certified with the
+/// turn shape a real 0.147 TUI sends, so the refusal below is the busy rule itself and not
+/// a side effect of how the broker treats the keyboard's frame.
+#[tokio::test]
+async fn a_measured_keyboard_turn_in_flight_refuses_the_phones_start() {
+    let h = start_broker();
+    h.push_replies(vec![("thread/start".into(), creation_response("01a0-a"))]);
+    let mut tui = connect(&h.tui_sock).await;
+    create_thread(&mut tui, "01a0-a").await;
+    let keyboard_turn = serde_json::json!({
+        "method": "turn/start",
+        "id": 3,
+        "params": {
+            "threadId": "01a0-a",
+            "input": [{"type": "text", "text": "from the keyboard", "text_elements": []}],
+            "clientUserMessageId": null,
+            "approvalPolicy": "untrusted",
+            "approvalsReviewer": "user",
+            "sandboxPolicy": null,
+            "cwd": LAUNCH_CWD,
+            "runtimeWorkspaceRoots": [LAUNCH_CWD],
+            "permissions": null,
+            "environments": null,
+            "multiAgentMode": null,
+            "responsesapiClientMetadata": null,
+            "additionalContext": null,
+            "outputSchema": null,
+            "collaborationMode": null
+        }
+    })
+    .to_string();
+    tui.send(Message::Text(keyboard_turn.clone()))
+        .await
+        .unwrap();
+    let rec = recorded_after(&h.state, 2).await;
+    assert_eq!(rec.last(), Some(&keyboard_turn));
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(
+        phone_turn_outcome(&h, &mut ccd, "01a0-a", 21)
+            .await
+            .as_deref(),
+        Some(ALREADY_BUSY)
+    );
+}
+
+/// **A keyboard that closes mid-move leaves no head, and the next keyboard's thread
+/// becomes it.**
+#[tokio::test]
+async fn a_new_keyboard_binds_after_one_closed_mid_move() {
+    let h = start_broker();
+    h.push_replies(vec![("\"start-1\"".into(), creation_response("01a0-a"))]);
+    h.push_replies(vec![(
+        "\"start-3\"".into(),
+        Message::Text(
+            serde_json::json!({"id": "start-3", "result": {
+                "thread": {"id": "01a0-c", "path": "/x"},
+                "cwd": LAUNCH_CWD,
+                "runtimeWorkspaceRoots": [LAUNCH_CWD]
+            }})
+            .to_string(),
+        ),
+    )]);
+    let mut first = connect(&h.tui_sock).await;
+    create_thread(&mut first, "01a0-a").await;
+    first
+        .send(Message::Text(
+            CREATION_REQUEST.replace("start-1", "start-2"),
+        ))
+        .await
+        .unwrap();
+    recorded_after(&h.state, 2).await;
+    first.close(None).await.unwrap();
+    drop(first);
+    settle().await;
+
+    let mut second = connect(&h.tui_sock).await;
+    second
+        .send(Message::Text(
+            CREATION_REQUEST.replace("start-1", "start-3"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_frame(&mut second).await["result"]["thread"]["id"],
+        "01a0-c"
+    );
+
+    let mut ccd = connect(&h.ccd_sock).await;
+    assert_eq!(phone_turn_outcome(&h, &mut ccd, "01a0-c", 21).await, None);
+}
+
+/// **A phone that lost to the keyboard is told so, even when the app-server's
+/// `serverRequest/resolved` reaches its leg before its own answer does.** The daemon
+/// waits on this disposition; without it the phone's card waits out the daemon's whole
+/// budget and the leg is dropped.
+#[tokio::test]
+async fn a_phone_that_lost_after_the_resolution_arrived_is_told_the_keyboard_won() {
+    let h = start_broker_with_events();
+    let _keyboard = keyboard_on(&h, "th-A").await;
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // tui leg
+    h.push_script(vec![approval(COMMAND_EXEC_APPROVAL, "th-A", 0)]); // ccd leg
+    h.push_replies(vec![]); // tui leg
+    h.push_replies(vec![(
+        "thread/loaded/list".into(),
+        Message::Text(
+            r#"{"method":"serverRequest/resolved","params":{"threadId":"th-A","requestId":0}}"#
+                .into(),
+        ),
+    )]); // ccd leg
+    let mut tui = connect(&h.tui_sock).await;
+    drain_approval(&mut tui).await;
+    let mut ccd = connect(&h.ccd_sock).await;
+    drain_approval(&mut ccd).await;
+
+    tui.send(answer(0, "keyboard")).await.unwrap();
+    assert!(event_containing(&h, "capability confirmed: winner=Tui").await);
+
+    ccd.send(Message::Text(
+        r#"{"method":"thread/loaded/list","id":50,"params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        next_frame(&mut ccd).await["method"],
+        "serverRequest/resolved"
+    );
+
+    ccd.send(answer(0, "phone")).await.unwrap();
+    let told = next_frame(&mut ccd).await;
+    assert_eq!(told["method"], "codeconnect/responseDisposition", "{told}");
+    assert_eq!(told["params"]["delivered"], false);
+    assert_eq!(told["params"]["winner"], "tui", "{told}");
+    settle().await;
+    let upstream = h.state.recorded.lock().unwrap().clone();
+    assert_eq!(
+        upstream
+            .iter()
+            .filter(|f| f.contains(r#""by":"keyboard""#))
+            .count(),
+        1
+    );
+    assert!(
+        !upstream.iter().any(|f| f.contains(r#""by":"phone""#)),
+        "the losing answer forwards zero bytes: {upstream:?}"
     );
 }

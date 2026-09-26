@@ -1241,10 +1241,10 @@ final class DaemonConnection {
             // dispatch, and in arrival order like everything else here.
             onTerminal?(message)
         case .unknown(let type):
-            // **G9: never swallowed.** A frame type this build cannot read is
-            // the difference between a five-minute fix and a day during a phase
-            // that adds four message types, and the reader deserves to know the
-            // Mac is telling them something this app cannot hear.
+            // **Never swallowed.** A frame type this build cannot read is the
+            // difference between a five-minute fix and a day whenever the Mac
+            // adds message types, and the reader deserves to know the Mac is
+            // telling them something this app cannot hear.
             unreadableFrame =
                 "This phone cannot read a “\(Self.boundedType(type))” message from the Mac."
             unreadableFrameAt = Date()

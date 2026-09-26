@@ -17,7 +17,7 @@ import Foundation
 ///      local` carries no decision at all — the Codex wire has no provenance for
 ///      a keyboard answer — so the copy says it does not know, rather than
 ///      naming a choice.
-///   3. **No raw JSON on a product screen** (decision D9). The status words,
+///   3. **No raw JSON on a product screen.** The status words,
 ///      the write stage and the option ids are wire vocabulary; what the reader
 ///      sees is a sentence.
 enum CodexProse {
@@ -48,8 +48,8 @@ enum CodexProse {
         /// Both were a full stop, which produced *"Sent, outcome unknown. this
         /// interrupt was already sent…"* — a sentence beginning after a period
         /// with a lowercase letter, on the surface whose whole job is to be
-        /// read. K2 fixed the rejection titles; this is the same seam, ruled
-        /// once for every arm.
+        /// read. The rejection titles had the same seam; it is ruled here once
+        /// for every arm.
         var oneLine: String {
             messageIsVerbatim ? "\(title): \(message)" : "\(title). \(message)"
         }

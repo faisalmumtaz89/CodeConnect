@@ -1,15 +1,14 @@
-//! GATED live end-to-end integration for the `internal-codex-host` wrapper
-//! (Phase 2e-2a), validated against a real `codex` (0.147). This stands up the
-//! WHOLE host — a real `codex app-server`, the in-process broker in front of it,
-//! and the real interactive TUI (`codex --remote`) — inside a PTY, and proves the
-//! things this chunk exists to guarantee:
+//! GATED live end-to-end integration for the `internal-codex-host` wrapper,
+//! validated against a real `codex` (0.147). This stands up the WHOLE host — a
+//! real `codex app-server`, the in-process broker in front of it, and the real
+//! interactive TUI (`codex --remote`) — inside a PTY, and proves the things this
+//! host exists to guarantee:
 //!
 //!   1. **CRUX** — the real `codex --remote` TUI attaches THROUGH the broker: it
-//!      completes the WS-over-UDS handshake on the broker's `tui.sock` and at
-//!      least one request off that leg is classified `Forward` and relayed
-//!      upstream. Proven from the broker's own event-sink log (`broker.log`),
-//!      which records `Tui: forward (...)` only when a real client connected on
-//!      the TUI leg and a request was relayed. If `codex --remote` cannot
+//!      completes the WS-over-UDS handshake on the broker's `tui.sock` and its
+//!      `initialize` is relayed upstream. Proven from the broker's own event-sink
+//!      log (`broker.log`), which records `Tui: forward (initialize)` only when a
+//!      real client connected on the TUI leg and that request was relayed. If `codex --remote` cannot
 //!      handshake the broker's `tui.sock`, no such line ever appears — that is a
 //!      STOP-AND-AMEND, and the test fails loudly, dumping both logs.
 //!   2. **Teardown** — after the host is signalled, it stops both children and
@@ -24,17 +23,12 @@
 //!      twin of this gate is `codex_host_fatal.rs` (fake codex, normal suite);
 //!      this one proves the same contract holds against the real binaries.
 //!
-//! # What the forward line does and does not prove
+//! # What the forward line proves
 //!
-//! The broker's `Forward` notes are deliberately generic (`request allowlisted`,
-//! `ownership request: fingerprint asserted`) — they carry no method name. So this
-//! harness asserts exactly what the log evidences: a real codex client completed
-//! the handshake and a request was classified `Forward` and relayed. The stronger
-//! statement — that the request was the mandatory `initialize` — follows from the
-//! app-server's own protocol (it rejects everything before `initialize`, so a
-//! session that goes on to work must have sent it first), but that is *reasoning*,
-//! not something the log line evidences, so it is written as a comment and never
-//! asserted.
+//! The broker passes the keyboard's frames through and logs each request under its
+//! method (`codex-broker/src/relay.rs`), so `Tui: forward (initialize)` is the log's
+//! own evidence that a real codex client completed the handshake and its `initialize`
+//! was relayed.
 //!
 //! # Why `#[ignore]` AND env-gated (mirrors `codex-broker/tests/live_appserver.rs`)
 //!
@@ -52,21 +46,15 @@
 //! coverage that executed, against the wrong thing.
 //!
 //! What that premise check actually establishes, stated at its real strength: the
-//! resolved file **is a native Mach-O executable** (a filesystem fact), it **reports**
-//! a version (its own claim about itself), and its **guarded surface** — the app-server
-//! parameter shapes the broker defends plus the root CLI command set — matches the
-//! vendored baseline, or differs from it only where
-//! `codex_broker::guarded_surface`'s adjudicated delta tables say a measurement was taken.
-//! It is not a proof that the binary is genuinely upstream codex — nothing short of
-//! a signature check would be, and a binary that lies about `--version` would pass.
-//! All three are still worth having, because the failures they actually catch are the
-//! common ones: an `npm` shim or shell wrapper on PATH, and an install whose wire or
-//! command surface this harness was never grounded against.
+//! resolved file **is a native Mach-O executable** (a filesystem fact) and it **reports**
+//! a version (its own claim about itself). It is not a proof that the binary is
+//! genuinely upstream codex — nothing short of a signature check would be, and a binary
+//! that lies about `--version` would pass. Both are still worth having, because the
+//! failure they actually catch is the common one: an `npm` shim or shell wrapper on PATH.
 //!
-//! The version is **recorded, never gated** — this used to assert a `0.147.` prefix,
-//! matching the launcher's compiled-in pin. Both are gone for the same reason: a
-//! version literal refuses every weekly codex release while proving nothing about
-//! whether that release is safe to host.
+//! The version is **recorded, never gated**: CodeConnect hosts whichever codex the
+//! developer installed, so a version literal here would refuse every weekly codex release
+//! while proving nothing.
 //!
 //! Run it deliberately:
 //! ```text
@@ -78,16 +66,16 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// The A7.1 digest of the codex binary under test: the identity resolution pins,
-/// which the host re-verifies immediately before each of its two execs. Computed
-/// here rather than written down because these harnesses build (or copy) their
-/// codex at run time.
+/// The executable-identity digest of the codex binary under test: the identity
+/// resolution pins, which the host re-verifies immediately before each of its two
+/// execs. Computed here rather than written down because these harnesses build (or
+/// copy) their codex at run time.
 ///
 /// **Derived locally, deliberately, and now that is a choice rather than the only
-/// option.** Until 2e-7d nothing could pin a digest: `codeconnect codex` refused
-/// before it would have spawned a coordinator, so every harness composed the
-/// charter a launcher would have written. The launcher exists now and its own path
-/// is gated end to end by `the_codex_command_launches_a_real_session_end_to_end`
+/// option.** Before the launcher existed nothing could pin a digest: `codeconnect
+/// codex` refused before it would have spawned a coordinator, so every harness
+/// composed the charter a launcher would have written. The launcher exists now and
+/// its own path is gated end to end by `the_codex_command_launches_a_real_session_end_to_end`
 /// (`live_codex_coordinator.rs`). This file still derives its own, because:
 ///
 /// **the subject here is `internal-codex-host` ALONE.** It is spawned under a pty
@@ -235,15 +223,14 @@ fn resolve_codex() -> Option<PathBuf> {
 // symlink chain the user controls, and `which codex` finds whatever is first on
 // PATH, which on a dev machine is quite often an `npm` shim or a shell wrapper.
 // A live run against the wrong thing does not fail; it validates the host against
-// a binary the rest of CodeConnect refuses to launch, and reports it as green. So
+// a binary CodeConnect would never launch, and reports it as green. So
 // the premise is checked here, and a mismatch FAILS the run with a message that
 // names what was found.
 //
 // The check is deliberately described at its real strength throughout: it
-// establishes that the file IS a native executable, that it REPORTS a version, and
-// that its GUARDED SURFACE is one CodeConnect is grounded against. "Is genuinely the
-// codex it claims to be" is a stronger claim than any of those, and is not asserted
-// anywhere below.
+// establishes that the file IS a native executable and that it REPORTS a version.
+// "Is genuinely the codex it claims to be" is a stronger claim than either, and is not
+// asserted anywhere below.
 
 /// Bounded budget for `codex --version`. A binary that does not answer promptly is
 /// not the standalone native CLI, and the gate must not hang on it.
@@ -766,9 +753,8 @@ fn is_alive(pid: i32) -> bool {
 /// reports coverage that never executed or that proved something else.
 ///
 /// The two premises it establishes, at their real strength: the resolved file is a
-/// **native** Mach-O executable, it **reports** a version, and its **guarded surface**
-/// is one this build is grounded against
-/// when asked. Neither is a proof that the binary is genuinely upstream codex.
+/// **native** Mach-O executable, and it **reports** a version when asked. Neither is a
+/// proof that the binary is genuinely upstream codex.
 fn live_gate() -> Option<PathBuf> {
     if std::env::var("CC_CODEX_LIVE").as_deref() != Ok("1") {
         eprintln!("SKIP live_codex_host: set CC_CODEX_LIVE=1 to run the live host test");
@@ -794,12 +780,8 @@ fn live_gate() -> Option<PathBuf> {
         codex.display()
     );
 
-    // Premise 2: it REPORTS the pinned series — a self-report, taken at that
-    // strength and no higher. Everything this chunk asserts — the reserved argv
-    // grammar, the app-server's `--listen unix://` transport, the WS handshake the
-    // broker answers on tui.sock — is grounded on 0.147. Against a binary reporting
-    // a different series a pass would mean nothing and a failure would be misread
-    // as a bug in the host.
+    // Premise 2: it REPORTS a version — a self-report, taken at that strength and no
+    // higher, and recorded rather than gated.
     let version = match codex_version_bounded(&codex, VERSION_PROBE_BUDGET) {
         Ok(v) => v,
         Err(why) => panic!(
@@ -808,37 +790,8 @@ fn live_gate() -> Option<PathBuf> {
             codex.display()
         ),
     };
-    // THE PREMISE IS THE GATE'S OWN VERDICT, NOT A VERSION LITERAL.
-    //
-    // This used to assert `version.starts_with("0.147.")`, mirroring the compiled-in
-    // version pin `src/codex.rs` then enforced. That pin is gone: what decides whether
-    // a codex may be hosted is now whether its **guarded surface** matches the vendored
-    // baseline (`codex::ensure_guarded_surface`). A literal here would have gone red on
-    // every weekly codex release while proving nothing about whether that release was
-    // safe to host — the same defect, in the test suite instead of the launcher.
-    //
-    // So the premise asks the real question, through the same projection the gate runs.
-    // A build the gate would admit is a build this harness may validate against; one it
-    // would refuse is refused here too, naming what moved.
-    match codex_broker::guarded_surface::unadjudicated_against_baseline(&codex) {
-        Ok(changes) if changes.is_empty() => {}
-        Ok(changes) => panic!(
-            "CC_CODEX_LIVE=1 resolved {} reporting codex {version}, whose guarded surface \
-             CodeConnect is NOT grounded against:\n  {}\nValidating the host against it \
-             would prove the wrong thing. Adjudicate these in \
-             `codex_broker::guarded_surface`'s delta tables, or unset CC_CODEX_LIVE.",
-            codex.display(),
-            changes.join("\n  ")
-        ),
-        Err(why) => panic!(
-            "CC_CODEX_LIVE=1 resolved {} but its guarded surface could not be read: {why}. \
-             A live run whose premise is unverified must FAIL.",
-            codex.display()
-        ),
-    }
     eprintln!(
-        "live gate premise verified: {} is a native executable reporting codex {version}, \
-         and its guarded surface is one this build is grounded against",
+        "live gate premise verified: {} is a native executable reporting codex {version}",
         codex.display()
     );
     Some(codex)
@@ -932,9 +885,9 @@ fn kill_pid(pid: i32, signal: &str) {
         .status();
 }
 
-// ------------------------------------------------- the D7 admission the host runs
+// ------------------------------- the launch-coordination admission the host runs
 //
-// Since 2e-2b the host presents itself to the D7 launch gate before it creates
+// The host presents itself to the launch-coordination gate before it creates
 // anything: it takes an exclusive `host_lease` on a `pending` launch record, or
 // refuses and exits 75 having made nothing. That is a real gate, not a formality,
 // so a harness that drives the host directly has to give it a launch to belong to.
@@ -1044,24 +997,14 @@ impl PtyHost {
         use std::os::unix::process::CommandExt;
         // BSD `script`: `script [-q] file [command ...]` runs the command directly
         // (no shell) with a PTY as its stdio. `/dev/null` discards the typescript.
-        //
-        // Round-2 P4: the host is spawned WITHOUT a coordinator, so it inherits this
-        // process's cwd — and that is the cwd the app-server will resolve and report. The
-        // launch cwd must therefore be this directory, canonicalized here exactly as the
-        // real coordinator canonicalizes it before writing the host argv.
-        let launch_cwd = std::fs::canonicalize(std::env::current_dir().expect("cwd"))
-            .expect("canonical cwd")
-            .to_str()
-            .expect("utf-8 cwd")
-            .to_string();
         let mut child = Command::new("/usr/bin/script")
             .args([
                 "-q",
                 "/dev/null",
                 codeconnect,
                 "internal-codex-host",
-                // The D7 launch identity the host presents to the gate before it
-                // creates anything (2e-2b).
+                // The launch identity the host presents to the gate before it
+                // creates anything.
                 "--uid",
                 &launch.uid,
                 "--nonce",
@@ -1070,41 +1013,14 @@ impl PtyHost {
                 "/tmp/cc-host-harness-no-server.sock",
                 "--codex",
                 codex.to_str().expect("codex path is utf-8"),
-                // A7.1: the identity the host re-verifies before each exec.
+                // The executable-identity pin: the identity the host re-verifies
+                // before each exec.
                 "--codex-sha256",
                 &codex_sha256(codex),
                 "--run-dir",
                 run,
                 "--codex-home",
                 home,
-                // The host applies no policy default: every fingerprint dimension
-                // is required and must be passed explicitly.
-                //
-                // **`on-request`, because that is what the real TUI asserts.** A
-                // codex 0.147 `codex --remote` sends `approvalPolicy:"on-request"`
-                // on its `thread/start`, and the broker's fingerprint validator
-                // refuses any present ownership value that disagrees with the
-                // launch fingerprint. A harness that launches with `untrusted`
-                // therefore gets
-                //
-                //   Tui: refuse->synthetic error (thread/start: fingerprint refused
-                //   (Conflict): params.approvalPolicy: "on-request" but fingerprint
-                //   is "untrusted")
-                //
-                // the TUI exits fatally, and the session dies about two seconds in
-                // with no thread ever created. The broker is behaving correctly;
-                // the fingerprint it was handed was the wrong one.
-                "--approval-policy",
-                "on-request",
-                "--approvals-reviewer",
-                "user",
-                "--sandbox",
-                "read-only",
-                "--hooks-enabled",
-                "true",
-                // Round-2 P4: the canonical launch cwd (the workspace anchor).
-                "--launch-cwd",
-                launch_cwd.as_str(),
             ])
             .env("TERM", "xterm-256color")
             .env("CODECONNECT_HOME", &launch.home)
@@ -1242,14 +1158,15 @@ fn live_session_up(codex: &Path, run: &HostRunDir, home: &ShortTmpDir, launch: &
     let codeconnect = env!("CARGO_BIN_EXE_codeconnect");
     let host = PtyHost::spawn(codeconnect, codex, run.as_str(), home.as_str(), launch);
 
-    // The host launches `codex --remote unix://<tui.sock>`. `Tui: forward (...)`
+    // The host launches `codex --remote unix://<tui.sock>`. `Tui: forward (initialize)`
     // appears in broker.log ONLY when a real client completed the WS-over-UDS
-    // handshake on tui.sock AND a request off that leg was classified Forward and
-    // relayed upstream — exactly the handshake compatibility this chunk must prove
-    // live. (The forwarded request is necessarily `initialize`, since the
-    // app-server rejects everything before it — but the broker's Forward note is
-    // generic, so that inference is reasoning, not evidence, and is not asserted.)
-    let forwarded = wait_for_log_contains(&broker_log, "Tui: forward", Duration::from_secs(25));
+    // handshake on tui.sock AND its `initialize` was relayed upstream — exactly the
+    // handshake compatibility this test must prove live.
+    let forwarded = wait_for_log_contains(
+        &broker_log,
+        "Tui: forward (initialize)",
+        Duration::from_secs(25),
+    );
     if !forwarded {
         let broker = read_file(&broker_log);
         let appserver = read_file(&as_stderr);

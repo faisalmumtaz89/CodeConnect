@@ -103,8 +103,8 @@ struct DaemonProfile: Sendable, Hashable {
     /// **The minimum daemon for an ANSWERABLE Codex card** (minor 19).
     ///
     /// Minor 19 is where `request_id` arrived on the Codex `approval_resolved`
-    /// payload. Below it a resolution cannot be correlated at all — D1 forbids
-    /// prefix-parsing `source_event_id`, and there is nothing else to key on —
+    /// payload. Below it a resolution cannot be correlated at all — the phone
+    /// never prefix-parses `source_event_id`, and there is nothing else to key on —
     /// so a card answered at the Mac stays live and tappable on the phone for
     /// ever, with nothing on screen to explain it.
     ///

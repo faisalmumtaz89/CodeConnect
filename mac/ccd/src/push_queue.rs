@@ -131,11 +131,10 @@ pub(crate) fn recipients(
                 // announces. `PushGate::exclusions_if_valid` is what builds the
                 // list — the devices whose delivered watermark for this session
                 // has reached the triggering seq — and `Daemon::dispatch_push` is
-                // its only caller. Round-8: this line also claimed the list
-                // carried "could not confirm what the device said it can render",
-                // which it never has. That is `DeviceFeatures::Unconfirmable`, and
-                // it is refused at the second filter below, where the log line
-                // says so.
+                // its only caller. The list never carries "could not confirm what
+                // the device said it can render": that is
+                // `DeviceFeatures::Unconfirmable`, and it is refused at the second
+                // filter below, where the log line says so.
                 crate::log_debug!(
                     "push: {} is excluded from this doorbell; skipping",
                     target.device_id

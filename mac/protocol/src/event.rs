@@ -25,7 +25,7 @@ pub enum Source {
     /// carries this source, so the dedup key `(session_uid, source,
     /// source_event_id)` is a clean per-session namespace that can never collide
     /// with a Claude fact (different source *and* different `session_uid`). Its
-    /// `source_event_id`s are thread-namespaced (D4) so a thread switch inside one
+    /// `source_event_id`s are thread-namespaced so a thread switch inside one
     /// session cannot alias two threads' item ids.
     Codex,
     /// tmux capture-pane snapshot. Presence checks only, never semantics.

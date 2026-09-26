@@ -145,7 +145,7 @@ pub mod terminal_close {
 /// not a name resolution, not a push. See [`RegisterPush::features`] for why the
 /// write side was deleted rather than kept working. The predicate below is live all
 /// the same, because push eligibility already asks it — of the *device row*, which
-/// this phase leaves `NULL` on every device.
+/// is `NULL` on every device.
 ///
 /// [`RegisterPush::features`]: ClientMessage::RegisterPush::features
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,7 +216,7 @@ pub enum ClientMessage {
         /// scoping path with no input is machinery rather than a feature, and no
         /// shipping client encodes this field. It rides `hello` because it is a
         /// property of the whole connection rather than of one request, which is
-        /// what the phase that lands the scoping will want.
+        /// where connection scoping, once built, will want it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         features: Option<ClientFeatures>,
     },
@@ -372,8 +372,8 @@ pub enum ClientMessage {
         /// nothing that ships can fill the field — no client encodes it — and a
         /// write path with no input is machinery, not a feature. So every device
         /// row reads `NULL`, which is the Claude floor, and a device hears about a
-        /// non-Claude agent only once a later phase lands both the phone that
-        /// advertises and the persistence that records it.
+        /// non-Claude agent only once both a phone that advertises and the
+        /// persistence that records it exist.
         ///
         /// It rides `register_push` rather than `hello` because push eligibility is
         /// a property of the *device*, projected per device at dequeue time, not of
@@ -479,8 +479,8 @@ pub enum ClientMessage {
     /// it answers `ServerMessage::Error{code:"bad_request"}` — legible, but not a
     /// `ComposeResult`, so a client waiting for one waits for something that is not coming.
     /// A client must therefore not SEND this unless [`Capabilities::codex_compose`] is
-    /// true; hiding the affordance is not the same thing, and Phase 5 owes a test that
-    /// proves the transmission is gated and not merely the button.
+    /// true; hiding the affordance is not the same thing, and the client's tests must
+    /// prove the transmission is gated and not merely the button.
     ///
     /// A mutating operation, so it carries a ledger identity like every other.
     /// `request_id` makes a retry idempotent and `payload_hash` binds it to the
@@ -990,7 +990,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Who resolved a Codex approval, when that is known. Upstream carries no
-/// provenance (A2: `serverRequest/resolved` is the same frame however it was
+/// provenance (`serverRequest/resolved` is the same frame however it was
 /// answered), so this is derived from the broker's own winner disposition, never
 /// read off the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1007,7 +1007,7 @@ pub enum ResolutionActor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClearCause {
-    /// A `turn/interrupt` retired the pending (A3).
+    /// A `turn/interrupt` retired the pending.
     TurnAborted,
     /// The turn completed and took the pending with it.
     TurnCompleted,
@@ -1053,7 +1053,7 @@ pub enum ClearCause {
 }
 
 /// How far a phone claim got before delivery became uncertain. Present only on
-/// [`CodexResolution::Unknown`] (D3): a claim recorded but not provably actuated
+/// [`CodexResolution::Unknown`]: a claim recorded but not provably actuated
 /// is terminal evidence, never retried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2029,7 +2029,7 @@ mod tests {
         }
     }
 
-    /// **The Phase-1 byte-identical gate.** Adding the Codex resolution envelope
+    /// **The Claude byte-identical gate.** Adding the Codex resolution envelope
     /// and the `option_id` decision variant must not have moved a single byte of
     /// a Claude answer's serialization. These are the exact strings the shipped
     /// client already decodes; if a field reorders, a key renames, or an
@@ -2166,7 +2166,7 @@ mod tests {
 
         // An empty list is **omitted** on the wire — a daemon with nothing to add
         // beyond the Claude floor sends no field, so an older phone renders no new
-        // diagnostic row. This is what the current daemon emits in Phase 1.
+        // diagnostic row.
         let mut floor = capabilities_fixture();
         floor.supported_agents = Vec::new();
         let s = serde_json::to_string(&floor).unwrap();
@@ -2175,7 +2175,7 @@ mod tests {
             "empty must be omitted: {s}"
         );
 
-        // A non-empty list (Phase 2, once a second agent can be driven) serializes.
+        // A non-empty list (once a second agent can be driven) serializes.
         let s = serde_json::to_string(&capabilities_fixture()).unwrap();
         assert!(s.contains(r#""supported_agents":["claude"]"#), "{s}");
     }
@@ -2347,12 +2347,12 @@ mod tests {
         assert!(s.contains(r#""status":"rejected""#), "{s}");
     }
 
-    /// **The wire matrix, at the type level** (Phase-1 gate): a connection's
+    /// **The wire matrix, at the type level**: a connection's
     /// advertised-agent set scopes what may be delivered to it, and the daemon's
     /// own `supported_agents` is intersected with it. A client that predates the
     /// seam (no features) is Claude-only, so a Codex session's records are never
     /// eligible for it; a Codex-aware client is. The per-connection *enforcement*
-    /// of this scoping is a later phase; this pins the primitive it will use.
+    /// of this scoping is not built yet; this pins the primitive it will use.
     #[test]
     fn the_advertised_agent_set_scopes_what_a_connection_may_receive() {
         use crate::agent::AgentKind;
@@ -2361,7 +2361,7 @@ mod tests {
         fn deliverable(daemon: &[AgentKind], client: &ClientFeatures, agent: &AgentKind) -> bool {
             daemon.contains(agent) && client.supports(agent)
         }
-        let daemon_supports = [AgentKind::Claude]; // Phase-1 daemon: Claude only.
+        let daemon_supports = [AgentKind::Claude]; // A daemon that runs Claude only.
 
         // An old reader (no features ⇒ Claude-only): Claude records deliver,
         // Codex records never do.

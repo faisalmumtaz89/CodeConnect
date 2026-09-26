@@ -72,8 +72,8 @@ extension ApprovalCard {
     ///
     /// For Codex, and for a card whose agent nobody knows, that fallback was a
     /// raw-JSON hole: `display_text` there is literally `"{tool}\n{input}"`, so
-    /// an unverifiable card printed the wire onto the one product screen D9
-    /// says must never show it. Those get one sentence instead, and the card is
+    /// an unverifiable card printed the wire onto the one product screen that
+    /// must never show it. Those get one sentence instead, and the card is
     /// not answerable (see `DecisionCardView.answerSurface`) — a rendering
     /// nobody can vouch for is not a question anybody should answer from here.
     func primaryText(verification: Verification, agent: AgentKind?) -> String {

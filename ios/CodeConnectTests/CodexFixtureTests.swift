@@ -446,7 +446,7 @@ final class CodexFixtureTests: XCTestCase {
     /// **Press and answer are two facts, and the gate sits between them.**
     ///
     /// The render harness presses Stop and Compose for real: `applyCodexFixture`
-    /// drives `stopCodexTurn`/`composeToCodex`, which since F1 refuse on the
+    /// drives `stopCodexTurn`/`composeToCodex`, which refuse on the
     /// send path unless the summary's `codex_link` is `subscribed` and the
     /// capability is advertised. So a fixture is only honest if the two agree,
     /// in both directions:
@@ -459,10 +459,10 @@ final class CodexFixtureTests: XCTestCase {
     ///     stops, or the press is a frame nobody will ever answer, and the
     ///     render hangs on it for the whole request timeout.
     ///
-    /// The second clause is also the truthful shape of D7: whether the Mac's
-    /// control link to Codex is up is a fact only the Mac holds at the moment of
-    /// the send, so "the link went down between the summary and the frame" is
-    /// the only way its refusal sentence can ever reach a phone.
+    /// The second clause is also the truthful shape of the link-state refusal:
+    /// whether the Mac's control link to Codex is up is a fact only the Mac holds
+    /// at the moment of the send, so "the link went down between the summary and
+    /// the frame" is the only way its refusal sentence can ever reach a phone.
     func testPressAndStagedAnswerAgreeWithTheSendPathGate() throws {
         for state in CodexFixtures.State.allCases {
             let caps = state.capabilities

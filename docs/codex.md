@@ -22,29 +22,69 @@ codeconnect codex -m <model> "start on the parser"
 ```
 
 The session runs in CodeConnect's private tmux server and is attached to your terminal.
+Codex gets the environment of the shell you launched it from, not the tmux server's;
+only `TERM` is tmux's. Codex does not see `TMUX` or `TMUX_PANE`: its output reaches
+your terminal unchanged, so it behaves as it does run there directly.
 Close the tab and it keeps running; `codeconnect attach <name>` brings it back.
 `codeconnect ls` lists what is running.
+Your terminal shows the session through CodeConnect's built-in tmux control-mode
+client, so Codex draws as it does run directly, and every key — `Ctrl-B`
+included — reaches Codex byte for byte rather than tmux. This also applies to Claude
+sessions and reattachments.
 
-### What is refused, and why
+Interactive startup attaches the terminal before starting the Codex UI, and the
+attach reports the terminal's default colors to tmux for Codex's pane, so Codex's
+color query is answered with your terminal's colors. The UI waits up to five seconds
+for the attach. A terminal that does not answer the color query leaves tmux without
+them, and tmux 3.7 then answers black rather than nothing, so Codex draws its input
+band for a black background where run directly it draws none.
 
-CodeConnect owns some of the launch. If you pass one of those settings, the launch stops
-before anything is created and says which setting and who owns it. There are six kinds of
-refusal:
+When Codex exits, the session ends the way `codex` does run directly: its token usage,
+then `To continue this session, run: codex resume <id>` once the conversation is saved,
+or `Session ID: <id>` before it is. The hosted Codex UI is a client of the session's own
+server and says goodbye as one, with a reconnect command for a socket that closes with
+the session, so CodeConnect replaces that goodbye with the direct one. A Ctrl+C pressed
+while Codex is already quitting can stop it before it says goodbye; the screen then keeps
+what Codex drew.
+
+### What is passed through, and what is refused
+
+Your flags reach Codex as you wrote them: the sandbox, the approval policy, a profile,
+`-c` overrides and feature flags included, wherever they sit on the command line — so
+`codeconnect codex "fix it" --search` searches, as `codex` does. A flag CodeConnect does
+not know (a new Codex flag, say) is passed on unchanged; if it takes a value, write it as
+`--flag=value`, because written with a space the next word is kept as your prompt and
+Codex reports the missing value. CodeConnect sets no sandbox or approval policy
+of its own, so the session runs exactly as `codex` would in the same directory — Codex
+picks both from your config and the project's trust.
+
+`-C`/`--cd <dir>` works as it does in Codex: `<dir>` becomes the session's folder, where
+Codex runs and where the session is listed. A relative path is read against the directory
+you ran `codeconnect codex` from, and a path that is not a directory stops the launch before
+anything is created.
+
+`codeconnect codex resume …` and `codeconnect codex fork …` are hosted exactly like a new
+session — same pane, same broker, and the phone follows the thread you resumed or forked.
+Their own options (`--last`, `--all`, a session id, a prompt) work as in Codex; `--cd` is
+the session's folder here too. `resume` or `fork` must be the first word that is not a
+flag; every word after it is a session id or your prompt. Leaving the picker with Ctrl+C
+(or quitting any Codex session before it starts a conversation) ends the launch quietly,
+as it does in Codex.
+
+Two kinds of argument are refused, before anything is created, with a message naming
+what was refused and why:
 
 | Refused | Examples | Why |
 |---|---|---|
-| A flag CodeConnect sets | `-C`/`--cd`, `-s`/`--sandbox`, `--add-dir`, `--remote` | The working directory, the sandbox and the transport are the session's identity. Everything else is checked against them. |
-| A profile | `-p`/`--profile` | A named codex profile can carry approval and hook settings, so the profile choice is CodeConnect's. |
-| An approval control | `-a`/`--ask-for-approval`, `--full-auto`, `--yolo`, the `--dangerously-bypass-*` flags | These move who answers an approval. Your phone answers approvals, so they cannot be handed away. |
-| A config key CodeConnect owns | `-c approval_policy=…`, `--enable`/`--disable` of a pinned feature | Same reason, reached by another spelling. Nesting and dotted paths are both caught. |
-| A subcommand | `resume`, `fork`, `exec`, `agents`, `queue`, … | Only the interactive Codex TUI is hosted. |
-| Anything it cannot classify | an unexpandable short-flag cluster, a `-c` value it cannot decode | It fails closed rather than forward something it does not understand. |
+| The transport | `--remote`, `--remote-auth-token-env` | The terminal UI must talk to Codex through the broker, or there is no session for the phone to reach. |
+| Any other subcommand | `exec`, `review`, `agents`, `queue`, … | Only the interactive Codex TUI is hosted: a new session, `resume` or `fork`. |
 
-One refusal is worth calling out because it is not a permission problem: Codex's
-"request permissions tool" feature is pinned **off**, because it asks for a permission
-profile that only the terminal can grant, and CodeConnect answers approvals from the phone.
-
-`codeconnect codex` has no `--help` of its own — `--help` is passed to `codex`. Use
+`--help`, `-h`, `--version` and `-V` (also inside a short cluster such as `-hC dir`), and
+`help` as the first word (`codeconnect codex help resume`), are Codex's own: they run
+`codex` with your arguments in your terminal, before anything else is checked (so
+`--help resume` shows help, as in Codex), and start no session. The `codex` run is the
+one a launch would use — the first native Codex binary CodeConnect finds — or, when
+there is only a script wrapper such as the npm shim, that wrapper. Use
 `codeconnect --help` for the launcher's own commands.
 
 ## What your phone can do
@@ -137,38 +177,63 @@ besides answering an approval, stopping a turn and saying something.
 ## The security boundary
 
 CodeConnect puts a broker between Codex's terminal UI and Codex's own app server, on two
-separate sockets — one for the keyboard, one for the daemon — and which socket a message
-arrived on is what decides what it may do. The broker **refuses by default**: any method,
-and any *parameter*, that is not explicitly admitted for that socket is refused with a
-numeric code and never reaches Codex. Four code-execution methods are refused on every
-socket, always. **The phone's socket is narrower than the keyboard's**: it may not create
-or fork a thread, may not do Codex's account and model reads, and its turn message is
-exactly fourteen fields against the keyboard's twenty-four — it cannot name a model, an
-effort, a service tier or a workspace, and the policy fields it may name are held to exact
-equality with the session's own launch. When Codex or the broker refuses something, the
-phone is told a **numeric code** and a fixed sentence, never the upstream message: those
-messages have been measured naming a turn id the phone never sent, and a future one could
-say anything. The full text stays on the Mac, in the log.
+separate sockets — one for the keyboard, one for the daemon that speaks for the phone —
+and which socket a message arrived on is what decides what it may do.
+
+**The keyboard's socket is a passthrough.** The person at the Mac is as trusted as in
+native Codex: the terminal UI is launched with the keyboard's own flags and no sandbox or
+approval policy of CodeConnect's, everything it sends reaches Codex byte for byte, and every
+request Codex sends — approvals, tool calls, questions for the user — reaches the terminal
+UI. The broker only watches that traffic, to know which thread the keyboard is on and
+whether a turn is running. The one keyboard message it holds back is an answer to an
+approval the phone has already answered.
+
+**The phone's socket refuses by default**: any method, and any *parameter*, that is not
+explicitly admitted is refused with a numeric code and never reaches Codex. Four
+code-execution methods are refused, always. The phone may not create, fork or unsubscribe a
+thread, may not change a thread's settings, and may not do Codex's account and model reads.
+Its turn message is exactly fourteen fields — it cannot name a model, an effort, a service
+tier or a workspace. Every field but the thread and the words is sent empty, so a turn the
+phone starts runs under whatever approval policy, sandbox and permissions the thread has at
+that moment, which only the keyboard can change; a turn message from the phone that names
+any of them is refused. That also means **the phone has exactly the keyboard's
+authority**: a session whose keyboard runs with approvals and the sandbox turned off runs a
+phone's turn the same way.
+
+A phone's turn, steer, stop and approval answer must all name **the thread the keyboard is
+on**. When the keyboard moves — `/new`, `/resume`, a fork — the phone may act on nothing
+until the move lands, and then only on the new thread; a thread the keyboard has left stays
+readable from the phone and nothing more. The phone follows the keyboard to that thread
+whichever way it moved: Codex announces a thread it creates (`/new`, a fork) but not one the
+keyboard resumes, so when the move lands on a thread nobody announced, the broker tells the
+daemon itself, once. A turn is refused while one is running, whoever
+started it. The phone is handed only the requests it can answer — a command or file-change
+approval on that thread. Every other request Codex asks is left to the keyboard: Codex asks
+every connected client and takes the first answer, so the phone's leg answering anything,
+even with a refusal, would answer the keyboard's question for it.
+
+When Codex or the broker refuses something, the phone is told a **numeric code** and a
+fixed sentence, never the upstream message: those messages have been measured naming a
+turn id the phone never sent, and a future one could say anything. The full text stays on
+the Mac, in the log.
 
 ## When Codex updates
 
-CodeConnect does not pin a Codex version number. It checks the part of Codex it actually
-guards — the app-server methods the broker filters, and Codex's root subcommand and flag
-list — against what it was grounded on. This is called the **guarded-surface gate**, and it
-runs at every launch, before anything is created.
+CodeConnect runs whichever Codex you installed. It pins no version and checks no schema:
+the launcher reads `codex --version` and refuses only a binary that cannot say what it is.
 
-* If that surface is unchanged, the build is admitted whatever it calls itself. Weekly
-  Codex releases that do not move the wire are hosted with no change here.
-* If it moved, the launch is refused, and the refusal **names each thing that moved**.
-  The message says what is true: the checks that keep a session inside its sandbox have not
-  been proven for this build, CodeConnect has to be re-grounded first, and downgrading
-  Codex is not being asked for.
+What protects the phone does not depend on the Codex version. The broker admits only a
+fixed set of phone messages, each in a fixed shape, and refuses everything else — so a
+Codex release that changed one of those shapes would have the phone's requests refused
+rather than let through. The keyboard's traffic is not inspected, so a new Codex feature
+works at the keyboard the day it ships.
 
-Two Codex surfaces are grounded in the tree today: 0.147, which the live gates were proven
-on, and 0.153. The version is recorded in the launch evidence, not used as the gate — the
-build measured at this commit is `codex-cli 0.153.4`, and the launcher's own test suite
-confirms its guarded surface is admitted (`cargo test -p codeconnect --bin codeconnect`,
-486 tests, all passing).
+Two things are worth re-checking live after a Codex update, because no unit test can see
+them: that a phone turn's empty settings still mean "keep the thread's own", and that the
+flags and subcommands Codex accepts still match the launcher's lists. A flag the launcher
+does not know is passed on unchanged but takes no spaced value (write `--flag=value`), and
+a new subcommand is refused only once it is added to the launcher's list — until then the
+fence keeps it from being dispatched, and it reaches Codex as prompt text.
 
 ### The freeze on the `codex` binary
 
@@ -205,8 +270,8 @@ same account allowance as typing it at the Mac. There is no CodeConnect account,
 key and no separate meter.
 
 CodeConnect itself never starts a model turn. Everything it does around a session — the
-version probe, the schema and argv reads, the guarded-surface gate, the hash and freeze,
-the recovery sweeps — is local work that opens no session and contacts no account.
+version probe, the hash and freeze, the recovery sweeps — is local work that opens no
+session and contacts no account.
 
 ## Troubleshooting
 
@@ -233,24 +298,24 @@ below. `codeconnect ls` shows what is running in tmux even when the daemon is do
 
 ### The refusal sentence on the phone
 
-When a Stop or a message is refused, the phone shows the Mac's own sentence. There are 70
+When a Stop or a message is refused, the phone shows the Mac's own sentence. There are 69
 of them and they fall into four kinds. Which kind it is tells you whether trying again is
 worth anything:
 
 | Kind | How many | What it means | Try again? |
 |---|---|---|---|
-| Link state | 20 | A fact about the Mac's control link right now — reconnecting, not yet watching the thread, no link at all. | Yes, shortly. |
+| Link state | 19 | A fact about the Mac's control link right now — reconnecting, not yet watching the thread, no link at all. | Yes, shortly. |
 | This Mac's own store | 5 | A local lookup or record failed **before** anything was sent. Nothing reached Codex. | Yes. Then check the Mac. |
 | Settled | 43 | The ask was wrong, the id is spent, or the outcome is already recorded. | No. |
 | Wire code | 2 | Codex or the broker refused the write, and the sentence carries their numeric code — never their message. | No. Do it at the Mac. |
 
 Every sentence is written in one place in the daemon and emitted as
 [`fixtures/codex/refusal-sentences.json`](../fixtures/codex/refusal-sentences.json), which
-a build gate compares byte for byte. If you want the exact wording of all 70, read that
+a build gate compares byte for byte. If you want the exact wording of all 69, read that
 file.
 
 Two words in those sentences are worth knowing: **rejected** means nothing was sent, and
-**indeterminate** means it was sent and nobody saw the result. 53 of the 70 are the first,
+**indeterminate** means it was sent and nobody saw the result. 52 of the 69 are the first,
 17 are the second.
 
 ### Lines in the daemon log
@@ -296,8 +361,7 @@ disconnected. It is a fact about the **link**, not about whether the session is 
 
 | Symptom | Likely cause |
 |---|---|
-| The launch refuses and names a flag | CodeConnect owns that setting. See [what is refused](#what-is-refused-and-why). |
-| The launch refuses naming things that "moved" | Codex updated past what CodeConnect was grounded on. Update CodeConnect. |
+| The launch refuses and names a flag or subcommand | Only the interactive TUI is hosted, through CodeConnect's own transport. See [what is refused](#what-is-passed-through-and-what-is-refused). |
 | `npm`/installer cannot update `codex` — `Operation not permitted` | A freeze was left standing. Run `codeconnect codex` once, or `chflags nouchg /path/to/codex`. |
 | No Stop button on a Codex session | Daemon below 1.17, or the link is not `subscribed`. |
 | No composer on a Codex session | Daemon below 1.18. |

@@ -43,7 +43,7 @@ enum AnswerAttempt: Sendable {
     /// later answer for the same key (`ccd/src/state.rs`), so a locally-resolved,
     /// never-confirmed answer comes back as a `duplicate` carrying
     /// `indeterminate: true`. Rendering that as "Already answered" with a
-    /// checkmark is the same false-confirmation this phase forbids, so an
+    /// checkmark is the same false-confirmation the app forbids, so an
     /// indeterminate duplicate is reported as `.indeterminate`, never `.duplicate`.
     static func classify(duplicate outcome: AnswerOutcome, staleHash: Bool) -> AnswerAttempt {
         outcome.indeterminate
@@ -1873,9 +1873,9 @@ final class AppModel {
     /// The turn this session is running, or nil when the phone holds none.
     ///
     /// Derived from the event envelopes, because there is no "a turn began"
-    /// fact on this wire at all — see `CodexTurnTracker`. Decision D2 prefers
-    /// the approval event's own envelope `turn_id` when the Mac supplies one and
-    /// falls back to this; the tracker already reads whichever is present,
+    /// fact on this wire at all — see `CodexTurnTracker`. The approval event's
+    /// own envelope `turn_id` is preferred when the Mac supplies one, and this is
+    /// the fallback; the tracker already reads whichever is present,
     /// because both arrive as `Event.turnID`.
     func runningTurn(for key: String) -> String? {
         let controls = codexControls(for: key)
@@ -1932,7 +1932,7 @@ final class AppModel {
             controls.stopNotSent("Nothing is running to stop.")
             return nil
         }
-        // **The uid or nothing** (decision D4). The tmux name is handed to the
+        // **The uid or nothing.** The tmux name is handed to the
         // next run, so hashing and sending it can aim an abort at a session the
         // reader never saw. There is no safe fallback, so there is none.
         guard let reference = Self.sessionReference(summary) else {
@@ -2027,7 +2027,7 @@ final class AppModel {
     }
 
     /// The one string a mutation may name a session by: its uid. `nil` when
-    /// there is none, which is a refusal and not a fallback (D4).
+    /// there is none, which is a refusal and not a fallback.
     private static func sessionReference(_ summary: SessionSummary) -> String? {
         summary.sessionUID.isEmpty ? nil : summary.sessionUID
     }
@@ -2105,7 +2105,7 @@ final class AppModel {
     ) -> String? {
         switch (agent, decision) {
         case (.codex, _) where !resolvesCodexCards:
-            // **F4.** Below minor 19 the resolution carries no `request_id`, so
+            // **Old daemons.** Below minor 19 the resolution carries no `request_id`, so
             // an answered card can never be retired. A card that cannot be
             // retired must not be answered from here, by any vocabulary.
             return "This Mac's CodeConnect is too old to answer a Codex card from the phone, "

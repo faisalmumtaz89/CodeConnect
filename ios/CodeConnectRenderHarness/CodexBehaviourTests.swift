@@ -35,9 +35,9 @@ final class CodexBehaviourTests: XCTestCase {
     /// so nothing was sent"* — so a bar carrying them would be two controls
     /// whose only behaviour is a refusal.
     ///
-    /// Driven on the **two-option** card, which is the shape that was
-    /// unanswerable before this phase: Claude's `> 2` rule suppressed the option
-    /// list and left exactly the pair Codex will not accept.
+    /// Driven on the **two-option** card, which is the shape Claude's `> 2`
+    /// rule would make unanswerable: it suppresses the option list and leaves
+    /// exactly the pair Codex will not accept.
     func testACodexCardOffersItsOwnOptionsAndNoAllowDeny() throws {
         let app = launch(
             "card-two-options",
@@ -59,9 +59,9 @@ final class CodexBehaviourTests: XCTestCase {
         app.terminate()
     }
 
-    /// **The G1 regression, end to end.**
+    /// **A card answered at the Mac is not tappable, end to end.**
     ///
-    /// Before this phase a Codex `approval_resolved` never reached its card:
+    /// A Codex `approval_resolved` once never reached its card:
     /// its payload is a bare `CodexResolution` carrying none of `AnswerOutcome`'s
     /// fields, so the decode returned nil, nothing was recorded, and the card
     /// stayed live and tappable on the phone **after it had already been
@@ -94,9 +94,9 @@ final class CodexBehaviourTests: XCTestCase {
         app.terminate()
     }
 
-    /// **The ordering trap (test plan S3).** A `turn_complete` arrives and *then*
-    /// the resolution. Neither may leave a live card on a dead turn, and no
-    /// frame in between may show one.
+    /// **The ordering trap.** A `turn_complete` arrives and *then* the
+    /// resolution. Neither may leave a live card on a dead turn, and no frame in
+    /// between may show one.
     ///
     /// Staged as `cleared-turn-aborted`, whose fixture delivers exactly that
     /// order through the real ingest path.

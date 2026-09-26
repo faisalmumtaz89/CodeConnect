@@ -41,7 +41,7 @@ import SwiftUI
         @State private var segment: Surface = .timeline
         @State private var threeWay: Density = .comfortable
         @State private var fieldText = ""
-        @State private var monoField = "100.84.21.7:8765"
+        @State private var monoField = "100.64.12.34:8765"
         @State private var errorField = "not-a-token"
         @State private var multiline = ""
         @State private var unlabelled = ""

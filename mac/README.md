@@ -9,7 +9,7 @@ harness that is not shipped.
 | `ccd` | The daemon: SQLite event log, hook gate, transcript tailer, tailnet WebSocket server, push. |
 | `codeconnect` | The shim: `codeconnect claude` hosts a session in `tmux -L codeconnect` and attaches in place. Also the per-session supervisor and the LaunchAgent lifecycle. |
 | `cc-hook` | The tiny binary Claude Code invokes on every wired hook event. |
-| `codex-broker` | Library, not a binary: the broker that sits in front of Codex's JSON-RPC app server, refusing by default on two sockets. It runs in-process inside `codeconnect internal-codex-host`, the host the launcher spawns. |
+| `codex-broker` | Library, not a binary: the broker that sits in front of Codex's JSON-RPC app server on two sockets — the keyboard's passes through, the phone's refuses by default. It runs in-process inside `codeconnect internal-codex-host`, the host the launcher spawns. |
 | `soak` | Not shipped. The chaos gauntlet — see [Soaking it](#soaking-it). |
 
 ## Run it
@@ -25,11 +25,37 @@ codeconnect claude                         # in any project directory
 `codeconnect claude` passes every argument through to the real `claude`, so
 `codeconnect claude --permission-mode default --resume` works exactly as expected.
 
+Claude and Codex sessions get the environment of the shell that launched them — API
+keys, a virtualenv or direnv `PATH` — not the one the tmux server was started with.
+`TERM` is tmux's for Codex and the calling terminal's for Claude, and the variables
+CodeConnect sets for the session, such as `CODECONNECT_SESSION_UID`, keep CodeConnect's
+values. The values travel in a `0600` file in the session's private directory, never on
+a command line (Claude's `TERM` aside), and the pane deletes the file as it starts. The
+agents do not see `TMUX` or `TMUX_PANE`: their output reaches your terminal unchanged,
+so they behave as they do run there directly (told it is inside tmux, Claude caps itself
+at 256 colours). CodeConnect's own processes in the pane keep them.
+
+The local attachment (`codeconnect claude`, `codeconnect codex`, `codeconnect attach`)
+is a tmux control-mode client built into `codeconnect` (`codeconnect/src/attach.rs`):
+it writes the pane's output to your terminal unchanged, types your keys into the pane
+with `send-keys -H`, and follows the terminal's size. tmux itself answers some terminal
+queries for the pane (device attributes, cursor position, XTVERSION, DECRQM, DECRQSS,
+window size reports, and default colours); those are removed from what reaches your
+terminal so the agent gets exactly one answer, and the terminal's default colours are
+reported to tmux at attach. Every other query — kitty's `CSI ? u`, OSC 4, 12 and 52,
+XTGETTCAP — is your terminal's to answer. An attach paints the pane's history and
+screen from `capture-pane`, restores the cursor, the pane title and the modes tmux
+tracks, and never replays earlier output. It also sets `scroll-on-clear off` on the
+pane, so a screen the agent clears is not kept in the history a later attach paints.
+
 ## Codex sessions
 
 ```sh
 codeconnect codex                 # in any project directory
 ```
+
+When launched from a terminal, a new Codex session uses its measured columns and
+rows before the TUI starts, including when the tmux server is already running.
 
 Codex has no hooks, so a Codex session is hosted differently: the launcher puts a broker
 in front of Codex's own JSON-RPC app server, and the broker is what makes a phone answer
@@ -37,9 +63,15 @@ safe. From the phone you can answer an approval with Codex's own options, stop a
 turn, and say something — a new turn when the session is idle, joining the running turn
 when it is busy.
 
-Some arguments are refused rather than forwarded, because CodeConnect owns them for the
-session: the working directory, the sandbox, the approval controls, a named profile, and
-every codex subcommand (only the interactive TUI is hosted).
+Your arguments reach `codex` as native `codex` would read them — the sandbox, approval
+policy and profile included, flags after the prompt and flags this build does not know
+(passed on unchanged) too — and `--cd <dir>` becomes the session's folder. `--help`,
+`-h`, `--version` and `-V` run `codex` itself in your terminal and start no session.
+Exactly two things are refused, before anything is created: the transport flags
+(`--remote`, `--remote-auth-token-env`), which would take the terminal UI off the
+broker, and codex subcommands, anywhere before `--` (only the interactive TUI is
+hosted). `resume` and `fork` are the interactive TUI, so `codeconnect codex resume --last`
+and `codeconnect codex fork <id>` are hosted like a new session.
 
 **[`docs/codex.md`](../docs/codex.md) is the operator page** — launching, what the phone
 can and cannot do, the security boundary, what happens when Codex updates, quota, and the
@@ -181,8 +213,8 @@ Both halves are measured, and each catches a different way of losing the
 keyboard. Submitting `/status` while a turn is running leaves Claude's Settings
 view drawn **above** the composer box when the turn ends: the box is there, the
 cursor is hidden, typed text never appears and Enter does nothing. And a pane
-in tmux's copy-mode — where the mouse wheel over the inline transcript puts it,
-since the daemon's tmux config turns the mouse on — keeps `cursor_flag` at 1
+in tmux's copy-mode — which an ordinary tmux client attached by hand can enter —
+keeps `cursor_flag` at 1
 while routing every key to tmux's own mode table: `send-keys` exits 0 and the
 text is never delivered. Without the second half the interlock authorises keys
 into a pane that cannot receive them and reports them sent.
@@ -985,7 +1017,7 @@ Every field is optional. The defaults are what the daemon is validated against.
 | `input_box_needles` | the composer's box | Whitespace-insensitive needles proving the composer is ready, replacing the shape check. By default the composer is recognised by the box Claude draws it in — its `❯` prompt row directly under a rule of box-drawing horizontals — because the footer hints are dropped as soon as the mode hint or a subagent count needs the room. |
 | `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |
 | `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
-| `tmux_status` | `false` | Show tmux's status bar inside the session. |
+| `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
 | `claude_bin` | auto | Explicit path to the real `claude`. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |

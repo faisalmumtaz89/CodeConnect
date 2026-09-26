@@ -141,8 +141,8 @@ struct RenderDriver {
     /// Two questions, because a subject can fail to be photographed in two
     /// different ways, and one test cannot catch both:
     ///
-    ///   * a **control** must be `isHittable` — K1's own word. Geometry alone
-    ///     passed `codex-stop-offered--ax5`, where the Stop sits *inside* the
+    ///   * a **control** must be `isHittable`. Geometry alone passed
+    ///     `codex-stop-offered--ax5`, where the Stop sits *inside* the
     ///     window but *underneath* the fleet's "1 decision needs you" bar. A
     ///     control the shutter cannot see and a thumb cannot reach is exactly
     ///     the certificate this gate exists to refuse.
@@ -1026,7 +1026,7 @@ enum RenderCatalog {
     ///
     /// The occlusion itself is a **product defect in shared tail-follow
     /// chrome** — a decision card's primary control covered by an overlay at
-    /// accessibility sizes. It is not Codex's, this phase does not fix it, and
+    /// accessibility sizes. It is not Codex's, it is not fixed here, and
     /// it is reported.
     private static func tapPastTheTailPill(
         _ app: XCUIApplication, _ driver: RenderDriver, _ control: XCUIElement, _ what: String
@@ -1127,7 +1127,7 @@ enum RenderCatalog {
         codexScenario(
             "card-two-options",
             purpose:
-                "two options — the shape that was UNANSWERABLE before this phase (Claude's >2 rule)",
+                "two options — the shape Claude's >2 rule once made UNANSWERABLE",
             reach: { app, driver in
                 try openCard(app, driver)
                 try driver.require(
@@ -1178,7 +1178,7 @@ enum RenderCatalog {
         //
         // **Reached through the Deck, not the timeline**, and that is the
         // finding this scenario turned up rather than a convenience: a card
-        // from a pre-minor-19 daemon carries no D2 turn envelope — `turn_id` is
+        // from a pre-minor-19 daemon carries no envelope turn — `turn_id` is
         // a minor-19 field — so it has no turn to hang a timeline row on and
         // does not appear in the session's timeline at all. The Deck is where
         // such a card is readable, which is also the honest reader path: it is
@@ -1321,7 +1321,7 @@ enum RenderCatalog {
                 try driver.require(
                     driver.element(containing: "Stopped", in: app), "the stopped banner")
             }),
-        // **The gate, photographed.** `codex_link` is `offline`, so F1's send
+        // **The gate, photographed.** `codex_link` is `offline`, so the send
         // path refuses before anything leaves: what is on screen is the app's
         // own sentence over "Nothing was sent", and the Mac has said nothing
         // because it was never asked.
@@ -1383,7 +1383,7 @@ enum RenderCatalog {
                 // `codex-compose-started--ax5` and `codex-compose-steered--ax5`,
                 // where the timeline is simply blank. That squeeze is a
                 // pre-existing property of the banner at accessibility sizes,
-                // not something this phase introduced, and it is reported
+                // not something Codex introduced, and it is reported
                 // rather than worked around with a weaker gate.
                 //
                 // The L photograph of this scenario does carry the whole
@@ -1392,11 +1392,11 @@ enum RenderCatalog {
         // **The one Codex render whose input is the daemon's own output.**
         //
         // Every other scenario on this list is staged from JSON written in this
-        // repo, and that is how a P0 shipped: the hand-made `user_message` wore
-        // Claude's `{"message":{"content":…}}` while the adapter sends
-        // `{"text":…}`, so the fixtures and the app agreed with each other, both
-        // renders were green, and a real phone drew a whole Codex turn as a lone
-        // "Turn complete". This one replays
+        // repo, and that is how a serious bug shipped: the hand-made
+        // `user_message` wore Claude's `{"message":{"content":…}}` while the
+        // adapter sends `{"text":…}`, so the fixtures and the app agreed with
+        // each other, both renders were green, and a real phone drew a whole
+        // Codex turn as a lone "Turn complete". This one replays
         // `fixtures/codex/phone-turn-stream-0.153.4.json` — the file ccd
         // byte-compares against — frame for frame, and requires the words and
         // the tool rows to be in the photograph.

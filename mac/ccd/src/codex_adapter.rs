@@ -1,18 +1,18 @@
 //! Codex app-server → agent-neutral event normalization.
 //!
-//! This is the observation half of the Codex adapter (CODEX-PLAN Phase 2, the
-//! "single source; fences" section). It takes the app-server **notification**
-//! frames a connection delivers — the real codex-cli 0.147 shapes, captured in
-//! `fixtures/codex/` — and turns them into [`PendingEvent`]s in the same
-//! thread → turn → item model the Claude path already feeds the phone. Nothing
-//! here talks to a socket, a broker, or the daemon: it is a pure, unit-testable
-//! mapper over frames. The live WS-over-UDS client, the broker, approvals, the
-//! resolution envelope, steering, and the switch machinery are separate chunks.
+//! This is the observation half of the Codex adapter. It takes the app-server
+//! **notification** frames a connection delivers — the real codex-cli 0.147
+//! shapes, captured in `fixtures/codex/` — and turns them into [`PendingEvent`]s
+//! in the same thread → turn → item model the Claude path already feeds the
+//! phone. Nothing here talks to a socket, a broker, or the daemon: it is a pure,
+//! unit-testable mapper over frames. The live WS-over-UDS client, the broker,
+//! approvals, the resolution envelope, steering, and the switch machinery live
+//! elsewhere.
 //!
 //! ## What the frames actually look like (grounded in the fixtures)
 //!
 //! Every mapping decision below cites the fixture line it was read off. The
-//! ground truth is the captured stream, not the plan's prose — where they
+//! ground truth is the captured stream, not any written description — where they
 //! diverge, the code follows the capture and the divergence is reported.
 //!
 //! ## Source and dedup
@@ -21,22 +21,22 @@
 //! first-hand structured observation of a Codex session, exactly as a hook is
 //! for Claude. The daemon dedup key is `(session_uid, source, source_event_id)`
 //! (`store.rs`), so this module's whole job on the id side is to mint a **stable,
-//! unique** `source_event_id` per fact, **thread-namespaced** per D4 so a thread
+//! unique** `source_event_id` per fact, **thread-namespaced** so a thread
 //! switch inside one session cannot alias two threads' item ids. Tool calls and
 //! their results share one upstream `item.id`, so — matching the Claude
 //! convention (`state.rs`: `pre:`/`post:`) — the call is `…:pre:<id>` and the
 //! result `…:post:<id>`, or they would collapse to one row.
 //!
-//! ## In-flight state and interrupted turns (D14/D15)
+//! ## In-flight state and interrupted turns
 //!
 //! Most mappings are per-frame pure. The one exception is an **interrupted**
 //! (or failed) turn: `turn/completed{status:"interrupted"}` carries `items: []`
 //! (`itemsView:"notLoaded"`) even for items that were mid-flight, and those
-//! items never receive their own `item/completed` (D14). So the adapter tracks
+//! items never receive their own `item/completed`. So the adapter tracks
 //! the items it has seen `item/started` for and, at the aborted boundary,
 //! synthesizes their terminal states from what it observed **live** — never
-//! from cross-resume item-id equality, which D15 says is unstable inside an
-//! interrupted turn.
+//! from cross-resume item-id equality, which is unstable inside an interrupted
+//! turn.
 //!
 //! ## The two entry points
 //!
@@ -74,47 +74,10 @@ fn require_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 /// cannot read. A present value that is not a non-empty string is: it means the field
 /// has changed type under us, and reading past it would be reading a shape nobody
 /// measured.
-/// **The three values a turn needs, or nothing.**
-///
-/// All three or none, deliberately. Each is shape-checked by
-/// [`CodexAdapter::plan_resume_seed`] before this runs, so an answer that reaches here
-/// with one missing is one the wire genuinely did not send it on — and a `turn/start`
-/// assembled from two of them plus a guess is a frame the broker refuses, with a refusal
-/// that would read as a bug in the guess rather than as the missing field it is.
-///
-/// `cwd` is taken as the `Value` it is, not as a parsed string: the broker compares it by
-/// exact structural equality against what it bound at the thread's creation, so anything
-/// this side did to it could only make that comparison fail.
-fn read_turn_launch(result: &Value) -> Option<TurnLaunch> {
-    let approval_policy = require_str(result, "approvalPolicy")?.to_string();
-    let approvals_reviewer = require_str(result, "approvalsReviewer")?.to_string();
-    let cwd = result.get("cwd").filter(|v| v.is_string())?.clone();
-    Some(TurnLaunch {
-        approval_policy,
-        approvals_reviewer,
-        cwd,
-    })
-}
-
 fn absent_or_nonempty_str(v: &Value, key: &str) -> bool {
     match v.get(key) {
         None | Some(Value::Null) => true,
         Some(other) => other.as_str().is_some_and(|s| !s.is_empty()),
-    }
-}
-
-/// An **optional** field that must be a `{"type": "<non-empty>"}` object when present.
-/// The effective sandbox is the one policy field that is an object rather than a
-/// string (`{"type":"readOnly","networkAccess":false}`, measured live and in the
-/// fixture).
-fn absent_or_typed_object(v: &Value, key: &str) -> bool {
-    match v.get(key) {
-        None | Some(Value::Null) => true,
-        Some(Value::Object(map)) => map
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|s| !s.is_empty()),
-        Some(_) => false,
     }
 }
 
@@ -189,12 +152,11 @@ struct OpenItem {
 ///   * **`fileChange`** — `changes` an array (cloned into the payload, not read), and
 ///     the same terminal `status` on the same reasoning.
 ///
-/// All four of those field names, and `status`'s presence, are what
-/// `mac/codex-broker/schema-0.153/guarded-wire-stable.json` declares REQUIRED for the
-/// two variants (`request thread/resume` → `result.definitions` → `ThreadItem`), and
-/// the terminal set is its `CommandExecutionStatus`/`PatchApplyStatus` enums minus
-/// `inProgress`. So this is not a shape guessed from one capture; it is the guarded
-/// surface, asserted.
+/// All four of those field names, and `status`'s presence, are what codex 0.153's
+/// app-server schema (`codex app-server generate-json-schema`) declares REQUIRED for the
+/// two variants (`thread/resume`'s result → `ThreadItem`), and the terminal set is its
+/// `CommandExecutionStatus`/`PatchApplyStatus` enums minus `inProgress`. So this is not a
+/// shape guessed from one capture; it is the schema, asserted.
 ///
 /// **Everything else is refused**, including item types this build models perfectly well
 /// from the live wire, and including several — `mcpToolCall`, `dynamicToolCall`,
@@ -208,9 +170,9 @@ struct OpenItem {
 ///
 /// The admitted types are what a resume answer has been measured to carry:
 /// `userMessage` and `agentMessage` in the committed
-/// `fixtures/codex/resume-populated-answer.json`, `reasoning` in the live two-session
-/// measurement recorded in the plan's A14 (a completed turn whose live stream was
-/// userMessage → reasoning → agentMessage came back carrying all three), and the two
+/// `fixtures/codex/resume-populated-answer.json`, `reasoning` in a live two-session
+/// measurement (a completed turn whose live stream was userMessage → reasoning →
+/// agentMessage came back carrying all three), and the two
 /// tool types in `fixtures/codex/resume-after-tool-turn-0.153.4.jsonl` — the 2026-09-08
 /// production answer, whose refusal cost 70 epochs over 18 minutes (see the tool guard in
 /// [`CodexAdapter::plan_resume_seed`]).
@@ -358,15 +320,15 @@ fn seeded_tool_payload_is_readable(item: &Value, item_type: &str) -> bool {
 /// **Has this tool item's outcome been DECIDED?**
 ///
 /// The three terminal members of the 0.153 `CommandExecutionStatus` and
-/// `PatchApplyStatus` enums, which are the same three
-/// (`mac/codex-broker/schema-0.153/guarded-wire-stable.json`). `inProgress` is the
+/// `PatchApplyStatus` enums, which are the same three (codex 0.153's app-server
+/// schema). `inProgress` is the
 /// fourth and the one deliberately absent: an item still running has no outcome to
 /// record, and the seeding path's only reason to read a tool item is to record the
 /// outcome it states.
 ///
 /// Spelled as an allowlist rather than as `!= "inProgress"` for the reason every other
-/// check in this file is: a status the guarded surface has not declared is a shape
-/// nobody has measured, and the honest response to one is to re-ground, not to assume
+/// check in this file is: a status codex's schema has not declared is a shape
+/// nobody has measured, and the honest response to one is to measure it, not to assume
 /// it means "finished". A `failed` or `declined` item is recorded as exactly that —
 /// `tool_result_payload` copies the string through — so nothing here decides what an
 /// outcome MEANS, only that one was stated.
@@ -402,32 +364,6 @@ const RESUME_ITEMS_VIEW_FULL: &str = "full";
 /// caller that got them all written applies the state rebuild. A seed that is planned
 /// and never applied has changed nothing, so the attach that failed can simply be
 /// retried on the next connection.
-/// **What a resumed thread runs under, taken from the answer that resumed it.**
-///
-/// The three values a `turn/start` must carry to be admitted: the broker asserts each
-/// against the launch fingerprint it holds, and refuses the turn if any disagrees. So this
-/// is not a grant — the daemon cannot widen anything by getting one wrong, only be refused
-/// — it is how the daemon learns the shape of a frame it never authored before.
-///
-/// They come from the **response**, which is the server echoing what the thread was
-/// created with, and that creation was itself fingerprint-asserted and workspace-verified
-/// by the broker when it was admitted. So a value here is one the broker has already
-/// proven once and will prove again.
-///
-/// `plan_resume_seed` already checked `approvalPolicy`, `approvalsReviewer` and `cwd` for
-/// shape — the note there says why, and names this as the chunk that would read them.
-/// `runtimeWorkspaceRoots` is deliberately NOT read: the phone's `turn/start` does not
-/// carry it (MEASURED — codex refuses the key from a client that has not declared
-/// `experimentalApi`), and the broker admits its absence because the head-check has
-/// already proven the thread whose roots it would name. A value nothing sends is a value
-/// this struct has no business holding.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TurnLaunch {
-    pub approval_policy: String,
-    pub approvals_reviewer: String,
-    pub cwd: Value,
-}
-
 pub struct ResumeSeed {
     /// The thread this answer was read under — the one the resume asked about.
     thread_id: String,
@@ -448,10 +384,6 @@ pub struct ResumeSeed {
     /// reported by the caller, never inferred from the event count.
     described_turns: usize,
     terminal_turns: usize,
-    /// What this thread runs under, when the answer described all three values. `None`
-    /// when any of them was absent — a partial set cannot author a turn, and guessing the
-    /// missing one is exactly the thing the broker would refuse.
-    launch: Option<TurnLaunch>,
 }
 
 impl ResumeSeed {
@@ -484,11 +416,6 @@ impl ResumeSeed {
     /// [`crate::codex_link`]'s follow-up attach.
     pub fn running_turn_ids(&self) -> &[String] {
         &self.running_turns
-    }
-
-    /// What this thread runs under, if the answer said all four things.
-    pub fn launch(&self) -> Option<&TurnLaunch> {
-        self.launch.as_ref()
     }
 }
 
@@ -567,8 +494,8 @@ impl CodexAdapter {
             // interrupt.jsonl interrupted with items:[]).
             "turn/completed" => self.on_turn_completed(params),
 
-            // turn/started — observed live (interrupt.jsonl), but per A1/A3 it is
-            // never replayed and a late subscriber rebuilds in-flight state from
+            // turn/started — observed live (interrupt.jsonl), but it is never
+            // replayed and a late subscriber rebuilds in-flight state from
             // the resume response's turns[].status instead. The neutral model has
             // no "turn started" fact, so it maps to nothing.
             //
@@ -599,12 +526,12 @@ impl CodexAdapter {
             | "item/commandExecution/outputDelta"
             | "item/commandExecution/terminalInteraction" => Vec::new(),
 
-            // Approval request/resolution is Phase 3 (typed cards, composite-id
-            // activations, the resolution envelope, option ids). It is observed
-            // in this stream (command-execution.jsonl, interrupt.jsonl) but
-            // deliberately NOT normalized here — emitting a bare approval event
-            // without that machinery would be exactly the speculative half-surface
-            // the plan forbids. Dropped, tracked for Phase 3.
+            // Approval request/resolution is `codex_approval`'s (typed cards,
+            // composite-id activations, the resolution envelope, option ids). It
+            // is observed in this stream (command-execution.jsonl,
+            // interrupt.jsonl) but deliberately NOT normalized here — emitting a
+            // bare approval event without that machinery would be a speculative
+            // half-surface. Dropped here.
             "item/commandExecution/requestApproval"
             | "item/fileChange/requestApproval"
             | "item/permissions/requestApproval"
@@ -641,8 +568,8 @@ impl CodexAdapter {
     ///     **placeholder ids** — `item-1`, `item-2` — while the live wire is emitting
     ///     `01a03888-ca10-…` and `msg_060c22…` for those very items. The same turn,
     ///     resumed twice, reported `item-1`/`item-2` while it ran and the real ids once
-    ///     it finished. This is D15, and it is **wider than the plan recorded**: D15
-    ///     named interrupted turns, and it is every non-finished turn.
+    ///     it finished. Item ids are unstable not only in interrupted turns but in
+    ///     **every non-finished turn**.
     ///
     /// So the rule is forced, not chosen:
     ///
@@ -657,9 +584,9 @@ impl CodexAdapter {
     ///     that its turn is alive;
     ///   * **any other status fails closed.** `interrupted` and `failed` are real on
     ///     the *notification* wire and have never been seen on this one; what a
-    ///     resume answer says about an aborted turn is exactly the thing D15 warns is
-    ///     treacherous, and guessing it is the mistake this whole chunk exists not to
-    ///     repeat. The refusal is loud and names the shape.
+    ///     resume answer says about an aborted turn is exactly what those unstable
+    ///     ids make treacherous, and guessing it is the mistake this function exists
+    ///     not to make. The refusal is loud and names the shape.
     pub fn plan_resume_seed(&self, result: &Value, requested_thread: &str) -> Option<ResumeSeed> {
         // --- identity: this answer must be about the thread we asked about -------
         let thread = result.get("thread")?;
@@ -678,28 +605,11 @@ impl CodexAdapter {
         // starts being read — would file this session's facts under whatever it says, and
         // a contradictory pair is precisely the shape that would go unnoticed.
         //
-        // A forked thread might legitimately carry a different `sessionId`; forks are
-        // refused by the broker's single-thread invariant pre-D2, and if one ever
-        // reaches here the refusal is the designed re-grounding trigger rather than a
-        // silent misfiling.
+        // A forked thread might legitimately carry a different `sessionId`; if one
+        // ever reaches here the refusal is the designed re-grounding trigger rather
+        // than a silent misfiling.
         if !absent_or_equal(thread, "sessionId", requested_thread) {
             return None;
-        }
-
-        // --- the effective policy fields, read for SHAPE ------------------------
-        // Not turned into facts — they are the session's configuration, not its
-        // timeline. They are checked because a later chunk reads this answer for the
-        // policy a resumed thread is running under (the sandbox the turn/start
-        // deferral resolves to, D2's fingerprint material), and an answer whose policy
-        // has changed type is an answer this build cannot read. Absent and `null` both
-        // pass: the answer spells "no value" both ways.
-        if !absent_or_typed_object(result, "sandbox") {
-            return None;
-        }
-        for key in ["approvalPolicy", "approvalsReviewer", "cwd", "model"] {
-            if !absent_or_nonempty_str(result, key) {
-                return None;
-            }
         }
 
         let turns = result.pointer("/thread/turns")?.as_array()?;
@@ -721,7 +631,7 @@ impl CodexAdapter {
         // The two backwards cursors are NOT required absent: measured, they are always
         // present, non-empty JSON strings, on every answer including the complete ones,
         // so they say "here is where paging backwards would start", not "this is a
-        // page". They are checked for TYPE only, like the policy fields.
+        // page". They are checked for TYPE only.
         if !matches!(result.get("initialTurnsPage"), None | Some(Value::Null)) {
             return None;
         }
@@ -804,7 +714,7 @@ impl CodexAdapter {
             // unsafe, and the reconstructed answer behind both is committed as
             // `fixtures/codex/resume-after-tool-turn-0.153.4.jsonl`:
             //
-            //   * **the turn has not finished.** A26/A29's running-turn limit, untouched
+            //   * **the turn has not finished.** The running-turn limit, untouched
             //     and deliberately so: an `inProgress` turn's item ids are measured
             //     PLACEHOLDERS (`item-1`), so a fact minted from one takes a dedup key
             //     the live wire will never produce and holds it first-wins. Written as
@@ -817,8 +727,8 @@ impl CodexAdapter {
             //     would persist a SUCCESS THAT NEVER HAPPENED on a first-wins key and
             //     hold it against the real terminal for ever — the same hazard
             //     `on_item_completed` guards on the live path. `status` is REQUIRED on
-            //     both variants by `mac/codex-broker/schema-0.153/guarded-wire-stable.json`
-            //     (`request thread/resume` → `result.definitions`, `ThreadItem`), so an
+            //     both variants by codex 0.153's app-server schema (`thread/resume`'s
+            //     result, `ThreadItem`), so an
             //     answer that omits it is malformed rather than merely unmeasured, and
             //     the reader may demand it explicitly instead of inferring it.
             //
@@ -961,7 +871,6 @@ impl CodexAdapter {
             terminal_turns,
             running_turns,
             discarded_usage,
-            launch: read_turn_launch(result),
         })
     }
 
@@ -974,11 +883,11 @@ impl CodexAdapter {
     ///   * **Never fabricate.** An open item the answer does not confirm still running
     ///     is dropped **without a terminal**. It may have completed while the link was
     ///     down — in which case the answer already described its real terminal and that
-    ///     fact is now durable — or it may have vanished from history entirely (D16).
+    ///     fact is now durable — or it may have vanished from history entirely.
     ///     Either way, synthesizing one from an id the answer did not vouch for is
-    ///     inventing a fact. D15's renames land here by construction: a placeholder id
-    ///     matches no observed item, so the observed item is simply dropped rather than
-    ///     terminalized under a fabricated identity.
+    ///     inventing a fact. Placeholder-id renames land here by construction: a
+    ///     placeholder id matches no observed item, so the observed item is simply
+    ///     dropped rather than terminalized under a fabricated identity.
     ///   * **Merge, never replace.** An open item whose turn the answer reports still
     ///     running keeps everything this adapter watched happen — its `item/started`
     ///     snapshot and every delta that streamed into it. The answer confirms the
@@ -1190,10 +1099,10 @@ impl CodexAdapter {
 
         let mut out = Vec::new();
 
-        // Aborted boundary (D14): the terminal carries items:[] even for
+        // Aborted boundary: the terminal carries items:[] even for
         // in-flight items, which never get their own item/completed. Synthesize
         // a terminal for each still-open item of this turn, from what we tracked
-        // live (D15: our own observed ids, never cross-resume equality). A clean
+        // live (our own observed ids, never cross-resume equality). A clean
         // `completed` turn's items already terminalized via item/completed, so
         // only interrupted/failed synthesize.
         let synthesize = matches!(status, "interrupted" | "failed");
@@ -1423,7 +1332,7 @@ impl OpenItem {
     }
 }
 
-/// The thread-namespaced source-event id (D4): `<thread_id>:<suffix>`. Threads
+/// The thread-namespaced source-event id: `<thread_id>:<suffix>`. Threads
 /// never share the separator-free prefix, so two threads' identical item ids
 /// cannot alias after a switch.
 fn sid(thread_id: &str, suffix: &str) -> String {
@@ -1696,7 +1605,7 @@ mod tests {
         assert_eq!(result.payload["status"], "completed");
     }
 
-    // ---- interrupted-turn synthesis (D14/D15) ----
+    // ---- interrupted-turn synthesis ----
 
     #[test]
     fn an_interrupted_turn_synthesizes_terminals_for_dangling_items() {
@@ -2347,7 +2256,7 @@ mod tests {
     ///
     /// It may have finished while the link was down — in which case the answer just
     /// described its real terminal and that fact is already durable — or it may have
-    /// vanished from history altogether (D16). Synthesizing one from an id the answer
+    /// vanished from history altogether. Synthesizing one from an id the answer
     /// did not vouch for would be inventing a result for something that may never have
     /// produced one.
     #[test]
@@ -2600,7 +2509,7 @@ mod tests {
             );
         };
 
-        // **The turn is still going.** A29's running-turn limit is deliberately
+        // **The turn is still going.** The running-turn limit is deliberately
         // untouched: a running turn's item ids are measured placeholders, so its
         // `commandExecution` would be minted under an id the live wire never emitted.
         refused("a tool item inside a RUNNING turn", &|r| {
@@ -2612,8 +2521,8 @@ mod tests {
         // **The item's own outcome is not decided.** `tool_result_payload` defaults a
         // missing `status` to `"completed"`, on a FIRST-WINS key — so an item without
         // one would persist a success that never happened and hold the key against the
-        // real terminal for ever. `status` is required on this variant by
-        // `schema-0.153/guarded-wire-stable.json`, so an answer lacking it is malformed
+        // real terminal for ever. `status` is required on this variant by codex 0.153's
+        // app-server schema, so an answer lacking it is malformed
         // rather than merely unmeasured.
         refused("a commandExecution with no status at all", &|r| {
             r["thread"]["turns"][1]["items"][2]
@@ -3188,21 +3097,6 @@ mod tests {
             });
         }
 
-        // The effective policy fields, read for shape because a later chunk reads them
-        // for value. Absent and null pass; a changed TYPE does not.
-        refused("a sandbox that is not a typed object", &|r| {
-            r["sandbox"] = json!("read-only");
-        });
-        refused("a sandbox object with no type", &|r| {
-            r["sandbox"] = json!({"networkAccess": false});
-        });
-        refused("an approval policy that is not a string", &|r| {
-            r["approvalPolicy"] = json!({"kind": "on-request"});
-        });
-        refused("a cwd that is not a string", &|r| {
-            r["cwd"] = json!(["/work/proj"]);
-        });
-
         // **A completed turn whose userMessage carries no content parts is ACCEPTED.**
         //
         // `all()` over an empty array is true, and that is the intended reading: an empty
@@ -3259,45 +3153,11 @@ mod tests {
                 .is_some(),
             "the committed captured answer must be ACCEPTED"
         );
-        // Absent optional policy fields are legitimate, and must not be read as a
-        // changed type.
-        let mut trimmed = populated_result();
-        for key in [
-            "sandbox",
-            "approvalPolicy",
-            "approvalsReviewer",
-            "cwd",
-            "model",
-        ] {
-            trimmed.as_object_mut().unwrap().remove(key);
-        }
-        assert!(
-            adapter
-                .plan_resume_seed(&trimmed, POPULATED_THREAD)
-                .is_some(),
-            "an absent optional field is not a shape change"
-        );
-        let mut nulled = populated_result();
-        for key in [
-            "sandbox",
-            "approvalPolicy",
-            "approvalsReviewer",
-            "cwd",
-            "model",
-        ] {
-            nulled[key] = Value::Null;
-        }
-        assert!(
-            adapter
-                .plan_resume_seed(&nulled, POPULATED_THREAD)
-                .is_some(),
-            "the answer spells `no value` as null too"
-        );
     }
 
     #[test]
     fn replaying_a_frame_twice_yields_the_same_ids() {
-        // Idempotency: a thread/started re-broadcast on reconnect (D2) must map to
+        // Idempotency: a thread/started re-broadcast on reconnect must map to
         // the same dedup key, so the store collapses it to one row.
         let f: Value = frames(LIFECYCLE)
             .into_iter()

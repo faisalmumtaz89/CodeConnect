@@ -251,13 +251,13 @@ async fn main() -> Result<()> {
         })
     };
 
-    // **A12.2.** A registration whose parked link will not stop inside the link stop
+    // **Owed links.** A registration whose parked link will not stop inside the link stop
     // budget is accepted with no link installed: Live in the fleet, observed by
     // nothing. No other part of the daemon ever builds that link — `codex_link::run`
     // never returns on its own, so a link never vacates the slot, and the only other
     // builder is the next registration for that uid. This is the retry.
     //
-    // **A12.2's second half — WHICH thread the rebuilt link binds — is closed now,
+    // **The other half — WHICH thread the rebuilt link binds — is closed now,
     // and the fix is not here.** This ticker only guarantees that a link gets
     // BUILT. Which thread it then binds used to be open, and open in the worst way:
     // a first thread or a `/new` emitting its one-shot `thread/started` during the
@@ -266,7 +266,7 @@ async fn main() -> Result<()> {
     // can name a thread that appeared while nothing was watching. With no hint the
     // link stayed unbound; with a stale hint the broker accepts a resume of a
     // RETIRED thread (`is_session_thread` widens resume to retired threads on
-    // purpose, for 2e-4c switching) while the active head went undiscovered.
+    // purpose, for thread switching) while the active head went undiscovered.
     //
     // The blocker was that ccd cannot ask: the head lives in the broker's own
     // `Binding::creation`, and no ccd-allowlisted method reports it. What was
@@ -2351,9 +2351,9 @@ mod tests {
         assert!(advice.contains("LAN address"), "{advice}");
         assert!(!advice.contains("daemon restart"), "{advice}");
 
-        // And the same for the LAN bind F2 exists for: Tailscale hands out no
-        // RFC1918 address, so an empty probe leaves that classification certain
-        // and the opt-in is still the way through.
+        // And the same for the LAN bind the plaintext opt-in exists for:
+        // Tailscale hands out no RFC1918 address, so an empty probe leaves that
+        // classification certain and the opt-in is still the way through.
         let config = config_with(Some("192.168.1.20"));
         let plan = plan_bind(&config, &[], false);
         let advice = plaintext_refusal_advice(&config, &plan, false).expect("must be advised");
@@ -3651,8 +3651,8 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Independent adversarial validation of the plaintext opt-in (F2) and
-    // the tailnet watcher (F5). Written against the promises rather than
+    // Independent adversarial validation of the plaintext opt-in and
+    // the tailnet watcher. Written against the promises rather than
     // against the implementation, and deliberately overlapping the tests
     // above: two of these are the same claim asked at the exact edge of
     // every range, and one is the coupling between the planner and the
@@ -3783,8 +3783,9 @@ mod tests {
         for address in VOUCHABLE {
             let ip: IpAddr = address.parse().unwrap_or_else(|_| panic!("{address}"));
             assert!(is_local_network(ip), "{address}");
-            // Empty tailnet on purpose: the defect F2 fixes is an operator
-            // with no Tailscale at all, so the opt-in has to hold there.
+            // Empty tailnet on purpose: the defect the plaintext opt-in fixes
+            // is an operator with no Tailscale at all, so the opt-in has to
+            // hold there.
             let config = allowing(address);
             let plan = plan_bind(&config, &[], false);
             assert_eq!(

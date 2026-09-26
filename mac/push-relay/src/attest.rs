@@ -731,8 +731,9 @@ mod tests {
         assert_eq!(verified.receipt.len(), 3977);
     }
 
-    /// Finding 2 as an executable fact: narrow the algorithm list by the one
-    /// entry most default sets omit, and the genuine chain stops verifying.
+    /// Why `CHAIN_ALGORITHMS` carries `ECDSA_P384_SHA256`, as an executable fact:
+    /// narrow the algorithm list by the one entry most default sets omit, and the
+    /// genuine chain stops verifying.
     #[test]
     fn a_narrow_algorithm_list_rejects_apples_real_chain() {
         let narrow: &[&dyn SignatureVerificationAlgorithm] = &[

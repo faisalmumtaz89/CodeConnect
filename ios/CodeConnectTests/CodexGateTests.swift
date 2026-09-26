@@ -2,10 +2,10 @@ import XCTest
 
 @testable import CodeConnect
 
-/// **Tier 1.4 and 1.5 — the capability gate, and idempotence at the client.**
+/// **The capability gate, and idempotence at the client.**
 ///
-/// The contract's own normative rule, and the one thing this phase most owes a
-/// test for:
+/// The normative rule, and the one thing the Codex controls most owe a test
+/// for:
 ///
 /// > The phone **MUST NOT TRANSMIT** `compose` unless
 /// > `capabilities.codex_compose == true`. **Hiding the button is not the same
@@ -216,7 +216,7 @@ final class CodexGateTests: XCTestCase {
             "no Codex mutation may leave for a Claude session: sent \(wire.types)")
     }
 
-    /// And the link state gates it too (decision D3): only `subscribed` can
+    /// And the link state gates it too: only `subscribed` can
     /// actuate, and the other three are told before the tap rather than after.
     func testOnlyASubscribedLinkIsOffered() {
         let model = AppModel(
@@ -325,7 +325,7 @@ final class CodexGateTests: XCTestCase {
             "different words are a different message")
     }
 
-    // MARK: The bounded grey (decision D3/D7)
+    // MARK: The bounded grey
 
     /// A link-state refusal greys Stop for a **bounded** window, then gives it
     /// back — four of the daemon's own sentences end in "try again shortly", so

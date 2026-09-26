@@ -1,7 +1,7 @@
-//! End-to-end, real-process tests for the D7 launch coordination path, run
+//! End-to-end, real-process tests for the launch coordination path, run
 //! against an **isolated throwaway tmux server** (a private `-S <socket>` under
 //! a temp dir — never the operator's live `codeconnect` server) and an isolated
-//! `CODECONNECT_HOME`. These exercise the coordinator, the D6 exec gate, and the
+//! `CODECONNECT_HOME`. These exercise the coordinator, the exec gate, and the
 //! custodian as the separate processes they really are.
 //!
 //! The load-bearing gate: **the launch outcome is owned even when the
@@ -10,9 +10,9 @@
 //! custodian must then drive the record to `failed`, destroy the disposable tmux
 //! session, and mark cleanup `complete` — with no guessed grace period.
 //!
-//! # What changed in 2e-2b, and why these tests now need a codex
+//! # Why these tests need a codex
 //!
-//! The pane no longer runs a `/bin/sh` placeholder: it runs the **real**
+//! The pane does not run a `/bin/sh` placeholder: it runs the **real**
 //! `internal-codex-host`, and the coordinator commits `ready` only after
 //! observing that host's own evidence (both broker legs bound under the run dir,
 //! the pane's session still proven ours). So a bring-up here is a real bring-up,
@@ -34,21 +34,21 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-/// The A7.1 digest of the codex binary under test: the identity resolution pins,
-/// which the host re-verifies immediately before each of its two execs. Computed
-/// here rather than written down because these harnesses build (or copy) their
-/// codex at run time.
+/// The executable-identity digest of the codex binary under test: the identity
+/// resolution pins, which the host re-verifies immediately before each of its two
+/// execs. Computed here rather than written down because these harnesses build (or
+/// copy) their codex at run time.
 ///
 /// **Derived locally, deliberately, and now that is a choice rather than the only
-/// option.** Until 2e-7d nothing could pin a digest: `codeconnect codex` refused
-/// before it would have spawned a coordinator, so every harness composed the
-/// charter a launcher would have written. The launcher exists now and its own path
-/// is gated end to end by `the_codex_command_launches_a_real_session_end_to_end`
+/// option.** Before the launcher could spawn a coordinator, nothing could pin a
+/// digest, so every harness composed the charter a launcher would have written. The
+/// launcher exists now and its own path is gated end to end by
+/// `the_codex_command_launches_a_real_session_end_to_end`
 /// (`live_codex_coordinator.rs`). This file still derives its own, because:
 ///
 /// **the codex here is a python3 fake**, generated per run. What is under test is
 /// the coordinator/custodian's ownership of a launch, not codex; a launcher
-/// resolving a real, version-pinned codex would defeat the point and make this
+/// resolving a real, identity-pinned codex would defeat the point and make this
 /// suite need a live binary it has never needed.
 fn codex_sha256(path: &Path) -> String {
     protocol::hash::sha256_file(path).expect("hash the codex binary under test")
@@ -73,8 +73,8 @@ static SOCK_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// The file that tells [`write_fake_codex`]'s TUI branch to exit instead of
 /// holding the pane. Written beside the fake codex, so it changes the script's
-/// behaviour without changing the script's bytes — the A7.1 digest the charter
-/// pins is taken over the file itself and must stay the same.
+/// behaviour without changing the script's bytes — the executable-identity digest
+/// the charter pins is taken over the file itself and must stay the same.
 const TUI_EXITS_MARKER: &str = "tui-exits";
 
 fn tmux_bin() -> PathBuf {
@@ -155,7 +155,7 @@ impl Sandbox {
         Sandbox {
             home,
             // The tmux socket is a UNIX SOCKET, so it is bound by SUN_LEN (104)
-            // like every other socket in this chunk — and the macOS temp dir is
+            // like every other socket in this suite — and the macOS temp dir is
             // long enough that `<tempdir>/cc-life-<tag>-<pid>-<nanos>/tmux.sock`
             // depends on the tag's length to fit. It does not fit for a tag as
             // ordinary as "lastsession": tmux answers `File name too long`, the
@@ -241,10 +241,9 @@ impl Sandbox {
     /// Production runs every CodeConnect session on one shared server, so the
     /// server outlives any individual session. A private per-test server does not:
     /// when its last session dies the server exits with it, the socket goes away,
-    /// and `destroy_owned_session` can only answer `Unavailable` — because a
-    /// server that does not answer is never proof our uid is absent (tmux.rs,
-    /// round-4 finding 1 / round-5 finding 4). The custodian then retries that
-    /// forever and never reaches `Complete`.
+    /// and `destroy_owned_session` can only answer `Unavailable` — because a server
+    /// that does not answer is never proof our uid is absent (tmux.rs). The
+    /// custodian then retries that forever and never reaches `Complete`.
     ///
     /// That rule is correct and this suite is not the place to argue with it. What
     /// the rule means is that a **single-session** tmux server is a topology where
@@ -303,14 +302,10 @@ impl Sandbox {
             // The dimensions the host applies no default to. The coordinator
             // carries them verbatim into the pane command.
             .args(["--codex", self.codex.to_str().unwrap()])
-            // A7.1: the identity of the codex binary, re-verified in the host
+            // The identity of the codex binary, re-verified in the host
             // before each exec.
             .args(["--codex-sha256", &codex_sha256(&self.codex)])
             .args(["--codex-home", self.codex_home.to_str().unwrap()])
-            .args(["--approval-policy", "untrusted"])
-            .args(["--approvals-reviewer", "user"])
-            .args(["--sandbox", "read-only"])
-            .args(["--hooks-enabled", "true"])
             .args(extra);
         cmd.env("CODECONNECT_HOME", &self.home)
             .env("CODECONNECT_TMUX", &self.tmux)
@@ -321,12 +316,12 @@ impl Sandbox {
             .expect("spawn coordinator")
     }
 
-    /// Make this sandbox's fake TUI die shortly after it starts, without ever
-    /// binding a thread. See [`TUI_EXITS_MARKER`].
-    fn arm_a_tui_that_exits(&self) {
+    /// Make this sandbox's fake TUI exit with `status` shortly after it starts,
+    /// without ever binding a thread. See [`TUI_EXITS_MARKER`].
+    fn arm_a_tui_that_exits(&self, status: u8) {
         std::fs::write(
             self.codex.parent().unwrap().join(TUI_EXITS_MARKER),
-            "the TUI exits\n",
+            format!("{status}\n"),
         )
         .expect("arm the exiting TUI");
     }
@@ -447,8 +442,8 @@ impl Sandbox {
     }
 
     /// Run the ACTUAL gated `internal-codex-sweep` subcommand and return its exit
-    /// status (finding 5: the sweep no longer always exits 0 — a record it could not
-    /// examine is surfaced as a non-zero exit, so callers can assert on it).
+    /// status (the sweep does not always exit 0 — a record it could not examine is
+    /// surfaced as a non-zero exit, so callers can assert on it).
     ///
     /// **Its stderr is kept**, in the file the failure diagnostic reads. The pass says
     /// one line per thing it did and one per thing it could not, and a test that waits
@@ -494,9 +489,9 @@ impl Sandbox {
         //
         // This is not tidiness. A custodian outlives the coordinator by design,
         // and a test that ends with the launch still `ready` leaves one running:
-        // it then finds its tmux server killed (an unanswered socket, which
-        // round-4 forbids reading as absence) and its record deleted (a load
-        // error, retried by design), so it retries **forever** — a spinning
+        // it then finds its tmux server killed (an unanswered socket, which the
+        // cleanup rule forbids reading as absence) and its record deleted (a
+        // load error, retried by design), so it retries **forever** — a spinning
         // process per test run, accumulating across the day. Measured on this
         // machine before this line existed: 75 of them.
         // The coordinator too, and for a reason worth stating: a test that spawns
@@ -615,11 +610,12 @@ impl Drop for Sandbox {
 /// sleeps, holding the session open.
 ///
 /// **Unless [`TUI_EXITS_MARKER`] sits beside it**, in which case the TUI sleeps
-/// briefly and exits 0. That is the measured shape of the defect this suite could
-/// not previously express: a pane whose host came up perfectly — both legs
-/// serving, both children past `execve` and alive, the session `Live` — and whose
-/// TUI then died without a thread ever binding, because the broker refused its
-/// first `thread/start`.
+/// briefly and exits with the status the marker holds. With a non-zero status that
+/// is the measured shape of a launch that fails after its host is up: a
+/// pane whose host came up perfectly — both legs serving, both children past
+/// `execve` and alive, the session `Live` — and whose TUI then died without a
+/// thread ever binding, because the broker refused its first `thread/start`. With
+/// status 0 it is a TUI the user quit before starting a thread.
 ///
 /// The sleep is not padding. `spawn_fenced` proves the TUI is past `execve` by
 /// requiring it to be ALIVE under an image that is not the host's own, so a TUI
@@ -660,12 +656,16 @@ if argv and argv[0] == "app-server":
 # (and already-covered) failure than the one this marker exists to stage.
 if not (argv and argv[0] == "app-server"):
     here = os.path.dirname(os.path.realpath(__file__))
-    if os.path.exists(os.path.join(here, "{marker}")):
+    with open(os.path.join(here, "initial-tui-size"), "w") as output:
+        output.write("%d %d" % tuple(os.get_terminal_size(0)))
+    marker = os.path.join(here, "{marker}")
+    if os.path.exists(marker):
         # Long enough for the host's `prove_past_execve` to see a live, exec'd
         # child, short enough that the coordinator is still inside its
         # thread-binding grace.
         time.sleep(2)
-        sys.exit(0)
+        with open(marker) as status:
+            sys.exit(int(status.read()))
 
 while True:
     time.sleep(3600)
@@ -735,7 +735,7 @@ fn tagged_pids(tag: &str) -> Vec<i32> {
 /// Attached to the cleanup assertions because their failure mode is "nothing
 /// happened", and a record dump alone cannot distinguish a custodian that died
 /// from one that is alive and stuck — which are opposite bugs. Both were hit
-/// while building this chunk, and this is what told them apart.
+/// while building this suite, and this is what told them apart.
 fn diagnose(sb: &Sandbox, uid: &str) -> String {
     let cust = sb.custodian_pid(uid);
     let cust_alive = cust.map(|p| unsafe { libc::kill(p, 0) == 0 });
@@ -802,6 +802,98 @@ fn broker_legs_bound(run: &Path) -> bool {
 }
 
 #[test]
+fn coordinator_sets_dimensions_before_the_tui_starts() {
+    for (warm, dimensions, expected) in [(false, "131x43", "131 43"), (true, "97x31", "97 31")] {
+        let uid = protocol::uid::new().unwrap();
+        let sb = Sandbox::new("size", &uid);
+        if warm {
+            sb.keepalive();
+        }
+        let mut coord = sb.spawn_coordinator_opts(&uid, &["--terminal-size", dimensions]);
+        let first_size = sb.codex.parent().unwrap().join("initial-tui-size");
+        assert!(
+            wait_until(Duration::from_secs(30), || std::fs::read_to_string(
+                &first_size
+            )
+            .is_ok_and(|text| !text.is_empty())),
+            "{}",
+            diagnose(&sb, &uid)
+        );
+        assert_eq!(std::fs::read_to_string(&first_size).unwrap(), expected);
+        sb.kill_session("cc-1");
+        assert!(wait_until(Duration::from_secs(30), || matches!(
+            coord.try_wait(),
+            Ok(Some(_))
+        )));
+    }
+}
+
+#[test]
+fn coordinator_applies_the_status_preference_from_its_config_home() {
+    for show in [false, true] {
+        let uid = protocol::uid::new().unwrap();
+        let sb = Sandbox::new("status", &uid);
+        std::fs::write(
+            sb.home.join("config.json"),
+            serde_json::json!({"tmux_status": show}).to_string(),
+        )
+        .unwrap();
+        sb.keepalive();
+        let mut set_status = Command::new(&sb.tmux);
+        set_status.args([
+            "-S",
+            sb.sock.to_str().unwrap(),
+            "set-option",
+            "-g",
+            "status",
+            if show { "off" } else { "on" },
+        ]);
+        assert!(matches!(
+            protocol::proc::run_deadlined(&mut set_status, Duration::from_secs(5)).unwrap(),
+            protocol::proc::RunOutcome::Completed { status, .. } if status.success()
+        ));
+        let mut coord = sb.spawn_coordinator(&uid);
+        assert!(
+            wait_until(Duration::from_secs(30), || sb.state(&uid).as_deref()
+                == Some("Ready")),
+            "{}",
+            diagnose(&sb, &uid)
+        );
+        let mut query = Command::new(&sb.tmux);
+        query.args([
+            "-S",
+            sb.sock.to_str().unwrap(),
+            "show-options",
+            "-Av",
+            "-t",
+            "=cc-1:",
+            "status",
+        ]);
+        match protocol::proc::run_deadlined(&mut query, Duration::from_secs(5)).unwrap() {
+            protocol::proc::RunOutcome::Completed {
+                status,
+                stdout,
+                truncated,
+                ..
+            } => {
+                assert!(status.success());
+                assert!(!truncated);
+                assert_eq!(
+                    String::from_utf8(stdout).unwrap().trim(),
+                    if show { "on" } else { "off" }
+                );
+            }
+            outcome => panic!("status query failed: {outcome:?}"),
+        }
+        sb.kill_session("cc-1");
+        assert!(wait_until(Duration::from_secs(30), || matches!(
+            coord.try_wait(),
+            Ok(Some(_))
+        )));
+    }
+}
+
+#[test]
 fn a_ready_launch_runs_the_real_host_in_the_pane_and_commits_ready() {
     // Evolved from `a_ready_launch_creates_the_session_and_commits_ready`. It used
     // to pass `--test-bringup ready`, which committed `ready` on nothing at all.
@@ -837,15 +929,14 @@ fn a_ready_launch_runs_the_real_host_in_the_pane_and_commits_ready() {
     // The real host comes up in the pane and binds both broker legs — the exact
     // evidence the coordinator's bring-up waits for.
     //
-    // This used to have to be observed BEFORE `Ready`, and the reason it no
-    // longer does is the whole of 2e-7b. Committing `Ready` used to *start* the
-    // teardown: the coordinator exited, and a `ready` record whose coordinator is
-    // proven gone is session-fatal, so the custodian destroyed the session about
-    // 200ms later and took the run dir with it (asserting the legs after `Ready`
-    // raced that and lost, 2 runs in 20). The coordinator now stays as the
-    // session's supervisor, which is what the custodian's `ready` arm always
-    // assumed, so the legs are still bound after `Ready` — and the assertions
-    // below prove it rather than merely not racing it.
+    // This does not have to be observed BEFORE `Ready`, though it once did.
+    // Committing `Ready` used to *start* the teardown: the coordinator exited, and
+    // a `ready` record whose coordinator is proven gone is session-fatal, so the
+    // custodian destroyed the session about 200ms later and took the run dir with
+    // it (asserting the legs after `Ready` raced that and lost, 2 runs in 20). The
+    // coordinator now stays as the session's supervisor, which is what the
+    // custodian's `ready` arm always assumed, so the legs are still bound after
+    // `Ready` — and the assertions below prove it rather than merely not racing it.
     let legs = wait_until(Duration::from_secs(30), || broker_legs_bound(&run));
     assert!(
         legs,
@@ -859,10 +950,10 @@ fn a_ready_launch_runs_the_real_host_in_the_pane_and_commits_ready() {
         sb.state(uid).as_deref() == Some("Ready")
     });
     assert!(ok, "record: {:?}", sb.record_text(uid));
-    // Round-5 finding 1: server A's identity is PERSISTED in the launch record
-    // (the coordinator captured the resolved session+server and wrote it), so the
-    // separate custodian/supervisor can bind cleanup/liveness to A — the
-    // production pin is no longer None. It carries a proven server_birth.
+    // Server A's identity is PERSISTED in the launch record (the coordinator captured
+    // the resolved session+server and wrote it), so the separate custodian/supervisor
+    // can bind cleanup/liveness to A — the production pin is not None. It carries a
+    // proven server_birth.
     let record = sb.record_text(uid).expect("record exists");
     assert!(
         record.contains("\"server_a\"") && record.contains("\"server_birth\""),
@@ -944,11 +1035,10 @@ fn a_ready_launch_runs_the_real_host_in_the_pane_and_commits_ready() {
 ///
 /// The measured defect, reproduced without a live codex: from a directory the
 /// owner's `~/.codex` marks `trust_level = "trusted"`, the TUI's first
-/// `thread/start` is refused by the launch fingerprint and codex 0.153 exits
-/// immediately. Every fact the coordinator's bring-up checks is true for the whole
-/// ~2 s before it does — both broker legs serving under a run dir this uid owns, a
-/// live host lease, both children past `execve` and alive, the tmux session `Live`
-/// — so `Ready` committed, `codeconnect codex` `exec`ed into `tmux attach-session`,
+/// `thread/start` was refused and codex 0.153 exited immediately. Every fact the
+/// coordinator's bring-up checks is true for the whole ~2 s before it does — both
+/// broker legs serving under a run dir this uid owns, a live host lease, both children past `execve` and alive, the tmux session `Live`
+/// — so `Ready` committed, `codeconnect codex` attached the terminal to the session,
 /// and the user got a pane that flickered to `[exited]` with nothing said. The only
 /// account of why lived in `<run_dir>/broker.log`, and the sweep deleted it.
 ///
@@ -956,7 +1046,7 @@ fn a_ready_launch_runs_the_real_host_in_the_pane_and_commits_ready() {
 ///
 ///   * the launch reaches `Failed` — so `wait_on_record` gives the launcher
 ///     `LaunchWait::Failed`, which `codex::launch` prints verbatim in the user's own
-///     terminal, instead of `Ready` and an `exec_attach` into a dead pane;
+///     terminal, instead of `Ready` and an attach to a dead pane;
 ///   * the reason says what happened, in words, in the durable record; and
 ///   * `broker.log` is at `~/.codeconnect/logs/` after the run dir is gone.
 ///
@@ -969,7 +1059,7 @@ fn a_tui_that_dies_without_binding_a_thread_fails_the_launch_and_keeps_the_broke
     let uid = "01JQXV9K7B8N4M2P6R3T5W9YQM";
     let sb = Sandbox::new("nothread", uid);
     sb.keepalive();
-    sb.arm_a_tui_that_exits();
+    sb.arm_a_tui_that_exits(1);
     let run = sb.expected_run_dir(uid);
     let mut coord = sb.spawn_coordinator(uid);
 
@@ -1032,6 +1122,56 @@ fn a_tui_that_dies_without_binding_a_thread_fails_the_launch_and_keeps_the_broke
     );
 }
 
+/// **A TUI quit cleanly before any thread ends the session quietly.** Ctrl+C in
+/// codex's `resume` picker exits with status 0 and prints nothing (measured on
+/// 0.155.1). The host marks the quit and ends the pending launch with it — the mark
+/// is what the launcher reads to exit without printing anything — and records no
+/// reason for the phone. The coordinator leaves and the run dir is swept.
+#[test]
+fn a_tui_quit_cleanly_before_a_thread_ends_without_a_failure() {
+    let uid = "01JQXV9K7B8N4M2P6R3T5W9YQN";
+    let sb = Sandbox::new("quitclean", uid);
+    sb.keepalive();
+    sb.arm_a_tui_that_exits(0);
+    let run = sb.expected_run_dir(uid);
+    let mut coord = sb.spawn_coordinator(uid);
+
+    assert!(
+        wait_until(Duration::from_secs(30), || broker_legs_bound(&run)),
+        "the pane's host must bind both broker legs before its TUI quits: {}",
+        run.display()
+    );
+    assert!(
+        wait_until(Duration::from_secs(45), || matches!(
+            coord.try_wait(),
+            Ok(Some(_))
+        )),
+        "the coordinator must leave a launch its TUI was quit out of: {:?}",
+        sb.record_text(uid)
+    );
+    let record = sb.record_text(uid).expect("record exists");
+    assert_eq!(
+        sb.failure_reason(uid).as_deref(),
+        Some("the codex TUI was quit before it started a thread"),
+        "{record}"
+    );
+    let fields: serde_json::Value = serde_json::from_str(&record).expect("a JSON record");
+    assert_eq!(
+        fields["codex_quit_before_thread"],
+        serde_json::Value::Bool(true),
+        "the host must say the TUI was quit: {record}"
+    );
+    assert!(
+        fields.get("codex_unbound_exit").is_none(),
+        "a clean quit records no failure reason for the phone: {record}"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || !run.exists()),
+        "the run dir is still swept: {}",
+        run.display()
+    );
+}
+
 #[test]
 fn killing_the_coordinator_after_new_session_lets_the_custodian_own_the_outcome() {
     let uid = "01JQXV9K7B8N4M2P6R3T5W9YQE";
@@ -1079,12 +1219,12 @@ fn killing_the_coordinator_after_new_session_lets_the_custodian_own_the_outcome(
 
 #[test]
 fn killing_the_coordinator_during_new_session_keeps_the_custodian_armed_to_clean_up() {
-    // Principle B (durable-before-mutation): `new_session_indeterminate` is
-    // fsynced BEFORE `tmux new-session`, so a coordinator killed **while tmux is
-    // in flight** leaves a record that already says "indeterminate" and keeps the
-    // custodian armed. Here the coordinator hangs *inside* new-session (session
-    // already created, flag still set) and is SIGKILLed there; the retained
-    // custodian must fail the launch and clean the (late) session.
+    // Durable-before-mutation: `new_session_indeterminate` is fsynced BEFORE `tmux
+    // new-session`, so a coordinator killed **while tmux is in flight** leaves a
+    // record that already says "indeterminate" and keeps the custodian armed. Here
+    // the coordinator hangs *inside* new-session (session already created, flag
+    // still set) and is SIGKILLed there; the retained custodian must fail the
+    // launch and clean the (late) session.
     let uid = "01JQXV9K7B8N4M2P6R3T5W9YQG";
     let sb = Sandbox::new("killduring", uid);
     // Production's tmux server is shared; make this one shared too (see
@@ -1452,7 +1592,7 @@ fn the_last_session_on_a_server_still_reaches_terminal_cleanup() {
 
 #[test]
 fn a_record_without_server_a_never_claims_the_remain_on_exit_premise() {
-    // **Round-3 finding 5: the shape the retired inference needed is unreachable.**
+    // **The shape the retired inference needed is unreachable.**
     //
     // This test used to assert the opposite. `server_gone_evidence` had a no-A
     // fallback that read "the host is proven dead" as "the session is gone", gated on

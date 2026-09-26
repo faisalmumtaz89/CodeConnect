@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "In-wrapper WebSocket-over-UDS relay + refuse-by-default allowlist for the Codex app-server (security core; thread-switch machinery is a later sub-chunk)."
+description = "WebSocket-over-UDS relay in front of the Codex app-server, with a refuse-by-default security core for the phone's leg."
 
 [lib]
 name = "codex_broker"
@@ -19,8 +19,8 @@ default = []
 frame-tee = []
 
 # The security core (message shape classification, the allowlist, the refusal
-# matrix, ownership-fingerprint validation) is a PURE synchronous module with no
-# I/O — it is unit-testable against the captured Phase-0 frames with no runtime.
+# matrix) is a PURE synchronous module with no I/O — it is unit-testable against
+# the captured frames with no runtime.
 # The relay transport (UDS listeners + the WS handshake + framing/reassembly) is
 # the only async surface; the upstream app-server connection sits behind a trait
 # so integration tests drive it against captured frames with no live infra.

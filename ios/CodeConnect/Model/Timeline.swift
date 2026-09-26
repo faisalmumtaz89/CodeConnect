@@ -181,7 +181,7 @@ enum TimelineBuilder {
                     let resolution = event.codexResolution
                 {
                     // The second arm, and the order matters: Claude's shape is
-                    // tried first and wins where both could apply, so this phase
+                    // tried first and wins where both could apply, so the Codex arm
                     // cannot change what a Claude session does. A Codex payload
                     // fails the first read (it has no `request_id` *inside* an
                     // `AnswerOutcome`, and none of that struct's other required

@@ -10,7 +10,7 @@
 //! that can be made to point at different bytes between the moment one is
 //! inspected and the moment one is `execve`d — so `codeconnect::codex` pins the
 //! resolved `codex` by its digest and re-derives that digest immediately before
-//! each spawn (A7.1).
+//! each spawn.
 //!
 //! Hashing alone does not finish that job, because a hash is taken through an
 //! **open file** and an exec is performed on a **pathname**, and those are two
@@ -320,7 +320,7 @@ pub fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
 /// non-owned file in a user-owned directory (rename-over succeeds), an ACL granting
 /// `write-data` without attribute-change, and an ownership-disabled external volume
 /// are all cases where `fchflags` fails and a write or replacement still lands. So a
-/// freeze failure means the F2 content-mutation hole is simply **not closed** on that
+/// freeze failure means the content-mutation hole is simply **not closed** on that
 /// path, and this type says so rather than implying otherwise. What stays true is the
 /// direction of the trade: the fallback is exactly the prior guarantee, never below
 /// it.
@@ -523,7 +523,7 @@ impl FreezeHolder {
     /// Whether this holder is **provably** gone — the only condition under which
     /// undoing its freeze is not revoking a live launch's guard.
     ///
-    /// Fail-closed in the D7 sense: `false` means "not proven dead", which covers a
+    /// Fail-closed: `false` means "not proven dead", which covers a
     /// holder that is alive, a holder that is stopped, and a kernel that could not
     /// be asked. Only two things prove death, and both are proofs rather than
     /// inferences:
@@ -699,7 +699,7 @@ fn unlock(file: &std::fs::File) {
 /// records directory, and the same path runs from a signal handler, where a file
 /// write and a lock acquisition are not allowed. A symmetric rule — everyone who owns
 /// it clears it — is what two concurrent sessions on one binary actually met: the
-/// session that ended first took the pin off the one still running. Phase 2's
+/// session that ended first took the pin off the one still running. The pin's
 /// guarantee is that the pinned bytes cannot change for the whole life of a session's
 /// app-server, and a peer's release must not be able to end it.
 ///
@@ -1616,7 +1616,7 @@ mod tests {
         assert!(sha256_file(&path).is_err());
     }
 
-    // ------------------------------------------------- the vnode check (A7.1)
+    // ---------------------------------------------------------- the vnode check
 
     /// A private scratch directory, named so two tests (or two `cargo test`
     /// processes) cannot collide over one pathname — these tests rename files over
@@ -1809,9 +1809,9 @@ mod tests {
         }
     }
 
-    /// The two halves of finding 1, separated so each is visible on its own, with no
-    /// race to stage: **a digest taken through a handle keeps describing the file the
-    /// handle was opened on, and a pathname does not.**
+    /// The two halves of the pathname swap, separated so each is visible on its own,
+    /// with no race to stage: **a digest taken through a handle keeps describing the
+    /// file the handle was opened on, and a pathname does not.**
     ///
     /// This is the whole exploit in four lines. The digest below comes out equal to
     /// the *original* bytes even though the name has been atomically replaced — which
@@ -1887,8 +1887,8 @@ mod tests {
         panic!("the hashing thread never opened the target: the race was not staged");
     }
 
-    /// **Finding 1, staged as the real thing.** An atomic `rename` lands over the
-    /// pathname *after* the hash has demonstrably opened the file and long before it
+    /// **The pathname swap, staged as the real thing.** An atomic `rename` lands over
+    /// the pathname *after* the hash has demonstrably opened the file and long before it
     /// reaches EOF — the shape every installer, `npm` overwrite and
     /// `standalone/current` flip actually has.
     ///
@@ -1936,12 +1936,12 @@ mod tests {
         );
     }
 
-    // -------------------------------------------- the freeze (A7.1, findings 1 & 2)
+    // --------------------------------------------------------------- the freeze
 
-    /// **Findings 1 and 2, defeated at the kernel rather than merely detected.**
+    /// **Both attacks, defeated at the kernel rather than merely detected.**
     /// While the guard lives the bytes are immutable, so the two attacks a bare
     /// `(dev, ino)` comparison cannot see — a same-inode content overwrite behind the
-    /// reader (finding 2), and a `rename` over the name before `execve` (finding 1) —
+    /// reader, and a `rename` over the name before `execve` —
     /// are refused `EPERM` by the OS. Dropping the guard restores the file.
     #[test]
     fn freezing_refuses_every_write_and_swap_until_the_guard_is_dropped() {
@@ -1968,8 +1968,8 @@ mod tests {
             "the file must be frozen while the guard lives"
         );
 
-        // Finding 2: there is no writable handle to be had — not for the name, and
-        // not for any other hard link to the inode.
+        // The content overwrite: there is no writable handle to be had — not for the
+        // name, and not for any other hard link to the inode.
         for name in [&target, &other_link] {
             let err = std::fs::OpenOptions::new()
                 .write(true)
@@ -1983,8 +1983,8 @@ mod tests {
             );
         }
 
-        // Finding 1: the swap cannot even land while frozen — it is not a narrow
-        // race, it is refused.
+        // The pathname swap cannot even land while frozen — it is not a narrow race,
+        // it is refused.
         let err = std::fs::rename(&replacement, &target)
             .expect_err("a rename over a frozen name must be refused");
         assert_eq!(err.raw_os_error(), Some(libc::EPERM));
@@ -2196,7 +2196,7 @@ mod tests {
         );
     }
 
-    // ------------------------------------------- the janitor's clear (H1.1)
+    // ------------------------------------------------------ the janitor's clear
 
     /// Take the flag off `path` whatever it carries, so a scratch dir holding a
     /// deliberately-frozen file can still be torn down.
@@ -2687,7 +2687,7 @@ mod tests {
     }
 
     /// **Two live holders, and only the setter's release clears.** This is the
-    /// concurrent-sessions case the Phase 2 pin is actually made of: one binary, two
+    /// concurrent-sessions case the executable pin is actually made of: one binary, two
     /// sessions, each holding the freeze for the whole life of its own app-server.
     ///
     /// Under a rule where an adopter clears on release, session B ending first takes

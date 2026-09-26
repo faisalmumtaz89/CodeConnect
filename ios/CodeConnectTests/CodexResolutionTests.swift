@@ -2,10 +2,10 @@ import XCTest
 
 @testable import CodeConnect
 
-/// **Tier 1.2 — a Codex `approval_resolved` must resolve its card.**
+/// **A Codex `approval_resolved` must resolve its card.**
 ///
-/// The highest-value test in the phase, and the one that stands in front of the
-/// worst defect the gap list found: before it, a Codex card stayed **live and
+/// The highest-value test in this file, and the one that stands in front of the
+/// worst Codex card defect: before it, a Codex card stayed **live and
 /// tappable on the phone** after it had been answered at the Mac, cleared by an
 /// interrupt, or timed out. `Timeline` wrote resolutions into
 /// `outcomesByRequest` via `AnswerOutcome`, which requires `request_id`; a Codex
@@ -13,9 +13,9 @@ import XCTest
 /// decode returned nil, nothing was recorded, and `actionBarAvailable` stayed
 /// true forever.
 ///
-/// **Decision D1, and where the fixtures stand.** The daemon adds `request_id`
-/// to the Codex `approval_resolved` payload — additively, in the same spelling
-/// and position as Claude's. The phone correlates on that field **only**; it
+/// **The correlation field, and where the fixtures stand.** The daemon adds
+/// `request_id` to the Codex `approval_resolved` payload — additively, in the
+/// same spelling and position as Claude's. The phone correlates on that field **only**; it
 /// never prefix-parses `source_event_id`, because parsing an id-bearing string
 /// is exactly the thing that fails silently.
 ///
@@ -23,13 +23,12 @@ import XCTest
 /// has since been **cross-checked against the Rust that landed it**:
 /// `ws.rs`'s `CodexResolutionPayload` is `{ request_id, #[serde(flatten)]
 /// resolution }`, which puts `request_id` beside the status tag rather than
-/// inside a nested object — exactly the flat shape these read. No capture in
-/// `fixtures/codex/` carries it yet (every one predates the change), so the
-/// hand-written frames here are the only exercise it gets on this side until
-/// T4 runs against a live daemon.
+/// inside a nested object — exactly the flat shape these read. No live capture
+/// in `fixtures/codex/` carries it (every one predates the change); the daemon's
+/// own bytes for it are `minor-19-wire.json`, decoded whole below.
 ///
 /// `aResolutionWithoutARequestIdCorrelatesToNothing` keeps the fallback honest:
-/// it pins what a pre-D1 frame does, which is nothing at all.
+/// it pins what an older daemon's frame does, which is nothing at all.
 @MainActor
 final class CodexResolutionTests: XCTestCase {
 
@@ -60,7 +59,7 @@ final class CodexResolutionTests: XCTestCase {
     }
 
     /// A Codex resolution: a **bare `CodexResolution`** as the payload, with
-    /// D1's additive `request_id` beside the status. Not wrapped in an
+    /// the additive `request_id` beside the status. Not wrapped in an
     /// `AnswerOutcome`, and carrying none of its fields.
     private func codexResolution(
         requestID: String = "rid-1", seq: UInt64 = 2, body: String
@@ -145,12 +144,12 @@ final class CodexResolutionTests: XCTestCase {
         }
     }
 
-    /// **`source_event_id` is never parsed.** The contract's open question 4.1
-    /// offered a `"resolved:"` prefix parse as the alternative; D1 chose the
-    /// field. This pins the choice: a resolution whose `source_event_id` says
-    /// `resolved:rid-1` but whose payload carries no `request_id` correlates to
-    /// nothing, and the card stays live rather than being retired by a string
-    /// that happened to start with the right eight characters.
+    /// **`source_event_id` is never parsed.** A `"resolved:"` prefix parse was
+    /// the alternative; the daemon chose the field. This pins the choice: a
+    /// resolution whose `source_event_id` says `resolved:rid-1` but whose payload
+    /// carries no `request_id` correlates to nothing, and the card stays live
+    /// rather than being retired by a string that happened to start with the
+    /// right eight characters.
     func testAResolutionWithoutARequestIdCorrelatesToNothing() throws {
         let unaugmented = try event(
             """
@@ -181,7 +180,7 @@ final class CodexResolutionTests: XCTestCase {
         XCTAssertTrue(card.isPending, "somebody else's resolution is not an answer to this")
     }
 
-    /// **This phase must not regress Claude.** The `AnswerOutcome` path is
+    /// **Codex resolution must not regress Claude.** The `AnswerOutcome` path is
     /// byte-identical and still wins where both could apply.
     func testAClaudeResolutionIsUnaffected() throws {
         let request = try event(
@@ -207,9 +206,9 @@ final class CodexResolutionTests: XCTestCase {
         XCTAssertFalse(card.isPending)
     }
 
-    /// The ordering trap the test plan names S3: a `turn_complete` arrives
-    /// **before** the resolution. Neither event may leave a live card on a dead
-    /// turn, and the resolution is what retires it either way.
+    /// The ordering trap: a `turn_complete` arrives **before** the resolution.
+    /// Neither event may leave a live card on a dead turn, and the resolution is
+    /// what retires it either way.
     func testATurnCompleteBeforeTheResolutionStillRetiresTheCard() throws {
         let turnComplete = try event(
             """
@@ -234,8 +233,8 @@ final class CodexResolutionTests: XCTestCase {
     /// The daemon's tests byte-compare against this file, so it is the one place
     /// the two languages meet on the same bytes rather than on two readings of a
     /// decisions document. Everything the phone needs from minor 19 is in it —
-    /// D1's `request_id` on the resolution payload, D2's `turn_id` on the
-    /// approval's *envelope*, D3's `codex_link` and `agent` on the summaries —
+    /// `request_id` on the resolution payload, `turn_id` on the approval's
+    /// *envelope*, `codex_link` and `agent` on the summaries —
     /// and this decodes all of it through the app's own types and drives the
     /// real `TimelineBuilder` over it.
     ///
@@ -263,7 +262,7 @@ final class CodexResolutionTests: XCTestCase {
         let root = try XCTUnwrap(
             try JSONDecoder().decode(JSONValue.self, from: data).objectValue)
 
-        // ---- D3: the fleet ------------------------------------------------
+        // ---- the fleet ----------------------------------------------------
         let sessions = try XCTUnwrap(root["sessions"]?.arrayValue)
             .compactMap { $0.decoded(SessionSummary.self) }
         XCTAssertEqual(sessions.count, 2, "both summaries decode")
@@ -277,13 +276,13 @@ final class CodexResolutionTests: XCTestCase {
             "a Claude row says `none` explicitly — the field is never skipped")
         XCTAssertFalse(claude.codexLink.canActuate(.compose))
 
-        // ---- D2: the turn is on the approval's ENVELOPE --------------------
+        // ---- the turn is on the approval's ENVELOPE ------------------------
         let request = try XCTUnwrap(root["approval_request"]?.decoded(Event.self))
         XCTAssertEqual(request.kind, .approvalRequest)
         XCTAssertEqual(request.source, .daemon, "a Codex card is `daemon`, never `hook`")
         XCTAssertEqual(
             request.turnID, "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
-            "D2: the card's own turn, so Stop needs no inference at all")
+            "the card's own turn, so Stop needs no inference at all")
         let card = try XCTUnwrap(request.approvalCard)
         XCTAssertTrue(
             card.verification.hashMatchesDisplayText, "the real card's hash gate holds")
@@ -291,7 +290,7 @@ final class CodexResolutionTests: XCTestCase {
             CodexCard.options(in: card.toolInput).map(\.id),
             ["accept", "acceptWithExecpolicyAmendment", "cancel"])
 
-        // ---- D1: the resolution correlates on `request_id` -----------------
+        // ---- the resolution correlates on `request_id` ---------------------
         let resolved = try XCTUnwrap(root["approval_resolved"]?.decoded(Event.self))
         XCTAssertNil(
             resolved.approvalOutcome, "still not an AnswerOutcome, and never will be")
@@ -306,7 +305,7 @@ final class CodexResolutionTests: XCTestCase {
         XCTAssertFalse(item.isPending, "the daemon's own bytes retire the card")
         XCTAssertEqual(ApprovalRow.headerTitle(for: item), "RESOLVED")
 
-        // ---- D2 again, through the tracker the Stop control reads ----------
+        // ---- the turn again, through the tracker the Stop control reads ----
         XCTAssertEqual(
             CodexTurnTracker.runningTurn(in: [request]),
             "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
@@ -323,7 +322,7 @@ final class CodexResolutionTests: XCTestCase {
     // on a card answered at the Mac, because `ApprovalRow` read `outcome`
     // alone) is covered there.
 
-    /// The Claude header words are byte-identical. This phase adds a branch; it
+    /// The Claude header words are byte-identical. Codex adds a branch; it
     /// does not move the existing one.
     func testTheClaudeRowHeaderIsUnchanged() throws {
         func item(indeterminate: Bool) throws -> ApprovalItem {
@@ -349,7 +348,7 @@ final class CodexResolutionTests: XCTestCase {
         XCTAssertEqual(ApprovalRow.headerTitle(for: try item(indeterminate: true)), "UNCONFIRMED")
     }
 
-    // MARK: The running turn (gap G11)
+    // MARK: The running turn
 
     /// **The one honest hide.** `interrupt` requires a `turn_id`; the approval
     /// card carries none, and `turn/started` maps to no event at all — so the
