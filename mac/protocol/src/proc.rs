@@ -41,7 +41,7 @@ pub enum RunOutcome {
     /// are then a **prefix**, not the whole answer. A caller that parses the
     /// output for completeness (a census that must not silently omit a row) MUST
     /// treat `truncated` as proof-of-nothing (Unavailable/Unknown), never as a
-    /// clean short answer (finding 3).
+    /// clean short answer.
     Completed {
         status: std::process::ExitStatus,
         stdout: Vec<u8>,
@@ -207,7 +207,7 @@ fn drain_available(
                 // keep writing and eventually exit — never block on a full pipe.
                 // But record that bytes were dropped: the captured output is now
                 // a prefix, and a completeness-sensitive caller must not read it
-                // as a clean short answer (finding 3).
+                // as a clean short answer.
                 if n > room {
                     *truncated = true;
                 }
@@ -312,7 +312,7 @@ mod tests {
         }
     }
 
-    /// Finding 3: output past [`MAX_STREAM_BYTES`] is captured only as a prefix,
+    /// Output past [`MAX_STREAM_BYTES`] is captured only as a prefix,
     /// and `Completed.truncated` reports it — so a completeness-sensitive caller
     /// (a census that must not silently omit a row) can fail closed instead of
     /// reading a clean short answer.

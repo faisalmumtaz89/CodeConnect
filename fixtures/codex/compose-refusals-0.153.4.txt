@@ -37,7 +37,7 @@ statement about an absent `cwd`. `cwd` is not gated — the second row carries i
 and is accepted.
 
 --- how this reached us, which is the part worth keeping ---
-The first live run of the 4b compose gate failed here, not in a test:
+The first live run of compose against a real Codex failed here, not in a test:
 
     COMPOSE (idle) -> Rejected { reason: "that message was refused (code -32600)
                                  and nothing was changed; say it at the Mac" }

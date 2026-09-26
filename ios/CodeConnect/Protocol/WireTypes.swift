@@ -217,7 +217,7 @@ extension AgentKind: Codable {
 /// fact `codex_thread_id` could never carry, because a thread id reads the same
 /// whether the control link is subscribed, merely bound, or reconnecting.
 ///
-/// Decision D3, and **cross-checked against the Rust that landed it**:
+/// **Cross-checked against the Rust that landed it**:
 /// `event.rs`'s `CodexLink` is
 /// `subscribed | bound | bound_not_started | offline | none`, spelled by hand in
 /// its own pinning test rather than trusted to `rename_all`, and

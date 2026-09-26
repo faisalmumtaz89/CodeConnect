@@ -1,28 +1,32 @@
 //! Kernel-backed process **birth identity**, OS **boot identity**, and a
-//! **boot-relative monotonic clock** — the primitives D5/D6/D7 stand on.
+//! **boot-relative monotonic clock** — the primitives process signalling, the
+//! exec gate and launch cleanup stand on.
 //!
-//! The governing invariant (D5): CodeConnect never signals by name or by bare
+//! The governing invariant: CodeConnect never signals by name or by bare
 //! pid. Every signal, every "is my coordinator still alive?" check, and every
 //! launch-record admission binds to a `(pid, birth_identity)` pair. A pid on
 //! its own is a liar the instant the kernel reuses it; the birth identity is
 //! what makes reuse observable.
 //!
-//! ## Darwin field choice — [UNVERIFIED], Phase-0 stop-and-amend
+//! ## Darwin field choice
 //!
 //! The birth identity is the process **start time**, read via
 //! `proc_pidinfo(PROC_PIDTBSDINFO)` as `proc_bsdinfo.pbi_start_tvsec` /
 //! `pbi_start_tvusec` (seconds + microseconds since the epoch). This is the
-//! same `proc_pidinfo` family D5's descendant census uses. It is chosen
+//! same `proc_pidinfo` family the descendant census uses. It is chosen
 //! because:
 //!
 //!   * It is assigned by the kernel at fork and — the load-bearing claim — is
-//!     **preserved across `execve`** (D6 needs the identity recorded before the
-//!     gate's `execve` to equal the identity observed after it, with the pid
-//!     held constant). `execve` replaces the image, not the proc struct, so
-//!     `p_starttime` should survive. **This must be proven live before the
-//!     `codex` command is ungated** (the plan marks it [UNVERIFIED] under D6).
+//!     **preserved across `execve`** (the exec gate needs the identity recorded
+//!     before the gate's `execve` to equal the identity observed after it, with
+//!     the pid held constant). `execve` replaces the image, not the proc
+//!     struct, so `p_starttime` survives. **Proven live**, not assumed:
+//!     `codeconnect`'s `the_recorded_birth_identity_survives_the_targets_execve`
+//!     (tests/exec_gate_integration.rs) reads the identity the gate reports
+//!     before `execve` and again after the target has exec'd, and asserts they
+//!     are equal.
 //!   * Together with the pid it disambiguates pid reuse at microsecond
-//!     resolution, which is the D5 canary requirement.
+//!     resolution, which binding every signal to `(pid, birth)` requires.
 //!
 //! The boot identity is `KERN_BOOTTIME` (also a `timeval`); the monotonic clock
 //! is `CLOCK_MONOTONIC`. Both are boot-scoped: a value is only comparable to
@@ -31,7 +35,7 @@
 //! (or a restore-from-image) changes the boot identity, and admission then
 //! fails closed rather than trusting a stale deadline. That `CLOCK_MONOTONIC`
 //! advances consistently across processes and its behaviour across sleep are
-//! the other [UNVERIFIED] Phase-0 items.
+//! [UNVERIFIED].
 
 use serde::{Deserialize, Serialize};
 
@@ -61,8 +65,8 @@ pub struct BootIdentity {
 }
 
 /// Whether a recorded `(pid, birth)` is still the very process that was
-/// recorded. Absence and "cannot tell" are **distinct** — D7 turns on it:
-/// `Unavailable` is never treated as absence.
+/// recorded. Absence and "cannot tell" are **distinct** — cleanup turns on
+/// it: `Unavailable` is never treated as absence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Liveness {
     /// This exact pid is live and its start time matches the recorded birth.
@@ -112,7 +116,7 @@ pub fn read_birth_identity(pid: i32) -> Option<BirthIdentity> {
 
 /// Read the process group id of `pid` off the same `proc_bsdinfo` answer as its
 /// birth identity, so a recorded `(pid, birth, pgid)` triple is internally
-/// consistent (D6 records the pgid alongside the birth identity).
+/// consistent (the exec gate records the pgid alongside the birth identity).
 pub fn read_pgid(pid: i32) -> Option<i32> {
     Some(read_bsdinfo(pid)?.pbi_pgid as i32)
 }
@@ -130,19 +134,19 @@ pub fn current_identity() -> Option<ProcessIdentity> {
 
 /// Is `identity` still exactly the process that was recorded?
 ///
-/// Three-valued and **fail-closed in both directions** (Principle D / finding
-/// 6): only a *proven* absence or a *proven* identity change is `Gone`; a
-/// transient inability to read is `Unknown`, never `Gone` (so a caller never
-/// tears a session down on a hiccup) and never `Alive` (so a caller never treats
-/// an unreadable process as proof of life).
+/// Three-valued and **fail-closed in both directions**: only a *proven* absence
+/// or a *proven* identity change is `Gone`; a transient inability to read is
+/// `Unknown`, never `Gone` (so a caller never tears a session down on a hiccup)
+/// and never `Alive` (so a caller never treats an unreadable process as proof of
+/// life).
 ///
 ///   * `kill(pid, 0)` ⇒ `ESRCH`  → the pid does not exist → **Gone**.
 ///   * `kill(pid, 0)` ⇒ `0`/`EPERM` → the pid exists; but a **zombie** (an
 ///     unreaped, dead child — `SZOMB`) is **Gone**, not alive: its pid still
-///     occupies the table and `kill(0)` succeeds, yet the process is dead (finding
-///     6). Otherwise confirm identity by start time: equal → **Alive**;
-///     different → reuse → **Gone**; a birth read that *fails while the pid
-///     exists* is **Unknown**.
+///     occupies the table and `kill(0)` succeeds, yet the process is dead.
+///     Otherwise confirm identity by start time: equal → **Alive**; different →
+///     reuse → **Gone**; a birth read that *fails while the pid exists* is
+///     **Unknown**.
 ///   * any other `kill` errno → **Unknown**.
 pub fn liveness(identity: &ProcessIdentity) -> Liveness {
     let exists = unsafe { libc::kill(identity.pid, 0) };
@@ -157,9 +161,9 @@ pub fn liveness(identity: &ProcessIdentity) -> Liveness {
     }
     // A zombie (an exited-but-unreaped child) still occupies the pid table and
     // `kill(0)` succeeds, but it is DEAD — it must read `Gone`, not `Alive` and not
-    // `Unknown`, so a dead-but-unreaped custodian does not block its replacement
-    // (finding 6). On macOS `proc_pidinfo` *short-reads* a zombie, so the only
-    // reliable status source is `sysctl(KERN_PROC_PID)` (`p_stat == SZOMB`).
+    // `Unknown`, so a dead-but-unreaped custodian does not block its replacement.
+    // On macOS `proc_pidinfo` *short-reads* a zombie, so the only reliable status
+    // source is `sysctl(KERN_PROC_PID)` (`p_stat == SZOMB`).
     if is_zombie(identity.pid) == Some(true) {
         return Liveness::Gone;
     }
@@ -309,7 +313,7 @@ mod tests {
 
     #[test]
     fn an_unreaped_zombie_reads_as_gone_not_alive() {
-        // Finding 6/8: an exited-but-unreaped child is a zombie — its pid still
+        // An exited-but-unreaped child is a zombie — its pid still
         // occupies the table, `kill(pid, 0)` succeeds — yet it is DEAD, and must
         // read `Gone`, never `Alive`/`Unknown`, so a dead-but-unreaped custodian
         // does not block its replacement.

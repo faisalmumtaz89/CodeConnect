@@ -102,8 +102,8 @@ extension Event {
     /// A Codex `approval_resolved` payload is a **bare `CodexResolution`** —
     /// not an `AnswerOutcome`, not wrapped in one — so `approvalOutcome` reads
     /// it as nil and a second accessor is the only way to see it at all. This is
-    /// the single most dangerous divergence in the phase: without it a Codex
-    /// card stays live and tappable after it has already been decided.
+    /// the single most dangerous divergence between the agents: without it a
+    /// Codex card stays live and tappable after it has already been decided.
     var codexResolution: CodexResolution? {
         // `kind` is checked here rather than at the call site because a
         // `CodexResolution` decoder is total by design — every unrecognised
@@ -114,7 +114,7 @@ extension Event {
         return payload.decoded(CodexResolution.self)
     }
 
-    /// Which card a Codex resolution belongs to (decision D1).
+    /// Which card a Codex resolution belongs to.
     ///
     /// The daemon puts `request_id` in the payload additively, in the same
     /// spelling and position as Claude's. **`source_event_id` is deliberately

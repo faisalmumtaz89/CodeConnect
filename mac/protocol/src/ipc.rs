@@ -406,8 +406,8 @@ pub struct RegisterSession {
     /// The runtime socket the Codex broker exposes to ccd. Absent for Claude.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_socket: Option<String>,
-    /// The monotonic thread **generation** (visit) this registration speaks for
-    /// (D4). The daemon adopts a registration only when this is not older than a
+    /// The monotonic thread **generation** (visit) this registration speaks for.
+    /// The daemon adopts a registration only when this is not older than a
     /// generation it already holds, so a stale supervisor frame can never
     /// overwrite newer adapter state. Absent for Claude, whose sessions have no
     /// generations, which is why the guard is inert on the Claude path.

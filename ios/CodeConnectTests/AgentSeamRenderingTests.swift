@@ -2,7 +2,7 @@ import XCTest
 
 @testable import CodeConnect
 
-/// The agent-seam **rendering** half of Phase-1 decode-safety (findings 6a/6b):
+/// The agent-seam **rendering** half of decode-safety:
 /// decoding the new shapes safely is only half the job — the copy the reader
 /// actually sees must never make an actuation claim this build cannot support.
 /// These assert the pure, static copy-producing functions that drive
@@ -22,9 +22,9 @@ final class AgentSeamRenderingTests: XCTestCase {
             inferred: false, indeterminate: indeterminate)
     }
 
-    // MARK: 6a — an unknown applied-path never claims a real actuation
+    // MARK: An unknown applied-path never claims a real actuation
 
-    /// The exact trap the plan forbids: an `AnswerPath.unknown` used to render as
+    /// The trap this guards against: an `AnswerPath.unknown` used to render as
     /// "returned to the hook" — a positive claim about how the answer landed that
     /// this build cannot vouch for. It must now read as unrecognised, never as a
     /// hook return or a keystroke.
@@ -49,7 +49,7 @@ final class AgentSeamRenderingTests: XCTestCase {
         XCTAssertEqual(ResolutionBanner.actuationPhrase(for: .hookReturn), "returned to the hook")
     }
 
-    // MARK: 6b — an indeterminate outcome renders as indeterminate, never confirmed
+    // MARK: An indeterminate outcome renders as indeterminate, never confirmed
 
     /// The classification step, tested pure: an `indeterminate` outcome must
     /// never become `.applied` (the case rendered as "confirmed"). This is the
@@ -91,7 +91,7 @@ final class AgentSeamRenderingTests: XCTestCase {
         XCTAssertTrue(provenance.contains("never confirmed"), provenance)
     }
 
-    // MARK: 6b — the DUPLICATE path is where indeterminate actually arrives
+    // MARK: The DUPLICATE path is where indeterminate actually arrives
 
     /// The reachable path the first fix missed: the daemon replays a recorded,
     /// never-confirmed outcome as `AnswerResult.duplicate` carrying
@@ -134,7 +134,7 @@ final class AgentSeamRenderingTests: XCTestCase {
         XCTAssertEqual(ResolutionBanner.headline(for: attempt), "Already answered")
     }
 
-    // MARK: 6b — the already-resolved banner (recorded outcome on the card)
+    // MARK: The already-resolved banner (recorded outcome on the card)
 
     /// A recorded outcome with `indeterminate: true` — the shape the daemon
     /// replays — must render the card's already-resolved banner as "Unconfirmed"
@@ -154,7 +154,7 @@ final class AgentSeamRenderingTests: XCTestCase {
         XCTAssertEqual(DecisionCardView.alreadyResolvedIcon(for: confirmed), "checkmark.seal")
     }
 
-    // MARK: 6b — the timeline tool status
+    // MARK: The timeline tool status
 
     /// An indeterminate answer must not stamp a definitive tool status. An
     /// indeterminate *deny* must not read as `denied`; a confirmed deny still does.
@@ -178,7 +178,7 @@ final class AgentSeamRenderingTests: XCTestCase {
 }
 
 
-/// Finding 7 — composite wire request-ids are **opaque**. The client correlates
+/// Composite wire request-ids are **opaque**. The client correlates
 /// an approval to its answer by exact-string equality of `request_id` and never
 /// parses or decodes the id. Two visit generations of the SAME logical
 /// (session_uid, thread_id, server_request_id) are different opaque strings that
@@ -277,7 +277,7 @@ final class CompositeIdOpacityTests: XCTestCase {
 }
 
 
-/// The persisted-timeline `ApprovalRow` (finding 6, last reachable site): a
+/// The persisted-timeline `ApprovalRow`: a
 /// recorded `approvalResolved` outcome carrying `indeterminate: true` is
 /// retained onto the row and must render UNCONFIRMED — never a definitive
 /// "RESOLVED", decision/actor claim, or "Resolved approval" to VoiceOver.
@@ -353,7 +353,7 @@ final class PersistedApprovalRowTests: XCTestCase {
 }
 
 
-/// Finding 6, the whole CLASS closed in one place: a decision card must never
+/// The whole CLASS closed in one place: a decision card must never
 /// present an actionable pending state, or claim an outcome, it cannot back with
 /// authoritative LIVE state. Every scenario here is driven through the REAL
 /// production resolver the card view uses — `AppModel.liveApproval(...)` — and

@@ -630,8 +630,7 @@ where
                                 if features.is_some() {
                                     crate::log_debug!(
                                         "push: ignoring an advertised feature set from \
-                                         {device_id}; nothing writes device features in this \
-                                         phase"
+                                         {device_id}; nothing records device features"
                                     );
                                 }
                             }
@@ -1064,13 +1063,13 @@ where
     match message {
         // A second hello does not re-authenticate, and there is nothing else for
         // it to do: the `features` it may carry is ignored on exactly the same
-        // terms as the first hello's, because nothing in this phase writes a
+        // terms as the first hello's, because nothing in production writes a
         // device feature set.
         ClientMessage::Hello { features, .. } => {
             if let (Some(device_id), Some(_)) = (device_id, features) {
                 crate::log_debug!(
                     "push: ignoring an advertised feature set from {device_id}; nothing \
-                     writes device features in this phase"
+                     records device features"
                 );
             }
         }
@@ -1137,7 +1136,7 @@ where
             if features.is_some() {
                 crate::log_debug!(
                     "push: ignoring an advertised feature set from {device_id}; nothing \
-                     writes device features in this phase"
+                     records device features"
                 );
             }
             let registered = daemon
@@ -2362,13 +2361,14 @@ where
 
 /// Write one pane chunk to the phone, then settle it.
 ///
-/// A function rather than four lines inside the select arm, because the ordering
-/// is the whole of finding #3 and inline it was executed by no test at all: the
-/// chunk counts against the carrier's stall deadline until it is dropped, and it
-/// is dropped only once the write has returned. Taking a chunk off the queue is
-/// not delivering it — the queue reads empty behind a write that is still in
-/// flight, and a carrier that settled at the dequeue would read that as the phone
-/// withholding credit and close a healthy one (`terminal::forward`).
+/// A function rather than four lines inside the select arm, because the
+/// ordering is what keeps a healthy phone from being closed as a slow consumer,
+/// and inline it was executed by no test at all: the chunk counts against the
+/// carrier's stall deadline until it is dropped, and it is dropped only once
+/// the write has returned. Taking a chunk off the queue is not delivering it —
+/// the queue reads empty behind a write that is still in flight, and a carrier
+/// that settled at the dequeue would read that as the phone withholding credit
+/// and close a healthy one (`terminal::forward`).
 ///
 /// The grant is settled against the ledger first, as it always was: that is the
 /// phone's window reopening, which is a different question from delivery.
@@ -3715,7 +3715,7 @@ mod tests {
         (mine[0].features.clone(), foreign[0].features.clone())
     }
 
-    /// **AN INERT FIELD LEAVES A PRE-EXISTING SET EXACTLY AS IT FOUND IT** (round-9 F7).
+    /// **AN INERT FIELD LEAVES A PRE-EXISTING SET EXACTLY AS IT FOUND IT.**
     ///
     /// The sibling test above starts from a fresh `NULL` row, and `NULL` is what a
     /// clearing write produces — so "nothing was written" and "the column was wiped"
@@ -4922,13 +4922,13 @@ mod tests {
 
     /// A long replay does not cost a healthy phone its terminal.
     ///
-    /// This is the whole of finding #3, end to end and against nothing stubbed:
-    /// a real socket, a real tmux pane, a real store. The replay used to run to
-    /// completion inside the arm that asked for it, so while it ran the loop
-    /// polled nothing else — including the arm that drains the carrier's output.
-    /// The carrier's reader then parked with its queue full, and the per-call
-    /// ceiling turned that into `slow_consumer` on a phone that had done nothing
-    /// but credit every byte it was sent.
+    /// This is the slow-consumer close of a healthy phone, end to end and
+    /// against nothing stubbed: a real socket, a real tmux pane, a real store.
+    /// The replay used to run to completion inside the arm that asked for it,
+    /// so while it ran the loop polled nothing else — including the arm that
+    /// drains the carrier's output. The carrier's reader then parked with its
+    /// queue full, and the per-call ceiling turned that into `slow_consumer` on
+    /// a phone that had done nothing but credit every byte it was sent.
     ///
     /// Four things are asserted and each rules out a different way of passing
     /// vacuously:
@@ -5757,8 +5757,8 @@ mod tests {
     /// directly, which is enough to prove the ledgers and nothing at all about
     /// the select loop: measured, an unconditional log placed as the output arm's
     /// first statement was never once reached by the suite, so the arm that
-    /// carries every pane byte — and with it the delivery accounting finding #3
-    /// turns on — was reachable only by reading it. This drives the real loop
+    /// carries every pane byte — and with it the delivery accounting the stall
+    /// deadline turns on — was reachable only by reading it. This drives the real loop
     /// over a real socket against a real tmux session, and the marker it waits
     /// for can arrive no other way.
     #[tokio::test]

@@ -8,35 +8,32 @@
 //! to be the **native standalone executable** and not a `#!`-script / `.js`
 //! wrapper (which could swap the real CLI out from under a pinned path), pins it
 //! by **byte identity** rather than by pathname so the bytes inspected here are
-//! provably the bytes every later `execve` runs (A7.1 — see [`ResolvedCodex`] and
-//! [`verify_codex_identity`]), pins the
-//! resolved binary to a compiled-in tested-version set, and parses the user's
-//! argv against the reserved grammar that keeps CodeConnect the sole owner of the
-//! launch's transport, working directory, profile, approval policy and — per
-//! A10 — sandbox policy. The `-c`
-//! ownership check parses values against the **same** TOML grammar the codex
-//! binary embeds (toml 0.9.11 / TOML 1.1), so a form codex applies cannot
-//! parse-fail here and be forwarded.
+//! provably the bytes every later `execve` runs (see [`ResolvedCodex`] and
+//! [`verify_codex_identity`]), and reads the user's argv the way codex does.
 //!
-//! **The command is live.** [`start`] resolves, version-pins, argv-validates and
-//! preflights the daemon — surfacing every one of those failures honestly and
-//! before anything exists — and then launches: it mints the session identity,
-//! spawns the D7 coordinator, and waits on the durable launch record. See
-//! [`start`] for the boundary this launch path accepts, and [`launch`] for the
-//! shape it shares with `codeconnect claude`.
+//! **The command is live.** [`start`] resolves, argv-validates and preflights the
+//! daemon — surfacing every one of those failures honestly and before anything
+//! exists — and then launches: it mints the session identity, spawns the launch
+//! coordinator, and waits on the durable launch record. See [`start`] for the
+//! boundary this launch path accepts, and [`launch`] for the shape it shares with
+//! `codeconnect claude`.
 //!
-//! **Grounded against the installed codex-cli 0.147.0.** Every acceptance and
-//! refusal below was probed against the live binary (flag arities and attached
-//! short forms via invalid-enum sentinels; the subcommand set and its hidden
-//! entries/aliases from clap's own completion output; the ownership config keys
-//! parsed the way codex parses them — the value as TOML). The parser is a real
-//! parser, not a denylist scan: it normalizes spaced, `=`-joined and attached
-//! short forms (`-C.`, `-aon-request`, `-capproval_policy=x`, `-pfoo`), knows
-//! each flag's arity (so it can tell a flag's value from the next token, and a
-//! bare prompt from a subcommand), honours the `--` boundary, and refuses
-//! subcommand **names and aliases** anywhere codex would dispatch one — because
-//! only interactive-TUI invocation is supported. Everything it does not refuse is
-//! forwarded verbatim.
+//! **The keyboard is as trusted as native codex.** Every flag reaches the TUI —
+//! sandbox, approval, profile, `-c` and feature flags included, and flags this walk
+//! does not know, unchanged — with three structural exceptions:
+//! `--remote`/`--remote-auth-token-env` (the TUI must be the broker's client, or there
+//! is no session for the phone to reach), subcommands (only the interactive session is
+//! hosted: a new one, or `resume`/`fork` as the first positional — see
+//! [`HOSTED_SUBCOMMANDS`]), and `--cd`, which becomes the session folder (see
+//! [`session_folder`]).
+//! `--help`/`--version` run codex itself and create no session ([`codex_itself`]). The
+//! parser is a real parser, not a denylist scan: it normalizes spaced, `=`-joined and
+//! attached short forms (`-C.`, `-mgpt-5`, `-ca=b`), knows the arity of the flags in
+//! its table (so it can tell a flag's value from the next token, and a bare prompt from
+//! a subcommand), honours the `--` boundary, and refuses subcommand **names and
+//! aliases** anywhere codex would dispatch one. Flag arities and short forms were
+//! probed on the live binary with invalid-enum sentinels, and the subcommand set and
+//! its hidden entries/aliases come from clap's own completion output.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -55,14 +52,14 @@ const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
 /// [`path`](Self::path) is the fully-canonicalised versioned executable: the
 /// invocation candidate with every symlink resolved. On a standalone install the
 /// invocation hops through a moving `standalone/current` symlink to a
-/// version-stamped release directory (A1). Resolution canonicalises **once** and
-/// fails closed if it cannot, and this single path is what gets version-checked,
+/// version-stamped release directory. Resolution canonicalises **once** and
+/// fails closed if it cannot, and this single path is what is asked its version,
 /// recorded as launch evidence and exec'd by the app-server and TUI alike, so a
 /// `standalone/current` flip cannot make the recorded, checked and executed
-/// binaries disagree (CODEX-PLAN.md launch coordination; "all spawned Codex
-/// processes use the same resolved executable").
+/// binaries disagree: all spawned Codex processes use the same resolved
+/// executable.
 ///
-/// # Why the digest exists (A7.1)
+/// # Why the digest exists
 ///
 /// **A canonical path is a name, not an executable.** Canonicalising pins which
 /// name is used; it says nothing about which bytes that name reaches at any later
@@ -71,8 +68,7 @@ const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
 /// app-server spawn, the TUI spawn — in two different processes, and every one of
 /// those opens is free to see a different file. An install, an `npm` replacement or
 /// a `standalone/current` flip landing in that window would let the bytes that ran
-/// differ from the bytes that were magic-checked and version-pinned, which is
-/// exactly the pre-ungate hole A7 names.
+/// differ from the bytes that were magic-checked and hashed.
 ///
 /// [`sha256`](Self::sha256) closes it by carrying the *identity* forward instead of
 /// the name alone: it is the SHA-256 of the exact bytes read during resolution,
@@ -126,19 +122,20 @@ pub struct ResolvedCodex {
 
 /// The `codex` command entry point.
 ///
-/// Resolves the binary, pins its version, validates the argv against the
-/// reserved grammar, preflights the daemon — every one of those can fail with its
-/// own honest error, and all of them fail *before anything exists* — and then
-/// launches ([`launch`]).
+/// Resolves the binary, validates the argv against the reserved grammar, reads the
+/// binary's version, resolves the session folder, preflights the daemon — every one
+/// of those can fail with its own honest error, and all of them fail *before anything
+/// exists* — and then launches ([`launch`]). An argv that asks for codex's help or
+/// version is handed to codex itself first, instead ([`codex_itself`]).
 ///
-/// # THE ACCEPTED BOUNDARY (A22, and the single place it is stated)
+/// # THE ACCEPTED BOUNDARY (the single place it is stated)
 ///
 /// Everything above this function was built to hold a launch closed against a
 /// binary that is not the one it inspected, a daemon that could never be told
-/// about the session, a passthrough that moves approval or sandbox ownership, and
+/// about the session, a passthrough that detaches the TUI from the broker, and
 /// a rolled-back peer that would file the run as the wrong agent. One class of
-/// attacker is deliberately **out of scope**, and the ungate is the moment to say
-/// so once, plainly, rather than to leave it implied by a dozen local caveats:
+/// attacker is deliberately **out of scope**, and this is the place to say so
+/// once, plainly, rather than to leave it implied by a dozen local caveats:
 ///
 /// **A hostile process already running as the user's own uid is not defended
 /// against.** It can `ptrace` this process, signal it, replace the binaries it is
@@ -174,60 +171,50 @@ pub struct ResolvedCodex {
 /// against its own signature and runs, and nothing in this launch path enforces a
 /// codex signing identity to compare it against.
 ///
-/// **Separate accepted post-ungate residuals — not instances of the boundary above,
-/// because neither of them needs a hostile actor at all:**
+/// **Separate accepted residuals — not instances of the boundary above, because
+/// neither of them needs a hostile actor at all:**
 ///
-///   * **A11.2**, a benign within-boot pid/pgid-reuse TOCTOU: the custodian's group
-///     kill can land on an unrelated same-uid process that inherited a recycled
-///     group id, with nobody attacking anything (`codex_custodian::group_warrant`
-///     carries the measurement). Closing it needs env-nonce provenance via
-///     `KERN_PROCARGS2`.
-///   * **F7**, a benign package update: the native `--codex`
-///     dispatcher is pinned faithfully and completely, but the subordinates it
-///     selects for `--version`, `app-server` and the TUI are not, so an ordinary
-///     update can change what actually runs while the pinned dispatcher's own bytes
-///     are unchanged and every gate here passes. Closing it needs a package-layout
-///     specification, which is a scoping decision about what a supported install is;
-///     see [`is_native_magic`].
+///   * **The pgid-reuse gap**, a benign within-boot pid/pgid-reuse TOCTOU: the
+///     custodian's group kill can land on an unrelated same-uid process that
+///     inherited a recycled group id, with nobody attacking anything
+///     (`codex_custodian::group_warrant` carries the measurement). Closing it
+///     needs env-nonce provenance via `KERN_PROCARGS2`.
+///   * **The unpinned dispatcher subordinates**, a benign package update: the
+///     native `--codex` dispatcher is pinned faithfully and completely, but the
+///     subordinates it selects for `--version`, `app-server` and the TUI are not,
+///     so an ordinary update can change what actually runs while the pinned
+///     dispatcher's own bytes are unchanged and every gate here passes. Closing
+///     it needs a package-layout specification, which is a scoping decision about
+///     what a supported install is; see [`is_native_magic`].
 pub fn start(passthrough: &[String]) -> Result<()> {
     let config = Config::load();
 
+    // `--help` and `--version` are codex's own answers, printed in this terminal as
+    // native `codex` prints them — before any refusal and any launch check, because
+    // nothing is launched. See `codex_itself`.
+    if asks_help_or_version(passthrough) {
+        use std::os::unix::process::CommandExt;
+        let codex = first_codex(codex_candidates_for(&config))?;
+        let err = codex_itself(&codex, passthrough).exec();
+        return Err(err).with_context(|| format!("running {}", codex.display()));
+    }
+
     // Binary first, exactly as the Claude path resolves its binary first: a
-    // missing or untested executable must surface before anything else. The
-    // canonicalised path is what we version-check and exec.
+    // missing or unusable executable must surface before anything else. The
+    // canonicalised path is what we check and exec.
     let resolved = resolve_codex_bin(&config)?;
-    // The version is RECORDED, not gated: it names what ran, in the launch evidence and
-    // in a refusal. What decides whether this build may be hosted is the guarded-surface
-    // gate below — see [`ensure_guarded_surface`] for why a version string was the wrong
-    // question to ask.
+    // Reserved grammar. A refused flag or subcommand surfaces here, naming what
+    // was refused and why, before anything is created.
+    let argv = scan_codex_argv(passthrough).map_err(|refusal| anyhow!("{refusal}"))?;
     // **The freeze a previous launch could not give back is cleared HERE, before this
     // one takes a freeze of its own.** See `clear_freezes_left_standing`.
     clear_freezes_left_standing();
-    // ONE freeze, five probes: version, root command surface, both schema bundles, and
-    // the effective value of the one feature this launch pins off.
-    // See `probe_codex` for why they share a freeze rather than taking one each.
-    let scratch = ScratchDir::new()?;
-    let probe = probe_codex(&resolved, &scratch.0)?;
-    let version = parse_codex_version(&String::from_utf8_lossy(&probe.version_out))
-        .ok_or_else(|| anyhow!("could not read a version from `codex --version`"))?;
-    // NOT YET RECORDED. The gate returns the digest of the surface it admitted so that
-    // carrying it into the launch record beside `codex_sha256` is a pure addition rather
-    // than a change of shape — but that plumbing (charter flag → coordinator → record)
-    // is its own sub-issue and is not built yet. Bound and dropped deliberately, rather
-    // than the gate pretending it has nowhere to report from.
-    let _admitted_surface = ensure_guarded_surface(&probe)
-        .with_context(|| format!("checking codex {version} against CodeConnect's grounding"))?;
+    // The binary must say what it is before it is hosted. See `probe_codex`.
+    probe_codex(&resolved)?;
 
-    // **What the launch SETS is the argv; what this checks is the outcome.** The one
-    // feature CodeConnect pins off is pinned with a `-c`, and codex ranks a managed
-    // configuration layer above `-c` — so the pin is airtight for an operator and
-    // beatable by an administrator. Read back from the same frozen bytes, under the
-    // same override, in the same `CODEX_HOME` the spawns will use.
-    refuse_unless_pinned_feature_is_off(&String::from_utf8_lossy(&probe.features))?;
-
-    // Reserved grammar. A refused flag or subcommand surfaces here, naming what
-    // was refused and why, before anything is created.
-    validate_codex_argv(passthrough).map_err(|refusal| anyhow!("{refusal}"))?;
+    // A `--cd` that names no directory stops the launch here, before anything exists.
+    let caller_cwd = std::env::current_dir().context("reading the current directory")?;
+    let folder = session_folder(&argv.cd, &caller_cwd)?;
 
     // Daemon preflight, before anything is created. Ordering is load-bearing and
     // is what `new-old-new-real.sh` step 7(g) drives: a rolled-back daemon must
@@ -237,7 +224,7 @@ pub fn start(passthrough: &[String]) -> Result<()> {
         &protocol::agent::AgentKind::Codex,
     ))?;
 
-    launch(&resolved, passthrough)
+    launch(&resolved, &folder, &argv.normalized)
 }
 
 /// Retry, before this launch freezes anything of its own, the clears that were left
@@ -387,181 +374,6 @@ fn refuse_unless_hostable(support: crate::daemon::AgentSupport) -> Result<()> {
 
 // ------------------------------------------------------------------- the launch
 
-/// The launch policy CodeConnect owns for every Codex session.
-///
-/// These four are the broker's [`codex_broker::fingerprint::LaunchFingerprint`]
-/// dimensions. The charter defaults none of them and neither does the host — an
-/// omitted dimension is a refused launch, not an assumed one — so the launcher is
-/// where the values are decided, and this is the only place they are written down.
-///
-/// **Each is the value a live session was actually proven on, not a preference.**
-/// `approval_policy` is `on-request` because `untrusted` was MEASURED to kill real
-/// sessions about two seconds in: the real 0.147 TUI's own `thread/start` asserts
-/// `approvalPolicy: "on-request"`, and a launch fingerprint of `untrusted` makes the
-/// broker refuse the TUI's opening request (CODEX-PLAN A14; both live harnesses moved
-/// to `on-request` for the same reason). The remaining three are the set every live
-/// gate in this repo has run on — `live_codex_coordinator`, `live_codex_host` and
-/// `codex_link_live` all launch with exactly these — so the fingerprint a user gets
-/// is the fingerprint the gates prove.
-///
-/// They are constants rather than configuration on purpose. The whole point of the
-/// reserved grammar above is that CodeConnect owns approval and sandbox policy for
-/// the session; a config key that moved them would hand back through the front door
-/// exactly what [`validate_codex_argv`] refuses at the command line.
-///
-/// **What a user notices:** because `--sandbox read-only` is now genuinely set on
-/// the TUI (`codex_host`'s TUI spawn) rather than merely claimed here, a session in
-/// a project the user had marked `trust_level = "trusted"` will ask for approval on
-/// writes and commands where an unpinned codex would not have — that is this
-/// pre-Phase-3 policy working, not a regression.
-const LAUNCH_APPROVAL_POLICY: &str = "on-request";
-/// See [`LAUNCH_APPROVAL_POLICY`].
-const LAUNCH_APPROVALS_REVIEWER: &str = "user";
-/// See [`LAUNCH_APPROVAL_POLICY`].
-const LAUNCH_SANDBOX: &str = "read-only";
-/// See [`LAUNCH_APPROVAL_POLICY`]. Rendered as the charter's `true`/`false`.
-const LAUNCH_HOOKS_ENABLED: bool = true;
-
-/// The one codex feature CodeConnect pins **off**, and the only launch dimension
-/// carried as a config override rather than as a flag.
-///
-/// `features.request_permissions_tool` exposes a model-callable tool whose approval
-/// arrives as `item/permissions/requestApproval`. What that request asks for is a
-/// permission *profile* — a filesystem and network shape — rather than a yes/no
-/// about one action, so there is no set of buttons a phone could honestly be
-/// offered for it, and the grant is bound to the terminal: a session driven from
-/// the phone would park on a question only the Mac can close. Every other approval
-/// CodeConnect claims is answerable from the phone, and this is the one that would
-/// not be, so it is removed rather than half-supported.
-///
-/// **Measured on the installed codex, which is why the pin is on an argv rather
-/// than a sentence.** `codex features list` reports the feature `under development`
-/// and `false`; an operator `config.toml` carrying `[features]
-/// request_permissions_tool = true` flips it to `true`; and a
-/// `-c features.request_permissions_tool=false` on the same invocation puts it back
-/// to `false`. Since a shipping launch hands both codex processes the operator's own
-/// `CODEX_HOME` (see [`codex_home`]), the config value is the operator's to set —
-/// so the absence is made structural at each `execve` instead of being assumed.
-///
-/// [`path_is_owned`] owns the same key from the other direction, so a caller's own
-/// `-c` (or `--enable`/`--disable`) for it is refused at the terminal with a reason
-/// rather than silently losing to the pin.
-///
-/// # What the pin does not reach: a managed configuration layer
-///
-/// The `-c` above is a command-line override, and codex ranks a MANAGED (MDM /
-/// administrator-pushed) configuration layer ABOVE command-line overrides. An
-/// administrator who pushes `[features] request_permissions_tool = true` through
-/// that layer therefore wins against this pin, and nothing here reads the
-/// EFFECTIVE configuration back to notice: the argv is asserted, the outcome is
-/// not.
-///
-/// **Recorded rather than defended against, and the shape of the exposure is why.**
-/// The actor is above the user's own uid — outside the same-uid boundary every
-/// other guard here is drawn at, where an actor who can push a managed profile can
-/// already replace the binary this launches. And the consequence is degraded but
-/// honest: the family that becomes producible is bound to the terminal, so the
-/// question lands on the Mac's screen and the phone is offered nothing to actuate.
-/// A session driven from the phone parks on it; nothing is granted from the phone
-/// that would not have been.
-///
-/// The hardening, when it is worth its cost, is an EFFECTIVE-CONFIG POSTCHECK at
-/// launch rather than a second override: read the feature back out of the codex the
-/// launch is about to use — the harness already reads `codex features list`, which
-/// is the seam — and refuse the launch with a reason when it does not answer
-/// `false`. That turns a pin on the input into a check on the result, which is the
-/// only form that can survive a layer ranked above the input.
-pub(crate) const PINNED_OFF_FEATURE: &str = "request_permissions_tool";
-
-/// The `-c` value that pins [`PINNED_OFF_FEATURE`] off.
-///
-/// Built from the constant rather than written out, so the key the launch writes
-/// and the key the grammar owns cannot drift apart.
-pub(crate) fn pinned_off_feature_override() -> String {
-    format!("features.{PINNED_OFF_FEATURE}=false")
-}
-
-/// Ask the codex about to be used what [`PINNED_OFF_FEATURE`] will actually be, with
-/// the launch's own override applied and in the `CODEX_HOME` the launch will name.
-///
-/// **This is a read, and it starts nothing.** `features list` prints the resolved
-/// registry and exits; it opens no session, contacts no account and spends no quota
-/// (measured). It is the seam A28 named for turning "we set the argv" into "we know
-/// the answer".
-///
-/// The home is passed explicitly rather than inherited, for the same reason the
-/// charter names it rather than defaulting it: the value the app-server runs under
-/// is a decision, and a probe that read a different one would be answering about
-/// somebody else's configuration.
-fn read_effective_features(bin: &Path, codex_home: &Path) -> Result<Vec<u8>> {
-    run_bounded_in_home(
-        bin,
-        &["features", "list", "-c", &pinned_off_feature_override()],
-        codex_home,
-        PROBE_BUDGET,
-    )
-}
-
-/// Refuse the launch unless the feature the launch pins off is **effectively** off.
-///
-/// **The pin is a `-c`, and codex ranks a managed configuration layer above `-c`.**
-/// So an administrator who pushes `[features] request_permissions_tool = true`
-/// through that layer beats the value every spawn carries, and CodeConnect would be
-/// asserting the argv while the app-server ran with the feature on — handing the
-/// model a tool that asks for a permission profile only the terminal can grant, in a
-/// product whose whole proposition is that the phone answers. The argv is what we
-/// set; this is what we got.
-///
-/// **An unreadable answer refuses, exactly as [`verify_codex_identity`] does.** "I
-/// could not check" and "it is off" are different answers and only one of them
-/// licenses a spawn. A listing that never names the feature is unreadable in that
-/// sense too: on a build where the key has moved or been renamed, the guarded-surface
-/// gate has re-grounding to demand anyway, so nothing is lost by saying so here.
-///
-/// **This is a PREFLIGHT, and the difference is worth stating rather than leaving to
-/// be inferred.** What it reads is the effective value at probe time — the same
-/// frozen bytes, the same `-c`, the same `CODEX_HOME` the spawns will name — from a
-/// `codex features list` run before anything is created. It is not a reading of the
-/// running app-server's own configuration: nothing here asks the process that will
-/// host the conversation what it ended up with. The gap between them is a managed
-/// layer that changes underneath after the probe and before the spawn, which is
-/// seconds wide and is not the case this exists for.
-///
-/// **That a managed/MDM layer outranks `-c` is UNVERIFIED here.** Staging
-/// `/etc/codex/managed_config.toml` is a system path and needs root, so the premise
-/// rests on corroboration from the binary's own strings; the refusing half of this
-/// function is driven by a stub rather than by that layer. What IS measured is the
-/// half that matters for not breaking launches: `-c` beats an ordinary
-/// `config.toml`, so an operator's `true` there is handled by the pin and does not
-/// reach this refusal.
-fn refuse_unless_pinned_feature_is_off(listing: &str) -> Result<()> {
-    let stated = listing.lines().find_map(|line| {
-        let mut fields = line.split_whitespace();
-        (fields.next() == Some(PINNED_OFF_FEATURE)).then(|| fields.last().unwrap_or("").to_string())
-    });
-    match stated.as_deref() {
-        Some("false") => Ok(()),
-        Some("true") => bail!(
-            "refusing to launch: this codex reports `{PINNED_OFF_FEATURE}` as ON even with the \
-             override this launch applies. CodeConnect answers approvals from the phone, and \
-             that feature gives the model a tool that asks for a permission profile only the \
-             terminal can grant — so a session under it would stall on a question nothing in \
-             this product can answer. An override ranked above the command line is what does \
-             this: a managed or MDM configuration layer. Clearing it there, or launching codex \
-             directly, are the two ways on."
-        ),
-        other => bail!(
-            "refusing to launch: this codex did not say whether `{PINNED_OFF_FEATURE}` is on \
-             or off — `codex features list` answered {}. The launch pins that feature off and \
-             checks the result, and an answer it cannot read is not an answer of `off`.",
-            match other {
-                None => "without naming it at all".to_string(),
-                Some(value) => format!("`{value}`, which is neither `true` nor `false`"),
-            }
-        ),
-    }
-}
-
 /// How long the coordinator has to reach a terminal launch outcome.
 ///
 /// 60s, which is what every live gate in this repo runs with, rather than the
@@ -583,40 +395,20 @@ const LAUNCH_PATIENCE: std::time::Duration =
 /// See [`LAUNCH_PATIENCE`].
 const RECORD_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Mint the session identity, spawn the coordinator, wait on the record, attach.
-///
-/// **This is `codeconnect claude`'s launch with one process substituted, and it is
-/// deliberately not a second design.** The Claude path (`main.rs::start_agent`)
-/// reads the cwd, takes the lowest free `cc-N` off the tmux server, mints a uid,
-/// creates the tmux session, spawns a detached supervisor and `exec`s into
-/// `tmux attach-session` — printing nothing, because the alternate screen erases
-/// anything it could print. Every one of those steps is here, in that order, using
-/// the same functions.
-///
-/// The one structural difference is D7's, and it is the reason the Codex path exists
-/// at all: **the launcher does not create the tmux session.** The coordinator
-/// performs every forward launch mutation itself, including `tmux new-session`, so
-/// that launcher death at any point changes nothing; the launcher spawns it *before
-/// tmux exists* and then only waits on the durable record
-/// ([`crate::codex_coordinator::wait_on_record`]). So where the Claude path attaches
-/// on the strength of `tmux new-session -d` having returned, this one attaches on the
-/// strength of a fsynced `Ready`.
-///
-/// Which makes the two ends identical again: on success the session name is a live
-/// tmux session on the shared server, and `exec_attach` puts the user in it. `ls`,
-/// `attach`, and closing the tab all behave the same for both agents because by that
-/// point there is nothing agent-shaped left in the picture.
-fn launch(resolved: &ResolvedCodex, passthrough: &[String]) -> Result<()> {
-    // The cwd is passed RAW, and that is not an oversight. The chain has exactly
+/// Mint the session identity and spawn the detached launch coordinator.
+/// Interactive launches attach once the coordinator has recorded and configured
+/// its session, and the host starts the TUI once that attach has reported the
+/// terminal's colors. The launcher keeps watching the durable outcome while it
+/// shows the session.
+fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Result<()> {
+    // The folder is passed RAW, and that is not an oversight. The chain has exactly
     // one canonicalization, in the coordinator
-    // (`codex_coordinator::canonical_launch_cwd`), because the canonical spelling
-    // is the anchor the broker's fingerprint, the creation-response check and every
-    // turn's workspace check are compared against by plain string equality. A
-    // second `canonicalize` here would be a second answer about the same directory,
-    // taken at a different instant, with nothing requiring the two to agree — the
-    // same failure the digest is carried rather than re-derived to avoid.
-    let cwd = std::env::current_dir().context("reading the current directory")?;
-    let cwd = cwd.to_string_lossy().to_string();
+    // (`codex_coordinator::canonical_launch_cwd`), and every later hop carries its
+    // spelling verbatim. A second `canonicalize` here would be a second answer about
+    // the same directory, taken at a different instant, with nothing requiring the
+    // two to agree — the same failure the digest is carried rather than re-derived
+    // to avoid.
+    let cwd = folder.to_string_lossy().to_string();
 
     // The same namespace `codeconnect claude` draws from, on the same tmux server:
     // one `cc-N` sequence across both agents, so `ls` and `attach` see one fleet and
@@ -630,6 +422,7 @@ fn launch(resolved: &ResolvedCodex, passthrough: &[String]) -> Result<()> {
     // launch record are keyed by.
     let session_uid = protocol::uid::new().context("minting a session uid")?;
 
+    let terminal_size = crate::tmux::terminal_size();
     let charter = coordinator_charter(&CharterInputs {
         uid: &session_uid,
         launch_nonce: &crate::codex_launch::mint_nonce(),
@@ -639,22 +432,29 @@ fn launch(resolved: &ResolvedCodex, passthrough: &[String]) -> Result<()> {
         codex: resolved,
         codex_home: &codex_home(),
         tui_args: passthrough,
+        terminal_size,
     });
     spawn_coordinator(&session_name, &session_uid, &charter)?;
+
+    if terminal_size.is_some() {
+        return wait_with_terminal(&session_uid, LAUNCH_PATIENCE, RECORD_POLL);
+    }
 
     match crate::codex_coordinator::wait_on_record(&session_uid, LAUNCH_PATIENCE, RECORD_POLL) {
         // The record is `Ready` and proven durable. The coordinator has become the
         // session's supervisor, the pane is real, and the session is on the shared
         // tmux server under `session_name` — so this is the Claude path's own last
         // line, reached the same way and printing the same nothing.
-        crate::codex_coordinator::LaunchWait::Ready => {
-            crate::tmux::exec_attach(&session_name)?;
-            unreachable!("exec replaces the process")
-        }
+        crate::codex_coordinator::LaunchWait::Ready => crate::tmux::attach(&session_name),
         // **The record's reason, verbatim.** It is already sanitized to one printable
         // bounded line by `wait_on_record`, and it is the only account of the failure
         // that survives the runtime dir being swept — so it is reported as the record
         // holds it rather than wrapped in a second story about it.
+        // A TUI quit before any thread is the user leaving, as native codex's picker
+        // lets them: nothing to report.
+        crate::codex_coordinator::LaunchWait::Failed(_) if quit_before_thread(&session_uid) => {
+            Ok(())
+        }
         crate::codex_coordinator::LaunchWait::Failed(reason) => bail!("{reason}"),
         // Not a verdict. The launcher's patience ran out; the coordinator and the
         // custodian still own the outcome and will still drive the record to a
@@ -668,6 +468,124 @@ fn launch(resolved: &ResolvedCodex, passthrough: &[String]) -> Result<()> {
             crate::codex_launch::session_dir(&session_uid).display()
         ),
     }
+}
+
+/// Whether this launch ended because its TUI was quit cleanly before any thread
+/// bound — Ctrl+C in codex's `resume` picker exits with status 0 and prints nothing
+/// (measured on 0.155.1). See
+/// [`crate::codex_launch::LaunchRecord::codex_quit_before_thread`].
+fn quit_before_thread(uid: &str) -> bool {
+    crate::codex_launch::load(uid).is_ok_and(|record| record.codex_quit_before_thread)
+}
+
+/// Own the attached client without moving it out of the terminal's foreground
+/// process group. The detached coordinator and custodian have separate groups.
+struct LaunchTerminal {
+    client: crate::attach::Client,
+}
+
+impl LaunchTerminal {
+    fn spawn(pin: &protocol::tmux::OwnedSession) -> Result<Self> {
+        Ok(Self {
+            client: crate::tmux::spawn_owned_attach(pin)?,
+        })
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        self.client.stop()
+    }
+}
+
+impl Drop for LaunchTerminal {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+fn wait_with_terminal(uid: &str, patience: Duration, poll: Duration) -> Result<()> {
+    use crate::codex_coordinator::LaunchWait;
+    use crate::codex_launch::LaunchState;
+
+    let deadline = Instant::now() + patience;
+    let mut terminal: Option<LaunchTerminal> = None;
+    let mut pin = None;
+    let mut verified = false;
+    let mut ready = false;
+    let outcome = (|| {
+        loop {
+            // Reuse the existing consumer-side fsync and sanitized failure path.
+            // A zero patience is a single observation, not a launch timeout.
+            if !ready {
+                match crate::codex_coordinator::wait_on_record(uid, Duration::ZERO, poll) {
+                    LaunchWait::Failed(_) if quit_before_thread(uid) => return Ok(()),
+                    LaunchWait::Failed(reason) => bail!("{reason}"),
+                    LaunchWait::Ready => ready = true,
+                    LaunchWait::TimedOut => {}
+                }
+            }
+            if terminal.is_none() {
+                if let Ok(record) = crate::codex_launch::load(uid) {
+                    if !matches!(record.state, LaunchState::Failed { .. })
+                        && record.remain_on_exit_asserted
+                        && crate::codex_launch::prove_record_durable(uid).is_ok()
+                    {
+                        if let Some(server) = record.server_a {
+                            let expected = server.as_pin(protocol::TMUX_SOCKET_NAME, uid);
+                            terminal = Some(LaunchTerminal::spawn(&expected)?);
+                            pin = Some(expected);
+                        }
+                    }
+                }
+            }
+            if let Some(client) = terminal.as_mut() {
+                let exited = client
+                    .client
+                    .child
+                    .try_wait()
+                    .context("checking the terminal client")?;
+                if exited.is_none() && !verified {
+                    if let Some(expected) = pin.as_ref() {
+                        verified = protocol::tmux::reverify_owned_client(
+                            client.client.child.id() as i32,
+                            expected,
+                        )
+                        .is_ok();
+                    }
+                }
+                if ready && exited.is_some() {
+                    return client
+                        .client
+                        .wait()
+                        .context("the codex terminal client ended");
+                }
+            }
+            if (!ready || !verified) && Instant::now() >= deadline {
+                if ready {
+                    bail!("the codex launch is ready, but its terminal attachment could not be verified; the session remains owned by its coordinator");
+                }
+                bail!(
+                    "the codex launch did not reach a terminal state within {}s. It has not been \
+                     cancelled — the coordinator and its custodian still own it — but this command \
+                     has stopped waiting. The outcome is recorded at {}; `codeconnect ls` shows the \
+                     session if it came up.",
+                    patience.as_secs(),
+                    crate::codex_launch::session_dir(uid).display()
+                );
+            }
+            std::thread::sleep(poll);
+        }
+    })();
+    // Restore the shell's terminal before reporting an error. Never signal the
+    // session, coordinator, custodian, or a process group here.
+    if let Some(client) = terminal.as_mut() {
+        if let Err(cleanup) = client.stop() {
+            return match outcome {
+                Ok(()) => Err(cleanup),
+                Err(error) => Err(error.context(format!("terminal cleanup failed: {cleanup:#}"))),
+            };
+        }
+    }
+    outcome
 }
 
 /// The isolated `CODEX_HOME` the app-server and the TUI both run under.
@@ -694,6 +612,7 @@ struct CharterInputs<'a> {
     codex: &'a ResolvedCodex,
     codex_home: &'a Path,
     tui_args: &'a [String],
+    terminal_size: Option<(u16, u16)>,
 }
 
 /// Build the `internal-codex-coordinator` charter argv.
@@ -706,7 +625,7 @@ struct CharterInputs<'a> {
 /// This function takes a [`ResolvedCodex`], not a path, and emits
 /// `--codex-sha256 {codex.sha256}`: the digest of the exact bytes
 /// [`inspect_candidate`] read, from the same single read that produced the Mach-O
-/// verdict, and that [`read_codex_version`] then froze and re-verified across
+/// verdict, and that [`probe_codex`] then froze and re-verified across
 /// `codex --version`. Re-hashing `codex.path` here instead would produce a digest of
 /// whatever the name reaches *now* — which, in the one scenario the pin exists for
 /// (an install or update landing mid-launch), is a truthful digest of the wrong
@@ -732,25 +651,21 @@ fn coordinator_charter(inputs: &CharterInputs<'_>) -> Vec<String> {
         LAUNCH_DEADLINE_MS.to_string(),
         "--codex".into(),
         inputs.codex.path.to_string_lossy().into_owned(),
-        // A7.1: the identity of the bytes, beside the name of the file. Carried from
+        // The identity of the bytes, beside the name of the file. Carried from
         // resolution — see this function's doc.
         "--codex-sha256".into(),
         inputs.codex.sha256.clone(),
         "--codex-home".into(),
         inputs.codex_home.to_string_lossy().into_owned(),
-        "--approval-policy".into(),
-        LAUNCH_APPROVAL_POLICY.into(),
-        "--approvals-reviewer".into(),
-        LAUNCH_APPROVALS_REVIEWER.into(),
-        "--sandbox".into(),
-        LAUNCH_SANDBOX.into(),
-        "--hooks-enabled".into(),
-        LAUNCH_HOOKS_ENABLED.to_string(),
     ];
     // `--tmux-socket` is deliberately absent: the coordinator's default is
     // `protocol::TMUX_SOCKET_NAME`, the one server `codeconnect claude`, `ls` and
     // `attach` all address. Naming it here would be a second copy of that constant
     // with nothing keeping the two equal.
+    if let Some((cols, rows)) = inputs.terminal_size {
+        argv.extend(["--terminal-size".into(), format!("{cols}x{rows}")]);
+        argv.push("--wait-for-terminal".into());
+    }
     if !inputs.tui_args.is_empty() {
         argv.push("--".into());
         argv.extend(inputs.tui_args.iter().cloned());
@@ -763,8 +678,8 @@ fn coordinator_charter(inputs: &CharterInputs<'_>) -> Vec<String> {
 /// The same daemonisation shape as the Claude path's `spawn_supervisor`, for the
 /// same two reasons and with one extra: `process_group(0)` keeps the SIGHUP/SIGINT
 /// aimed at the tab's foreground group away from it, and the redirected stdio means
-/// a log survives the tab. The extra is that this process is about to `exec` into a
-/// tmux client and the coordinator will then *continue as the session's supervisor*
+/// a log survives the tab. The extra is that this process is about to become the
+/// terminal's tmux client and the coordinator will then *continue as the session's supervisor*
 /// (`codex_coordinator::supervise_ready_session`) for the whole life of the run — a
 /// coordinator sharing this process group would be killed by the first Ctrl-C after
 /// the user detaches, and a `ready` record whose coordinator is gone is session-fatal.
@@ -813,18 +728,13 @@ fn spawn_coordinator(session_name: &str, session_uid: &str, charter: &[String]) 
 /// `standalone/current` hop, and it is the single path everything downstream
 /// uses.
 ///
-/// **A7.1.** Canonicalisation pins a pathname; it does not pin a file. So each
-/// candidate is read exactly once ([`inspect_candidate`]) and that single read
-/// yields both the Mach-O verdict and the SHA-256 that every later exec site
-/// verifies against — see [`ResolvedCodex`] for why the name alone is not enough
-/// and what the pin does and does not claim.
+/// **Executable identity.** Canonicalisation pins a pathname; it does not pin a
+/// file. So each candidate is read exactly once ([`inspect_candidate`]) and that
+/// single read yields both the Mach-O verdict and the SHA-256 that every later
+/// exec site verifies against — see [`ResolvedCodex`] for why the name alone is not
+/// enough and what the pin does and does not claim.
 fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
-    let candidates = codex_candidates(
-        config,
-        std::env::var_os(CODEX_BIN_ENV).map(PathBuf::from),
-        &protocol::home_dir(),
-        protocol::tmux::search_path("codex"),
-    );
+    let candidates = codex_candidates_for(config);
 
     let current_canonical = std::env::current_exe()
         .ok()
@@ -858,9 +768,9 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
         // The resolved file must be the **actual native executable**. A generic
         // wrapper — the npm `codex.js` shebang shim at `/opt/homebrew/bin/codex`,
         // or any `#!`-script — selects and spawns a native binary at runtime, so
-        // an npm replacement between our version-check and the later app-server /
+        // an npm replacement between our checks and the later app-server /
         // TUI spawns would swap the real CLI while our canonical path is
-        // unchanged, defeating both the version pin and the parser grammar. Skip
+        // unchanged, defeating the identity pin. Skip
         // a wrapper so a native candidate later in the list still wins; only if
         // none is native do we refuse, naming the wrapper.
         //
@@ -882,7 +792,7 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
             // Unusable is skipped rather than fatal, exactly as a wrapper is: a
             // candidate we could not pin an identity to, early in the list, must not
             // stop a perfectly good one later in it. It can never be *used*, because
-            // A7.1 forbids running bytes no digest is attributable to.
+            // this launch never runs bytes no digest is attributable to.
             CandidateIdentity::Unusable(why) => {
                 rejected.get_or_insert((canonical, why));
             }
@@ -913,8 +823,8 @@ enum CandidateIdentity {
     /// opened or read end to end, or it *was* read end to end but the pathname
     /// stopped naming it partway through (see [`inspect_candidate`]). In both cases
     /// there is nothing this launch could honestly pin — a digest of bytes we cannot
-    /// reach by the name we would `execve` is not an identity — and A7.1 forbids
-    /// running what cannot be pinned. Not `Unreadable`: the second case reads
+    /// reach by the name we would `execve` is not an identity — and this launch
+    /// never runs what cannot be pinned. Not `Unreadable`: the second case reads
     /// perfectly, which is exactly what makes it dangerous.
     Unusable(String),
 }
@@ -988,17 +898,17 @@ fn inspect_candidate(path: &Path) -> CandidateIdentity {
 /// Pure, over bytes rather than a path, so the magic table is testable on its own
 /// and cannot drift from the single read that produces those bytes.
 ///
-/// # UNGATE BLOCKER: a compiled dispatcher is pinned, and what it dispatches to is not
+/// # Accepted residual: a compiled dispatcher is pinned, and what it dispatches to is not
 ///
 /// A magic number says "a native executable"; it does not say "standalone Codex". A
 /// *compiled native dispatcher* — a small Mach-O binary that picks a real codex at
-/// runtime and spawns it — passes this check, and passes the version pin too if it
+/// runtime and spawns it — passes this check, and states a version too if it
 /// forwards `--version`.
 ///
 /// Stated exactly, because a residual that is not exact is not a residual, it is a
 /// hope. A launch execs the resolved `--codex` three times:
 ///
-///   1. `codex --version`, in the launcher ([`read_codex_version`]);
+///   1. `codex --version`, in the launcher ([`probe_codex`]);
 ///   2. `codex app-server --listen unix://…`, in the host;
 ///   3. the interactive TUI, `codex --remote …`, in the host.
 ///
@@ -1011,29 +921,27 @@ fn inspect_candidate(path: &Path) -> CandidateIdentity {
 ///
 /// **Not pinned:** everything on the other side of it. Whatever binary the dispatcher
 /// selects and spawns for `--version`, for `app-server` and for the TUI — three more
-/// execs CodeConnect never sees — is not inspected, not magic-checked, not
-/// version-pinned and not hashed, and nothing requires the three to be the same
-/// binary as each other. So a dispatcher can answer `--version` from a pinned build
+/// execs CodeConnect never sees — is not inspected, not magic-checked and not
+/// hashed, and nothing requires the three to be the same
+/// binary as each other. So a dispatcher can answer `--version` from one build
 /// and then run something else entirely under the app-server and the TUI, which are
 /// the two execs the whole command gate exists to contain: the app-server is what
 /// executes the model's tool calls and the TUI is what the operator types into.
 ///
 /// The identity chain is therefore closed up to the file we exec and **open past any
-/// process that re-dispatches**. The plan (A7, same paragraph as the hash-pin) calls
-/// this out as needing "its own pre-ungate enforcement (e.g. verifying the standalone
-/// package layout)". This is not the hash-pin's residual and it is not narrowed by
-/// it; it is a separate hole, and the only reason it is not gaping today is that the
-/// dispatcher shape anyone actually ships — the npm `codex.js` shebang shim — is
-/// caught here as a [`CandidateIdentity::Wrapper`], while a *compiled* one is caught
-/// nowhere.
+/// process that re-dispatches**. Closing it would need its own enforcement (for
+/// example, verifying the standalone package layout). This is not the hash-pin's
+/// residual and it is not narrowed by it; it is a separate hole, and the only
+/// reason it is not gaping today is that the dispatcher shape anyone actually
+/// ships — the npm `codex.js` shebang shim — is caught here as a
+/// [`CandidateIdentity::Wrapper`], while a *compiled* one is caught nowhere.
 ///
-/// **This is F7, and it is an accepted residual rather than a blocker** — the owner
-/// ruled that at the 2e-7d ungate, and [`start`] records it as one of the two residuals that are
-/// separate from the A22 boundary. It stays open because no layout verifier can be
-/// invented here: "e.g." in the plan is an example rather than a specification, and
-/// picking one unilaterally would silently narrow which installs CodeConnect
-/// supports — a scoping decision, not an implementation detail. Closing it needs
-/// that ruling first.
+/// **This is an accepted residual rather than a blocker** — [`start`] records it as
+/// one of the two residuals that are separate from the accepted boundary. It stays
+/// open because no layout verifier can be invented here: there is no specification
+/// of a supported package layout, and picking one unilaterally would silently narrow
+/// which installs CodeConnect supports — a scoping decision, not an implementation
+/// detail. Closing it needs that ruling first.
 fn is_native_magic(magic: [u8; 4]) -> bool {
     matches!(
         u32::from_be_bytes(magic),
@@ -1044,7 +952,7 @@ fn is_native_magic(magic: [u8; 4]) -> bool {
     )
 }
 
-// ------------------------------------------------------- executable identity (A7.1)
+// -------------------------------------------------------------- executable identity
 
 /// The wire width of a pinned digest: SHA-256 as lowercase hex.
 const CODEX_SHA256_HEX_LEN: usize = 64;
@@ -1077,8 +985,8 @@ pub(crate) fn parse_codex_sha256(raw: &str) -> Result<String> {
 
 /// Refuse a `--codex` that is not an **absolute** path.
 ///
-/// **Two different resolvers read that one string.** A7.1's guard opens it
-/// ([`verify_codex_identity`] → `File::open`) and the spawns execute it
+/// **Two different resolvers read that one string.** The executable-identity guard
+/// opens it ([`verify_codex_identity`] → `File::open`) and the spawns execute it
 /// (`Command::new`), and those two disagree on exactly one class of input: a value
 /// containing no `/`. `File::open("codex")` opens `./codex`; `Command::new("codex")`
 /// searches `PATH`. A charter naming a bare `codex` would hash one file and execute
@@ -1115,10 +1023,10 @@ pub(crate) fn require_absolute_codex(path: &Path) -> Result<()> {
 
 /// Re-read the file at `path` and refuse unless it still hashes to `expected`.
 ///
-/// **This is the A7.1 guard.** It stands immediately before each point where these
-/// bytes are about to become a running process, so that what runs is what was
-/// inspected and version-pinned rather than merely whatever was reachable through
-/// the same name. Three sites — [`read_codex_version`]'s `--version` exec and the
+/// **This is the executable-identity guard.** It stands immediately before each
+/// point where these bytes are about to become a running process, so that what
+/// runs is what was inspected and hashed rather than merely whatever was reachable
+/// through the same name. Three sites — [`probe_codex`]'s `--version` exec and the
 /// host's two spawns (`codex_host::run_session` and `codex_host::drive`) — all now
 /// the same flavour: **prevention with the freeze held across the exec.** A mismatch
 /// means nothing runs.
@@ -1228,80 +1136,7 @@ fn codex_candidates(
     candidates
 }
 
-// -------------------------------------------------------------- version pinning
-
-/// Run `codex --version` and return the parsed version string — with the exec
-/// **bracketed by the resolved binary's identity** (A7.1).
-///
-/// It takes the whole [`ResolvedCodex`], not a bare path, because the exec it
-/// performs is itself one of the opens A7 names: `Command::new(path)` makes the
-/// kernel open that pathname afresh, and whatever it finds there is what reports a
-/// version. Resolution already hashed the file; this freezes and re-verifies the
-/// digest *before* the exec and holds the freeze across it, so the version that gets
-/// pinned is a statement about the exact bytes this launch will carry rather than
-/// about whatever answered `--version`.
-///
-/// **This one is prevention now, like the host's spawns — the asymmetry is gone.**
-/// It used to be detection-only: the exec ran pre-gate with only the resolution hash
-/// behind it, so a replacement landing in front of it *ran* as `codex --version` and
-/// the launch was merely refused afterwards. The freeze removes that: the bytes are
-/// pinned immutable and verified before the exec, and an installer or update cannot
-/// change them while the child runs, so the version reported here is the pinned
-/// build's. A swap that landed before the freeze is caught by the freeze's own vnode
-/// check (the name no longer reaches the frozen handle) and refuses with nothing run.
-/// What the freeze does not exclude is a hostile same-uid peer — out of scope, and
-/// unreachable by any macOS mechanism; see [`protocol::hash::FrozenExecutable`].
-///
-/// That accounting also rests on resolution no longer being a half-second opening: a
-/// rename landing inside [`inspect_candidate`]'s read once minted a pin over a file
-/// the pathname had already stopped naming. The vnode arm on that read makes the pin
-/// a statement about this file rather than whichever the name reached first (see
-/// [`ResolvedCodex`]).
-///
-/// The freeze is cleared only after the child has exited, and the output is
-/// interpreted after that — a swapped binary cannot have run, so any failure to read
-/// a version is a real one and not a swap misreported as a parse error.
-///
-/// What remains uncatchable: a replacement *reverted* before the check, which no
-/// verify-by-content scheme can see, and the post-clear demand-paging residual — both
-/// stated on [`ResolvedCodex`] and [`protocol::hash::FrozenExecutable`].
-/// **Superseded on the launch path by [`probe_codex`]**, which reads the version as one
-/// of five answers under a single held freeze. Kept because it is the narrowest possible
-/// statement of the freeze-then-exec discipline and its tests pin exactly that: a binary
-/// swapped or moved between resolution and exec is refused. `probe_codex` inherits the
-/// discipline; these tests are what prove it is the right one.
-#[cfg(test)]
-fn read_codex_version(resolved: &ResolvedCodex) -> Result<String> {
-    let bin = resolved.path.as_path();
-    // Freeze + verify BEFORE the exec, and hold the freeze across it. This exec used
-    // to be the one A7.1 site that could only *detect* a swap after the fact — it ran
-    // pre-gate, so a replacement landing in front of it ran as `codex --version`
-    // before anything checked. Now the bytes are pinned immutable and verified first,
-    // and stay frozen while the child runs, so the version pinned below is reported
-    // by the pinned bytes and no unverified binary is reachable here at all.
-    // Nothing is recorded: this is a test-only narrowing of the discipline, run in
-    // a process with no launch record to write into.
-    let frozen = verify_codex_identity(
-        bin,
-        &resolved.sha256,
-        "before `codex --version`",
-        protocol::hash::LockHold::UntilReleased,
-        |_| Ok(()),
-    )?;
-    let output = Command::new(bin)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("running {} --version", bin.display()))?;
-    // The child has exited (`output` waited for it); the frozen bytes are the bytes
-    // that ran, so the freeze can be cleared before the output is interpreted.
-    drop(frozen);
-    if !output.status.success() {
-        bail!("{} --version exited with {}", bin.display(), output.status);
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_codex_version(&text)
-        .ok_or_else(|| anyhow!("could not read a version from `codex --version`: {text:?}"))
-}
+// ------------------------------------------------------------------- the version
 
 /// Pull the version out of `codex --version` output.
 ///
@@ -1310,8 +1145,8 @@ fn read_codex_version(resolved: &ResolvedCodex) -> Result<String> {
 /// `codex-cli <version>` or a bare `<version>` — and anything with an extra line,
 /// or extra/ambiguous tokens on the line, is rejected rather than guessed. So
 /// neither `codex-cli 0.148.0 compatibility 0.147.0` (extra tokens) nor
-/// `codex-cli 0.147.0\ncompatibility 0.148.0` (extra line) can be misread as a
-/// pinned version. Pure, so the shape is pinned by tests rather than by the live
+/// `codex-cli 0.147.0\ncompatibility 0.148.0` (extra line) is taken for a version
+/// codex did not state. Pure, so the shape is pinned by tests rather than by the live
 /// binary.
 fn parse_codex_version(text: &str) -> Option<String> {
     let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
@@ -1332,26 +1167,21 @@ fn parse_codex_version(text: &str) -> Option<String> {
         .then(|| version.to_string())
 }
 
-// ------------------------------------------------------------- the guarded-surface gate
+// ------------------------------------------------------------- the launch probe
 
 /// The wall-clock budget for one launch probe.
 ///
-/// Generous against the measurement — the four probes that were timed take ~150 ms on
-/// the real binary, and the fifth is one more exec of the same already-frozen,
-/// already-hashed bytes — because the number is not a performance target, it is the
-/// point past which the gate stops waiting for an answer it is never going to get.
+/// Generous against the measurement — a probe takes well under a second on the real
+/// binary — because the number is not a performance target, it is the point past which
+/// the launch stops waiting for an answer it is never going to get.
 const PROBE_BUDGET: Duration = Duration::from_secs(30);
 
 /// How long to spend reaping a probe after its process group has been SIGKILLed.
 const PROBE_REAP_BUDGET: Duration = Duration::from_secs(2);
 
-/// The stdout ceiling for one probe. `completion bash` is the chatty one, MEASURED at
-/// ~230 KiB on 0.153; the schema commands write to disk and print nothing.
+/// The stdout ceiling for one probe. A version line is a few bytes; the ceiling is what
+/// keeps a binary that streams from holding the launch's memory.
 const PROBE_STDOUT_LIMIT: u64 = 8 << 20;
-
-/// The ceiling on one generated bundle document. `ClientRequest.json` is MEASURED at
-/// ~1.2 MiB on both binaries.
-const PROBE_FILE_LIMIT: u64 = 64 << 20;
 
 /// What is known about a probe's leader process — deliberately three-valued, because a
 /// `try_wait` error proves only that *that call* collected no status. Filing it as
@@ -1427,13 +1257,13 @@ impl Drop for Probe {
 /// Drain one pipe on its own thread, under a byte ceiling, reporting overflow as a
 /// FAILURE rather than as the end of output.
 ///
-/// The read is moved off the gate's thread because a descendant that inherited the write
+/// The read is moved off the launch's thread because a descendant that inherited the write
 /// end can defer EOF forever; the caller bounds the *wait* with `recv_timeout`.
 ///
 /// `LIMIT + 1` is asked for so that hitting the ceiling is detectable. `Read::take(N)`
 /// reports EOF once N bytes are consumed, so a plain `take(LIMIT)` hands back a prefix
 /// indistinguishable from a complete answer — and a prefix of a flood is exactly the
-/// vacuous pass a gate must not take. A read error is reported for the same reason: a
+/// vacuous pass a probe must not take. A read error is reported for the same reason: a
 /// truncated answer must never become a shorter one.
 fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
     pipe: Option<R>,
@@ -1463,14 +1293,13 @@ fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
 /// Exec `bin args` under a wall-clock budget and an output ceiling, with the caller
 /// holding the freeze, and return its stdout.
 ///
-/// Split out so a caller that already holds a verified freeze can run several probes
-/// under **one** of them — see [`probe_codex`].
+/// Split out so the caller can hold a verified freeze across it — see [`probe_codex`].
 ///
 /// **Bounded on purpose.** The binary being probed is whatever is installed at the codex
-/// path: the gate's job is to decide whether to host it, so it cannot assume it behaves.
-/// A plain `output()` gives an unknown executable an unbounded hold on the launch *and*
-/// on the freeze — it can never exit, never close its pipes (a forked descendant inherits
-/// the write ends, so EOF never arrives), or stream until the gate runs out of memory.
+/// path, and nothing has run it yet, so the probe cannot assume it behaves. A plain
+/// `output()` gives an unknown executable an unbounded hold on the launch *and* on the
+/// freeze — it can never exit, never close its pipes (a forked descendant inherits the
+/// write ends, so EOF never arrives), or stream until the launcher runs out of memory.
 /// Every wait here is against a deadline and every path attempts to kill the probe's
 /// whole process group, pipes collected FIRST so the kill always happens while the
 /// leader's pgid is provably not recycled.
@@ -1481,33 +1310,9 @@ fn run_under_freeze(bin: &Path, args: &[&str]) -> Result<Vec<u8>> {
 /// [`run_under_freeze`]'s body, with the budget a parameter so the boundedness itself can
 /// be tested without the test paying the production budget to observe it.
 fn run_bounded(bin: &Path, args: &[&str], budget: Duration) -> Result<Vec<u8>> {
-    run_bounded_inner(bin, args, None, budget)
-}
-
-/// [`run_bounded`] with the `CODEX_HOME` the launch will use named explicitly, for
-/// the one probe whose answer depends on which configuration is being resolved.
-fn run_bounded_in_home(
-    bin: &Path,
-    args: &[&str],
-    codex_home: &Path,
-    budget: Duration,
-) -> Result<Vec<u8>> {
-    run_bounded_inner(bin, args, Some(codex_home), budget)
-}
-
-fn run_bounded_inner(
-    bin: &Path,
-    args: &[&str],
-    codex_home: Option<&Path>,
-    budget: Duration,
-) -> Result<Vec<u8>> {
     use std::os::unix::process::CommandExt;
     let what = format!("{} {}", bin.display(), args.join(" "));
-    let mut command = Command::new(bin);
-    if let Some(home) = codex_home {
-        command.env("CODEX_HOME", home);
-    }
-    let child = command
+    let child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1555,83 +1360,13 @@ fn run_bounded_inner(
     Ok(stdout)
 }
 
-/// Read one file the probe just generated, under a ceiling.
+/// Ask the installed codex its version, under a held freeze, and refuse a binary that
+/// does not state one. The value itself decides nothing.
 ///
-/// Same reasoning as [`spawn_pipe_reader`]: the writer is the binary under examination,
-/// and a gate that will happily read whatever it produced has handed it the launch's
-/// memory. `LIMIT + 1` so that hitting the ceiling is a refusal rather than a truncation.
-fn read_generated(path: &Path) -> Result<Vec<u8>> {
-    use std::os::unix::fs::OpenOptionsExt;
-    // **Opened so it cannot block, and validated so it cannot lie.** The writer of this
-    // file is the binary under examination — the gate has not yet decided whether to host
-    // it — and it can write `ClientRequest.json` as a FIFO instead of a file. A plain
-    // `File::open` on a FIFO with no writer blocks forever, outside every probe deadline,
-    // *while the executable freeze is still held*: the launch would hang and the freeze
-    // would never clear. `O_NONBLOCK` makes that open fail instead, `O_NOFOLLOW` stops the
-    // final component being a symlink to somewhere else, and the `fstat` below is
-    // authoritative about the handle actually held.
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "reading {} — a bundle codex was asked to write",
-                path.display()
-            )
-        })?;
-    if !file
-        .metadata()
-        .with_context(|| format!("stat {}", path.display()))?
-        .file_type()
-        .is_file()
-    {
-        bail!(
-            "{} is not a regular file. `generate-json-schema` writes ordinary files; a pipe \
-             or device here would block the launch with the executable freeze held.",
-            path.display()
-        );
-    }
-    let mut buf = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::Read::take(file, PROBE_FILE_LIMIT + 1),
-        &mut buf,
-    )
-    .with_context(|| format!("reading {}", path.display()))?;
-    if buf.len() as u64 > PROBE_FILE_LIMIT {
-        bail!(
-            "{} is larger than {PROBE_FILE_LIMIT} bytes; the measured bundle is ~1.2 MiB, so \
-             this is not one",
-            path.display()
-        );
-    }
-    Ok(buf)
-}
-
-/// Everything the launch gate asks the installed codex about itself, read under a
-/// **single** held freeze.
-///
-/// # One freeze, every exec — stronger and faster than one freeze each
-///
-/// The launcher asks the binary several questions before it will host it: its version,
-/// its root command surface (`completion bash`), one per app-server schema bundle, and
-/// the effective value of the one feature this launch pins off. Each used to take its
-/// own freeze-and-verify; the last is affordable only because it rides this one.
-///
-/// **Stronger:** separate freezes leave gaps between them. A version read under freeze A
-/// and a schema read under freeze D are two statements about two moments, and nothing
-/// said the bytes were the same in between — which is exactly the reasoning
-/// [`verify_codex_identity`] exists to refuse. One freeze held across them all makes them
-/// one statement about one set of bytes, which is what the gate's conclusion actually
-/// claims.
-///
-/// **Faster, and that mattered:** `freeze_and_hash` reads and digests the whole 210 MB
-/// executable, MEASURED at 7.5 s in a debug build. Four of them put ~30 s in front of
-/// every launch — enough that the live end-to-end gate timed out waiting for a launch
-/// record, which is how this was found. One freeze puts the gate back at the cost of the
-/// single `--version` hash the launcher already paid.
-fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {
-    use codex_broker::guarded_surface as gs;
+/// The answer is attributable to the pinned bytes only because the freeze is held across
+/// the exec: [`verify_codex_identity`] refuses a binary that is not the one resolution
+/// inspected, and the flag keeps it from being replaced while it runs.
+fn probe_codex(resolved: &ResolvedCodex) -> Result<()> {
     let bin = resolved.path.as_path();
     // **The launcher's freeze has no record behind it, so the signal handler is the
     // record.** This runs before a uid is minted: there is no launch record for a
@@ -1647,7 +1382,7 @@ fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {
     let frozen = verify_codex_identity(
         bin,
         &resolved.sha256,
-        "before the launch probes",
+        "before `codex --version`",
         // **The lock is held for the whole probe, and it is standing in for the record
         // this site cannot write.** There is no uid yet, so nothing a custodian scans
         // will ever name this freeze — and a custodian's scan-and-clear takes this same
@@ -1663,72 +1398,17 @@ fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {
         |_| Ok(()),
     )?;
 
-    let probe = (|| -> Result<CodexProbe> {
-        let version_out = run_under_freeze(bin, &["--version"])?;
-        let completion = run_under_freeze(bin, &["completion", "bash"])?;
-        // **The fifth question under the same freeze, and that is what makes it
-        // affordable.** The postcheck A28 named was deferred for the launch latency a
-        // separate freeze-and-hash of a 210 MB binary would cost; asked here it costs
-        // one more exec of bytes already frozen and already hashed, and it is one
-        // statement about one set of bytes along with the other four.
-        let features = read_effective_features(bin, &codex_home())?;
-        let mut bundles = Vec::new();
-        for bundle in codex_broker::guarded_surface::BUNDLES {
-            let out = scratch.join(bundle);
-            let out_arg = out.to_string_lossy().into_owned();
-            let mut args = vec!["app-server", "generate-json-schema", "--out", &out_arg];
-            if bundle == "experimental" {
-                args.push("--experimental");
-            }
-            run_under_freeze(bin, &args)?;
-            // READ HERE, under the freeze, not by the caller afterwards. The gate's
-            // conclusion is about the bytes that will be exec'd; a path handed back to a
-            // caller that opens it after the freeze is released is a second read of a
-            // second moment, and between the two the scratch tree could be replaced with
-            // a projection of the baseline. Owning the bytes closes that window with the
-            // freeze that made the answer trustworthy still held.
-            let client_request = read_generated(&out.join("ClientRequest.json"))?;
-            // The result documents are named by the request document, so it is parsed
-            // here — inside the freeze — to learn which ones to read. Only the ones a
-            // guarded method reaches (≈18 of the bundle's 250–370 files).
-            let parsed = gs::parse_schema(&String::from_utf8_lossy(&client_request))
-                .map_err(|e| anyhow!("{e}"))
-                .with_context(|| format!("parsing the {bundle} bundle's ClientRequest.json"))?;
-            let mut results = Vec::new();
-            for name in gs::guarded_result_types(&parsed).map_err(|e| anyhow!("{e}"))? {
-                let file = format!("{name}.json");
-                let path = ["v2", "v1"]
-                    .iter()
-                    .map(|d| out.join(d).join(&file))
-                    .find(|p| p.is_file())
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "the {bundle} bundle has no {file}, which a guarded method's \
-                             params type says is its result"
-                        )
-                    })?;
-                results.push((name, read_generated(&path)?));
-            }
-            bundles.push(ProbedBundle {
-                bundle,
-                client_request,
-                client_notification: read_generated(&out.join("ClientNotification.json"))?,
-                server_request: read_generated(&out.join("ServerRequest.json"))?,
-                results,
-            });
-        }
-        Ok(CodexProbe {
-            version_out,
-            completion,
-            bundles,
-            features,
-        })
-    })();
+    let version_out = run_under_freeze(bin, &["--version"]);
 
-    // Cleared only after every child has exited, so all five answers are attributable to
-    // the frozen bytes. A failure clears it too, with nothing having been admitted.
+    // Cleared only after the child has exited, so the answer is attributable to the
+    // frozen bytes. A failure clears it too, with nothing having been admitted. The
+    // output is interpreted only after that: the identity check has already run, so a
+    // swapped binary is reported as swapped and never as an unreadable version.
     drop(frozen);
-    probe
+    let text = String::from_utf8_lossy(&version_out?).into_owned();
+    parse_codex_version(&text)
+        .map(|_| ())
+        .ok_or_else(|| anyhow!("could not read a version from `codex --version`: {text:?}"))
 }
 
 /// A **test-only stand-in for the launcher's probe freeze**
@@ -1742,8 +1422,8 @@ fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {
 /// launch delivers — and reads the file's flags afterwards.
 ///
 /// A real launcher run cannot stand in for this: it needs a codex whose answers get
-/// past the guarded-surface gate, and the flag would then be cleared by the ordinary
-/// path rather than by the handler. This is the smallest process that has the
+/// past the probe, and the flag would then be cleared by the ordinary path rather than
+/// by the handler. This is the smallest process that has the
 /// property under test. Hidden machinery, never a human command.
 pub fn run_freeze_probe(args: &[String]) -> ! {
     let (Some(path), Some(marker)) = (args.first(), args.get(1)) else {
@@ -1808,221 +1488,6 @@ pub fn run_freeze_lock_hold(args: &[String]) -> ! {
     std::process::exit(0)
 }
 
-/// What [`probe_codex`] read, all of it from one frozen set of bytes.
-struct CodexProbe {
-    version_out: Vec<u8>,
-    completion: Vec<u8>,
-    bundles: Vec<ProbedBundle>,
-    /// `codex features list` with the launch's own override applied, in the
-    /// `CODEX_HOME` the launch will name — the EFFECTIVE value of the one feature
-    /// this launch pins off. See [`refuse_unless_pinned_feature_is_off`].
-    features: Vec<u8>,
-}
-
-/// One schema bundle as the probe read it, **as bytes rather than paths** — see
-/// [`probe_codex`] for why the read happens inside the freeze.
-///
-/// Four documents, because the broker's contract with codex is not only "what may the
-/// client send". `initialized` is an admitted NOTIFICATION; the server sends REQUESTS the
-/// broker classifies and now answers; and the broker forwards the RESULTS of every method
-/// it admits. A gate that read only `ClientRequest.json` would admit a build whose
-/// `thread/read` result grew a field, or whose `item/tool/call` changed shape.
-struct ProbedBundle {
-    bundle: &'static str,
-    client_request: Vec<u8>,
-    client_notification: Vec<u8>,
-    server_request: Vec<u8>,
-    /// `(response type name, its bytes)`, for the guarded methods only.
-    results: Vec<(String, Vec<u8>)>,
-}
-
-/// A scratch directory for one gate run, removed when the guard drops.
-///
-/// `generate-json-schema` writes a tree rather than to stdout (measured: `--out <DIR>`
-/// is required, there is no stdout form), so the gate needs somewhere to put ~3 MB
-/// twice. Cleaning up on drop means a refusal — which returns early from several arms —
-/// does not leave the tree behind.
-///
-/// # Created exclusively, and private
-///
-/// `mkdir(2)` with `O_EXCL` semantics and mode `0700`, not `create_dir_all`. The two
-/// differ exactly where it matters: `create_dir_all` succeeds against a directory (or a
-/// symlink to one) that somebody else put there first, so the gate would generate its
-/// bundles into, and read them back out of, a tree it does not own. `DirBuilder::create`
-/// fails `EEXIST` on anything already at the path, symlinks included, and the mode is set
-/// at creation rather than afterwards so there is no window in which the tree is
-/// world-writable.
-struct ScratchDir(std::path::PathBuf);
-
-impl ScratchDir {
-    fn new() -> Result<ScratchDir> {
-        use std::os::unix::fs::DirBuilderExt;
-        // A process-local counter, because **a clock is not a unique-name source.**
-        // `SystemTime::now()` is coarser than the nanoseconds it is formatted in, so
-        // two callers inside one tick produced the same string, the same hash and the
-        // same path — and the second `create` failed `EEXIST`. Sequential calls never
-        // showed it (the clock advances between them), which is why every
-        // single-threaded run of this suite was green while a parallel one went red on
-        // a test that merely wanted a directory. The error arm made it worse: a
-        // `duration_since` failure hashed the EMPTY STRING, a constant.
-        //
-        // The counter makes the name unique BY CONSTRUCTION within a process, which is
-        // the whole of the observed failure. The pid separates live processes, and the
-        // clock stays in so a reused pid cannot land on a directory an earlier process
-        // of the same number left behind.
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!(
-            "codeconnect-codex-schema-{}-{}",
-            std::process::id(),
-            protocol::hash::sha256_hex(format!("{seq}-{nanos}").as_bytes())
-                .get(..16)
-                .unwrap_or("scratch")
-        ));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .with_context(|| {
-                format!(
-                    "creating {} for the codex schema gate — it must not already exist",
-                    path.display()
-                )
-            })?;
-        Ok(ScratchDir(path))
-    }
-}
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Refuse unless the installed codex's **guarded surface** matches the vendored 0.147
-/// reference, and return the digest of the surface that was admitted.
-///
-/// # Why this replaced the version-string pin
-///
-/// The pin ([`CODEX_PINNED_VERSIONS`], now recorded rather than gated) asked "is this
-/// build called 0.147.0?". That is a proxy for the real question, and a bad one in both
-/// directions: it refuses every weekly codex release whose wire shape did not move at
-/// all, and the pressure it creates is to bump the number — the one edit that re-proves
-/// nothing. This asks the real question instead: *is the part of codex that CodeConnect
-/// guards the same part it was grounded against?* A build whose guarded surface is
-/// identical is admitted whatever it calls itself; a build whose guarded surface moved
-/// is refused **naming what moved**, which is the work item for the re-grounding.
-///
-/// # Both surfaces, because one of them is not in the schema
-///
-/// * The **wire** surface — the guarded methods' parameter shapes, from
-///   `codex app-server generate-json-schema`. This is what the broker's allowlist and
-///   fingerprint defend.
-/// * The **argv** surface — the root subcommand and flag set, from
-///   `codex completion bash`. This is what [`validate_codex_argv`] defends, and
-///   `generate-json-schema` says nothing about it.
-///
-/// Gating only the wire surface would have been a **regression**, measured rather than
-/// argued: codex 0.153 adds `agents`, `queue` and `migrate-rollouts`, none of which
-/// [`is_subcommand`] knows, so [`validate_codex_argv`] classifies them as prompt text
-/// and forwards them — and `codex agents` reaches the shared local app-server daemon
-/// while `codex queue` injects a message into another session, both around the broker.
-/// A wire-only gate would have admitted 0.153 with that door open.
-///
-/// # Fail direction
-///
-/// Closed in every arm: a failed exec, a non-UTF-8 or unparseable schema, a bundle that
-/// will not project, a method that vanished, a subcommand that appeared. The one verdict
-/// that admits is "no differences at all".
-fn ensure_guarded_surface(probe: &CodexProbe) -> Result<String> {
-    use codex_broker::guarded_surface as gs;
-
-    let mut changes: Vec<String> = Vec::new();
-    let mut admitted: Vec<(&str, String)> = Vec::new();
-
-    // --- the argv surface ---------------------------------------------------------
-    let completion = String::from_utf8(probe.completion.clone())
-        .context("`codex completion bash` did not emit UTF-8; refusing to guess at its surface")?;
-    let installed_argv = gs::project_argv(&completion)
-        .map_err(|e| anyhow!("{e}"))
-        .context("reading the installed codex's root command surface")?;
-    changes.extend(
-        gs::diff_argv(&gs::admissible_argv(&installed_argv), &installed_argv)
-            .iter()
-            .map(ToString::to_string),
-    );
-    admitted.push((gs::ARGV_BUNDLE, serde_json::to_string(&installed_argv)?));
-
-    // --- the wire surface ---------------------------------------------------------
-    for probed in &probe.bundles {
-        let bundle = probed.bundle;
-        // The SAME duplicate-member discipline the c2s classifier applies to a frame: a
-        // document whose meaning depends on which duplicate a parser keeps has no single
-        // meaning, and the gate's verdict is an equality of parsed values.
-        let parse = |raw: &[u8], what: &str| -> Result<serde_json::Value> {
-            gs::parse_schema(&String::from_utf8_lossy(raw))
-                .map_err(|e| anyhow!("{e}"))
-                .with_context(|| format!("reading the {bundle} bundle's {what}"))
-        };
-        let mut results = std::collections::BTreeMap::new();
-        for (name, raw) in &probed.results {
-            results.insert(name.clone(), parse(raw, name)?);
-        }
-        let installed = gs::project_bundle(&gs::BundleDocs {
-            client_request: &parse(&probed.client_request, "ClientRequest.json")?,
-            client_notification: &parse(&probed.client_notification, "ClientNotification.json")?,
-            server_request: &parse(&probed.server_request, "ServerRequest.json")?,
-            results: &results,
-        })
-        .map_err(|e| anyhow!("{e}"))
-        .with_context(|| format!("projecting the {bundle} bundle onto the guarded surface"))?;
-        changes.extend(
-            gs::diff_wire(&gs::admissible_wire(bundle, &installed), &installed)
-                .iter()
-                .map(|c| format!("[{bundle}] {c}")),
-        );
-        admitted.push((bundle, serde_json::to_string(&installed)?));
-    }
-
-    if !changes.is_empty() {
-        bail!(
-            "this codex build's guarded surface differs from the one CodeConnect was \
-             grounded against, so the checks that keep a session inside its sandbox have \
-             not been proven for it:\n  {}\n\
-             CodeConnect has to be re-grounded against this build before it can host it — \
-             each item above is measured, pinned and re-tested. Updating CodeConnect is the \
-             way through; downgrading codex is not asked for and will not be.",
-            changes.join("\n  ")
-        );
-    }
-
-    // The digest of what was ADMITTED — derived from the installed binary's own
-    // projection, not from the vendored copy it was proven equal to. The two are equal
-    // by the time control reaches here, so the values coincide; deriving it from the
-    // vendored side would still be wrong, because it would report the same digest for a
-    // codex whose surface was never actually read.
-    //
-    Ok(admitted_digest(&admitted))
-}
-
-/// The digest of the surfaces that were admitted, over an **unambiguous** encoding.
-///
-/// Each part is committed with its LABEL and its BYTE LENGTH before its bytes. A bare
-/// concatenation is not unambiguous: two different splits of the same byte stream across
-/// bundles digest identically, and so do two parts whose labels were swapped. A digest
-/// that cannot distinguish those is not evidence about which surface was read — and this
-/// value exists to be carried into a launch record as exactly that evidence.
-fn admitted_digest(parts: &[(&str, String)]) -> String {
-    let mut framed = String::new();
-    for (label, body) in parts {
-        framed.push_str(&format!("{label} {}\n{body}\n", body.len()));
-    }
-    protocol::hash::sha256_hex(framed.as_bytes())
-}
-
 // --------------------------------------------------------- reserved argv grammar
 
 /// Why a `codex` argv was refused. Each variant renders a message that names what
@@ -2030,53 +1495,14 @@ fn admitted_digest(parts: &[(&str, String)]) -> String {
 /// tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexRefusal {
-    /// A flag whose value CodeConnect owns for the launch: the transport
-    /// (`--remote`, `--remote-auth-token-env`), the working directory
-    /// (`-C`/`--cd`), and the sandbox policy (`-s`/`--sandbox`, `--add-dir`).
+    /// A flag that would make the TUI something other than the broker's client:
+    /// `--remote` and `--remote-auth-token-env`. Without the broker there is no
+    /// session for the phone to reach.
     OwnedFlag { flag: String, owner: &'static str },
-    /// `--profile`/`-p`: a named profile can carry approval and hook settings, so
-    /// the profile choice is CodeConnect's, not the caller's.
-    Profile { flag: String },
-    /// A control that would move approval or hook-trust ownership away from
-    /// CodeConnect (`-a`/`--ask-for-approval`, `--approve-for-me`, `--full-auto`,
-    /// the `--dangerously-bypass-*` flags, and their `--yolo`/`--not-so-yolo`
-    /// aliases).
-    ApprovalControl { flag: String },
-    /// A `-c`/`--config` override, or an `--enable`/`--disable` feature toggle,
-    /// that reaches a configuration key CodeConnect owns — at any nesting, whether
-    /// spelled as a dotted path or nested inside a TOML value.
-    OwnedConfigKey { key: String, via: String },
-    /// A subcommand name or alias. Only interactive-TUI invocation is supported;
-    /// `resume`, `fork`, `exec`, and the rest are refused wherever codex would
-    /// dispatch one.
+    /// A subcommand name or alias. Only the interactive TUI is hosted — a new session,
+    /// or `resume`/`fork` as the first positional ([`HOSTED_SUBCOMMANDS`]); `exec` and
+    /// the rest are refused wherever codex would dispatch one.
     Subcommand { name: String },
-    /// A token CodeConnect could not confidently classify as benign — a
-    /// short-flag cluster it cannot fully expand, or a `-c` key whose quoting it
-    /// cannot decode. Per the governing invariant (A7): fail closed on
-    /// uncertainty rather than forward something past the ownership boundary.
-    Unclassifiable { detail: String },
-}
-
-/// The extra clause an owned key earns when "CodeConnect owns it" is true but does
-/// not say what the caller loses by it.
-///
-/// Most owned keys need nothing: `approval_policy` and `sandbox` are visibly the
-/// session's policy, and a reader who reached for one knows what they were reaching
-/// for. The pinned-off feature is different — it is refused not because CodeConnect
-/// set it to something else it prefers, but because the request it would turn on has
-/// nowhere to be answered from, and a bare "we own this" would read as a permission
-/// problem instead of a missing surface.
-///
-/// Matched on the key's last segment so both spellings of the same setting reach it:
-/// `-c` reports the dotted path (`features.request_permissions_tool`) and
-/// `--enable`/`--disable` report the bare feature name.
-fn why_owned(key: &str) -> Option<&'static str> {
-    let leaf = key.rsplit('.').next().unwrap_or(key);
-    (leaf == PINNED_OFF_FEATURE).then_some(
-        "CodeConnect answers approvals from the phone, and this one asks for a \
-         permission profile that only the terminal can grant, so the session is \
-         launched without it",
-    )
 }
 
 impl std::fmt::Display for CodexRefusal {
@@ -2086,36 +1512,11 @@ impl std::fmt::Display for CodexRefusal {
                 f,
                 "`{flag}` is set by CodeConnect ({owner}) and cannot be passed to `codeconnect codex`"
             ),
-            CodexRefusal::Profile { flag } => write!(
-                f,
-                "`{flag}` is refused: a codex profile can carry approval and hook settings that \
-                 CodeConnect owns for the session"
-            ),
-            CodexRefusal::ApprovalControl { flag } => write!(
-                f,
-                "`{flag}` is refused: CodeConnect owns approval and hook-trust policy for the session"
-            ),
-            CodexRefusal::OwnedConfigKey { key, via } => match why_owned(key) {
-                Some(because) => write!(
-                    f,
-                    "`{via} {key}` is refused: `{key}` is a configuration key CodeConnect owns \
-                     for the session — {because}"
-                ),
-                None => write!(
-                    f,
-                    "`{via} {key}` is refused: `{key}` is a configuration key CodeConnect owns for the session"
-                ),
-            },
             CodexRefusal::Subcommand { name } => write!(
                 f,
-                "`codex {name}` is a subcommand; `codeconnect codex` supports only the interactive \
-                 session, so subcommands and their aliases are refused"
-            ),
-            CodexRefusal::Unclassifiable { detail } => write!(
-                f,
-                "`{detail}` could not be parsed with confidence, so it is refused rather than \
-                 forwarded — to keep CodeConnect's ownership of the session's approval policy \
-                 (pass a simpler invocation)"
+                "`codex {name}` is a subcommand; `codeconnect codex` hosts only the interactive \
+                 session (a new one, `resume` or `fork`), so other subcommands and their \
+                 aliases are refused"
             ),
         }
     }
@@ -2124,7 +1525,7 @@ impl std::fmt::Display for CodexRefusal {
 /// A recognised flag's argument arity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Arity {
-    /// Takes no value (`--search`, `--psp`).
+    /// Takes no value (`--search`).
     Bool,
     /// Takes exactly one value, spaced (`--model x`), `=`-joined (`--model=x`) or
     /// attached-short (`-mx`).
@@ -2142,16 +1543,12 @@ struct KnownFlag {
     arity: Arity,
 }
 
-/// Look up a long flag name (without a `=value` tail) in the 0.147 table.
+/// Look up a long flag name (without a `=value` tail) in the known table.
 ///
-/// The complete interactive/global flag surface of codex-cli 0.147.0, including
-/// the **hidden** globals that do not appear in `--help` but are real:
-/// `--psp` (a bool global), and the approval aliases `--yolo`
-/// (= `--dangerously-bypass-approvals-and-sandbox`) and `--not-so-yolo`
-/// (= `--approve-for-me`) from `shared_options`. `--full-auto` is recognised too:
-/// the interactive parser rejects it, but it is a real approval-owner control
-/// elsewhere in codex, so recognising it lets it be refused precisely rather than
-/// forwarded to a generic "unexpected argument".
+/// The interactive/global flags of codex-cli 0.147.0 whose arity this walk needs to
+/// know, plus the approval aliases `--yolo` and `--not-so-yolo`. A flag missing from
+/// the table is not refused: it is forwarded unchanged and never takes the next word
+/// as its value (see [`scan_codex_argv`]).
 fn known_long(name: &str) -> Option<KnownFlag> {
     let flag = |canonical, arity| Some(KnownFlag { canonical, arity });
     match name {
@@ -2179,10 +1576,8 @@ fn known_long(name: &str) -> Option<KnownFlag> {
         }
         "--yolo" => flag("--yolo", Arity::Bool),
         "--dangerously-bypass-hook-trust" => flag("--dangerously-bypass-hook-trust", Arity::Bool),
-        "--full-auto" => flag("--full-auto", Arity::Bool),
         "--search" => flag("--search", Arity::Bool),
         "--no-alt-screen" => flag("--no-alt-screen", Arity::Bool),
-        "--psp" => flag("--psp", Arity::Bool),
         "--help" => flag("--help", Arity::Bool),
         "--version" => flag("--version", Arity::Bool),
         _ => None,
@@ -2206,8 +1601,8 @@ fn known_short(letter: char) -> Option<KnownFlag> {
 }
 
 /// A classified token: a recognised flag (with any value attached to the token
-/// itself), a cluster of only recognised bool short-flags, a token that cannot be
-/// confidently classified, a positional, or the `--` boundary.
+/// itself), a cluster of only recognised bool short-flags, a flag-shaped token not in
+/// the known table, a positional, or the `--` boundary.
 enum Token {
     Flag {
         flag: KnownFlag,
@@ -2215,12 +1610,10 @@ enum Token {
     },
     /// A short cluster of only bool flags (`-hV`), forwarded as-is.
     BoolCluster,
-    /// A7 fail-closed: any flag-shaped token not on the benign/known allowlist —
-    /// an unknown long flag, an unknown short flag, or a short cluster with an
-    /// unknown character. Refused rather than forwarded, because an unrecognised
-    /// flag is uncertainty and a hidden approval control (as `--psp` once was)
-    /// must never ride through.
-    Unclassifiable,
+    /// A flag-shaped token not in the known table — an unknown long flag, an unknown
+    /// short flag, or a short cluster with an unknown character. Forwarded unchanged,
+    /// and it takes no following token as its value.
+    Unknown,
     Positional,
     Boundary,
 }
@@ -2228,10 +1621,8 @@ enum Token {
 /// Classify a single argv token in isolation. Attached values (`--model=x`,
 /// `-mx`, `-C.`) are split out here; a spaced value is the following token and is
 /// pulled by the caller. Short clusters are **fully expanded** so a bool short in
-/// front of a value short (`-hcapproval_policy=never`) cannot smuggle an owned
-/// key through as a discarded suffix. **Any flag-shaped token not on the known
-/// allowlist is `Unclassifiable`** (A7 allowlist): only enumerated benign/known
-/// flags pass; everything else is refused.
+/// front of a value short (`-hmgpt-5`) keeps the value with its flag. A flag-shaped
+/// token not in the known table is `Unknown`.
 fn classify(token: &str) -> Token {
     if token == "--" {
         return Token::Boundary;
@@ -2243,7 +1634,7 @@ fn classify(token: &str) -> Token {
         };
         return match known_long(&name) {
             Some(flag) => Token::Flag { flag, attached },
-            None => Token::Unclassifiable,
+            None => Token::Unknown,
         };
     }
     // A single leading `-` and at least one more char: a short flag or cluster.
@@ -2260,8 +1651,8 @@ fn classify(token: &str) -> Token {
 /// `-`). Leading **bool** shorts (`-h`/`-V`) are stepped over; the first **value**
 /// short terminates the cluster and takes the remainder as its attached value
 /// (`-hcKEY=V` ⇒ `--config KEY=V`). A cluster of only bool shorts is a
-/// `BoolCluster`; an unknown character anywhere (head or after a known short) is
-/// not a known flag and fails closed (A7 allowlist).
+/// `BoolCluster`; an unknown character anywhere (head or after a known short) makes
+/// the whole cluster `Unknown`.
 fn classify_short_cluster(shorts: &str) -> Token {
     for (offset, letter) in shorts.char_indices() {
         match known_short(letter) {
@@ -2277,7 +1668,7 @@ fn classify_short_cluster(shorts: &str) -> Token {
                 };
                 return Token::Flag { flag, attached };
             }
-            None => return Token::Unclassifiable,
+            None => return Token::Unknown,
         }
     }
     // Every character was a recognised bool short.
@@ -2286,45 +1677,50 @@ fn classify_short_cluster(shorts: &str) -> Token {
 
 /// Validate a `codex` argv against the reserved grammar.
 ///
-/// `Ok(())` means every token is either a CodeConnect-neutral flag, a user flag,
-/// a prompt, or content past the `--` boundary — all forwarded to codex verbatim.
-/// `Err` names the first refused token.
+/// `Ok(())` means every token is a codex flag, a prompt, or content past the `--`
+/// boundary — all forwarded to codex (`--cd` as the session folder). `Err` names the
+/// first refused token.
 ///
 /// Subcommand detection matches how codex actually dispatches (probed on 0.147):
 /// a subcommand token is recognised in **any** positional slot, not just the
 /// first — `codex please resume` dispatches Resume with `please` as the prompt,
-/// and `codex --psp resume` dispatches Resume through a (known) hidden global
-/// flag. Unknown flags never reach this stage: they are refused up front by the
-/// allowlist, so they can neither ride through nor smuggle a subcommand.
+/// and `codex --search resume` dispatches Resume behind a flag. An unknown flag takes
+/// no value here, so the word after it is a positional and is judged as one. The one
+/// exception is `resume` or `fork` as the first positional, which is hosted
+/// ([`HOSTED_SUBCOMMANDS`]); every word after it is a session id or a prompt.
 ///
 /// **This is the crate's single source of truth for the grammar.** It has two
 /// callers: [`start`] (the user's `codeconnect codex` argv) and
 /// [`crate::codex_host::parse_host_args`] (the passthrough the coordinator hands
 /// the wrapper's TUI). The host deliberately reuses it rather than restating it —
 /// it does not trust its caller, and a second copy of the grammar could drift on
-/// which flags CodeConnect owns.
+/// which flags keep the TUI the broker's client.
 pub fn validate_codex_argv(args: &[String]) -> Result<(), CodexRefusal> {
     scan_codex_argv(args).map(|_| ())
 }
 
 /// What one walk of a codex argv established.
 struct ArgvScan {
-    /// The argv to exec: every value-taking flag rewritten into attached form, and a
-    /// `--` in front of the positionals. See [`fence_positionals`].
+    /// The argv to exec: a hosted subcommand ([`HOSTED_SUBCOMMANDS`]) if one was given,
+    /// then every flag, value-taking ones rewritten into attached form, then `--`, then
+    /// the positionals — and no `--cd`. See [`fence_positionals`].
     normalized: Vec<String>,
+    /// Every `--cd` value, in order; a `--cd` with no value is an empty string. See
+    /// [`session_folder`].
+    cd: Vec<String>,
 }
 
-/// **Insert `--` before the first positional, so a bare token can never dispatch.**
+/// **Put every flag first and `--` in front of the positionals, so a bare token can
+/// never dispatch.**
 ///
 /// # Why the refusal table cannot be the safety property
 ///
 /// `is_subcommand` is a closed list, and MEASURED: no enumeration codex emits carries
 /// its hidden aliases — `cloud-tasks` dispatches on both binaries and appears in neither
-/// `--help` nor any of the five completion shells. So a *future* hidden alias would be in
-/// neither the vendored argv reference (the launch gate cannot see it) nor the refusal
-/// table (nobody knew to add it), would be classified as prompt text, and codex would
-/// dispatch it. That is the original escape class, and no amount of list-keeping closes
-/// it, because the thing that would have to be enumerated cannot be.
+/// `--help` nor any of the five completion shells. So a *future* hidden alias would not be
+/// in the refusal table (nobody knew to add it), would be classified as prompt text, and
+/// codex would dispatch it. That is the original escape class, and no amount of
+/// list-keeping closes it, because the thing that would have to be enumerated cannot be.
 ///
 /// `--` closes it structurally, and every claim here is measured on BOTH binaries:
 ///
@@ -2340,26 +1736,35 @@ struct ArgvScan {
 /// Both outcomes after the boundary are safe: one positional becomes the prompt, and a
 /// second is a hard parse error. Neither dispatches.
 ///
-/// # Why before the FIRST positional rather than before everything
+/// # Why every flag moves in front of the fence
 ///
-/// `--` terminates option parsing too, so putting it in front of the whole passthrough
-/// would turn the user's own `-m gpt-5` into positionals and break the launch. Inserting
-/// it at the first positional preserves flag semantics and argument order exactly.
+/// `--` terminates option parsing too, so a flag written after the prompt (`hi
+/// --search`, which native codex accepts) would become prompt text behind it — 0.155.1
+/// answers `unrecognized subcommand '--search'`. codex's parser does not care where a
+/// flag sits relative to the positionals, so the flags are emitted first, in their own
+/// relative order, then `--`, then the positionals in theirs.
+///
+/// # Why an unknown flag takes no value
+///
+/// A flag missing from the known table is forwarded unchanged, so a new codex flag
+/// works the day it ships. Its arity is unknown, so it never takes the next word: that
+/// word stays a positional behind the fence. A value flag written with a space then
+/// gets codex's own "a value is required" error (codex's parser treats `--` as the end
+/// of options, never as an option's value); written with `=` it works.
 ///
 /// # Why every value-taking flag is REWRITTEN into attached form
 ///
 /// Because otherwise the fence would rest on this walk's arity model agreeing with clap's,
-/// and nothing gates that. The guarded-surface gate compares flag SPELLINGS and subcommand
-/// names; it says nothing about how many values a flag consumes. So a future codex that
-/// kept the same root token set but changed `-i` from greedy to single-value would pass
-/// the gate, and this walk — still sweeping greedily — would consume `features` in
+/// and nothing checks that. So a future codex that kept the same flag spellings but changed
+/// `-i` from greedy to single-value would be launched, and this walk — still sweeping
+/// greedily — would consume `features` in
 /// `-i a.png features` as an image, see no positional, insert no fence, and hand codex a
 /// bare token it now dispatches.
 ///
 /// The rewrite removes the dependency instead of trying to track it. Every flag in the
 /// emitted argv is either a bool or carries its value **attached to the flag token**, so
 /// no bare token is any flag's value under ANY arity model — which makes every remaining
-/// bare token a positional, and the first of them is fenced. This walk's arity model is
+/// bare token a positional, and all of them are fenced. This walk's arity model is
 /// then only a UX classifier: get it wrong and codex reports a missing or surplus value,
 /// which is legible and fail-closed. It can no longer expose a positional.
 ///
@@ -2371,35 +1776,39 @@ struct ArgvScan {
 /// `turn/start.params.input` — two `localImage` items, same paths, same order.
 ///
 /// The refusal table stays, and is now the *legibility* layer rather than the safety one:
-/// `codeconnect codex resume` still says exactly why it was refused instead of silently
+/// `codeconnect codex exec` still says exactly why it was refused instead of silently
 /// becoming a prompt.
+///
+/// `resume` or `fork` as the first positional is the one bare token kept in front of the
+/// fence: it leads the emitted argv ([`HOSTED_SUBCOMMANDS`]).
 pub fn fence_positionals(args: &[String]) -> Result<Vec<String>, CodexRefusal> {
     Ok(scan_codex_argv(args)?.normalized)
 }
 
 fn scan_codex_argv(args: &[String]) -> Result<ArgvScan, CodexRefusal> {
     let mut i = 0;
-    let mut normalized: Vec<String> = Vec::with_capacity(args.len() + 1);
-    // Set once, when the first positional is emitted: `--` goes in front of it and every
-    // later token rides behind that boundary.
-    let mut fenced = false;
+    let mut flags: Vec<String> = Vec::with_capacity(args.len());
+    let mut positionals: Vec<String> = Vec::new();
+    let mut cd = Vec::new();
+    let mut subcommand = None;
+    let mut boundary = false;
 
     while i < args.len() {
         match classify(&args[i]) {
             // Everything after `--` is prompt content: forwarded verbatim, never
             // interpreted as a flag or a subcommand.
             Token::Boundary => {
-                normalized.extend_from_slice(&args[i..]);
-                return Ok(ArgvScan { normalized });
+                boundary = true;
+                positionals.extend_from_slice(&args[i + 1..]);
+                break;
             }
 
             Token::Flag { flag, attached } => match flag.arity {
                 Arity::Bool => {
-                    refuse_bool(flag.canonical)?;
                     // A bool consumes no value, so its spelling cannot swallow anything;
                     // it is emitted canonically for uniformity, with any (rejectable)
                     // attached tail preserved so codex still sees what was written.
-                    normalized.push(match attached {
+                    flags.push(match attached {
                         Some(value) => format!("{}={value}", flag.canonical),
                         None => flag.canonical.to_string(),
                     });
@@ -2430,8 +1839,13 @@ fn scan_codex_argv(args: &[String]) -> Result<ArgvScan, CodexRefusal> {
                             }
                         },
                     };
-                    refuse_value_flag(flag.canonical, value.as_deref())?;
-                    normalized.push(match &value {
+                    refuse_owned_flag(flag.canonical)?;
+                    // The session folder, not a TUI argument: see [`session_folder`].
+                    if flag.canonical == "--cd" {
+                        cd.push(value.unwrap_or_default());
+                        continue;
+                    }
+                    flags.push(match &value {
                         Some(value) => format!("{}={value}", flag.canonical),
                         // No value to attach — codex will report the missing one, which
                         // is the same answer it would have given the spaced form.
@@ -2450,48 +1864,112 @@ fn scan_codex_argv(args: &[String]) -> Result<ArgvScan, CodexRefusal> {
                     // becomes its own attached occurrence.
                     i += 1;
                     match attached {
-                        Some(value) => normalized.push(format!("{}={value}", flag.canonical)),
+                        Some(value) => flags.push(format!("{}={value}", flag.canonical)),
                         None => {
+                            let before = flags.len();
                             while i < args.len() && !looks_like_flag(&args[i]) {
-                                normalized.push(format!("{}={}", flag.canonical, args[i]));
+                                flags.push(format!("{}={}", flag.canonical, args[i]));
                                 i += 1;
+                            }
+                            // Nothing swept: forwarded bare, as a value flag is, for
+                            // codex to report the missing value.
+                            if flags.len() == before {
+                                flags.push(flag.canonical.to_string());
                             }
                         }
                     }
                 }
             },
 
-            // A cluster of only bool short-flags (`-hV`): consumes no value, so it is
-            // forwarded as-is.
-            Token::BoolCluster => {
-                normalized.push(args[i].clone());
+            // A cluster of only bool short-flags (`-hV`), or a flag this walk does not
+            // know: forwarded as written, consuming no value.
+            Token::BoolCluster | Token::Unknown => {
+                flags.push(args[i].clone());
                 i += 1;
             }
 
-            // A7 allowlist fail-closed: a flag-shaped token not on the known
-            // list, or a cluster we could not fully expand.
-            Token::Unclassifiable => {
-                return Err(CodexRefusal::Unclassifiable {
-                    detail: args[i].clone(),
-                })
-            }
-
             Token::Positional => {
-                if is_subcommand(&args[i]) {
+                let token = &args[i];
+                if subcommand.is_none()
+                    && positionals.is_empty()
+                    && HOSTED_SUBCOMMANDS.contains(&token.as_str())
+                {
+                    subcommand = Some(token.clone());
+                } else if subcommand.is_none() && is_subcommand(token) {
                     return Err(CodexRefusal::Subcommand {
-                        name: args[i].clone(),
+                        name: token.clone(),
                     });
+                } else {
+                    positionals.push(token.clone());
                 }
-                if !fenced {
-                    normalized.push("--".to_string());
-                    fenced = true;
-                }
-                normalized.push(args[i].clone());
                 i += 1;
             }
         }
     }
-    Ok(ArgvScan { normalized })
+
+    let mut normalized: Vec<String> = subcommand.into_iter().collect();
+    normalized.extend(flags);
+    if boundary || !positionals.is_empty() {
+        normalized.push("--".to_string());
+        normalized.extend(positionals);
+    }
+    Ok(ArgvScan { normalized, cd })
+}
+
+/// Whether an argv asks codex for its help or version text, before `--`: a flag that
+/// is `--help` or `--version`, a short cluster that reaches `h` or `V` before its first
+/// value short or unknown letter (codex acts on a cluster's letters in order), or a
+/// first positional `help` (`codex help`, `codex help resume`).
+///
+/// Judged on the raw argv, ahead of the grammar, so no refusal can stand in front of
+/// it. A spaced value is never flag-shaped (see [`scan_codex_argv`]), so every
+/// flag-shaped token is a flag; a known flag's spaced value is stepped over so it is
+/// never taken for the first positional.
+fn asks_help_or_version(args: &[String]) -> bool {
+    let mut i = 0;
+    let mut positional_seen = false;
+    while i < args.len() && args[i] != "--" {
+        let token = &args[i];
+        i += 1;
+        if looks_like_flag(token) && flag_asks_help_or_version(token) {
+            return true;
+        }
+        match classify(token) {
+            Token::Positional => {
+                if !positional_seen && token == "help" {
+                    return true;
+                }
+                positional_seen = true;
+            }
+            Token::Flag {
+                flag,
+                attached: None,
+            } if flag.arity != Arity::Bool => {
+                while i < args.len() && !looks_like_flag(&args[i]) {
+                    i += 1;
+                    if flag.arity == Arity::Value {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn flag_asks_help_or_version(token: &str) -> bool {
+    if let Some(long) = token.strip_prefix("--") {
+        let name = long.split_once('=').map_or(long, |(name, _)| name);
+        return matches!(name, "help" | "version");
+    }
+    token.strip_prefix('-').is_some_and(|shorts| {
+        shorts
+            .chars()
+            .map_while(known_short)
+            .take_while(|flag| flag.arity == Arity::Bool)
+            .any(|flag| matches!(flag.canonical, "--help" | "--version"))
+    })
 }
 
 /// Whether a token would begin a flag to codex (used to bound greedy `--image`).
@@ -2500,421 +1978,100 @@ fn looks_like_flag(token: &str) -> bool {
     token.starts_with('-') && token != "-"
 }
 
-/// Refuse an owned bool flag; forward the rest.
-fn refuse_bool(canonical: &str) -> Result<(), CodexRefusal> {
-    match canonical {
-        "--approve-for-me"
-        | "--not-so-yolo"
-        | "--full-auto"
-        | "--dangerously-bypass-approvals-and-sandbox"
-        | "--yolo"
-        | "--dangerously-bypass-hook-trust" => Err(CodexRefusal::ApprovalControl {
-            flag: canonical.to_string(),
-        }),
-        _ => Ok(()),
-    }
+/// Codex, run with the caller's own arguments, in the caller's terminal.
+///
+/// What `codeconnect codex --help` (or `--version`, `-h`, `-V`, in any cluster) becomes:
+/// the answer is codex's, so it is codex that is run, exactly as the caller would have
+/// run it, inheriting stdio and handing back its exit status. The path is the codex a
+/// launch would choose ([`first_codex`]); the launch's hash and freeze protect a
+/// session this process hosts, and nothing is hosted here, so they are not paid.
+fn codex_itself(codex: &Path, args: &[String]) -> Command {
+    let mut command = Command::new(codex);
+    command.args(args);
+    command
 }
 
-/// Refuse an owned value flag, or inspect a `-c`/`--enable`/`--disable` key;
-/// forward the rest.
-fn refuse_value_flag(canonical: &str, value: Option<&str>) -> Result<(), CodexRefusal> {
+/// The codex a launch would choose, for help and version: the first candidate that
+/// is a native executable and not this binary, in the launch's own order
+/// ([`codex_candidates`], as [`resolve_codex_bin`] walks it), judged by its magic number
+/// alone — no hash, no freeze. When no candidate is native, the first existing one, so
+/// a machine with only a script shim still gets codex's help.
+fn first_codex(candidates: Vec<PathBuf>) -> Result<PathBuf> {
+    let current = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok());
+    let existing: Vec<PathBuf> = candidates
+        .into_iter()
+        .filter(|candidate| candidate.is_file())
+        .filter_map(|candidate| candidate.canonicalize().ok())
+        .filter(|canonical| Some(canonical) != current.as_ref())
+        .collect();
+    let native = existing.iter().find(|path| starts_with_native_magic(path));
+    native.or(existing.first()).cloned().ok_or_else(|| {
+        anyhow!("could not find the codex binary; set codex_bin in ~/.codeconnect/config.json")
+    })
+}
+
+/// Whether the file's first four bytes are a Mach-O magic number ([`is_native_magic`]).
+fn starts_with_native_magic(path: &Path) -> bool {
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut magic))
+        .is_ok_and(|()| is_native_magic(magic))
+}
+
+/// [`codex_candidates`] for this process: config, `CODECONNECT_CODEX_BIN`, the
+/// well-known paths and `PATH`.
+fn codex_candidates_for(config: &Config) -> Vec<PathBuf> {
+    codex_candidates(
+        config,
+        std::env::var_os(CODEX_BIN_ENV).map(PathBuf::from),
+        &protocol::home_dir(),
+        protocol::tmux::search_path("codex"),
+    )
+}
+
+/// Refuse the two flags that would take the TUI off the broker; forward the rest.
+fn refuse_owned_flag(canonical: &str) -> Result<(), CodexRefusal> {
     match canonical {
         "--remote" | "--remote-auth-token-env" => Err(CodexRefusal::OwnedFlag {
             flag: canonical.to_string(),
             owner: "the app-server transport",
         }),
-        "--cd" => Err(CodexRefusal::OwnedFlag {
-            flag: canonical.to_string(),
-            owner: "the session working directory",
-        }),
-        // A10: the sandbox dimension. CodeConnect names the launch's sandbox in
-        // the fingerprint it records and the broker enforces, so a passthrough
-        // that moves that dimension is an ownership escape — the TUI would run
-        // under a sandbox the fingerprint does not describe. `--add-dir` is the
-        // same dimension by another name: on 0.147 it is "additional directories
-        // that should be writable alongside the primary workspace", i.e. a
-        // widening of the sandbox's writable roots.
-        //
-        // One arm covers every spelling: `-s` is canonicalised to `--sandbox` by
-        // [`known_short`] before it reaches here, so the spaced, `=`-joined,
-        // attached (`-sread-only`) and clustered (`-hs read-only`) forms all
-        // arrive as this canonical name.
-        "--sandbox" => Err(CodexRefusal::OwnedFlag {
-            flag: canonical.to_string(),
-            owner: "the session sandbox policy",
-        }),
-        "--add-dir" => Err(CodexRefusal::OwnedFlag {
-            flag: canonical.to_string(),
-            owner: "the session sandbox policy's writable roots",
-        }),
-        "--profile" => Err(CodexRefusal::Profile {
-            flag: canonical.to_string(),
-        }),
-        "--ask-for-approval" => Err(CodexRefusal::ApprovalControl {
-            flag: canonical.to_string(),
-        }),
-        "--config" => {
-            if let Some(value) = value {
-                match config_override_verdict(value) {
-                    ConfigVerdict::Owned(key) => {
-                        return Err(CodexRefusal::OwnedConfigKey {
-                            key,
-                            via: canonical.to_string(),
-                        })
-                    }
-                    ConfigVerdict::Unclassifiable(detail) => {
-                        return Err(CodexRefusal::Unclassifiable { detail })
-                    }
-                    ConfigVerdict::Benign => {}
-                }
-            }
-            Ok(())
-        }
-        "--enable" | "--disable" => {
-            if let Some(feature) = value {
-                match feature_verdict(feature) {
-                    FeatureVerdict::Owned => {
-                        // `feature` is a bare identifier here (Owned implies it).
-                        return Err(CodexRefusal::OwnedConfigKey {
-                            key: feature.to_string(),
-                            via: canonical.to_string(),
-                        });
-                    }
-                    FeatureVerdict::Unclassifiable => {
-                        return Err(CodexRefusal::Unclassifiable {
-                            detail: format!("{canonical} {feature}"),
-                        })
-                    }
-                    FeatureVerdict::Benign => {}
-                }
-            }
-            Ok(())
-        }
         _ => Ok(()),
     }
 }
 
-/// The verdict on a `-c`/`--config` override.
-enum ConfigVerdict {
-    /// Reaches an owned setting; carries the offending key path for the message.
-    Owned(String),
-    /// Could not be parsed with confidence (an undecodable key, or a structured
-    /// value we cannot realise): refuse per A7 rather than forward.
-    Unclassifiable(String),
-    /// Forward.
-    Benign,
-}
-
-/// Judge a `-c`/`--config` override.
+/// The directory the session runs in: the caller's `--cd`, resolved against the
+/// directory `codeconnect codex` was run from, or that directory itself.
 ///
-/// Parsed the way codex parses it (`config_override.rs`, against the **same**
-/// embedded `toml` grammar — TOML 1.1): the raw is split on the first `=` into a
-/// key-path and a value. The **key** is decoded with real TOML key semantics
-/// (bare/quoted/dotted keys), not a naive `.` split — so `apps."team.prod".x`
-/// decodes to three segments and `"approval_policy"` decodes to the owned key —
-/// and a key whose quoting we cannot decode fails closed. Ownership is judged
-/// **by full key path**, not by a matching key name: a path is refused only when
-/// it reaches an actual owned setting
-/// (`apps.<id>.tools.<tool>.approval_mode`, `mcp_servers.<id>.default_tools_approval_mode`,
-/// `features.hooks`, …), so an owned-*named* key that is arbitrary data in an
-/// unowned container — `mcp_servers.<id>.env.approval_mode`, a server named
-/// `hooks` — forwards. The **value** is realised as TOML: a structured literal
-/// (`{…}`/`[…]`) that does not parse fails closed (codex, on the same grammar,
-/// might realise and apply it); a scalar that does not parse is codex's own
-/// string-literal fallback, harmless.
-fn config_override_verdict(raw: &str) -> ConfigVerdict {
-    let (key_part, value_part) = match raw.split_once('=') {
-        Some((key, value)) => (key, Some(value)),
-        None => (raw, None),
+/// Native `codex --cd <dir>` makes `<dir>` the agent's working root. Here the
+/// session's pane starts in it, so the app-server and the TUI both run there and the
+/// session is registered under it. The TUI is handed no `--cd` of its own
+/// ([`fence_positionals`] leaves it out): a relative one would be read against the
+/// folder rather than against the caller's directory.
+///
+/// Refused before anything is created: a `--cd` with no directory, more than one
+/// `--cd`, and a path that is not a directory.
+fn session_folder(cd: &[String], caller_cwd: &Path) -> Result<PathBuf> {
+    let dir = match cd {
+        [] => return Ok(caller_cwd.to_path_buf()),
+        [dir] if !dir.is_empty() => dir,
+        [_] => bail!("`--cd` needs a directory"),
+        _ => bail!("`--cd` was given more than once"),
     };
-
-    let mut path = match decode_toml_key_path(key_part) {
-        Some(path) => path,
-        // A7: a key whose TOML quoting/escaping we cannot decode is refused.
-        None => return ConfigVerdict::Unclassifiable(key_part.trim().to_string()),
-    };
-
-    // The value is judged on the RAW, untrimmed argument: trimming here would
-    // erase an edge CR/LF before the injection check that depends on it.
-    let value = match value_part {
-        None => None,
-        Some(value) => match parse_toml_value(value) {
-            ValueParse::Value(realised) => Some(realised),
-            // A second assignment / table header injected past the value: codex,
-            // on the same grammar, might realise and apply it. Fail closed.
-            ValueParse::Injected => return ConfigVerdict::Unclassifiable(raw.trim().to_string()),
-            // A structured literal we could not parse: fail closed for the same
-            // reason. (Trim only to recognise the `{`/`[` shape — a broadening,
-            // never-weakening use of trim.)
-            ValueParse::StringLiteral if is_structured_literal(value.trim()) => {
-                return ConfigVerdict::Unclassifiable(raw.trim().to_string())
-            }
-            // A scalar codex would treat as a string literal: no nested keys.
-            ValueParse::StringLiteral => None,
-        },
-    };
-
-    match owned_in_subtree(&mut path, value.as_ref()) {
-        Some(owned) => ConfigVerdict::Owned(owned),
-        None => ConfigVerdict::Benign,
+    let folder = caller_cwd.join(dir);
+    match std::fs::metadata(&folder) {
+        Ok(meta) if meta.is_dir() => Ok(folder),
+        Ok(_) => bail!("`--cd {dir}`: {} is not a directory", folder.display()),
+        Err(err) => bail!("`--cd {dir}`: {}: {err}", folder.display()),
     }
-}
-
-/// The outcome of realising a `-c` value as TOML.
-enum ValueParse {
-    /// A single clean TOML value (scalar, inline table, array).
-    Value(toml::Value),
-    /// Did not parse as TOML — codex's string-literal fallback (no nested keys).
-    StringLiteral,
-    /// A multi-line value that is not a single TOML value: a second assignment
-    /// or table header injected past the value (`1\napproval_policy="never"`).
-    /// Fail closed.
-    Injected,
-}
-
-/// Realise a `-c` value as TOML — **directly**, not through a wrapper, so there
-/// is no sentinel a caller could collide with. `toml::Value` parses a lone value
-/// (scalar, inline table incl. multi-line/1.1, array); trailing content after the
-/// value is a parse error. A parse failure is codex's string-literal fallback —
-/// **except** when the raw value contains a CR/LF: a scalar never spans lines, so
-/// a multi-line parse failure is a `key = value` (or table-header) injection and
-/// fails closed.
-///
-/// The injection check reads the **raw** value for a CR/LF; the parse itself is
-/// fed the trimmed value only because `toml::Value` rejects surrounding
-/// whitespace, and trimming for the parse can only *broaden* what is recognised
-/// as structured (a padded `{…}` still walks / fails closed), never hide a
-/// newline from the raw check.
-fn parse_toml_value(value: &str) -> ValueParse {
-    match value.trim().parse::<toml::Value>() {
-        Ok(realised) => ValueParse::Value(realised),
-        Err(_) if value.contains(['\n', '\r']) => ValueParse::Injected,
-        Err(_) => ValueParse::StringLiteral,
-    }
-}
-
-/// Whether a `-c` value is clearly meant as a structured TOML literal.
-fn is_structured_literal(value: &str) -> bool {
-    value.starts_with('{') || value.starts_with('[')
-}
-
-/// Decode a `-c` key into its path segments using **TOML key grammar** — the key
-/// is parsed strictly as the left-hand side of a single TOML assignment, so bare
-/// keys, quoted keys (`"team.prod"` is one segment, `"prod[#1]"` too), dotted keys
-/// and escapes are decoded correctly. Returns `None`, the A7 fail-closed signal,
-/// when the key does not parse as one lone key chain (unbalanced quote, empty
-/// key, an unquoted `[table header]`, stray whitespace).
-fn decode_toml_key_path(key: &str) -> Option<Vec<String>> {
-    // The one unconditional reject: a raw CR/LF, which no single key expression
-    // contains and which is how a table-header / second-assignment injection is
-    // introduced. `[`/`]`/`#` are legal **inside** a quoted key segment, so they
-    // are not blanket-rejected — an unquoted table header still fails the parse
-    // below and fails closed there.
-    if key.contains(['\n', '\r']) {
-        return None;
-    }
-    // Assign a distinctive synthetic sentinel value. A genuine single-key
-    // assignment resolves to exactly this at the end of the chain; a
-    // table/array-header-shaped key (`[[benign]] #`) resolves to a table or array
-    // (and may comment out the `= …`), so its terminal is not the sentinel.
-    const SENTINEL: i64 = 0;
-    let document = format!("{key} = {SENTINEL}");
-    let table: toml::Table = document.parse().ok()?;
-    let mut path = Vec::new();
-    let mut current = toml::Value::Table(table);
-    // A single override key produces one chain of single-entry tables.
-    while let toml::Value::Table(mut table) = current {
-        if table.len() != 1 {
-            return None;
-        }
-        let key = table.keys().next()?.clone();
-        let value = table.remove(&key)?;
-        path.push(key);
-        current = value;
-    }
-    // The terminal MUST be exactly the synthetic sentinel we assigned — proof
-    // that the key resolved to a plain `key = value` leaf, not to a table/array
-    // structure the key itself introduced.
-    if current != toml::Value::Integer(SENTINEL) {
-        return None;
-    }
-    (!path.is_empty()).then_some(path)
-}
-
-/// Walk the config subtree rooted at `path` (extending it with the realised
-/// value's keys), returning the first full path that reaches an owned setting.
-fn owned_in_subtree(path: &mut Vec<String>, value: Option<&toml::Value>) -> Option<String> {
-    if path_is_owned(path) {
-        return Some(path.join("."));
-    }
-    match value {
-        Some(toml::Value::Table(table)) => {
-            for (key, nested) in table {
-                path.push(key.clone());
-                let found = owned_in_subtree(path, Some(nested));
-                path.pop();
-                if found.is_some() {
-                    return found;
-                }
-            }
-            None
-        }
-        // An array introduces no named segment; walk its elements at the same
-        // path so a table nested in one is still reached.
-        Some(toml::Value::Array(items)) => items
-            .iter()
-            .find_map(|item| owned_in_subtree(path, Some(item))),
-        _ => None,
-    }
-}
-
-/// Whether a full config key path reaches a setting CodeConnect owns.
-///
-/// The owned surfaces, grounded against the codex 0.147 binary (each field name
-/// and its `<id>`/`<tool>` nesting confirmed by feeding invalid values and
-/// reading which key codex names in the validation error):
-///   * the top-level approval controls, as tables/scalars — `approval_policy`
-///     (including its `granular.*` table), `approvals_reviewer`, `hooks`, `notify`
-///     — owned at and below their root;
-///   * the top-level **sandbox** controls (A10) — `sandbox`, `sandbox_mode`,
-///     `sandbox_policy`, `sandbox_workspace_write`, `sandbox_permissions` — owned
-///     at and below their root, for the same reason `-s`/`--sandbox` is refused:
-///     CodeConnect names the sandbox in the launch fingerprint, so a `-c` that
-///     moves it is the same ownership escape wearing a config key. Probed on
-///     0.147: `sandbox_workspace_write.writable_roots` and
-///     `.network_access` are real typed settings (feeding an integer names the
-///     key in codex's own validation error) and `sandbox_mode` is a real string
-///     enum; `sandbox`, `sandbox_policy` and `sandbox_permissions` are the
-///     spellings codex's own `-c` help example and the broker's sandbox
-///     fingerprint dimension use. `sandbox_permissions` is owned **deliberately**:
-///     an earlier revision forwarded `sandbox_permissions=["disk-full-read-access"]`
-///     as benign, but a read-scope widening is a mutation of the very dimension
-///     CodeConnect claims, so it belongs on this axis and is now refused.
-///     Refusal needs no knowledge of what a key expands to — that a token reaches
-///     an owned root is the whole test — so an unenforced or renamed spelling
-///     costs an over-refusal (acceptable under A7), never an escape;
-///   * the top-level **permission-profile** controls — `permissions` and
-///     `default_permissions` — owned at and below their root. These are a SECOND,
-///     independent sandbox channel, not a spelling of the
-///     first, and the list above missed them. Probed on the installed 0.147 with
-///     the same invalid-value technique: `-c permissions=5` ⇒ "invalid type:
-///     integer `5`, expected struct PermissionsToml in `permissions`";
-///     `-c 'permissions={wide=5}'` ⇒ "expected struct PermissionProfileToml";
-///     `-c 'permissions={wide={filesystem=5}}'` ⇒ "expected struct
-///     FilesystemPermissionsToml"; `-c default_permissions=5` ⇒ "invalid type:
-///     integer `5`, expected a string in `default_permissions`". They are live and
-///     COUPLED, which is what makes them a profile system rather than two stray
-///     keys: `-c 'default_permissions="x"'` alone ⇒ "default_permissions requires a
-///     `[permissions]` table", and a `[permissions]` table alone ⇒ "config defines
-///     `[permissions]` profiles but does not set `default_permissions`". And the
-///     pair together is ACCEPTED and activated:
-///     `-c 'permissions={wide={filesystem={"/"="write"}}}' -c 'default_permissions="wide"'`
-///     runs. A forwarded `-c` carrying them therefore hands the pane a filesystem
-///     write scope CodeConnect never named in its launch fingerprint — the same
-///     ownership escape as `-s`/`--sandbox`, wearing a different config key;
-///   * `features.hooks` (and below) and `features.codex_hooks` — hook enablement;
-///   * `features.request_permissions_tool` — the one feature the launch pins off,
-///     because the request it turns on can only be answered at the terminal. Owned
-///     in BOTH directions on purpose: the launch already pins the value, so this
-///     refusal buys legibility rather than safety — a caller who asks for the tool
-///     is told why they cannot have it instead of watching the pin quietly win.
-///     See [`PINNED_OFF_FEATURE`];
-///   * `auto_review.policy` — selecting the automatic reviewer;
-///   * per-app: `apps.<id>.default_tools_approval_mode`,
-///     `apps.<id>.approvals_reviewer`, `apps.<id>.tools.<tool>.approval_mode`;
-///   * per-MCP-server: `mcp_servers.<id>.default_tools_approval_mode`,
-///     `mcp_servers.<id>.tools.<tool>.approval_mode`.
-///
-/// Case-sensitive, since codex's TOML keys are.
-fn path_is_owned(path: &[String]) -> bool {
-    let seg = |i: usize| path.get(i).map(String::as_str);
-
-    // Top-level controls: owned at their root and anywhere beneath it.
-    if matches!(
-        seg(0),
-        Some("approval_policy")
-            | Some("approvals_reviewer")
-            | Some("hooks")
-            | Some("notify")
-            | Some("sandbox")
-            | Some("sandbox_mode")
-            | Some("sandbox_policy")
-            | Some("sandbox_workspace_write")
-            | Some("sandbox_permissions")
-            | Some("permissions")
-            | Some("default_permissions")
-    ) {
-        return true;
-    }
-
-    match seg(0) {
-        Some("features") => {
-            matches!(seg(1), Some("hooks") | Some("codex_hooks"))
-                || seg(1) == Some(PINNED_OFF_FEATURE)
-        }
-        Some("auto_review") => seg(1) == Some("policy"),
-        Some("apps") if path.len() >= 3 => match (seg(2), path.len()) {
-            (Some("default_tools_approval_mode"), 3) => true,
-            (Some("approvals_reviewer"), 3) => true,
-            (Some("tools"), 5) => seg(4) == Some("approval_mode"),
-            _ => false,
-        },
-        Some("mcp_servers") if path.len() >= 3 => match (seg(2), path.len()) {
-            (Some("default_tools_approval_mode"), 3) => true,
-            (Some("tools"), 5) => seg(4) == Some("approval_mode"),
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-/// The verdict on an `--enable`/`--disable <FEATURE>` name.
-enum FeatureVerdict {
-    /// A feature CodeConnect owns: either half of hook enablement, or the one
-    /// feature the launch pins off ([`PINNED_OFF_FEATURE`]).
-    Owned,
-    /// Not a plain bare feature identifier — quotes, dots, escapes, whitespace,
-    /// or anything a bare name never has. Refuse (A7): codex takes only bare
-    /// feature identifiers (probed: `--enable '"hooks"'` ⇒ "Unknown feature flag"),
-    /// so a non-bare value cannot be a real feature, and we do not try to decode
-    /// what codex would reject.
-    Unclassifiable,
-    /// A benign bare feature name; forward.
-    Benign,
-}
-
-/// Judge an `--enable`/`--disable` feature name.
-///
-/// codex feature names are bare identifiers (probed on 0.147: `--enable hooks`,
-/// `--enable web_search` are accepted bare; `--enable '"hooks"'` is rejected as an
-/// unknown flag — the quotes are literal, not decoded). So the allowlist is: a
-/// plain bare identifier (`[A-Za-z0-9_-]+`); anything else fails closed; the
-/// bare owned features — both halves of hook enablement and the one the launch
-/// pins off — are refused. `--enable X` and `--disable X` are codex's own
-/// spellings of `-c features.X=true|false`, so they are judged on the same axis
-/// as the `-c` and refused in both directions: what is owned is the setting, not
-/// a direction to move it in.
-fn feature_verdict(feature: &str) -> FeatureVerdict {
-    // Validate the RAW, untrimmed value: any leading/trailing/embedded whitespace
-    // or newline means it is not a bare identifier, so it fails closed — never
-    // trim before this decision.
-    let is_bare = !feature.is_empty()
-        && feature
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    if !is_bare {
-        return FeatureVerdict::Unclassifiable;
-    }
-    if matches!(feature, "hooks" | "codex_hooks") || feature == PINNED_OFF_FEATURE {
-        return FeatureVerdict::Owned;
-    }
-    FeatureVerdict::Benign
 }
 
 /// Whether a bare positional token is a codex subcommand name or alias.
 ///
 /// The **union** of the top-level command sets of every codex build CodeConnect has
-/// been grounded against, enumerated from clap's own completion output — including the
+/// been measured against, enumerated from clap's own completion output — including the
 /// **hidden** commands (`execpolicy`, `responses-api-proxy`, `stdio-to-uds`), the
 /// visible aliases (`e` for `exec`, `a` for `apply`) and the hidden alias
 /// (`cloud-tasks` for `cloud`, which completion does not emit). Matching a positional
@@ -2932,15 +2089,9 @@ fn feature_verdict(feature: &str) -> FeatureVerdict {
 /// exists to prevent. Removing a token as codex retires it would re-open exactly that
 /// hole for anyone still on the older build, so tokens are only ever added.
 ///
-/// Keeping this in step with reality is not left to diligence: the launch gate
-/// ([`ensure_guarded_surface`]) refuses any codex whose root command set has moved away
-/// from a vendored reference, and `every_dispatchable_root_token_is_accounted_for` proves
-/// both directions of the tie — every referenced subcommand is refused here, and every
-/// token refused here is either in a reference or on the measured hidden-alias list.
-/// The table itself, as data rather than a `matches!` arm, so
-/// [`every_dispatchable_root_token_is_accounted_for`] can walk it in both directions.
-/// A table that can only be *queried* can hold a token no reference knows about and
-/// nothing would notice.
+/// This table is the legibility layer, not the safety one: a subcommand it does not know
+/// still cannot dispatch, because [`fence_positionals`] puts `--` in front of the first
+/// positional.
 const ROOT_SUBCOMMANDS: [&str; 34] = [
     // --- 0.153 additions. See this function's doc: each was measured dispatching
     // on a real 0.153 binary while `validate_codex_argv` waved it through.
@@ -2984,9 +2135,57 @@ fn is_subcommand(token: &str) -> bool {
     ROOT_SUBCOMMANDS.contains(&token)
 }
 
+/// The subcommands hosted like a new session, when they are the first positional before
+/// `--`: each opens the same interactive TUI on an existing thread, and both accept
+/// `--remote` (measured on 0.153.4 and 0.155.1). Neither has subcommands of its own, so
+/// every positional after it is a session id or a prompt, fenced like any other. The
+/// emitted argv leads with the subcommand, and the host puts it in front of `--remote`.
+pub(crate) const HOSTED_SUBCOMMANDS: [&str; 2] = ["resume", "fork"];
+
+/// The production CODE of a source file — everything before its test module, with
+/// `//` comments (whole-line and trailing, doc comments included) removed — so a
+/// source-reading test can find neither its own needle nor a commented-out call.
+///
+/// A `//` counts as a comment only outside a string literal on its line (an even number
+/// of `"` before it), so `"unix://…"` is kept.
+#[cfg(test)]
+pub(crate) fn production_source(source: &str) -> String {
+    let end = source
+        .find("\n#[cfg(test)]\nmod tests {")
+        .expect("the file has a test module");
+    source[..end]
+        .lines()
+        .map(|line| {
+            let comment = line
+                .match_indices("//")
+                .map(|(at, _)| at)
+                .find(|&at| line[..at].matches('"').count() % 2 == 0);
+            match comment {
+                Some(at) => line[..at].trim_end(),
+                None => line,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The body of the top-level production function whose signature starts with
+    /// `signature`, from this file. Panics when there is none, so a renamed function
+    /// fails the test that reads it rather than letting it read something else.
+    fn production_fn(signature: &str) -> String {
+        let source = production_source(include_str!("codex.rs"));
+        let at = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} must exist in production code"));
+        let rest = &source[at..];
+        // rustfmt puts a top-level function's closing brace alone at column 0, so the
+        // first `\n}\n` past the signature ends the body.
+        rest[..rest.find("\n}\n").expect("a closed function body")].to_string()
+    }
 
     // ------------------------------------------------------ binary resolution
 
@@ -3063,7 +2262,11 @@ mod tests {
 
     /// A charter over a REAL file whose recorded digest is deliberately NOT that
     /// file's digest, so the two possible implementations give different answers.
-    fn charter_over_a_real_file_with(sha256: &str, tui_args: &[String]) -> (Vec<String>, PathBuf) {
+    fn charter_over_a_real_file_with(
+        sha256: &str,
+        tui_args: &[String],
+        terminal_size: Option<(u16, u16)>,
+    ) -> (Vec<String>, PathBuf) {
         // `std::env::current_exe()` is a real, readable, absolute file — and one
         // whose actual sha256 is emphatically not the sentinel below.
         let real = std::env::current_exe().expect("this test binary is a real file");
@@ -3080,18 +2283,67 @@ mod tests {
             codex: &resolved,
             codex_home: Path::new("/home/u/.codex"),
             tui_args,
+            terminal_size,
         });
         (argv, real)
     }
 
-    /// **The A7.1 invariant, as a falsifiable test rather than a paragraph: the
-    /// charter carries the digest resolution took, and never re-derives one.**
+    /// The charter [`launch`] builds for this session folder and TUI argv.
+    fn charter_for(folder: &Path, tui_args: &[String]) -> (Vec<String>, PathBuf) {
+        let real = std::env::current_exe().expect("this test binary is a real file");
+        let resolved = ResolvedCodex {
+            path: real.clone(),
+            sha256: "d".repeat(CODEX_SHA256_HEX_LEN),
+        };
+        let argv = coordinator_charter(&CharterInputs {
+            uid: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            launch_nonce: "nonce-a",
+            custodian_nonce: "nonce-b",
+            session_name: "cc-7",
+            cwd: &folder.to_string_lossy(),
+            codex: &resolved,
+            codex_home: Path::new("/home/u/.codex"),
+            tui_args,
+            terminal_size: None,
+        });
+        (argv, real)
+    }
+
+    #[test]
+    fn the_launcher_carries_terminal_size_before_tui_arguments() {
+        let prompt = vec!["a prompt".to_string()];
+        let (argv, _) = charter_over_a_real_file_with(
+            &"b".repeat(CODEX_SHA256_HEX_LEN),
+            &prompt,
+            Some((131, 43)),
+        );
+        assert_eq!(flag(&argv, "--terminal-size"), Some("131x43"));
+        let wait_index = argv
+            .iter()
+            .position(|arg| arg == "--wait-for-terminal")
+            .unwrap();
+        let size_index = argv
+            .iter()
+            .position(|arg| arg == "--terminal-size")
+            .unwrap();
+        let boundary = argv.iter().position(|arg| arg == "--").unwrap();
+        assert!(size_index < boundary);
+        assert!(wait_index < boundary);
+        assert_eq!(&argv[boundary + 1..], &prompt);
+        let (argv, _) = charter_over_a_real_file_with(&"b".repeat(CODEX_SHA256_HEX_LEN), &[], None);
+        assert!(!argv.iter().any(|arg| arg == "--terminal-size"));
+        assert!(!argv.iter().any(|arg| arg == "--wait-for-terminal"));
+    }
+
+    /// **The executable-identity invariant, as a falsifiable test rather than a
+    /// paragraph: the charter carries the digest resolution took, and never
+    /// re-derives one.**
     ///
     /// The distinction is invisible on a quiet machine — re-hashing an unchanged
     /// file returns the same string — and it is the entire value of the pin on a
     /// busy one, where a `codex` install landing between resolution and this call
     /// makes the two answers differ and only the carried one still describes the
-    /// bytes that were magic-checked and version-pinned.
+    /// bytes that were magic-checked and hashed.
     ///
     /// So the test makes them differ on purpose: the `ResolvedCodex` names a real
     /// file and records a digest that is *not* that file's. A carrying
@@ -3102,7 +2354,7 @@ mod tests {
     #[test]
     fn the_charter_carries_the_resolve_time_digest_and_never_re_derives_it() {
         let pinned = "a".repeat(CODEX_SHA256_HEX_LEN);
-        let (argv, real) = charter_over_a_real_file_with(&pinned, &[]);
+        let (argv, real) = charter_over_a_real_file_with(&pinned, &[], None);
 
         // The premise: these two really are different answers about one path.
         let on_disk = protocol::hash::sha256_file(&real).expect("hash this test binary");
@@ -3127,9 +2379,8 @@ mod tests {
     /// the coordinator's own default (the one shared server).
     #[test]
     fn the_charter_names_every_undefaulted_dimension_and_no_tmux_socket() {
-        let (argv, _) = charter_over_a_real_file_with(&"b".repeat(CODEX_SHA256_HEX_LEN), &[]);
+        let (argv, _) = charter_over_a_real_file_with(&"b".repeat(CODEX_SHA256_HEX_LEN), &[], None);
 
-        // The eight the coordinator requires, plus the four the launcher owns.
         for required in [
             "--uid",
             "--nonce",
@@ -3140,10 +2391,6 @@ mod tests {
             "--codex",
             "--codex-sha256",
             "--codex-home",
-            "--approval-policy",
-            "--approvals-reviewer",
-            "--sandbox",
-            "--hooks-enabled",
         ] {
             assert!(
                 flag(&argv, required).is_some(),
@@ -3152,10 +2399,19 @@ mod tests {
         }
         assert_eq!(flag(&argv, "--session-name"), Some("cc-7"));
         assert_eq!(flag(&argv, "--cwd"), Some("/some/where"));
-        assert_eq!(flag(&argv, "--approval-policy"), Some("on-request"));
-        assert_eq!(flag(&argv, "--approvals-reviewer"), Some("user"));
-        assert_eq!(flag(&argv, "--sandbox"), Some("read-only"));
-        assert_eq!(flag(&argv, "--hooks-enabled"), Some("true"));
+        // The launcher names no session policy: the TUI chooses its sandbox and approval
+        // policy exactly as native codex does.
+        for policy in [
+            "--approval-policy",
+            "--approvals-reviewer",
+            "--sandbox",
+            "--hooks-enabled",
+        ] {
+            assert!(
+                !argv.iter().any(|a| a == policy),
+                "the charter must not name {policy}: {argv:?}"
+            );
+        }
         assert_eq!(
             flag(&argv, "--deadline-ms"),
             Some(LAUNCH_DEADLINE_MS.to_string().as_str())
@@ -3179,7 +2435,7 @@ mod tests {
     /// coordinator flag into a TUI argument.
     #[test]
     fn the_charter_forwards_a_passthrough_only_behind_the_boundary() {
-        let (bare, _) = charter_over_a_real_file_with(&"c".repeat(CODEX_SHA256_HEX_LEN), &[]);
+        let (bare, _) = charter_over_a_real_file_with(&"c".repeat(CODEX_SHA256_HEX_LEN), &[], None);
         assert!(
             !bare.iter().any(|a| a == "--"),
             "an empty passthrough must add no boundary: {bare:?}"
@@ -3187,7 +2443,7 @@ mod tests {
 
         let passthrough = vec!["--model".to_string(), "gpt-5".to_string(), "hi".to_string()];
         let (with, _) =
-            charter_over_a_real_file_with(&"c".repeat(CODEX_SHA256_HEX_LEN), &passthrough);
+            charter_over_a_real_file_with(&"c".repeat(CODEX_SHA256_HEX_LEN), &passthrough, None);
         let at = with
             .iter()
             .position(|a| a == "--")
@@ -3199,7 +2455,7 @@ mod tests {
         );
         // The boundary is last: nothing the launcher owns may follow it.
         assert!(
-            with[..at].iter().any(|a| a == "--hooks-enabled"),
+            with[..at].iter().any(|a| a == "--codex-home"),
             "the launcher's own dimensions must all precede the boundary: {with:?}"
         );
     }
@@ -3247,7 +2503,7 @@ mod tests {
         );
     }
 
-    /// **H2.1: the launch clears freezes left standing BEFORE it takes one, and the
+    /// **The launch clears freezes left standing BEFORE it takes one, and the
     /// order is the whole of the fix.**
     ///
     /// `probe_codex` holds the executable's own freeze lock for its entire run, and
@@ -3263,12 +2519,7 @@ mod tests {
     /// silently, as a pass that runs on every launch and can never clear anything.
     #[test]
     fn the_launch_clears_freezes_left_standing_before_its_probe_takes_one() {
-        let source = include_str!("codex.rs");
-        let at = source
-            .find("pub fn start(passthrough: &[String]) -> Result<()> {")
-            .expect("start must exist");
-        let rest = &source[at..];
-        let start = &rest[..rest.find("\n}\n").expect("a closed function body")];
+        let start = production_fn("pub fn start(passthrough: &[String]) -> Result<()> {");
 
         let sweep = start
             .find("clear_freezes_left_standing()")
@@ -3299,14 +2550,7 @@ mod tests {
     /// would otherwise regress in silence.
     #[test]
     fn the_launch_probe_installs_the_signal_release_before_it_takes_the_freeze() {
-        let source = include_str!("codex.rs");
-        let at = source
-            .find(
-                "fn probe_codex(resolved: &ResolvedCodex, scratch: &Path) -> Result<CodexProbe> {",
-            )
-            .expect("probe_codex must exist");
-        let rest = &source[at..];
-        let probe = &rest[..rest.find("\n}\n").expect("a closed function body")];
+        let probe = production_fn("fn probe_codex(resolved: &ResolvedCodex) -> Result<()> {");
 
         let install = probe
             .find("install_freeze_signal_release()")
@@ -3345,16 +2589,7 @@ mod tests {
     /// class of regression that would otherwise land silently.
     #[test]
     fn the_preflight_refuses_before_a_uid_or_a_tmux_name_is_taken() {
-        let source = include_str!("codex.rs");
-        let body = |signature: &str| {
-            let at = source
-                .find(signature)
-                .unwrap_or_else(|| panic!("{signature} must exist"));
-            let rest = &source[at..];
-            // rustfmt puts a top-level function's closing brace alone at column 0,
-            // so the first `\n}\n` past the signature ends the body.
-            &rest[..rest.find("\n}\n").expect("a closed function body")]
-        };
+        let body = production_fn;
 
         let start = body("pub fn start(passthrough: &[String]) -> Result<()> {");
         let preflight = start
@@ -3374,7 +2609,8 @@ mod tests {
 
         // And the other half: the minters really are in `launch`, so the assertion
         // above is about where they are rather than about a spelling that vanished.
-        let launch_body = body("fn launch(resolved: &ResolvedCodex, passthrough: &[String])");
+        let launch_body =
+            body("fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String])");
         for minter in ["uid::new(", "next_session_name("] {
             assert!(
                 launch_body.contains(minter),
@@ -3395,95 +2631,6 @@ mod tests {
             Some(explicit) => assert_eq!(observed, PathBuf::from(explicit)),
             None => assert_eq!(observed, home),
         }
-    }
-
-    /// **The pin is an argv override, and something can outrank an argv override.**
-    ///
-    /// codex ranks a managed configuration layer above `-c`, so an administrator who
-    /// pushes `[features] request_permissions_tool = true` through it beats the value
-    /// every spawn carries. What the launch asserts today is the argv; what this
-    /// asserts is the outcome — the feature read back out of the codex about to be
-    /// used, with the launch's own override applied, exactly as the app-server will
-    /// see it.
-    ///
-    /// Three answers, and only one of them launches.
-    #[test]
-    fn the_effective_feature_is_read_back_and_only_off_launches() {
-        let off = "\
-apply_patch_freeform                     removed            false
-request_permissions_tool                 under development  false
-web_search                               stable             true
-";
-        refuse_unless_pinned_feature_is_off(off).expect("an effective false is the launch case");
-
-        let on = off.replace(
-            "request_permissions_tool                 under development  false",
-            "request_permissions_tool                 under development  true",
-        );
-        let refused = refuse_unless_pinned_feature_is_off(&on)
-            .expect_err("an effective true must refuse the launch");
-        let text = format!("{refused:#}");
-        for expected in [PINNED_OFF_FEATURE, "managed", "refusing to launch"] {
-            assert!(
-                text.contains(expected),
-                "the refusal must say what was found and why: {text}"
-            );
-        }
-
-        // **A listing that does not answer is not an answer of `false`.** The same
-        // rule `verify_codex_identity` states: could-not-check and it-is-off are
-        // different answers and only one licenses a spawn.
-        let silent = off.replace("request_permissions_tool", "some_other_feature");
-        assert!(
-            refuse_unless_pinned_feature_is_off(&silent).is_err(),
-            "a listing that never names the feature must refuse rather than assume"
-        );
-        assert!(
-            refuse_unless_pinned_feature_is_off(
-                "request_permissions_tool  under development  maybe"
-            )
-            .is_err(),
-            "a value that is neither true nor false must refuse rather than be guessed at"
-        );
-    }
-
-    /// **Driven against the real installed codex, in a scratch `CODEX_HOME`.**
-    ///
-    /// The parse above is about strings; this is about whether the launch's override
-    /// actually wins where it has to. Measured here rather than asserted from the
-    /// documentation: an operator `config.toml` turning the feature on is the case
-    /// the pin was built for, and the launch must still go through.
-    ///
-    /// The managed layer that outranks the override lives at a system path, so the
-    /// refusing half cannot be staged without changing the machine — it is covered
-    /// by the parse above, on the answer such a layer would produce.
-    #[test]
-    fn the_launch_override_beats_an_operator_config_on_the_real_binary() {
-        let Ok(resolved) = resolve_codex_bin(&Config::default()) else {
-            return; // no codex installed; the parse test above still holds
-        };
-        let home = std::env::temp_dir().join(format!(
-            "cc-features-probe-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(
-            home.join("config.toml"),
-            "[features]\nrequest_permissions_tool = true\n",
-        )
-        .unwrap();
-
-        let listing = read_effective_features(&resolved.path, &home)
-            .expect("`codex features list` is a local command and answers without an account");
-        let listing = String::from_utf8_lossy(&listing);
-        assert!(
-            listing.contains(PINNED_OFF_FEATURE),
-            "the installed codex still has to know the feature this launch pins: {listing}"
-        );
-        refuse_unless_pinned_feature_is_off(&listing)
-            .expect("the launch's own override must beat an operator config.toml that turns it on");
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -3652,7 +2799,7 @@ web_search                               stable             true
         cleanup(&root);
     }
 
-    // ------------------------------------------------ executable identity (A7.1)
+    // ------------------------------------------------------- executable identity
 
     #[test]
     fn resolution_pins_the_bytes_it_inspected_not_just_the_name() {
@@ -3936,7 +3083,7 @@ web_search                               stable             true
         assert!(err.contains("lowercase"), "names the case: {err}");
     }
 
-    /// `codex --version` is itself one of the opens A7 names, so a version that
+    /// `codex --version` is itself one of the pathname opens, so a version that
     /// parsed is not on its own a version that describes the bytes this launch will
     /// carry. Against the **real** installed codex: the launch is refused because the
     /// file does not match what was pinned.
@@ -3947,7 +3094,7 @@ web_search                               stable             true
     /// `when` assertion below is what pins that ordering.
     ///
     /// A digest that never matched stands in for a swap that happened before the
-    /// check — which `read_codex_version` cannot tell apart from any other mismatch,
+    /// check — which `probe_codex` cannot tell apart from any other mismatch,
     /// and does not need to: it asks only "are these still the pinned bytes?".
     #[test]
     fn a_parsed_version_alone_does_not_let_a_launch_through() {
@@ -3956,15 +3103,13 @@ web_search                               stable             true
             return;
         }
         let real = resolve_codex_bin(&Config::default()).unwrap();
-        // Sanity: this same call succeeds when the pin holds — covered by
-        // `the_live_binary_reports_a_pinned_version`, which resolves and reads for
-        // real. Here only the mismatch arm is staged, so the suite pays for one
-        // hash of a 220 MB binary rather than two.
+        // Only the mismatch arm is staged, so the suite pays for one hash of a 220 MB
+        // binary rather than two; the matching arm is the ordinary launch.
         let swapped = ResolvedCodex {
             path: real.path.clone(),
             sha256: protocol::hash::sha256_hex(b"some other codex"),
         };
-        let err = read_codex_version(&swapped)
+        let err = probe_codex(&swapped)
             .expect_err("a version check whose binary does not match the pin must refuse");
         let text = format!("{err:#}");
         assert!(
@@ -3986,7 +3131,7 @@ web_search                               stable             true
     /// checks in the other order this reports "could not read a version", which is
     /// true and sends the operator after the wrong problem — a malformed codex
     /// rather than a swapped one. No native binary is needed, because
-    /// `read_codex_version` only execs the path it is given.
+    /// `probe_codex` only execs the path it is given.
     #[test]
     fn a_swapped_binary_is_reported_as_swapped_and_not_as_malformed() {
         let root = tempdir();
@@ -3998,7 +3143,7 @@ web_search                               stable             true
             path: script.clone(),
             sha256: protocol::hash::sha256_hex(b"what was actually pinned"),
         };
-        let err = read_codex_version(&swapped).expect_err("a moved binary must be refused");
+        let err = probe_codex(&swapped).expect_err("a moved binary must be refused");
         let text = format!("{err:#}");
         assert!(
             text.contains("not the one this launch pinned"),
@@ -4015,7 +3160,7 @@ web_search                               stable             true
             path: script.clone(),
             sha256: protocol::hash::sha256_file(&script).unwrap(),
         };
-        let err = read_codex_version(&honest).expect_err("an unparseable version must be refused");
+        let err = probe_codex(&honest).expect_err("an unparseable version must be refused");
         assert!(
             format!("{err:#}").contains("could not read a version"),
             "an unmoved binary's real problem must still surface: {err:#}"
@@ -4024,7 +3169,7 @@ web_search                               stable             true
         cleanup(&root);
     }
 
-    // --------------------------------------------------------- version pinning
+    // ------------------------------------------------------------- the version
 
     #[test]
     fn parses_only_the_two_exact_version_shapes() {
@@ -4056,41 +3201,27 @@ web_search                               stable             true
         assert_eq!(parse_codex_version("").as_deref(), None);
     }
 
-    /// The version string is READ and RECORDED, and it decides nothing.
+    /// The version is READ — a binary that cannot state one is not hosted — and its
+    /// value decides nothing: [`probe_codex`] returns `()`, so no version reaches
+    /// `start`.
     ///
     /// Read the source rather than call anything, the same idiom
     /// `the_preflight_refuses_before_a_uid_or_a_tmux_name_is_taken` uses and for the
-    /// same reason: what must be proven is the *absence* of a call inside a function
-    /// that talks to a live binary, which no unit test can reach by calling it.
-    ///
-    /// This is the mutation guard for the whole change. Restore the version-string
-    /// compare in `start` and this test goes red — which is what stops the pin being
-    /// quietly reinstated "just to be safe" beside a gate that already answers the
-    /// question properly, leaving every weekly codex refused again.
+    /// same reason: `start` talks to a live binary, which no unit test can reach by
+    /// calling it.
     #[test]
-    fn the_version_string_is_recorded_and_never_gates() {
-        let source = include_str!("codex.rs");
-        let at = source
-            .find("pub fn start(passthrough: &[String]) -> Result<()> {")
-            .expect("start must exist");
-        let rest = &source[at..];
-        let start = &rest[..rest.find("\n}\n").expect("a closed function body")];
+    fn the_version_is_read_and_its_value_decides_nothing() {
+        let start = production_fn("pub fn start(passthrough: &[String]) -> Result<()> {");
 
         assert!(
-            start.contains("probe_codex(") && start.contains("parse_codex_version("),
-            "the version must still be READ — it names what ran, and it is one of the \
-             five answers `probe_codex` reads under a single held freeze"
+            start.contains("probe_codex("),
+            "the version must still be READ — a binary that cannot say what it is is not \
+             launched"
         );
-        for gate in ["ensure_pinned_version", "is_pinned_codex_version"] {
-            assert!(
-                !start.contains(gate),
-                "{gate} is back in start(): the version string must be recorded, not \
-                 gated. The guarded-surface gate is what decides."
-            );
-        }
+        let probe = production_fn("fn probe_codex(resolved: &ResolvedCodex) -> Result<()> {");
         assert!(
-            start.contains("ensure_guarded_surface("),
-            "start must run the guarded-surface gate"
+            probe.contains("parse_codex_version("),
+            "the probe must parse what it read"
         );
     }
 
@@ -4107,7 +3238,7 @@ web_search                               stable             true
     /// variable at all. That is what this asserts first, by calling it with the variable
     /// set. The source scan below is the second line — a capture build should still not
     /// have a launcher that switches the recorder on by itself — and it reads the source
-    /// for the same reason `the_version_string_is_recorded_and_never_gates` does: what
+    /// for the same reason `the_version_is_read_and_its_value_decides_nothing` does: what
     /// must be proven is the ABSENCE of a call, which no unit test reaches by calling
     /// anything.
     #[test]
@@ -4142,7 +3273,7 @@ web_search                               stable             true
     /// unconditional call.
     #[test]
     fn the_hosts_frame_tee_call_is_gated_on_this_crates_feature() {
-        let host = include_str!("codex_host.rs");
+        let host = production_source(include_str!("codex_host.rs"));
         let at = host
             .find("FrameTee::from_env()")
             .expect("the host builds the tee");
@@ -4200,12 +3331,8 @@ web_search                               stable             true
         // flags — rather than the whole file, and the needles are BUILT rather than
         // written, because a literal here would appear in this test's own source and
         // match itself. (It did, on the first run.)
-        let source = include_str!("codex.rs");
-        let at = source
-            .find("fn coordinator_charter(inputs: &CharterInputs<'_>) -> Vec<String> {")
-            .expect("the charter builder must exist");
-        let rest = &source[at..];
-        let charter = &rest[..rest.find("\n}\n").expect("a closed function body")];
+        let charter =
+            production_fn("fn coordinator_charter(inputs: &CharterInputs<'_>) -> Vec<String> {");
         for needle in ["frame-tee", "capture", "tee"] {
             let flag = format!("--{needle}");
             assert!(
@@ -4225,7 +3352,7 @@ web_search                               stable             true
         // allowlist rather than the parent environment) — but it must only ever pass
         // through a value it already found, never invent one. Both halves are asserted:
         // the forward exists, and it is guarded by a read of the same variable.
-        let coord = include_str!("codex_coordinator.rs");
+        let coord = production_source(include_str!("codex_coordinator.rs"));
         assert!(
             coord.contains("codex_broker::FRAME_TEE_ENV"),
             "the coordinator must forward the frame-tee variable into the pane, or the \
@@ -4238,38 +3365,12 @@ web_search                               stable             true
         );
     }
 
-    /// The installed codex — whatever version it is — must pass the real gate.
-    ///
-    /// This replaces `the_live_binary_reports_a_pinned_version`, whose premise was a
-    /// literal ("is it 0.147?") and which therefore went red on every codex release
-    /// while proving nothing about whether the release was safe to host. The premise is
-    /// now the honest one: the gate admitted this build.
-    #[test]
-    fn the_live_binarys_guarded_surface_is_admitted() {
-        if !on_path("codex") {
-            eprintln!("skipped: no `codex` on PATH — nothing to check");
-            return;
-        }
-        let resolved = resolve_codex_bin(&Config::default()).unwrap();
-        let scratch = ScratchDir::new().expect("scratch dir");
-        let probe = probe_codex(&resolved, &scratch.0).expect("the launch probes must run");
-        let version = parse_codex_version(&String::from_utf8_lossy(&probe.version_out))
-            .expect("codex --version must parse");
-        match ensure_guarded_surface(&probe) {
-            Ok(digest) => assert_eq!(digest.len(), 64, "the surface digest is a sha256"),
-            Err(e) => panic!(
-                "the installed codex {version} is not one this build is grounded \
-                 against:\n{e:#}"
-            ),
-        }
-    }
-
     /// **A probe is bounded in both directions, proven deterministically.**
     ///
     /// No codex and no `CC_CODEX_LIVE`, because the dangerous shapes are invisible
     /// against the real binary: it answers and exits in the same breath, so an unbounded
-    /// collection looks fine forever. The gate runs whatever is installed at the codex
-    /// path — deciding whether to host it is the whole job — so it must survive a binary
+    /// collection looks fine forever. The probe runs whatever is installed at the codex
+    /// path, before anything has vetted it, so it must survive a binary
     /// that never closes its pipes and one that streams without end.
     ///
     /// The flood goes on **stdout** here, and the ceiling is what has to catch it: a
@@ -4351,138 +3452,45 @@ web_search                               stable             true
         );
     }
 
-    /// The admitted-surface digest distinguishes surfaces a bare concatenation cannot.
-    ///
-    /// It is meant to be carried into a launch record as evidence of *which* surface was
-    /// read, so two different readings must not share a digest. Both collisions a
-    /// delimiter-free join admits are checked: a byte moved across the boundary between
-    /// two parts, and two parts whose labels were swapped.
+    /// **A launch its TUI was quit out of ends quietly; any other failure is printed.**
+    /// Ctrl+C in codex's `resume` picker exits with status 0 and prints nothing
+    /// (measured on 0.155.1), so the launcher returns success with nothing said. A
+    /// launch that failed without that mark still reports its reason.
     #[test]
-    fn the_admitted_digest_is_framed_and_labelled() {
-        let d = |parts: &[(&str, &str)]| {
-            admitted_digest(
-                &parts
-                    .iter()
-                    .map(|(l, b)| (*l, b.to_string()))
-                    .collect::<Vec<_>>(),
+    fn a_launch_quit_before_a_thread_ends_quietly() {
+        use crate::codex_launch::{CleanupState, LaunchLock, NewLaunch};
+        use protocol::proc_identity::{boot_identity, current_identity, monotonic_now_nanos};
+        let ended = |uid: &str, quit: bool| {
+            let lock = LaunchLock::acquire(uid).unwrap();
+            crate::codex_launch::create_pending(
+                &lock,
+                NewLaunch {
+                    launch_nonce: "n".into(),
+                    uid: uid.into(),
+                    session_name: "cc-1".into(),
+                    coordinator: current_identity().unwrap(),
+                    boot: boot_identity().unwrap(),
+                    deadline_monotonic_nanos: monotonic_now_nanos().unwrap() + 60_000_000_000,
+                    created_ms: 1,
+                },
             )
+            .unwrap();
+            if quit {
+                crate::codex_launch::note_codex_quit_before_thread(&lock, uid).unwrap();
+            }
+            crate::codex_launch::to_failed(&lock, uid, "the reason", CleanupState::Pending)
+                .unwrap();
         };
-        let base = d(&[("argv", "ab"), ("stable", "cd")]);
-        assert_ne!(
-            base,
-            d(&[("argv", "abc"), ("stable", "d")]),
-            "a byte moved across the boundary must change the digest"
-        );
-        assert_ne!(
-            base,
-            d(&[("stable", "ab"), ("argv", "cd")]),
-            "swapping which bundle a surface came from must change the digest"
-        );
-        assert_eq!(base.len(), 64);
-    }
+        let patience = Duration::from_millis(200);
+        let poll = Duration::from_millis(5);
 
-    /// **Two scratch trees alive at once have different names.**
-    ///
-    /// The name used to be `pid` plus a hash of the clock, and a clock is not a
-    /// unique-name source: `SystemTime::now()` on macOS is coarser than the
-    /// nanoseconds it is formatted in, so two calls inside one tick hash to the same
-    /// string and the second `create` fails `EEXIST`. It cost a parallel run of this
-    /// crate a red — `a_shipping_build_cannot_enable_the_frame_tee`, which merely
-    /// wanted a directory — and it is a production path, not a test one: the schema
-    /// gate is what allocates these.
-    ///
-    /// Concurrent callers are the case, and the case this crate's own test runner
-    /// creates: a `--test-threads` default of "one per core" means several tests can
-    /// be inside `ScratchDir::new` at the same instant. Sequential calls do NOT show
-    /// it — the clock advances between them — which is why the defect survived every
-    /// single-threaded run of this suite.
-    #[test]
-    fn two_scratch_trees_never_collide() {
-        let ready = std::sync::Arc::new(std::sync::Barrier::new(16));
-        let hands: Vec<_> = (0..16)
-            .map(|_| {
-                let ready = std::sync::Arc::clone(&ready);
-                // Every thread is released at once, so they read the clock together.
-                std::thread::spawn(move || {
-                    ready.wait();
-                    ScratchDir::new()
-                })
-            })
-            .collect();
-        let held: Vec<_> = hands
-            .into_iter()
-            .map(|h| h.join().expect("no thread may panic"))
-            .map(|d| d.expect("each scratch tree must get a name of its own"))
-            .collect();
-        let mut names: Vec<_> = held.iter().map(|d| d.0.clone()).collect();
-        names.sort();
-        let before = names.len();
-        names.dedup();
-        assert_eq!(before, names.len(), "two live scratch trees shared a path");
-    }
+        ended("quit-launch", true);
+        wait_with_terminal("quit-launch", patience, poll).expect("a quit launch is quiet");
 
-    /// The scratch tree is created exclusively, so the gate never generates into — or
-    /// reads back out of — a directory somebody else placed at the path.
-    #[test]
-    fn the_scratch_directory_will_not_adopt_one_that_already_exists() {
-        let dir = ScratchDir::new().expect("scratch dir");
-        let path = dir.0.clone();
-        assert!(
-            std::fs::DirBuilder::new().create(&path).is_err(),
-            "creating the scratch tree must fail when anything is already at the path"
-        );
-        // …and it is private to this user from the moment it exists.
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
-        assert_eq!(mode & 0o777, 0o700, "the scratch tree must be 0700");
-    }
-
-    /// A generated bundle larger than the ceiling is a refusal, not an allocation.
-    #[test]
-    fn an_oversized_generated_bundle_is_refused() {
-        let dir = ScratchDir::new().expect("scratch dir");
-        let small = dir.0.join("small.json");
-        std::fs::write(&small, b"{}").expect("write");
-        assert_eq!(read_generated(&small).expect("small reads"), b"{}");
-        assert!(
-            read_generated(&dir.0.join("absent.json")).is_err(),
-            "a bundle codex did not write is a refusal"
-        );
-    }
-
-    /// **A generated bundle that is not a regular file must be refused PROMPTLY.**
-    ///
-    /// The writer here is the binary the gate has not yet decided to host, and it chooses
-    /// what to put at these paths. A FIFO with no writer blocks `File::open` forever —
-    /// outside every probe deadline, and *while the executable freeze is still held*, so
-    /// the launch hangs and the freeze never clears. The bound is asserted in wall-clock
-    /// terms because "refused" and "refused eventually" are different failures here.
-    #[test]
-    fn a_generated_bundle_that_is_a_fifo_is_refused_without_blocking() {
-        let dir = ScratchDir::new().expect("scratch dir");
-        let fifo = dir.0.join("ClientRequest.json");
-        let c = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
-
-        let started = Instant::now();
-        let why = read_generated(&fifo).expect_err("a FIFO must be refused");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the refusal must be prompt; a blocking open would hold the freeze forever"
-        );
-        assert!(
-            format!("{why:#}").contains("regular file")
-                || format!("{why:#}").contains("Device not configured"),
-            "expected a not-a-regular-file refusal, got: {why:#}"
-        );
-
-        // A symlink at the final component is refused too: the bundle must be the one the
-        // probe wrote, not one pointed elsewhere after the fact.
-        let real = dir.0.join("real.json");
-        std::fs::write(&real, b"{}").expect("write");
-        let link = dir.0.join("ClientNotification.json");
-        std::os::unix::fs::symlink(&real, &link).expect("symlink");
-        assert!(read_generated(&link).is_err(), "a symlink must be refused");
+        ended("failed-launch", false);
+        let err = wait_with_terminal("failed-launch", patience, poll)
+            .expect_err("a failed launch is reported");
+        assert_eq!(err.to_string(), "the reason");
     }
 
     // ----------------------------------------------------- reserved argv grammar
@@ -4501,16 +3509,13 @@ web_search                               stable             true
     }
 
     #[test]
-    fn owned_transport_and_cwd_flags_are_refused_every_form() {
+    fn the_transport_flags_are_refused_every_form() {
         for parts in [
             &["--remote", "unix:///x"][..],
             &["--remote=unix:///x"][..],
             &["--remote-auth-token-env", "TOK"][..],
-            &["-C", "/x"][..],
-            &["-C/x"][..],
-            &["-C."][..],
-            &["--cd", "/x"][..],
-            &["--cd=/x"][..],
+            &["--remote-auth-token-env=TOK"][..],
+            &["--remote"][..],
         ] {
             assert!(
                 matches!(refuse(parts), CodexRefusal::OwnedFlag { .. }),
@@ -4519,325 +3524,160 @@ web_search                               stable             true
         }
     }
 
-    /// A10: the sandbox dimension is CodeConnect's, so no spelling of the two
-    /// flags that move it may be forwarded. Every normalized form the grammar
-    /// admits is pinned here — spaced, `=`-joined, attached short, and a short
-    /// cluster whose value short is `s` (both with the value attached to the
-    /// cluster and spaced after it) — because a form that slipped past would
-    /// forward a sandbox mutation the launch fingerprint does not describe.
-    #[test]
-    fn sandbox_policy_flags_are_refused_every_form() {
-        for parts in [
-            &["--sandbox", "danger-full-access"][..],
-            &["--sandbox=workspace-write"][..],
-            &["-s", "read-only"][..],
-            &["-sread-only"][..],
-            &["-s=read-only"][..],
-            // Short clusters: a bool short in front of `-s` must not let the
-            // sandbox value ride through as a discarded suffix.
-            &["-hsread-only"][..],
-            &["-hs", "read-only"][..],
-            &["-Vsdanger-full-access"][..],
-            // A missing value is still the owned flag: codex would error, but the
-            // refusal must not depend on a value being present.
-            &["--sandbox"][..],
-            &["-s"][..],
-            // The writable-root widening on the same dimension.
-            &["--add-dir", "/repo"][..],
-            &["--add-dir=/repo"][..],
-            &["--add-dir"][..],
-        ] {
-            assert!(
-                matches!(refuse(parts), CodexRefusal::OwnedFlag { .. }),
-                "{parts:?} should be an owned-flag refusal"
-            );
-        }
-    }
-
-    #[test]
-    fn profile_is_refused_spaced_equals_and_attached() {
-        for parts in [
-            &["--profile", "work"][..],
-            &["--profile=work"][..],
-            &["-p", "work"][..],
-            &["-pwork"][..],
-            &["-pfoo"][..],
-        ] {
-            assert!(
-                matches!(refuse(parts), CodexRefusal::Profile { .. }),
-                "{parts:?} should be a profile refusal"
-            );
-        }
-    }
-
-    #[test]
-    fn approval_owner_controls_and_aliases_are_refused() {
-        for parts in [
-            &["-a", "never"][..],
-            &["-aon-request"][..],
-            &["-a", "on-request"][..],
-            &["--ask-for-approval", "untrusted"][..],
-            &["--ask-for-approval=never"][..],
-            &["--approve-for-me"][..],
-            &["--full-auto"][..],
-            &["--dangerously-bypass-approvals-and-sandbox"][..],
-            &["--dangerously-bypass-hook-trust"][..],
-            // Hidden aliases from shared_options.
-            &["--yolo"][..],
-            &["--not-so-yolo"][..],
-        ] {
-            assert!(
-                matches!(refuse(parts), CodexRefusal::ApprovalControl { .. }),
-                "{parts:?} should be an approval-control refusal"
-            );
-        }
-    }
-
-    #[test]
-    fn owned_config_keys_are_refused_including_structural_toml() {
-        for parts in [
-            // Top-level owned controls.
-            &["-c", "approval_policy=never"][..],
-            &["-capproval_policy=never"][..],
-            &["-c", "approvals_reviewer=auto_review"][..],
-            &["--config", "approval_policy=never"][..],
-            &["--config=approval_policy=never"][..],
-            &["-c", "hooks.pre=x"][..],
-            &["-c", "hooks=x"][..],
-            &["-c", "notify=x"][..],
-            &["-c", "notify.command=x"][..],
-            &["-c", "features.hooks=true"][..],
-            &["-c", "features.hooks.trust=true"][..],
-            &["-c", "approval_policy.granular.foo=never"][..],
-            &["-c", "features.codex_hooks=false"][..],
-            &["-c", "auto_review.policy=approve"][..],
-            // Schema-valid per-app / per-MCP-server approval paths and values.
-            &["-c", "apps._default.approvals_reviewer=auto_review"][..],
-            &["-c", "apps.myapp.default_tools_approval_mode=approve"][..],
-            &["-c", "apps.myapp.tools.mytool.approval_mode=approve"][..],
-            &["-c", "mcp_servers.s.default_tools_approval_mode=approve"][..],
-            &["-c", "mcp_servers.s.tools.t.approval_mode=approve"][..],
-            // Structural TOML values — inline and aggregate tables.
-            &["-c", "features={hooks=false}"][..],
-            &["-c", "apps={_default={approvals_reviewer=\"auto_review\"}}"][..],
-            &[
-                "-c",
-                "mcp_servers={s={default_tools_approval_mode=\"approve\"}}",
-            ][..],
-            &["-c", "approval_policy={granular={foo=\"never\"}}"][..],
-            // TOML 1.1 forms codex applies but a TOML-1.0 parser would reject —
-            // must be refused, never forwarded (differential grammar test).
-            &["-c", "features={hooks=false,}"][..],
-            &["-c", "features={ hooks = false ,\n}"][..],
-            // TOML-key-aware decoding: a quoted owned key is still owned.
-            &["-c", "\"approval_policy\"=never"][..],
-            &["-c", "apps.\"my.app\".default_tools_approval_mode=approve"][..],
-            &["-c", "\"hooks\".command=x"][..],
-            // A10 — the sandbox dimension, one case per owned root, in the
-            // spellings a `-c` can wear: dotted, quoted, structural and
-            // `--config` long form.
-            &["-c", "sandbox=danger-full-access"][..],
-            &["-c", "sandbox_mode=danger-full-access"][..],
-            &["--config", "sandbox_mode=danger-full-access"][..],
-            &["-c", "sandbox_policy=danger-full-access"][..],
-            &["-c", "sandbox_workspace_write.writable_roots=[\"/\"]"][..],
-            &["-c", "sandbox_workspace_write.network_access=true"][..],
-            &["-c", "sandbox_workspace_write={network_access=true}"][..],
-            // The read-scope widening an earlier revision forwarded as benign.
-            &[
-                "--config",
-                "sandbox_permissions=[\"disk-full-read-access\"]",
-            ][..],
-            &["-csandbox_permissions=[\"disk-full-read-access\"]"][..],
-            // TOML-key-aware decoding on the sandbox axis: a quoted owned root,
-            // and a quoted (dot-bearing) leaf under one.
-            &["-c", "\"sandbox_mode\"=danger-full-access"][..],
-            &["-c", "sandbox_workspace_write.\"odd.key\"=1"][..],
-            // The PERMISSION-PROFILE axis. The exact pair measured ACCEPTED and
-            // activated by the installed codex 0.147 (see `path_is_owned`), plus each
-            // half alone and the spellings a `-c` can wear: structural, dotted, quoted
-            // and `--config` long form.
-            &["-c", "permissions={wide={filesystem={\"/\"=\"write\"}}}"][..],
-            &["-c", "default_permissions=\"wide\""][..],
-            &["--config", "default_permissions=\"wide\""][..],
-            &["-cdefault_permissions=\"wide\""][..],
-            &["-c", "permissions.wide.filesystem.\"/\"=\"write\""][..],
-            &["-c", "\"permissions\"={wide={network=true}}"][..],
-            &["-c", "\"default_permissions\"=\"wide\""][..],
-            // Feature toggles.
-            &["--enable", "hooks"][..],
-            &["--disable", "hooks"][..],
-            &["--disable", "codex_hooks"][..],
-            // The feature the launch pins off, in every spelling that reaches it.
-            // Both directions: what is owned is the setting, not a direction.
-            &["-c", "features.request_permissions_tool=true"][..],
-            &["-c", "features.request_permissions_tool=false"][..],
-            &["--config", "features={request_permissions_tool=true}"][..],
-            &["-c", "features.\"request_permissions_tool\"=true"][..],
-            &["--enable", "request_permissions_tool"][..],
-            &["--disable", "request_permissions_tool"][..],
-        ] {
-            assert!(
-                matches!(refuse(parts), CodexRefusal::OwnedConfigKey { .. }),
-                "{parts:?} should be an owned-config-key refusal"
-            );
-        }
-    }
-
-    /// **The refusal that costs the caller a feature says what it costs them.**
+    /// **The keyboard is as trusted as native codex:** every sandbox, approval, profile,
+    /// config and feature flag reaches the TUI, in every spelling, rewritten only into
+    /// its attached form.
     ///
-    /// Every other owned key is visibly the session's policy: somebody who reached
-    /// for `sandbox` knows what they were reaching for, and "CodeConnect owns this"
-    /// is the whole answer. The pinned-off feature is not like that — nothing about
-    /// the key says the request it turns on has nowhere to be answered from — so the
-    /// bare sentence would read as a permission problem and send the reader looking
-    /// for a way around it. This pins the extra clause, in both spellings that reach
-    /// it, and pins that the ordinary owned keys did NOT grow one.
-    ///
-    /// **Mutation:** return `None` from `why_owned` and the first two go red;
-    /// return the clause for every key and the last one does.
+    /// **Mutation:** refuse any of these in `refuse_owned_flag` and this fails.
     #[test]
-    fn the_pinned_off_feature_is_refused_with_the_reason_it_is_pinned() {
-        for parts in [
-            &["-c", "features.request_permissions_tool=true"][..],
-            &["--enable", "request_permissions_tool"][..],
+    fn the_keyboards_own_policy_flags_reach_the_tui() {
+        for (parts, fenced) in [
+            (
+                &["--sandbox", "danger-full-access"][..],
+                &["--sandbox=danger-full-access"][..],
+            ),
+            (&["-sread-only"][..], &["--sandbox=read-only"][..]),
+            (
+                &["-hs", "workspace-write"][..],
+                &["--sandbox=workspace-write"][..],
+            ),
+            (&["--add-dir", "/repo"][..], &["--add-dir=/repo"][..]),
+            (&["-p", "work"][..], &["--profile=work"][..]),
+            (&["-a", "never"][..], &["--ask-for-approval=never"][..]),
+            (&["--approve-for-me"][..], &["--approve-for-me"][..]),
+            (&["--yolo"][..], &["--yolo"][..]),
+            (
+                &["--dangerously-bypass-approvals-and-sandbox"][..],
+                &["--dangerously-bypass-approvals-and-sandbox"][..],
+            ),
+            (
+                &["--dangerously-bypass-hook-trust"][..],
+                &["--dangerously-bypass-hook-trust"][..],
+            ),
+            (
+                &["-c", "approval_policy=never"][..],
+                &["--config=approval_policy=never"][..],
+            ),
+            (
+                &["-c", "features={hooks=false"][..],
+                &["--config=features={hooks=false"][..],
+            ),
+            (
+                &["-c", "features.hooks=true"][..],
+                &["--config=features.hooks=true"][..],
+            ),
+            (&["--enable", "hooks"][..], &["--enable=hooks"][..]),
+            (&["--disable", "hooks"][..], &["--disable=hooks"][..]),
         ] {
-            let said = refuse(parts).to_string();
-            assert!(
-                said.contains("answers approvals from the phone")
-                    && said.contains("only the terminal can grant"),
-                "{parts:?} must say why the feature is not available: {said}"
+            assert_eq!(
+                fence_positionals(&argv(parts)).unwrap_or_else(|e| panic!("{parts:?}: {e}")),
+                argv(fenced),
+                "{parts:?} must reach the TUI"
             );
         }
-        let sandbox = refuse(&["-c", "sandbox=danger-full-access"]).to_string();
-        assert!(
-            !sandbox.contains("answers approvals from the phone"),
-            "a key that speaks for itself gets no extra clause: {sandbox}"
+    }
+
+    /// **`--cd` is the session folder, in every spelling codex accepts** (`--help` on
+    /// 0.155.1: `-C, --cd <DIR>`), and the TUI is handed none of its own.
+    ///
+    /// Driven through the real argv parser, then [`session_folder`], then the charter
+    /// the coordinator is spawned with — whose `--cwd` is the pane's start directory and,
+    /// canonicalized by the coordinator, the directory the session is registered under.
+    #[test]
+    fn cd_is_the_session_folder_in_every_form() {
+        let caller = ScratchDir::new().expect("scratch dir");
+        let folder = ScratchDir::new().expect("scratch dir");
+        let dir = folder.0.to_str().expect("utf-8").to_string();
+        let attached_short = format!("-C{dir}");
+        let equals_short = format!("-C={dir}");
+        let equals_long = format!("--cd={dir}");
+        for parts in [
+            vec!["--cd", dir.as_str()],
+            vec![equals_long.as_str()],
+            vec!["-C", dir.as_str()],
+            vec![attached_short.as_str()],
+            vec![equals_short.as_str()],
+            vec!["-hC", dir.as_str()],
+            vec!["-m", "gpt-5", "--cd", dir.as_str(), "fix it"],
+        ] {
+            let scan = scan_codex_argv(&argv(&parts)).unwrap_or_else(|e| panic!("{parts:?}: {e}"));
+            assert_eq!(scan.cd, vec![dir.clone()], "{parts:?}");
+            assert!(
+                !scan
+                    .normalized
+                    .iter()
+                    .any(|t| t == "--cd" || t.starts_with("--cd=") || t.starts_with("-C")),
+                "the TUI must not be handed a --cd of its own: {:?}",
+                scan.normalized
+            );
+            let resolved = session_folder(&scan.cd, &caller.0).expect("an existing directory");
+            assert_eq!(resolved, folder.0);
+            let (charter, _) = charter_for(&resolved, &scan.normalized);
+            assert_eq!(flag(&charter, "--cwd"), Some(dir.as_str()));
+        }
+        // The rest of the argv is untouched by taking `--cd` out of it.
+        let scan = scan_codex_argv(&argv(&["-m", "gpt-5", "--cd", &dir, "fix it"])).unwrap();
+        assert_eq!(scan.normalized, argv(&["--model=gpt-5", "--", "fix it"]));
+    }
+
+    /// Without `--cd` the session folder is the directory `codeconnect codex` was run
+    /// from, exactly as before.
+    #[test]
+    fn without_cd_the_session_folder_is_the_callers_directory() {
+        let caller = ScratchDir::new().expect("scratch dir");
+        let scan = scan_codex_argv(&argv(&["-m", "gpt-5", "hi"])).unwrap();
+        assert!(scan.cd.is_empty());
+        assert_eq!(session_folder(&scan.cd, &caller.0).unwrap(), caller.0);
+    }
+
+    /// A relative `--cd` is read against the caller's directory, as native codex reads
+    /// it — not against wherever the coordinator or the pane happens to run.
+    #[test]
+    fn a_relative_cd_is_resolved_against_the_callers_directory() {
+        let caller = ScratchDir::new().expect("scratch dir");
+        std::fs::create_dir(caller.0.join("sub")).unwrap();
+        for parts in [&["--cd", "sub"][..], &["-Csub"][..], &["--cd=./sub"][..]] {
+            let scan = scan_codex_argv(&argv(parts)).unwrap();
+            let resolved = session_folder(&scan.cd, &caller.0).expect("sub exists");
+            assert!(resolved.is_absolute(), "{resolved:?}");
+            assert_eq!(
+                std::fs::canonicalize(&resolved).unwrap(),
+                std::fs::canonicalize(caller.0.join("sub")).unwrap(),
+                "{parts:?}"
+            );
+        }
+        let scan = scan_codex_argv(&argv(&["-C", ".."])).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(session_folder(&scan.cd, &caller.0.join("sub")).unwrap())
+                .unwrap(),
+            std::fs::canonicalize(&caller.0).unwrap()
         );
     }
 
-    /// **Owning one feature is not owning the namespace it lives in.**
-    ///
-    /// `features.*` is a large table of unrelated switches, and refusing all of it
-    /// would take a launch the grammar has no reason to refuse. The three owned
-    /// names are the two halves of hook enablement and the one the launch pins off;
-    /// everything else forwards.
-    ///
-    /// **Mutation:** widen the `features` arm to `seg(1).is_some()` and these fail.
+    /// A `--cd` that names no usable directory stops the launch with a reason, before
+    /// anything is created.
     #[test]
-    fn a_feature_the_launch_does_not_own_still_forwards() {
-        for parts in [
-            &["-c", "features.web_search=true"][..],
-            &["--enable", "web_search"][..],
-            // Near neighbours of the pinned name, which are different settings.
-            &["-c", "features.default_mode_request_user_input=true"][..],
-            &["--enable", "exec_permission_approvals"][..],
+    fn a_cd_that_names_no_directory_is_refused_with_a_reason() {
+        let caller = ScratchDir::new().expect("scratch dir");
+        std::fs::write(caller.0.join("a-file"), b"x").unwrap();
+        for (parts, said) in [
+            (&["--cd", "missing"][..], "No such file or directory"),
+            (
+                &["--cd", "/definitely/not/a/real/dir/xyzzy"][..],
+                "No such file or directory",
+            ),
+            (&["-C", "a-file"][..], "is not a directory"),
+            (&["--cd"][..], "needs a directory"),
+            (&["--cd="][..], "needs a directory"),
+            (&["--cd", "--search"][..], "needs a directory"),
+            (&["--cd", ".", "-C", "."][..], "more than once"),
         ] {
-            assert!(
-                validate_codex_argv(&argv(parts)).is_ok(),
-                "{parts:?} names no setting CodeConnect owns and must forward"
-            );
+            let scan = scan_codex_argv(&argv(parts)).unwrap_or_else(|e| panic!("{parts:?}: {e}"));
+            let err = session_folder(&scan.cd, &caller.0)
+                .expect_err(&format!("{parts:?} must be refused"))
+                .to_string();
+            assert!(err.contains(said), "{parts:?}: {err}");
         }
-    }
-
-    #[test]
-    fn unparsable_or_undecodable_config_overrides_fail_closed() {
-        // A structured value we cannot parse, and a key whose quoting we cannot
-        // decode: refused as unclassifiable (A7), never forwarded.
-        for parts in [
-            &["-c", "features={hooks=false"][..], // unbalanced inline table
-            &["-c", "apps=[unterminated"][..],    // unbalanced array
-            &["-c", "apps.\"team.prod=1"][..],    // unbalanced quoted key
-            // A `[table header]` / newline injected into the KEY is not a lone
-            // key expression — refused (single-key strictness).
-            &["-c", "[benign]\napproval_policy=never"][..],
-            &["-c", "benign]\napproval_policy"][..],
-            &["-c", "a\nb=1"][..],
-            // A second assignment injected past the VALUE is refused.
-            &["-c", "model=1\napproval_policy=\"never\""][..],
-            &["-c", "x=0\n[apps.e.tools.t]\napproval_mode=\"approve\""][..],
-            // Sentinel-collision payload: a valid-TOML value that embeds an owned
-            // assignment over a newline. Must be refused (no user-collidable
-            // sentinel; a multi-line parse failure fails closed).
-            &[
-                "-c",
-                "model=\"gpt-5\"\n__cc_probe__=0\napproval_policy=\"never\"",
-            ][..],
-            // `--enable`/`--disable` with a non-bare (quoted/escaped) feature.
-            &["--enable", "\"hooks\""][..],
-            &["--disable", "\"codex_hooks\""][..],
-            &["--enable", "hooks.trust"][..],
-            // Security checks must see the RAW, untrimmed argument.
-            // (1) A table/array-header-shaped KEY whose synthetic sentinel is
-            //     commented/displaced — its terminal is not the `= 0` leaf.
-            &["-c", "[[benign]] #"][..],
-            &["-c", "[benign] #"][..],
-            &["-c", "[[x]]"][..],
-            // (2) A VALUE whose leading CR/LF (which trimming would erase) embeds
-            //     an owned assignment.
-            &["-c", "features=\nhooks=false"][..],
-            &["-c", "model=\r\napproval_policy=\"never\""][..],
-            // (3) A FEATURE with edge/embedded whitespace or newline.
-            &["--enable", " web_search "][..],
-            &["--enable", "web_search\n"][..],
-            &["--disable", " hooks "][..],
-        ] {
-            assert!(
-                matches!(refuse(parts), CodexRefusal::Unclassifiable { .. }),
-                "{parts:?} should fail closed as unclassifiable"
-            );
-        }
-    }
-
-    #[test]
-    fn unowned_config_keys_and_features_pass_through() {
-        accept(&["-c", "model=o3"]);
-        accept(&["-cmodel=o3"]);
-        accept(&["-c", "model_reasoning_effort=high"]);
-        accept(&["-c", "mcp_servers={s={command=\"x\"}}"]);
-        accept(&["--enable", "some_other_feature"]);
-        accept(&["--disable", "telemetry"]);
-        // A differently-cased key does not reach the owned TOML key.
-        accept(&["-c", "Approval_Policy=never"]);
-        // An unowned TOML-1.1 structural value (trailing comma) parses and
-        // forwards — the grammar matches codex, so this is not falsely refused.
-        accept(&["-c", "mcp_servers={s={command=\"x\"},}"]);
-        // Path-aware: an owned-*named* key that is arbitrary data in an unowned
-        // container is not refused.
-        accept(&["-c", "mcp_servers.s.env.approval_mode=literal"]);
-        accept(&["-c", "mcp_servers.s.env={approval_mode=\"literal\"}"]);
-        // An MCP server (or app) literally named after an owned control.
-        accept(&["-c", "mcp_servers.hooks.command=x"]);
-        accept(&["-c", "apps.notify.command=x"]);
-        // The A10 sandbox roots are owned by exact **segment**, at the top level
-        // only: a server or app literally named `sandbox` is still just a name.
-        accept(&["-c", "mcp_servers.sandbox.command=x"]);
-        accept(&["-c", "apps.sandbox_mode.command=x"]);
-        // Same for the permission-profile roots: owned by exact top-level segment,
-        // so an MCP server or app that happens to be NAMED
-        // `permissions`/`default_permissions` still forwards. This is the over-refusal
-        // direction — the new roots must not swallow the namespace.
-        accept(&["-c", "mcp_servers.permissions.command=x"]);
-        accept(&["-c", "apps.default_permissions.command=x"]);
-        accept(&["-c", "mcp_servers.s.env.permissions=literal"]);
-        accept(&["-c", "some_table={default_permissions=\"wide\"}"]);
-        // `approval_policy` nested under an unowned container is not the real one.
-        accept(&["-c", "some_table={approval_policy=\"never\"}"]);
-        accept(&["-c", "some_table={sandbox_mode=\"danger-full-access\"}"]);
-        // A direct `approval_mode` under an app/server (not under tools) is not a
-        // real owned setting.
-        accept(&["-c", "apps.foo.approval_mode=whatever"]);
-        // TOML-key-aware decoding: a benign quoted key forwards — a server named
-        // with a dot, and a single quoted key that merely looks like a dotted
-        // owned path.
-        accept(&["-c", "mcp_servers.\"some.server\".command=x"]);
-        accept(&["-c", "\"hooks.command\"=x"]);
-        // Quote-aware key precheck: `[`/`]`/`#` are legal inside a quoted segment,
-        // so a server named `prod[#1]` forwards (they are not blanket-rejected).
-        accept(&["-c", "mcp_servers.\"prod[#1]\".command=x"]);
-        // Benign bare feature names forward.
-        accept(&["--enable", "web_search"]);
-        accept(&["--disable", "telemetry"]);
     }
 
     #[test]
@@ -4862,11 +3702,9 @@ web_search                               stable             true
             "execpolicy",
             "apply",
             "a",
-            "resume",
             "archive",
             "delete",
             "unarchive",
-            "fork",
             "cloud",
             "cloud-tasks",
             "responses-api-proxy",
@@ -4880,6 +3718,122 @@ web_search                               stable             true
                 "`codex {name}` should be refused as a subcommand"
             );
         }
+    }
+
+    /// **`resume` and `fork` are hosted like a new session.** The subcommand leads the
+    /// emitted argv, its own options follow the flags-then-fence rule, and `--cd` is still
+    /// the session folder. The host re-fences what the launcher emitted, so the emitted
+    /// form must come back unchanged.
+    #[test]
+    fn resume_and_fork_are_hosted_with_their_own_options() {
+        let fence = |parts: &[&str]| {
+            let out = fence_positionals(&argv(parts)).unwrap_or_else(|e| panic!("{parts:?}: {e}"));
+            assert_eq!(fence_positionals(&out).unwrap(), out, "{parts:?} re-fences");
+            out
+        };
+        assert_eq!(fence(&["resume"]), argv(&["resume"]));
+        assert_eq!(fence(&["resume", "--last"]), argv(&["resume", "--last"]));
+        assert_eq!(
+            fence(&["resume", "0199-id", "fix the test"]),
+            argv(&["resume", "--", "0199-id", "fix the test"])
+        );
+        assert_eq!(fence(&["fork", "--last"]), argv(&["fork", "--last"]));
+        assert_eq!(
+            fence(&["fork", "--all", "0199-id"]),
+            argv(&["fork", "--all", "--", "0199-id"])
+        );
+        assert_eq!(
+            fence(&[
+                "resume",
+                "-m",
+                "gpt-5",
+                "--include-non-interactive",
+                "0199-id"
+            ]),
+            argv(&[
+                "resume",
+                "--model=gpt-5",
+                "--include-non-interactive",
+                "--",
+                "0199-id"
+            ])
+        );
+        assert_eq!(
+            fence(&["-m", "gpt-5", "--search", "resume", "--last"]),
+            argv(&["resume", "--model=gpt-5", "--search", "--last"])
+        );
+        assert_eq!(
+            fence(&["resume", "--last", "--", "--not-a-flag"]),
+            argv(&["resume", "--last", "--", "--not-a-flag"])
+        );
+        let scan = scan_codex_argv(&argv(&["fork", "--cd", "/x", "--last"])).unwrap();
+        assert_eq!(scan.cd, vec!["/x"]);
+        assert_eq!(scan.normalized, argv(&["fork", "--last"]));
+        let scan = scan_codex_argv(&argv(&["-C", "/y", "resume", "0199-id"])).unwrap();
+        assert_eq!(scan.cd, vec!["/y"]);
+        assert_eq!(scan.normalized, argv(&["resume", "--", "0199-id"]));
+        // Past the caller's own `--` the word is prompt text, as before.
+        assert_eq!(fence(&["--", "resume"]), argv(&["--", "resume"]));
+    }
+
+    /// Only `resume` and `fork`, and only as the first positional: every other subcommand
+    /// is still refused, and so is a subcommand name after a prompt.
+    #[test]
+    fn only_resume_and_fork_are_hosted_and_only_as_the_first_positional() {
+        for parts in [
+            &["exec"][..],
+            &["app-server"][..],
+            &["-m", "gpt-5", "exec", "hi"][..],
+            &["please", "resume"][..],
+        ] {
+            assert!(
+                matches!(refuse(parts), CodexRefusal::Subcommand { .. }),
+                "{parts:?} must be refused as a subcommand"
+            );
+        }
+        assert!(matches!(
+            refuse(&["resume", "--remote", "unix:///x"]),
+            CodexRefusal::OwnedFlag { .. }
+        ));
+    }
+
+    /// **After `resume` or `fork`, every word is a session id or a prompt**, never a
+    /// subcommand: `resume` and `fork` have none of their own, so native codex reads
+    /// `codex resume --last review` as a prompt and `codex fork 0199 e` as an id and a
+    /// prompt. The fence keeps each behind `--`.
+    #[test]
+    fn words_after_resume_or_fork_are_ids_and_prompts() {
+        for (parts, fenced) in [
+            (&["resume", "review"][..], &["resume", "--", "review"][..]),
+            (
+                &["resume", "--last", "a"][..],
+                &["resume", "--last", "--", "a"][..],
+            ),
+            (&["fork", "0199", "e"][..], &["fork", "--", "0199", "e"][..]),
+            (&["resume", "help"][..], &["resume", "--", "help"][..]),
+            (
+                &["resume", "0199-id", "fork"][..],
+                &["resume", "--", "0199-id", "fork"][..],
+            ),
+        ] {
+            let out = fence_positionals(&argv(parts)).unwrap_or_else(|e| panic!("{parts:?}: {e}"));
+            assert_eq!(out, argv(fenced), "{parts:?}");
+            assert_eq!(fence_positionals(&out).unwrap(), out, "{parts:?} re-fences");
+        }
+    }
+
+    /// `resume --help` and `fork -h` are codex's own help, run directly as before.
+    #[test]
+    fn help_for_resume_and_fork_runs_codex_itself() {
+        for parts in [
+            &["resume", "--help"][..],
+            &["fork", "-h"][..],
+            &["resume", "--last", "--help"][..],
+            &["help", "fork"][..],
+        ] {
+            assert!(asks_help_or_version(&argv(parts)), "{parts:?}");
+        }
+        assert!(!asks_help_or_version(&argv(&["resume", "--last"])));
     }
 
     /// The three subcommands codex 0.153 added, which this grammar forwarded as prompt
@@ -4902,45 +3856,194 @@ web_search                               stable             true
         }
     }
 
-    /// **The two guarded surfaces must agree, in BOTH directions.**
-    ///
-    /// This is the seam between the launch gate and the argv grammar. The gate proves
-    /// the installed binary's command set still equals a vendored reference; this proves
-    /// the references are fully covered by the refusal table, and — the direction that
-    /// matters for the class the projection cannot see — that every token in the refusal
-    /// table is either enumerated by a reference or explicitly listed as a hidden alias.
-    ///
-    /// Without the second direction a dispatchable root token could sit in NEITHER: not
-    /// in the completion script (so the argv diff never sees it appear) and not in the
-    /// refusal table (so `validate_codex_argv` forwards it as prompt text). `cloud-tasks`
-    /// is that class, measured: it dispatches on both binaries and appears in no
-    /// enumeration either of them emits. Listing it in
-    /// [`codex_broker::guarded_surface::HIDDEN_ROOT_ALIASES`] is what makes it a
-    /// reviewed fact instead of a token that happens to be here, and
-    /// `the_hidden_root_aliases_still_dispatch_and_are_still_hidden` re-measures both
-    /// halves of that claim against live binaries.
+    /// **`-i`/`--image` with no value reaches codex, which refuses it.** Native codex
+    /// answers `a value is required` (rc 2); dropping the flag would launch a session
+    /// the caller did not ask for.
     #[test]
-    fn every_dispatchable_root_token_is_accounted_for() {
-        use codex_broker::guarded_surface as gs;
-        let mut known: std::collections::BTreeSet<String> = gs::baseline_argv().subcommands;
-        known.extend(gs::grounded_argv().subcommands);
-        for name in &known {
+    fn an_image_flag_with_no_value_is_forwarded_for_codex_to_refuse() {
+        let fence = |parts: &[&str]| fence_positionals(&argv(parts)).expect("accepted");
+        assert_eq!(fence(&["-i"]), argv(&["--image"]));
+        assert_eq!(fence(&["--image"]), argv(&["--image"]));
+        assert_eq!(fence(&["-i", "--", "hi"]), argv(&["--image", "--", "hi"]));
+        assert_eq!(fence(&["-i", "--search"]), argv(&["--image", "--search"]));
+        assert_eq!(fence(&["-i", "a.png"]), argv(&["--image=a.png"]));
+    }
+
+    /// **Help and version come first:** before the refusals, the binary checks and
+    /// every launch step — native codex prints help for `--help resume` and for
+    /// `--remote ws://x --help`, and runs from a script shim as readily as from the
+    /// native binary.
+    #[test]
+    fn help_and_version_run_before_any_refusal_or_launch_check() {
+        let start = production_fn("pub fn start(passthrough: &[String]) -> Result<()> {");
+        let native = start
+            .find("codex_itself(")
+            .expect("start runs codex itself");
+        for later in [
+            "resolve_codex_bin(",
+            "scan_codex_argv(",
+            "clear_freezes_left_standing()",
+            "probe_codex(",
+            "launch(&resolved",
+        ] {
             assert!(
-                is_subcommand(name),
-                "a vendored argv reference names `{name}` as a root subcommand, but the \
-                 refusal table does not know it — it would be forwarded as prompt text \
-                 and codex would dispatch it"
+                native < start.find(later).expect(later),
+                "codex itself must run before {later}"
             );
         }
-        for token in ROOT_SUBCOMMANDS {
+    }
+
+    /// **A flag after the prompt still reaches codex as a flag.** Native `codex hi
+    /// --search` searches; a fence in front of `hi` would turn `--search` into prompt
+    /// text (0.155.1: `unrecognized subcommand '--search'`). So every flag is emitted
+    /// first, in its own relative order, then `--`, then the positionals in order.
+    #[test]
+    fn flags_after_the_prompt_are_emitted_before_the_fence() {
+        let fence = |parts: &[&str]| fence_positionals(&argv(parts)).expect("accepted");
+        assert_eq!(fence(&["hi", "--search"]), argv(&["--search", "--", "hi"]));
+        assert_eq!(
+            fence(&["fix it", "-m", "gpt-5", "--search"]),
+            argv(&["--model=gpt-5", "--search", "--", "fix it"])
+        );
+        assert_eq!(
+            fence(&["one", "-c", "x=1", "two", "-c", "y=2"]),
+            argv(&["--config=x=1", "--config=y=2", "--", "one", "two"])
+        );
+        assert_eq!(
+            fence(&["hi", "--search", "--", "--not-a-flag"]),
+            argv(&["--search", "--", "hi", "--not-a-flag"])
+        );
+    }
+
+    /// **A flag this launcher has never seen reaches codex unchanged**, and never takes
+    /// the next word as its value — so the next word is a positional behind the fence
+    /// and cannot be dispatched. A value flag written with a space then gets codex's
+    /// own "a value is required" error; the `=` form works.
+    #[test]
+    fn flags_the_launcher_does_not_know_pass_through_unchanged() {
+        let fence = |parts: &[&str]| fence_positionals(&argv(parts)).expect("accepted");
+        assert_eq!(fence(&["--worktree"]), argv(&["--worktree"]));
+        assert_eq!(
+            fence(&["--worktree", "hi"]),
+            argv(&["--worktree", "--", "hi"])
+        );
+        assert_eq!(
+            fence(&["--future-flag=v", "hi"]),
+            argv(&["--future-flag=v", "--", "hi"])
+        );
+        assert_eq!(fence(&["-Zq", "hi"]), argv(&["-Zq", "--", "hi"]));
+        // Known value flags keep their arity.
+        assert_eq!(
+            fence(&["--worktree", "-m", "gpt-5", "hi"]),
+            argv(&["--worktree", "--model=gpt-5", "--", "hi"])
+        );
+        // The word after an unknown flag is a positional, so a subcommand name there is
+        // still refused rather than handed to codex.
+        assert!(matches!(
+            refuse(&["--future-flag", "features"]),
+            CodexRefusal::Subcommand { .. }
+        ));
+        // The transport stays owned in every spelling.
+        assert!(matches!(
+            refuse(&["--worktree", "--remote=x"]),
+            CodexRefusal::OwnedFlag { .. }
+        ));
+    }
+
+    /// **`--help` and `--version` are codex's own**, alone or inside a short cluster,
+    /// anywhere before `--`, whatever else the argv holds: the launch runs codex with the
+    /// caller's own arguments and creates no session.
+    #[test]
+    fn help_and_version_run_codex_itself_with_the_callers_arguments() {
+        for parts in [
+            &["--help"][..],
+            &["-h"][..],
+            &["--version"][..],
+            &["-V"][..],
+            &["-hC", "x"][..],
+            &["-Vm", "gpt-5"][..],
+            &["hi", "--help"][..],
+            &["--worktree", "-h"][..],
+            // Native codex answers these with help, so no refusal may come first.
+            &["--help", "resume"][..],
+            &["--version", "resume"][..],
+            &["--help", "--remote", "ws://x"][..],
+            &["--remote", "ws://x", "--help"][..],
+            // `codex help` and `codex help <sub>` print help natively.
+            &["help"][..],
+            &["help", "resume"][..],
+            &["-m", "gpt-5", "help"][..],
+        ] {
             assert!(
-                known.contains(token) || gs::HIDDEN_ROOT_ALIASES.contains(&token),
-                "the refusal table refuses `{token}`, which no vendored reference \
-                 enumerates and HIDDEN_ROOT_ALIASES does not claim — so nothing measures \
-                 whether it still dispatches, and its siblings could be missing here \
-                 without anything noticing"
+                asks_help_or_version(&argv(parts)),
+                "{parts:?} asks codex itself"
             );
         }
+        for parts in [
+            &["--", "--help"][..],
+            &["-m", "gpt-5"][..],
+            &["-mh"][..],
+            &["hi"][..],
+            // Only the FIRST positional, and never a flag's value or past `--`.
+            &["hi", "help"][..],
+            &["-m", "help"][..],
+            &["-i", "a.png", "help"][..],
+            &["--", "help"][..],
+        ] {
+            assert!(
+                !asks_help_or_version(&argv(parts)),
+                "{parts:?} is an ordinary launch"
+            );
+        }
+        let codex = Path::new("/opt/codex/bin/codex");
+        let raw = argv(&["-hC", "x"]);
+        let cmd = codex_itself(codex, &raw);
+        assert_eq!(cmd.get_program(), codex.as_os_str());
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            raw.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>(),
+            "the caller's arguments, verbatim — the `h` in `-hC` included"
+        );
+    }
+
+    /// **Help runs the codex a launch would choose**: the first native executable in the
+    /// launch's own candidate order ([`codex_candidates`]), with none of the launch's
+    /// hash or freeze. A script shim earlier in the list is skipped exactly as a launch
+    /// skips it; only when no native binary exists at all does help fall back to the
+    /// first candidate, so a shim-only machine still gets codex's help. Nothing at all is
+    /// a clear error.
+    #[test]
+    fn help_runs_the_codex_a_launch_would_choose() {
+        let root = tempdir();
+        let shim = root.join("codex-shim");
+        std::fs::write(&shim, b"#!/bin/sh\necho help\n").unwrap();
+        make_executable(&shim);
+        assert!(
+            matches!(inspect_candidate(&shim), CandidateIdentity::Wrapper),
+            "the premise: a launch would refuse this file"
+        );
+        let native = root.join("codex-native");
+        std::fs::write(&native, [0xCF, 0xFA, 0xED, 0xFE, 0, 0, 0, 0]).unwrap();
+        make_executable(&native);
+
+        // `codex_bin` names the shim; the native binary comes later in the same order.
+        let config = Config {
+            codex_bin: Some(shim.to_string_lossy().into_owned()),
+            ..Config::default()
+        };
+        let candidates = codex_candidates(&config, Some(native.clone()), &root, None);
+        assert_eq!(
+            first_codex(candidates).expect("a codex"),
+            native.canonicalize().unwrap(),
+            "help must run the native binary a launch would run, not the shim"
+        );
+
+        // Shim-only: help still runs it.
+        let found = first_codex(vec![root.join("absent"), shim.clone()]).expect("a codex");
+        assert_eq!(found, shim.canonicalize().unwrap());
+        let none = first_codex(vec![root.join("absent")]).expect_err("nothing to run");
+        assert!(format!("{none:#}").contains("could not find the codex binary"));
+        cleanup(&root);
     }
 
     /// The fence goes in front of the first positional, and every value-taking flag is
@@ -5020,7 +4123,11 @@ web_search                               stable             true
     /// refusal message is not replaced by a silent prompt.
     #[test]
     fn the_fence_refuses_what_the_grammar_refuses() {
-        for parts in [&["resume"][..], &["--yolo"][..], &["--unknown-flag"][..]] {
+        for parts in [
+            &["exec"][..],
+            &["--remote=x"][..],
+            &["--unknown-flag", "features"][..],
+        ] {
             assert!(
                 fence_positionals(&argv(parts)).is_err(),
                 "{parts:?} must still be refused"
@@ -5045,8 +4152,7 @@ web_search                               stable             true
         use std::os::unix::fs::PermissionsExt;
         let dir = ScratchDir::new().expect("scratch dir");
         let shim = dir.0.join("codex-shim");
-        // Dispatches `zzz-future-alias` — a token in neither ROOT_SUBCOMMANDS,
-        // HIDDEN_ROOT_ALIASES, nor either vendored argv reference.
+        // Dispatches `zzz-future-alias` — a token ROOT_SUBCOMMANDS does not know.
         std::fs::write(
             &shim,
             "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    --) echo PROMPT; exit 0 ;;\n \
@@ -5083,9 +4189,8 @@ web_search                               stable             true
     /// **A future codex that changed a flag's ARITY still cannot be made to dispatch.**
     ///
     /// The case, staged exactly: a binary whose `-i` consumes ONE value, given
-    /// `-i a.png features`. Our walk still believes `-i` is greedy — nothing gates
-    /// option arity, and the guarded-surface gate compares spellings, not how many
-    /// values a flag eats — so under the old passthrough it swept both tokens, saw no
+    /// `-i a.png features`. Our walk still believes `-i` is greedy — nothing checks
+    /// option arity — so under the old passthrough it swept both tokens, saw no
     /// positional, inserted no fence, and handed the binary a bare `features` to
     /// dispatch.
     ///
@@ -5147,11 +4252,11 @@ web_search                               stable             true
     #[test]
     fn a_subcommand_after_a_consumed_flag_value_is_refused() {
         assert!(matches!(
-            refuse(&["-m", "gpt", "resume"]),
+            refuse(&["-m", "gpt", "exec"]),
             CodexRefusal::Subcommand { .. }
         ));
         assert!(matches!(
-            refuse(&["--model=gpt", "fork"]),
+            refuse(&["--model=gpt", "review"]),
             CodexRefusal::Subcommand { .. }
         ));
     }
@@ -5175,18 +4280,17 @@ web_search                               stable             true
     }
 
     #[test]
-    fn a_hidden_global_flag_cannot_smuggle_a_subcommand() {
-        // `codex --psp resume` dispatches Resume; the recognised hidden global
-        // must not shield it.
+    fn a_flag_cannot_smuggle_a_subcommand() {
+        // `codex --search exec` dispatches Exec; a flag in front must not shield it.
         assert!(matches!(
-            refuse(&["--psp", "resume"]),
+            refuse(&["--search", "exec"]),
             CodexRefusal::Subcommand { .. }
         ));
-        // An unknown flag fails closed up front (allowlist) — it never reaches
-        // subcommand detection, so it can neither ride through nor smuggle one.
+        // An unknown flag takes no value, so the word after it is judged as a
+        // positional and refused.
         assert!(matches!(
-            refuse(&["--not-a-real-flag", "resume"]),
-            CodexRefusal::Unclassifiable { .. }
+            refuse(&["--not-a-real-flag", "exec"]),
+            CodexRefusal::Subcommand { .. }
         ));
     }
 
@@ -5211,7 +4315,7 @@ web_search                               stable             true
         accept(&["--image", "a", "b", "fork"]);
         // But a real flag terminates the greedy consumption.
         assert!(matches!(
-            refuse(&["-i", "a", "--cd", "/x"]),
+            refuse(&["-i", "a", "--remote", "x"]),
             CodexRefusal::OwnedFlag { .. }
         ));
         // Attached `--image=a` / `-ia` takes exactly one value (grounded:
@@ -5221,11 +4325,11 @@ web_search                               stable             true
         accept(&["--image=a", "b"]);
         accept(&["-ia", "b"]);
         assert!(matches!(
-            refuse(&["--image=a", "resume"]),
+            refuse(&["--image=a", "exec"]),
             CodexRefusal::Subcommand { .. }
         ));
         assert!(matches!(
-            refuse(&["-ia", "fork"]),
+            refuse(&["-ia", "review"]),
             CodexRefusal::Subcommand { .. }
         ));
     }
@@ -5233,65 +4337,55 @@ web_search                               stable             true
     #[test]
     fn a_value_option_does_not_swallow_a_flag_shaped_follower() {
         // Grounded: `codex --model --yolo` is a missing-value error, and `--yolo`
-        // is parsed as a flag — so the forbidden follower must reach our refusal,
+        // is parsed as a flag — so a forbidden follower must reach our refusal,
         // never ride through as the option's value.
         assert!(matches!(
-            refuse(&["--model", "--yolo"]),
-            CodexRefusal::ApprovalControl { .. }
-        ));
-        assert!(matches!(
-            refuse(&["-m", "-aon-request"]),
-            CodexRefusal::ApprovalControl { .. }
-        ));
-        assert!(matches!(
-            refuse(&["--enable", "--approve-for-me"]),
-            CodexRefusal::ApprovalControl { .. }
-        ));
-        assert!(matches!(
-            refuse(&["--local-provider", "--config=approval_policy=never"]),
-            CodexRefusal::OwnedConfigKey { .. }
-        ));
-        assert!(matches!(
-            refuse(&["--config", "--cd", "/x"]),
+            refuse(&["--model", "--remote=x"]),
             CodexRefusal::OwnedFlag { .. }
         ));
+        assert!(matches!(
+            refuse(&["--config", "--remote", "x"]),
+            CodexRefusal::OwnedFlag { .. }
+        ));
+        assert_eq!(
+            fence_positionals(&argv(&["-m", "--nope"])).unwrap(),
+            argv(&["--model", "--nope"])
+        );
         // A benign flag follower is still just the next flag; the value-option had
         // no value (codex would error), but nothing forbidden rode through.
         accept(&["--model", "--search"]);
     }
 
     #[test]
-    fn short_clusters_are_fully_expanded_and_cannot_smuggle_an_owned_key() {
+    fn short_clusters_are_fully_expanded() {
         // A bool short in front of a value short must not discard the suffix: the
-        // `-c approval_policy=never` inside `-hcapproval_policy=never` is refused.
-        assert!(matches!(
-            refuse(&["-hcapproval_policy=never"]),
-            CodexRefusal::OwnedConfigKey { .. }
-        ));
-        assert!(matches!(
-            refuse(&["-Vcapproval_policy=never"]),
-            CodexRefusal::OwnedConfigKey { .. }
-        ));
+        // `-c model=o3` inside `-hcmodel=o3` keeps its value.
+        assert_eq!(
+            fence_positionals(&argv(&["-hcmodel=o3"])).unwrap(),
+            argv(&["--config=model=o3"])
+        );
         // A cluster of only bool shorts forwards.
         accept(&["-hV"]);
         accept(&["-h"]);
         // A value short attached after a bool short still consumes its own value.
-        assert!(matches!(refuse(&["-hC."]), CodexRefusal::OwnedFlag { .. }));
+        assert_eq!(scan_codex_argv(&argv(&["-hC."])).unwrap().cd, vec!["."]);
     }
 
     #[test]
-    fn repeated_owned_and_neutral_flags_are_handled() {
+    fn repeated_flags_are_forwarded_each_time() {
+        assert_eq!(
+            fence_positionals(&argv(&["-c", "model=o3", "-c", "approval_policy=never"])).unwrap(),
+            argv(&["--config=model=o3", "--config=approval_policy=never"])
+        );
         assert!(matches!(
-            refuse(&["-c", "model=o3", "-c", "approval_policy=never"]),
-            CodexRefusal::OwnedConfigKey { .. }
+            refuse(&["-c", "model=o3", "--remote", "x"]),
+            CodexRefusal::OwnedFlag { .. }
         ));
-        accept(&["-c", "model=o3", "-c", "reasoning_effort=high"]);
     }
 
     #[test]
-    fn the_benign_flag_allowlist_forwards_only_known_flags() {
-        // Every benign interactive flag from `codex --help` (plus a prompt) is
-        // forwarded.
+    fn the_known_interactive_flags_are_forwarded() {
+        // Every interactive flag from `codex --help` (plus a prompt) is forwarded.
         accept(&["-m", "gpt-5"]);
         accept(&["--model", "gpt-5"]);
         accept(&["-i", "shot.png"]);
@@ -5302,27 +4396,27 @@ web_search                               stable             true
         accept(&["--strict-config"]);
         accept(&["-h"]);
         accept(&["-V"]);
-        // A recognised hidden global on its own, with a prompt, is neutral.
-        accept(&["--psp", "fix the build"]);
         // A realistic benign invocation: a prompt plus a known flag.
         accept(&["-m", "gpt-5", "fix the flaky test"]);
     }
 
     #[test]
-    fn unknown_flags_fail_closed_under_the_allowlist() {
-        // A7 allowlist: anything flag-shaped that is not on the known list is
-        // refused, not forwarded — an unknown long flag, an unknown short flag,
-        // and a short cluster with an unknown character.
-        for parts in [
-            &["--not-a-real-flag"][..],
-            &["--future-approval-flag", "x"][..],
-            &["--typo"][..],
-            &["-Z"][..],
-            &["-hq"][..], // -h known, q unknown -> fail closed
+    fn unknown_flags_are_forwarded_as_written() {
+        // An unknown long flag, an unknown short flag, and a short cluster with an
+        // unknown character are all forwarded unchanged, taking no value.
+        for (parts, fenced) in [
+            (&["--not-a-real-flag"][..], &["--not-a-real-flag"][..]),
+            (
+                &["--future-approval-flag", "x"][..],
+                &["--future-approval-flag", "--", "x"][..],
+            ),
+            (&["-Z"][..], &["-Z"][..]),
+            (&["-hq"][..], &["-hq"][..]),
         ] {
-            assert!(
-                matches!(refuse(parts), CodexRefusal::Unclassifiable { .. }),
-                "{parts:?} should fail closed under the allowlist"
+            assert_eq!(
+                fence_positionals(&argv(parts)).unwrap(),
+                argv(fenced),
+                "{parts:?}"
             );
         }
         // A known short with an attached value is still a value, not "unknown":
@@ -5335,40 +4429,23 @@ web_search                               stable             true
         accept(&["--", "--remote", "unix:///x"]);
         accept(&["--", "-C", "/x"]);
         accept(&["--", "exec"]);
+        // Past the boundary `-C` is prompt text, not the session folder.
+        assert!(scan_codex_argv(&argv(&["--", "-C", "/x"]))
+            .unwrap()
+            .cd
+            .is_empty());
         assert!(matches!(
-            refuse(&["--cd", "/x", "--", "prompt"]),
+            refuse(&["--remote", "x", "--", "prompt"]),
             CodexRefusal::OwnedFlag { .. }
         ));
     }
 
     #[test]
     fn refusal_messages_name_what_and_why() {
-        assert!(refuse(&["--remote", "x"]).to_string().contains("--remote"));
-        assert!(refuse(&["-p", "work"]).to_string().contains("--profile"));
-        assert!(refuse(&["--yolo"])
+        assert!(refuse(&["--remote", "x"])
             .to_string()
-            .contains("approval and hook-trust"));
-        assert!(refuse(&["-a", "never"])
-            .to_string()
-            .contains("--ask-for-approval"));
-        assert!(refuse(&["-c", "approval_policy=never"])
-            .to_string()
-            .contains("approval_policy"));
-        assert!(refuse(&["-sread-only"])
-            .to_string()
-            .contains("the session sandbox policy"));
-        assert!(refuse(&["--add-dir", "/repo"])
-            .to_string()
-            .contains("writable roots"));
-        assert!(
-            refuse(&["-c", "sandbox_workspace_write.writable_roots=[\"/\"]"])
-                .to_string()
-                .contains("sandbox_workspace_write.writable_roots")
-        );
-        assert!(refuse(&["-c", "features={hooks=false}"])
-            .to_string()
-            .contains("hooks"));
-        assert!(refuse(&["resume"]).to_string().contains("resume"));
+            .contains("--remote` is set by CodeConnect (the app-server transport)"));
+        assert!(refuse(&["exec"]).to_string().contains("exec"));
     }
 
     // ------------------------------------------------------------- test helpers
@@ -5406,6 +4483,21 @@ web_search                               stable             true
 
     fn cleanup(dir: &Path) {
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A private temp directory, removed when it drops.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new() -> Result<ScratchDir> {
+            Ok(ScratchDir(tempdir()))
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            cleanup(&self.0);
+        }
     }
 
     fn make_executable(path: &Path) {

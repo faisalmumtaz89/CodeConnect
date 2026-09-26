@@ -2,7 +2,7 @@ import XCTest
 
 @testable import CodeConnect
 
-/// **The P0 the operator found on a real phone: a Codex turn ran and the
+/// **The bug the operator found on a real phone: a Codex turn ran and the
 /// timeline showed only "Turn complete".**
 ///
 /// The words were on the wire the whole time. `ccd` logged `user_message` and

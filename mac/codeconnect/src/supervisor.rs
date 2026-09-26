@@ -71,7 +71,7 @@ const RECONNECT_MAX: Duration = Duration::from_secs(10);
 /// underneath — while holding cleanup for less time than the launch's own bring-up
 /// budget. It does not cover a daemon that is down for the afternoon. That
 /// residual is real and is *not* closed by this: closing it needs a durable outbox
-/// with an owner that outlives this process, which is a design chunk. What this
+/// with an owner that outlives this process, which is a design of its own. What this
 /// buys is that the failure is now bounded, reported in the run's own log, and no
 /// longer silent.
 const EXIT_REPORT_BUDGET: Duration = Duration::from_secs(15);
@@ -172,7 +172,7 @@ pub struct CodexSeat {
     /// The broker's ccd leg (`<run dir>/ccd.sock`) — the daemon's control link
     /// dials exactly this path.
     pub ccd_socket: String,
-    /// The thread visit this registration's frames are attributed to (D4). A
+    /// The thread visit this registration's frames are attributed to. A
     /// fresh launch is the first visit, so the coordinator sends 1.
     pub generation: u64,
 }
@@ -1453,10 +1453,9 @@ fn recover_composer_with(
 //
 // A visible cursor is not the whole answer either. A pane in one of tmux's own
 // modes routes every keystroke to that mode instead of to Claude, and does it
-// with the cursor still showing — so the wheel over the inline transcript,
-// which is what `render_server_conf`'s `mouse on` is for, produces a screen
-// where the composer is drawn, the cursor is up, `send-keys` exits 0 and the
-// text is never delivered. Both facts come back from one `display`; see
+// with the cursor still showing — so a pane an ordinary tmux client put in
+// copy-mode shows a screen where the composer is drawn, the cursor is up,
+// `send-keys` exits 0 and the text is never delivered. Both facts come back from one `display`; see
 // [`tmux::who_has_the_keyboard`].
 
 /// May this send leave the pane's copy-mode by itself, rather than asking the
@@ -1466,10 +1465,8 @@ fn recover_composer_with(
 /// intent to type, there is no second reader whose place in the transcript
 /// this would take, and a scroll position is a view of history rather than a
 /// question: leaving it loses nothing that was not still in the pane's
-/// history a moment later. Refusing it made the wheel — which
-/// [`tmux::render_server_conf`]'s `mouse on` puts under every scroll at the
-/// Mac — into something that silently disabled the phone until somebody
-/// walked back to the keyboard.
+/// history a moment later. Refusing it would let one scroll at the Mac silently
+/// disable the phone until somebody walked back to the keyboard.
 ///
 /// **No, for anything else tmux is holding.** A clock-mode, a `choose-tree`,
 /// a `customize-mode` — and a copy-mode with any of them underneath — are
@@ -1775,16 +1772,16 @@ fn report_exit_retrying(
     let mut backoff = RECONNECT_MIN;
     let mut last = "the budget was spent before a single attempt could be made".to_string();
     loop {
-        // **The budget is wall-clock, and these two lines are what make it one**
-        // (2e-7b round-2 F4). It used to be a per-attempt timeout stacked on a
-        // deadline checked only *after* the attempt, with the sleep deliberately
-        // capped to land ON the deadline — so the loop's last act was reliably to
-        // start a fresh full-length attempt at the moment its budget ran out. A
-        // daemon silent from the start took the budget plus one attempt; one that
-        // went silent at the final attempt took the budget plus a full attempt on
-        // top of the attempts already spent. At the production numbers that is
-        // ~20.5s and ~25s against a 15s budget, and this whole loop exists to keep
-        // the launch's cleanup below its own bring-up budget.
+        // **The budget is wall-clock, and these two lines are what make it one.**
+        // A per-attempt timeout stacked on a deadline checked only *after* the
+        // attempt, with the sleep capped to land ON the deadline, makes the loop's
+        // last act reliably to start a fresh full-length attempt at the moment its
+        // budget runs out. A daemon silent from the start then takes the budget plus
+        // one attempt; one that goes silent at the final attempt takes the budget
+        // plus a full attempt on top of the attempts already spent. At the
+        // production numbers that is ~20.5s and ~25s against a 15s budget, and this
+        // whole loop exists to keep the launch's cleanup below its own bring-up
+        // budget.
         //
         //   * no attempt is STARTED at or after the deadline; and
         //   * an attempt may not outlive the budget it is spending — its timeout is
@@ -1804,13 +1801,14 @@ fn report_exit_retrying(
         // Never sleep past the budget either: a backoff that overshot would spend
         // budget the clamp above has already promised to an attempt.
         //
-        // **And never sleep away more than HALF of what is left** (round-3 F4). The
-        // wall-clock bound above made the loop honest about when it stops; it did not
-        // make the schedule cover the window it claims. With instant failures the
-        // attempts fell at ~0, 0.5, 1.5, 3.5 and 7.5 seconds, and the next 8-second
-        // backoff then consumed the entire remainder of a 15-second budget — so a
-        // daemon that came back at 9 seconds was never tried at all, INSIDE the bound
-        // this loop advertises. The blind tail was the whole second half.
+        // **And never sleep away more than HALF of what is left.** The wall-clock
+        // bound above makes the loop honest about when it stops; it does not make the
+        // schedule cover the window it claims. With instant failures and plain
+        // doubling the attempts fall at ~0, 0.5, 1.5, 3.5 and 7.5 seconds, and the
+        // next 8-second backoff then consumes the entire remainder of a 15-second
+        // budget — so a daemon that came back at 9 seconds would never be tried at
+        // all, INSIDE the bound this loop advertises. The blind tail is the whole
+        // second half.
         //
         // Halving what is left is the smallest rule that closes it. Every sleep leaves
         // at least as much budget as it spends, so an attempt starts in every remaining
@@ -2137,14 +2135,15 @@ mod tests {
         );
     }
 
-    /// **The second silence, and the same two answers** (2e-7b round-2 F3).
+    /// **The second silence, and the same two answers.**
     ///
-    /// `owned_liveness` used to read a census lacking our uid as a durable `Gone`
-    /// whichever server answered, so a live server A that lost its address to a
-    /// stranger B could be declared exited. It is now `Unknown` — which is a NEW
-    /// shape of silence reaching `probe_liveness`, and the supervisor's contract has
-    /// to hold for it exactly as it does for `NoServer`: unreadable while A might be
-    /// alive, and an exit once A is proven dead.
+    /// `owned_liveness` reads a census lacking our uid as `Unknown`, not a durable
+    /// `Gone`, when the answering server is not the one the session was resolved
+    /// against, so a live server A that lost its address to a stranger B is not
+    /// declared exited. That is a second shape of silence reaching `probe_liveness`,
+    /// and the supervisor's contract has to hold for it exactly as it does for
+    /// `NoServer`: unreadable while A might be alive, and an exit once A is proven
+    /// dead.
     ///
     /// Driven against a real stranger server rather than argued from the arm's
     /// pattern, because the claim is about what the census actually returns.
@@ -2154,7 +2153,7 @@ mod tests {
             eprintln!("skipped: no tmux");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("cc-sup-f3-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cc-sup-dead-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("sock").to_string_lossy().into_owned();
         // A real, healthy server that has simply never heard of our uid.
@@ -2188,7 +2187,7 @@ mod tests {
                 tmux::SessionPresence::Unknown(_)
             ),
             "a stranger's complete census must not end a session whose own server is \
-             still alive — this is the false SessionEnd F3 names"
+             still alive — that would be a false SessionEnd"
         );
 
         let mut dead_pin = pin_on(
@@ -2281,7 +2280,7 @@ mod tests {
         //
         // It waits for two connections and this test makes one, so it is still parked
         // in `accept` at the end — see [`FakeDaemon`] for why that has to be released
-        // rather than detached (round-3 F8).
+        // rather than detached.
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
@@ -2332,9 +2331,9 @@ mod tests {
 
     /// A fake daemon still parked in `accept`, and the flag that lets it out.
     ///
-    /// **Dropping a `JoinHandle` detaches a thread; it does not wake one** (round-3
-    /// F8). A test whose retry loop makes fewer connections than its fake daemon waits
-    /// for left that thread blocked in `accept` for the life of the test binary,
+    /// **Dropping a `JoinHandle` detaches a thread; it does not wake one.** A test
+    /// whose retry loop makes fewer connections than its fake daemon waits for would
+    /// leave that thread blocked in `accept` for the life of the test binary,
     /// holding its listener, its socket file and any accepted streams. The schedule is
     /// not something a teardown should depend on, so the release is explicit: set the
     /// flag, make one connection to unpark the `accept`, and JOIN — the join is what
@@ -2386,18 +2385,20 @@ mod tests {
         FakeDaemon { stop, handle }
     }
 
-    /// **The retry schedule must cover the window it claims** (round-3 F4).
+    /// **The retry schedule must cover the window it claims.**
     ///
-    /// The wall-clock bound made the loop honest about when it STOPS. It said nothing
-    /// about where inside the budget it looks: with instant failures the attempts fell
-    /// at ~0, 0.5, 1.5, 3.5 and 7.5 seconds and the next 8-second backoff swallowed the
-    /// rest, so against the production 15-second budget a daemon that came back at 9
-    /// seconds was never tried — the run's introduction and its `SessionEnd` lost
-    /// inside the bound, not beyond it. That is not residual R1 (a daemon down for the
-    /// afternoon); it is the loop failing at the job it advertises.
+    /// The wall-clock bound makes the loop honest about when it STOPS. It says nothing
+    /// about where inside the budget it looks: with instant failures and plain doubling
+    /// the attempts fall at ~0, 0.5, 1.5, 3.5 and 7.5 seconds and the next 8-second
+    /// backoff swallows the rest, so against the production 15-second budget a daemon
+    /// that came back at 9 seconds would never be tried — the run's introduction and
+    /// its `SessionEnd` lost inside the bound, not beyond it. That is not the accepted
+    /// residual (a daemon down for the afternoon); it is the loop failing at the job it
+    /// advertises.
     ///
-    /// Driven at 3 seconds because the rule scales with the budget: the old schedule's
-    /// blind tail there is (1.5s, 3.0s), and this daemon appears at 1.8s — inside it.
+    /// Driven at 3 seconds because the rule scales with the budget: an uncapped
+    /// schedule's blind tail there is (1.5s, 3.0s), and this daemon appears at 1.8s —
+    /// inside it.
     ///
     /// **Mutation:** remove the `remaining / 2` cap and the sleep after the third
     /// attempt runs to the deadline; the report is never delivered and this fails at
@@ -2484,15 +2485,14 @@ mod tests {
         }
     }
 
-    /// **The budget is wall-clock: no attempt may START at or after the deadline**
-    /// (2e-7b round-2 F4).
+    /// **The budget is wall-clock: no attempt may START at or after the deadline.**
     ///
-    /// The deadline used to be checked only *after* an attempt, while the backoff
-    /// was capped to land exactly ON it — so the loop reliably began one more
-    /// full-length attempt at the instant its budget expired. Driven here: the first
-    /// two attempts fail instantly, the sleeps carry the loop to the deadline, and
-    /// the daemon then goes silent. Under the old shape that last attempt runs the
-    /// whole per-attempt timeout past a budget that is already spent.
+    /// A deadline checked only *after* an attempt, with the backoff capped to land
+    /// exactly ON it, makes the loop reliably begin one more full-length attempt at
+    /// the instant its budget expires. Driven here: the first two attempts fail
+    /// instantly, the sleeps carry the loop to the deadline, and the daemon then goes
+    /// silent. Under that shape the last attempt runs the whole per-attempt timeout
+    /// past a budget that is already spent.
     ///
     /// **Mutation:** move the `remaining.is_zero()` check back below the attempt and
     /// the elapsed time jumps from the budget to the budget plus a full
@@ -2508,7 +2508,7 @@ mod tests {
         let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
 
         // 1.2s against a 500ms first backoff: attempt, sleep 500, attempt, sleep
-        // 500 (the round-3 F4 cap: never more than half of what is left) — and the
+        // 500 (the cap: never more than half of what is left) — and the
         // silent connection is what the remaining ~200ms is then spent on.
         let budget = Duration::from_millis(1_200);
         let started = std::time::Instant::now();
@@ -2540,8 +2540,8 @@ mod tests {
         held.release(&socket);
     }
 
-    /// **An attempt may not outlive the budget it is spending** (2e-7b round-2 F4,
-    /// the other half).
+    /// **An attempt may not outlive the budget it is spending** (the other half of
+    /// the wall-clock budget).
     ///
     /// A daemon silent from the very first connection: the per-attempt timeout has
     /// to be the smaller of its default and what is left, or one attempt alone
@@ -3955,11 +3955,9 @@ means the full history gets re-read on your next message.
     ///
     /// Measured on claude 2.1.232: copy-mode leaves `#{cursor_flag}` at 1 while
     /// every keystroke goes to tmux's own mode table, `send-keys` still exits
-    /// 0, and the text never reaches the composer. The mouse wheel over the
-    /// inline transcript is what puts a pane there, and
-    /// [`tmux::render_server_conf`] turns the mouse on, so this is the ordinary
-    /// state of somebody reading their own session at the Mac — and a prompt
-    /// from the phone is the intent to type into it.
+    /// 0, and the text never reaches the composer. An ordinary tmux client
+    /// attached by hand puts a pane there, and a prompt from the phone is the
+    /// intent to type into it.
     ///
     /// Real tmux and real copy-mode, because the whole claim is about what tmux
     /// does with a keystroke. The harness's own record of what it received is
@@ -4638,7 +4636,7 @@ means the full history gets re-read on your next message.
         // danger: a frame the daemon cannot tell from a supervisor arriving is
         // one it hands the session to, and the process behind this one is
         // already dead. A daemon that adopts it then ends whichever run has
-        // since resumed the uid instead of this one — measured, round-10 F1.
+        // since resumed the uid instead of this one — measured.
         assert_eq!(
             frames[0]["exit_replay"], true,
             "the replay must identify itself: {frames:?}"

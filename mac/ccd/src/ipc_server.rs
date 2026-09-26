@@ -239,21 +239,21 @@ async fn read_loop(
                 let supported_agents = daemon.supported_agents();
                 let supported = supported_agents.contains(&agent);
                 // **Logged because this answer is otherwise unobservable from
-                // outside the asking process** (2e-7b round-2 F5). The launcher
+                // outside the asking process.** The launcher
                 // refuses only on a decoded `false`, and treats an absent or
                 // undecodable answer exactly like a hosting one — so "the launcher
                 // got past the preflight" is not evidence that any daemon said yes.
-                // A harness could previously only ask on a SECOND connection of its
-                // own, which is a different round trip against a daemon that may
-                // have died in between. This is the daemon reporting what it told
-                // the connection that actually asked.
+                // Asking on a SECOND connection of the harness's own is a different
+                // round trip against a daemon that may have died in between. This
+                // is the daemon reporting what it told the connection that
+                // actually asked.
                 //
-                // **Logged AFTER the enqueue, and only if it succeeded** (round-3
-                // F6). Written first and with the result discarded, the line was an
+                // **Logged AFTER the enqueue, and only if it succeeded.** Written
+                // first and with the result discarded, the line would be an
                 // affirmative the harness could read while the answer was dropped on
                 // the floor — and a dropped answer is an EOF the launcher reads as
                 // `Indeterminate`, which reaches the same launch gate. The one thing
-                // the count assertion has to exclude was the one thing it could not
+                // the count assertion has to exclude would be the one thing it could not
                 // see. Bound honestly at its real strength: this says the answer was
                 // handed to THIS connection's write queue, not that the bytes were
                 // flushed — a daemon killed between the two still logs it, the same
@@ -307,7 +307,7 @@ async fn read_loop(
                 reason,
             } => {
                 // **The registration this connection made is the identity the
-                // report is established against** (round-9 F3), on the same terms
+                // report is established against**, on the same terms
                 // the heartbeat above uses it: it was resolved once, on this
                 // connection, and cannot drift. `report_exit` opens a fresh socket
                 // and replays its registration immediately before this frame, so

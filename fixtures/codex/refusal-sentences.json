@@ -6,9 +6,9 @@
     "wire_code": "the app-server or the broker refused the write; the sentence carries their numeric code and never their message"
   },
   "counts": {
-    "link_state": 20,
+    "link_state": 19,
     "permanent": 43,
-    "total": 70,
+    "total": 69,
     "transient_local": 5,
     "wire_code": 2
   },
@@ -326,13 +326,6 @@
       "id": "compose_thread_switching",
       "outcome": "rejected",
       "text": "this Codex session is moving to another thread, so nothing was said; try again once it has settled",
-      "verb": "compose"
-    },
-    {
-      "category": "link_state",
-      "id": "compose_launch_unread",
-      "outcome": "rejected",
-      "text": "this Mac has not yet read what this Codex thread runs under, so it cannot start a turn on it; try again shortly, or say it at the Mac",
       "verb": "compose"
     },
     {

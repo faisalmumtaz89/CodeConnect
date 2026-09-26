@@ -6,7 +6,7 @@
 //!
 //! # The other families, and why none of them is a card
 //!
-//! The vendored bundle declares three more server→client requests, and what
+//! Codex's app-server schema declares three more server→client requests, and what
 //! each of them can ever be to this daemon was measured rather than reasoned
 //! about — once against the broker, which decides what a ccd leg is handed at
 //! all, and once against a live app-server, which decides whether the frame
@@ -26,23 +26,15 @@
 //!   cannot observe what it is never sent, so nothing here could read them even
 //!   if the wire produced them.
 //!
-//! # The permissions producer exists, and the launch removes it
+//! # The permissions producer exists, and the operator's config decides it
 //!
-//! **It would be false to say nothing produces one.** Codex has a
-//! model-callable permissions tool, and turning it on is a config key away:
-//! measured, `features.request_permissions_tool` reads `false` by default, an
-//! operator `config.toml` setting it reads `true`, and a
-//! `-c features.request_permissions_tool=false` on the argv reads `false`
-//! again. A shipping launch hands the codex processes the operator's own
-//! `CODEX_HOME`, so that key is the operator's to set.
-//!
-//! What is true is that a CodeConnect session is launched without it. The
-//! launcher writes that override onto both spawns and its reserved argv grammar
-//! refuses a caller's own `-c` for the same key, with a message saying why. So
-//! the absence is a property of the launch rather than a hope about defaults —
-//! and on a live session with the pin verified on the running app-server's argv,
-//! driven from five positions that could each produce one (a question put to the
-//! user, a network escalation, a filesystem escalation with the command
+//! **It would be false to say nothing produces one.** Codex has a model-callable
+//! permissions tool behind a feature flag, measured `false` by default and `true`
+//! when the operator's `config.toml` turns it on. A CodeConnect session runs under
+//! the operator's own `CODEX_HOME` and sets no feature of its own, so the key is
+//! the operator's, exactly as in native codex. On a live 0.153 session with the
+//! feature off, driven from five positions that could each produce one (a question
+//! put to the user, a network escalation, a filesystem escalation with the command
 //! approved, the same with it declined, and an MCP form with a real MCP server
 //! connected and a tool on it called), **the app-server emitted none of the
 //! three.** The escalation the model reaches for instead is the command family
@@ -50,17 +42,15 @@
 //! `commandExecution` one.
 //!
 //! So no card, row, doorbell or answer path exists for any of them, and building
-//! one would be machinery for an input this build's own sessions cannot produce.
+//! one would be machinery for an input the phone is never handed.
 //!
-//! **Two honest limits on that.** The zero for `requestUserInput` and for
-//! elicitation is a fact about what this model did on these prompts, not a wire
-//! property: nothing structural stops a codex build emitting either, and the
-//! reason they would still not reach a card is the broker's, not the
-//! app-server's. And the broker's refusal of `requestUserInput` has a cost worth
-//! naming: inside a CodeConnect session the model cannot put a question to the
-//! keyboard through that family, because the exchange is answered upstream with
-//! a method-unavailable error rather than delivered to the terminal. That is a
-//! recorded product limitation of running codex behind this broker.
+//! **The limit on that.** The zero is a fact about what this model did on these
+//! prompts with the feature off, not a wire property: an operator who turns the
+//! permissions tool on gets that family, and nothing structural stops a codex build
+//! emitting the other two. The reason none of them reaches a card is the broker's, not the
+//! app-server's: it hands the phone's leg only a command or file-change approval
+//! on the thread the keyboard is on, and leaves every other server request to the
+//! keyboard, which receives it as native codex would.
 //!
 //! # The wire wins over the bundle label
 //!
@@ -119,9 +109,10 @@
 //!   names where the command runs, so an approval for another environment is a
 //!   different question — and one this build has never measured and could not
 //!   describe on a card. It is pinned to the **literal** `"local"` and refused
-//!   otherwise ([`Refusal::UnmeasuredEnvironment`]), which is the 2e-7c rule: an
-//!   unmeasured capability is refused, not guessed. Pinned to one value it is a
-//!   constant, and a constant secures nothing inside a hash.
+//!   otherwise ([`Refusal::UnmeasuredEnvironment`]), the rule an unmeasured
+//!   `thread/start` key meets too: an unmeasured capability is refused, not
+//!   guessed. Pinned to one value it is a constant, and a constant secures
+//!   nothing inside a hash.
 //!
 //!   **Absence is refused too, and that is the measurement talking.** The bundle
 //!   says `"default": null`, but a default in a JSON schema is a statement about
@@ -312,7 +303,7 @@ impl Family {
     /// deny-consequence sentence (`ios/CodeConnect/Protocol/PayloadViews.swift`,
     /// `Views/DecisionCard.swift`). Borrowing `"Bash"` would buy a terminal
     /// glyph at the price of a title that names a tool Codex does not have, so
-    /// these say what the request is. Phase 5 owns what the app makes of them.
+    /// these say what the request is. What the app makes of them is the app's.
     fn tool_name(self) -> &'static str {
         match self {
             Family::Command => "command",
@@ -324,7 +315,7 @@ impl Family {
     ///
     /// **Pane-measured while a real decision was up**, because for the
     /// file-change family there is nowhere else to read them from: its request
-    /// declares no `availableDecisions` in either vendored bundle and carries
+    /// declares no `availableDecisions` in either the 0.147 or the 0.153 schema and carries
     /// none on the live wire. The command family's *set* does come off the wire
     /// — this table only supplies its words.
     fn labels(self) -> &'static [(&'static str, &'static str)] {
@@ -699,8 +690,8 @@ pub(crate) enum Refusal {
     /// as though it were the local one. **Absence is refused on the same terms
     /// as a different value**: the bundle's `"default": null` is a statement
     /// about the JSON, not about where a command runs, and no capture has ever
-    /// omitted the field for this family. Refused for the reason 2e-7c refuses
-    /// an unmeasured `thread/start` key: a capability nobody has measured is not
+    /// omitted the field for this family. Refused for the reason an unmeasured
+    /// `thread/start` key is refused: a capability nobody has measured is not
     /// a capability this build may quietly exercise.
     UnmeasuredEnvironment,
 }
@@ -2573,7 +2564,7 @@ mod tests {
     /// `fixtures/codex/approval-0.153.jsonl` — and requires the two to be
     /// byte-identical. Either half alone would be weak: a fixture nobody
     /// re-derives goes stale silently, and a re-derivation with no committed
-    /// artefact leaves Phase 5 nothing to build against. Together they mean a
+    /// artefact leaves the app nothing to build against. Together they mean a
     /// change to the card shape must change the file, in the diff, where a
     /// reviewer sees it.
     ///

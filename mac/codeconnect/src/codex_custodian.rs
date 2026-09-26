@@ -1,7 +1,7 @@
-//! The **launch custodian** (D7) — independent cleanup authority, armed before
+//! The **launch custodian** — independent cleanup authority, armed before
 //! `tmux new-session`.
 //!
-//! The custodian is a minimal detached process (brought up through the D6 exec
+//! The custodian is a minimal detached process (brought up through the exec
 //! gate) that outlives the coordinator's forward path. Its whole reason to exist
 //! is that a timed-out or coordinator-killed launch must still reach a terminal
 //! outcome and have its disposable tmux session cleaned — by someone whose
@@ -18,15 +18,15 @@
 //!   * **`failed{cleanup:pending}`** — resolve the uid → internal id + server
 //!     epoch, revalidate, and kill only that id. `Unavailable` is **never**
 //!     absence (retry). After an **indeterminate** `new-session`, one
-//!     observation of UID absence is **insufficient** (no guessed grace period,
-//!     D7): the custodian stays armed until it observes and cleans the late UID
+//!     observation of UID absence is **insufficient** (no guessed grace
+//!     period): the custodian stays armed until it observes and cleans the late UID
 //!     or the tmux server's identity changes.
 //!
 //! The `tick` is written against a [`CustodianDeps`] trait so every branch is
 //! unit-tested without real processes or a live tmux; [`run`] wires the real
 //! kernel + tmux behind it and loops.
 //!
-//! ## What cleanup covers, and the orphan story (2e-2b)
+//! ## What cleanup covers, and the orphan story
 //!
 //! Since the pane runs the real `internal-codex-host`
 //! ([`crate::codex_host`]), killing the session is not the whole of cleanup —
@@ -90,10 +90,10 @@
 //! not process hunting, because every identity was durably recorded rather than
 //! inferred.
 //!
-//! The residual is narrower than the paragraph above once described: a host
-//! SIGKILLed in the window between spawning a child and recording it leaves that
-//! child unrecorded. The window is minimised (see `codex_host`'s
-//! `RECORD_LOCK_BUDGET`) and closing it entirely is a documented pre-ungate gate.
+//! A host SIGKILLed between spawning a child and recording it cannot leave that
+//! child running unrecorded: `codex_host`'s spawn fence (`spawn_fenced`) parks the
+//! child after `fork`, before `execve`, until its identity is recorded, and a
+//! child whose host dies first `_exit`s without ever becoming codex.
 //!
 use crate::codex_launch::{
     self, deadline_expiry, CleanupState, Expiry, LaunchLock, LaunchRecord, LaunchState,
@@ -117,7 +117,7 @@ pub enum Tick {
     /// `ready` and the coordinator/supervisor is gone: session-fatal teardown
     /// performed — done.
     ReadyFatalTeardown,
-    /// UID absent but the `new-session` was indeterminate: stay armed (D7).
+    /// UID absent but the `new-session` was indeterminate: stay armed.
     StayArmedIndeterminate,
     /// tmux was Unavailable/Ambiguous — retry next pass (never treated as done).
     RetryCleanup,
@@ -183,7 +183,7 @@ pub trait CustodianDeps {
     /// the launch's uid present on a live session.
     ///
     /// It exists for exactly one decision: after an indeterminate `new-session`,
-    /// D7 says one observation of absence is not proof, because the late session
+    /// one observation of absence is not proof, because the late session
     /// might still be coming. That reasoning stops applying the moment the late
     /// session has actually been seen — it came, and what follows is the custodian
     /// killing it. Without this, a kill the custodian could not *confirm* in a
@@ -191,7 +191,7 @@ pub trait CustodianDeps {
     /// reads as `Absent` on the next pass and the custodian stays armed forever.
     fn seen_session_present(&self) -> bool;
     /// Whether the **recorded server A** is provably dead — pid and birth, never
-    /// socket reachability (the 2c invariant).
+    /// socket reachability.
     /// Whether the server that hosted this session is provably gone — bound to a
     /// recorded identity, never to socket reachability. See
     /// [`server_gone_evidence`] for the two bindings and why each is safe.
@@ -288,7 +288,7 @@ pub trait CustodianDeps {
 }
 
 /// Run one custodian pass. Pure with respect to [`CustodianDeps`]; every
-/// scenario the D7 gates list is reachable by scripting the deps.
+/// scenario the launch-coordination gates list is reachable by scripting the deps.
 pub fn tick<D: CustodianDeps>(deps: &D) -> Result<Tick> {
     let record = deps.load()?;
     match &record.state {
@@ -311,7 +311,7 @@ pub fn tick<D: CustodianDeps>(deps: &D) -> Result<Tick> {
                 }
             }
         }
-        // A9.6(b): the symmetric first arm to the `Failed` one below. A Ready
+        // The symmetric first arm to the `Failed` one below. A Ready
         // record whose cleanup already reads `Complete` has been torn down, but
         // the write that said so may have been rendered visible without its
         // dir-fsync succeeding — exactly the case the Failed path already
@@ -322,12 +322,12 @@ pub fn tick<D: CustodianDeps>(deps: &D) -> Result<Tick> {
             Ok(Tick::Done)
         }
         LaunchState::Ready => {
-            // Only a PROVEN-gone coordinator is session-fatal (Principle D): an
+            // Only a PROVEN-gone coordinator is session-fatal: an
             // `Unknown` coordinator must NOT trigger a teardown.
             if deps.coordinator_liveness() == Liveness::Gone {
                 // Ready is committed, so we do not rewrite the state — the
                 // session ending is the outcome (reported on the supervisor/
-                // daemon exit path, 2d/2e). But the teardown must actually
+                // daemon exit path). But the teardown must actually
                 // succeed: a `Killed`/`Absent`/`EpochChanged` is terminal, while
                 // an `Unavailable`/`Ambiguous` is retried, never treated as done.
                 match deps.destroy() {
@@ -346,7 +346,7 @@ pub fn tick<D: CustodianDeps>(deps: &D) -> Result<Tick> {
                         Ok(Tick::ReadyFatalTeardown)
                     }
                     CleanupOutcome::Unavailable(_) => {
-                        // A9.5: the Ready path needs the same escapes the retry
+                        // The Ready path needs the same escapes the retry
                         // path has. A prior-boot Ready record is rearmed by
                         // `recovery_sweep` (it flags any non-Complete cleanup whose
                         // custodian is gone, with no boot check) and
@@ -511,7 +511,7 @@ fn complete_cleanup<D: CustodianDeps>(deps: &D) -> Result<CleanupProgress> {
     Ok(CleanupProgress::Complete)
 }
 
-/// Whether the D7 "no guessed grace period" rule still applies — i.e. whether a
+/// Whether the "no guessed grace period" rule still applies — i.e. whether a
 /// late session might STILL be coming, so one observation of absence is not proof.
 ///
 /// It starts as the raw `new_session_indeterminate` flag and is retired by either
@@ -558,7 +558,7 @@ fn group_has_members(pgid: i32) -> bool {
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
-/// Whether a recorded pgid may still be signalled as a group (A11.2).
+/// Whether a recorded pgid may still be signalled as a group (the pgid-reuse guard).
 #[derive(Debug, PartialEq, Eq)]
 enum GroupWarrant {
     Warranted,
@@ -608,7 +608,7 @@ enum GroupWarrant {
 /// host reaps its children by pid (`Child::start_kill`), so the app-server's
 /// surviving descendants are exactly what this arm reaches on the ordinary teardown
 /// path. Refusing here would trade a narrow within-boot risk for a guaranteed leak of
-/// codex subprocesses on every session that ends normally — the leak this whole chunk
+/// codex subprocesses on every session that ends normally — the leak this arm
 /// exists to close.
 ///
 /// **The worst arm of that residual is closed rather than recorded.** The residual
@@ -630,7 +630,7 @@ enum GroupWarrant {
 /// `boot_changed` uses in the other direction is inverted here on purpose, because
 /// this side is authorizing a `SIGKILL` rather than declining to conclude an absence.
 ///
-/// **What would close it**, and why it is a chunk of its own rather than a line
+/// **What would close it**, and why it is a change of its own rather than a line
 /// here: provenance the members carry themselves. The host would stamp the
 /// app-server's environment with this launch's nonce, every descendant would inherit
 /// it, and the warrant would enumerate `KERN_PROC_PGRP` and require every member to
@@ -711,7 +711,7 @@ fn birth_matches(identity: &ProcessIdentity) -> GroupWarrant {
 /// is retired.** It read "the pane's command *is* the host, so a host proven dead
 /// means tmux reaped the pane and the session with it" — which
 /// holds only because a pane dies when its command exits, which is only true because
-/// `remain-on-exit` is off. A11.3 made that premise something the coordinator
+/// `remain-on-exit` is off. The coordinator then made that premise something it
 /// asserts and records, and the branch then demanded the recorded bit
 /// ([`LaunchRecord::remain_on_exit_asserted`]) before firing.
 ///
@@ -785,12 +785,12 @@ fn resolve_cleanup<D: CustodianDeps>(deps: &D, record: &LaunchRecord) -> Result<
         CleanupOutcome::EpochChanged | CleanupOutcome::ServerGone => {
             // EpochChanged: the server's identity changed — any session our uid
             // could have named is on a lifetime that no longer exists.
-            // ServerGone: the kill drained the server, so the
-            // disposable session AND its server are gone. In BOTH cases the server
-            // that could have run a late `new-session` no longer exists, so this
-            // is a valid exit even after an indeterminate `new-session` — the
-            // reasoning D7 already applies to EpochChanged. Neither is a *proven*
-            // "we killed our exact session", but the cleanup goal is met.
+            // ServerGone: the kill drained the server, so the disposable session
+            // AND its server are gone. In BOTH cases the server that could have run
+            // a late `new-session` no longer exists, so this is a valid exit even
+            // after an indeterminate `new-session` — the same reasoning already
+            // applied to EpochChanged. Neither is a *proven* "we killed our exact
+            // session", but the cleanup goal is met.
             if let Some(tick) = cleanup_tick(complete_cleanup(deps)?) {
                 return Ok(tick);
             }
@@ -1071,8 +1071,8 @@ impl CustodianDeps for RealDeps {
         for child in &host_children {
             let role = &child.role;
             let pid = child.identity.pid;
-            // The D5 invariant: verify the recorded identity is still THAT process
-            // before signalling anything. A pid whose birth no longer matches is
+            // Verify the recorded identity is still THAT process before
+            // signalling anything. A pid whose birth no longer matches is
             // somebody else's process now.
             //
             // The check is immediately before the signal, which narrows the
@@ -1088,14 +1088,15 @@ impl CustodianDeps for RealDeps {
                 // how a forked descendant of the app-server survives every kill
                 // (measured: it does).
                 //
-                // The group is only signalled if it still HAS members. That was once
-                // the whole warrant — "a process group id stays allocated while any
-                // member exists, so an occupied group cannot have been recycled" —
-                // but A11.2 is precisely that the premise holds only while the group
-                // stays occupied. A group that EMPTIES and has its id reused between
-                // the probe and the signal is exactly the case the sentence does not
-                // cover, and `kill(-pgid, 0)` cannot tell "our forked descendants"
-                // from "a stranger now occupying that number".
+                // The group is only signalled if it still HAS members. That was
+                // once the whole warrant — "a process group id stays allocated
+                // while any member exists, so an occupied group cannot have been
+                // recycled" — but the pgid-reuse guard exists because the premise
+                // holds only while the group stays occupied. A group that EMPTIES
+                // and has its id reused between the probe and the signal is exactly
+                // the case the sentence does not cover, and `kill(-pgid, 0)` cannot
+                // tell "our forked descendants" from "a stranger now occupying that
+                // number".
                 //
                 // So membership is bound to the recorded identity as well: a group id
                 // can only be created afresh by a process whose PID equals it, so
@@ -1109,9 +1110,9 @@ impl CustodianDeps for RealDeps {
                                 // ago, whose id passed [`group_warrant`].
                                 //
                                 // NOT "proven not to have been recycled", which is
-                                // what this comment used to say and what A11.2's row
-                                // says is false: `Warranted` includes the
-                                // FREE-LEADER arm, which is deliberately
+                                // what this comment used to say and what the
+                                // pgid-reuse guard says is false: `Warranted`
+                                // includes the FREE-LEADER arm, which is deliberately
                                 // uncorroborated — nothing Darwin offers can tell
                                 // our leader's surviving descendants from a stranger
                                 // now occupying that number. Kept anyway, because it
@@ -1161,7 +1162,7 @@ impl CustodianDeps for RealDeps {
             // group is signalled as a pid — killing that group would mean killing
             // by a number whose members we never recorded.
             //
-            // A11.2: "it is alive" is not "it is still in the group we recorded".
+            // "it is alive" is not "it is still in the group we recorded".
             // The membership is re-proven here, against the kernel, immediately
             // before the group signal — a child that has since called `setpgid` is
             // no longer a warrant for killing that number, so it is signalled by pid
@@ -1271,6 +1272,11 @@ impl CustodianDeps for RealDeps {
         Ok(())
     }
     fn sweep_run_dir(&self, record: &LaunchRecord) -> bool {
+        // The caller's environment, if the pane never took it, holds the caller's
+        // secrets and has no other owner.
+        let _ = std::fs::remove_file(crate::caller_env::file(&crate::codex_launch::session_dir(
+            &record.uid,
+        )));
         // The path comes from the record rather than the custodian's command line,
         // exactly as `destroy` reads server A: the coordinator fsyncs it before
         // `tmux new-session`, so the record is the one place that knows it even
@@ -1311,10 +1317,10 @@ impl CustodianDeps for RealDeps {
         // it. Only the marker the owning host wrote can settle whose it is, and
         // only an fd can bind the reading of that marker to the thing deleted.
         //
-        // A11.5 lives in [`codex_launch::sweep_owned_run_dir`] rather than here,
-        // because the HOST tears the same directory down on its own exit and had
-        // kept a path-addressed `remove_dir_all` — two callers, one discipline, so
-        // there is nothing for them to drift apart on.
+        // The fd-anchored sweep lives in [`codex_launch::sweep_owned_run_dir`]
+        // rather than here, because the HOST tears the same directory down on its
+        // own exit and had kept a path-addressed `remove_dir_all` — two callers,
+        // one discipline, so there is nothing for them to drift apart on.
         match crate::codex_launch::sweep_owned_run_dir(
             std::path::Path::new(run_dir),
             &record.uid,
@@ -1548,7 +1554,7 @@ pub fn custodian_log_path(uid: &str) -> std::path::PathBuf {
     protocol::logs_dir().join(format!("codex-custodian-{uid}.log"))
 }
 
-/// Bring a custodian up through the D6 exec gate for `uid`, monitoring
+/// Bring a custodian up through the exec gate for `uid`, monitoring
 /// `coordinator`, and fsync its identity into the record before releasing it.
 /// Shared by the coordinator's initial arm and the recovery sweep's rearm.
 pub fn spawn_custodian_through_gate(
@@ -1631,7 +1637,7 @@ pub fn spawn_custodian_through_gate(
 }
 
 /// Run one bounded recovery sweep and rearm a replacement custodian for every
-/// `failed{cleanup:pending}` record whose custodian died (D7: "both killed ⇒
+/// `failed{cleanup:pending}` record whose custodian died ("both killed ⇒
 /// next sweep rearms"; total-guardian-loss recovered from durable state). The
 /// record transitions themselves are done inside [`codex_launch::recovery_sweep_each`];
 /// this adds the process re-spawn the sweep cannot do on its own.
@@ -1762,9 +1768,8 @@ pub fn run_sweep_once(socket: &str) -> Result<()> {
     }
 }
 
-/// The `internal-codex-sweep` subcommand: one bounded recovery sweep. Wired at
-/// CodeConnect invocation / ccd startup by the ungate (2d); dispatchable now so
-/// the sweep machinery is exercised end-to-end.
+/// The `internal-codex-sweep` subcommand: one bounded recovery sweep. The daemon
+/// runs it as its codex recovery pass (`sweep_codex_recovery` in ccd).
 ///
 /// The sweep's outcome is **surfaced**, not swallowed: a rearm that
 /// could not be completed leaves a guardianless record, so it exits non-zero (and
@@ -1793,7 +1798,7 @@ fn parse_sweep_socket(args: &[String]) -> String {
 }
 
 // ----------------------------------------------------------------------------
-// Late-host self-refusal (D6/D7): a `codex-host` that starts must validate the
+// Late-host self-refusal: a `codex-host` that starts must validate the
 // launch record + take a live lease, else it may only clean up its own session.
 // ----------------------------------------------------------------------------
 
@@ -1823,11 +1828,11 @@ pub enum HostAdmission {
     ParkInert { reason: String },
 }
 
-/// The `internal-codex-host-preflight` subcommand: the D7 gate a tmux-started
-/// `codex-host` runs **before it creates anything**. It validates the launch
-/// record and takes a live lease, or refuses and runs cleanup-only. Exits `0`
-/// when admitted, and `75` (`EX_TEMPFAIL`) on a cleanup-only refusal so the caller
-/// knows Codex must not launch.
+/// The `internal-codex-host-preflight` subcommand: the launch-coordination gate a
+/// tmux-started `codex-host` runs **before it creates anything**. It validates the
+/// launch record and takes a live lease, or refuses and runs cleanup-only. Exits
+/// `0` when admitted, and `75` (`EX_TEMPFAIL`) on a cleanup-only refusal so the
+/// caller knows Codex must not launch.
 ///
 /// **Superseded as a launch path.** The host now runs this same gate ITSELF:
 /// [`crate::codex_host`] takes `--uid`/`--nonce`/`--tmux-socket` and calls
@@ -1875,7 +1880,7 @@ pub fn run_host_preflight(args: &[String]) -> ! {
     }
 }
 
-/// The gate a tmux-started `codex-host` runs before it creates anything (D7).
+/// The gate a tmux-started `codex-host` runs before it creates anything.
 /// On admission it holds the lease and proceeds to bring the session up
 /// ([`crate::codex_host`]). On any doubt it destroys **only its own** uid's
 /// session and refuses —
@@ -2026,12 +2031,13 @@ pub(crate) mod tests {
             host_identity: None,
             host_claimed_run_dir: false,
             session_observed: false,
-            // A11.3: the ordinary case — the coordinator got past `new-session` and
+            // The ordinary case — the coordinator got past `new-session` and
             // asserted the option, so the premise the no-A escape rests on holds.
             // The test that cares about its ABSENCE clears it explicitly.
             remain_on_exit_asserted: true,
             codex_thread_bound: false,
             codex_unbound_exit: None,
+            codex_quit_before_thread: false,
             exec_freeze: None,
             children: vec![],
             created_ms: 0,
@@ -2277,7 +2283,7 @@ pub(crate) mod tests {
         // The branch used to conclude "the session is gone" from "the host is proven
         // dead", which is only sound because a pane dies when its command exits —
         // and `remain-on-exit on` breaks that, reachable from a user's own
-        // `~/.tmux.conf` with no bug of ours. A11.3 gated the inference on the
+        // `~/.tmux.conf` with no bug of ours. A first fix gated the inference on the
         // recorded fact that the coordinator had asserted the option away.
         //
         // That gate was not enough. `remain_on_exit_asserted` covers ONE assertion,
@@ -2431,7 +2437,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ready_cleanup_retry_escapes_on_a_boot_change_or_a_dead_server_a() {
-        // A9.5: a prior-boot Ready record gets a fresh custodian from
+        // A prior-boot Ready record gets a fresh custodian from
         // `recovery_sweep` (Ready + cleanup != Complete + guardian gone, with no
         // boot check), and `cas_custodian_with_child` admits Ready. That custodian
         // probes a socket nothing answers, reads `Unavailable`, and — before this
@@ -2467,9 +2473,9 @@ pub(crate) mod tests {
 
     #[test]
     fn ready_cleanup_never_escapes_on_ambiguity() {
-        // A9.5's deliberate asymmetry, matching `resolve_cleanup`: `Ambiguous` is
-        // tmux showing something this code refuses to pick between, which is the
-        // opposite of proof that the session is gone. No amount of boot or
+        // The Ready path's deliberate asymmetry, matching `resolve_cleanup`:
+        // `Ambiguous` is tmux showing something this code refuses to pick between,
+        // which is the opposite of proof that the session is gone. No amount of boot or
         // server-gone evidence licenses a terminal cleanup on it.
         let mut d = Scripted::new(base_record(
             LaunchState::Ready,
@@ -2486,7 +2492,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ready_already_complete_is_done() {
-        // A9.6(b): the symmetry the Failed arm already has. A
+        // The symmetry the Failed arm already has. A
         // visibly-Complete record may have been published by a write whose
         // dir-fsync failed, so the exit re-proves it (idempotent) instead of
         // trusting the re-read — and does NOT fall through to a second destroy.
@@ -2516,7 +2522,7 @@ pub(crate) mod tests {
         assert_eq!(tick(&d).unwrap(), Tick::Done);
     }
 
-    /// The late-host self-refusal gate (D6/D7): a host on a live, pending,
+    /// The late-host self-refusal gate: a host on a live, pending,
     /// nonce-matching launch whose coordinator is alive is admitted (and takes
     /// the lease); once the launch has failed, the same host is refused and runs
     /// cleanup-only. The socket points at a non-existent server, so cleanup is a
@@ -2587,7 +2593,7 @@ pub(crate) mod tests {
     }
 
     /// **An arrival write that FAILS parks; it does not fall through to a verdict
-    /// that destroys** (A11.8, the arrival-write-failure-mid-admission boundary).
+    /// that destroys** (the arrival-write-failure-mid-admission boundary).
     ///
     /// `late_host_admission` calls the arrival write first on every path, because
     /// "ARRIVAL IS THE FIRST DURABLE ACT ON ANY PATH THAT MAY DESTROY" — every
@@ -2857,7 +2863,7 @@ pub(crate) mod tests {
 
     #[test]
     fn an_indeterminate_absence_is_terminal_once_the_session_has_actually_been_seen() {
-        // D7: after an indeterminate `new-session`, ONE observation of absence is
+        // After an indeterminate `new-session`, ONE observation of absence is
         // not proof, because the late session may still be coming. That reasoning
         // expires the moment the late session has been seen — it came, and this is
         // the tail of our own kill.
@@ -2992,7 +2998,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A11.2: the group kill is warranted by an occupied group id, and that warrant
+    /// The group kill is warranted by an occupied group id, and that warrant
     /// expires the moment the id could have been recycled.
     ///
     /// Here the recorded leader's pid is occupied by a process with a DIFFERENT
@@ -3715,7 +3721,7 @@ pub(crate) mod tests {
         thaw_and_remove(&bin);
     }
 
-    /// **The counterexample this round closed, end to end: nobody was left to clear.**
+    /// **The counterexample, end to end: nobody was left to clear.**
     ///
     /// Setter A is SIGKILLed. Adopter B is stopped — a `SIGSTOP`ped holder reads
     /// `Alive` and stays that way — for longer than A's custodian will wait. A's
@@ -3812,7 +3818,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// **H2.1, the launcher's half: the next launch takes the flag off.**
+    /// **Clearing a standing freeze, the launcher's half: the next launch takes the
+    /// flag off.**
     ///
     /// The pass that clears a standing claim had no production caller, so the
     /// counterexample the retry was written for — a dead setter, a custodian that
@@ -3966,8 +3973,8 @@ pub(crate) mod tests {
     ///
     /// This is the other half of the same rule. `Busy` was counted as a clean pass, so
     /// `run_sweep_once` exited zero having opened nothing — and a caller that retries
-    /// until zero stopped retrying. Before H2.1 that case was `Skipped`, exit 1, and
-    /// the caller knew to come back.
+    /// until zero stopped retrying. Like a `Skipped` record, it has to exit non-zero,
+    /// so the caller knows to come back.
     #[test]
     fn a_pass_that_never_got_the_lock_does_not_report_a_clean_one() {
         let uid = "sweep-held-lock";
@@ -4269,7 +4276,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// **H2.1, the daemon's half: the pass the daemon spawns clears the same claim.**
+    /// **Clearing a standing freeze, the daemon's half: the pass the daemon spawns
+    /// clears the same claim.**
     ///
     /// `ccd` cannot link any of this — the launcher is a binary crate with no library —
     /// so the daemon spawns `codeconnect` and names
@@ -4581,10 +4589,10 @@ pub(crate) mod tests {
         let _ = child.wait();
     }
 
-    /// A11.2, the other side: the measured case must still work. When the recorded
-    /// leader's pid is genuinely FREE, nothing can be leading a fresh group with
-    /// that id, so the members still in it inherited it from our leader — and they
-    /// are exactly the forked descendants that used to survive every kill.
+    /// The pgid-reuse guard, the other side: the measured case must still work. When
+    /// the recorded leader's pid is genuinely FREE, nothing can be leading a fresh
+    /// group with that id, so the members still in it inherited it from our leader —
+    /// and they are exactly the forked descendants that used to survive every kill.
     ///
     /// Without this, the guard above could be "closed" by never signalling at all.
     #[test]
@@ -4634,7 +4642,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// **A11.2's worst arm: cross-BOOT pgid reuse.**
+    /// **The pgid-reuse guard's worst arm: cross-BOOT pgid reuse.**
     ///
     /// The unoccupied-leader arm is deliberately uncorroborated within one boot, and
     /// the recorded bound used to say the unrelated-group risk needs pid wraparound.
@@ -4693,7 +4701,7 @@ pub(crate) mod tests {
         real_deps("abareboot").teardown_children(&record);
 
         // THE GATE: the group is untouched. A stranger's group surviving is the
-        // whole point — this is the one place in A11.2's residual where failing
+        // whole point — this is the one place in the pgid-reuse residual where failing
         // closed costs nothing, because nothing of ours can outlive a reboot.
         assert!(
             group_has_members(pgid),
@@ -4703,8 +4711,9 @@ pub(crate) mod tests {
         let _ = descendant.wait();
     }
 
-    /// A11.2, the live-child half: "the recorded identity is alive" is not "it is
-    /// still in the group we recorded", and the group signal needs the second fact.
+    /// The pgid-reuse guard, the live-child half: "the recorded identity is alive" is
+    /// not "it is still in the group we recorded", and the group signal needs the
+    /// second fact.
     ///
     /// A record claiming `pgid == pid` for a process that is NOT a group leader used
     /// to send `kill(-pid, ...)` at a group id that does not exist. That returns
@@ -4756,7 +4765,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A11.5: the delete is bound to the INODE the marker was read from, not to the
+    /// The delete is bound to the INODE the marker was read from, not to the
     /// path it was reached by.
     ///
     /// The window this closes: the custodian read the owner marker by path and then
@@ -4811,7 +4820,7 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A11.5, the other half of the same binding: the marker is read through the
+    /// The other half of the same binding: the marker is read through the
     /// descriptor too, so the verdict describes the directory that will actually be
     /// emptied rather than whatever now answers to the name.
     #[test]
@@ -4845,9 +4854,28 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A11.5, end to end through `sweep_run_dir`: a marked run dir with nested
-    /// contents is removed whole, and a tree deeper than the sweep will descend is
-    /// REFUSED rather than removed by some other route.
+    /// A launch whose pane never took the caller's environment leaves that file in
+    /// the session's directory; the custodian's sweep is what removes it.
+    #[test]
+    fn the_sweep_removes_a_caller_environment_the_pane_never_took() {
+        let uid = "envsweep";
+        let handed = crate::caller_env::write(
+            &codex_launch::session_dir(uid),
+            [("SECRET".into(), "value".into())],
+            &[],
+        )
+        .unwrap();
+        let mut record = base_record(fail(), CleanupState::Pending, false);
+        record.uid = uid.into();
+        record.run_dir = None;
+
+        assert!(real_deps(uid).sweep_run_dir(&record));
+        assert!(!handed.exists(), "{} must be removed", handed.display());
+    }
+
+    /// The fd-anchored sweep, end to end through `sweep_run_dir`: a marked run dir with
+    /// nested contents is removed whole, and a tree deeper than the sweep will descend
+    /// is REFUSED rather than removed by some other route.
     ///
     /// The depth arm is what pins the wiring. `remove_dir_all` — the path-addressed
     /// call this replaced — has no such bound, so a sweep that quietly went back to
@@ -4891,12 +4919,12 @@ pub(crate) mod tests {
             "and the directory must still be there to retry on"
         );
 
-        // A11.5, the half a single pass cannot see: the failed pass must still hold
-        // its own RETRY WARRANT. The owner marker is the only thing that makes this
-        // directory provably ours, and the sweep used to unlink it with every other
-        // entry — so the second pass read the missing marker as `Foreign`, reported
-        // DEALT WITH, and the record went `Complete` over an unremoved tree with
-        // nobody left to notice.
+        // The fd-anchored sweep, the half a single pass cannot see: the failed pass
+        // must still hold its own RETRY WARRANT. The owner marker is the only thing
+        // that makes this directory provably ours, and the sweep used to unlink it with
+        // every other entry — so the second pass read the missing marker as `Foreign`,
+        // reported DEALT WITH, and the record went `Complete` over an unremoved tree
+        // with nobody left to notice.
         assert!(
             ours.join(codex_launch::RUN_DIR_OWNER_FILE).exists(),
             "the owner marker must OUTLIVE a failed pass — it is the warrant the \

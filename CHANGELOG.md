@@ -3,6 +3,56 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Hosted sessions look like the agent run directly
+
+`codeconnect claude`, `codeconnect codex` and `codeconnect attach` now show the session
+through a tmux control-mode client built into `codeconnect`, instead of an ordinary tmux
+client on the alternate screen.
+
+- **Drawn as run directly.** Claude Code and Codex draw exactly as they do run
+  directly — inline, not forced full screen — so terminals such as Warp frame them
+  the same way. Your terminal's own scrollback, selection and mouse wheel work as
+  usual.
+- **Re-attaching repaints the session.** `codeconnect attach` paints the history and
+  screen with their colours, the cursor and the title, then streams the session live.
+- **Your environment.** Claude and Codex get the environment of the shell you launched
+  them from — API keys, a virtualenv or direnv `PATH` — not the tmux server's. They do
+  not see `TMUX`/`TMUX_PANE`, so Claude keeps true colour.
+- **Codex exits the way it does run directly**, with its token usage and `codex resume
+  <id>` or `Session ID: <id>`, not a reconnect command for a socket that is gone.
+- Known limits: kitty keyboard mode is not detected, and a re-attached tab does not get
+  back keyboard modes tmux does not track. A terminal that does not report its colours
+  is answered black by tmux, so Codex draws its input band for a black background.
+
+## Codex runs as it does natively
+
+`codeconnect codex` now hosts whichever Codex you installed, launched the way you would
+launch it yourself. See [`docs/codex.md`](docs/codex.md).
+
+- **No version or schema gate.** The launch no longer compares Codex against recorded
+  0.147/0.153 schemas, so a new Codex release is hosted the day it ships. The phone
+  stays protected by the broker's fixed phone shapes, which refuse anything a release
+  changes.
+- **Your flags reach Codex.** The sandbox, the approval policy, profiles, `-c`
+  overrides and feature flags are passed through instead of refused. CodeConnect no
+  longer starts the terminal UI read-only or turns Codex's permissions tool off: Codex
+  picks both from your config and the project's trust, exactly as when you run `codex`.
+  A phone's turn runs under whatever the keyboard has set.
+- **`--cd <dir>` works.** The directory becomes the session's folder — where Codex runs
+  and where the session is listed. A relative path is read against the directory you
+  ran the command from; a path that is not a directory stops the launch.
+- **Flags work wherever you put them, including new ones.** A flag after the prompt
+  still reaches Codex as a flag, and a flag CodeConnect does not know is passed on
+  unchanged (write a value as `--flag=value`).
+- **`--help` and `--version` are Codex's.** They run `codex` in your terminal and start
+  no session.
+- **`resume` and `fork` work.** `codeconnect codex resume --last`, `codeconnect codex
+  resume <id>` and `codeconnect codex fork …` are hosted like a new session, and the
+  phone follows the thread you picked. Quitting the picker with Ctrl+C ends quietly, as
+  in Codex, instead of being reported as a failed launch.
+- Still refused: `--remote`/`--remote-auth-token-env` (the terminal UI must talk
+  through the broker) and every other subcommand.
+
 ## Deep links land on the decision — iPhone app
 
 A tapped notification resolves to `codeconnect://session/<id>?request=<rid>`, whose

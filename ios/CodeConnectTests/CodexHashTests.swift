@@ -15,7 +15,7 @@ import XCTest
 ///
 /// and Rust's `str::len()` is a **UTF-8 byte count**. Swift's `String.count` is
 /// grapheme clusters. That single word is the most likely silent bug in this
-/// phase: a `.count` implementation passes every ASCII vector below and fails
+/// hash: a `.count` implementation passes every ASCII vector below and fails
 /// only the two that carry an accent, a CJK character or a ZWJ sequence — which
 /// is exactly why those two are here.
 ///
@@ -24,12 +24,12 @@ import XCTest
 /// produced by a third, independent implementation of the documented preimage —
 /// a short Python script written from `hash.rs` — rather than by this Swift.
 /// Pinning this file's own output would prove only that it agrees with itself.
-/// T4.2 remains the only thing that proves the real daemon computes the same:
-/// one live `interrupt` and one live `compose` that do not come back
+/// A live run remains the only thing that proves the real daemon computes the
+/// same: one live `interrupt` and one live `compose` that do not come back
 /// `stale payload_hash`.
 final class CodexHashTests: XCTestCase {
 
-    /// A uid-shaped reference, per decision D4: the phone hashes over
+    /// A uid-shaped reference: the phone hashes over
     /// `session_uid`, never a display name.
     private let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
     private let turn = "01a073f6-2004-7750-a697-a6c12004ca48"

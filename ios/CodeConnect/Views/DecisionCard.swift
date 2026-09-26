@@ -162,7 +162,7 @@ struct DecisionCardView: View {
         guard let agent else { return .noneAnswerable }
         switch agent {
         case .codex:
-            // **F4.** Below minor 19 a Codex resolution carries no `request_id`,
+            // **Old daemons.** Below minor 19 a Codex resolution carries no `request_id`,
             // so an answered card can never be retired — it would stay live and
             // tappable for ever. A card that cannot be retired must not be
             // answerable.
@@ -883,7 +883,7 @@ struct DecisionCardView: View {
         }
     }
 
-    /// **The one card state no capture proves** (contract §4.6): the patch
+    /// **The one card state no capture proves**: the patch
     /// exceeded 32 files and the Mac sent a count and a digest instead of the
     /// rest. Rendered as exactly that — never as a list of paths the phone does
     /// not have, and never elided, because approving a patch whose size you were
@@ -974,7 +974,7 @@ struct DecisionCardView: View {
     @ViewBuilder
     private var disclosures: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // **D9: a Codex card shows no wire on a product screen.**
+            // **A Codex card shows no wire on a product screen.**
             //
             // This drew `toolInput.prettyJSONString` plus the `request_id` and
             // `payload_hash` lines for every card — so every Codex card had raw
@@ -1055,10 +1055,10 @@ struct DecisionCardView: View {
     /// What the reader actually chose, once a Codex card has ended — a
     /// sentence, never the wire's option table replayed.
     ///
-    /// Prose rather than a status block, on purpose (D9): `status answered / by
-    /// local / decision absent` is the *evidence* for this sentence, and it
-    /// belongs in a capture, not on the screen of somebody who wants to know
-    /// whether their file got written.
+    /// Prose rather than a status block, on purpose (no wire on a product
+    /// screen): `status answered / by local / decision absent` is the *evidence*
+    /// for this sentence, and it belongs in a capture, not on the screen of
+    /// somebody who wants to know whether their file got written.
     @ViewBuilder
     private var whatWasChosenBlock: some View {
         if let resolution = effectiveCodexResolution {
@@ -1137,8 +1137,7 @@ struct DecisionCardView: View {
     /// revert to actionable, and its resolved/indeterminate banner must stand.
     ///
     /// A genuinely *pending* card whose backing vanished still has `nil` from both
-    /// sources, so the `isBacked` gate below renders it `.unavailable` — the
-    /// round-5/6/7 behaviour is preserved.
+    /// sources, so the `isBacked` gate below still renders it `.unavailable`.
     private var effectiveOutcome: AnswerOutcome? {
         Self.effectiveOutcome(live: live?.outcome, snapshot: approval.outcome)
     }

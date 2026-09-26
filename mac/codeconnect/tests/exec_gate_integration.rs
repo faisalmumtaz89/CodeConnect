@@ -1,8 +1,8 @@
-//! Real-process integration tests for the D6 inert exec gate.
+//! Real-process integration tests for the inert exec gate.
 //!
 //! These spawn the actual `codeconnect internal-exec-gate` subcommand (via
 //! `CARGO_BIN_EXE_codeconnect`) and drive its release socket by hand, playing
-//! the owner. The load-bearing assertion in every scenario is the same one D6
+//! the owner. The load-bearing assertion in every scenario is the same one the gate
 //! makes: **no target-side marker exists unless a valid GO was sent** — owner
 //! death, a wrong nonce, or a malformed token all leave the target untouched.
 
@@ -166,7 +166,7 @@ fn a_malformed_token_is_refused() {
 
 #[test]
 fn the_recorded_birth_identity_survives_the_targets_execve() {
-    // Fence `execve` on a real **target-side marker**, not a sleep (finding 5):
+    // Fence `execve` on a real **target-side marker**, not a sleep:
     // the target's first act is to create the marker, which is proof it truly
     // replaced the gate's image. Only once the marker appears do we read the
     // target's birth identity and assert the one reported at READY (pre-exec)
@@ -200,7 +200,7 @@ fn the_recorded_birth_identity_survives_the_targets_execve() {
 
 #[test]
 fn a_gate_that_never_receives_go_times_out_and_exits_without_exec() {
-    // The GO timeout (finding 5): with the owner still alive (writer open, so
+    // The GO timeout: with the owner still alive (writer open, so
     // this is a *timeout*, not an EOF/owner-death) but no GO ever sent, the gate
     // must _exit non-zero and never touch its target. The short env-override
     // timeout keeps the test sub-second.
@@ -227,11 +227,10 @@ fn a_gate_that_never_receives_go_times_out_and_exits_without_exec() {
 
 #[test]
 fn a_trickle_of_bytes_cannot_extend_the_absolute_go_deadline() {
-    // Finding 10: the GO wait is an ABSOLUTE deadline, not a per-read timeout. A
+    // The GO wait is an ABSOLUTE deadline, not a per-read timeout. A
     // malicious/wedged owner that trickles bytes slower than the deadline must
-    // NOT keep the gate alive past it — the gate _exits without exec. Without the
-    // fix, each byte reset a fresh full-window timeout and a late GO would be
-    // accepted.
+    // NOT keep the gate alive past it — the gate _exits without exec. A per-read
+    // timeout would start a fresh full window on each byte and accept a late GO.
     let marker = unique_marker("trickle");
     let (owner, _ready) = spawn_gate_env(
         "secret",
@@ -269,7 +268,7 @@ fn a_trickle_of_bytes_cannot_extend_the_absolute_go_deadline() {
 
 #[test]
 fn the_readiness_fence_delivers_an_ack_from_the_execed_target() {
-    // The owner-side readiness fence (finding 5): a gated CodeConnect target, on
+    // The owner-side readiness fence: a gated CodeConnect target, on
     // GO, confirms it has execed and started by writing an ACK back over the gate
     // fd. Drive the gate by hand and prove both that the ACK arrives and that the
     // target really ran — this is what makes "custodian armed before tmux" real

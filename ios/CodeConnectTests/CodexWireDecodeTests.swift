@@ -131,11 +131,11 @@ final class CodexWireDecodeTests: XCTestCase {
             ["accept", "acceptForSession", "cancel"])
     }
 
-    // MARK: The five wire strings (gap G2)
+    // MARK: The five wire strings
 
-    /// **Fails before this phase.** `ClearCause` had no `itemCompleted`, so the
-    /// one cause that means *the turn is still running* fell into the unknown
-    /// bucket beside a cause that means the opposite.
+    /// **Without `itemCompleted`**, the one `ClearCause` that means *the turn is
+    /// still running* would fall into the unknown bucket beside a cause that
+    /// means the opposite.
     func testItemCompletedIsNotTurnCompleted() throws {
         let resolution = try decode(
             CodexResolution.self, #"{"status":"cleared","cause":"item_completed"}"#)
@@ -163,9 +163,9 @@ final class CodexWireDecodeTests: XCTestCase {
         }
     }
 
-    /// **Fails before this phase** (D5). Without the named case every successful
-    /// Codex answer rendered through `AnswerPath.unknown`, whose whole contract
-    /// is that it never claims an actuation — so a confirmed answer read as
+    /// **A named answer path.** Without the named case every successful Codex
+    /// answer would render through `AnswerPath.unknown`, whose whole contract is
+    /// that it never claims an actuation — so a confirmed answer would read as
     /// unvouchable.
     func testCodexResponseIsANamedAnswerPath() throws {
         XCTAssertEqual(try decode(AnswerPath.self, #""codex_response""#), .codexResponse)
@@ -173,7 +173,7 @@ final class CodexWireDecodeTests: XCTestCase {
         XCTAssertEqual(AnswerPath.codexResponse.rawValue, "codex_response")
     }
 
-    /// D5's other half: an `applied_via` this build has never heard of still
+    /// The other half: an `applied_via` this build has never heard of still
     /// decodes, into `.unknown`, and never fails the frame.
     func testAnUnknownAnswerPathIsRetainedNotAFrameFailure() throws {
         XCTAssertEqual(try decode(AnswerPath.self, #""teleported""#), .unknown("teleported"))
@@ -216,9 +216,8 @@ final class CodexWireDecodeTests: XCTestCase {
         XCTAssertEqual(kind.rawValue, "codex_webSearch")
     }
 
-    /// **Fails before this phase.** `SessionSummary` had no `agent`, and
-    /// `ProtocolTests.testSessionSummaryIgnoresAnUnexpectedAgentKey` pinned the
-    /// ignoring. `agent.rs`: absent ⇒ `claude`; an unknown *present* string is
+    /// **`SessionSummary` decodes `agent`** rather than ignoring it.
+    /// `agent.rs`: absent ⇒ `claude`; an unknown *present* string is
     /// retained, never coerced to Claude.
     func testAnUnknownAgentIsNeverClaude() throws {
         func summary(_ agentClause: String) throws -> SessionSummary {
@@ -263,7 +262,7 @@ final class CodexWireDecodeTests: XCTestCase {
         else { return XCTFail("an unknown agent must not inherit a vocabulary") }
     }
 
-    /// D3: `codex_link` is the addressee state, defaulted so an older daemon
+    /// `codex_link` is the addressee state, defaulted so an older daemon
     /// still parses; `codex_thread_id` is opaque and only ever carried.
     ///
     /// **Two minors' worth of vocabulary, decoded by one code path.** Four of the
@@ -325,7 +324,7 @@ final class CodexWireDecodeTests: XCTestCase {
         XCTAssertEqual(indeterminate, .indeterminate(reason: "the wire died"))
     }
 
-    /// §3 of the contract, as a decode fact: a refusal carries no id the phone
+    /// A decode fact: a refusal carries no id the phone
     /// did not send.
     func testARefusedInterruptCarriesNoTurnId() throws {
         let rejected = try decode(
@@ -369,7 +368,7 @@ final class CodexWireDecodeTests: XCTestCase {
             try decode(ComposeResult.self, #"{"status":"duplicate","turn_id":"t-1"}"#))
     }
 
-    /// The single easiest mistake in the phase: every result enum discriminates
+    /// The single easiest mistake in these types: every result enum discriminates
     /// on **`status`**, never on `type`.
     func testResultsDiscriminateOnStatusNotType() {
         XCTAssertThrowsError(
@@ -430,7 +429,7 @@ final class CodexWireDecodeTests: XCTestCase {
     /// fixture rather than on the app.
     ///
     /// What is byte-accurate in them is the `result` object, which is the part
-    /// this phase's decoder is actually responsible for — so that is what is
+    /// the app's decoder is actually responsible for — so that is what is
     /// decoded, and the envelope's shortfall is named rather than worked around
     /// silently.
     func testTheComposeCaptureIsAbbreviatedAndItsResultsStillDecode() throws {

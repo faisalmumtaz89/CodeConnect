@@ -226,8 +226,8 @@ jobs:
       # gap hid nine test names that printed on every test run.
       - name: No references to internal documents
         run: |
-          if grep -rIn --exclude-dir=.git --exclude-dir=internal --exclude=ci.yml \
-              -iE 'project-spec|fix-plan|audit-[a-z]+\.md|panel-[a-z]+\.md|docs/(research|review)|[_a-z0-9]w[0-9]b?[_ ]' .; then
+          if grep -rIn --exclude-dir=.git --exclude-dir=internal --exclude=ci.yml --exclude=.gitignore \
+              -iE 'project-spec|fix-plan|audit-[a-z]+\.md|panel-[a-z]+\.md|docs/(research|review)|[_a-z0-9]w[0-9]b?[_ ]|internal/[a-z]|[a-z]+-(plan|tracker)\.md' .; then
             echo "::error::reference to a document that is not in this repository"
             exit 1
           fi

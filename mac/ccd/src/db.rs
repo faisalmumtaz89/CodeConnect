@@ -111,7 +111,7 @@ db_ops! {
     fn count_events_of_kind(session_uid: String, kind: EventKind) -> u64;
     fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;
-    /// The durable Codex generation high-water for one uid (plan A5.1), or
+    /// The durable Codex generation high-water for one uid, or
     /// `None` when nothing provable has been adopted under it.
     fn codex_generation(session_uid: String) -> Option<u64>;
     fn find_session(reference: String) -> Option<SessionRow>;
@@ -155,7 +155,7 @@ db_ops! {
 // to fit every case is harder to read than the six functions it saves.
 impl Db {
     /// Write a session row **and** the Codex generation its registration was
-    /// accepted at, in one statement (plan A5.1).
+    /// accepted at, in one statement.
     ///
     /// Hand-written rather than a `db_ops!` entry because the macro passes every
     /// argument to the store by reference, and the generation is a `Copy` scalar

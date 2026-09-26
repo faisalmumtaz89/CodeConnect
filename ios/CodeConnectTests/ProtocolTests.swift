@@ -781,7 +781,7 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
 
     // MARK: applied_via (AnswerPath)
 
-    /// The bug this whole phase exists to close: an `applied_via` a newer daemon
+    /// The bug this test exists to keep closed: an `applied_via` a newer daemon
     /// invented used to decode to `.sendKeys`, so the app claimed it had typed
     /// keystrokes it never sent. It must now land in its own `.unknown` case and
     /// read as *not* `send_keys`.
@@ -981,7 +981,7 @@ final class AgentSeamDecodeSafetyTests: XCTestCase {
     ///
     /// That fact is still true and still worth holding — the second half below
     /// is the same assertion, on a key this build genuinely does not know. What
-    /// changed is that `agent` stopped being one of those keys: Phase 5 gave it
+    /// changed is that `agent` stopped being one of those keys: the app gave it
     /// a decoded field, because *ignoring* it is exactly what let a Codex
     /// session inherit Claude's whole vocabulary. So the first half now asserts
     /// the opposite of what the old name promised, which is why the name had to

@@ -491,9 +491,10 @@ pub const COUNTDOWN_CLEAR: &str = "\r\u{1b}[2K";
 /// reader. `10` shows immediately; frames follow *elapsed monotonic time*
 /// (a delayed tick shows the true remainder, never replays missed numbers);
 /// `0` is never shown; Return — or stdin closing — ends the hold at once.
+/// `skip(wait)` waits up to `wait` and says whether the reader asked to go on.
 pub fn hold_for_reading(
     total: std::time::Duration,
-    skip: &std::sync::mpsc::Receiver<()>,
+    mut skip: impl FnMut(std::time::Duration) -> bool,
     out: &mut dyn std::io::Write,
     mut now: impl FnMut() -> std::time::Instant,
 ) {
@@ -520,32 +521,34 @@ pub fn hold_for_reading(
         let until_change =
             remainder.saturating_sub(std::time::Duration::from_secs(left.saturating_sub(1)));
         let wait = until_change.max(std::time::Duration::from_millis(1));
-        match skip.recv_timeout(wait) {
-            Ok(()) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        if skip(wait) {
+            break;
         }
     }
     let _ = write!(out, "{COUNTDOWN_CLEAR}");
     let _ = out.flush();
 }
 
-/// The Return listener: canonical input, no raw mode — a completed line
-/// *or EOF* is the signal (both return from `read_line`, both send). The
-/// reader is injected so tests drive the real listener with real input
-/// shapes; production hands it stdin. The thread parks in `read_line`;
-/// when the hold ends first, the exec replaces this image, thread included.
-pub fn spawn_line_listener(
-    reader: impl std::io::Read + Send + 'static,
-) -> std::sync::mpsc::Receiver<()> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let mut reader = std::io::BufReader::new(reader);
-        let _ = std::io::BufRead::read_line(&mut reader, &mut line);
-        let _ = tx.send(());
-    });
-    rx
+/// Whether Return was pressed on `fd` — or it closed — within `wait`.
+///
+/// Waited for here, on the caller's thread, and never by a reader left behind:
+/// the attach that follows the hold reads the same terminal in raw mode, and a
+/// reader still parked on it would take the terminal's answers and the user's
+/// keys. A terminal in canonical mode is readable only once a whole line or EOF
+/// is there, so readiness is the Return; the line is consumed with it.
+pub fn returned_within(fd: std::os::fd::RawFd, wait: std::time::Duration) -> bool {
+    let mut poll = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = wait.as_millis().min(i32::MAX as u128) as i32;
+    if unsafe { libc::poll(&mut poll, 1, millis) } <= 0 {
+        return false;
+    }
+    let mut line = [0u8; 1024];
+    unsafe { libc::read(fd, line.as_mut_ptr().cast(), line.len()) };
+    true
 }
 
 // ----------------------------------------------------------------- update
@@ -1249,7 +1252,6 @@ mod tests {
             "\r\u{1b}[2KContinuing in 10s\u{2026} Press Return to continue now."
         );
 
-        let (_tx, rx) = std::sync::mpsc::channel::<()>();
         let mut out: Vec<u8> = Vec::new();
         // A fake clock: the first frame reads zero elapsed — "display 10
         // immediately" — and every later observation has jumped three
@@ -1259,7 +1261,7 @@ mod tests {
         let mut observations = 0u64;
         hold_for_reading(
             std::time::Duration::from_secs(10),
-            &rx,
+            |_| false,
             &mut out,
             move || {
                 let elapsed = observations.saturating_sub(1) * 3;
@@ -1281,30 +1283,16 @@ mod tests {
     /// cleared; the ten seconds are never served blind.
     #[test]
     fn return_or_eof_ends_the_hold_immediately() {
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        tx.send(()).unwrap();
         let mut out: Vec<u8> = Vec::new();
         let begun = std::time::Instant::now();
         hold_for_reading(
             std::time::Duration::from_secs(10),
-            &rx,
+            |_| true,
             &mut out,
             std::time::Instant::now,
         );
         assert!(begun.elapsed() < std::time::Duration::from_secs(2));
         assert!(String::from_utf8(out).unwrap().ends_with(COUNTDOWN_CLEAR));
-
-        // Disconnected sender = stdin reader gone (EOF): same immediate end.
-        let (tx2, rx2) = std::sync::mpsc::channel::<()>();
-        drop(tx2);
-        let begun = std::time::Instant::now();
-        hold_for_reading(
-            std::time::Duration::from_secs(10),
-            &rx2,
-            &mut Vec::new(),
-            std::time::Instant::now,
-        );
-        assert!(begun.elapsed() < std::time::Duration::from_secs(2));
     }
 
     /// The exhaustive styling truth table — every combination of the three
@@ -1367,7 +1355,6 @@ mod tests {
                 Ok(())
             }
         }
-        let (_tx, rx) = std::sync::mpsc::channel::<()>();
         let mut sink = CountingSink {
             bytes: Vec::new(),
             flushes: 0,
@@ -1376,7 +1363,7 @@ mod tests {
         let mut observations = 0u64;
         hold_for_reading(
             std::time::Duration::from_secs(10),
-            &rx,
+            |_| false,
             &mut sink,
             move || {
                 let elapsed = observations.saturating_sub(1) * 3;
@@ -1393,25 +1380,51 @@ mod tests {
         assert_eq!(sink.flushes, 5, "four frames and the clear, each flushed");
     }
 
-    /// The *real* listener, fed real input shapes: a completed Return line
-    /// signals, and true EOF — `read_line` returning zero bytes — signals
-    /// identically. Neither can leave the hold waiting out its ten seconds.
+    /// The *real* wait, on a real descriptor: a Return line and EOF each end
+    /// the hold at once, and a hold that runs out leaves **nothing** reading —
+    /// what is typed afterwards is still there for the attach that follows.
     #[test]
-    fn the_line_listener_signals_on_return_and_on_real_eof() {
-        for input in [&b"\n"[..], &b""[..]] {
-            let rx = spawn_line_listener(std::io::Cursor::new(input.to_vec()));
-            let begun = std::time::Instant::now();
-            hold_for_reading(
-                std::time::Duration::from_secs(10),
-                &rx,
-                &mut Vec::new(),
-                std::time::Instant::now,
-            );
-            assert!(
-                begun.elapsed() < std::time::Duration::from_secs(3),
-                "input {input:?} must end the hold immediately"
-            );
-        }
+    fn the_wait_signals_on_return_and_eof_and_leaves_no_reader_behind() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        let pipe = || {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            use std::os::fd::FromRawFd;
+            unsafe {
+                (
+                    std::fs::File::from_raw_fd(fds[0]),
+                    std::fs::File::from_raw_fd(fds[1]),
+                )
+            }
+        };
+        let (read, mut write) = pipe();
+        write.write_all(b"\n").unwrap();
+        assert!(returned_within(
+            read.as_raw_fd(),
+            std::time::Duration::from_secs(5)
+        ));
+        let (read, write) = pipe();
+        drop(write);
+        assert!(returned_within(
+            read.as_raw_fd(),
+            std::time::Duration::from_secs(5)
+        ));
+
+        let (mut read, mut write) = pipe();
+        let begun = std::time::Instant::now();
+        hold_for_reading(
+            std::time::Duration::from_secs(1),
+            |wait| returned_within(read.as_raw_fd(), wait),
+            &mut Vec::new(),
+            std::time::Instant::now,
+        );
+        assert!(begun.elapsed() >= std::time::Duration::from_secs(1));
+        write.write_all(b"typed after the hold").unwrap();
+        drop(write);
+        let mut after = Vec::new();
+        read.read_to_end(&mut after).unwrap();
+        assert_eq!(after, b"typed after the hold");
     }
 
     /// `daemon status` renders for stdout's own signals and never counts
@@ -1449,7 +1462,6 @@ mod tests {
                 Ok(())
             }
         }
-        let (_tx, rx) = std::sync::mpsc::channel::<()>();
         let mut sink = CountingSink {
             bytes: Vec::new(),
             flushes: 0,
@@ -1461,7 +1473,7 @@ mod tests {
         let mut calls = 0usize;
         hold_for_reading(
             std::time::Duration::from_secs(10),
-            &rx,
+            |_| false,
             &mut sink,
             move || {
                 let offset = offsets[calls.min(offsets.len() - 1)];

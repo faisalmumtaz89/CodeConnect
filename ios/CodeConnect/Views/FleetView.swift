@@ -525,12 +525,11 @@ struct FleetView: View {
     /// **Short, and only during the cooldown.** Two rules meet here and the
     /// first render got both wrong:
     ///
-    ///   * **Not the link state.** Decision D3 and A29a: the fleet cannot tell a
-    ///     subscribed link from a reconnecting one, so Stop is *offered* and the
-    ///     daemon's refusal — which always names which condition failed — is
-    ///     what the operator reads. Greying on a link state the summary reports
-    ///     but cannot act on would hide the button on the one signal that is
-    ///     genuinely informative.
+    ///   * **Not the link state.** The fleet cannot tell a subscribed link from
+    ///     a reconnecting one, so Stop is *offered* and the daemon's refusal —
+    ///     which always names which condition failed — is what the operator
+    ///     reads. Greying on a link state the summary reports but cannot act on
+    ///     would hide the button on the one signal that is genuinely informative.
     ///   * **Not the daemon's sentence.** It is already drawn, verbatim, in the
     ///     banner directly beneath this row. Handed to the button as well it
     ///     rendered as a twelve-line orange column half the row wide, pushing the
@@ -975,7 +974,7 @@ private struct FleetBanner: View {
         if model.sampleFleetActive {
             return [.sampleFleet(onLeave: { model.stopSampleFleet() })]
         }
-        // **G9: a message this build cannot read is never swallowed.**
+        // **A message this build cannot read is never swallowed.**
         //
         // It outranks the link banner because it is a *different* problem and
         // the louder one: the link is healthy, the Mac is working, and this

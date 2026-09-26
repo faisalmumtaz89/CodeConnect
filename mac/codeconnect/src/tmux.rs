@@ -5,6 +5,7 @@
 //! before injecting keys. Nothing here ever infers agent *semantics* from
 //! terminal bytes; that is the failure mode that killed agentapi and Omnara.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -12,7 +13,6 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 use protocol::proc::{run_deadlined, RunOutcome};
-use protocol::tmux::target_session;
 pub use protocol::tmux::{search_path, SessionPresence};
 
 /// How long a non-interactive tmux client may take before it is killed.
@@ -141,24 +141,17 @@ fn run_tmux(command: &mut Command, deadline: Duration, what: &str) -> Result<Vec
 /// inline, the pane history *is* the conversation, and 2,000 lines is where
 /// "scroll up to see what happened" quietly stopped working.
 ///
-/// `mouse on` is the scroll fix itself. Without it tmux never advertises mouse
-/// tracking, the outer terminal falls back to translating the wheel into arrow
-/// keys, and Claude receives arrows it neither wanted nor can use — the
-/// "scroll wheel is sending arrow keys" warning verbatim. With it, the wheel
-/// enters tmux copy-mode over the inline transcript, which is exactly the
-/// native-terminal scrollback plain `claude` gets for free. The remaining
-/// three lines are Anthropic's own documented tmux configuration for Claude
-/// Code (code.claude.com/docs/en/terminal-config): passthrough and extended
-/// keys are what keep bindings like shift+enter working under a host.
+/// Nothing here speaks to the terminal: every client is a control-mode client
+/// ([`crate::attach`] at the Mac, the daemon's for the phone), which shows the pane's
+/// own output. `extended-keys` is how tmux encodes a key it sends by name — the
+/// daemon's `Enter` — for a program that asked for the extended forms, as Claude
+/// and Codex do.
 fn render_server_conf(history_limit: u32) -> String {
     format!(
         "# Written by codeconnect before each spawn; edits here are overwritten.\n\
          # Change history via `tmux_history_limit` in config.json instead.\n\
-         set -g mouse on\n\
          set -g history-limit {history_limit}\n\
-         set -g allow-passthrough on\n\
-         set -s extended-keys on\n\
-         set -as terminal-features 'xterm*:extkeys'\n"
+         set -s extended-keys on\n"
     )
 }
 
@@ -211,9 +204,7 @@ fn write_server_conf(history_limit: u32) -> Result<PathBuf> {
 /// Bring an **already-running** server up to the config's options.
 ///
 /// The conf file above only speaks at server start, so a server that predates
-/// this build — or this config value — never hears it. `mouse` is a session
-/// option applied globally and takes effect immediately, upgrading even the
-/// session the user is attached to right now. `history-limit` genuinely cannot
+/// this build — or this config value — never hears it. `history-limit` genuinely cannot
 /// reach panes that already exist — tmux fixes capacity at pane creation — so
 /// it is set for the panes that come next and the shortfall is accepted rather
 /// than papered over.
@@ -223,10 +214,8 @@ fn write_server_conf(history_limit: u32) -> Result<PathBuf> {
 fn ensure_server_options(history_limit: u32) {
     let limit = history_limit.to_string();
     for args in [
-        ["set-option", "-g", "mouse", "on"],
         ["set-option", "-g", "history-limit", limit.as_str()],
         ["set-option", "-s", "extended-keys", "on"],
-        ["set-option", "-g", "allow-passthrough", "on"],
     ] {
         let _ = run(&args);
     }
@@ -297,18 +286,26 @@ pub fn next_session_name() -> Result<String> {
     )
 }
 
-/// Create a detached session running `argv`, with `env` exported into it.
+/// Create a detached session running `argv` with the caller's environment and
+/// `env` exported into it.
+///
+/// The caller's environment reaches the pane through a private file in
+/// `session_dir` (see [`crate::caller_env`]), so the agent sees what it would see
+/// run directly, not what the tmux server was started with.
 ///
 /// `argv` is passed as separate arguments through `sh -c '…' "$0" "$@"` so no
-/// user argument is ever interpolated into a shell string. The wrapper exists
-/// solely to `unset CLAUDE_CODE_CHILD_SESSION`: the tmux *server* may have
-/// inherited it at start-up, and a session that inherits it writes no transcript
-/// at all (measured) — silently, which is the worst kind of failure.
+/// user argument is ever interpolated into a shell string. The shell unsets
+/// `CLAUDE_CODE_CHILD_SESSION`: the caller may carry it, and a session that
+/// inherits it writes no transcript at all. The environment wrapper restores the
+/// calling terminal's color inputs and hides the pane's `TMUX`/`TMUX_PANE` from
+/// Claude.
+#[allow(clippy::too_many_arguments)]
 pub fn new_session(
     name: &str,
     cwd: &str,
     env: &[(String, String)],
     argv: &[String],
+    session_dir: &std::path::Path,
     size: Option<(u16, u16)>,
     status_bar: bool,
     history_limit: u32,
@@ -318,6 +315,8 @@ pub fn new_session(
     // upgrades a server that was already running from an older build.
     let conf = write_server_conf(history_limit)?;
     ensure_server_options(history_limit);
+    let exe = pane_exe()?;
+    let caller = crate::caller_env::write(session_dir, std::env::vars_os(), env)?;
     let mut command = base()?;
     command.arg("-f").arg(&conf);
     command.args(["new-session", "-d", "-s", name, "-c", cwd]);
@@ -328,18 +327,18 @@ pub fn new_session(
         command.arg("-e").arg(format!("{key}={value}"));
     }
     command.arg("--");
-    command.arg("/bin/sh");
-    command.arg("-c");
-    command.arg(r#"unset CLAUDE_CODE_CHILD_SESSION; exec "$0" "$@""#);
+    command.args(crate::caller_env::pane_prefix(&exe, &caller));
+    command.args(claude_terminal_wrapper(std::env::var_os("TERM")));
     for arg in argv {
         command.arg(arg);
     }
 
     // The startup deadline, not the operational one: this command may be the
     // one that forks the server and reads its config.
-    run_tmux(&mut command, STARTUP_DEADLINE, "new-session")
-        .map_err(|err| anyhow::anyhow!("{err}"))
-        .context("starting tmux session")?;
+    if let Err(err) = run_tmux(&mut command, STARTUP_DEADLINE, "new-session") {
+        let _ = std::fs::remove_file(&caller);
+        return Err(anyhow::anyhow!("{err}")).context("starting tmux session");
+    }
 
     // Session-scoped so the user's own tmux config is untouched. Without this
     // the tab shows a status line that plain `claude` never has.
@@ -351,12 +350,52 @@ pub fn new_session(
     if !status_bar && run(&["set-option", "-t", &target_pane(name), "status", "off"])?.is_none() {
         eprintln!("codeconnect: could not hide the tmux status bar for {name}");
     }
-
-    // Claude Code tracks terminal focus and prints a warning inside the session
-    // when tmux swallows the events. Enabling it per-session removes the last
-    // visible difference from plain `claude` without touching ~/.tmux.conf.
-    let _ = run(&["set-option", "-t", &target_pane(name), "focus-events", "on"]);
     Ok(())
+}
+
+/// This binary, which the pane runs first to take on the caller's environment.
+/// Under a test binary, the `codeconnect` cargo builds beside it.
+#[cfg(not(test))]
+fn pane_exe() -> Result<PathBuf> {
+    std::env::current_exe().context("locating the codeconnect binary")
+}
+
+#[cfg(test)]
+fn pane_exe() -> Result<PathBuf> {
+    Ok(crate::caller_env::built_binary())
+}
+
+/// Give Claude the caller's `TERM` — [`crate::caller_env`] has already restored the
+/// rest of the caller's environment and leaves `TERM` as tmux's — and hide the
+/// pane's `TMUX`/`TMUX_PANE`. Its output reaches the terminal unchanged
+/// ([`crate::attach`]), so it must behave as it does in that terminal: told it is
+/// inside tmux, it caps itself at 256 colors.
+fn claude_terminal_wrapper(term: Option<OsString>) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = [
+        "/usr/bin/env",
+        "-u",
+        "TMUX",
+        "-u",
+        "TMUX_PANE",
+        "-u",
+        "TERM",
+    ]
+    .map(OsString::from)
+    .into();
+    if let Some(term) = term {
+        let mut assignment = OsString::from("TERM=");
+        assignment.push(term);
+        argv.push(assignment);
+    }
+    argv.extend(
+        [
+            "/bin/sh",
+            "-c",
+            r#"unset CLAUDE_CODE_CHILD_SESSION; exec "$0" "$@""#,
+        ]
+        .map(OsString::from),
+    );
+    argv
 }
 
 /// Text snapshot of the session's active pane, with `lines` of scrollback.
@@ -402,8 +441,8 @@ pub enum Keyboard {
     Program,
     /// A view Claude opened has them, and the pane's cursor is hidden.
     View,
-    /// tmux itself has them: the pane is in one of tmux's own modes, which is
-    /// where the mouse wheel over the transcript puts it.
+    /// tmux itself has them: the pane is in one of tmux's own modes, which an
+    /// ordinary tmux client attached by hand can put it in.
     Scrollback(TmuxMode),
 }
 
@@ -448,10 +487,8 @@ impl Keyboard {
 /// one of tmux's modes routes every key to that mode's table instead of to the
 /// program, and it does so with `cursor_flag` still at 1: measured on claude
 /// 2.1.232 in copy-mode, `send-keys -l` exits 0, the text never reaches the
-/// composer, and it is still absent after leaving the mode. This is the
-/// ordinary state of somebody reading their own session — [`render_server_conf`]
-/// turns the mouse on, and the wheel over the inline transcript enters
-/// copy-mode.
+/// composer, and it is still absent after leaving the mode. CodeConnect's own
+/// clients never enter one, but an ordinary tmux client attached by hand can.
 ///
 /// `#{pane_in_mode}` **counts** the modes stacked on the pane rather than
 /// flagging one, and several can be on at once (measured on tmux 3.7b: a pane
@@ -630,18 +667,142 @@ pub fn send_key(name: &str, key: &str) -> Result<(), TmuxError> {
     .map(|_| ())
 }
 
-/// Replace this process with an attached tmux client, so the terminal tab hosts
-/// the session natively and closing the tab leaves the session running.
-pub fn exec_attach(name: &str) -> Result<std::convert::Infallible> {
-    use std::os::unix::process::CommandExt;
-    // A session that exists means a server that is running, and it may predate
-    // the scroll fix: bring its options up before the user's client connects,
-    // so the wheel works in the session they are about to look at.
-    ensure_server_options(protocol::config::Config::load().tmux_history_limit);
-    let error = base()?
-        .args(["attach-session", "-t", &target_session(name)])
-        .exec();
-    Err(error).context("exec tmux attach-session")
+/// Show a session in this terminal until it ends, through the control-mode
+/// client in [`crate::attach`]: the agent draws in the terminal exactly as it does
+/// run directly, and closing the tab leaves the session running.
+pub fn attach(name: &str) -> Result<()> {
+    let reply = run(&[
+        "display-message",
+        "-p",
+        "-t",
+        &target_pane(name),
+        "#{session_id} #{pane_id}",
+    ])?
+    .unwrap_or_default();
+    let Some((session, pane)) = reply
+        .trim()
+        .split_once(' ')
+        .filter(|(session, pane)| internal_id(session, '$') && internal_id(pane, '%'))
+    else {
+        bail!("no session named {name}");
+    };
+    let terminal = crate::attach::Terminal::open()?;
+    let mut argv: Vec<String> = ["-N", "-C", "-L", protocol::TMUX_SOCKET_NAME]
+        .map(str::to_owned)
+        .into();
+    for (index, command) in terminal
+        .attach_commands(session, pane)
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            argv.push(";".into());
+        }
+        argv.extend(command);
+    }
+    crate::attach::Client::spawn(terminal, argv, session.into(), pane.into())?.wait()
+}
+
+/// tmux's own id for a session (`$N`), window (`@N`) or pane (`%N`).
+fn internal_id(value: &str, sigil: char) -> bool {
+    value
+        .strip_prefix(sigil)
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Attach before the TUI starts, so the terminal's colours are reported for the
+/// pane before Codex asks for them. The caller owns the returned client and keeps
+/// watching launch readiness while it runs.
+pub fn spawn_owned_attach(
+    expected: &protocol::tmux::OwnedSession,
+) -> Result<crate::attach::Client> {
+    let current = protocol::tmux::resolve_owned_session(&expected.socket, &expected.uid)
+        .map_err(|why| anyhow::anyhow!("resolving the codex terminal: {why:?}"))?;
+    if current != *expected || expected.server_birth.is_none() {
+        bail!("the codex terminal changed before attachment");
+    }
+    let pane = run_tmux(
+        Command::new(tmux_bin()?)
+            .args(server_flag(&expected.socket))
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &expected.session_id,
+                "#{pane_id}",
+            ]),
+        OPERATION_DEADLINE,
+        "reading the codex pane",
+    )?;
+    let pane = String::from_utf8_lossy(&pane).trim().to_string();
+    let terminal = crate::attach::Terminal::open()?;
+    let commands = terminal.attach_commands(&expected.session_id, &pane);
+    let argv = owned_attach_argv(expected, &pane, &commands)?;
+    crate::attach::Client::spawn(terminal, argv, expected.session_id.clone(), pane)
+}
+
+fn server_flag(socket: &str) -> [&str; 2] {
+    [if socket.contains('/') { "-S" } else { "-L" }, socket]
+}
+
+/// The pinned attach: `commands` run only if the server, the session and its pane
+/// are still the ones resolved, and the check and the attach run on the same
+/// server connection — an internal session id alone could otherwise bind to a
+/// replacement server.
+fn owned_attach_argv(
+    expected: &protocol::tmux::OwnedSession,
+    pane: &str,
+    commands: &[Vec<String>],
+) -> Result<Vec<String>> {
+    let id = &expected.session_id;
+    if !internal_id(id, '$')
+        || !internal_id(pane, '%')
+        || !protocol::uid::is_well_formed(&expected.uid)
+        || expected.server_pid <= 0
+        || expected.server_start_time <= 0
+        || expected.session_created <= 0
+    {
+        bail!("the codex terminal has an invalid attachment identity");
+    }
+    let server = format!(
+        "#{{&&:#{{==:#{{pid}},{}}},#{{==:#{{start_time}},{}}}}}",
+        expected.server_pid, expected.server_start_time
+    );
+    let session = format!(
+        "#{{&&:#{{==:#{{session_id}},{id}}},#{{&&:#{{==:#{{session_created}},{}}},#{{==:#{{{}}},{}}}}}}}",
+        expected.session_created, protocol::ENV_SESSION_UID, expected.uid
+    );
+    let pane_check = format!("#{{==:#{{pane_id}},{pane}}}");
+    // Every argument is single-quoted for tmux's parser; none contains a quote
+    // (ids and the uid are validated, and colour reports are rebuilt from hex).
+    let mut list = Vec::new();
+    for command in commands {
+        if command.iter().any(|arg| arg.contains('\'')) {
+            bail!("an attach command cannot be quoted");
+        }
+        list.push(
+            command
+                .iter()
+                .map(|arg| format!("'{arg}'"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+    let [flag, socket] = server_flag(&expected.socket);
+    Ok(vec![
+        "-N".into(),
+        "-C".into(),
+        flag.into(),
+        socket.into(),
+        "if-shell".into(),
+        "-F".into(),
+        "-t".into(),
+        id.clone(),
+        format!("#{{&&:{server},#{{&&:{session},{pane_check}}}}}"),
+        list.join(" ; "),
+        "display-message -p 'the codex terminal changed before attachment' ; run-shell 'exit 1'"
+            .into(),
+    ])
 }
 
 /// Exact *pane* target — the session's current pane.
@@ -681,6 +842,7 @@ pub fn terminal_size() -> Option<(u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::tmux::target_session;
 
     #[test]
     fn the_shim_and_the_daemon_read_tmux_through_the_same_classifier() {
@@ -795,6 +957,153 @@ mod tests {
         assert_eq!(target_pane("cc-1"), "=cc-1:");
     }
 
+    /// The pinned attach runs its commands only against the session, server and
+    /// pane it resolved. Its `refresh-client -C` sizes the window only once the
+    /// control client is attached, so the window's size shows which branch ran.
+    #[test]
+    fn the_pinned_attach_runs_only_against_the_resolved_session_and_pane() {
+        let dir = std::env::temp_dir().join(format!("cc-attach-{}", protocol::uid::new().unwrap()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = TestServer {
+            dir,
+            pid: std::cell::Cell::new(None),
+        };
+        let uid = protocol::uid::new().unwrap();
+        let stamp = format!("{}={uid}", protocol::ENV_SESSION_UID);
+        let started = run_tmux(
+            &mut server.command(&[
+                "new-session",
+                "-d",
+                "-s",
+                "attachment",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "-e",
+                &stamp,
+                "--",
+                "/bin/sleep",
+                "60",
+            ]),
+            STARTUP_DEADLINE,
+            "creating the attachment test session",
+        );
+        if let Ok(bytes) = run_tmux(
+            &mut server.command(&["display-message", "-p", "#{pid}"]),
+            OPERATION_DEADLINE,
+            "reading the test server",
+        ) {
+            server
+                .pid
+                .set(String::from_utf8_lossy(&bytes).trim().parse().ok());
+        }
+        started.unwrap();
+        let pin = protocol::tmux::resolve_owned_session(&server.socket(), &uid).unwrap();
+        let pane = String::from_utf8(
+            run_tmux(
+                &mut server.command(&[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &pin.session_id,
+                    "#{pane_id}",
+                ]),
+                OPERATION_DEADLINE,
+                "reading the test pane",
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let commands = |size: &str| {
+            vec![
+                vec![
+                    "attach-session".to_string(),
+                    "-t".into(),
+                    pin.session_id.clone(),
+                ],
+                vec!["refresh-client".to_string(), "-C".into(), size.into()],
+            ]
+        };
+        let size = || {
+            String::from_utf8(
+                run_tmux(
+                    &mut server.command(&[
+                        "display-message",
+                        "-p",
+                        "-t",
+                        &pin.session_id,
+                        "#{window_width}x#{window_height}",
+                    ]),
+                    OPERATION_DEADLINE,
+                    "reading the window size",
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .trim()
+            .to_string()
+        };
+        let mut variants = Vec::new();
+        let mut wrong = pin.clone();
+        wrong.uid = protocol::uid::new().unwrap();
+        variants.push((wrong, pane.clone()));
+        let mut wrong = pin.clone();
+        wrong.server_pid += 1;
+        variants.push((wrong, pane.clone()));
+        let mut wrong = pin.clone();
+        wrong.server_start_time += 1;
+        variants.push((wrong, pane.clone()));
+        let mut wrong = pin.clone();
+        wrong.session_created += 1;
+        variants.push((wrong, pane.clone()));
+        variants.push((pin.clone(), "%999".into()));
+        for (wrong, wrong_pane) in variants {
+            let result = run_tmux(
+                Command::new(tmux_bin().unwrap())
+                    .args(owned_attach_argv(&wrong, &wrong_pane, &commands("91x17")).unwrap()),
+                OPERATION_DEADLINE,
+                "refusing a changed attachment",
+            );
+            assert!(
+                matches!(result, Err(TmuxError::Failed { .. })),
+                "{result:?}"
+            );
+            assert_eq!(size(), "80x24", "a refused attach changed the window");
+        }
+        // With its input closed the control client attaches, runs the rest of
+        // the list and detaches.
+        run_tmux(
+            Command::new(tmux_bin().unwrap())
+                .args(owned_attach_argv(&pin, &pane, &commands("91x17")).unwrap()),
+            OPERATION_DEADLINE,
+            "running the matching attachment",
+        )
+        .unwrap();
+        assert_eq!(size(), "91x17");
+        for bad_id in ["", "$", "$0 ; kill-server", "$-1"] {
+            let mut wrong = pin.clone();
+            wrong.session_id = bad_id.into();
+            assert!(owned_attach_argv(&wrong, &pane, &commands("91x17")).is_err());
+        }
+        for bad_pane in ["", "%", "%1 ; kill-server", "$1"] {
+            assert!(owned_attach_argv(&pin, bad_pane, &commands("91x17")).is_err());
+        }
+        let quoted = vec![vec!["display-message".to_string(), "it's".into()]];
+        assert!(owned_attach_argv(&pin, &pane, &quoted).is_err());
+        run_tmux(
+            &mut server.command(&["kill-server"]),
+            OPERATION_DEADLINE,
+            "stopping the attachment test server",
+        )
+        .unwrap();
+        assert!(proven_gone(
+            server.pid.get().expect("test server pid recorded")
+        ));
+    }
+
     /// **The suite must not write into the operator's own `~/.codeconnect`.** A test
     /// run is not a spawn, and a machine whose real config file is rewritten — with
     /// a history limit some test picked — by `cargo test` has had its state changed
@@ -834,22 +1143,125 @@ mod tests {
     }
 
     /// The conf is what makes the first pane correct, so its content is pinned:
-    /// lose `mouse on` and scrolling regresses to arrow-key noise; lose
-    /// `history-limit` and the first pane silently reverts to tmux's 2,000.
+    /// lose `history-limit` and the first pane silently reverts to tmux's 2,000.
     #[test]
-    fn the_server_conf_carries_the_scroll_contract() {
+    fn the_server_conf_carries_history_and_key_encoding() {
         // The rendered string, not the file: the path is shared with the live-tmux
         // test running in parallel, and reading it back raced.
         let body = render_server_conf(12_345);
-        for line in [
-            "set -g mouse on",
-            "set -g history-limit 12345",
-            "set -g allow-passthrough on",
-            "set -s extended-keys on",
-            "set -as terminal-features 'xterm*:extkeys'",
-        ] {
+        for line in ["set -g history-limit 12345", "set -s extended-keys on"] {
             assert!(body.contains(line), "conf lost {line:?}:\n{body}");
         }
+    }
+
+    /// tmux itself executes the conf without a single error.
+    #[test]
+    fn tmux_loads_the_server_conf_cleanly() {
+        let Ok(tmux) = tmux_bin() else {
+            return;
+        };
+        let dir = conf_root();
+        let conf = dir.join("parse-check.conf");
+        std::fs::write(&conf, render_server_conf(1_000)).unwrap();
+        // Short and outside the test's temp root, whose paths can exceed the socket
+        // path limit; tmux leaves the file behind after kill-server.
+        let socket = PathBuf::from(format!("/tmp/cc-parse-check-{}", std::process::id()));
+        let output = Command::new(&tmux)
+            .arg("-S")
+            .arg(&socket)
+            .args([
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "sleep 5",
+                ";",
+                "source-file",
+            ])
+            .arg(&conf)
+            .output()
+            .unwrap();
+        let _ = Command::new(&tmux)
+            .arg("-S")
+            .arg(&socket)
+            .arg("kill-server")
+            .output();
+        let _ = std::fs::remove_file(&socket);
+        let messages = String::from_utf8_lossy(&output.stdout).to_lowercase()
+            + &String::from_utf8_lossy(&output.stderr).to_lowercase();
+        assert!(output.status.success(), "{messages}");
+        assert!(
+            !messages.contains("error") && !messages.contains("unknown"),
+            "{messages}"
+        );
+    }
+
+    #[test]
+    fn claude_gets_the_caller_s_term_and_not_the_pane_s_tmux() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let raw = b"color-\xff-'\n$(printf injected)".to_vec();
+        let run = |term: Option<OsString>| {
+            let argv = claude_terminal_wrapper(term);
+            let output = Command::new(&argv[0])
+                .args(&argv[1..])
+                .args([
+                    "/bin/sh",
+                    "-c",
+                    r#"printf '%s\000' "$TERM" "${TMUX+x}" "${TMUX_PANE+x}" "$COLORTERM""#,
+                ])
+                .env_clear()
+                .envs([
+                    ("TERM", "tmux-256color"),
+                    ("TMUX", "/private/tmp/tmux-501/codeconnect,1,0"),
+                    ("TMUX_PANE", "%0"),
+                    ("COLORTERM", "truecolor"),
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output.stderr);
+            output.stdout
+        };
+        let mut expected = raw.clone();
+        expected.extend_from_slice(b"\0\0\0truecolor\0");
+        assert_eq!(run(Some(OsString::from_vec(raw))), expected);
+        let without = run(None);
+        assert!(
+            !without.starts_with(b"tmux-256color") && without.ends_with(b"\0\0\0truecolor\0"),
+            "a caller with no TERM does not hand Claude tmux's: {without:?}"
+        );
+    }
+
+    #[test]
+    fn claude_terminal_wrapper_executes_paths_with_equals_and_preserves_arguments() {
+        let dir =
+            std::env::temp_dir().join(format!("cc-color-path={}", protocol::uid::new().unwrap()));
+        std::fs::create_dir(&dir).unwrap();
+        let program = dir.join("claude=command");
+        std::os::unix::fs::symlink("/bin/sh", &program).unwrap();
+        let argv = claude_terminal_wrapper(None);
+        let output = Command::new(&argv[0])
+            .args(&argv[1..])
+            .arg(&program)
+            .args([
+                "-c",
+                r#"printf '%s\000' "${CLAUDE_CODE_CHILD_SESSION+x}" "$@""#,
+                "claude",
+                "--settings",
+                "",
+                "x=y",
+                "-u",
+                "'\n$(printf injected)",
+            ])
+            .env("CLAUDE_CODE_CHILD_SESSION", "1")
+            .output();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let output = output.unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            b"\0--settings\0\0x=y\0-u\0'\n$(printf injected)\0"
+        );
     }
 
     #[test]
@@ -857,6 +1269,7 @@ mod tests {
         // Guards against a tmux release changing the parse. Uses a throwaway
         // session on the private server so it cannot disturb a real one.
         let name = format!("cctest-{}", std::process::id());
+        let session_dir = conf_root().join(&name);
         let created = new_session(
             &name,
             "/tmp",
@@ -866,6 +1279,7 @@ mod tests {
                 "-c".to_string(),
                 "sleep 30".to_string(),
             ],
+            &session_dir,
             Some((80, 24)),
             false,
             50_000,
@@ -875,6 +1289,13 @@ mod tests {
         }
         assert!(has_session(&name).unwrap(), "session target form broke");
         assert!(capture_pane(&name, 5).is_ok(), "pane target form broke");
+        let handed = session_dir.join("environment");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while handed.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!handed.exists(), "the pane took the caller's environment");
+        assert!(has_session(&name).unwrap(), "the pane command kept running");
         let _ = run(&["kill-session", "-t", &target_session(&name)]);
     }
 

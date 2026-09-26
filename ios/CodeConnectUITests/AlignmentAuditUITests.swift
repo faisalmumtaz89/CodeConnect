@@ -90,7 +90,7 @@ final class AlignmentAuditUITests: XCTestCase {
             """
             [\(size.rawValue)] "\(label)" sits at \(labelEdge) while the text it \
             labels sits at \(bodyEdge). A section label must share the edge of the \
-            content it introduces — see D1 in internal/DESIGN-TRACKER.md.
+            content it introduces.
             """,
             file: file, line: line)
     }

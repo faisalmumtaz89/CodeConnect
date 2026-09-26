@@ -128,7 +128,7 @@ final class CodexProseTests: XCTestCase {
         XCTAssertTrue(steered.title.contains("joined"), steered.title)
     }
 
-    /// D8: a replay reads with the **verb that was true when the words landed**,
+    /// A replay reads with the **verb that was true when the words landed**,
     /// because the route was snapshotted at the claim. `started: false` says
     /// they joined a running turn even if the session is idle now.
     func testADuplicateReadsWithTheVerbTheOriginalEarned() {
@@ -144,14 +144,14 @@ final class CodexProseTests: XCTestCase {
 
     // `testIndeterminateIsNeverOfferedARetry` lived here and asserted
     // `CodexProse.mayRetry`, a Boolean **nothing in production ever consulted**.
-    // It read as proof of the strongest claim this phase makes and proved only
+    // It read as proof of the strongest claim Codex compose makes and proved only
     // that a pure function returned what it was written to return — while the
     // real send path happily re-sent an indeterminate compose under a fresh id.
     // The rule now lives on the send path and is asserted there, by counting
     // frames: `CodexSendPathTests.testAnUnchangedComposeIsNotResentAfterIndeterminate`.
     // `mayRetry` is deleted.
 
-    // MARK: The answer surface (gap G4)
+    // MARK: The answer surface
 
     private func card(toolInput: String, toolName: String = "command") -> ApprovalCard {
         let display = "\(toolName)\n\(toolInput)"
@@ -216,7 +216,7 @@ final class CodexProseTests: XCTestCase {
         XCTAssertEqual(shown.count, 3, "a third outcome Allow cannot express still renders")
     }
 
-    /// **F5 — the surface follows the SESSION, not the card.**
+    /// **The surface follows the SESSION, not the card.**
     ///
     /// `tool_input` is content the agent itself authored, so it cannot be the
     /// discriminator: a Claude tool emitting an `options[]` table lost Allow and
@@ -294,7 +294,7 @@ final class CodexProseTests: XCTestCase {
         else { return XCTFail("guessing a vocabulary for an unknown agent is guessing on the wire") }
     }
 
-    // MARK: G10 — one line, one seam rule
+    // MARK: One line, one seam rule
 
     /// **A title that ends in a period runs into a lowercase sentence.**
     ///
@@ -303,7 +303,7 @@ final class CodexProseTests: XCTestCase {
     /// joined `"\(title). \(message)"`. The daemon's sentences begin
     /// lowercase and carry their own punctuation, so that produced
     /// *"Sent, outcome unknown. this interrupt was already sent…"* — the same
-    /// seam K2 fixed for rejections, still there for every other arm. One rule,
+    /// seam the rejection titles had, still there for every other arm. One rule,
     /// stated where the banner is built: a colon before a sentence the daemon
     /// wrote, a period before one the app wrote.
     func testAVerbatimDaemonSentenceIsNotIntroducedByAFullStop() {
@@ -461,7 +461,7 @@ final class CodexProseTests: XCTestCase {
             "the clause is already in the message: \(banner.title) / \(banner.message)")
     }
 
-    /// **F8 — an unknown status claims nothing either way.** It used to decode
+    /// **An unknown status claims nothing either way.** It used to decode
     /// as `.indeterminate`, which asserts the mutation *was* issued; a future
     /// `cancelled_before_send` would have read "Sent, outcome unknown".
     func testAnUnknownStatusClaimsNeitherActuationNorNonActuation() {

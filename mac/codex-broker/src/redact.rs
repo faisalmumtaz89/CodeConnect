@@ -5,15 +5,15 @@
 //! inputs are **attacker-chosen bytes**: a method name, a params key at any nesting, a
 //! request id, a thread id, an ownership value. Interpolating any of them verbatim into a
 //! log line is a log-injection channel — a key of
-//! `"zzz\n2026-08-25 broker: forward (ownership request: fingerprint asserted)"` writes a
+//! `"zzz\n2026-08-25 broker: forward (request allowlisted)"` writes a
 //! forged line into the very file a gate greps.
 //!
 //! The rule this module enforces is therefore: **a refusal detail carries fixed vocabulary,
 //! counts, and shapes — never client-chosen text**, with exactly THREE narrow exceptions,
 //! all of which are *grammar-gated* rather than trusted:
 //!
-//! * [`method`] — every method in the pinned 0.147 census (134 of them, the widest set this
-//!   broker will ever be asked about) matches `[a-z][A-Za-z0-9_/]*` and is at most 40 bytes
+//! * [`method`] — every client method codex 0.147's schema declared (134 of them) and every
+//!   method the committed captures carry matches `[a-z][A-Za-z0-9_/]*` and is at most 40 bytes
 //!   (longest: `externalAgentConfig/import/readHistories`). A string matching that grammar
 //!   cannot contain a newline, a control byte, or a quote, so it cannot forge a log line;
 //!   [`MAX_LOGGED_METHOD_BYTES`] adds headroom over the measured maximum. Anything else is
@@ -41,8 +41,8 @@ use serde_json::Value;
 use crate::message::RequestId;
 use crate::session::MAX_REQUEST_ID_BYTES;
 
-/// The longest method name this broker will echo into the audit log. The pinned 0.147
-/// census tops out at 40 bytes (`externalAgentConfig/import/readHistories`); 64 leaves
+/// The longest method name this broker will echo into the audit log. Codex 0.147's client
+/// methods top out at 40 bytes (`externalAgentConfig/import/readHistories`); 64 leaves
 /// headroom for a future rename without ever logging an unbounded client string.
 pub const MAX_LOGGED_METHOD_BYTES: usize = 64;
 
@@ -61,11 +61,10 @@ pub fn value_shape(v: Option<&Value>) -> String {
     }
 }
 
-/// Is `m` a method name drawn from the grammar the pinned census satisfies?
+/// Is `m` a method name drawn from the grammar codex's method names satisfy?
 ///
-/// `[a-z][A-Za-z0-9_/]*`, at most [`MAX_LOGGED_METHOD_BYTES`]. Verified against
-/// `schema-0.147/methods-{stable,experimental}.json` by
-/// [`tests::every_pinned_method_is_loggable`].
+/// `[a-z][A-Za-z0-9_/]*`, at most [`MAX_LOGGED_METHOD_BYTES`]. Verified against the
+/// committed captures by [`tests::every_captured_method_is_loggable`].
 fn is_census_grammar_method(m: &str) -> bool {
     !m.is_empty()
         && m.len() <= MAX_LOGGED_METHOD_BYTES
@@ -150,28 +149,64 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The two grammars above are only sound if the real vocabulary satisfies them. This
-    /// asserts the METHOD grammar against the pinned census itself, so a future schema bump
-    /// that introduced a method outside the grammar fails here rather than silently
-    /// degrading every unknown-method refusal to a byte count.
+    /// The method grammar is only sound if the real vocabulary satisfies it. This asserts it
+    /// against every method name the committed captures carry, in both directions of the
+    /// wire, so a codex that introduced a method outside the grammar and was captured fails
+    /// here rather than silently degrading every refusal of it to a byte count.
     #[test]
-    fn every_pinned_method_is_loggable() {
-        for bundle in [
-            include_str!("../schema-0.147/methods-stable.json"),
-            include_str!("../schema-0.147/methods-experimental.json"),
-        ] {
-            let v: Value = serde_json::from_str(bundle).expect("census parses");
-            for key in ["client_requests", "client_notifications"] {
-                for m in v[key].as_array().expect("census array") {
-                    let m = m.as_str().expect("census method is a string");
+    fn every_captured_method_is_loggable() {
+        const CAPTURES: &[(&str, &str)] = &[
+            (
+                "session-0.153.jsonl",
+                include_str!("../../../fixtures/codex/session-0.153.jsonl"),
+            ),
+            (
+                "thread-switch.jsonl",
+                include_str!("../../../fixtures/codex/thread-switch.jsonl"),
+            ),
+            (
+                "lifecycle.jsonl",
+                include_str!("../../../fixtures/codex/lifecycle.jsonl"),
+            ),
+            (
+                "command-execution.jsonl",
+                include_str!("../../../fixtures/codex/command-execution.jsonl"),
+            ),
+            (
+                "side-fork-0.153.4.jsonl",
+                include_str!("../../../fixtures/codex/side-fork-0.153.4.jsonl"),
+            ),
+        ];
+        fn collect_methods<'v>(v: &'v Value, out: &mut Vec<&'v str>) {
+            match v {
+                Value::Object(map) => {
+                    if let Some(m) = map.get("method").and_then(Value::as_str) {
+                        out.push(m);
+                    }
+                    map.values().for_each(|val| collect_methods(val, out));
+                }
+                Value::Array(items) => items.iter().for_each(|i| collect_methods(i, out)),
+                _ => {}
+            }
+        }
+        let mut total = 0usize;
+        for (name, capture) in CAPTURES {
+            for line in capture.lines().filter(|l| !l.trim().is_empty()) {
+                let v: Value = serde_json::from_str(line)
+                    .unwrap_or_else(|e| panic!("captured frame in {name} parses: {e}"));
+                let mut methods = Vec::new();
+                collect_methods(&v, &mut methods);
+                for m in methods {
                     assert!(
                         is_census_grammar_method(m),
-                        "pinned method {m:?} is outside the loggable grammar"
+                        "captured method {m:?} in {name} is outside the loggable grammar"
                     );
                     assert_eq!(method(m), m);
+                    total += 1;
                 }
             }
         }
+        assert!(total > 100, "the captures carried only {total} methods");
     }
 
     /// The thread-id grammar against **every committed fixture**, not a subset: the measured
@@ -228,8 +263,8 @@ mod tests {
                 include_str!("../../../fixtures/codex/composite_ids.json"),
                 false,
             ),
-            // **The 4b captures, and the steer one is the reason they are here.** The
-            // notes `check_steer_binding` writes echo an `expectedTurnId` through
+            // **The steer and compose captures, and the steer one is the reason they are
+            // here.** The notes `check_steer_binding` writes echo an `expectedTurnId` through
             // [`thread_id`], which is sound only if a real TURN id conforms to the same
             // grammar a thread id does. Nothing asserted that until this row: every file
             // above carries thread ids, and none of them carries a turn id in a position
@@ -279,7 +314,7 @@ mod tests {
     /// **Every wire id position this crate renders through [`thread_id`]**: thread ids and
     /// turn ids alike.
     ///
-    /// It used to collect thread positions only, which made the two 4b fixture rows pass on
+    /// Collecting thread positions only would let the steer and compose fixture rows pass on
     /// their `threadId` alone — they were added *because* `check_steer_binding` renders an
     /// `expectedTurnId` through the same grammar, and that was the one position the sweep
     /// did not look at. Changing only a capture's `expectedTurnId` to a newline-bearing
@@ -331,7 +366,7 @@ mod tests {
     /// Its sibling walks the committed captures and asserts every id conforms; this walks
     /// a corrupted COPY and asserts the walk would have caught it. Without that, "the
     /// fixture proves the turn ids conform" rests on the collector visiting a position it
-    /// did not visit — which is what the two 4b rows were added for and did not get.
+    /// did not visit — which is what those two rows were added for and did not get.
     ///
     /// **Mutation:** drop `expectedTurnId`/`turnId`/`turn` from `collect_wire_ids` and
     /// this goes red while every committed capture stays green.

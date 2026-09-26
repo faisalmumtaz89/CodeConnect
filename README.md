@@ -33,9 +33,10 @@ That's the whole setup. The agent itself behaves exactly as it did before, and t
 
 ## Why you might not want this (yet)
 
-- **The terminal is tmux's while a session runs.** The session is hosted in a private tmux server, which is what lets it outlive the tab and what the phone types into. An attached tmux client uses the alternate screen, so your existing scrollback is set aside and restored on exit, and tmux prints `[exited]` when the session ends. That is tmux, not CodeConnect, and no tmux setting removes it. If your terminal's own scrollback matters more to you than session survival, run `claude` directly and pair a different session.
-  - *Scrolling*: the private server runs `mouse on`, so the wheel scrolls the session's own history — up to `tmux_history_limit` lines (50,000 by default) of conversation. The trade tmux imposes: dragging now selects through tmux's copy mode; hold **Shift** to select through your terminal natively instead.
-  - *Padding*: some terminals draw full-screen apps edge to edge by design. Warp pads them with **0px by default** — Settings → Appearance → Full-screen Apps lets you set custom padding or match the blocks UI, which restores the exact framing plain `claude` gets. That is the terminal's presentation of tmux, and the terminal's setting is the right place to change it.
+- **A session runs inside tmux, even though it does not look like it.** The session is hosted in a private tmux server, which is what lets it outlive the tab and what the phone types into. Your terminal shows it through a built-in tmux control-mode client that writes the agent's own output to the terminal unchanged, so Claude Code and Codex draw exactly as they do run directly, and your terminal's own scrollback, selection and wheel work as usual. What remains of tmux:
+  - *Re-attaching* in a new tab (`codeconnect attach`) repaints the session from tmux's record of it — the history and screen with their colours, the cursor, and the modes tmux tracks. Two modes tmux does not track are not restored: kitty keyboard flags and focus reporting. An agent that turned them on when it started (Codex and Claude Code push kitty flags) gets your terminal's default key encoding and no focus events in a re-attached tab.
+  - *Terminal queries* are answered by tmux where tmux answers them (device attributes, cursor position, version), so an agent sees tmux there rather than your terminal; its default colours are your terminal's, or black if your terminal does not report them. tmux's device-attributes answer arrives before your terminal's answer to kitty's keyboard query, the order agents read as "no kitty keyboard support".
+  - *Two tabs on one session* share one size: tmux sizes the session for the tab used most recently, so a differently sized second tab shows it drawn for the other one.
 - **The app is not out yet.** It launches on the App Store soon. The iOS source is public to be read and audited — see the license. The Mac side updates itself from signed universal release binaries, so once installed it needs no toolchain; the first install today is `./install.sh`, which builds from source and needs Rust.
 - **It assumes one Mac, one tailnet, one person.** That is the shape it is used in daily; anything else is unexplored.
 
@@ -50,7 +51,7 @@ iPhone (SwiftUI)  ──wss:// tailnet (ws:// fallback)──▶  ccd (Rust daem
 ```
 
 - **`ccd`** — event-sourced daemon. SQLite WAL log with a per-session monotonic sequence, so a reconnect replays gap-free or says it couldn't. Never the parent of an agent: `kill -9 ccd` loses nothing.
-- **`codeconnect`** — launches an agent inside a private tmux server. For Claude Code it wires the hooks; for Codex, which has none, it puts a broker in front of Codex's own JSON-RPC app server. The agent behaves unchanged; the terminal is tmux's while the session is attached.
+- **`codeconnect`** — launches an agent inside a private tmux server. For Claude Code it wires the hooks; for Codex, which has none, it puts a broker in front of Codex's own JSON-RPC app server. The agent behaves unchanged, and your terminal shows its output as it does run directly.
 - **`cc-hook`** — tiny binary the hooks call. Fails safe: if the daemon is unreachable, the decision goes back to the local keyboard.
 - **The phone** — a client of the event log, not a source of truth.
 

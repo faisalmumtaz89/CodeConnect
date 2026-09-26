@@ -113,14 +113,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 ///     `codex_pending_approvals`, and `pending_approvals` goes back to being
 ///     Claude-only. The same reasoning as `4` one table down: the old daemon
 ///     reads `pending_approvals` GLOBALLY, without walking a session row, so
-///     `4`'s session split did not hide the cards. `2e-7a` deferred this split
-///     only because nothing produced a Codex card; the approval observer is
+///     `4`'s session split did not hide the cards. This split waited only
+///     because nothing produced a Codex card; the approval observer is
 ///     that producer. Ships with `pending_approvals_refuse_codex_card`, which a
 ///     rollback keeps for the same reason the session trigger is kept, and with
 ///     the `all_pending_approvals` view for the reads that answer for both
 ///     agents. `answer_claims` and `text_mutations` are deliberately NOT split:
 ///     nothing writes a Codex row into either, and a table split ahead of its
-///     producer is the speculative half-surface this plan refuses.
+///     producer is the speculative half-surface this design refuses.
 const SCHEMA_VERSION: i64 = 5;
 
 pub struct Store {
@@ -299,12 +299,12 @@ fn push_registration(row: &rusqlite::Row<'_>, epoch: &str) -> rusqlite::Result<P
 /// hears nothing.** It is the only direction that cannot grant a device something
 /// it never claimed.
 ///
-/// **Nothing writes this column in this phase, so today the third state cannot
+/// **Nothing in production writes this column, so today the third state cannot
 /// arise and every row is `NULL`.** The advertisement write side was deleted —
 /// nothing that ships can fill `RegisterPush::features`, so it was a write path
 /// with no input — and the daemon discards an advertised set rather than
 /// persisting it. The `Unconfirmable` branch is therefore a fail-closed decode
-/// kept for the phase that lands the writes, not a state incident response will
+/// kept for the day a write lands, not a state incident response will
 /// meet: until then, silence here is not repaired by a later advertisement,
 /// because there is no later advertisement to repair it with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1674,8 +1674,8 @@ impl Store {
     /// the registration as the authority on which agent a run is, and
     /// `the_resolver_never_pairs_one_registrations_row_with_anothers_addressee`
     /// exercises exactly that path. Whether a run may change agents at all is a
-    /// question about registration adoption (plan A5.1, generation-aware
-    /// adoption), not about storage, and answering it here would be this layer
+    /// question about registration adoption (generation-aware adoption), not
+    /// about storage, and answering it here would be this layer
     /// inventing a policy the layer that owns it has not adopted. So the store
     /// does the one thing it can do without deciding anything: it carries the
     /// whole row across first, and then applies the ordinary upsert on top of
@@ -1699,7 +1699,7 @@ impl Store {
     }
 
     /// The same write, carrying the **Codex generation this registration was
-    /// accepted at** (plan A5.1, clause "durable high-water evidence").
+    /// accepted at** — the durable high-water evidence.
     ///
     /// A second method rather than a fourteenth field on [`SessionRow`], and the
     /// reason is what the column is *for*. `SessionRow` is the fleet projection
@@ -1712,7 +1712,7 @@ impl Store {
     /// literal.
     ///
     /// It is nonetheless **one statement**, not a second write chased after the
-    /// first, because the ordering clause A5.1 turns on is that a refused frame
+    /// first, because the ordering adoption turns on is that a refused frame
     /// mutates nothing and an accepted one leaves the row and its generation
     /// agreeing. Two statements would leave a crash window where the row names a
     /// registration whose generation was never recorded — and the next daemon
@@ -1733,7 +1733,7 @@ impl Store {
         // that number anyway. The argument was sound and the fallback was not:
         // saturating writes a high-water that disagrees with the one the caller
         // holds in memory, which makes the durable/incoming equality the adoption
-        // guard turns on (plan A5.1) read false for a generation that was in fact
+        // guard turns on read false for a generation that was in fact
         // adopted, and makes a restart reload a *lower* high-water than the daemon
         // had. Silently storing a different number than the caller asked for is
         // the failure mode, and the size of the number is not what makes it one.
@@ -1821,10 +1821,10 @@ impl Store {
                     -- moved on, and the pair it left behind — a generation
                     -- carrying a thread no registration at that generation ever
                     -- named — is read as a BINDING by the adoption guard
-                    -- (`Daemon::register_supervisor`, plan A5.1). Traced:
+                    -- (`Daemon::register_supervisor`). Traced:
                     -- `(G1,A)` then `(G2,none)` then `(G2,B)` refused B, on the
                     -- evidence of a `(G2,A)` that was never an acceptance. The
-                    -- same `COALESCE` also carried a pre-A5.1 row's thread into
+                    -- same `COALESCE` also carried an older row's thread into
                     -- the first generation ever recorded for it.
                     --
                     -- So a write that ADVANCES the generation writes the thread
@@ -1898,7 +1898,7 @@ impl Store {
                     -- registration recorded. Nothing here refuses a *lower*
                     -- generation — that refusal belongs to registration
                     -- adoption, which decides it before it ever calls this
-                    -- (`Daemon::register_supervisor`, plan A5.1) — and putting
+                    -- (`Daemon::register_supervisor`) — and putting
                     -- a MAX() here instead would be this layer inventing an
                     -- adoption policy, which is the mistake the note above on
                     -- agent changes already declines to make.
@@ -1931,7 +1931,7 @@ impl Store {
         })
     }
 
-    /// The **durable Codex generation high-water** for one uid (plan A5.1).
+    /// The **durable Codex generation high-water** for one uid.
     ///
     /// `None` for a uid with no row, for a Claude run, and for a Codex row
     /// written before this column existed — all three mean the same thing to the
@@ -2834,8 +2834,8 @@ impl Store {
     /// send that field, so the write was acting on an input the wire cannot
     /// produce and it is gone. The columns stay and are left exactly as they are —
     /// which today is `NULL` on every row, the Claude floor
-    /// [`Store::push_targets`] reads. Phase 5 brings the write back into this
-    /// transaction, with the phone that exercises it, for the reason it was here.
+    /// [`Store::push_targets`] reads. The write belongs back in this transaction,
+    /// with the phone that exercises it, for the reason it was here.
     pub fn set_push_token(
         &self,
         device_id: &str,
@@ -2952,11 +2952,11 @@ impl Store {
     /// re-advertises to *this* run — which is what makes a restart start from the
     /// honest floor rather than from whatever the last process was told.
     ///
-    /// **Nothing writes that column in this phase**, so in a live database it is
+    /// **Nothing in production writes that column**, so in a live database it is
     /// `NULL` on every row and this decode always answers the Claude floor. The
     /// other branches are kept rather than deferred because they cost one string
-    /// comparison, because they are what the column *means*, and because the write
-    /// Phase 5 turns on must arrive at a read that already refuses everything it
+    /// comparison, because they are what the column *means*, and because a write,
+    /// once one exists, must arrive at a read that already refuses everything it
     /// cannot vouch for — not at one that has to be taught to.
     pub fn push_targets(&self, epoch: &str) -> Result<Vec<PushRegistration>> {
         let conn = self.read();
@@ -3053,7 +3053,7 @@ impl Store {
     /// stamp, from bytes that will not decode, and from an empty column need rows in
     /// all four shapes, and this is the only thing that can produce them. Kept
     /// rather than re-derived from raw SQL in each test, because it is also the
-    /// write Phase 5 turns on when a phone that advertises arrives with the wire
+    /// write production needs once a phone that advertises arrives with the wire
     /// that exercises it.
     ///
     /// **`None` means the device said nothing, and nothing else.** It is not a
@@ -3097,9 +3097,9 @@ impl Store {
     // Claude floor. A tidy-up that broadens authorization is not a tidy-up, and
     // the untouched bytes are what carry the distinction the read depends on.
     //
-    // In this phase there is nothing to sweep either way: no handler writes this
+    // Today there is nothing to sweep either way: no handler writes this
     // column, so every row holds `NULL` and reads as the floor. The read's other
-    // branches are what the write Phase 5 lands will meet.
+    // branches are what a write, once one lands, will meet.
 
     pub fn list_devices(&self) -> Result<Vec<DeviceRow>> {
         let conn = self.read();
@@ -3213,10 +3213,10 @@ impl Store {
             // `all_sessions`, so it accepts a Codex uid. What stops it is
             // upstream, in the daemon — `Daemon::handle_permission_request`
             // refuses a non-Claude session before a card is built at all, which
-            // is scaffolding that lifts when Phase 3 splits this table. The
+            // is scaffolding that lifts once this table is split per agent. The
             // refusal is up there rather than down here on purpose: a store
             // guard that quietly dropped a Codex card would report success and
-            // lose the card, which is the failure this whole chunk exists to
+            // lose the card, which is the failure this whole isolation exists to
             // prevent in the other direction. See [`create_schema`].
             "INSERT INTO pending_approvals(session_uid, session_id, request_id, card,
                                            generation, created_ms)
@@ -3537,8 +3537,8 @@ impl Store {
                     // attached, so a crash between the two used to leave an
                     // `applying` row for the old daemon to rewrite. What stops
                     // that is `send_text` refusing a non-Claude session before
-                    // it reaches this call — scaffolding that lifts when Phase 3
-                    // splits the table. See [`create_schema`].
+                    // it reaches this call — scaffolding that lifts once the
+                    // table is split per agent. See [`create_schema`].
                     "INSERT INTO text_mutations(session_uid, request_id, payload_hash,
                                                 status, matched, started_at, settled_at)
                      SELECT ?1, ?2, ?3, 'applying', NULL, ?4, NULL
@@ -3612,11 +3612,9 @@ impl Store {
     // client_request_id)`. It is the same claim-before-write, lookup-then-
     // conflict primitive as `claim_text_mutation`/`settle_text_mutation` above,
     // widened so any Codex mutation (answer, compose, interrupt) shares one
-    // idempotency law. Phase 1 shipped the schema and this primitive with its
-    // conflict semantics proven and no caller; Phase 3b wired the first producer
-    // to it — a phone answer claims here under `operation_kind = "answer"` — so
-    // the `cfg_attr(not(test), allow(dead_code))` this used to carry is gone,
-    // because the code is live.
+    // idempotency law. A phone answer is its first producer — it claims here
+    // under `operation_kind = "answer"` — so the code is live and carries no
+    // `cfg_attr(not(test), allow(dead_code))`.
 
     /// Take durable ownership of one mutation, or find out who already has.
     ///
@@ -4172,7 +4170,7 @@ fn answer_claim_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerClaim> {
 /// understood is exactly what an automatic cleanup must not touch. This build's
 /// [`Store::orphan_event_count`] reads `all_sessions` and does not over-count.
 ///
-/// ### The obligation this leaves open, named so Phase 3 cannot miss it
+/// ### The obligation this leaves open
 ///
 /// Four tables — `pending_approvals`, `answer_claims`, `text_mutations` and
 /// `answers` — are reached by v0.6.0 **globally**, without going through a
@@ -4195,9 +4193,9 @@ fn answer_claim_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerClaim> {
 /// So the real reason is a decision: **each of those three producers now refuses
 /// a non-Claude session outright, before any durable write.** That is
 /// scaffolding, deliberately — it makes Codex approvals and Codex text mutations
-/// impossible rather than merely unbuilt, and it is what a Phase-3 split
-/// removes. It is cheap and reversible where splitting four tables now would be
-/// machinery built ahead of the wire that will shape it. The refusals live in
+/// impossible rather than merely unbuilt, and it is what splitting these tables
+/// per agent removes. It is cheap and reversible where splitting four tables now
+/// would be machinery built ahead of the wire that will shape it. The refusals live in
 /// `Daemon::send_text`, `Daemon::handle_permission_request` and `Daemon::answer`;
 /// `send_text_to_a_codex_session_is_refused_before_it_claims_anything`,
 /// `a_permission_request_for_a_codex_session_raises_no_card` and
@@ -4222,7 +4220,7 @@ fn answer_claim_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnswerClaim> {
 /// it. The three tests were repointed rather than deleted — they now put their
 /// refusals in front of a **registered** Codex session instead of one staged into
 /// the store, which is a stronger claim than the one they were making — and they
-/// are what a Phase-3 split has to change on purpose. The day the split stops
+/// are what a per-agent split has to change on purpose. The day the split stops
 /// being speculative is therefore the day somebody edits those refusals, not a
 /// day a test goes red on its own.
 fn create_schema(conn: &Connection) -> Result<()> {
@@ -4264,7 +4262,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- copying columns rather than by mapping them.
             codex_thread_id   TEXT,
             codex_socket      TEXT,
-            -- The **durable Codex generation high-water** (plan A5.1). NULL for
+            -- The **durable Codex generation high-water**. NULL for
             -- Claude and for every row predating it; carried on this table for
             -- the same one-shape reason as the two columns above, and for no
             -- other — no row that lives here can ever have a value, because
@@ -4303,8 +4301,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             agent             TEXT NOT NULL DEFAULT 'claude',
             codex_thread_id   TEXT,
             codex_socket      TEXT,
-            -- **The durable Codex generation high-water** (plan A5.1, clause
-            -- "durable high-water evidence in rollback-isolated storage").
+            -- **The durable Codex generation high-water**, kept in
+            -- rollback-isolated storage.
             --
             -- The generation of the last registration this daemon ACCEPTED for
             -- this uid — the same quantity `SupervisorHandle::codex_generation`
@@ -4318,8 +4316,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- A durable value can never strand a live session, because the only
             -- thing it refuses is a generation the daemon has already adopted.
             --
-            -- **Rollback-isolated in the sense the clause means.** Only a Codex
-            -- registration ever writes a non-NULL value, and `upsert_session`
+            -- **Rollback-isolated: a rolled-back daemon never sees a value.** Only a
+            -- Codex registration ever writes a non-NULL value, and `upsert_session`
             -- files a Codex run here — in the table a v0.6.0 daemon does not
             -- know the name of, and cannot re-file into `sessions` because the
             -- shadow trigger below refuses the write. The twin column on
@@ -4329,7 +4327,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             --
             -- `INTEGER`, nullable, and read back as `Option<u64>`: NULL is "no
             -- generation has been adopted for this uid", which is what a Claude
-            -- row, a pre-A5.1 row and an unregistered uid all are.
+            -- row, a row older than the column and an unregistered uid all are.
             codex_generation  INTEGER
         );
 
@@ -4747,14 +4745,14 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             push_credential   TEXT,
             -- The device's advertised feature set (its agent list) as JSON, and
             -- the feature epoch of the daemon run that confirmed it. **Null on
-            -- every row today, and nothing in this phase writes either one**: no
+            -- every row today, and nothing in production writes either one**: no
             -- shipping client can send a `features` field, so the daemon has no
             -- input to record and does not pretend otherwise. Null is the Claude
             -- floor, which is also what every row predating the agent seam holds.
             -- The columns are declared now because the read (`push_targets`) is
             -- already fail-closed against them — a set stamped with another run's
-            -- epoch, or bytes that will not decode, authorize nothing — and Phase 5
-            -- turns the write on without a migration.
+            -- epoch, or bytes that will not decode, authorize nothing — and a later build
+            -- can turn the write on without a migration.
             features          TEXT,
             features_epoch    TEXT
         );
@@ -4912,7 +4910,7 @@ struct CodexSessionMove {
 ///     are not among them — so anything the shared copy holds for these is a
 ///     default or a `NULL`, never news. `codex_generation` belongs to this
 ///     family and not to freshest-wins for a reason beyond "v0.6.0 cannot write
-///     it": it is the high-water a registration is refused against (plan A5.1),
+///     it": it is the high-water a registration is refused against,
 ///     so letting a rollback-era copy decide it would let a daemon downgrade
 ///     rather than only ever fail to advance.
 ///   * **Everything else is freshest-wins, decided together by `updated_at`.**
@@ -5098,8 +5096,8 @@ fn needs_codex_card_move(conn: &Connection) -> Result<bool> {
 /// occupy the unique index that stops a real re-delivery from rebinding.
 ///
 /// **Nothing this build ships can produce such a row**, which is the reason this
-/// is a delete and not a migration worth more code: the three 2e-7a producers
-/// refuse a non-Claude run before any durable write, and the observer that
+/// is a delete and not a migration worth more code: the three shared-table
+/// producers refuse a non-Claude run before any durable write, and the observer that
 /// replaces one of those refusals writes `codex_pending_approvals` directly. A
 /// row here therefore means an intermediate build or a hand-edited database, and
 /// leaving it is the one thing that is definitely wrong — it is precisely the
@@ -5139,7 +5137,7 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ("sessions", "agent", "TEXT NOT NULL DEFAULT 'claude'"),
     ("sessions", "codex_thread_id", "TEXT"),
     ("sessions", "codex_socket", "TEXT"),
-    // The durable Codex generation high-water (plan A5.1). **Both** tables are
+    // The durable Codex generation high-water. **Both** tables are
     // named, unlike the three entries above, and the asymmetry is not an
     // oversight: those predate `codex_sessions`, so on every database that could
     // be missing them the Codex table is created fresh at the current shape and
@@ -5157,7 +5155,7 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     ("sessions", "codex_generation", "INTEGER"),
     ("codex_sessions", "codex_generation", "INTEGER"),
     // Per-device feature set and the daemon-version epoch it was last confirmed
-    // under. Both nullable, and in this phase both are `NULL` for every row:
+    // under. Both nullable, and today both are `NULL` for every row:
     // **nothing writes them.** No shipping client can advertise a feature set —
     // the phone encodes no such field — so the write side was deleted rather than
     // carried, and an inbound `features` is ignored. `NULL` is the Claude-only
@@ -5167,7 +5165,8 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     // stamped with another run's epoch, or bytes that will not decode, is
     // [`DeviceFeatures::Unconfirmable`] and authorizes nothing. That is what makes
     // a Codex doorbell reach no device at all until a phone genuinely advertises
-    // one, and it is why Phase 5 lands a write here rather than a migration.
+    // one, and it is why a write, when a phone needs one, lands here rather
+    // than in a migration.
     ("devices", "features", "TEXT"),
     ("devices", "features_epoch", "TEXT"),
 ];
@@ -5677,8 +5676,8 @@ pub enum CodexCardOutcome {
 /// silently split the card in half. The row and the in-memory card would take
 /// the new content while the already-filed `ApprovalRequest` — and every
 /// connected client holding it — kept the old one, with no event and no ring to
-/// say the question had changed. A phone would then be showing, and Phase 3b
-/// answering, a question the app-server had replaced.
+/// say the question had changed. A phone would then be showing, and answering,
+/// a question the app-server had replaced.
 ///
 /// So the stored row is read and compared instead. **Byte equality of `card`,
 /// not hash equality**, because it is both simpler and strictly stronger: the
@@ -5951,7 +5950,7 @@ mod tests {
         event
     }
 
-    /// **The generalized ledger's conflict law** (Phase-1 gate): a retry under
+    /// **The generalized ledger's conflict law**: a retry under
     /// the same `(operation_kind, session_uid, client_request_id)` with *changed*
     /// claimed material is a conflict, never a second actuation; an unsettled
     /// replay is indeterminate; a settled one replays its outcome; the operation
@@ -6114,7 +6113,7 @@ mod tests {
 
     /// **One phone answer, claimed and settled in the one generalized ledger.**
     ///
-    /// The ledger Phase 1 built says it covers "answer, compose, interrupt", and
+    /// The generalized ledger says it covers "answer, compose, interrupt", and
     /// this is the answer half arriving. What it must NOT arrive as is a second
     /// claim-before-write table for the operation the first one was built for:
     /// two idempotency laws for one question drift the moment only one of them
@@ -6132,8 +6131,8 @@ mod tests {
     /// **Mutation:** claim answers under a second, answer-only ledger table of
     /// their own and the `Applied` replay below goes red, because the generalized
     /// ledger — the one every later Codex mutation will use — would know nothing
-    /// about the answer. (A25 forbids that second table, and
-    /// `a_fresh_database_is_created_at_the_current_schema` asserts it does not exist.)
+    /// about the answer. (`a_fresh_database_is_created_at_the_current_schema`
+    /// asserts that second table does not exist.)
     #[test]
     fn an_answer_is_claimed_and_settled_in_the_one_generalized_ledger() {
         let (store, _p) = temp_store();
@@ -6498,8 +6497,8 @@ mod tests {
 
     /// **What the column holds, and what each shape of it authorizes.**
     ///
-    /// The read side is what is under test, and it is the only side that ships in
-    /// this phase: nothing writes this column, so a live row is always `NULL` —
+    /// The read side is what is under test, and it is the only side that ships:
+    /// nothing writes this column, so a live row is always `NULL` —
     /// the Claude floor, and the row every phone predating the field has.
     /// [`Store::set_device_features`] is here as the fixture writer, because the
     /// other three shapes have to exist for the decode to be asked about at all.
@@ -6618,20 +6617,16 @@ mod tests {
 
     /// **Additive-column compatibility (new → old → new).**
     ///
-    /// The invariant this asserts for Phase 1: the agent-seam columns are purely
-    /// additive, so a pre-seam positional reader/writer works unchanged and no
-    /// data is lost across a reopen. **Only Claude rows exist**, because the
-    /// daemon now fails closed on any non-Claude registration (see
-    /// `a_registration_for_an_unsupported_agent_is_refused_with_no_trace`) — a
-    /// Codex `sessions` row cannot be written in this phase at all.
+    /// The invariant this asserts: the agent-seam columns are purely additive,
+    /// so a pre-seam positional reader/writer works unchanged and no data is
+    /// lost across a reopen. **Only Claude rows are written here**, because the
+    /// shared `sessions` table holds no other kind.
     ///
-    /// > **HARD PHASE-2 GATE — must land before the `codex` command is exposed.**
-    /// > The moment a real Codex writer exists, Codex durable state (sessions,
-    /// > pending, claims, mutations, cursors) must move into agent-scoped storage
-    /// > a legacy daemon never enumerates or mutates. A Codex row in the *shared*
-    /// > `sessions` table would be enumerated by a rolled-back old daemon (its
-    /// > positional `SELECT` returns every row, agent-agnostically). That is
-    /// > acceptable ONLY while no such row can exist. This test deliberately does
+    /// > **Codex durable state lives in agent-scoped storage** (`codex_sessions`,
+    /// > `codex_pending_approvals`, `mutation_ledger`) that a legacy daemon never
+    /// > enumerates or mutates. A Codex row in the *shared* `sessions` table
+    /// > would be enumerated by a rolled-back old daemon (its positional `SELECT`
+    /// > returns every row, agent-agnostically). This test deliberately does
     /// > **not** place a Codex row in the shared table, because in a correct build
     /// > one cannot be there.
     ///
@@ -6645,7 +6640,7 @@ mod tests {
     fn additive_columns_are_transparent_to_a_legacy_reader_and_lose_no_data() {
         let (_p, path) = {
             let (store, path) = temp_store();
-            // NEW daemon writes only Claude rows (the only kind Phase 1 permits)
+            // NEW daemon writes only Claude rows (the only kind the shared table holds)
             // plus a device with a feature set.
             store
                 .upsert_session(&session_row(&key("AA", "cc-1")))
@@ -7026,8 +7021,7 @@ mod tests {
     }
 
     /// **The durable Codex generation high-water, at the layer that stores it**
-    /// (plan A5.1, clause "durable high-water evidence in rollback-isolated
-    /// storage").
+    /// — durable high-water evidence in rollback-isolated storage.
     ///
     /// Four claims, and each of them is a different way the evidence could stop
     /// being evidence:
@@ -7136,7 +7130,7 @@ mod tests {
     }
 
     /// **The thread on a row was named by a registration at that row's exact
-    /// generation** (round-C F2) — the invariant the adoption guard states and
+    /// generation** — the invariant the adoption guard states and
     /// `COALESCE` alone did not provide.
     ///
     /// Under the old statement a generation could advance while the previous
@@ -7149,7 +7143,8 @@ mod tests {
     ///   * a generation that ADVANCES writes the thread it carries, absence
     ///     included, so an inherited thread cannot pose as this visit's;
     ///   * the same is true when the row predates the column entirely (a thread,
-    ///     no generation), which is the pre-A5.1 misattribution;
+    ///     no generation), which is the misattribution a row written before the
+    ///     generation column can carry;
     ///   * a write at or BELOW the standing generation still `COALESCE`s, which is
     ///     the reconnect that names no thread and must change nothing;
     ///   * and a writer with no generation at all — every hook, heartbeat and
@@ -7212,8 +7207,9 @@ mod tests {
              has always had"
         );
 
-        // The pre-A5.1 row: a thread and no generation at all. The first
-        // generation ever recorded for it must not adopt that thread as its own.
+        // A row from before the generation column: a thread and no generation at
+        // all. The first generation ever recorded for it must not adopt that
+        // thread as its own.
         let legacy = key("CY", "cx-2");
         let mut row = codex_session_row(&legacy);
         row.codex_thread_id = Some("th-from-the-seam".into());
@@ -7236,8 +7232,7 @@ mod tests {
         );
     }
 
-    /// **A generation SQLite cannot represent is refused, never rounded**
-    /// (round-C F3).
+    /// **A generation SQLite cannot represent is refused, never rounded.**
     ///
     /// The column is `INTEGER`, which is `i64`; the caller's type is `u64`. This
     /// used to saturate to `i64::MAX`, so the value read back was a different
@@ -8962,7 +8957,7 @@ mod tests {
         assert_eq!(
             declared[projected.len()..],
             ["codex_generation"],
-            "the only column outside the fleet projection is the A5.1 high-water"
+            "the only column outside the fleet projection is the generation high-water"
         );
     }
 
@@ -9066,7 +9061,7 @@ mod tests {
         // `claim_text_mutation` and `claim_mutation` still accept a Codex run on
         // purpose: their tables are deliberately NOT split, because nothing
         // writes a Codex row into either. Splitting a table ahead of its
-        // producer is the speculative half-surface this plan refuses.
+        // producer is the speculative half-surface this design refuses.
         assert_eq!(
             store
                 .claim_text_mutation(&codex.uid, "req-3", "hash", &now)
@@ -9123,8 +9118,8 @@ mod tests {
         "answers",
     ];
 
-    /// **The store's half of the tripwire for the obligation this chunk leaves
-    /// open**, and it is the weaker half on purpose.
+    /// **The store's half of the tripwire for the obligation the shared tables
+    /// leave open**, and it is the weaker half on purpose.
     ///
     /// The four tables in [`GLOBALLY_SWEPT_TABLES`] are not split. What keeps
     /// them empty of Codex rows is not the store — the store's own API will
@@ -9188,8 +9183,8 @@ mod tests {
     /// A Codex card lands in the agent-scoped table, and the shared one refuses
     /// it — in the SCHEMA, so a rollback keeps the refusal.
     ///
-    /// This is the half of the 2e-7a obligation that `create_schema` said would
-    /// come due "the day somebody edits those refusals". The daemon-side gate
+    /// This is the half of the shared-table obligation that `create_schema` said
+    /// would come due "the day somebody edits those refusals". The daemon-side gate
     /// could only ever protect a daemon that still had it; a trigger protects
     /// the database from the binary, which is the direction a rollback runs in.
     ///
@@ -9498,7 +9493,7 @@ mod tests {
     ///
     /// SQL rather than a `Store` method on purpose — the Rust writer lands with
     /// the observer that calls it, and a store API with no producer is the
-    /// speculative half-surface this plan refuses. What these tests are about
+    /// speculative half-surface this design refuses. What these tests are about
     /// is the SCHEMA: the table, the view over both agents, the uniqueness that
     /// makes a re-delivery rebind, and the trigger that keeps the shared table
     /// clean while a rolled-back binary is the one running.
@@ -11153,7 +11148,7 @@ mod tests {
         assert_eq!(store.list_devices().unwrap().len(), 1);
     }
 
-    /// **The A5.1 high-water column is added to BOTH session tables on a
+    /// **The generation high-water column is added to BOTH session tables on a
     /// database the previous build wrote**, and the two shapes still match
     /// afterwards.
     ///
@@ -11224,7 +11219,7 @@ mod tests {
             .unwrap();
             assert!(
                 needs_column_additions(&conn).unwrap(),
-                "the premise: this database is missing the A5.1 column"
+                "the premise: this database is missing the generation column"
             );
         }
 
@@ -11253,7 +11248,10 @@ mod tests {
             "a row that predates the column has no provable high-water, and reads \
              as one — not as generation zero, which would refuse nothing"
         );
-        let row = store.get_session(uid).unwrap().expect("the pre-A5.1 run");
+        let row = store
+            .get_session(uid)
+            .unwrap()
+            .expect("the run older than the column");
         assert_eq!(
             row.agent,
             AgentKind::Codex,
@@ -12029,7 +12027,7 @@ mod tests {
         Store::open(path).unwrap()
     }
 
-    /// **A rollback-mixed tuple is repaired on the way back up.** (D2)
+    /// **A rollback-mixed tuple is repaired on the way back up.**
     ///
     /// A build carrying the credential column wrote `(T1, C1)`. A rollback to a
     /// build that predates it updated the token in place — it knows only
@@ -12090,7 +12088,7 @@ mod tests {
         );
     }
 
-    /// **A historically revoked row loses its lingering push tuple.** (D3)
+    /// **A historically revoked row loses its lingering push tuple.**
     ///
     /// A build that predated [`Store::revoke_device`]'s tuple-clear revoked a
     /// row and kept its token and credential. It never delivers — `push_targets`
@@ -12310,7 +12308,7 @@ mod tests {
     /// `[Claude, Codex]` set, every one of these inputs supports Claude either way
     /// and the last two cases cannot be told from the first two — the test would
     /// pass while a restart quietly broadened a Codex-only phone into a
-    /// Claude-eligible one (round-3 P1/P7). A set that names Codex *without*
+    /// Claude-eligible one. A set that names Codex *without*
     /// Claude is the shape that makes the difference observable.
     ///
     /// **Mutation:** decode the unconfirmable shapes as

@@ -1,7 +1,7 @@
 //! Shape-based classification of a whole, reassembled client→server WebSocket
 //! message.
 //!
-//! A4 forces classification by **shape, not method name**: an approval answer is a
+//! Classification is by **shape, not method name**: an approval answer is a
 //! method-less `{id, result|error}` response that durably widens policy, so it can
 //! never be recognized by a method check. The broker first decides *what kind of
 //! thing* a frame is (request / notification / response / array / binary /
@@ -85,7 +85,7 @@ impl RequestId {
 /// The classified shape of a whole client→server message.
 ///
 /// The parsed JSON object (for the request/notification/response kinds) is carried
-/// alongside so the allowlist and the fingerprint validator can read `method` /
+/// alongside so the allowlist and the session observer can read `method` /
 /// `params` / `id` without reparsing a multi-MB body.
 #[derive(Debug, Clone)]
 pub enum Shape {
@@ -102,13 +102,9 @@ pub enum Shape {
     /// method; an unknown notification is a bypass, so it is never exempt.
     Notification { method: String, obj: Value },
     /// `{id, result|error}` with **no** method — a method-less capability answer
-    /// (approval decision). Recognized by shape; validated against a registered
-    /// upstream capability (the fanout registry — a later sub-chunk).
-    Response {
-        id: RequestId,
-        is_error: bool,
-        obj: Value,
-    },
+    /// (approval decision). Recognized by shape; validated against the server request
+    /// it answers ([`crate::response_capability`]).
+    Response { id: RequestId, obj: Value },
     /// A top-level JSON array (a JSON-RPC batch). No schema-legal error form exists
     /// (`RequestId` excludes null), so it forwards zero bytes.
     Array,
@@ -178,19 +174,10 @@ fn classify_object(obj: Value) -> Shape {
                 Some(id) => id,
                 None => return Shape::Malformed("response id is not string|int"),
             };
-            match (has_result, has_error) {
-                (true, false) => Shape::Response {
-                    id,
-                    is_error: false,
-                    obj,
-                },
-                (false, true) => Shape::Response {
-                    id,
-                    is_error: true,
-                    obj,
-                },
-                _ => Shape::Malformed("method-less frame is neither result nor error"),
+            if has_result == has_error {
+                return Shape::Malformed("method-less frame is neither result nor error");
             }
+            Shape::Response { id, obj }
         }
     }
 }
@@ -258,24 +245,16 @@ pub(crate) struct FrameHeader {
 /// What a frame's top-level `result`/`error` members prove about it — decided by the header
 /// scan, without the body ever becoming a [`Value`].
 ///
-/// ## One definition of "a valid response", shared by two rules
+/// ## One definition of "a valid response", used by every rule that reads one
 ///
-/// This is the SAME rule as `session::classify_creation_response`'s first two arms,
-/// deliberately: the ledger's DRAIN rule ("may this frame release an outstanding id?") and
-/// the creation-response CLASSIFICATION rule ("did this frame prove success or failure?")
-/// must never disagree about what a response is, or an id could be released by a frame the
-/// creation state machine would not accept — which is exactly the hole one shared
-/// definition closes.
+/// The ledger's DRAIN rule ("may this frame release an outstanding id?"), the end of a
+/// `turn/start`, and the outcome of a keyboard head move ("did this answer prove success or
+/// failure?") all read this one kind, so they can never disagree about what a response is.
 ///
-/// * [`Self::Result`] ⇔ `classify_creation_response`'s INSTALL precondition (`error` absent,
-///   `result` present).
-/// * [`Self::Error`] ⇔ its REOPEN arm (`result` absent, and `error` structurally a JSON-RPC
-///   error object — an INTEGER `code` AND a STRING `message`, per
-///   `session::is_jsonrpc_error_object`).
-/// * [`Self::NotAResponse`] ⇔ its indeterminate CLOSED arm.
-///
-/// `session::response_kind_agrees_with_the_creation_state_machine` pins that equivalence, so
-/// the two cannot drift apart.
+/// * [`Self::Result`] — `error` absent, `result` present: a move lands, a turn is answered.
+/// * [`Self::Error`] — `result` absent, and `error` structurally a JSON-RPC error object (an
+///   INTEGER `code` AND a STRING `message`): a move is refused, a turn never started.
+/// * [`Self::NotAResponse`] — neither: it proves nothing and releases nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResponseKind {
     /// Exactly one top-level `result`, and no `error`: a JSON-RPC success response.
@@ -310,7 +289,7 @@ impl ResponseKind {
 /// The ledger also has to prove a frame IS a response before its id may be released,
 /// which needs presence/exclusivity of `result` vs `error` plus the error's two field
 /// TYPES — and nothing more. So `result` keeps being skipped with `IgnoredAny` (its
-/// presence is a bool; its 5.76 MB `plugin/list` body is never touched), and only
+/// presence is a bool; a 10.4 MB `plugin/list` body is never touched), and only
 /// `error` — a handful of small members on the real wire — is descended into, by
 /// [`ErrorProbe`], which itself reduces `code`/`message` to a TYPE TAG rather than a
 /// value and `IgnoredAny`s every other member including the spec's optional `data`.
@@ -323,9 +302,9 @@ impl ResponseKind {
 /// unparseable, has trailing content, or repeats ANY **top-level** member (a repeated
 /// top-level member makes the header itself ambiguous between our parse and the
 /// app-server's, so no id may be released on it). Nested duplicates are deliberately not
-/// inspected: they cannot change the header, and any frame this admits as a *creation
-/// response* candidate is re-parsed in full by [`parse_no_dup_value`] before it may install
-/// a binding — so the strict whole-frame duplicate discipline is unchanged for binding.
+/// inspected: they cannot change the header, and a success answering a keyboard move is
+/// re-parsed in full by [`parse_no_dup_value`] before it may move the head — so the strict
+/// whole-frame duplicate discipline holds for the head.
 pub(crate) fn scan_frame_header(s: &str) -> Option<FrameHeader> {
     let mut de = serde_json::Deserializer::from_str(s);
     let header = Header::deserialize(&mut de).ok()?;
@@ -376,7 +355,7 @@ impl<'de> Visitor<'de> for HeaderVisitor {
                     has_method = true;
                 }
                 // PRESENCE only — the body is skipped, never materialized. This is the
-                // 5.76 MB `plugin/list` answer's path.
+                // multi-megabyte `plugin/list` answer's path.
                 "result" => {
                     let _: de::IgnoredAny = map.next_value()?;
                     has_result = true;
@@ -518,8 +497,8 @@ impl<'de> Visitor<'de> for ErrorProbeVisitor {
 
 /// The only thing the error probe needs to know about `code` and `message`: their JSON type.
 ///
-/// `Integer` matches `session::is_jsonrpc_error_object`'s `is_i64() || is_u64()`
-/// exactly — a float or a numeric string is `Other`, not an integer.
+/// `Integer` is `serde_json`'s `is_i64() || is_u64()` exactly — a float or a numeric
+/// string is `Other`, not an integer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JsonKind {
     Integer,
@@ -709,10 +688,7 @@ mod tests {
             r#"{"id":0,"result":{"decision":{"acceptWithExecpolicyAmendment":{}}}}"#,
         ));
         match s {
-            Shape::Response { id, is_error, .. } => {
-                assert_eq!(id, RequestId::Int(0));
-                assert!(!is_error);
-            }
+            Shape::Response { id, .. } => assert_eq!(id, RequestId::Int(0)),
             other => panic!("{other:?}"),
         }
     }
@@ -720,7 +696,7 @@ mod tests {
     #[test]
     fn method_less_response_error() {
         let s = classify_shape(&text(r#"{"id":"q","error":{"code":-1,"message":"x"}}"#));
-        assert!(matches!(s, Shape::Response { is_error: true, .. }));
+        assert!(matches!(s, Shape::Response { id: RequestId::Str(ref q), .. } if q == "q"));
     }
 
     #[test]

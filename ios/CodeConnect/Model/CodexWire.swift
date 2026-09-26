@@ -30,7 +30,7 @@ enum CodexHash {
     ///
     /// `sessionRef` is **exactly the string the message's `session_id` field
     /// carries**. The daemon recomputes with the client's own spelling, so the
-    /// phone contracts itself to `session_uid` always (decision D4) rather than
+    /// phone contracts itself to `session_uid` always rather than
     /// relying on a normalisation the hash check does not perform.
     static func interrupt(sessionRef: String, turnID: String) -> String {
         digest(tag: "codeconnect.interrupt.v1", fields: [sessionRef, turnID])
@@ -97,8 +97,8 @@ enum CodexCard {
     }
 
     /// The files a card could not carry, because the patch exceeded the 32-file
-    /// ceiling. **Constructed shape** — no capture in the corpus exercises it
-    /// (contract §4.6) — so it is rendered as a count and a digest and never as
+    /// ceiling. **Constructed shape** — no capture in the corpus exercises it —
+    /// so it is rendered as a count and a digest and never as
     /// a list of paths the phone does not have.
     struct ChangesOmitted: Sendable, Hashable {
         let count: Int
@@ -281,15 +281,15 @@ struct ComposeDraft: Sendable, Hashable {
 ///
 /// So the running turn is the newest `turn_id` seen on this session's event
 /// envelopes with no `turn_complete` carrying the *same* id after it. When there
-/// is none, Stop is hidden — the one honest hide in the phase, because it is a
-/// fact the phone genuinely holds rather than a guess about the Mac.
+/// is none, Stop is hidden — the one honest hide in the Codex controls, because
+/// it is a fact the phone genuinely holds rather than a guess about the Mac.
 ///
-/// **D2 landed, and this stayed.** Minor 19 puts `turn_id` on the approval
-/// event's own envelope, which deletes the inference for every card a current
-/// daemon raises. The derivation is kept as the fallback for cards from a daemon
-/// that predates the field — and it needs no branch to prefer the envelope,
-/// because an approval event's `turn_id` arrives as `Event.turnID` exactly like
-/// every other event's, and the newest one wins by construction.
+/// **The envelope turn landed, and this stayed.** Minor 19 puts `turn_id` on
+/// the approval event's own envelope, which deletes the inference for every card
+/// a current daemon raises. The derivation is kept as the fallback for cards
+/// from a daemon that predates the field — and it needs no branch to prefer the
+/// envelope, because an approval event's `turn_id` arrives as `Event.turnID`
+/// exactly like every other event's, and the newest one wins by construction.
 enum CodexTurnTracker {
 
     /// The turn this session is running, or nil.

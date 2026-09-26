@@ -1,4 +1,4 @@
-//! GATED live integration for the **ccd control link** (Phase 2e-3), against a
+//! GATED live integration for the **ccd control link**, against a
 //! real codex 0.147: a real coordinator, a real host, a real broker, a real
 //! app-server and a real `codex --remote` TUI in a real tmux pane.
 //!
@@ -13,7 +13,7 @@
 //!   2. **The link binds from the live stream, and its frames become facts.** The
 //!      real [`crate::codex_link::run`] task, given no thread id at all, learns one
 //!      from the `thread/started` the TUI broadcasts to a merely-initialized
-//!      connection (A1/D1/D2), and that frame lands in the store as a normalized
+//!      connection, and that frame lands in the store as a normalized
 //!      fact through the ordinary [`crate::state::Daemon::ingest`] path.
 //!   3. **The no-rollout answer, asserted at the only moment it exists.** Before
 //!      any turn, a raw `thread/resume` is admitted by the broker's session binding
@@ -46,7 +46,7 @@
 //!   7. **The attached link observes the next turn LIVE.** A second real turn runs and
 //!      lands as facts of its own turn — including the token usage, which exists only
 //!      on the notification wire and therefore cannot have been recovered.
-//!   7b. **That turn rings, and the link says what it is** (2e-5). The terminal claim 7
+//!   7b. **That turn rings, and the link says what it is**. The terminal claim 7
 //!      just proved live is the only one in this run that was WATCHED arriving — turn 1
 //!      came back through a resume answer, and an answer never rings — so the doorbell
 //!      here is that turn's. It carries `Completed`, the Codex agent (what narrows the
@@ -66,19 +66,14 @@
 //! Two assertions here used to say the opposite, and both were built to be flipped
 //! exactly here.
 //!
-//! The first was claim 4's: that the broker **refused** the TUI's `turn/start`. Two
-//! broker changes retired it — `fingerprint.rs` reads the real TUI's explicit
-//! `"sandboxPolicy": null` as a **deferral** to the named thread's own policy rather
-//! than an unprovable claim, and `refusal.rs`'s `FingerprintThenHeadCheck` discharges
-//! that deferral by forwarding a `turn/start` only when its `threadId` is the session's
-//! one bound thread. So claim 4 asserts **that exact note**, with the old refusal
-//! asserted **negatively** beside it so a regression names itself instead of quietly
-//! reading as "no turn was attempted".
+//! The first was claim 4's: that the broker **refused** the TUI's `turn/start`. The
+//! broker passes the keyboard's frames through as they are, so claim 4 asserts the
+//! keyboard's `turn/start` forward note.
 //!
 //! The second was claim 6b's: that the link met the populated answer, refused to guess
 //! at it, and reconnected for ever — a loop this gate asserted by pairing initializes to
 //! resumes on the broker's own connection identity. That refusal was correct while
-//! nothing had measured the answer's completeness, its keying, or D15's id stability.
+//! nothing had measured the answer's completeness, its keying, or its id stability.
 //! Those measurements now exist, they are written down on
 //! [`crate::codex_adapter::CodexAdapter::plan_resume_seed`], and one of them changed the
 //! design: a **running** turn's `items[]` carry placeholder ids (`item-1`, `item-2`)
@@ -87,7 +82,7 @@
 //! are what the old loop became.
 //!
 //! **Claim 5 split rather than flipped, and the split is the third thing that moved.**
-//! Until 2e-4b a `thread/started` *discharged* the outstanding attach: a connection that
+//! A `thread/started` once *discharged* the outstanding attach: a connection that
 //! watched the thread start was taken to hold its whole stream already, so resuming
 //! would only ask for a replay of what it had. Against the measured wire that reasoning
 //! is exactly backwards — turn frames reach only the **resume-subscribed** connection,
@@ -115,7 +110,7 @@
 //! been captured describing one, so [`crate::codex_adapter::CodexAdapter::plan_resume_seed`]
 //! refuses any turn state other than the two measured, and an operator who interrupts a
 //! turn gets a loud STOP-AND-AMEND rather than a guess. That refusal is the designed
-//! re-grounding trigger for the chunk that captures it.
+//! re-grounding trigger for whatever change captures it.
 //!
 //! **The `run` loop's own reconnect** — EOF, backoff, re-handshake and the retryable
 //! not-ready attach — is proven deterministically in
@@ -158,46 +153,20 @@ static SANDBOX_SEQ: AtomicU32 = AtomicU32::new(0);
 const VERSION_PROBE_BUDGET: Duration = Duration::from_secs(20);
 const PROBE_OUTPUT_LIMIT: u64 = 64 * 1024;
 
-/// The stable prefix of the broker's `turn/start` forward note — enough to answer
-/// "was a turn forwarded at all?", and therefore what the wait polls on. It is
-/// **not** enough to assert with: see [`TURN_FORWARD_NOTE`].
-const TURN_FORWARD_PREFIX: &str = "Tui: forward (turn/start";
-
-/// The **exact** note a forwarded `turn/start` must carry, verbatim from
-/// `codex-broker`'s `refusal.rs`.
-///
-/// The real TUI sends an explicit `"sandboxPolicy": null`, which the fingerprint
-/// reads as a deferral to the named thread's own policy; the head-check discharges
-/// it by forwarding only when `params.threadId` is the session's one bound thread.
-/// That discharge is the whole security claim of this chunk, so the assertion is on
-/// the note that names it. The prefix alone would still pass if the deferral were
-/// replaced by some looser acceptance — a `Forward` that never checked the head, or
-/// a fingerprint that took `null` as "no constraint" — which is exactly the
-/// regression worth catching.
-///
-/// The sibling note, `turn/start: fingerprint asserted and head-checked`, belongs to
-/// a turn carrying an explicit matching sandbox string; a real 0.147 TUI does not
-/// send one, so it is unreachable here and asserting it would assert nothing.
-const TURN_FORWARD_NOTE: &str = "Tui: forward (turn/start: head-checked; sandbox deferral \
-                                 discharged by the verified thread binding)";
-
-/// The broker's refusal when a session that already has a thread bound (or a
-/// creation in flight) is asked for a second one. Verbatim from `refusal.rs`.
-///
-/// Asserted **negatively**: this gate's whole thread-identity story assumes the one
-/// thread the link bound in claim 2 is the one every later claim is about. If the
-/// TUI ever starts a second thread, the broker now refuses it — and without this
-/// assertion that refusal would surface only as a downstream mystery (a resume for a
-/// thread nobody ran a turn on), rather than naming itself.
-const SECOND_THREAD_REFUSAL: &str = "thread/start: this session already has a thread bound";
+/// The broker's note for a keyboard `turn/start` it passed through: the keyboard's
+/// request logged under its method (`codex-broker/src/relay.rs`, `handle_text`'s
+/// `Forward` arm, `"{role:?}: forward ({note}) (conn {conn})"` with the note the
+/// keyboard's method). The wait polls on it and the claim asserts it.
+const TURN_FORWARD_NOTE: &str = "Tui: forward (turn/start)";
 
 /// The ccd-leg note for `initialize` and the census reads.
 const CCD_INITIALIZE_NOTE: &str = "Ccd: forward (request allowlisted)";
 /// The ccd-leg note for `initialized`.
 const CCD_INITIALIZED_NOTE: &str = "Ccd: forward (notification allowlisted)";
-/// The ccd-leg note for `thread/resume` — the ONE thing ccd may send that is
-/// classified an ownership request, so it cannot be mistaken for anything else.
-const CCD_RESUME_NOTE: &str = "Ccd: forward (ownership request: fingerprint asserted)";
+/// The ccd-leg note for `thread/resume` (`codex-broker/src/refusal.rs`,
+/// `Disposition::ResumeSessionThread`'s arm), which no other ccd request carries.
+const CCD_RESUME_NOTE: &str =
+    "Ccd: forward (thread/resume: names a thread of this session and nothing else)";
 
 /// The committed ground truth for a post-turn `thread/resume` answer, captured off
 /// this very wire.
@@ -279,10 +248,10 @@ fn resolve_codeconnect() -> PathBuf {
 
 /// **Build the launcher, then use it.**
 ///
-/// Found the hard way, in 2e-4c, while mutation-testing a live gate: `cargo test -p ccd`
+/// Found the hard way while mutation-testing a live gate: `cargo test -p ccd`
 /// does not rebuild `codeconnect`, and this harness drives `codeconnect` — which is what
 /// carries the broker into the pane. A deliberate, load-bearing mutation of
-/// `codex-broker/src/fingerprint.rs` was therefore invisible to the live run, and the gate
+/// the broker was therefore invisible to the live run, and the gate
 /// PASSED against a binary built before the mutation existed. A live gate that can pass
 /// against a stale binary is not a gate; it will just as happily pass against a broken
 /// change nobody rebuilt.
@@ -449,22 +418,6 @@ fn live_gate() -> Option<PathBuf> {
             codex.display()
         ),
     };
-    // The premise is the gate's own verdict, not a version literal: `codeconnect`'s
-    // launcher no longer pins a version, it pins the guarded surface. See
-    // `codeconnect/tests/live_codex_host.rs` for the full reasoning.
-    match codex_broker::guarded_surface::unadjudicated_against_baseline(&codex) {
-        Ok(changes) if changes.is_empty() => {}
-        Ok(changes) => panic!(
-            "CC_CODEX_LIVE=1 resolved {} reporting codex {version}, whose guarded surface \
-             CodeConnect is NOT grounded against:\n  {}",
-            codex.display(),
-            changes.join("\n  ")
-        ),
-        Err(why) => panic!(
-            "CC_CODEX_LIVE=1 resolved {} but its guarded surface could not be read: {why}.",
-            codex.display()
-        ),
-    }
     assert!(
         tmux_bin().is_some(),
         "CC_CODEX_LIVE=1 was set but no tmux was found."
@@ -647,8 +600,8 @@ fn conn_id(line: &str) -> Option<String> {
 /// A link sends `initialize`, `initialized` and `thread/resume` and nothing else
 /// (`codex_link`'s module doc), so these five markers are the whole of what one of
 /// its connections can produce, and their ORDER is half the claim: a resume
-/// pipelined ahead of the handshake violates A2, and a second resume on a connection
-/// that never re-opened is the retry shape this branch must not be taking.
+/// pipelined ahead of the handshake is the pipelining a link never does, and a second
+/// resume on a connection that never re-opened is the retry shape this branch must not be taking.
 const CCD_LIFECYCLE: [&str; 5] = [
     "leg opened",
     "initialize",
@@ -803,7 +756,7 @@ fn ccd_window_verdict(conns: &[CcdConn]) -> (Vec<&str>, Option<&str>, Vec<&CcdCo
 ///
 /// Claim 6b can only be run by paying for a real model call, so the one component
 /// that decides whether its connection pairing is real would otherwise be the only
-/// piece of this chunk with no in-tree evidence behind it. A parser that mis-groups
+/// piece of this gate with no in-tree evidence behind it. A parser that mis-groups
 /// does not fail loudly: it makes claim 6b pass vacuously, or fail for a reason that
 /// is not the one being tested.
 ///
@@ -875,12 +828,12 @@ fn a_ccd_leg_is_grouped_by_the_brokers_own_connection_id() {
             "Ccd: leg opened (conn 1)",
             "Ccd: forward (request allowlisted) (conn 1)",
             "Ccd: forward (notification allowlisted) (conn 1)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 1)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 1)",
             "Ccd: leg opened (conn 2)",
             "Ccd leg ended (conn 1): closed",
             "Ccd: forward (request allowlisted) (conn 2)",
             "Ccd: forward (notification allowlisted) (conn 2)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 2)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 2)",
             "Ccd leg ended (conn 2): closed",
             "Ccd: leg opened (conn 3)",
             "Ccd: forward (request allowlisted) (conn 3)",
@@ -903,7 +856,7 @@ fn a_ccd_leg_is_grouped_by_the_brokers_own_connection_id() {
             "Ccd: leg opened (conn 1)",
             "Ccd: forward (request allowlisted) (conn 1)",
             "Ccd: forward (notification allowlisted) (conn 1)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 1)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 1)",
             "Ccd: read error (conn 1): connection reset",
             "Ccd leg ended (conn 1): connection reset",
         ]),
@@ -927,29 +880,29 @@ fn a_ccd_leg_is_grouped_by_the_brokers_own_connection_id() {
             "Ccd: leg opened (conn 1)",
             "Ccd: forward (request allowlisted) (conn 1)",
             "Ccd: forward (notification allowlisted) (conn 1)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 1)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 1)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 1)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 1)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 1)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 1)",
         ]),
         (vec![("1".into(), 4, 0)], vec![], Some("1".into()), vec![],),
         "a retry on the same connection is the not-ready attach loop, and it must read \
          as in-flight rather than as a step out of order"
     );
 
-    // 4. **PREVIOUSLY PASSED.** A resume pipelined ahead of the handshake (A2). The
+    // 4. **PREVIOUSLY PASSED.** A resume pipelined ahead of the handshake. The
     //    positional pairing only asked whether an `initialize` had been seen on this
     //    connection at some point before the resume, never whether `initialized` came
     //    between them — so this read as one clean cycle.
     assert_eq!(
         verdict(&[
             "Ccd: leg opened (conn 1)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 1)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 1)",
             "Ccd: forward (request allowlisted) (conn 1)",
             "Ccd: forward (notification allowlisted) (conn 1)",
             "Ccd leg ended (conn 1): closed",
         ]),
         (vec![("1".into(), 3, 2)], vec![], None, vec!["1".into()],),
-        "a resume sent ahead of the handshake violates A2 and is not a cycle, however \
+        "a resume sent ahead of the handshake violates the no-pipelining rule and is not a cycle, however \
          complete the connection's line count looks"
     );
 
@@ -964,11 +917,11 @@ fn a_ccd_leg_is_grouped_by_the_brokers_own_connection_id() {
             "Ccd: leg opened (conn 1)",
             "Ccd: forward (request allowlisted) (conn 1)",
             "Ccd: forward (notification allowlisted) (conn 1)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 1)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 1)",
             "Ccd: leg opened (conn 2)",
             "Ccd: forward (request allowlisted) (conn 2)",
             "Ccd: forward (notification allowlisted) (conn 2)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 2)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 2)",
         ]),
         (
             vec![("1".into(), 4, 0), ("2".into(), 4, 0)],
@@ -990,7 +943,7 @@ fn a_ccd_leg_is_grouped_by_the_brokers_own_connection_id() {
             "Ccd: leg opened (conn 1)",
             "Ccd: forward (request allowlisted) (conn 1)",
             "Ccd: forward (notification allowlisted) (conn 1)",
-            "Ccd: forward (ownership request: fingerprint asserted) (conn 1)",
+            "Ccd: forward (thread/resume: names a thread of this session and nothing else) (conn 1)",
             "Ccd leg ended (conn 1): closed",
         ]),
         (vec![("1".into(), 5, 0)], vec!["1".into()], None, vec![],),
@@ -1043,8 +996,8 @@ fn assert_private_dir(path: &Path) {
 /// **The canonical launch cwd of a [`LiveSandbox`]'s coordinator.**
 ///
 /// [`LiveSandbox::spawn_coordinator`] passes `--cwd /tmp`; the coordinator resolves it
-/// once (`canonical_launch_cwd`) and that resolved string is what the broker
-/// fingerprints, what the app-server reports, and what the real supervisor registers.
+/// once (`canonical_launch_cwd`) and that resolved string is what the host is launched
+/// with, what the app-server reports, and what the real supervisor registers.
 /// Derived from the launch here for the same reason it is derived from the launch
 /// there — `/tmp` is a symlink on macOS, so the two spellings are not equal.
 fn sandbox_launch_cwd() -> String {
@@ -1182,13 +1135,13 @@ impl LiveSandbox {
             // down mid-run by the very machinery that is working correctly.
             .args(["--deadline-ms", "900000"])
             .args(["--codex", codex.to_str().expect("codex path is utf-8")])
-            // A7.1 executable hash-pin: the coordinator carries the identity of the
+            // Executable hash-pin: the coordinator carries the identity of the
             // codex binary beside its path, and the host re-verifies it immediately
             // before each of its two execs. Required — a missing digest is refused,
             // never defaulted to trusting the pathname.
             //
-            // Derived here rather than taken from the launcher, and since 2e-7d
-            // that is a choice: `codeconnect codex` pins its own digest now, and
+            // Derived here rather than taken from the launcher, and that is a
+            // choice: `codeconnect codex` pins its own digest now, and
             // its whole path is gated end to end by
             // `the_codex_command_launches_a_real_session_end_to_end`
             // (`codeconnect/tests/live_codex_coordinator.rs`). This harness keeps
@@ -1201,23 +1154,6 @@ impl LiveSandbox {
                 &protocol::hash::sha256_file(codex).expect("hash the codex binary under test"),
             ])
             .args(["--codex-home", self.codex_home.to_str().unwrap()])
-            // `on-request`, not `untrusted`, and that is a **measured** choice: a
-            // real 0.147 TUI's `thread/start` carries `approvalPolicy:"on-request"`,
-            // so a launch fingerprint of `untrusted` makes the broker refuse it
-            //
-            //   Tui: refuse->synthetic error (thread/start: fingerprint refused
-            //   (Conflict): params.approvalPolicy: "on-request" but fingerprint is
-            //   "untrusted")
-            //
-            // and the TUI then exits fatally, taking the pane and the whole session
-            // with it about two seconds in. No thread is ever created, so there is
-            // nothing for a control link to observe. Nothing in this chunk changes
-            // the coordinator's own defaults; this gate names the value that lets a
-            // thread exist, and the mismatch is reported rather than papered over.
-            .args(["--approval-policy", "on-request"])
-            .args(["--approvals-reviewer", "user"])
-            .args(["--sandbox", "read-only"])
-            .args(["--hooks-enabled", "true"])
             .args(["--test-bringup", "hang"])
             .env("CODECONNECT_HOME", &self.home)
             .env("CODECONNECT_TMUX", &self.tmux)
@@ -1252,9 +1188,6 @@ impl LiveSandbox {
         })
     }
 
-    /// Type into the pane's TTY. The only way to drive the session: ccd may not
-    /// start turns (the broker refuses `turn/start` to the ccd role by design), so
-    /// a turn can only ever be started by the real TUI.
     /// Type one line into the composer and keep pressing Enter until the thing
     /// it was typed for has happened.
     ///
@@ -1433,16 +1366,12 @@ impl LiveSandbox {
     }
 
     /// Pin this sandbox's codex to a specific model and reasoning effort, by writing the
-    /// `config.toml` a real operator's `~/.codex` would carry (2e-4c).
+    /// `config.toml` a real operator's `~/.codex` would carry.
     ///
-    /// **This is the only way a brokered session's model can differ from the default**, and
-    /// that is a MEASURED constraint rather than a harness convenience: the TUI's `/model`
-    /// affordance drives `thread/settings/update` (plus a `config/batchWrite` to persist
-    /// it), and the broker refuses `thread/settings/update` outright as
-    /// `OwnershipAdjacent` — it is the same method that can move `approval_policy`, and it
-    /// durably widens policy with a bare `result:{}`. So within a brokered session the
-    /// model is FIXED at launch, and the population the 2e-4c pin widening actually serves
-    /// is "an operator whose configured model is not the one the fixture captured".
+    /// The gates never type the TUI's `/model` (which drives `thread/settings/update`), so
+    /// the model a gate runs under is the one this config names at launch, and the
+    /// population the model-pin widening serves is "an operator whose configured model is
+    /// not the one the fixture captured".
     ///
     /// Must be called before `spawn_coordinator`: the app-server reads the config once, at
     /// start.
@@ -1509,7 +1438,7 @@ impl LiveSandbox {
 /// (`/tmp/cch.*`), which is what the coordinator, the host, the app-server and the
 /// TUI carry — and nothing else does. A shell codex spawns for a tool call carries
 /// the COMMAND, and the only sandbox-owned path a command can carry is one the gate
-/// itself put there. So while the 4a interrupt gates asked for their markers under
+/// itself put there. So while the interrupt gates asked for their markers under
 /// `/tmp` directly, the shells that write them were reachable by no sweep this
 /// harness had, and MEASURED they outlived the run: those gates ask for `sleep 45 &&
 /// touch <marker>` and then interrupt the turn, and `/tmp/cc-4a-*.<nanos>.txt`
@@ -1607,7 +1536,7 @@ impl Drop for LiveSandbox {
 
 /// A raw WS-over-UDS client on the broker's ccd leg, used to read the wire
 /// directly: what `initialize` answers, what a ccd-allowlisted census read returns,
-/// and — the fact this chunk most needs on the record — the RAW shape of a
+/// and — the fact this file most needs on the record — the RAW shape of a
 /// `thread/resume` response.
 struct RawCcd {
     ws: tokio_tungstenite::WebSocketStream<UnixStream>,
@@ -1740,7 +1669,7 @@ impl RawCcd {
     /// `initialize` + `initialized` and then sends nothing at all, which is the whole
     /// point — that is exactly the position the control link occupies while its
     /// `thread/resume` keeps being refused, so what this connection is broadcast is
-    /// what the link is broadcast (A1/D2).
+    /// what the link is broadcast.
     ///
     /// The recorded method list is what makes claim 5 a **measurement**: "the link
     /// recorded nothing" inferred from an empty table is a claim a broken adapter
@@ -1885,7 +1814,7 @@ fn observed(methods: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
 /// device side, and it is deliberate state of the build rather than a gap here —
 /// no device can be Codex-eligible yet, because the shipping iOS client
 /// advertises a feature set on neither `hello` nor `register_push` and nothing in
-/// this phase writes the column at all, so every stored device decodes as the
+/// this build writes the column at all, so every stored device decodes as the
 /// Claude-only floor and [`crate::push_queue::recipients`] narrows a Codex
 /// doorbell to nobody. That narrowing is the read side standing on its own, which
 /// is precisely why the write side was deleted rather than repaired. Claim 7b is
@@ -2039,16 +1968,10 @@ async fn run_the_warm_up_turn(sb: &LiveSandbox) {
 /// **Including its `cwd`, which is the CANONICAL launch cwd and used to be `/tmp`.**
 /// `supervise_ready_session` registers `deps.launch_cwd`, i.e.
 /// `canonical_launch_cwd(charter.cwd)` — resolved once, at the authority that owns it, so
-/// that the launcher, the broker's launch fingerprint and the app-server's own `cwd` are
+/// that the launcher, the broker's launch record and the app-server's own `cwd` are
 /// the same bytes. This harness passed `--cwd /tmp` to the coordinator and then registered
-/// the un-canonicalized `/tmp`, which no real supervisor ever sends. Nothing noticed while
-/// every compose gate ran a warm-up turn first, because a link with an accepted resume
-/// answer takes its launch from the ANSWER. The first gate to compose from
-/// [`crate::codex_link::CodexAddressee::BoundNotStarted`] — where
-/// [`crate::codex_link::launch_of_record`] builds the frame out of this very field — was
-/// refused by the broker with `-32001 "turn refused: it does not run in the workspace
-/// bound at its thread's creation"`, because `/tmp` is a symlink on macOS and the thread
-/// was bound at `/private/tmp`. The registration now carries what production carries.
+/// the un-canonicalized `/tmp`, which no real supervisor ever sends. The registration
+/// carries what production carries.
 async fn register_the_run(
     daemon: &Arc<crate::state::Daemon>,
     session: &SessionKey,
@@ -2083,7 +2006,7 @@ async fn register_the_run_on(
                 tmux_session: session.name.clone(),
                 tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
                 // See this function's doc: the canonical spelling, because that is the
-                // one the coordinator resolves and the broker fingerprints.
+                // one the coordinator resolves.
                 cwd: sandbox_launch_cwd(),
                 supervisor_pid: std::process::id(),
                 claude_bin: None,
@@ -2407,7 +2330,7 @@ impl GatedCcdLeg {
 
 /// **A real phone: the daemon's own `ws_server`, on loopback, over a real WebSocket.**
 ///
-/// Plan Phase 3's gates are written "WS test client", and the difference from calling
+/// The answer gates are written against a WS test client, and the difference from calling
 /// [`crate::state::Daemon::answer`] directly is not decoration. An answer that arrives
 /// this way is decoded from bytes by `protocol::ws::ClientMessage`, admitted by the
 /// handshake, dispatched by `ws_server`'s own match arm, and answered with a
@@ -2694,8 +2617,9 @@ impl PhoneOverTheWire {
     ///
     /// A phone answering a card whose disposition is being held gets no `answer_result`
     /// until the daemon's own `DISPOSITION_BUDGET` expires — 15 s in a real `ccd`
-    /// process, which is longer than the window gate 5 has to kill it in. This writes the
-    /// frame and leaves; what the daemon did with it is read out of its database.
+    /// process, which is longer than the window the kill gate has to kill it in. This
+    /// writes the frame and leaves; what the daemon did with it is read out of its
+    /// database.
     async fn send_answer(&mut self, card: &protocol::ws::ApprovalCard, option_id: &str, uid: &str) {
         let frame = serde_json::json!({
             "type": "answer",
@@ -2911,7 +2835,7 @@ fn teardown_kills_the_shell_that_names_the_sandbox_base() {
     assert!(
         died,
         "the shell naming {tag} was still alive five seconds after teardown; in a \
-         real 4a run this is the escalated retry that touches its marker ~45 s AFTER \
+         real run this is the escalated retry that touches its marker ~45 s AFTER \
          the sandbox is gone"
     );
     assert!(
@@ -2937,21 +2861,22 @@ fn children_of(parent: i32) -> Vec<i32> {
         .unwrap_or_default()
 }
 
-/// **A session launched on a model the fixture never captured still runs a turn** (2e-4c).
+/// **A session launched on a model the fixture never captured still runs a turn**.
 ///
 /// The live subject of the model-pin widening, and the reason it needed one.
 ///
-/// 2e-4a pinned `turn/start`'s `collaborationMode` to the captured value BYTE FOR BYTE.
+/// The broker once pinned `turn/start`'s `collaborationMode` to the captured value
+/// BYTE FOR BYTE.
 /// That field carries `settings.model` and `settings.reasoning_effort`, so the pin bound
 /// the whole broker to one specific model: an operator whose `~/.codex/config.toml` says
 /// `model = "gpt-5.6-terra"` got a policy refusal on their very first turn, with an audit
-/// note about a captured boundary. A13 recorded that refusal as "the designed 2e-4c
-/// re-grounding trigger", and this is the gate that proves the trigger was discharged
+/// note about a captured boundary. That refusal was the designed
+/// re-grounding trigger, and this is the gate that proves the trigger was discharged
 /// against a real wire rather than against an argument.
 ///
 /// The spike measured eleven real `turn/start` frames across three models and found the
 /// field splits cleanly: `mode` and `developer_instructions` byte-identical every time —
-/// including against the 2e-4a fixture captured a week earlier on a different sandbox —
+/// including against the earlier fixture captured a week before on a different sandbox —
 /// while `model` and `reasoning_effort` simply carried whatever the picker last set. The
 /// instruction channel stays pinned exactly; the two knobs are type-checked. This gate
 /// runs a session on `gpt-5.6-terra` at `high`, neither of which appears in the fixture,
@@ -3031,9 +2956,9 @@ async fn a_session_launched_on_an_uncaptured_model_still_runs_a_turn() {
     // And the broker FORWARDED a turn — named in its own log — rather than merely not
     // refusing one.
     assert!(
-        broker_log.contains("turn/start: head-checked"),
-        "broker.log must show the turn/start FORWARDING through the head-check; its \
-         absence would mean the turn never reached the broker at all. \
+        broker_log.contains(TURN_FORWARD_NOTE),
+        "broker.log must show the keyboard's turn/start forwarded ({TURN_FORWARD_NOTE:?}); \
+         its absence would mean the turn never reached the broker at all. \
          broker.log:\n{broker_log}"
     );
     println!(
@@ -3077,7 +3002,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // Order matters and is the whole design of claim 2: the host binds both legs
     // and only then launches the TUI, so a link that connects the moment the legs
     // appear is a merely-initialized connection when the TUI creates its thread —
-    // which is precisely who `thread/started` is broadcast to (A1/D1/D2). Nothing
+    // which is precisely who `thread/started` is broadcast to. Nothing
     // is handed to the link: it must learn the identity off the wire.
     let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-live");
     let (daemon, _db, push) = live_daemon(&session);
@@ -3098,10 +3023,6 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
             socket: sb.ccd_sock(),
             generation: 1,
             thread_id: None,
-            // What the real supervisor registers: the coordinator's `--cwd /tmp`,
-            // canonicalized once at the authority that owns it — the same string the
-            // broker fingerprints. Derived here from the launch, never from an answer.
-            launch_cwd: sandbox_launch_cwd(),
         },
         first_presence.clone(),
         crate::codex_link::LinkCarry::new(),
@@ -3220,12 +3141,8 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
 
     // --- 6. CLAIM 4: a real turn RUNS through the broker ---------------------
     //
-    // This replaces the old tripwire, which asserted the broker REFUSED the TUI's
-    // `turn/start` and was built to be flipped exactly here. Two broker changes
-    // made the forward possible: `fingerprint.rs` reads the real TUI's explicit
-    // `"sandboxPolicy": null` as a deferral to the named thread's policy, and
-    // `refusal.rs`'s head-check discharges that deferral by forwarding only a
-    // `turn/start` whose `threadId` is the session's one bound thread.
+    // The broker passes the keyboard's frames through, so the TUI's `turn/start`
+    // reaches the app-server as it was sent and the broker logs it under its method.
     //
     // The prompt is chosen to trigger no tools and answer in one word, so this
     // costs one small model call and completes in seconds.
@@ -3244,68 +3161,18 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     tokio::time::sleep(Duration::from_millis(600)).await;
     sb.send_keys(&["Enter"]);
 
-    // The WAIT is on the stable prefix, because all it has to answer is "was a turn
-    // forwarded at all?" — hanging the full 90s on a note that moved by one word
-    // would report "no turn was submitted", which is a different and misleading
-    // failure. The ASSERTION below is on the exact note.
     let forwarded = wait_until(Duration::from_secs(90), || {
-        read_file(&sb.run_dir.join("broker.log")).contains(TURN_FORWARD_PREFIX)
+        read_file(&sb.run_dir.join("broker.log")).contains(TURN_FORWARD_NOTE)
     })
     .await;
     let broker_log = read_file(&sb.run_dir.join("broker.log"));
     assert!(
         forwarded,
-        "the broker did not forward the TUI's turn/start within 90s. Either no turn \
-         was submitted (check the pane), or the forwarding path regressed and the \
-         session can no longer run work at all. pane:\n{}\nbroker.log:\n{broker_log}",
+        "the broker did not forward the TUI's turn/start within 90s (expected \
+         {TURN_FORWARD_NOTE:?}). Either no turn was submitted (check the pane), or the \
+         keyboard's passthrough regressed and the session can no longer run work at all. \
+         pane:\n{}\nbroker.log:\n{broker_log}",
         sb.capture_pane()
-    );
-    // **The exact note, not the prefix.** A forward is only the right outcome if it
-    // happened for the right reason: the TUI's explicit `"sandboxPolicy": null` was
-    // read as a DEFERRAL and that deferral was DISCHARGED by the head-check proving
-    // `params.threadId` is the session's one bound thread. The prefix alone would
-    // still pass if the deferral were replaced by some looser acceptance — a
-    // fingerprint that read `null` as "no constraint", or a forward that skipped the
-    // head-check — and that discharge is the entire security claim of this chunk.
-    //
-    // The method-level refusals that guard the OTHER fingerprint fields — a
-    // `turn/start` diverging on permissions, cwd or workspace roots — are broker unit
-    // tests, in `codex-broker/src/refusal.rs` and `codex-broker/src/fingerprint.rs`.
-    // A live TUI cannot be made to send a divergent fingerprint on demand, so
-    // asserting them here would mean asserting nothing.
-    assert!(
-        broker_log.contains(TURN_FORWARD_NOTE),
-        "the broker forwarded a turn/start, but NOT under the note that says the \
-         sandbox deferral was discharged by the verified thread binding. Expected \
-         verbatim:\n  {TURN_FORWARD_NOTE}\nA forward under any other note means the \
-         TUI's explicit `sandboxPolicy: null` was accepted by some path other than \
-         the head-check that proves the turn names the session's one bound thread — \
-         which is the whole of what this gate certifies about turn safety.\n\
-         broker.log:\n{broker_log}"
-    );
-    // Asserted negatively so the OLD failure mode names itself. A build that starts
-    // refusing again would otherwise show up only as a timeout above, which reads
-    // identically to "the operator's keystrokes never landed".
-    assert!(
-        !broker_log.contains("refuse->synthetic error (turn/start"),
-        "the broker refused a turn/start. That is the pre-2e-4 behaviour returning: \
-         the session cannot run work, and every claim below about a populated \
-         resume answer is unreachable.\nbroker.log:\n{broker_log}"
-    );
-    // **The single-thread session invariant, surfaced rather than left to confuse.**
-    // The broker binds a thread by correlated admitted creation and then closes the
-    // slot: a second `thread/start` or `thread/fork` is refused. Every claim from 2
-    // onwards is about ONE thread id, so a TUI that tried to start another would make
-    // the resume claims below assert against a thread nothing ran on — and the
-    // refusal would otherwise surface only as that downstream mystery.
-    assert!(
-        !broker_log.contains(SECOND_THREAD_REFUSAL),
-        "the TUI tried to start a SECOND thread and the broker refused it (the \
-         single-thread session invariant). Every claim in this gate is about the one \
-         thread the link bound in claim 2, so this is not a random failure: the \
-         session's thread identity is not what the assertions below assume, and the \
-         resume answers they read may be about a thread that never ran a \
-         turn.\nbroker.log:\n{broker_log}"
     );
 
     // **The turn COMPLETED, not merely started.** The only two signals this gate has
@@ -3473,7 +3340,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // Measured on this position across every run of this gate. All but one are methods
     // `codex_adapter` maps to `Vec::new()` — observation noise by construction. The
     // exception is `thread/started`, which is the announcement itself: it does carry a
-    // fact, and it is broadcast to merely-initialized connections by design (A1/D2).
+    // fact, and it is broadcast to merely-initialized connections by design.
     // That is the one delivery an unsubscribed connection is *supposed* to get.
     //
     // **`skills/changed` is in the set by measurement, and its provenance is recorded
@@ -3509,7 +3376,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
          never been measured to receive. Anything new here has to be checked against \
          the adapter before it is added: a method that maps to a FACT arriving on an \
          unsubscribed connection would break the whole `bound is not subscribed` story \
-         this chunk rests on. measured: {measured_fanout:?} — got: {distinct_all:?}"
+         this link rests on. measured: {measured_fanout:?} — got: {distinct_all:?}"
     );
     let turn_frames: Vec<&String> = observed_all
         .iter()
@@ -3555,7 +3422,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // those asks is answered, and acceptance subscribes the connection that has been
     // watching all along.
     //
-    // Until 2e-4b an announcement DISCHARGED the attach and this link would never have
+    // An announcement once DISCHARGED the attach and this link would never have
     // asked at all. Against the measured wire that is a link bound to its thread and
     // permanently deaf — which is the defect this assertion now guards, in the honest
     // form: the same connection, never restarted, has to end up subscribed.
@@ -3810,21 +3677,17 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // of the frame and comparing it to the frame is a tautology, and comparing it to
     // the fixture's would be worse — the fixture's `cwd` is per-run content this gate
     // deliberately does not pin. But the test KNOWS what it launched: the coordinator
-    // above was given `--cwd /tmp`, which it canonicalizes once (its own
-    // `canonical_launch_cwd`) before handing it to the host as `--launch-cwd`, and the
-    // broker's session binding then requires the created thread's cwd to equal it. So
-    // the expectation is `/tmp` canonicalized HERE — `/private/tmp` on macOS — and it
-    // is derived from the launch, not from the answer.
+    // above was given `--cwd /tmp`, which is the pane's cwd and so the directory the
+    // app-server and the TUI run in. So the expectation is `/tmp` canonicalized HERE —
+    // `/private/tmp` on macOS — and it is derived from the launch, not from the answer.
     let expected_cwd = std::fs::canonicalize("/tmp").expect("/tmp resolves");
     assert_eq!(
         post_turn_resume["result"]["cwd"].as_str(),
         expected_cwd.to_str(),
         "the resumed thread reports cwd={:?}, but this gate launched the coordinator \
-         with `--cwd /tmp`, which canonicalizes to {}. That value is the workspace \
-         anchor the broker verifies a thread creation against, so a divergence means \
-         the session ran somewhere other than where it was launched — and the sandbox \
-         and workspace claims beside it are about a workspace nobody asserted: \
-         {post_turn_resume}",
+         with `--cwd /tmp`, which canonicalizes to {}. A divergence means the session \
+         ran somewhere other than where it was launched — and the workspace claims \
+         beside it are about a workspace nobody asserted: {post_turn_resume}",
         post_turn_resume["result"]["cwd"],
         expected_cwd.display()
     );
@@ -3832,7 +3695,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     //
     // This used to be a type check, justified by "what a live run's workspace roots
     // resolve to is not something this gate launched, so pinning them would pin an
-    // accident". That reasoning was MEASURED FALSE in 2e-7c. Proxying a real
+    // accident". That reasoning was MEASURED FALSE. Proxying a real
     // `codex --remote` TUI against a real app-server — from a git repository root,
     // from a deep subdirectory of one, and from a directory in no repository at all —
     // the TUI sent `runtimeWorkspaceRoots: [<its own cwd, canonicalized>]` in every
@@ -3840,7 +3703,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     // does not vary with repo-ness: it is exactly the launch directory, which IS
     // something this gate launched.
     //
-    // So the broker now anchors it (A10 follow-on) exactly as it anchors `cwd`, and
+    // So the broker now anchors it exactly as it anchors `cwd`, and
     // this assertion is the live end of that anchor: a real session, resumed after a
     // real turn, still reporting the one workspace root the launch asked for.
     let roots = post_turn_resume["result"]["runtimeWorkspaceRoots"]
@@ -3873,38 +3736,25 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
          wider, or simply other, than the one the launch anchored: {post_turn_resume}",
         expected_cwd.display()
     );
-    // **The launch fingerprint governed the turn that actually ran.** This is the
-    // assertion that closes the loop opened by claim 4: the coordinator launched with
-    // `--sandbox read-only`, the broker forwarded the turn only by discharging the
-    // TUI's sandbox deferral to the bound thread's own policy — and here is that
-    // thread's policy, read back off the wire after the turn, still read-only with no
-    // network. If the deferral ever resolved to something laxer, the forward note
-    // could stay the same while THIS moved.
-    assert_eq!(
-        post_turn_resume["result"]["sandbox"], fixture["result"]["sandbox"],
-        "the effective sandbox the resumed thread reports is not the read-only, \
-         no-network policy the launch fingerprint pinned. The turn/start forward \
-         discharges a sandbox DEFERRAL to this thread's own policy, so this value is \
-         what the deferral resolved to — and a divergence here means the turn ran \
-         under a policy nobody asserted. live={} fixture={}",
-        post_turn_resume["result"]["sandbox"], fixture["result"]["sandbox"]
+    // **The thread reports the policy codex chose.** The launch names no sandbox and
+    // no approval policy: the TUI chooses both exactly as native codex does, from this
+    // sandbox's own config (which sets none) and the directory's trust. So the value is
+    // not pinned here — only that the resumed thread states one.
+    assert!(
+        post_turn_resume["result"]["sandbox"].is_object(),
+        "the resumed thread states no sandbox policy: {post_turn_resume}"
     );
     for field in ["approvalPolicy", "approvalsReviewer"] {
-        assert_eq!(
-            post_turn_resume["result"][field], fixture["result"][field],
-            "the resumed thread reports {field}={} where the ground truth records {}. \
-             The launcher pins this value and the broker's fingerprint refuses a \
-             thread/start that diverges from it, so a change here is either the \
-             launcher's pin or the app-server's reporting of it moving underneath \
-             this gate: {post_turn_resume}",
-            post_turn_resume["result"][field], fixture["result"][field]
+        assert!(
+            post_turn_resume["result"][field].is_string(),
+            "the resumed thread states no {field}: {post_turn_resume}"
         );
     }
     println!(
         "CLAIM 6a PASS — the post-turn resume answers with a populated turns[] \
-         (exactly {} turn, id {live_turn_id}, completed) whose thread id, turn \
-         status, effective sandbox, approval policy and reviewer all agree with the \
-         committed ground truth, whose cwd is the independently canonicalized launch \
+         (exactly {} turn, id {live_turn_id}, completed) whose thread id and turn \
+         status agree with the committed ground truth, which states its sandbox, \
+         approval policy and reviewer, whose cwd is the independently canonicalized launch \
          cwd {} and whose workspace roots are {roots:?}; this is the answer \
          codex_link refuses to guess at",
         turns.len(),
@@ -4109,14 +3959,14 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
 
     // --- 11. CLAIM 7: the attached link OBSERVES A SECOND TURN, LIVE --------------
     //
-    // Acceptance is what subscribes (measured in 2e-4a: turn frames reach only the
+    // Acceptance is what subscribes (measured live: turn frames reach only the
     // resume-subscribed connection), so the whole point of attaching is what happens
     // next. A second real turn runs, and this link — the ORIGINAL one, which bound from
     // the broadcast, kept asking, and attached when the rollout appeared — must now be
     // handed the `turn/*` and `item/*` frames the tap is measured never to get, and must
     // record them as facts of their own turn.
     //
-    // **This is the turn the whole chunk is for**, and it is asserted on the connection
+    // **This is the turn the whole gate is for**, and it is asserted on the connection
     // that has been open since before the TUI started. Nothing was restarted to make it
     // work.
     //
@@ -4321,7 +4171,6 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
             socket: sb.ccd_sock(),
             generation: 1,
             thread_id: Some(thread_id.clone()),
-            launch_cwd: sandbox_launch_cwd(),
         },
         crate::codex_link::LinkPresence::new(),
         crate::codex_link::LinkCarry::new(),
@@ -4506,11 +4355,11 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
 
     // --- 13. CLAIM 9: THE THREAD SWITCH, FOLLOWED LIVE ----------------------------
     //
-    // The 2e-4c milestone. Everything above happened on ONE thread; a real operator
+    // The thread-switch milestone. Everything above happened on ONE thread; a real operator
     // presses `/new`. Three things have to be true at once, and each was measured on the
     // wire before any of it was written:
     //
-    //   * the BROKER admits the second `thread/start` as a SWITCH — before 2e-4c its
+    //   * the BROKER admits the second `thread/start` as a SWITCH — an earlier
     //     single-thread invariant refused it, so a real user could not start a new chat
     //     at all;
     //   * the LINK follows, on the connection it already has: `thread/started` for the
@@ -4550,7 +4399,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     assert!(
         switched,
         "the link recorded nothing under a new thread after /new. Either the broker \
-         refused the second thread/start (the pre-2e-4c single-thread invariant) or the \
+         refused the second thread/start (the old single-thread invariant) or the \
          link ignored the announcement and is still watching the old thread. \
          broker.log:\n{}",
         read_file(&sb.run_dir.join("broker.log"))
@@ -4612,11 +4461,11 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
 
     // --- CLAIM 9c: the old timeline is INTACT and NOTHING crossed -----------------
     //
-    // The switch retired a VISIT, not a thread's history (D4). Every fact recorded
+    // The switch retired a VISIT, not a thread's history. Every fact recorded
     // before the switch must still be present, at the same seq — a switch that quietly
     // renumbered or dropped the old thread's timeline would be worse than one that
     // refused. And every fact in the store must belong to exactly one of the two
-    // threads, which is the D4 filter proven on live traffic rather than in a unit test.
+    // threads, which is the ingress filter proven on live traffic rather than in a unit test.
     for (key, seq) in &before_switch {
         assert!(
             after_switch.contains(&(key.clone(), *seq)),
@@ -4646,7 +4495,7 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
     println!(
         "CLAIM 9c PASS — {} pre-switch facts intact at their original seq, {} facts \
          total across exactly two threads ({old_thread} then {new_thread}), zero \
-         cross-thread contamination, zero duplicates. The D4 filter is proven on live \
+         cross-thread contamination, zero duplicates. The ingress filter is proven on live \
          traffic.",
         before_switch.len(),
         after_switch.len()
@@ -4667,14 +4516,14 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
 
 // ============================================================ MEASUREMENT PROBE
 //
-// Chunk 3a grounding, NOT a gate. It exists to answer four questions the design
+// Grounding, NOT a gate. It exists to answer four questions the design
 // cannot be written without, and it answers them by reading the wire rather than
 // by reasoning about it:
 //
 //   1. Does the app-server deliver `*/requestApproval` on the **ccd** upstream at
 //      all, and does it require a subscription? (Two connections, one resumed and
 //      one merely initialized, are tapped side by side.)
-//   2. What does 0.153 actually put in `availableDecisions` — Phase 0 measured
+//   2. What does 0.153 actually put in `availableDecisions` — an earlier probe measured
 //      exactly `[accept, acceptWithExecpolicyAmendment, cancel]` on 0.147, while
 //      the schema admits six.
 //   3. What retirement signal reaches ccd when the keyboard answers.
@@ -5241,7 +5090,7 @@ async fn measure_a_ccd_leg_answering_a_command_approval() {
 
     // ---- THE MEASUREMENT --------------------------------------------------
     // The shape under test, taken from the only place it is written down:
-    // `codex_approval`'s decision grammar and the vendored schema it was read
+    // `codex_approval`'s decision grammar and the codex schema it was read
     // from. If the server disagrees, that disagreement is the finding.
     // **Timed, because a bound has to be derived from a measurement.**
     // `relay::UPSTREAM_WRITE_BUDGET` is how long the broker waits for the pump's proof
@@ -5330,10 +5179,10 @@ async fn measure_a_ccd_leg_answering_a_command_approval() {
 
 /// **MEASUREMENT: what does the LOSING leg learn?**
 ///
-/// The keyboard answers first, and only then does the ccd leg send the response
-/// it had already composed. Gate 3 of Phase 3 needs a truthful outcome for that
-/// loser, and the whole question is whether anything at all comes back to the
-/// leg that lost — because if nothing does, an honest loser outcome cannot be
+/// The keyboard answers first, and only then does the ccd leg send the response it
+/// had already composed. The keyboard-and-phone race gate needs a truthful outcome
+/// for that loser, and the whole question is whether anything at all comes back to
+/// the leg that lost — because if nothing does, an honest loser outcome cannot be
 /// derived from the wire and has to be built.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
@@ -5506,7 +5355,7 @@ async fn measure_what_a_losing_ccd_response_is_told() {
     let _ = std::fs::remove_file(&marker);
 }
 
-/// **THE PHASE-3b GATE: a phone answer, through the production daemon, reaches
+/// **THE ANSWER GATE: a phone answer, through the production daemon, reaches
 /// the real app-server — and the TUI's prompt goes away without a key being
 /// pressed.**
 ///
@@ -6475,7 +6324,7 @@ async fn measure_what_a_file_change_approval_offers() {
     let _ = std::fs::remove_file(&target);
 }
 
-// ==================================================== THE PHASE-3b FAULT GATES
+// ==================================================== THE ANSWER FAULT GATES
 
 /// **The same store, and a daemon that has never seen it.**
 ///
@@ -6559,9 +6408,9 @@ fn cards_ever_raised(daemon: &Arc<crate::state::Daemon>, uid: &str) -> usize {
 /// settlement.**
 ///
 /// The window is real and it is short: `codex_link`'s `DISPOSITION_BUDGET` is
-/// 750 ms under `cfg(test)`, so a claim nobody has settled is made terminal
-/// **in this process** three quarters of a second after the response is written —
-/// which is a different ending from the one gate 4 is about. Polling at 1 ms over a
+/// 750 ms under `cfg(test)`, so a claim nobody has settled is made terminal **in this
+/// process** three quarters of a second after the response is written — which is a
+/// different ending from the one the bounce gate is about. Polling at 1 ms over a
 /// local SQLite read costs microseconds per pass, so the abort lands with the whole
 /// budget still ahead of it; a gate that missed the window fails saying so rather
 /// than asserting the wrong terminal.
@@ -6642,7 +6491,7 @@ async fn stage_an_unanswered_write(
 }
 
 /// **A phone answer caught in flight by a daemon bounce ends as ONE terminal
-/// unknown, against ONE card and ONE ledger row** (plan Phase 3, gate 4).
+/// unknown, against ONE card and ONE ledger row** (the bounce gate).
 ///
 /// The gate the whole `applying` state exists for. A claim under `answer` is taken
 /// by the link at the one moment it knows the response is about to be written, and
@@ -6747,7 +6596,7 @@ async fn a_claim_outstanding_across_a_daemon_bounce_becomes_one_terminal_unknown
         caught.expect("read the ledger"),
         Some(crate::store::AnswerStatus::Applying),
         "the claim was already settled before the bounce, so this run staged a \
-         different fault from the one gate 4 is about. Widen the staging rather than \
+         different fault from the one the bounce gate is about. Widen the staging rather than \
          weakening the assertion."
     );
     let told = answering.await.expect("the answering task");
@@ -6759,7 +6608,7 @@ async fn a_claim_outstanding_across_a_daemon_bounce_becomes_one_terminal_unknown
     fresh.recover().await;
     println!("RECOVERED — a daemon that has only ever seen this store from disk");
 
-    // ---- AND THEN IT REBINDS, which is what the plan's gate 4 is about ------
+    // ---- AND THEN IT REBINDS, which is what the bounce gate is about ---------
     //
     // A recovery on its own proves the ledger and the card were read back. It does not
     // prove the thing the gate is named for: a restarted daemon does not sit there, it
@@ -6877,7 +6726,7 @@ async fn a_claim_outstanding_across_a_daemon_bounce_becomes_one_terminal_unknown
 /// Every other gate in this file drives an in-process [`crate::state::Daemon`], and for
 /// most of them that is the right instrument: the daemon under test IS the library, and a
 /// child process would only put a socket between the assertions and the thing they are
-/// about. Gate 5 is the one that cannot use it. Its subject is *abrupt death and a
+/// about. The kill gate is the one that cannot use it. Its subject is *abrupt death and a
 /// reopened database* — a process that stops between writing an answer and learning what
 /// became of it, whose SQLite connection is never closed, whose WAL is left exactly where
 /// the kill found it, and whose successor has to open that file and decide. Dropping an
@@ -7172,16 +7021,16 @@ fn resolutions_at(db: &Path, uid: &str) -> Vec<protocol::ws::CodexResolution> {
 
 /// **A REAL `ccd` process, SIGKILLed after the write, records `Unknown` once when it is
 /// started again on the same database — and the app-server is never sent a second
-/// answer** (plan Phase 3, gate 5 — the one live kill).
+/// answer** (the kill gate — the one live kill).
 ///
-/// The sibling of gate 4 and a strictly stronger statement about the same fault, in two
-/// separate ways.
+/// The sibling of the bounce gate and a strictly stronger statement about the same fault,
+/// in two separate ways.
 ///
-/// **It is a process, and the process really dies.** Gate 4 bounces an in-process daemon:
-/// the `Arc<Store>` survives, its SQLite connection is closed politely, and the
-/// "restart" inherits a file nothing ever abandoned. That is a faithful model of a
-/// supervisor disconnect and no model at all of a kill. Here [`CcdChild`] runs the
-/// shipping binary on a private `CODECONNECT_HOME`, `SIGKILL` ends it by the pid this
+/// **It is a process, and the process really dies.** The bounce gate restarts an
+/// in-process daemon: the `Arc<Store>` survives, its SQLite connection is closed
+/// politely, and the "restart" inherits a file nothing ever abandoned. That is a faithful
+/// model of a supervisor disconnect and no model at all of a kill. Here [`CcdChild`] runs
+/// the shipping binary on a private `CODECONNECT_HOME`, `SIGKILL` ends it by the pid this
 /// harness started — never by name, because the operator's own daemon is running beside
 /// it — and the successor opens `events.db` with whatever the kill left in the WAL. That
 /// is the abrupt-death-and-reopen shape, and nothing short of a child process has it.
@@ -7537,7 +7386,7 @@ async fn subscribed_tap(sb: &LiveSandbox, label: &'static str) -> (WireTap, Stri
 }
 
 /// **The keyboard and the phone answer one approval at once: one winner actuates,
-/// and the loser is told something true** (plan Phase 3, gate 3).
+/// and the loser is told something true** (the keyboard-and-phone race gate).
 ///
 /// The two halves of this gate are answered by different evidence on purpose.
 ///
@@ -7766,7 +7615,7 @@ async fn the_keyboard_and_the_phone_racing_one_approval_leave_one_truthful_winne
 }
 
 /// **`acceptForSession` on a file change is accepted by the real app-server, and the
-/// edit lands** (plan Phase 3, "option variants round-trip by `option_id`").
+/// edit lands** (option variants round-trip by `option_id`).
 ///
 /// The option that has the least evidence behind it anywhere in this build. A
 /// command approval's options come off the wire in `availableDecisions`, so
@@ -7916,10 +7765,10 @@ async fn accept_for_session_on_a_file_change_is_taken_by_the_app_server() {
 }
 
 /// **A winning `cancel` is recorded as the phone's answer, not as a turn abort**
-/// (plan Phase 3, "phone-first ⇒ …"; the provenance race, on the real wire).
+/// (the provenance race, on the real wire).
 ///
 /// `cancel` is the one decision whose own consequence can overwrite its record.
-/// Measured on 0.153 (A25): a declined command lets the turn continue, while a
+/// Measured on 0.153: a declined command lets the turn continue, while a
 /// cancelled one **interrupts** it — and an interrupted turn's terminal retires every
 /// card the visit was holding as [`protocol::ws::ClearCause::TurnAborted`]. Both
 /// frames are broadcast to the same connection, microseconds apart, and both are
@@ -7944,25 +7793,23 @@ async fn accept_for_session_on_a_file_change_is_taken_by_the_app_server() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
 async fn a_winning_cancel_is_recorded_as_the_phones_answer_and_not_a_turn_abort() {
-    /// **STOP AND AMEND: the plan states this ordering and the wire disagrees.**
+    /// **An earlier record states the opposite ordering, and the wire disagrees.**
     ///
-    /// `internal/CODEX-PLAN.md` amendment **A25**, under its measured 0.153.2
-    /// approval wire, records that "interrupt orders `turn/completed{interrupted}`
-    /// before `resolved`".
+    /// An earlier capture of the 0.153.2 approval wire recorded that "interrupt
+    /// orders `turn/completed{interrupted}` before `resolved`".
     ///
     /// **Measured here, twice, against real codex 0.153.2: the opposite.** On a
     /// phone-driven `cancel`, a subscribed watching leg is handed the request's own
     /// `serverRequest/resolved` FIRST — at index 0 — and the interrupt's
     /// `turn/completed{interrupted}` six frames later, about 104 ms after the answer.
-    /// Two runs, same indices, same magnitude. The measurement wins over the plan;
-    /// A25's clause needs re-deriving rather than this constant being flipped to
+    /// Two runs, same indices, same magnitude. The measurement wins over the earlier
+    /// record, which needs re-deriving rather than this constant being flipped to
     /// match it.
     ///
-    /// **A hypothesis about why, which this gate did NOT test:** A25's ordering is
+    /// **A hypothesis about why, which this gate did NOT test:** the earlier ordering is
     /// probably the *keyboard* cancel, where the TUI issues its own `turn/interrupt`
     /// and that request's terminal therefore leads the approval's. Nothing here
-    /// measured a keyboard cancel, so that is a reading offered for whoever amends
-    /// the plan, not a second fact.
+    /// measured a keyboard cancel, so that is a reading offered, not a second fact.
     ///
     /// **The provenance outcome is the same either way, and that is the point of
     /// pinning the order rather than depending on it.** Both frames are terminals for
@@ -8143,7 +7990,7 @@ async fn a_winning_cancel_is_recorded_as_the_phones_answer_and_not_a_turn_abort(
 }
 
 /// **A phone answer the keyboard beat is told what the broker's own arbiter
-/// recorded** (plan Phase 3, gate 3's other half).
+/// recorded** (the keyboard-and-phone race gate's other half).
 ///
 /// [`the_keyboard_and_the_phone_racing_one_approval_leave_one_truthful_winner`] runs
 /// the two answers as close to together as this harness can and measures which won.
@@ -8380,13 +8227,13 @@ async fn a_phone_answer_that_lost_to_the_keyboard_is_told_what_the_broker_named(
     );
 }
 
-// ------------------------------------------------ approval quiescence (D3)
+// ------------------------------------------------ approval quiescence
 
 /// **MEASUREMENT: can the wire produce a thread switch while an approval is
 /// unanswered?**
 ///
-/// D3 was designed before the approval wire had been measured and before a phone
-/// could answer anything. Its subject is a switch (`/new`, resume, fork) that
+/// Approval quiescence was designed before the approval wire had been measured and
+/// before a phone could answer anything. Its subject is a switch (`/new`, resume, fork) that
 /// crosses an admitted answer, and every gate it enumerates presumes that crossing
 /// exists. Nothing here builds a barrier: this establishes, on the real 0.153 wire,
 /// whether the crossing is producible at all.
@@ -8400,7 +8247,7 @@ async fn a_phone_answer_that_lost_to_the_keyboard_is_told_what_the_broker_named(
 ///      overlay's own accept and pressing it would answer the very approval the
 ///      probe needs pending.
 ///   2. **What the broker's TUI leg was handed.** `/new` is `thread/unsubscribe`,
-///      `thread/unsubscribe`, `thread/start` (2e-4c), and the broker logs its
+///      `thread/unsubscribe`, `thread/start`, and the broker logs its
 ///      decision for each. A switch that never reached the leg leaves no line.
 ///   3. **Only then, the destructive one.** `Enter` is pressed, so whatever the
 ///      overlay does with it is recorded rather than guessed at, and the run ends
@@ -8949,8 +8796,8 @@ async fn measure_whether_new_is_offered_while_a_turn_runs() {
 /// wins. A timing assertion would be measuring this laptop; this measures the rule.
 ///
 /// The answer's own ending is deliberately not pinned here — the reply direction is
-/// held, so it ends the way every unattributable write ends, and `Unknown` is 3b's
-/// gate rather than this one's. What is pinned is that there is exactly ONE of it: a
+/// held, so it ends the way every unattributable write ends, and `Unknown` is the answer
+/// gate's rather than this one's. What is pinned is that there is exactly ONE of it: a
 /// handover that overtook the answer would be a second writer for a request the
 /// app-server accepts one answer to.
 #[tokio::test(flavor = "multi_thread")]
@@ -9146,9 +8993,9 @@ async fn a_replacement_registration_waits_for_an_answer_already_on_the_wire() {
 //
 // An earlier "switch is unproducible" verdict rested on probes that never
 // reached the switch decision: `/new` typed with the prompt up consumed a key
-// as the prompt's own decision; the second-TUI leg sent `{"cwd":"/tmp"}` and
-// was refused by fingerprint before any busy check; the mid-turn probe carried
-// no approval. The keyboard-interrupt window that A25/A26 say REVERSES the
+// as the prompt's own decision; the second-TUI leg sent `{"cwd":"/tmp"}`, a
+// shape no real TUI sends; the mid-turn probe carried
+// no approval. The keyboard-interrupt window that earlier captures say REVERSES the
 // terminal order (`turn/completed{interrupted}` PRECEDES `serverRequest/
 // resolved` on a KEYBOARD interrupt) was never probed at all.
 //
@@ -9364,12 +9211,12 @@ fn teardown(sub: WireTap, mut coord: Child, marker: &str) {
 /// **P1 — THE DECISIVE PROBE: a keyboard interrupt, then `/new`, with a command
 /// approval pending.**
 ///
-/// A25's `interrupt.jsonl` recorded, on a Ctrl-C of a running turn with NO approval
-/// prompt up, `turn/completed{interrupted}` before `serverRequest/resolved`. This
+/// An earlier capture, `interrupt.jsonl`, recorded, on a Ctrl-C of a running turn with
+/// NO approval prompt up, `turn/completed{interrupted}` before `serverRequest/resolved`. This
 /// probes a DIFFERENT scenario — Ctrl-C WHILE the approval prompt is showing — where
 /// the prompt consumes the interrupt as its own decline, so the item IS declined and
 /// `resolved` leads the turn terminal (both orderings are real for their own
-/// scenario; this is not a contradiction of A25). The concern either way is the busy
+/// scenario; this is not a contradiction of that capture). The concern either way is the busy
 /// mark: the broker clears it on ANY `turn/completed`, so if the terminal preceded the
 /// resolution a switch could be admitted while A was unresolved. This types Ctrl-C,
 /// then `/new`+Enter, and watches whether a new thread B is admitted before A resolves,
@@ -9561,19 +9408,15 @@ fn try_send_keys(sb: &LiveSandbox, keys: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// **P2 — the second-TUI-leg switch done right: a fully fingerprinted
-/// `thread/start`.** The prior probe sent `{"cwd":"/tmp"}` and was refused by
-/// fingerprint before reaching any busy/switch decision. A real `/new`'s
-/// `thread/start` carries the launch fingerprint's own dimensions and passes
-/// `assert_fingerprint`. This replays that full shape from a second connection
-/// on the TUI leg, with A's approval pending, and records the broker's verbatim
-/// answer — a fingerprint conflict (did not reach the decision), a session-policy
-/// refusal (reached the decision and was refused), or a `thread/started` (B
-/// admitted). It sends a small matrix so the answer cannot be blamed on one
-/// guessed field.
+/// **P2 — the second-TUI-leg switch done right: a real `/new`-shaped
+/// `thread/start`.** A real `/new`'s `thread/start` carries the launch's own policy
+/// values. This replays that full shape from a second connection on the TUI leg, with
+/// A's approval pending, and records the app-server's verbatim answer — the broker
+/// passes the keyboard's frames through — an error, or a `thread/started` (B created).
+/// It sends a small matrix so the answer cannot be blamed on one guessed field.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
-async fn p2_second_tui_leg_fully_fingerprinted_thread_start() {
+async fn p2_second_tui_leg_new_shaped_thread_start() {
     let Some(codex) = live_gate() else { return };
     let sb = LiveSandbox::new("p2ft");
     let coord = sb.spawn_coordinator(&codex);
@@ -9586,11 +9429,10 @@ async fn p2_second_tui_leg_fully_fingerprinted_thread_start() {
 
     let (mut sub, thread_a, wire_id) = raise_command_approval(&sb, &marker).await;
 
-    // The launch fingerprint of THIS sandbox: on-request / user / read-only, and
-    // its workspace is the coordinator's --cwd /tmp. The real 0.153 TUI shape
-    // sends cwd:null with runtimeWorkspaceRoots:[workspace]; model is not a
-    // fingerprint dimension. Send several well-formed variants and record each
-    // verbatim answer.
+    // The launch policy of THIS sandbox: on-request / user / read-only, and its
+    // workspace is the coordinator's --cwd /tmp. The real 0.153 TUI shape sends
+    // cwd:null with runtimeWorkspaceRoots:[workspace]. Send several well-formed
+    // variants and record each verbatim answer.
     let base = |cwd: Value, roots: Value| {
         serde_json::json!({
             "approvalPolicy": "on-request",
@@ -9620,15 +9462,15 @@ async fn p2_second_tui_leg_fully_fingerprinted_thread_start() {
     let attempts: Vec<(&str, Value)> = vec![
         ("baseline_malformed", serde_json::json!({"cwd": "/tmp"})),
         (
-            "fingerprinted_cwd_null_roots_tmp",
+            "launch_valued_cwd_null_roots_tmp",
             base(Value::Null, serde_json::json!(["/tmp"])),
         ),
         (
-            "fingerprinted_cwd_tmp_roots_tmp",
+            "launch_valued_cwd_tmp_roots_tmp",
             base(serde_json::json!("/tmp"), serde_json::json!(["/tmp"])),
         ),
         (
-            "fingerprinted_cwd_null_roots_null",
+            "launch_valued_cwd_null_roots_null",
             base(Value::Null, Value::Null),
         ),
     ];
@@ -9676,7 +9518,7 @@ async fn p2_second_tui_leg_fully_fingerprinted_thread_start() {
     write_probe_record(
         &sb,
         &sub,
-        "p2-second-tui-fingerprinted",
+        "p2-second-tui-new-shaped",
         &format!(
             "--- second-TUI thread/start answers ---\n{answers_dump}\n\
              --- still_pending_through_P2={still_pending} ---\n\
@@ -10175,7 +10017,7 @@ async fn drive_looking_for(
 fn capability_lines_naming_a_non_phone_family(log: &str) -> Vec<String> {
     log.lines()
         .filter(|line| {
-            line.contains(ANSWERED_UPSTREAM)
+            line.contains(WITHHELD)
                 || NON_PHONE_FAMILIES
                     .iter()
                     .any(|method| line.contains(method))
@@ -10184,31 +10026,23 @@ fn capability_lines_naming_a_non_phone_family(log: &str) -> Vec<String> {
         .collect()
 }
 
-/// The broker's own words for "this was emitted and not handed on".
-const ANSWERED_UPSTREAM: &str = "answer upstream";
+/// The broker's own words for "this was emitted and not handed on" to the phone
+/// (`codex-broker/src/relay.rs`, the `S2cDisposition::Withhold` arm).
+const WITHHELD: &str = "withhold (server request the phone cannot answer";
 
-/// The feature that turns the permissions producer on, and that a CodeConnect
-/// launch pins off.
-///
-/// Restated here rather than shared with the launcher, which is a different crate
-/// this harness does not depend on. The pin itself is asserted from the running
-/// app-server's own argv below, so a launcher that stopped writing it fails this
-/// probe rather than quietly changing what the probe measures.
+/// The codex feature that turns the permissions producer on. A launch sets no
+/// feature of its own, so the session has whatever the config says, as native codex
+/// does; this sandbox's config sets none.
 const PERMISSIONS_FEATURE: &str = "request_permissions_tool";
 
-/// What the codex under test says about one feature in a given `CODEX_HOME`: the
-/// value the config yields on its own, and the value the launcher's override
-/// yields on top of it.
+/// What the codex under test says about one feature in a given `CODEX_HOME`.
 ///
-/// A zero from this probe is a fact about a LAUNCH, and a launch is a config plus
-/// an argv. Reading the effective registry both ways is what turns "the feature is
-/// off" from an assumption about defaults into a measurement of the override — and
-/// it is also the only place the two are recorded together, which is what a reader
-/// needs to tell "nothing produces this" from "this launch does not".
-fn feature_registry_rows(codex: &Path, codex_home: &Path, feature: &str) -> String {
-    let read = |extra: &[&str]| -> String {
+/// A zero from this probe is a fact about a configuration, so the configuration is
+/// put on the record: it is what lets a reader tell "nothing produces this" from
+/// "this configuration does not".
+fn feature_registry_row(codex: &Path, codex_home: &Path, feature: &str) -> String {
+    let read = || -> String {
         let out = Command::new(codex)
-            .args(extra)
             .args(["features", "list"])
             .env("CODEX_HOME", codex_home)
             .stdin(Stdio::null())
@@ -10227,11 +10061,7 @@ fn feature_registry_rows(codex: &Path, codex_home: &Path, feature: &str) -> Stri
             Err(e) => format!("<could not run: {e}>"),
         }
     };
-    format!(
-        "  as the config leaves it : {}\n  with the launch's pin   : {}",
-        read(&[]),
-        read(&["-c", &format!("features.{feature}=false")]),
-    )
+    read()
 }
 
 /// The instrument is a parser, so it is tested rather than trusted.
@@ -10242,8 +10072,8 @@ fn feature_registry_rows(codex: &Path, codex_home: &Path, feature: &str) -> Stri
 #[test]
 fn the_broker_log_reader_finds_a_family_it_refused_and_ignores_the_traffic() {
     let log = "\
-2026-01-01T00:00:00Z INFO  Ccd: capability tombstoned (id-bearing non-answerable frame): id=Int(0) method=\"item/tool/requestUserInput\"
-2026-01-01T00:00:00Z INFO  Ccd: answer upstream (server request not serviceable through this broker; not delivered) (conn 3)
+2026-01-01T00:00:00Z INFO  capability withheld from the phone (the keyboard answers it): id=Int(0) method=\"item/tool/requestUserInput\"
+2026-01-01T00:00:00Z INFO  Ccd: withhold (server request the phone cannot answer; the keyboard answers it) (conn 3)
 2026-01-01T00:00:00Z INFO  Ccd: capability tombstoned (ambiguous bare id): id=Int(1) method=\"item/tool/call\"
 2026-01-01T00:00:00Z INFO  Tui leg ended (conn 2): closed
 ";
@@ -10251,10 +10081,10 @@ fn the_broker_log_reader_finds_a_family_it_refused_and_ignores_the_traffic() {
     assert_eq!(
         found.len(),
         2,
-        "the refused family and the upstream answer, and nothing else: {found:#?}"
+        "the withheld family and the withhold line, and nothing else: {found:#?}"
     );
     assert!(found[0].contains("item/tool/requestUserInput"));
-    assert!(found[1].contains(ANSWERED_UPSTREAM));
+    assert!(found[1].contains(WITHHELD));
     assert!(
         capability_lines_naming_a_non_phone_family("").is_empty(),
         "and an empty log finds nothing, which is why the probe asserts the log \
@@ -10271,14 +10101,14 @@ fn the_broker_log_reader_finds_a_family_it_refused_and_ignores_the_traffic() {
 ///      written to ask for exactly what each family is for — a permission
 ///      profile, a question put to the user, an MCP elicitation?
 ///   2. Of the ones it emits, which are DELIVERED to a subscribed ccd leg? The
-///      broker binds `*/requestApproval` and tombstones everything else, so the
-///      two answers can differ, and only the delivered ones are a card this
+///      broker hands the phone's leg only a command or file-change approval on the
+///      head and withholds everything else, so the two answers can differ, and only the delivered ones are a card this
 ///      daemon could ever raise.
 ///   3. What is on the frame, verbatim, for the ones that arrive?
 ///
 /// The delivered side is the tap; the emitted side is the broker's own
 /// capability log, which names the method of every id-bearing s2c request it
-/// refuses to hand on. A family absent from both is a family with no producer
+/// withholds from the phone. A family absent from both is a family with no producer
 /// this probe could find.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
@@ -10293,28 +10123,15 @@ async fn measure_which_non_phone_families_reach_the_ccd_leg() {
 
     // ------------------------------------------------------------- the premise
     //
-    // **What this probe measures is a LAUNCH, and the launch's own terms are read
-    // first.** The permissions family has a producer — a model-callable tool the
-    // app-server exposes when `features.request_permissions_tool` is on — so a
-    // session in which nothing produces it is telling you about this session's
-    // configuration unless the configuration is on the record. Two readings go on
-    // the record: what the registry says with the config alone, and what it says
-    // with the override a CodeConnect launch writes.
-    let feature_rows = feature_registry_rows(&codex, &sb.codex_home, PERMISSIONS_FEATURE);
-    println!("FEATURE REGISTRY (this sandbox's CODEX_HOME):\n{feature_rows}");
-    assert!(
-        feature_rows
-            .lines()
-            .last()
-            .is_some_and(|pinned| pinned.ends_with("false")),
-        "the launch's own override must leave the feature off, or the zero below \
-         is a measurement of nothing: {feature_rows}"
-    );
+    // **What this probe measures is a CONFIGURATION, and its terms are read first.**
+    // The permissions family has a producer — a model-callable tool the app-server
+    // exposes when the feature is on — so a session in which nothing produces it is
+    // telling you about this configuration unless the configuration is on the record.
+    let feature_row = feature_registry_row(&codex, &sb.codex_home, PERMISSIONS_FEATURE);
+    println!("FEATURE REGISTRY (this sandbox's CODEX_HOME): {feature_row}");
 
-    // And the pin is on the argv of the process that is actually running, read
-    // back from the process table rather than from the launcher's source. The
-    // app-server is where a model-callable tool is offered from, so this is the
-    // spawn the finding rests on.
+    // And the launch sets no feature of its own: the running app-server's argv, read
+    // back from the process table, carries no `-c` for it.
     let app_server_argv: Vec<String> =
         tagged_processes(&format!("app-server --listen unix://{}/as.sock", sb.tag()))
             .into_iter()
@@ -10322,11 +10139,15 @@ async fn measure_which_non_phone_families_reach_the_ccd_leg() {
             .collect();
     println!("APP-SERVER ARGV: {app_server_argv:#?}");
     assert!(
+        !app_server_argv.is_empty(),
+        "the running app-server must be found, or the check below proves nothing"
+    );
+    assert!(
         app_server_argv
             .iter()
-            .any(|argv| argv.contains(&format!("features.{PERMISSIONS_FEATURE}=false"))),
-        "the running app-server must carry the launch's feature pin; without it \
-         this probe measures a default rather than a launch: {app_server_argv:#?}"
+            .all(|argv| !argv.contains(PERMISSIONS_FEATURE)),
+        "the launch must leave the feature to the config, as native codex does: \
+         {app_server_argv:#?}"
     );
 
     run_the_warm_up_turn(&sb).await;
@@ -10448,7 +10269,7 @@ async fn measure_which_non_phone_families_reach_the_ccd_leg() {
         &sub,
         "nonphone-families",
         &format!(
-            "--- thread={thread_a} ---\n--- feature registry ---\n{feature_rows}\n\
+            "--- thread={thread_a} ---\n--- feature registry ---\n{feature_row}\n\
              --- app-server argv ---\n{}\n\
              --- table ---\n{}\n--- broker capability lines naming a watched family ---\n{:#?}\n\
              --- final pane ---\n{}\n",
@@ -10463,13 +10284,13 @@ async fn measure_which_non_phone_families_reach_the_ccd_leg() {
     //
     // **The zero is asserted, not printed.** A probe that only prints leaves the
     // reading to whoever ran it, and the reading is the finding: what this session
-    // establishes is that a CodeConnect launch produces none of these families, and
+    // establishes is that this configuration produces none of these families, and
     // a later release that starts producing one must fail here rather than change a
     // number in somebody's terminal scrollback.
     //
-    // It is a claim about a launch, not about codex: the permissions family has a
-    // producer, behind a feature this launch pins off (asserted above, before the
-    // session was driven). What is measured is the pinned launch.
+    // It is a claim about a configuration, not about codex: the permissions family has
+    // a producer, behind a feature this sandbox's config leaves at codex's default
+    // (recorded above, before the session was driven).
     let delivered: Vec<&str> = NON_PHONE_FAMILIES
         .into_iter()
         .filter(|method| sub.first(method).is_some())
@@ -10482,16 +10303,16 @@ async fn measure_which_non_phone_families_reach_the_ccd_leg() {
     );
     // And the other half of the same fact: nothing was emitted-and-refused either.
     // The tap sees only what the broker delivered, so a family the app-server sent
-    // and the broker answered upstream would be invisible to the check above; the
+    // and the broker withheld from the phone would be invisible to the check above; the
     // broker's own capability log is the witness for it, and it names the method of
-    // every id-bearing server request it declines to hand on.
+    // every id-bearing server request it withholds from the phone.
     let emitted_and_refused: Vec<String> = capability_lines_naming_a_non_phone_family(&whole_log)
         .into_iter()
         .filter(|line| NON_PHONE_FAMILIES.iter().any(|m| line.contains(m)))
         .collect();
     assert!(
         emitted_and_refused.is_empty(),
-        "the app-server emitted a non-phone family and the broker refused it: \
+        "the app-server emitted a non-phone family and the broker withheld it: \
          {emitted_and_refused:#?}. That is a producer, and this daemon's account of \
          these families has to say so."
     );
@@ -11760,7 +11581,7 @@ async fn measure_what_codex_itself_says_about_an_interrupt() {
 /// wire never produces and hold it first-wins. So a link that drops while a shell
 /// command is running cannot resubscribe at all until that turn is over, and never
 /// reaches the point where a running turn could be seeded. That refusal is deliberate
-/// and is not this chunk's to relax; what it means for the stop control is recorded
+/// and is not this gate's to relax; what it means for the stop control is recorded
 /// rather than worked around.
 ///
 /// **A FINISHED tool-bearing turn is a different matter and is now read**, which is why
@@ -12382,26 +12203,26 @@ async fn a_phone_stops_a_real_turn_and_the_record_says_so_exactly_once() {
     teardown(sub, coord, "/tmp/cc-4a-gate-unused");
 }
 
-/// **G1, G2, G3, G5, G7: the phone says something to a real Codex session.**
+/// **The phone says something to a real Codex session.**
 ///
 /// One session, one long turn, and every gate that can ride it — because each live turn is
 /// a real model turn against a real quota, and a gate that could share one and did not is
 /// spending somebody's allowance to re-prove a session came up.
 ///
-/// * **G1 idle start.** The thread is idle, the phone composes, and a REAL turn begins:
+/// * **Idle start.** The thread is idle, the phone composes, and a REAL turn begins:
 ///   `turn/started` on the wire, and the phone told `Started{turn}` naming it. The words
 ///   are a `turn/start` this daemon authored out of the resume answer's own values, which
 ///   is the first frame in this system a phone has ever caused.
-/// * **G2 active steer.** With that turn running, the phone composes again. No second turn
+/// * **Active steer.** With that turn running, the phone composes again. No second turn
 ///   starts, the phone is told `Steered{turn}` naming the SAME turn, and the model obeys
 ///   it in-turn — the pane carries the steered word.
-/// * **G7 the implicit steer is closed.** Asserted from the wire rather than argued: the
+/// * **The implicit steer is closed.** Asserted from the wire rather than argued: the
 ///   steer above went out as `turn/steer`, and the broker's own gate is what would have
 ///   refused a `turn/start` in its place. The `turn/start` count over the whole gate is
 ///   what proves no second turn was begun.
-/// * **G5 a duplicate.** The same id again is one wire write and one outcome.
-/// * **G3 a refusal carries no id the phone did not send.** After the terminal, a compose
-///   under a fresh id starts a turn rather than steering one — so the refusal G3 wants is
+/// * **A duplicate.** The same id again is one wire write and one outcome.
+/// * **A refusal carries no id the phone did not send.** After the terminal, a compose
+///   under a fresh id starts a turn rather than steering one — so that refusal is
 ///   driven at the daemon in the unit gate, and what is proven HERE is the property that
 ///   matters live: no reply the phone receives across the whole run carries a turn id it
 ///   was not itself told.
@@ -12413,9 +12234,7 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
     let coord = sb.spawn_coordinator(&codex);
     wait_for_the_broker_and_the_tui(&sb).await;
     wait_for_a_composer(&sb).await;
-    // The warm-up turn is what creates the rollout the link resumes from — and the resume
-    // answer is where this daemon learns what the thread runs under, which is what lets it
-    // author a `turn/start` at all.
+    // The warm-up turn is what creates the rollout the link resumes from.
     run_the_warm_up_turn(&sb).await;
 
     let session = SessionKey::new(&sb.uid, "cc-1");
@@ -12434,7 +12253,7 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
         .filter(|f| f["method"] == "turn/started")
         .count();
 
-    // ---- G1: the idle start ---------------------------------------------------
+    // ---- The idle start -------------------------------------------------------
     let marker = "COMPOSE-GATE-ONE";
     let started = phone
         .compose(
@@ -12464,7 +12283,7 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
         sub.methods()
     );
 
-    // ---- G2: the steer, into that same turn -----------------------------------
+    // ---- The steer, into that same turn ---------------------------------------
     let steered_word = "HELLO-STEER-4B";
     let steered = phone
         .compose(
@@ -12483,7 +12302,7 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
         "a compose into a running turn joins it, and names the turn it joined"
     );
 
-    // ---- G5: the duplicate ----------------------------------------------------
+    // ---- The duplicate --------------------------------------------------------
     let again = phone
         .compose(
             "cc-1",
@@ -12502,7 +12321,7 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
         "a duplicate replays the recorded outcome, including which route it took"
     );
 
-    // ---- G7: a ccd `turn/start` while the turn is busy forwards ZERO bytes ------
+    // ---- A ccd `turn/start` while the turn is busy forwards ZERO bytes ----------
     //
     // **Placed HERE, while the turn is still running, and that is not incidental.** The
     // first run of this gate put the probe after the terminal wait below: the thread was
@@ -12522,19 +12341,10 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
     //
     // The frame is [`crate::codex_link::compose_frame`]'s own output rather than a copy of
     // its fourteen keys, so a probe that still passes is a probe about the frame this link
-    // actually sends. Its `cwd` is the launch cwd, derived from what this gate launched
-    // rather than from anything the wire said: the coordinator was given `--cwd /tmp` and
-    // canonicalizes it once before it becomes the broker's anchor. There is no
-    // `runtimeWorkspaceRoots`, for the reason `compose_frame` states — codex 0.153.4
-    // refuses the key from a client that did not declare `experimentalApi`, and this leg
-    // does not.
+    // actually sends.
     let busy_probe_params;
     let busy_probe_answer;
     {
-        let launch_cwd = std::fs::canonicalize("/tmp")
-            .expect("/tmp resolves")
-            .to_string_lossy()
-            .into_owned();
         let mut raw = RawCcd::connect(&sb.ccd_sock()).await;
         // The handshake first: an unopened connection answers `-32600 "Not initialized"`
         // to everything, which is a fact about the probe rather than about the rule.
@@ -12543,18 +12353,12 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
             "the probe's initialize must be answered"
         );
         raw.notify("initialized", serde_json::json!({})).await;
-        let launch = crate::codex_adapter::TurnLaunch {
-            approval_policy: "on-request".into(),
-            approvals_reviewer: "user".into(),
-            cwd: serde_json::Value::String(launch_cwd),
-        };
         busy_probe_params = crate::codex_link::compose_frame(
             0,
             crate::store::COMPOSE_ROUTE_START,
             &tapped_thread,
             None,
             "sneak in",
-            Some(&launch),
         )["params"]
             .clone();
         let refused = raw
@@ -12595,7 +12399,7 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
          pane:\n{pane}"
     );
 
-    // ---- G7/G2: exactly ONE turn was begun -------------------------------------
+    // ---- Exactly ONE turn was begun -------------------------------------------
     let starts = sub
         .seen()
         .iter()
@@ -12678,17 +12482,12 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
     // fourteen keys a phone's `turn/start` is admitted with, as the app-server itself
     // received them, beside the answer it gave. The refusal is the broker's, not the
     // server's — which is the point of recording the pair: the server would have accepted
-    // this frame and folded it into the running turn.
-    //
-    // The real `cwd` is the sandbox's canonicalized `/tmp`, scrubbed here to the same
-    // `/work/proj` the other committed captures use. It is the only value in the frame
-    // that names this machine.
-    let mut recorded_probe = busy_probe_params.clone();
-    recorded_probe["cwd"] = serde_json::Value::String("/work/proj".into());
+    // this frame and folded it into the running turn. Nothing in the frame names this
+    // machine: every key but the thread and the words is null.
     write(
         "ccd",
         "c2s",
-        &serde_json::json!({"method": "turn/start", "params": recorded_probe}),
+        &serde_json::json!({"method": "turn/start", "params": busy_probe_params}),
     );
     write(
         "ccd",
@@ -12705,8 +12504,8 @@ async fn a_phone_starts_a_real_turn_and_then_steers_it() {
     teardown(sub, coord, "/tmp/cc-4b-gate-unused");
 }
 
-/// **G6: a daemon killed after writing a compose records `indeterminate` and never says
-/// it again.**
+/// **A daemon killed after writing a compose records `indeterminate` and never says it
+/// again.**
 ///
 /// The interrupt kill gate read across, on the same machinery and for a higher stake:
 /// saying something twice puts words in a model's mouth twice, which is not a recoverable
@@ -12739,10 +12538,7 @@ async fn a_daemon_killed_after_writing_a_compose_records_unknown_and_never_says_
     let supervisor = ccd.register(&session, gate.path()).await;
     let db = ccd.db();
     wait_for_a_composer(&sb).await;
-    // The warm-up turn creates the rollout the link resumes from, and that resume answer
-    // is where the daemon learns what the thread runs under — without it a start has
-    // nothing to author a frame from and is refused before any claim, which would leave
-    // this gate with no write to kill after.
+    // The warm-up turn creates the rollout the link resumes from.
     run_the_warm_up_turn(&sb).await;
     let (sub, _thread) = subscribed_tap(&sb, "ccd-observer").await;
 
@@ -13456,12 +13252,9 @@ async fn a_turn_start_from_a_bound_but_unresumed_leg() {
 
     // ---- (a) the turn/start from the bound-but-unresumed leg --------------------------
     //
-    // **The production values, through the production function.** These three used to
-    // be written out here by hand; they are now what `Connection::compose_turn` really
-    // sends from this position — the pinned launch policy CodeConnect owns for every
-    // codex session, and the canonical launch cwd the registration carries. Spelling
-    // them again here would make this measurement prove a copy rather than the frame.
-    let launch = crate::codex_link::launch_of_record(&sandbox_launch_cwd());
+    // **The production frame, through the production function** — what
+    // `Connection::compose_turn` really sends from this position. Spelling it again here
+    // would make this measurement prove a copy rather than the frame.
     let start_id = 901;
     let start_frame = crate::codex_link::compose_frame(
         start_id,
@@ -13469,7 +13262,6 @@ async fn a_turn_start_from_a_bound_but_unresumed_leg() {
         &thread,
         None,
         "Reply with the single word amber and nothing else.",
-        Some(&launch),
     );
     println!("PROBE turn/start FRAME {start_frame}");
     leg.send(start_frame.clone()).await;
@@ -13565,10 +13357,8 @@ async fn a_turn_start_from_a_bound_but_unresumed_leg() {
 /// session ever runs, that turn calls a tool, and the link is still subscribed
 /// afterwards.**
 ///
-/// Every other compose gate here begins with [`run_the_warm_up_turn`], because until
-/// 2e-7 a phone could not start the first turn at all: the link had never had a
-/// `thread/resume` accepted, so it held no launch of record and the compose gate refused.
-/// This gate deliberately runs **no** warm-up turn, which makes the whole run the
+/// Every other compose gate here begins with [`run_the_warm_up_turn`]. This gate
+/// deliberately runs **no** warm-up turn, which makes the whole run the
 /// position two production defects lived in and nothing here had ever exercised end to
 /// end:
 ///
@@ -13576,8 +13366,7 @@ async fn a_turn_start_from_a_bound_but_unresumed_leg() {
 ///      answered with the measured not-ready error, and it publishes
 ///      [`crate::codex_link::CodexAddressee::BoundNotStarted`] — the one un-subscribed
 ///      state in which a compose is admitted (`state.rs`'s compose gate), routed START
-///      only, on a launch built by [`crate::codex_link::launch_of_record`] rather than
-///      read from an answer that cannot exist yet.
+///      only.
 ///   2. **A finished tool-bearing turn is readable.** The resume seed used to refuse any
 ///      answer carrying a `commandExecution` or a `fileChange` outright. In production
 ///      that refusal was the STOP-AND-AMEND verdict, which ENDS the leg — so the first
@@ -13807,8 +13596,8 @@ async fn a_phone_starts_the_first_turn_and_the_link_survives_its_tool_call() {
     // **Which refusal comes back is a measurement, not a requirement.** The window closes
     // when the `turn/start` response lands, which was ~10 ms in the run this gate was
     // written against. Inside it the answer is `COMPOSE_START_IN_FLIGHT`; a moment later
-    // the link is plain `Bound` and the answer is `COMPOSE_LINK_BOUND` (or
-    // `COMPOSE_LAUNCH_UNREAD` from the link's own route check). The gate prints which
+    // the link is plain `Bound` and the answer is `COMPOSE_LINK_BOUND` (from the daemon's
+    // gate or the link's own route check). The gate prints which
     // actually happened and asserts only what is true of both: the ask was REFUSED, and
     // **exactly one `turn/start` left this link**. Retrying until the nicer sentence
     // appeared would be asserting the scheduler.
@@ -13827,17 +13616,14 @@ async fn a_phone_starts_the_first_turn_and_the_link_survives_its_tool_call() {
         "COMPOSE_START_IN_FLIGHT (it landed INSIDE the in-flight window)"
     } else if reason == crate::codex_refusals::COMPOSE_LINK_BOUND {
         "COMPOSE_LINK_BOUND (it landed after the start was answered, on a plain Bound link)"
-    } else if reason == crate::codex_refusals::COMPOSE_LAUNCH_UNREAD {
-        "COMPOSE_LAUNCH_UNREAD (it landed after the start was answered, launch not yet read)"
     } else {
         "an unrecognised sentence"
     };
     println!("STEP 2b WHICH REFUSAL: {which}");
     assert!(
         reason == crate::codex_refusals::COMPOSE_START_IN_FLIGHT
-            || reason == crate::codex_refusals::COMPOSE_LINK_BOUND
-            || reason == crate::codex_refusals::COMPOSE_LAUNCH_UNREAD,
-        "the refusal must be one of the three this position can honestly give, not an \
+            || reason == crate::codex_refusals::COMPOSE_LINK_BOUND,
+        "the refusal must be one of the two this position can honestly give, not an \
          accident: {reason}"
     );
     let ledger_after_the_race = compose_ledger(&daemon, &uid);
@@ -14162,12 +13948,10 @@ async fn a_phone_starts_the_first_turn_and_the_link_survives_its_tool_call() {
 
     // ---- THE TWO DIAGNOSTICS, printed before anything can panic ---------------------
     //
-    // (1) THE BROKER'S OWN ACCOUNT. `-32601` is `E_METHOD_UNAVAILABLE` /
-    //     `response_capability::unanswerable_error` — "not serviceable through the
-    //     CodeConnect broker" — which is a strange answer to a `thread/resume` the very
-    //     same leg answered `-32600` moments earlier. The broker writes one decision line
-    //     per frame it dispositions, with the connection id, so its account is here rather
-    //     than inferred from the daemon's side of the exchange.
+    // (1) THE BROKER'S OWN ACCOUNT. `-32601` is a strange answer to a `thread/resume`
+    //     the very same leg answered `-32600` moments earlier. The broker writes one
+    //     decision line per frame it dispositions, with the connection id, so its account
+    //     is here rather than inferred from the daemon's side of the exchange.
     //
     // (2) WERE TWO RESUMES IN FLIGHT AT ONCE? Every ccd-leg line that mentions a resume,
     //     in order, with the `(conn N)` each carries. "Concurrent" is then read off the
@@ -14316,7 +14100,6 @@ async fn a_phone_starts_the_first_turn_and_the_link_survives_its_tool_call() {
         &thread,
         None,
         "Reply with the single word amber and nothing else. Do not use any tool.",
-        Some(&crate::codex_link::launch_of_record(&sandbox_launch_cwd())),
     );
     let mut lines = String::new();
     let mut write = |conn: &str, dir: &str, frame: &Value| {
@@ -14408,8 +14191,7 @@ async fn a_phone_starts_the_first_turn_and_the_link_survives_its_tool_call() {
 /// [`crate::codex_link`]'s correlation guard is `kind == FrameKind::Response && id
 /// matches`, and `FrameKind::Response` means "no `method` member" — so a server *request*
 /// can never be taken for our answer. The only frame that can is a **response-shaped** one
-/// carrying a server request's id, which is exactly what the broker's
-/// `response_capability::unanswerable_error` produces (`-32601`).
+/// carrying a server request's id.
 ///
 /// If a string id is accepted here, the whole collision class goes away: the link's ids
 /// stop sharing a space with the app-server's, and no integer-keyed frame can be read as
@@ -14489,8 +14271,8 @@ async fn measure_whether_the_ccd_leg_accepts_string_request_ids() {
 
     // ---- (3) thread/resume, under a string id ---------------------------------------
     //
-    // The ownership-carrying method the link actually uses, so this exercises the
-    // broker's fingerprint path and its id ledger rather than only the census.
+    // The method the link actually uses, so this exercises the broker's resume pin and
+    // its id ledger rather than only the census.
     let resume_id = Value::String("ccd-resume-1".into());
     let resume_answer = if thread.is_empty() {
         None

@@ -14,7 +14,6 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use codex_broker::message::{classify_shape, Shape, WsPayload};
 use codex_broker::relay::Broker;
 use codex_broker::upstream::{ConnectFuture, UpstreamChannels, UpstreamFactory, UpstreamWrite};
-use codex_broker::LaunchFingerprint;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -123,17 +122,9 @@ async fn captured_frames_pass_through_s2c_byte_exact_and_in_order() {
     let _ = std::fs::remove_file(&tui);
     let _ = std::fs::remove_file(&ccd);
 
-    let fp = LaunchFingerprint {
-        approval_policy: "untrusted".into(),
-        approvals_reviewer: "user".into(),
-        sandbox: "read-only".into(),
-        hooks_enabled: true,
-        launch_cwd: "/work/proj".into(),
-    };
     let broker = Broker::new(
         tui.clone(),
         ccd.clone(),
-        fp,
         FakeFactory {
             inner: Arc::clone(&state),
         },

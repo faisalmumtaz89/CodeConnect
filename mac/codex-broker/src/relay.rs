@@ -1,25 +1,28 @@
 //! The WS-over-UDS relay skeleton — the async transport edge.
 //!
 //! Two Unix-domain listeners (`tui.sock`, `ccd.sock`); each accepted connection gets its
-//! own upstream app-server connection (A4: N upstreams per leg — the `/resume` picker
-//! opens a second one). The client→server direction is whole-message classified by the
-//! pure security core before **any** byte is forwarded; the server→client direction is a
-//! byte-exact passthrough.
+//! own upstream app-server connection (N upstreams per leg — the `/resume` picker
+//! opens a second one).
 //!
-//! Every accepted connection is stamped with a monotonic [`ConnId`]. It is
-//! threaded into BOTH directions — the c2s classifier reads it through
-//! [`crate::refusal::Env::conn`], and the s2c thread-binding observer takes it as a
-//! parameter — so thread-creation correlation is CONNECTION-scoped rather than role-scoped
-//! and two connections of the same role cannot answer each other's pending creation. The
-//! id appears in the `leg opened` / `leg ended` / error log lines so an operator can follow
-//! one connection through `broker.log`.
+//! * **The keyboard leg (`tui.sock`) is a passthrough.** Every frame the TUI sends —
+//!   request, notification, response, malformed text, binary — reaches the app-server as
+//!   it was written. The broker only watches it: the session learns where the head is and
+//!   what is running ([`SessionThreads::observe_tui_request`]), and a keyboard answer to a
+//!   phone-family approval takes the arbitration slot. The one frame it keeps back is a
+//!   keyboard answer to an approval whose slot is already taken
+//!   ([`LegCapabilities::arbitrate_tui`]).
+//! * **The phone leg (`ccd.sock`) is classified** whole-message by the pure security core
+//!   ([`crate::refusal`]) before any byte is forwarded.
+//! * **Server→client** is a byte-exact passthrough to the keyboard. The phone is handed
+//!   only the server requests it may answer ([`S2cDisposition`]).
 //!
-//! Deliberately NOT here (clean seams for the switch/fanout sub-chunk): the D2
-//! per-leg/session latch and vector barrier, quiesce/seal, generation/epoch stamping,
-//! the one-use response-capability fanout, per-leg failure containment beyond a plain
-//! close, and the byte-fidelity comparison harness. The role is anchored to the socket;
-//! the live reinitialization guard (a second `initialize` fails closed) is enforced
-//! here, and [`crate::allowlist::narrow_role`] holds the identity-narrowing rule.
+//! Every accepted connection is stamped with a monotonic [`ConnId`]. It is threaded into
+//! BOTH directions — the c2s path reads it, and the s2c observer takes it as a parameter —
+//! so correlation of a response to its request is CONNECTION-scoped and two connections of
+//! the same role cannot answer each other's requests. The id appears in the `leg opened` /
+//! `leg ended` / error log lines so an operator can follow one connection through
+//! `broker.log`. The phone's role is anchored to its socket: a second `initialize` on
+//! that leg fails closed.
 
 use std::io;
 use std::path::PathBuf;
@@ -31,7 +34,6 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::allowlist::Role;
-use crate::fingerprint::LaunchFingerprint;
 use crate::frame_tee::FrameTee;
 use crate::message::{RequestId, Shape, WsPayload};
 use crate::refusal::{decide, Env, RelayAction};
@@ -47,16 +49,15 @@ pub type EventSink = Arc<dyn Fn(&str) + Send + Sync>;
 /// "Has this session bound a thread yet?", asked of a broker that
 /// [`Broker::serve`] has already consumed.
 ///
-/// The answer is the broker's OWN verified binding
-/// ([`crate::session::ThreadBinding::bound_thread`]) — a thread this broker
-/// admitted the creation of, correlated on the connection that asked, with the
-/// server-resolved `cwd` proven equal to the launch cwd — never a guess read back
-/// out of the log's text. It is the one fact that separates "the pane came up and
-/// a session started" from "the pane came up and the TUI's first `thread/start`
-/// was refused", and the host reads it to decide which of those to record.
+/// The answer is the broker's own record ([`SessionThreads::thread_ever_bound`]) — a
+/// keyboard `thread/start`, `thread/resume` or `thread/fork` answered on the connection
+/// that asked with a thread — never a guess read back out of the log's text. It is the one
+/// fact that separates "the pane came up and a session started" from "the pane came up
+/// and the TUI exited without starting one", and the host reads it to decide which of
+/// those to record.
 pub type BoundThreadProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// The broker: two listeners, a launch fingerprint, and a per-connection upstream
+/// The broker: two listeners and a per-connection upstream
 /// factory. Generic over the factory so integration tests drive captured frames through
 /// a fake upstream with no live app-server.
 pub struct Broker<F: UpstreamFactory> {
@@ -66,24 +67,22 @@ pub struct Broker<F: UpstreamFactory> {
 }
 
 struct Ctx<F: UpstreamFactory> {
-    fingerprint: LaunchFingerprint,
     factory: F,
     /// The shared one-use response-capability arbiter (fanout winner across all legs).
     /// Each connection wraps it in its own [`LegCapabilities`] view; the arbiter itself
     /// is session-wide so the first response to a fanned-out approval wins across legs.
     arbiter: Arc<ResponseArbiter>,
-    /// Session-scoped thread binding, shared across every connection: the c2s classifier
-    /// claims a creation slot when it admits a `thread/start`, and the s2c stream of the
-    /// SAME leg installs the binding when the correlated creation response verifies. The
-    /// resume and turn paths read it.
+    /// Session-scoped thread state, shared across every connection: the keyboard's
+    /// requests start a head move, the answer on the SAME leg settles it, and the phone's
+    /// classifier reads the head and what is running.
     threads: SessionThreads,
     /// Mints the per-connection instance id ([`ConnId`]) handed to each accepted
     /// connection's task. A monotonic counter is enough: it never wraps in any realistic
     /// session (2^64 accepts), and it only has to distinguish connections that are alive
     /// at the same time from one another and from every earlier one.
     next_conn: AtomicU64,
-    /// **The head fan-out repair**: the last `thread/started` this broker forwarded,
-    /// kept verbatim, and every `ccd` leg that is owed one.
+    /// **The head fan-out**: the `thread/started` frames this broker forwarded, kept
+    /// verbatim, and every `ccd` leg with the head it was last told.
     ///
     /// The app-server broadcasts `thread/started` once, to the connections it has
     /// at that instant, and never replays it. That is the whole announcement: the
@@ -96,10 +95,11 @@ struct Ctx<F: UpstreamFactory> {
     /// registration's hint to chase, and neither can name a thread that appeared
     /// while nothing was watching.
     ///
-    /// So the fan-out is repaired at the only place that still holds the fact.
-    /// See [`deliver_head`] for what is delivered, to whom, on what authority, and
-    /// why the announcement, the head and the subscriber table are one lock rather
-    /// than three.
+    /// So the fan-out is repaired at the only place that still holds the fact — and
+    /// extended to the one head move the app-server never announces at all, the
+    /// keyboard's `/resume`. See [`owed_head`] for what is delivered, to whom, on what
+    /// authority, and why the announcements, the head and the subscriber table are one
+    /// lock rather than three.
     ///
     /// A `std::sync::Mutex` and not tokio's: every access is a field read or write
     /// with no await between lock and unlock.
@@ -114,12 +114,12 @@ struct Ctx<F: UpstreamFactory> {
     tee: FrameTee,
 }
 
-/// The announcement, the legs owed it, and nothing else — **deliberately one
+/// The announcements, the legs told the head, and nothing else — **deliberately one
 /// mutex**.
 ///
 /// The decision "this leg is owed *this* frame" is a joint statement about three
-/// facts: the broker's verified head, the announcement it last forwarded, and what
-/// the leg has already been sent. Reading them separately admits a stale pair — a
+/// facts: the broker's head, the announcements it forwarded, and what
+/// the leg has already been told. Reading them separately admits a stale pair — a
 /// head read as A, then B binds and replaces the announcement, and A is what goes
 /// out. Holding this one guard across the whole decision (and reading the head
 /// *inside* it, which is the only lock this one is ever taken above) makes the
@@ -136,10 +136,8 @@ struct HeadFanout {
     /// upstream socket, so two legs can process announcements A and B in opposite
     /// orders: leg 1 records B, leg 2 is descheduled and records A *after* it, and
     /// the slot is left naming a thread the session has already left. That is
-    /// not merely a stale read — [`deliver_head`] then refuses to say anything at all
-    /// (the announcement no longer names the head), and since no further announcement
-    /// of B is coming, B is denied to every later `ccd` subscriber for the rest of the
-    /// session.
+    /// not merely a stale read — the late subscriber is then handed a thread the session
+    /// has left rather than the head's own announcement.
     ///
     /// **The rule that was tried and measured false.** "Accept an announcement only
     /// when it names the current head" would make the slot monotonic — and would
@@ -152,7 +150,7 @@ struct HeadFanout {
     ///
     /// Keying by thread removes the ordering question instead of arbitrating it. A
     /// late write of A cannot displace B because it does not share a slot with it, and
-    /// [`deliver_head`] selects by the head rather than by arrival. **First bytes per
+    /// [`owed_head`] selects by the head rather than by arrival. **First bytes per
     /// thread win**: a second copy of a frame already recorded changes nothing, so a
     /// delayed leg's duplicate is inert by construction.
     ///
@@ -165,14 +163,11 @@ struct HeadFanout {
 
 /// How many `thread/started` frames [`HeadFanout::announced`] keeps.
 ///
-/// **Two, because two is what can be live at once.** A creation is admitted one at a
-/// time (`Creation::Pending` is a single slot and a competing `thread/start` is
-/// refused), so at any instant there is the head's own announcement and at most one
-/// successor's still waiting for its creation response. A third arrival means the
-/// session moved on again, and the frame evicted to make room is one whose thread is
-/// at or behind a head that has already been superseded twice — nothing
-/// [`deliver_head`] would ever select. If that eviction is ever wrong the failure is
-/// the pre-existing fail-closed one: nothing is said, and the next bind asks again.
+/// **Two, because two is what matters at once**: the head's own announcement and at most
+/// one successor's still waiting for the keyboard's move to settle. Announcements the
+/// keyboard did not cause can evict the head's own; nothing is lost when they do, because
+/// a head with no announcement held is told by the broker's own [`HEAD_NOTICE`] instead
+/// of the app-server's bytes.
 const MAX_ANNOUNCEMENTS: usize = 2;
 
 /// **What the broker tells a `ccd` leg about the answer it just sent.**
@@ -207,6 +202,26 @@ pub const RESPONSE_DISPOSITION: &str = "codeconnect/responseDisposition";
 /// — it is evidence about the far end, and it fails the leg closed. See
 /// [`crate::response_capability::LegCapabilities::observe_server_frame`].
 pub(crate) const CODECONNECT_NAMESPACE: &str = "codeconnect/";
+
+/// **The head bound to a thread no announcement this broker holds names.**
+///
+/// `{"method":"codeconnect/head","params":{"threadId":"<id>"}}`, to `ccd` legs only.
+///
+/// The app-server broadcasts `thread/started` for a thread it creates and nothing for one
+/// the keyboard resumes (`fixtures/codex/thread-switch.jsonl`: the `thread/resume`, its
+/// answer, an unsubscribe of the thread left, and no announcement). The head follows the
+/// resume ([`crate::session`]), so without a word from somewhere the daemon's link stays
+/// on the thread the keyboard left, and the phone's turns are refused for naming it.
+///
+/// **Composed, because there are no bytes to repeat.** Where the app-server did announce
+/// the head, its own frame is replayed instead (`owed_head`); this is the fallback for
+/// the head nothing announced, and it carries the one fact the broker itself established:
+/// a keyboard move naming this thread was answered with it. `threadId` is the spelling the
+/// `ccd` reader already takes a frame's thread from.
+///
+/// Under the `codeconnect/` namespace, so it can never be an app-server method, and an
+/// upstream frame claiming it closes the leg.
+pub const HEAD_NOTICE: &str = "codeconnect/head";
 
 /// The disposition frame for one answered `serverRequest`.
 ///
@@ -338,83 +353,44 @@ fn winner_role(role: Role) -> &'static str {
 struct Announcement {
     /// The thread the frame names, extracted the same way the `ccd` link extracts
     /// it (`params.threadId` or `params.thread.id`) so the head comparison in
-    /// [`deliver_head`] is asking about the thread the reader will bind to.
+    /// [`owed_head`] is asking about the thread the reader will bind to.
     thread_id: String,
     /// **The original bytes.** Not a frame this broker composes: the s2c direction
     /// is a byte-exact passthrough, and a replay that reconstructed the
-    /// announcement from the verified binding would be this broker asserting a
+    /// announcement from the head would be this broker asserting a
     /// shape rather than repeating one. Anything the app-server puts in that frame
     /// and the reader has not been told about survives the replay unchanged.
     raw: String,
 }
 
-/// A `ccd` leg waiting to be told the head.
+/// A `ccd` leg, and what it has been told about the head.
 struct CcdSubscriber {
-    /// The leg's own queue into its `ws`. A channel and not the socket, because the
-    /// socket belongs to that leg's task and this decision is made under a
-    /// `std::sync::Mutex` by whichever task saw the head move — usually the TUI's.
-    /// Unbounded: it carries at most one frame per head, and a head moves only when
-    /// a person presses `/new`.
-    ///
-    /// **Every entry carries the thread it was queued for**, so the leg can revalidate
-    /// it at the moment it sends rather than trusting a decision made when it was
-    /// enqueued. See [`QueuedHead`].
-    tx: tokio::sync::mpsc::UnboundedSender<QueuedHead>,
-    /// **The proof this leg no longer needs repairing**: it has forwarded a
-    /// `thread/started` of its own, so the app-server has it in the broadcast set
-    /// and every later announcement arrives live. Nothing is delivered to a leg
-    /// after this — which is also what keeps a *current* head from overtaking a
-    /// successor the leg has already seen announced but that has not bound yet
-    /// (the `ccd` link would take that for a `/new` back to the older thread).
-    live_seen: bool,
-    /// The head last delivered to this leg, so a redelivery of the same head is not
-    /// sent twice. It is not a stop condition: the window between forwarding
-    /// `initialize` and the server adding this connection to the broadcast set can
-    /// span a whole `/new`, so a leg already given A can still be owed B.
-    replayed: Option<String>,
-}
-
-/// A replay waiting in a leg's queue, **tagged with the head it was queued for**.
-///
-/// Enqueueing is not sending. The replay arm is the last of the three in
-/// [`handle_connection`]'s `select!`, so between the enqueue and the send this leg
-/// can pass a whole live exchange — including `/new`'s own announcement of B and the
-/// resume response that adopts it. Sending the queued A afterwards is not a stale
-/// no-op: the `ccd` reader takes an announcement naming neither its visit nor its
-/// candidate as a person pressing `/new`, so it reads it as a switch BACK to A and
-/// walks the link onto a thread the session has left.
-///
-/// `live_seen` does not cover this. It stops *future* enqueues to a leg that has seen
-/// a broadcast of its own; it cannot reach into a queue that was written before.
-///
-/// So the decision is re-made where it is acted on: the leg drops the entry unless
-/// `thread` is still the broker's verified head, read under the same guard the
-/// enqueue was made under. See [`head_is`].
-struct QueuedHead {
-    /// The head this frame was queued to announce.
-    thread: String,
-    /// The original bytes ([`Announcement::raw`]).
-    raw: String,
+    /// Wakes the leg's own task to ask [`owed_head`]. A wake and not a queue of
+    /// frames, because the socket belongs to that leg's task while the head moves
+    /// under whichever task saw the keyboard's answer — usually the TUI's. **The frame
+    /// is chosen when it is sent, not when the head moved**: a frame chosen earlier could
+    /// be overtaken on this leg by a whole `/new` before it left, and the `ccd` reader
+    /// takes an announcement naming neither its visit nor its candidate as a person
+    /// moving — it would walk the link back onto a thread the session has left. Wakes
+    /// coalesce, so a head that moves twice before the leg runs costs one delivery, of
+    /// the head as it then is.
+    wake: Arc<tokio::sync::Notify>,
+    /// The thread this leg was last told to follow: a `thread/started` it carried live,
+    /// or a head this broker sent it. The one record of what the leg was told. The leg is
+    /// owed the head exactly when the head is bound and this names another thread.
+    told: Option<String>,
 }
 
 impl<F: UpstreamFactory> Broker<F> {
     /// Build a broker. The one-use response-capability fanout arbiter is installed and
     /// fail-closed by construction: until a leg observes the soliciting `serverRequest`,
     /// every method-less response forwards zero upstream bytes.
-    pub fn new(
-        tui_sock: impl Into<PathBuf>,
-        ccd_sock: impl Into<PathBuf>,
-        fingerprint: LaunchFingerprint,
-        factory: F,
-    ) -> Self {
-        // The session thread store is anchored to the launch cwd carried in the
-        // fingerprint: a creation response naming any other workspace binds nothing.
-        let threads = SessionThreads::new(fingerprint.launch_cwd.clone());
+    pub fn new(tui_sock: impl Into<PathBuf>, ccd_sock: impl Into<PathBuf>, factory: F) -> Self {
+        let threads = SessionThreads::new();
         Self {
             tui_sock: tui_sock.into(),
             ccd_sock: ccd_sock.into(),
             ctx: Arc::new(Ctx {
-                fingerprint,
                 factory,
                 arbiter: Arc::new(ResponseArbiter::new()),
                 threads,
@@ -470,7 +446,7 @@ impl<F: UpstreamFactory> Broker<F> {
     /// type stays private and no caller can reach past this one question.
     pub fn bound_thread_probe(&self) -> BoundThreadProbe {
         let ctx = Arc::clone(&self.ctx);
-        Arc::new(move || ctx.threads.bound_thread().is_some())
+        Arc::new(move || ctx.threads.thread_ever_bound())
     }
 
     /// Bind both listeners and accept forever. Each accepted connection is handled in its
@@ -503,10 +479,9 @@ fn spawn_leg<F: UpstreamFactory>(
             (ctx.log)(&format!("{role:?}: leg opened (conn {conn})"));
             tokio::spawn(async move {
                 let outcome = handle_connection(role, conn, stream, ctx.clone()).await;
-                // The owning connection is gone. A creation still pending on it DID reach
-                // the server, so it lands in the indeterminate closed state rather than
-                // being stranded in flight for ever; the connection's reservation/tombstone
-                // sets are released at the same time.
+                // The owning connection is gone. A keyboard move still in flight on it DID
+                // reach the server, so its outcome is unknown and no head stands until the
+                // keyboard binds one again; the connection's id ledger goes with it.
                 ctx.threads.close_connection(conn);
                 // The head fan-out's own release: a leg that is gone is owed nothing,
                 // and its queue must not keep a slot in the table for the life of the
@@ -543,51 +518,42 @@ async fn handle_connection<F: UpstreamFactory>(
     let mut seen_initialize = false;
     // This leg's own view over the shared fanout arbiter: the s2c stream registers the
     // one-use capabilities solicited on THIS connection, disambiguating a bare response
-    // id into its thread (upstream ids are per-thread integers, reused across threads).
+    // id into its thread (a response names only the bare id, never the thread).
     let mut caps = LegCapabilities::new(Arc::clone(&ctx.arbiter), Arc::clone(&ctx.log));
-    // This leg's head-fan-out queue, minted for EVERY leg and published for none.
+    // This leg's head-fan-out wake, minted for EVERY leg and published for none.
     // Minting it here rather than under the role test is what leaves the role test
-    // load-bearing: [`handle_text`] is the only place the sender is handed to the
-    // subscriber table, and dropping its `Role::Ccd` conjunct would put a TUI leg in
-    // that table with a queue that is already wired to its socket. See
+    // load-bearing: [`handle_text`] is the only place it is handed to the subscriber
+    // table, and dropping its `Role::Ccd` conjunct would put a TUI leg in that table
+    // with a wake that is already wired to its socket. See
     // `a_tui_leg_is_neither_replayed_a_head_nor_able_to_trigger_one`.
-    let (head_tx, mut head_rx) = tokio::sync::mpsc::unbounded_channel::<QueuedHead>();
-    let mut head_tx = Some(head_tx);
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let mut head_wake = Some(Arc::clone(&wake));
 
     loop {
         tokio::select! {
             biased;
-            // server -> client: byte-exact passthrough (classification is c2s-only), but
-            // observed to verify this leg's pending thread creation (thread binding), to
-            // release the outstanding request ids this leg's responses answer, and to
-            // register one-use response capabilities (approval fanout). Both observers are
-            // PER CONNECTION — each correlates a bare response id against what THIS
-            // connection solicited, keyed by the relay-minted `ConnId`. (O12: the
-            // thread-binding key is `(ConnId, RequestId)`, never `(Role, RequestId)`, so two
-            // connections of the same role cannot answer each other's requests.)
+            // server -> client: observed to settle this leg's keyboard move, to follow what
+            // is running, to release the outstanding request ids this leg's responses
+            // answer, and to register one-use response capabilities (approval fanout). Both
+            // observers are PER CONNECTION — each correlates a bare response id against what
+            // THIS connection solicited, keyed by the relay-minted `ConnId`, so two
+            // connections of the same role cannot answer each other's requests.
             outbound = up.from_upstream.recv() => match outbound {
                 Some(msg) => {
                     let mut deliver = true;
                     if let Message::Text(t) = &msg {
                         ctx.tee.record(conn.0, "s2c", t);
                         ctx.threads.observe_server_frame(conn, t);
-                        // **An unanswerable server request is answered here, not sent on.**
-                        // Delivering a request the client will never be allowed to reply to
-                        // strands the exchange the SERVER opened — the hang C7 was, and the
-                        // same shape for every id-bearing non-approval s2c request. See
-                        // `S2cDisposition`.
-                        match caps.observe_server_frame(&ctx.threads, t) {
+                        // The keyboard is handed every frame. The phone is handed only the
+                        // server requests it may answer; the rest are the keyboard's, and
+                        // this leg neither delivers nor answers them. See `S2cDisposition`.
+                        match caps.observe_server_frame(role, &ctx.threads, t) {
                             S2cDisposition::Deliver => {}
-                            S2cDisposition::AnswerUpstream(frame) => {
+                            S2cDisposition::Withhold => {
                                 (ctx.log)(&format!(
-                                    "{role:?}: answer upstream (server request not serviceable \
-                                     through this broker; not delivered) (conn {})",
-                                    conn.0
+                                    "{role:?}: withhold (server request the phone cannot \
+                                     answer; the keyboard answers it) (conn {conn})"
                                 ));
-                                let answer = UpstreamWrite::unacked(Message::Text(frame));
-                                if up.to_upstream.send(answer).await.is_err() {
-                                    break;
-                                }
                                 deliver = false;
                             }
                             // Nothing further may cross a leg whose capability view can no
@@ -607,13 +573,10 @@ async fn handle_connection<F: UpstreamFactory>(
                         continue;
                     }
                     ws.send(msg).await?;
-                    // **Delivery on bind, not only on subscribe.** Either observer
-                    // above can be the moment the (head, announcement) pair completes
-                    // — `observe_server_frame` installs the binding from the creation
-                    // RESPONSE while `note_announcement` records the broadcast, and
-                    // the measured `/new` interleave puts the broadcast FIRST
-                    // (`fixtures/codex/thread-switch.jsonl:31`). Asking after every
-                    // server frame is what makes the completion order irrelevant.
+                    // **Delivery on bind, not only on subscribe.** The observer above
+                    // settles the head from the move's answer, so any server frame
+                    // can be the moment it binds. Asking after every one is what
+                    // makes the head reach a leg whichever leg carried the answer.
                     deliver_head(&ctx);
                 }
                 None => {
@@ -622,7 +585,8 @@ async fn handle_connection<F: UpstreamFactory>(
                     break;
                 }
             },
-            // client -> server: whole-message classify before forwarding any byte.
+            // client -> server: the keyboard's frames pass through; the phone's are
+            // classified whole before any byte is forwarded.
             inbound = ws.next() => {
                 let msg = match inbound {
                     // NOTE: `Ccd: read error` is asserted by a live gate — the connection id
@@ -637,19 +601,31 @@ async fn handle_connection<F: UpstreamFactory>(
                 match msg {
                     Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
                     Message::Close(_) => break,
+                    // The keyboard's bytes pass through, whatever they are.
+                    Message::Binary(bytes) if role == Role::Tui => {
+                        (ctx.log)(&format!("{role:?}: forward (keyboard passthrough) (conn {conn})"));
+                        let write = UpstreamWrite::unacked(Message::Binary(bytes));
+                        if !matches!(
+                            tokio::time::timeout(ctx.write_budget, up.to_upstream.send(write)).await,
+                            Ok(Ok(()))
+                        ) {
+                            (ctx.log)(&format!("{role:?}: upstream gone (conn {conn}); closing leg"));
+                            break;
+                        }
+                    }
                     Message::Binary(_) => {
-                        // No client→server binary form (refusal matrix): zero bytes, close.
+                        // No phone-leg binary form (refusal matrix): zero bytes, close.
                         (ctx.log)(&format!("{role:?}: binary frame (conn {conn}); closing leg"));
                         break;
                     }
                     Message::Text(text) => {
-                        // Recorded BEFORE classification, so a frame the broker refuses
-                        // is captured too. Those are the ones a re-grounding needs most:
-                        // the refusal log cannot name the parameter that caused it.
+                        // Recorded BEFORE anything is decided, so a frame the broker refuses
+                        // is captured too: the refusal log cannot name the parameter that
+                        // caused it.
                         ctx.tee.record(conn.0, "c2s", &text);
                         if handle_text(
                             role, conn, &ctx, &caps, &mut ws, &up, &mut seen_initialize,
-                            &mut head_tx, text,
+                            &mut head_wake, text,
                         )
                         .await?
                         {
@@ -658,40 +634,31 @@ async fn handle_connection<F: UpstreamFactory>(
                     }
                 }
             }
-            // The head owed to THIS leg, written by its own task. Last of the three
-            // arms deliberately: a live server frame is never stale, so when both are
-            // ready the passthrough goes first and the repair follows it.
-            replay = head_rx.recv() => match replay {
-                // **Revalidated HERE, not where it was queued.** Between
-                // the enqueue and this moment the two arms above can have carried a
-                // whole `/new` past this leg; a queued predecessor sent now would read
-                // as a switch BACK to it. Only the head still verified at send time
-                // goes out. See [`QueuedHead`].
-                //
-                // The `ccd` reader binds on an announcement and the bind is idempotent
-                // under the adapter's thread-namespaced identity keys, so a head it
-                // already holds costs it nothing.
-                Some(queued) => {
-                    if head_is(&ctx, &queued.thread) {
-                        ws.send(Message::Text(queued.raw)).await?;
+            // The head owed to THIS leg, chosen and sent by its own task. Last of the
+            // three arms deliberately: a live server frame is never stale, so when both
+            // are ready the passthrough goes first and the head follows it.
+            () = wake.notified() => {
+                if let Some(owed) = owed_head(&ctx, conn) {
+                    ws.send(Message::Text(owed.frame)).await?;
+                    // NOTE: `replayed thread/started` is asserted by live gates.
+                    (ctx.log)(&if owed.replayed {
+                        format!(
+                            "{role:?}: replayed thread/started for {} to a late subscriber \
+                             (conn {conn})",
+                            owed.thread
+                        )
                     } else {
-                        (ctx.log)(&format!(
-                            "{role:?}: dropped a stale head replay for {} (conn {conn})",
-                            queued.thread
-                        ));
-                    }
+                        format!("{role:?}: told the head {} (conn {conn})", owed.thread)
+                    });
                 }
-                // Unreachable while the leg lives: either this task still holds the
-                // sender (never subscribed) or the subscriber table does, and the table
-                // is only cleared after this loop has ended.
-                None => break,
-            },
+            }
         }
     }
     Ok(())
 }
 
-/// Classify one whole text message and act. Returns `Ok(true)` when the leg must close.
+/// Watch (keyboard) or classify (phone) one whole text message and act. Returns `Ok(true)`
+/// when the leg must close.
 #[allow(clippy::too_many_arguments)]
 async fn handle_text<F, S>(
     role: Role,
@@ -701,45 +668,32 @@ async fn handle_text<F, S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
     up: &crate::upstream::UpstreamChannels,
     seen_initialize: &mut bool,
-    head_tx: &mut Option<tokio::sync::mpsc::UnboundedSender<QueuedHead>>,
+    head_wake: &mut Option<Arc<tokio::sync::Notify>>,
     text: String,
 ) -> anyhow::Result<bool>
 where
     F: UpstreamFactory,
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    // Parse the whole message exactly once (a 5.76 MB plugin/list is not reparsed).
+    // Parse the whole message exactly once.
     let payload = WsPayload::Text(text);
     let shape = crate::message::classify_shape(&payload);
 
-    // Live reinitialization guard: role is anchored to the socket; a second `initialize`
-    // on the same connection is an identity change and fails closed.
-    if let Shape::Request { method, .. } = &shape {
-        if method == "initialize" {
-            if *seen_initialize {
-                (ctx.log)(&format!(
-                    "{role:?}: reinitialization (conn {conn}); closing leg"
-                ));
-                return Ok(true);
+    // Live reinitialization guard on the phone leg: role is anchored to the socket; a
+    // second `initialize` on the same connection is an identity change and fails closed.
+    if role == Role::Ccd {
+        if let Shape::Request { method, .. } = &shape {
+            if method == "initialize" {
+                if *seen_initialize {
+                    (ctx.log)(&format!(
+                        "{role:?}: reinitialization (conn {conn}); closing leg"
+                    ));
+                    return Ok(true);
+                }
+                *seen_initialize = true;
             }
-            *seen_initialize = true;
         }
     }
-
-    // The creation slot is claimed inside `decide` (it must be atomic with the decision),
-    // but the claim is only sound if the bytes actually GO OUT. The relay is the only place
-    // that knows both the parsed shape and whether the upstream write succeeded, so it
-    // remembers which id a `thread/start` would have claimed and rolls the claim back if
-    // the write fails. A refused `thread/start` never reaches the `Forward` arm, so the
-    // rollback below can only ever un-claim a claim this very message made.
-    let creation_id: Option<RequestId> = match &shape {
-        Shape::Request {
-            method,
-            id: Some(id),
-            ..
-        } if method == "thread/start" => Some(id.clone()),
-        _ => None,
-    };
 
     // Noted before `decide` consumes the shape; acted on below, only if the
     // `initialize` was actually forwarded. See [`deliver_head`].
@@ -766,16 +720,55 @@ where
         _ => None,
     };
 
-    // Scope `env` so it is dropped before any await (its `&dyn` trait objects are not
-    // `Send`, and the connection task must be `Send`).
-    let action = {
-        let env = Env {
-            fingerprint: &ctx.fingerprint,
-            capabilities: caps,
-            threads: &ctx.threads,
-            conn,
-        };
-        decide(role, &env, shape)
+    // The keyboard's frame is watched, not judged: the session learns from it before its
+    // bytes go out, and it forwards. A keyboard move is remembered so a hand-off that
+    // provably fails can put the head back.
+    //
+    // The phone's frame is classified. `env` is scoped so it is dropped before any await
+    // (its `&dyn` trait objects are not `Send`, and the connection task must be `Send`).
+    let mut move_id: Option<RequestId> = None;
+    // A keyboard request or notification is logged under its method, rendered through the
+    // audit-log grammar, so `broker.log` says what the keyboard did.
+    let mut keyboard_method: Option<String> = None;
+    let action = match role {
+        Role::Tui => {
+            if let Shape::Response { id, .. } = &shape {
+                // The one keyboard frame the broker may keep: an answer to an approval
+                // whose slot is already taken. See `LegCapabilities::arbitrate_tui`.
+                if caps.arbitrate_tui(id) {
+                    RelayAction::Forward {
+                        note: "keyboard passthrough",
+                    }
+                } else {
+                    RelayAction::DropLogKeepOpen {
+                        note: format!(
+                            "keyboard answer id={} to an approval already answered",
+                            crate::redact::request_id(id)
+                        ),
+                    }
+                }
+            } else {
+                if let Shape::Request { method, .. } | Shape::Notification { method, .. } = &shape {
+                    keyboard_method = Some(crate::redact::method(method).into_owned());
+                }
+                if ctx.threads.observe_tui_request(conn, &shape) {
+                    if let Shape::Request { id, .. } = &shape {
+                        move_id = id.clone();
+                    }
+                }
+                RelayAction::Forward {
+                    note: "keyboard passthrough",
+                }
+            }
+        }
+        Role::Ccd => {
+            let env = Env {
+                capabilities: caps,
+                threads: &ctx.threads,
+                conn,
+            };
+            decide(&env, shape)
+        }
     };
     // The receipt for the one message whose fate the arbiter and a leg are told about.
     // Minted only for a RESPONSE that is actually forwarded — `Forward` is the only
@@ -814,14 +807,14 @@ where
         RelayAction::Forward { note } => {
             // The connection id is APPENDED AFTER the existing parenthesised note, never
             // spliced into it. Live gates assert the exact substrings
-            // `Tui: forward (ownership request: fingerprint asserted)`,
-            // `Ccd: forward (request allowlisted)`, `Ccd: forward (notification allowlisted)`,
-            // `Tui: forward (turn/start: head-checked; …)`, so nothing may be inserted between
+            // `Tui: forward (turn/start)`, `Ccd: forward (request allowlisted)`,
+            // `Ccd: forward (notification allowlisted)`, so nothing may be inserted between
             // `forward (` and the note text. The trailing `(conn N)` is what lets a gate pair
             // a forward with the connection that made it, by real connection identity rather
             // than by role.
+            let note = keyboard_method.as_deref().unwrap_or(note);
             (ctx.log)(&format!("{role:?}: forward ({note}) (conn {conn})"));
-            // Recover the original bytes (no injection this sub-chunk) and forward.
+            // Recover the original bytes (nothing is injected) and forward.
             let text = match payload {
                 WsPayload::Text(t) => t,
                 WsPayload::Binary => unreachable!("text branch"),
@@ -847,19 +840,12 @@ where
                         // already bound when it arrives. `take` is what makes this
                         // once-per-leg without a second flag — the reinitialization guard
                         // above has already closed a leg that tried twice.
-                        if let Some(tx) = head_tx.take() {
+                        if let Some(wake) = head_wake.take() {
                             ctx.head_fanout
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .subscribers
-                                .insert(
-                                    conn,
-                                    CcdSubscriber {
-                                        tx,
-                                        live_seen: false,
-                                        replayed: None,
-                                    },
-                                );
+                                .insert(conn, CcdSubscriber { wake, told: None });
                             deliver_head(ctx);
                         }
                     }
@@ -867,31 +853,26 @@ where
                 // Refused: the pump is gone, so the envelope was never taken off the
                 // queue and never fed to `sink.send`. Zero bytes, proven.
                 Ok(Err(_)) => {
-                    if let Some(id) = &creation_id {
-                        // ZERO bytes reached the server, so the creation provably did not
-                        // happen: un-claim the slot so a retry (on a fresh connection) can
-                        // create the session's thread. Never a tombstone — nothing is
-                        // ambiguous.
-                        ctx.threads.rollback_creation(conn, id);
+                    if let Some(id) = &move_id {
+                        // ZERO bytes reached the server, so the keyboard's move provably
+                        // did not happen: the head goes back to where it was.
+                        ctx.threads.rollback_move(conn, id);
                         (ctx.log)(&format!(
-                            "{role:?}: upstream send failed (conn {conn}); creation claim \
-                             rolled back"
+                            "{role:?}: upstream send failed (conn {conn}); head move rolled \
+                             back"
                         ));
-                        // **A restored head is a head that BOUND.** A switch that provably
-                        // failed puts the predecessor back as the session's active thread,
-                        // and that is exactly the event the fan-out repair exists to
-                        // follow: a `ccd` leg that initialized while the creation was
-                        // pending saw no bound head at subscribe time, and this rollback is
-                        // the last thing that will ever make one true for it. Without the
-                        // ask it waits for a server frame that the failed upstream is not
-                        // going to send, and stays unbound for the life of the session.
+                        // **A restored head is a head that BOUND.** A `ccd` leg that
+                        // initialized while the move was in flight saw no head at
+                        // subscribe time, and this rollback is the last thing that will
+                        // ever make one true for it. Without the ask it waits for a server
+                        // frame that the failed upstream is not going to send.
                         deliver_head(ctx);
                     }
                     (ctx.log)(&format!(
                         "{role:?}: upstream gone (conn {conn}); closing leg"
                     ));
                     // **A reservation this answer took is released here, for the same
-                    // reason the creation claim above is rolled back.** Zero bytes proven
+                    // reason the head move above is rolled back.** Zero bytes proven
                     // is exactly what a socket that refused the write proves, arrived at
                     // one step earlier, so it earns the same verdict — the slot goes back
                     // and the approval is answerable again, by the keyboard in front of the
@@ -908,10 +889,9 @@ where
                 // The queue would not take it inside the budget. The upstream has stopped
                 // behaving like the app-server, so the leg closes and takes it down — but a
                 // `ccd` leg is told first, and told `unconfirmed`. Nothing is rolled back
-                // here, and that is the fail-closed direction: a creation claim whose
-                // hand-off expired is settled by the connection's own teardown, which files
-                // it as indeterminate rather than reopening a slot for a request that may
-                // yet be sitting on a queue.
+                // here, and that is the fail-closed direction: a head move whose hand-off
+                // expired is settled by the connection's own teardown, which leaves no head
+                // rather than putting back one the keyboard may be leaving.
                 Err(_) => {
                     (ctx.log)(&format!(
                         "{role:?}: upstream did not take the message within {:?} (conn \
@@ -1096,27 +1076,40 @@ enum WriteOutcome {
 }
 
 /// Keep a `thread/started` seen on the way out, so a later subscriber can be told
-/// about it — and record that the leg carrying it needs no repairing.
+/// about it — and record that the leg carrying it has been told that thread.
 ///
 /// The second half is not bookkeeping. `conn` is about to be sent these bytes by
-/// its own passthrough, which means the app-server has this connection in the
-/// broadcast set and every later announcement will reach it live. Marking it here
-/// is what stops the ordinary launch replaying a frame the leg is already
-/// receiving, and — the sharper case — what stops a *current* head being delivered
-/// to a leg that has already seen its successor announced but not yet bound. The
-/// `ccd` link reads an announcement naming neither its visit nor its candidate as
-/// a person pressing `/new`, so delivering the older thread there would walk the
-/// link backwards. See [`CcdSubscriber::live_seen`].
+/// its own passthrough, so the thread they name is the one its reader follows next.
+/// Recording it is what stops the ordinary launch telling a leg a head it heard
+/// announced — and what makes a late copy, one naming a thread the keyboard has since
+/// moved away from, owe the leg the head again: [`deliver_head`], asked after this very
+/// frame, sends it behind the announcement.
+///
+/// **A keyboard move's announcement cannot owe the leg its predecessor**, and that is
+/// causality rather than a rule kept here. The keyboard's request is observed, and the
+/// head set moving, before its bytes go upstream ([`crate::session`]); the app-server
+/// announces the new thread only after reading them (`fixtures/codex/thread-switch.jsonl`:
+/// the `thread/start` at line 30, the broadcasts at 31 and 33). So while a leg carries
+/// that announcement no head is bound, and nothing is owed until the new thread itself
+/// binds — which the leg was already told. An announcement no keyboard move caused names
+/// a thread that is not the head, so the head follows it.
 ///
 /// Notifications only. A `thread/started` arriving as anything else is not the
 /// announcement, and this stores nothing rather than guessing.
+///
+/// An `ephemeral` thread's announcement is ignored whole: that thread never becomes the
+/// head ([`crate::session`]) and the `ccd` reader does not follow it, so holding it
+/// would only evict the head's own announcement from the two slots, and a leg that
+/// heard it live has still not heard the head's.
 fn note_announcement<F: UpstreamFactory>(ctx: &Arc<Ctx<F>>, conn: ConnId, text: &str) {
     let Shape::Notification { method, obj } =
         crate::message::classify_shape(&WsPayload::Text(text.to_string()))
     else {
         return;
     };
-    if method != "thread/started" {
+    if method != "thread/started"
+        || obj.pointer("/params/thread/ephemeral") == Some(&serde_json::Value::Bool(true))
+    {
         return;
     }
     let Some(thread_id) = announced_thread_id(&obj) else {
@@ -1133,7 +1126,7 @@ fn note_announcement<F: UpstreamFactory>(ctx: &Arc<Ctx<F>>, conn: ConnId, text: 
     // See [`HeadFanout::announced`].
     if !fanout.announced.iter().any(|a| a.thread_id == thread_id) {
         fanout.announced.push(Announcement {
-            thread_id,
+            thread_id: thread_id.clone(),
             raw: text.to_string(),
         });
         // Oldest out. `remove(0)` on a two-element vector, once per `/new`.
@@ -1142,25 +1135,8 @@ fn note_announcement<F: UpstreamFactory>(ctx: &Arc<Ctx<F>>, conn: ConnId, text: 
         }
     }
     if let Some(sub) = fanout.subscribers.get_mut(&conn) {
-        sub.live_seen = true;
+        sub.told = Some(thread_id);
     }
-}
-
-/// Whether `thread` is **still** the broker's verified head.
-///
-/// Read under the [`HeadFanout`] guard — the same lock, in the same order
-/// (`head_fanout` → `threads`), that [`deliver_head`] takes to make the enqueue
-/// decision. That is what makes the send-time revalidation in [`handle_connection`]
-/// a statement about the head at the moment of sending rather than a second stale
-/// snapshot.
-fn head_is<F: UpstreamFactory>(ctx: &Arc<Ctx<F>>, thread: &str) -> bool {
-    let _fanout = ctx
-        .head_fanout
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    ctx.threads
-        .bound_thread()
-        .is_some_and(|head| head.id == thread)
 }
 
 /// The thread a `thread/started` names.
@@ -1187,134 +1163,102 @@ fn announced_thread_id(obj: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// **Repair the fan-out for a `ccd` leg that subscribed after the announcement.**
+/// **Wake every `ccd` leg whose head is out of date.**
 ///
-/// The app-server broadcasts `thread/started` to the connections it has when the
-/// thread is created. A `ccd` connection that did not exist then hears nothing,
-/// ever — and it is structurally the late one: the daemon's control link is built
-/// by a *registration*, the registration is sent by the supervisor the coordinator
-/// becomes on `ready`, and `ready` already requires the TUI to be past `execve` and
-/// alive. So the ordering the live gates observe is favourable scheduling, not a
-/// happens-before edge, and unfavourable scheduling leaves the link permanently
-/// unbound to the thread the session is actually on.
-///
-/// Rather than order the launch around it — which cannot be done without inverting
-/// what `ready` means — the missed frame is delivered late, to the one connection
-/// that missed it, by the one process that still holds it.
-///
-/// **The authority, stated exactly.** Two independent facts have to agree:
-///
-///   * the broker's own verified binding ([`ThreadBinding::bound_thread`]) — a
-///     thread is the head only if this broker admitted its creation, correlated
-///     the response on the connection that asked, and proved the server-resolved
-///     `cwd` equal to the coordinator's launch cwd; and
-///   * an announcement this broker actually forwarded, naming that same thread.
-///
-/// Neither alone would do. The binding has no announcement bytes, and composing
-/// some would make this broker the author of a frame the reader treats as the
-/// app-server's. The announcement alone is unverified broadcast content. Together
-/// they are "the frame the app-server sent about the thread this launch owns",
-/// which is precisely what the reader would have received had it been connected.
-///
-/// **Sent only to the `ccd` role.** The TUI is the client that *creates* threads;
-/// it was there for the announcement by construction, and a second copy would be a
-/// frame it never asked for. `ccd` is the observer, and re-announcing a thread it
-/// already carries is the one case its reader is explicitly built for (the
-/// reconnect path re-announces, and the bind is idempotent under the adapter's
-/// thread-namespaced identity keys).
-///
-/// **Delivered when the head BINDS, not only when a leg subscribes.**
-///
-/// Replaying once, at subscribe time, closed only half the hole. A leg forwards
-/// `initialize` and is registered here, but the app-server adds it to the broadcast
-/// set only when it has *answered* that request — and `ccd` sends `initialized`
-/// after the answer. During `/new` the announcement can precede the creation
-/// response (measured: `fixtures/codex/thread-switch.jsonl:31`), so a leg that
-/// reconnects while a creation is pending sees no bound head to be replayed, misses
-/// the live broadcast for the same reason, and under replay-on-subscribe would
-/// never be told again. Asking after every server frame as well is what turns the
-/// repair from "whatever was true at subscribe time" into "whatever becomes true
-/// while this leg is here".
-///
-/// **The authority, stated exactly.** Two independent facts have to agree:
-///
-///   * the broker's own verified binding ([`ThreadBinding::bound_thread`]) — a
-///     thread is the head only if this broker admitted its creation, correlated
-///     the response on the connection that asked, and proved the server-resolved
-///     `cwd` equal to the coordinator's launch cwd; and
-///   * an announcement this broker actually forwarded, naming that same thread.
-///
-/// Neither alone would do. The binding has no announcement bytes, and composing
-/// some would make this broker the author of a frame the reader treats as the
-/// app-server's. The announcement alone is unverified broadcast content. Together
-/// they are "the frame the app-server sent about the thread this launch owns",
-/// which is precisely what the reader would have received had it been connected.
-///
-/// **They are read as one snapshot.** The head is read *inside* the [`HeadFanout`]
-/// guard, which is the guard the announcement's only writer also takes. Reading
-/// them apart admits a stale pair: head observed as A, then B binds and replaces
-/// the announcement, and the leg is handed A. The lock
-/// order is `head_fanout` → `threads` and never the reverse — `note_announcement`
-/// touches only the former, `observe_server_frame` only the latter.
-///
-/// **Sent only to the `ccd` role**, because the subscriber table only ever holds
-/// `ccd` legs (see [`handle_text`]). The TUI is the client that *creates* threads;
-/// it was there for the announcement by construction, and a second copy would be a
-/// frame it never asked for.
-///
-/// Nothing is sent when there is no head, which is the ordinary launch's opening:
-/// the real broadcast is still to come and this connection will be one of its
-/// recipients — and when it is, `live_seen` retires it from this repair entirely.
+/// Called after every server frame, on subscribe, and when a failed hand-off puts a head
+/// back — every moment the head can bind. It decides nothing about frames: each woken leg
+/// asks [`owed_head`] itself, from its own task, at the moment it can send. Nothing is
+/// woken when there is no head, which is the ordinary launch's opening: the real broadcast
+/// is still to come and every `ccd` leg initialized by then will hear it.
 fn deliver_head<F: UpstreamFactory>(ctx: &Arc<Ctx<F>>) {
-    let mut delivered: Vec<ConnId> = Vec::new();
-    let head_id = {
-        let mut fanout = ctx
-            .head_fanout
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Inside the guard: this and the announcement below are ONE snapshot.
-        let Some(head) = ctx.threads.bound_thread() else {
-            return;
-        };
-        // Selected BY THE HEAD, not by arrival order. Nothing is said when no
-        // announcement names it: either none has arrived yet, or the ones held name
-        // threads this broker has not bound — a `/new` whose creation response has
-        // not landed. Not evidence about where the session is; the bind that follows
-        // will ask again.
-        let Some(raw) = fanout
-            .announced
-            .iter()
-            .find(|a| a.thread_id == head.id)
-            .map(|a| a.raw.clone())
-        else {
-            return;
-        };
-        for (conn, sub) in fanout.subscribers.iter_mut() {
-            if sub.live_seen || sub.replayed.as_deref() == Some(head.id.as_str()) {
-                continue;
-            }
-            // A closed queue means the leg's task has ended; its entry is removed by
-            // that task, so there is nothing to do here but skip it.
-            if sub
-                .tx
-                .send(QueuedHead {
-                    thread: head.id.clone(),
-                    raw: raw.clone(),
-                })
-                .is_err()
-            {
-                continue;
-            }
-            sub.replayed = Some(head.id.clone());
-            delivered.push(*conn);
-        }
-        head.id
+    let fanout = ctx
+        .head_fanout
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(head) = ctx.threads.bound_thread() else {
+        return;
     };
-    // Logged after the guard: the sink is caller-supplied and must never run under
-    // this lock. The `(conn N)` pairing a live gate reads is preserved per leg.
-    for conn in delivered {
-        (ctx.log)(&format!(
-            "Ccd: replayed thread/started for {head_id} to a late subscriber (conn {conn})"
-        ));
+    for sub in fanout.subscribers.values() {
+        if sub.told.as_deref() != Some(head.as_str()) {
+            sub.wake.notify_one();
+        }
     }
+}
+
+/// A head one `ccd` leg is owed, ready to send.
+struct OwedHead {
+    thread: String,
+    frame: String,
+    /// `frame` is the app-server's own announcement repeated, not a [`HEAD_NOTICE`].
+    replayed: bool,
+}
+
+/// **What the head is, told to one `ccd` leg that has not heard it.**
+///
+/// Two gaps, one repair.
+///
+/// *The late leg.* The app-server broadcasts `thread/started` once, to the connections it
+/// has when the thread is created. A `ccd` connection that did not exist then hears
+/// nothing, ever — and it is structurally the late one: the daemon's control link is built
+/// by a *registration*, the registration is sent once the launch is `ready`, and `ready`
+/// already requires the TUI to be past `execve` and alive. It can also be late inside a
+/// `/new`: the app-server adds a connection to the broadcast set only once it has answered
+/// its `initialize`, and the measured interleave puts the broadcast BEFORE the creation
+/// response (`fixtures/codex/thread-switch.jsonl:31`), so a leg reconnecting into that
+/// window misses the live frame and has no bound head to be told either — until the head
+/// binds, which is why [`deliver_head`] asks at every bind and not only on subscribe.
+///
+/// *The unannounced move.* A keyboard `/resume` moves the head and the app-server
+/// announces nothing, to anybody. Every `ccd` leg misses it, early or late.
+///
+/// **The authority** is the broker's own head ([`ThreadBinding::bound_thread`]): a thread
+/// is the head only if a keyboard `thread/start`, `thread/resume` or `thread/fork` was
+/// answered with it on the connection that asked. An ephemeral one never is. When the
+/// broker also forwarded an announcement naming that thread, the app-server's own bytes
+/// are what the leg is sent — exactly the frame it would have received had it been there.
+/// Otherwise it is sent [`HEAD_NOTICE`], the broker's word for the one fact it holds.
+///
+/// **Once per move, and never backwards.** A leg is owed the head only when it was last
+/// told another thread, live or by this broker ([`CcdSubscriber::told`]): a `/new` or a
+/// fork the leg heard announced is followed from the announcement, a head that moved away
+/// and back while the leg was not looking is not news, and a head is read at the moment it
+/// is sent, so a thread the session passed through is never said. No head is bound while
+/// a keyboard move is in flight, so a successor the leg heard announced is never
+/// overtaken by its predecessor ([`note_announcement`]).
+///
+/// **They are read as one snapshot.** The head is read *inside* the [`HeadFanout`] guard,
+/// which is the guard the announcements' only writer also takes, and the leg's record is
+/// updated under it. The lock order is `head_fanout` → `threads` and never the reverse —
+/// `note_announcement` takes both in that order, `observe_server_frame` only the latter.
+///
+/// **Sent only to the `ccd` role**, because the subscriber table only ever holds `ccd` legs
+/// (see [`handle_text`]). The TUI is the client that *creates* and *resumes* threads; it
+/// knows where it is, and a frame this broker composed has no business in its stream.
+fn owed_head<F: UpstreamFactory>(ctx: &Arc<Ctx<F>>, conn: ConnId) -> Option<OwedHead> {
+    let mut guard = ctx
+        .head_fanout
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fanout = &mut *guard;
+    let head = ctx.threads.bound_thread()?;
+    let sub = fanout.subscribers.get_mut(&conn)?;
+    if sub.told.as_deref() == Some(head.as_str()) {
+        return None;
+    }
+    sub.told = Some(head.clone());
+    let announced = fanout
+        .announced
+        .iter()
+        .find(|a| a.thread_id == head)
+        .map(|a| a.raw.clone());
+    Some(OwedHead {
+        replayed: announced.is_some(),
+        frame: announced.unwrap_or_else(|| head_notice(&head)),
+        thread: head,
+    })
+}
+
+/// The [`HEAD_NOTICE`] frame for `thread`.
+fn head_notice(thread: &str) -> String {
+    serde_json::json!({ "method": HEAD_NOTICE, "params": { "threadId": thread } }).to_string()
 }

@@ -51,16 +51,16 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// The A7.1 digest of the codex binary under test: the identity resolution pins,
-/// which the host re-verifies immediately before each of its two execs. Computed
-/// here rather than written down because these harnesses build (or copy) their
-/// codex at run time.
+/// The executable-identity digest of the codex binary under test: the identity
+/// resolution pins, which the host re-verifies immediately before each of its two
+/// execs. Computed here rather than written down because these harnesses build (or
+/// copy) their codex at run time.
 ///
 /// **Derived locally, deliberately, and now that is a choice rather than the only
-/// option.** Until 2e-7d nothing could pin a digest: `codeconnect codex` refused
-/// before it would have spawned a coordinator, so every harness composed the
-/// charter a launcher would have written. The launcher exists now and its own path
-/// is gated end to end by `the_codex_command_launches_a_real_session_end_to_end`
+/// option.** Before the launcher existed nothing could pin a digest: `codeconnect
+/// codex` refused before it would have spawned a coordinator, so every harness
+/// composed the charter a launcher would have written. The launcher exists now and
+/// its own path is gated end to end by `the_codex_command_launches_a_real_session_end_to_end`
 /// (`live_codex_coordinator.rs`). This file still derives its own, because:
 ///
 /// **several call sites here pass digests that are deliberately WRONG** — a digest
@@ -219,9 +219,9 @@ while True:
     path
 }
 
-// ------------------------------------------------- the D7 admission the host runs
+// ------------------------------- the launch-coordination admission the host runs
 //
-// Since 2e-2b the host presents itself to the D7 launch gate before it creates
+// The host presents itself to the launch-coordination gate before it creates
 // anything: it takes an exclusive `host_lease` on a `pending` launch record, or
 // refuses and exits 75 having made nothing. That is a real gate, not a formality,
 // so a harness that drives the host directly has to give it a launch to belong to.
@@ -350,8 +350,8 @@ impl Host {
         let child = Command::new(env!("CARGO_BIN_EXE_codeconnect"))
             .args([
                 "internal-codex-host",
-                // The D7 launch identity the host presents to the gate before it
-                // creates anything (2e-2b).
+                // The launch identity the host presents to the gate before it
+                // creates anything.
                 "--uid",
                 &launch.uid,
                 "--nonce",
@@ -360,24 +360,14 @@ impl Host {
                 "/tmp/cc-host-harness-no-server.sock",
                 "--codex",
                 codex.to_str().expect("utf-8"),
-                // A7.1: the identity the host re-verifies before each exec.
+                // The executable-identity pin: the identity the host re-verifies
+                // before each exec.
                 "--codex-sha256",
                 &codex_sha256(codex),
                 "--run-dir",
                 run_dir,
                 "--codex-home",
                 codex_home,
-                "--approval-policy",
-                "untrusted",
-                "--approvals-reviewer",
-                "user",
-                "--sandbox",
-                "read-only",
-                "--hooks-enabled",
-                "true",
-                // Round-2 P4: the canonical launch cwd (the workspace anchor).
-                "--launch-cwd",
-                "/tmp",
             ])
             .env("CODECONNECT_HOME", &launch.home)
             .stdin(Stdio::null())
@@ -716,17 +706,6 @@ fn app_server_dying_before_bind_fails_closed_with_its_stderr() {
             run.as_str(),
             "--codex-home",
             codex_home.as_str(),
-            "--approval-policy",
-            "untrusted",
-            "--approvals-reviewer",
-            "user",
-            "--sandbox",
-            "read-only",
-            "--hooks-enabled",
-            "true",
-            // Round-2 P4: the canonical launch cwd (the workspace anchor).
-            "--launch-cwd",
-            "/tmp",
         ])
         .env("CODECONNECT_HOME", &launch.home)
         .stdin(Stdio::null())
@@ -767,16 +746,16 @@ fn app_server_dying_before_bind_fails_closed_with_its_stderr() {
     println!("PASS app_server_dying_before_bind_fails_closed_with_its_stderr");
 }
 
-/// **A7.1, staged end to end in a real process.** The launcher pins the codex
-/// binary by digest; the file at that path is then replaced *before the host runs*
-/// — the `standalone/current` flip, the npm overwrite, the install landing
-/// mid-launch. The host must refuse, and must refuse having spawned nothing at all:
-/// the point of the pin is that those bytes never become a process.
+/// **The executable-identity pin, staged end to end in a real process.** The
+/// launcher pins the codex binary by digest; the file at that path is then replaced
+/// *before the host runs* — the `standalone/current` flip, the npm overwrite, the
+/// install landing mid-launch. The host must refuse, and must refuse having spawned
+/// nothing at all: the point of the pin is that those bytes never become a process.
 ///
 /// The fake here is a perfectly good, perfectly working codex both before and after
 /// the swap. Nothing about it is malformed — a magic check, an `--version` and an
 /// exec would all be happy with it. Only the identity check sees the difference,
-/// which is exactly the hole A7 named.
+/// which is exactly the hole between the bytes checked and the bytes executed.
 ///
 /// **This stages the swap that has already SETTLED by the time the host looks**, and
 /// that is the easy half. The digest comparison alone is enough to catch it, which is
@@ -842,16 +821,6 @@ fn a_codex_replaced_after_the_pin_is_refused_before_anything_is_spawned() {
             run.as_str(),
             "--codex-home",
             codex_home.as_str(),
-            "--approval-policy",
-            "untrusted",
-            "--approvals-reviewer",
-            "user",
-            "--sandbox",
-            "read-only",
-            "--hooks-enabled",
-            "true",
-            "--launch-cwd",
-            "/tmp",
         ])
         .env("CODECONNECT_HOME", &launch.home)
         .stdin(Stdio::null())
@@ -966,16 +935,6 @@ while True:
             run.as_str(),
             "--codex-home",
             codex_home.as_str(),
-            "--approval-policy",
-            "untrusted",
-            "--approvals-reviewer",
-            "user",
-            "--sandbox",
-            "read-only",
-            "--hooks-enabled",
-            "true",
-            "--launch-cwd",
-            "/tmp",
         ])
         .env("CODECONNECT_HOME", &launch.home)
         .stdin(Stdio::null())
@@ -1100,7 +1059,7 @@ fn an_existing_run_dir_is_refused() {
             "/tmp/cc-host-harness-no-server.sock",
             "--codex",
             fake.to_str().expect("utf-8"),
-            // A7.1: a well-formed digest that will never be checked — the
+            // A well-formed digest that will never be checked — the
             // run-dir refusal must happen BEFORE anything is inspected or
             // spawned, so a codex path that does not even exist is the
             // sharper probe here too.
@@ -1110,17 +1069,6 @@ fn an_existing_run_dir_is_refused() {
             run.as_str(),
             "--codex-home",
             codex_home.as_str(),
-            "--approval-policy",
-            "untrusted",
-            "--approvals-reviewer",
-            "user",
-            "--sandbox",
-            "read-only",
-            "--hooks-enabled",
-            "true",
-            // Round-2 P4: the canonical launch cwd (the workspace anchor).
-            "--launch-cwd",
-            "/tmp",
         ])
         .env("CODECONNECT_HOME", &launch.home)
         .stdin(Stdio::null())

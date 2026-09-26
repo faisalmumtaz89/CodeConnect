@@ -1,4 +1,4 @@
-//! The **inert exec gate** (D6) — no real child execs its target before its
+//! The **inert exec gate** — no real child execs its target before its
 //! `{spawn_nonce, role, pid, birth_identity, pgid}` is fsynced.
 //!
 //! ## The window this closes
@@ -6,7 +6,7 @@
 //! A launch actor that just `fork`+`exec`s a child has a gap: the child is
 //! already running its target (and can mutate, spawn, escape) before the parent
 //! has durably recorded *what it spawned*. If the parent then dies, nothing
-//! knows that child exists — it is an unrecorded escapee. D6 forbids that
+//! knows that child exists — it is an unrecorded escapee. The gate forbids that
 //! ordering: a child is spawned **inert**, its identity is fsynced, and only
 //! then is it released to `execve` its real target.
 //!
@@ -28,7 +28,7 @@
 //!    error, or a timeout all `_exit` the gate **without** exec.
 //!
 //! The tmux-started `codex-host` cannot inherit this pipe, so it is **its own
-//! gate** (handled in the coordinator/host path, D6/D7): before creating
+//! gate** (handled in the coordinator/host path): before creating
 //! anything it validates the launch record and self-records.
 //!
 //! Owner-side ordering is the load-bearing invariant: `on_ready` (the fsync)
@@ -53,8 +53,8 @@ const GATE_FD: RawFd = 3;
 /// never sending GO). Bounded so a wedged gate cannot hang a launch.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the **gate** blocks for `GO` before it `_exit`s without exec
-/// (finding 5). A gate whose owner never releases it must not linger forever.
+/// How long the **gate** blocks for `GO` before it `_exit`s without exec.
+/// A gate whose owner never releases it must not linger forever.
 const GO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A test-only env override for [`GO_TIMEOUT`], in milliseconds, so the
@@ -113,7 +113,7 @@ fn go_timeout() -> Duration {
 }
 
 /// How long the owner waits, **after** `GO`, for the target to confirm it has
-/// execed and started (the readiness fence, finding 5). Only after this does
+/// execed and started (the readiness fence). Only after this does
 /// `launch_gated` report success — so "custodian armed before tmux" is real, not
 /// merely "GO written".
 const ACK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -132,7 +132,7 @@ pub struct GateReady {
 }
 
 /// The durable spawn intent the owner fsyncs **before** it creates the socket or
-/// forks the gate (finding 4): a spawn is attributable to a nonce+role+argv-hash
+/// forks the gate: a spawn is attributable to a nonce+role+argv-hash
 /// even if the owner dies before the child's identity is recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnIntent {
@@ -171,20 +171,19 @@ pub struct GateSpec {
     pub stderr: Option<PathBuf>,
 }
 
-/// Bring a child up through the gate (D6, completed per Principle E).
+/// Bring a child up through the gate.
 ///
 /// Ordering, each step strictly before the next:
 ///   1. **`on_intent`** — the owner fsyncs `SpawnIntent{nonce,role,argv_hash}`
-///      *before* the socket or the child exists (finding 4).
+///      *before* the socket or the child exists.
 ///   2. spawn the inert gate; read `READY`.
 ///   3. validate against the kernel: reported pid == spawned pid, reported
-///      **pgid == kernel pgid**, reported birth == kernel birth (finding 5).
+///      **pgid == kernel pgid**, reported birth == kernel birth.
 ///   4. **`on_ready`** — the owner fsyncs the child identity (`ChildEntry` with
 ///      the nonce + argv_hash).
-///   5. **re-read** the birth identity after the fsync; abort if it changed
-///      (finding 5).
+///   5. **re-read** the birth identity after the fsync; abort if it changed.
 ///   6. send one-use `GO`.
-///   7. **readiness fence** — wait for the target's `ACK` (finding 5); only then
+///   7. **readiness fence** — wait for the target's `ACK`; only then
 ///      is the child *proven* to have execed and started. If `on_ready` fails,
 ///      GO is never sent, the gate EOFs and `_exit`s without exec.
 pub fn launch_gated<FI, FR>(spec: GateSpec, on_intent: FI, on_ready: FR) -> Result<GateReady>
@@ -442,7 +441,7 @@ fn gate_body(args: &[String]) -> Result<()> {
 
     // Our own process group: the gate contains itself and the coming target,
     // so cleanup can act on the group without touching our parent. A `setpgid`
-    // failure is **fatal** (finding 5) — a gate that could not contain itself
+    // failure is **fatal** — a gate that could not contain itself
     // must not exec — and the pgid is **read from the kernel**, never invented
     // as `pid`: a `getpgid`/read failure is fatal too.
     if unsafe { libc::setpgid(0, 0) } != 0 {
@@ -468,7 +467,7 @@ fn gate_body(args: &[String]) -> Result<()> {
     stream.flush().ok();
 
     // Block reading the single release token, but only until an **absolute
-    // deadline** (findings 5 & 10): owner death closes the only writer ⇒ read
+    // deadline**: owner death closes the only writer ⇒ read
     // returns 0 ⇒ exit; a wedged or malicious owner that trickles bytes cannot
     // extend the wait, because each read's timeout is the *remaining* time to the
     // one deadline, not a fresh full window per read. Deadline exceeded ⇒ exit
@@ -520,11 +519,11 @@ fn gate_body(args: &[String]) -> Result<()> {
         bail!("release nonce mismatch");
     }
 
-    // Released. Hand the gate socket to the target as the readiness-ACK fd
-    // (finding 5): keep GATE_FD open across execve (clear CLOEXEC) and name it
-    // in the environment so a CodeConnect child confirms it started. Then
-    // replace this process with the target — PID (and the recorded birth
-    // identity) preserved. execvp does not return on success.
+    // Released. Hand the gate socket to the target as the readiness-ACK fd:
+    // keep GATE_FD open across execve (clear CLOEXEC) and name it in the
+    // environment so a CodeConnect child confirms it started. Then replace this
+    // process with the target — PID (and the recorded birth identity) preserved.
+    // execvp does not return on success.
     unsafe {
         let flags = libc::fcntl(GATE_FD, libc::F_GETFD);
         if flags >= 0 {
@@ -538,7 +537,7 @@ fn gate_body(args: &[String]) -> Result<()> {
 }
 
 /// If launched through the exec gate, confirm to the owner that this process has
-/// really execed and started (the readiness fence, finding 5), then stop using
+/// really execed and started (the readiness fence), then stop using
 /// the ack fd. A no-op when not gated. Call once at the top of a gated
 /// subcommand's `main` body.
 pub fn ack_started_if_gated() {
@@ -563,7 +562,7 @@ pub fn ack_started_if_gated() {
 /// fires the readiness fence ([`ack_started_if_gated`]) so the owner's ACK wait
 /// resolves, then touches `<marker>` to prove it genuinely execed the target,
 /// and exits. Used by the exec-gate integration tests to fence `execve` on a
-/// real target-side marker rather than a sleep (finding 5). Hidden machinery,
+/// real target-side marker rather than a sleep. Hidden machinery,
 /// never a human command.
 pub fn run_ack_probe(args: &[String]) -> ! {
     ack_started_if_gated();

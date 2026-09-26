@@ -1,10 +1,10 @@
-//! The durable **launch record** (D7) — one owner, durable outcome.
+//! The durable **launch record** of launch coordination — one owner, durable
+//! outcome.
 //!
 //! A Codex launch's authoritative state lives in a single fsynced JSON file in
 //! the **session dir** (`~/.codeconnect/sessions/<uid>/launch.json`), never in
 //! the disposable runtime dir: cleanup removes the runtime dir but the record
-//! survives, so a failure reason is readable long after the runtime is gone
-//! (CODEX-PLAN.md §Launch coordination, step 4 and D7).
+//! survives, so a failure reason is readable long after the runtime is gone.
 //!
 //! Every transition happens under an interprocess **flock** on
 //! `launch.lock` and is a compare-and-swap: read the current record, verify the
@@ -13,7 +13,7 @@
 //! coordinator, the custodian, a late `codex-host`, and a future invocation's
 //! recovery sweep all touch one record without racing each other.
 //!
-//! ## Invariants this module enforces (D7)
+//! ## Invariants this module enforces
 //!
 //!   * **`failed` is terminal.** A `pending → failed` CAS can never be undone. A
 //!     coordinator that was merely *stopped* (SIGSTOP) past its deadline loses
@@ -171,7 +171,7 @@ pub enum CleanupState {
 
 /// A recorded child (app-server / TUI / custodian): its identity, pgid, the
 /// per-spawn nonce, and the hash of the argv it was released to exec — all as
-/// the D6 exec gate fsynced them **before** the child was allowed to `execve`
+/// the exec gate fsynced them **before** the child was allowed to `execve`
 /// (so the spawn is durably attributable to a specific nonce+argv).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildEntry {
@@ -199,7 +199,7 @@ pub struct ChildEntry {
     #[serde(default)]
     pub recorded_by: Option<ProcessIdentity>,
     /// **This child is past `execve`** — it is running the program it was spawned
-    /// to run, not still parked in the A11.1 fence (A11.1, readiness half).
+    /// to run, not still parked in the spawn fence (the fence's readiness side).
     ///
     /// The fence deliberately records the identity BEFORE the child can exec, which
     /// is what makes an unrecorded child impossible. The cost is that a recorded
@@ -310,7 +310,7 @@ pub struct LaunchRecord {
     /// id under this name's server; recorded so a late host knows what to sweep.
     pub session_name: String,
     pub coordinator: ProcessIdentity,
-    /// Armed before `tmux new-session` (D7). `None` only in the sliver before
+    /// Armed before `tmux new-session`. `None` only in the sliver before
     /// the custodian is armed — a live coordinator that reaches tmux without a
     /// custodian must fail the launch.
     pub custodian: Option<ProcessIdentity>,
@@ -322,7 +322,7 @@ pub struct LaunchRecord {
     pub cleanup: CleanupState,
     /// Set when the coordinator's `tmux new-session` timed out — an
     /// **indeterminate** outcome (tmux.rs:42). The custodian then treats one
-    /// observation of UID absence as *insufficient* (D7: no guessed grace
+    /// observation of UID absence as *insufficient* (no guessed grace
     /// period) and stays armed until it observes and cleans the late UID or the
     /// server's boot identity changes.
     #[serde(default)]
@@ -331,8 +331,8 @@ pub struct LaunchRecord {
     /// as `pending → failed`, so a host and the custodian — and two hosts —
     /// cannot both win.
     pub host_lease: Option<HostLease>,
-    /// The exec-gate spawn currently in flight, fsynced before the child exists
-    /// (D6). `None` when no spawn is between intent and identity.
+    /// The exec-gate spawn currently in flight, fsynced before the child exists.
+    /// `None` when no spawn is between intent and identity.
     #[serde(default)]
     pub pending_spawn: Option<PendingSpawn>,
     /// **Server A**: the persisted identity of the session+server the launch created.
@@ -402,7 +402,7 @@ pub struct LaunchRecord {
     #[serde(default)]
     pub session_observed: bool,
     /// That **one** `remain-on-exit off` assertion was proven to land on this
-    /// launch's session (A11.3).
+    /// launch's session.
     ///
     /// The premise cleanup would like to rest on — *a pane dies when its command
     /// exits* — is not automatically true. A user's own `~/.tmux.conf` can set
@@ -439,9 +439,9 @@ pub struct LaunchRecord {
     /// broker legs serving, the host's lease live, both children past `execve` and
     /// alive — is all true of a pane that is about to die. Measured: with a
     /// `~/.codex` that marks the launch cwd `trust_level = "trusted"`, the TUI's
-    /// first `thread/start` is refused by the fingerprint and the 0.153 TUI exits
-    /// immediately; the legs, the lease and both children satisfy every one of
-    /// those checks for the whole of the ~2 s before it does. So `Ready` committed,
+    /// first `thread/start` was refused and the 0.153 TUI exited immediately; the
+    /// legs, the lease and both children satisfy every one of those checks for the
+    /// whole of the ~2 s before it does. So `Ready` committed,
     /// the launcher `exec`ed into the pane, and the user got a flicker and
     /// `[exited]` with nothing said. The legs prove the HOST came up; this proves
     /// the SESSION did, and only the second is what the launcher is waiting for.
@@ -469,6 +469,17 @@ pub struct LaunchRecord {
     /// operator is never sent to a file that was not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_unbound_exit: Option<String>,
+    /// **The TUI was quit, cleanly, before any thread bound** — it exited with status 0,
+    /// which is how the user leaves codex's `resume`/`fork` picker (Ctrl+C, measured on
+    /// 0.155.1: status 0, nothing printed) or quits a new session at once. Written by the
+    /// host at teardown, before it ends a still-`pending` launch; read by the launcher,
+    /// never cleared.
+    ///
+    /// It is not a failure: no reason is recorded for the phone
+    /// ([`Self::codex_unbound_exit`] stays `None`), and a launcher that finds its launch
+    /// ended with this set exits quietly, as the native command does.
+    #[serde(default)]
+    pub codex_quit_before_thread: bool,
     /// **A vnode freeze this launch is holding right now** on the pinned codex
     /// executable — the exec hash-pin's `UF_IMMUTABLE`, written while the flag is
     /// being taken and withdrawn before it is given back.
@@ -572,7 +583,7 @@ pub enum Admission {
 }
 
 // ----------------------------------------------------------------------------
-// Fail-closed liveness predicates (Principle D).
+// Fail-closed liveness predicates.
 //
 // The two decisions the whole launch machine makes about a recorded guardian —
 // "may I admit/commit on it?" and "may I tear it down / rearm past it?" — are
@@ -631,7 +642,7 @@ fn fsync_dir(dir: &std::path::Path) -> Result<()> {
 /// made durable by fsyncing the root (`~/.codeconnect`) too, so a power loss
 /// cannot leave a `sessions/` whose grandparent entry was never written.
 fn create_session_dir_durably(dir: &std::path::Path) -> Result<()> {
-    // **ABSOLUTE from here on** (A9.6(c)) — restated locally, not established here.
+    // **ABSOLUTE from here on** — restated locally, not established here.
     //
     // The root is absolutised at its source, [`protocol::root_dir`], because a
     // relative root is wrong for every consumer and not just for this walk: it
@@ -690,9 +701,9 @@ fn create_session_dir_durably(dir: &std::path::Path) -> Result<()> {
 /// re-flushed on every lock acquisition, innermost-first — **every** one of them,
 /// up to and including the filesystem root.
 ///
-/// A9.6(c), and the bound is what matters. The walk used to stop at a point derived
-/// from `sessions_root`: first `.codeconnect`, then one level past it. Both are
-/// short of what the creation above can actually make. `private_dir` is
+/// The bound is what matters. A stop point derived from `sessions_root` —
+/// `.codeconnect`, or one level past it — is short of what the creation above can
+/// actually make. `private_dir` is
 /// `DirBuilder::recursive`, so it creates every missing ancestor without limit —
 /// and a deep `CODECONNECT_HOME` (`/a/b/c/d/e/f/g`) on a fresh machine means most
 /// of that chain is newly created, each with a dirent in its parent that has to be
@@ -815,7 +826,7 @@ pub fn load(uid: &str) -> Result<LaunchRecord> {
 }
 
 /// Re-prove that the record's own **directory entry** is durable — the reader's
-/// half of the durability handoff (A9.6a).
+/// half of the durability handoff.
 ///
 /// `store_atomic` publishes by rename and only *then* fsyncs the directory, so
 /// there is a window in which a `Ready` record is visible to `load` but its
@@ -1009,9 +1020,10 @@ fn store_atomic(uid: &str, record: &LaunchRecord) -> Result<()> {
         f.sync_all()
             .context("fsync of the launch record temp file")?;
     }
-    // The complement of the fault below, and the one A11.8's arrival-write boundary
-    // turns on: the rename has NOT happened, so `target` still holds the pre-image
-    // and the caller's `Err` describes a write that changed nothing. Sited exactly
+    // The complement of the fault below, and the one the host's arrival-write
+    // boundary (pre-arrival versus post-arrival failure) turns on: the rename has
+    // NOT happened, so `target` still holds the pre-image and the caller's `Err`
+    // describes a write that changed nothing. Sited exactly
     // at the rename because that is the last instant at which that is true — and
     // the temp is deliberately left where a failed `rename(2)` would leave it,
     // rather than tidied, so the staged aftermath is the real one. It is inert:
@@ -1026,7 +1038,8 @@ fn store_atomic(uid: &str, record: &LaunchRecord) -> Result<()> {
     }
     std::fs::rename(&temp, &target)
         .with_context(|| format!("renaming {} over {}", temp.display(), target.display()))?;
-    // The one fault this module cannot otherwise stage, and the one A9.3 turns on:
+    // The one fault this module cannot otherwise stage, and the one the cleanup
+    // disposition rule turns on:
     // the rename has ALREADY made the successor visible, and the fsync that would
     // make it durable then fails. The caller gets an `Err` for a write every reader
     // can nonetheless see. Injected rather than simulated because the whole point
@@ -1063,8 +1076,8 @@ pub struct NewLaunch {
     pub created_ms: i64,
 }
 
-/// Write the first `pending` record — a single-owner **ABSENT → Pending** CAS
-/// (Principle A). If any record already exists for this uid, refuse:
+/// Write the first `pending` record — a single-owner **ABSENT → Pending** CAS.
+/// If any record already exists for this uid, refuse:
 /// a duplicate or restarted coordinator must **never** erase a `Ready` or
 /// `Failed` outcome by blindly rewriting `pending`.
 pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord> {
@@ -1107,6 +1120,7 @@ pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord
         remain_on_exit_asserted: false,
         codex_thread_bound: false,
         codex_unbound_exit: None,
+        codex_quit_before_thread: false,
         exec_freeze: None,
         children: Vec::new(),
         created_ms: new.created_ms,
@@ -1116,15 +1130,15 @@ pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord
 }
 
 /// Commit a **created** `tmux new-session` outcome: persist **server A** and
-/// disarm the in-flight flag in **one atomic durable write** (A9.1).
+/// disarm the in-flight flag in **one atomic durable write**.
 ///
-/// The two halves used to be separate `store_atomic` calls
-/// (`clear_new_session_indeterminate` then `record_server_a`), and a crash in
-/// between left `new_session_indeterminate: false, server_a: null` — a session
-/// that had been created but was durably *unpinned*, so cleanup could only
-/// address it by socket+uid and a `Ready` record could commit with no identity to
-/// bind teardown to. Fusing them makes "a session exists" and "we know which one"
-/// the same durable fact, which is what A9.3's disposition rule then reads.
+/// As two separate `store_atomic` calls (clear the flag, then record server A), a
+/// crash in between would leave `new_session_indeterminate: false, server_a: null`
+/// — a session that had been created but was durably *unpinned*, so cleanup could
+/// only address it by socket+uid and a `Ready` record could commit with no
+/// identity to bind teardown to. Fusing them makes "a session exists" and "we know
+/// which one" the same durable fact, which is what the cleanup disposition rule
+/// then reads.
 ///
 /// Server A is the identity of the session+server the launch created, so the separate
 /// custodian/supervisor can bind cleanup and liveness to it. Recorded on a
@@ -1169,7 +1183,7 @@ pub fn record_new_session_created(
 /// Append a child the **host** spawned — the app-server or the TUI — to the
 /// record, so cleanup can address it by a proven identity instead of a guess.
 ///
-/// The same [`ChildEntry`] shape the D6 exec gate writes for the custodian, and
+/// The same [`ChildEntry`] shape the exec gate writes for the custodian, and
 /// for the same reason: `(pid, birth, pgid)` is the only thing this codebase will
 /// signal. A pid alone is a number the kernel may have handed to somebody else by
 /// the time cleanup runs; the birth identity is what makes it an identity.
@@ -1259,7 +1273,8 @@ pub fn note_host_claimed_run_dir(
     store_atomic(uid, &record)
 }
 
-/// Mark a recorded host child **past `execve`** (A11.1, readiness half) — see
+/// Mark a recorded host child **past `execve`** (the spawn fence's readiness
+/// side) — see
 /// [`ChildEntry::exec_confirmed`].
 ///
 /// Written by the host once it has PROVEN the child past `execve` — alive by its
@@ -1309,8 +1324,8 @@ pub fn confirm_host_child_exec(
     store_atomic(uid, &record)
 }
 
-/// Note that `remain-on-exit off` was proven set on this launch's session (A11.3)
-/// — see [`LaunchRecord::remain_on_exit_asserted`].
+/// Note that `remain-on-exit off` was proven set on this launch's session — see
+/// [`LaunchRecord::remain_on_exit_asserted`].
 ///
 /// Written by the coordinator immediately after the assertion returns success, and
 /// **before** the write that records server A, so the two states the custodian has
@@ -1370,6 +1385,20 @@ pub fn note_codex_thread_bound(_lock: &LaunchLock, uid: &str) -> Result<()> {
         return Ok(());
     }
     record.codex_thread_bound = true;
+    store_atomic(uid, &record)
+}
+
+/// Note that the TUI was quit cleanly before any thread bound. See
+/// [`LaunchRecord::codex_quit_before_thread`].
+///
+/// **History, not state**, like [`note_codex_thread_bound`]: no `pending` guard, never
+/// cleared. Idempotent.
+pub fn note_codex_quit_before_thread(_lock: &LaunchLock, uid: &str) -> Result<()> {
+    let mut record = load(uid)?;
+    if record.codex_quit_before_thread {
+        return Ok(());
+    }
+    record.codex_quit_before_thread = true;
     store_atomic(uid, &record)
 }
 
@@ -1771,13 +1800,14 @@ pub const HOST_CHILD_ROLES: [&str; 2] = ["app-server", "tui"];
 ///   * **Recorded by the live lease.** A successor's readiness must not be satisfied
 ///     by its predecessor's processes. The retained entries are still cleanup
 ///     evidence; they say nothing about whether the current host came up.
-///   * **Past `execve`** — A11.1's other side. The fence records each child while it
-///     is still parked before `execve`, precisely so an unrecorded child cannot
-///     exist, which means a recorded entry alone says "this pid is ours", not "this
-///     pid is codex". Everything else readiness looks at is already true at that
-///     moment: the broker binds its listeners before the TUI is spawned at all, and
-///     the host is obviously alive because it is the thing doing the spawning. See
-///     [`ChildEntry::exec_confirmed`] for what the host proves before setting it.
+///   * **Past `execve`** — the spawn fence's other side. The fence records each
+///     child while it is still parked before `execve`, precisely so an unrecorded
+///     child cannot exist, which means a recorded entry alone says "this pid is
+///     ours", not "this pid is codex". Everything else readiness looks at is
+///     already true at that moment: the broker binds its listeners before the TUI
+///     is spawned at all, and the host is obviously alive because it is the thing
+///     doing the spawning. See [`ChildEntry::exec_confirmed`] for what the host
+///     proves before setting it.
 ///   * **Alive now.** `exec_confirmed` is a fact about a moment that has passed and
 ///     nothing rewrites it when the child later dies. Read alone it certifies
 ///     `Ready` for a session whose TUI or app-server exited between the host's
@@ -1984,7 +2014,8 @@ fn marker_verdict_from_file(file: std::fs::File, uid: &str, launch_nonce: &str) 
     }
 }
 
-/// Read the ownership marker of the directory `dir_fd` refers to (A11.5).
+/// Read the ownership marker of the directory `dir_fd` refers to (the
+/// fd-anchored sweep).
 ///
 /// The difference from [`run_dir_marker`] is the whole point: the marker is reached
 /// with `openat` **through the caller's directory descriptor**, so the directory
@@ -2078,7 +2109,7 @@ fn open_subdir_at(parent: &DirFd, name: &std::ffi::CStr) -> std::io::Result<DirF
 pub(crate) const SWEEP_MAX_DEPTH: u32 = 16;
 
 /// Remove everything beneath `dir`, addressing every entry through `dir`'s own
-/// descriptor (A11.5).
+/// descriptor (the fd-anchored sweep).
 ///
 /// Each `unlinkat` is resolved relative to a descriptor that was opened once and
 /// verified once, so the directory being emptied is provably the directory whose
@@ -2230,7 +2261,7 @@ pub(crate) enum RunDirSweep {
     Retry(String),
 }
 
-/// Remove the run dir this launch owns, **through its own descriptor** (A11.5).
+/// Remove the run dir this launch owns, **through its own descriptor**.
 ///
 /// One implementation, two callers — the custodian sweeping a launch it inherited,
 /// and the host tearing down the directory it created — because the discipline is
@@ -2296,9 +2327,9 @@ pub(crate) fn sweep_owned_run_dir(
         // …with one exception, and it is this function's own residue. The marker is
         // unlinked once the tree is empty, and the `rmdir` right after it can still
         // fail; what stands then is an EMPTY directory at a name a later launch may
-        // derive, and A11.4 refuses to adopt an existing directory. `remove_dir`
-        // only ever succeeds on an empty one, so this collects that residue and can
-        // never touch a stranger's contents.
+        // derive, and run-dir creation refuses to adopt an existing directory.
+        // `remove_dir` only ever succeeds on an empty one, so this collects that
+        // residue and can never touch a stranger's contents.
         MarkerVerdict::Foreign => {
             drop(dir_fd);
             // **The `remove_dir`'s failure is READ, not discarded.** It used to be
@@ -2488,9 +2519,10 @@ fn marker_restore_staging_name() -> String {
 /// never a splice, never an empty file. That also retires the `EEXIST` question
 /// rather than answering it: `rename` replaces, so there is no "already there" case
 /// to guess at. Replacing is safe here and not merely convenient — the directory was
-/// verified `Ours` through this same descriptor at the top of the sweep, and A11.4
-/// refuses to adopt an existing directory, so no other launch can have claimed it in
-/// the meantime; the only thing that can be at that name is this same warrant.
+/// verified `Ours` through this same descriptor at the top of the sweep, and run-dir
+/// creation refuses to adopt an existing directory, so no other launch can have
+/// claimed it in the meantime; the only thing that can be at that name is this same
+/// warrant.
 ///
 /// Every failure unlinks the staging file, so a pass that could not restore leaves
 /// no litter for the next one to trip over.
@@ -2637,7 +2669,7 @@ pub enum ArrivalNote {
 
 /// Persist the **run dir** the coordinator chose for this launch's `codex-host`.
 ///
-/// Durable-before-mutation (Principle B), exactly like
+/// Durable-before-mutation, exactly like
 /// [`mark_new_session_starting`] and for the same reason: the path is written and
 /// fsynced *before* `tmux new-session` puts a host in a pane, so a coordinator
 /// that dies with tmux in flight still leaves a record naming the directory the
@@ -2649,7 +2681,7 @@ pub fn record_run_dir(_lock: &LaunchLock, uid: &str, run_dir: &str) -> Result<()
     store_atomic(uid, &record)
 }
 
-/// Fsync the **intent** to spawn a gated child, before the child exists (D6). Recorded
+/// Fsync the **intent** to spawn a gated child, before the child exists. Recorded
 /// on any non-terminal state where a spawn can be in flight (`pending`, or
 /// `failed{cleanup:pending}` for a sweep rearm).
 pub fn set_pending_spawn(_lock: &LaunchLock, uid: &str, intent: PendingSpawn) -> Result<()> {
@@ -2667,7 +2699,7 @@ pub fn set_pending_spawn(_lock: &LaunchLock, uid: &str, intent: PendingSpawn) ->
 }
 
 /// The exec gate's `on_ready`: the **single-owner CAS of the custodian slot**
-/// (Principle A) — atomically set the slot to `identity`, append the child's
+/// — atomically set the slot to `identity`, append the child's
 /// [`ChildEntry`], and clear the pending spawn intent, all in one durable write.
 ///
 /// The CAS succeeds only when the slot is **empty** (the coordinator's initial
@@ -2716,7 +2748,7 @@ pub fn cas_custodian_with_child(
         argv_hash: argv_hash.to_string(),
         // The custodian belongs to no host lease.
         recorded_by: None,
-        // The D6 exec gate releases the custodian only after this write, and the
+        // The exec gate releases the custodian only after this write, and the
         // custodian is not a host child — `host_children_recorded` never looks at it
         // and readiness never rests on it. Left false rather than invented.
         exec_confirmed: false,
@@ -2725,7 +2757,7 @@ pub fn cas_custodian_with_child(
     store_atomic(uid, &record)
 }
 
-/// CAS `pending → ready` (Principle A). Refuses unless, **re-checked under the lock at
+/// Single-owner CAS `pending → ready`. Refuses unless, **re-checked under the lock at
 /// commit time**, all of:
 ///   * the record is still `pending` (so a resumed, deadline-lost coordinator
 ///     cannot overwrite `failed`);
@@ -2733,7 +2765,7 @@ pub fn cas_custodian_with_child(
 ///   * the deadline has **not** passed;
 ///   * the custodian is recorded and **proven `Live`** — a session must never be
 ///     declared ready without an independent cleanup owner still breathing;
-///   * **server A is recorded** (A9.1) — a `Ready` record must never commit
+///   * **server A is recorded** — a `Ready` record must never commit
 ///     *unpinned*. Without this the Ready-fatal teardown falls into
 ///     `destroy_owned_session(.., None)`, an unpinned destroy addressed only by
 ///     socket+uid. The only path to `to_ready` is a `NewSessionOutcome::Created`,
@@ -2877,7 +2909,7 @@ pub fn set_cleanup(_lock: &LaunchLock, uid: &str, cleanup: CleanupState) -> Resu
     store_atomic(uid, &record)
 }
 
-/// **Durable-before-mutation** (Principle B, CRITICAL): mark the
+/// **Durable-before-mutation** (CRITICAL): mark the
 /// launch as having an *in-flight* `tmux new-session` and fsync it **before** the
 /// mutation is issued. While set, a coordinator death with tmux in flight leaves
 /// a record that already says "indeterminate", so the custodian stays armed
@@ -2895,11 +2927,11 @@ pub fn mark_new_session_starting(_lock: &LaunchLock, uid: &str) -> Result<()> {
     store_atomic(uid, &record)
 }
 
-// A9.1: the standalone "clear the in-flight flag" transition is gone. Its only
-// caller was the coordinator's `Created` arm, where it ran as a *separate*
-// `store_atomic` from `record_server_a` — the two-write window this amendment
-// closes. Both halves now live in `record_new_session_created`; the determinate
-// *failure* path keeps clearing the flag inside `fail_new_session_determinate`.
+// There is no standalone "clear the in-flight flag" transition: clearing it as a
+// *separate* `store_atomic` from recording server A would reopen the two-write
+// window. On a created session both halves live in `record_new_session_created`;
+// the determinate *failure* path clears the flag inside
+// `fail_new_session_determinate`.
 
 /// Fail the launch because `tmux new-session` was **indeterminate** — records
 /// the flag so the custodian will not treat one UID-absence observation as
@@ -2974,15 +3006,15 @@ pub fn fail_new_session_determinate(
     Ok(record.state)
 }
 
-/// A late `codex-host` admission attempt (Principle A/D), linearized under the lock
-/// with `pending → failed`. Admitted only when, at commit time, **all** of: the record
+/// A late `codex-host` admission attempt (single-owner, fail-closed), linearized
+/// under the lock with `pending → failed`. Admitted only when, at commit time,
+/// **all** of: the record
 /// parses and is this-boot; the nonce matches; the state is `pending`; the deadline is
 /// `Live`; the recorded coordinator is **proven `Live`** (not `Gone` and not
 /// `Unknown`); a custodian is recorded and **proven `Live`**; and no **live**
 /// `host_lease` already exists (the lease is **exclusive** — two correct-nonce hosts
 /// must not both be admitted). On success it records an exclusive [`HostLease`]
 /// carrying nonce/role/pgid; on any doubt it refuses and the host runs cleanup-only.
-/// D6/D7.
 pub fn admit_host(
     _lock: &LaunchLock,
     uid: &str,
@@ -2993,7 +3025,8 @@ pub fn admit_host(
 ) -> Result<Admission> {
     let mut record = match load(uid) {
         Ok(record) => record,
-        // A corrupt/missing record is fail-closed admission (D7 gate).
+        // A corrupt/missing record is fail-closed admission (the launch-coordination
+        // gate).
         Err(err) => {
             return Ok(Admission::Refused(format!(
                 "unreadable launch record: {err}"
@@ -3025,7 +3058,7 @@ pub fn admit_host(
         }
     }
     // The coordinator that armed this launch must be proven LIVE — `Unknown` is
-    // not proof (Principle D).
+    // not proof.
     if !liveness_admits(liveness(&record.coordinator)) {
         return Ok(Admission::Refused(
             "the coordinator that armed this launch is not proven live".into(),
@@ -3071,7 +3104,7 @@ pub fn admit_host(
 }
 
 // ----------------------------------------------------------------------------
-// Recovery sweep (D7 catastrophic-loss backstop).
+// Recovery sweep (the launch-coordination catastrophic-loss backstop).
 // ----------------------------------------------------------------------------
 
 /// A durable-state action the recovery sweep took or recommends for one record.
@@ -3158,7 +3191,7 @@ pub const LAUNCH_FREEZE_SWEEP_BUDGET: std::time::Duration = std::time::Duration:
 fn guardian_gone(id: Option<&ProcessIdentity>) -> bool {
     match id {
         None => true,
-        // Fail-closed (Principle D): only a *proven* Gone guardian counts as
+        // Fail-closed: only a *proven* Gone guardian counts as
         // absent — an `Unknown` one is left alone, never swept.
         Some(id) => liveness_is_gone(liveness(id)),
     }
@@ -3184,7 +3217,7 @@ enum SweepScope {
 /// Runs bounded and best-effort: an unreadable record is skipped (a future
 /// sweep, or the owning custodian, will get it), never guessed at.
 ///
-/// This is the **backstop**, not the primary reaper (D7): the pre-armed
+/// This is the **backstop**, not the primary reaper: the pre-armed
 /// custodian handles the common case; the sweep exists for total-guardian-loss.
 pub fn recovery_sweep_each(on_action: &mut dyn FnMut(SweepAction)) {
     sweep_records(
@@ -3438,7 +3471,7 @@ fn sweep_records(
                 LaunchState::Ready => {
                     // A committed session whose custodian has died has lost its
                     // independent teardown authority: rearm one. Only a
-                    // *proven* dead custodian triggers this (Principle D). But NOT if
+                    // *proven* dead custodian triggers this (fail-closed). But NOT if
                     // the session was already torn down: a Ready teardown records a
                     // durable marker (cleanup = Complete), so we
                     // must NOT rearm a fresh custodian on every later sweep for a
@@ -3730,7 +3763,7 @@ mod tests {
     /// B's unlink removes A's directory entry while A still holds the fd, B creates
     /// its own inode at the same name, and A's rename — which resolves the NAME, not
     /// the inode it wrote — publishes **B's** file. A returns success having
-    /// published bytes it never wrote and never fsynced; A11.5's "atomic and durable"
+    /// published bytes it never wrote and never fsynced; the sweep's "atomic and durable"
     /// closure is false of that inode, and a B that dies between its create and its
     /// write leaves an EMPTY warrant standing, which reads `Foreign` and abandons the
     /// directory.
@@ -4211,7 +4244,7 @@ mod tests {
 
     #[test]
     fn a_second_custodian_arm_over_a_live_one_is_refused_but_a_gone_one_is_replaced() {
-        // The concurrent/duplicate-sweep CAS (Principle A): once a
+        // The concurrent/duplicate-sweep single-owner CAS: once a
         // live custodian holds the slot, a second arm is refused (so two sweeps
         // never leave two untracked custodians); a slot whose occupant is proven
         // Gone is replaceable (the sweep's rearm).
@@ -4242,7 +4275,7 @@ mod tests {
 
     #[test]
     fn liveness_predicates_fail_closed_in_both_directions() {
-        // Principle D at the decision level: the two policies are fail-closed in
+        // Fail-closed liveness at the decision level: the two policies are fail-closed in
         // opposite directions, and BOTH reject `Unknown`. (A real `Unknown`
         // cannot be synthesized deterministically from the Darwin kernel, so the
         // decision logic is proven here while proc_identity's live tests prove
@@ -4265,7 +4298,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_coordinator_cannot_erase_a_terminal_record() {
-        // Principle A: create_pending is ABSENT→Pending only. A
+        // Single owner: create_pending is ABSENT→Pending only. A
         // restarted or duplicate coordinator must never blind-overwrite a
         // committed Failed (or Ready) outcome with a fresh pending.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
@@ -4289,7 +4322,7 @@ mod tests {
         np.coordinator = coord;
         create_pending(&lock, np).unwrap();
         arm(&lock, "dupready", live_custodian());
-        // A9.1: Ready requires a pinned session, so record A first — the same
+        // Ready requires a pinned session, so record A first — the same
         // durable write the coordinator's `Created` arm makes.
         record_new_session_created(&lock, "dupready", fake_server_a(), false).unwrap();
         // …and a live host with both children up, which is the other thing Ready
@@ -4466,10 +4499,10 @@ mod tests {
             )
             .unwrap();
         }
-        // A11.1, readiness half: RECORDED is not READY. The fence writes each entry
-        // while the child is still parked before `execve`, so the entries alone say
-        // "these pids are ours", not "these pids are codex" — and everything else
-        // readiness looks at is already true at that moment.
+        // The spawn fence's readiness side: RECORDED is not READY. The fence writes
+        // each entry while the child is still parked before `execve`, so the entries
+        // alone say "these pids are ours", not "these pids are codex" — and
+        // everything else readiness looks at is already true at that moment.
         assert!(
             !host_children_ready(&load("lease1").unwrap()),
             "children recorded but not yet past execve must not satisfy readiness"
@@ -4609,8 +4642,7 @@ mod tests {
         );
     }
 
-    /// **A takeover landing MID-readiness** (A11.8, the takeover-mid-readiness
-    /// boundary).
+    /// **A takeover landing MID-readiness** (the takeover-mid-readiness boundary).
     ///
     /// [`a_host_lease_is_taken_over_only_from_a_proven_gone_incumbent`] stages the
     /// takeover at the two ENDPOINTS of readiness — before any child is confirmed,
@@ -4825,11 +4857,11 @@ mod tests {
 
     #[test]
     fn a_created_session_is_pinned_and_disarmed_in_one_write() {
-        // A9.1: recording server A and clearing the in-flight flag are ONE atomic
-        // durable write. The postcondition asserted here is the invariant the
-        // split pair could not hold — there is no durable state in which the flag
-        // is clear but A is missing — plus the `cleanup → pending` restore the
-        // old `clear_new_session_indeterminate` carried.
+        // Recording server A and clearing the in-flight flag are ONE atomic
+        // durable write. The postcondition asserted here is the invariant two
+        // separate writes could not hold — there is no durable state in which the
+        // flag is clear but A is missing — plus the `cleanup → pending` restore
+        // on a still-`pending` record.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
         let lock = LaunchLock::acquire("a91").unwrap();
         create_pending(&lock, a_pending("a91", far)).unwrap();
@@ -4858,8 +4890,9 @@ mod tests {
 
     #[test]
     fn only_the_lease_holder_can_confirm_a_child_it_actually_recorded() {
-        // A11.1's readiness bit is what a `Ready` now rests on, so the write that
-        // sets it carries the same fence `record_host_child` does — and one more:
+        // The spawn fence's readiness bit is what a `Ready` now rests on, so the
+        // write that sets it carries the same fence `record_host_child` does — and
+        // one more:
         // it refuses a confirmation with nothing to confirm, because a bit set for
         // an entry that does not exist is a claim about a process nobody named.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
@@ -4931,9 +4964,10 @@ mod tests {
 
     #[test]
     fn a_failed_dir_fsync_still_leaves_the_in_flight_flag_visible() {
-        // A9.3's premise, proven rather than assumed. `store_atomic` publishes by
-        // rename and fsyncs the directory afterwards, so a failure of that fsync
-        // returns `Err` for a write that every reader can already see. The
+        // The cleanup disposition rule's premise, proven rather than assumed.
+        // `store_atomic` publishes by rename and fsyncs the directory afterwards,
+        // so a failure of that fsync returns `Err` for a write that every reader
+        // can already see. The
         // coordinator's pre-mutation block is the place this matters: the caller
         // gets an error and stops before tmux, while the record says a new-session
         // may be in flight.
@@ -5029,8 +5063,8 @@ mod tests {
 
     #[test]
     fn to_ready_refuses_a_record_with_no_server_a() {
-        // A9.1: a Ready record must never commit UNPINNED. Without this guard a
-        // crash between the old split writes could leave `server_a: null` on a
+        // A Ready record must never commit UNPINNED. Without this guard a
+        // crash between two split writes could leave `server_a: null` on a
         // record that then went Ready, and the Ready-fatal teardown would issue an
         // unpinned destroy addressed only by socket+uid.
         let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
@@ -5073,7 +5107,8 @@ mod tests {
 
     #[test]
     fn the_durability_walk_covers_every_ancestor_the_creation_could_have_made() {
-        // A9.6(c), both halves, and both were bounds this walk got wrong.
+        // Both halves of the durability walk's bound: the paths it walks must be
+        // absolute, and it must reach every ancestor.
         //
         // HALF ONE — a relative root walks off the end of the path. `root_dir()`
         // returns CODECONNECT_HOME verbatim and falls back to `./.codeconnect` with
@@ -5127,7 +5162,7 @@ mod tests {
 
     #[test]
     fn a_relative_session_dir_can_still_establish_its_durability_barrier() {
-        // The end-to-end half of A9.6(c)'s first bug. `root_dir()` hands back
+        // The end-to-end half of the relative-root case. `root_dir()` hands back
         // CODECONNECT_HOME verbatim, so the session dir can be relative — and the
         // walk then produced an EMPTY component whose `File::open("")` is ENOENT,
         // failing every single launch-lock acquisition. Driven through the real
@@ -5177,7 +5212,7 @@ mod tests {
 
     #[test]
     fn prove_record_durable_reports_an_unflushable_dir_instead_of_succeeding() {
-        // A9.6(a): the reader's half of the durability handoff. It must actually
+        // The reader's half of the durability handoff. It must actually
         // touch the directory — a version that returned Ok without opening it
         // would prove nothing. A session dir stripped of read permission (search
         // still allowed, so the record itself still parses) is the deterministic

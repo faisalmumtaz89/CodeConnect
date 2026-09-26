@@ -1,6 +1,6 @@
 # CodeConnect Push Gateway: Architecture and Phased Implementation Plan
 
-**Status:** Implemented. Phases 0–3 complete and codex-approved; the relay is deployed and proven end-to-end on real hardware. Phase 4 documentation is drafted; the Phase 4 rollout and operational items remain — see [Implementation status](#implementation-status) and the annotated rollout order in §6 for exactly which steps are done and which are pending.  
+**Status:** Implemented. Phases 0–3 complete; the relay is deployed and proven end-to-end on real hardware. Phase 4 documentation is drafted; the Phase 4 rollout and operational items remain — see [Implementation status](#implementation-status) and the annotated rollout order in §6 for exactly which steps are done and which are pending.  
 **Baseline commit:** `c2ffdf2` (the verified pre-implementation baseline in §1, not current HEAD)  
 **Target scale:** 1,000–10,000 users  
 **Decision:** Add a small CodeConnect-operated push relay as the default customer path. Keep direct APNs delivery as an explicit developer override.
@@ -9,7 +9,7 @@
 
 Recorded 2026-08-17. This section is the empirical status of the plan below; the numbered sections describe the design and remain the specification. The wire protocol is major 1, minor **14** (`mac/protocol/src/lib.rs`).
 
-**Phases 0–3 — complete, codex-approved.**
+**Phases 0–3 — complete.**
 
 - **Phase 0 (privacy truth):** `site/privacy.md`, `site/support.md`, `SECURITY.md`, `docs/ARCHITECTURE.md`, and the Mac/iOS READMEs distinguish direct from relay-backed notifications and carry the relay data inventory and retention. `ios/CodeConnect/PrivacyInfo.xcprivacy` declares the relay enrollment record.
 - **Phase 1 (relay service):** `mac/push-core` and `mac/push-relay` build and test; `ops/push-relay` holds the Render deployment assets. App Attest verification, the generic-only payload (`payload.rs`, title always `CodeConnect`), hash-only storage for APNs tokens, bearer credentials, App Attest key IDs and challenges (other content-free fields — public keys, receipts, environments, counters, bundle metadata, status/reasons, timestamps — stored in clear), rate limits, the `send`/`enrollment` kill switches, and encrypted backup generation with tested restore primitives are implemented (operator restore tooling and the restore drill remain Phase 4).

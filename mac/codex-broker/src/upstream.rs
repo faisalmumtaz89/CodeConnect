@@ -1,6 +1,6 @@
 //! The upstream app-server connection, behind a factory seam.
 //!
-//! A4: **one upstream per client connection, N per leg** (the TUI's `/resume` picker
+//! **One upstream per client connection, N per leg** (the TUI's `/resume` picker
 //! opens a *second* concurrent app-server connection, so a one-per-leg model kills the
 //! live TUI). Every accepted client connection therefore asks the [`UpstreamFactory`]
 //! for a fresh upstream.
@@ -9,7 +9,7 @@
 //! client→server as [`UpstreamWrite`] (the message plus the optional receipt for its
 //! write) — no async-fn-in-trait, no `Send` gymnastics. The security core never touches the network; the factory is the
 //! single seam where a real WS-over-UDS connection (production) or a scripted fake
-//! (integration tests, driven by captured Phase-0 frames) is supplied. This is how the
+//! (integration tests, driven by captured frames) is supplied. This is how the
 //! broker is "standalone testable against the captured frames without live infra."
 
 use std::future::Future;
@@ -122,8 +122,8 @@ pub trait UpstreamFactory: Send + Sync + 'static {
     fn connect(&self) -> ConnectFuture;
 }
 
-/// Byte-based frame/message bounds. D8: single notifications reach multi-MB
-/// (`plugin/list` at 5.76 MB is the A4 buffer worst case), so the bounds are byte-based,
+/// Byte-based frame/message bounds. Single notifications reach multi-MB
+/// (a `plugin/list` reply measures 10.4 MB on codex 0.153.4), so the bounds are byte-based,
 /// not message-count-based, and generous enough that a legitimate large frame is never
 /// rejected while still capping a malicious body.
 pub fn ws_config() -> WebSocketConfig {
@@ -136,10 +136,8 @@ pub fn ws_config() -> WebSocketConfig {
 
 /// Production factory: WebSocket over a Unix domain socket to the Codex app-server.
 ///
-/// SEAM: the broker owns an `initialize` the client never sees when it must re-attach a
-/// rotated connection (D4). That belongs to the switch sub-chunk; here each upstream is
-/// a plain relay of one client connection's traffic, and the client's own `initialize`
-/// flows through the allowlist.
+/// Each upstream is a plain relay of one client connection's traffic, and the client's
+/// own `initialize` flows through the allowlist.
 #[derive(Clone)]
 pub struct WsUdsUpstreamFactory {
     sock_path: PathBuf,
@@ -162,7 +160,7 @@ impl UpstreamFactory for WsUdsUpstreamFactory {
         Box::pin(async move {
             let stream = UnixStream::connect(&sock).await?;
             // The broker is the WS *client* to the app-server. `ws://localhost/` mirrors
-            // the Phase-0 wsuds handshake (Host: localhost, Upgrade: websocket).
+            // the captured wsuds handshake (Host: localhost, Upgrade: websocket).
             let (ws, _resp) = tokio_tungstenite::client_async_with_config(
                 "ws://localhost/",
                 stream,
@@ -433,5 +431,14 @@ mod tests {
             !receipt.await.unwrap_or(false),
             "a write into a dead socket is never reported as written"
         );
+    }
+
+    /// The capability observer parses every s2c frame whatever its size, so these bounds are
+    /// the only limit on what it can be handed.
+    #[test]
+    fn the_upstream_connection_bounds_every_message_and_frame() {
+        let config = ws_config();
+        assert_eq!(config.max_message_size, Some(64 << 20));
+        assert_eq!(config.max_frame_size, Some(64 << 20));
     }
 }

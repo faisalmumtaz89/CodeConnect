@@ -1,13 +1,13 @@
-//! The **`internal-codex-host` wrapper** (Phase 2e-2a) — the process that runs
-//! inside a tmux pane and hosts ONE Codex session end to end.
+//! The **`internal-codex-host` wrapper** — the process that runs inside a tmux
+//! pane and hosts ONE Codex session end to end.
 //!
 //! A host owns three moving parts for the lifetime of one pane:
 //!
 //!   1. a **`codex app-server`** child, bound to a private unix socket under an
 //!      isolated `CODEX_HOME` — the real upstream;
 //!   2. the in-process **broker** ([`codex_broker`]) in front of it, serving the
-//!      `tui.sock`/`ccd.sock` legs and enforcing the A4 security core against the
-//!      durable launch fingerprint;
+//!      `tui.sock`/`ccd.sock` legs: the keyboard's passes through, and the phone's
+//!      meets the refuse-by-default security core;
 //!   3. the real interactive **TUI** (`codex --remote unix://<tui.sock>`), spawned
 //!      in the foreground inheriting this process's tty — this is what the user
 //!      sees in the pane.
@@ -35,16 +35,15 @@
 //! State the premise honestly rather than overclaiming, because 0700 is not a
 //! universal exclusion: it excludes **other uids**, and the class it does not
 //! exclude is THE accepted boundary of the whole Codex launch path — stated once at
-//! [`crate::codex::start`] (A22) and deliberately not restated here or at any other
+//! [`crate::codex::start`] and deliberately not restated here or at any other
 //! site that leans on it, so the two cannot drift into two different boundaries.
 //! What the host actually relies on is: a **trusted parent path** (the host does not
 //! validate the parent chain, which the coordinator owns) plus that boundary's
 //! premise. Within it, freshness is enforced by the host itself, and nothing else
 //! about the caller is trusted.
 //!
-//! 2e-2b settled what that parent chain actually is, and it is not what this
-//! paragraph originally assumed ("a fresh path under the caller's own 0700 session
-//! dir"). The coordinator passes a path directly under **`/tmp`**, which is
+//! That parent chain is not a fresh path under the caller's own 0700 session dir.
+//! The coordinator passes a path directly under **`/tmp`**, which is
 //! world-writable and sticky, because a home-rooted run dir spends the `SUN_LEN`
 //! budget on the length of the user's home path
 //! ([`crate::codex_coordinator::RUN_DIR_PREFIX`] carries the full reasoning). So
@@ -92,11 +91,11 @@
 //! `panic = "abort"`: a panic aborts the whole host process immediately — no
 //! unwinding, no destructors, no `kill_on_drop`, and the two codex children are
 //! left running. Recovering from that is explicitly **not** this file's job; it
-//! belongs to the external supervisor, the D7 launch custodian
-//! ([`crate::codex_custodian`]), which is armed independently of this process and
-//! is wired to the host in 2e-2b. (Under `cargo test`'s dev profile panics unwind,
-//! so a panicking broker there surfaces as a `JoinError` on the race's broker arm —
-//! handled, but not the release behaviour.)
+//! belongs to the external supervisor, the launch custodian
+//! ([`crate::codex_custodian`]), which is armed independently of this process.
+//! (Under `cargo test`'s dev profile panics unwind, so a panicking broker there
+//! surfaces as a `JoinError` on the race's broker arm — handled, but not the
+//! release behaviour.)
 //!
 //! Every exit path aborts the broker, makes a bounded best-effort to reap both
 //! children, and then attempts to remove the whole run directory it created.
@@ -116,16 +115,15 @@
 //! tasks that ignored their cancellation point hang the process forever — after
 //! teardown had already honestly reported that it could not stop them.
 //!
-//! ## How this host is reached (2e-2b)
+//! ## How this host is reached
 //!
 //! The coordinator puts it in a tmux pane: `tmux new-session … -- <codeconnect>
 //! internal-codex-host --uid … --nonce … --tmux-socket … --codex … --codex-sha256 …
 //! --run-dir …`.
 //! Before anything exists — no run dir, no sockets, no children — it presents
-//! itself to the D7 launch gate ([`crate::codex_custodian::late_host_admission`])
-//! and is admitted or refused; a refused host destroys its own uid's session and
-//! exits having created nothing. `codeconnect codex` itself is still GATED and
-//! refuses, so nothing but the tests reaches any of this yet.
+//! itself to the launch-coordination gate
+//! ([`crate::codex_custodian::late_host_admission`]) and is admitted or refused;
+//! a refused host destroys its own uid's session and exits having created nothing.
 
 use std::io::Write;
 use std::io::{Read, Seek, SeekFrom};
@@ -138,7 +136,6 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use codex_broker::relay::{BoundThreadProbe, Broker, EventSink};
 use codex_broker::upstream::WsUdsUpstreamFactory;
-use codex_broker::LaunchFingerprint;
 use tokio::process::{Child, Command};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use tokio::task::JoinHandle;
@@ -214,23 +211,13 @@ const PRESERVED_LOG_PREFIX: &str = "broker-";
 /// See [`PRESERVED_LOG_PREFIX`].
 const PRESERVED_LOG_KEEP: usize = 50;
 
-/// The substring that marks the one broker disposition which ENDS a TUI.
-///
-/// Measured on codex 0.153: a `thread/start` the fingerprint refuses is answered
-/// with a synthetic JSON-RPC error, and the TUI exits within milliseconds — the
-/// broker log's very next line is `Tui leg ended: IO error: Broken pipe`. The
-/// other two refusal dispositions (`drop, keep open`, `drop, close leg`) do not
-/// produce that, so quoting one of them as the reason a session never started
-/// would be a guess dressed as evidence. This is deliberately the narrow marker.
-const REFUSAL_MARKER: &str = ": refuse->synthetic error (";
-
 /// Exit code when bring-up could not be proven, or the app-server / broker died
 /// while the session was up (session-fatal). `EX_SOFTWARE`.
 ///
 /// **These codes share a namespace with the TUI's own status.** On a clean TUI
 /// exit the host returns the TUI's code verbatim, so a codex that exits 70 or 130
 /// is indistinguishable here from a host-detected fatal or a host signal. The
-/// coordinator (2e-2b) must therefore not treat 70/130 as proof of *which* thing
+/// coordinator must therefore not treat 70/130 as proof of *which* thing
 /// happened — the broker log and the host's stderr line are the discriminators.
 /// Malformed-charter errors also land on 70 rather than `EX_USAGE`, since the only
 /// caller is the coordinator and every one of these means "this pane did not run".
@@ -241,7 +228,7 @@ const EX_HOST_FATAL: i32 = 70;
 /// Short on purpose: it is the only stretchable part of the spawn→record window,
 /// during which a SIGKILLed host would leave an unrecorded live child.
 ///
-/// **Why the D6 exec gate is not used here**, which would close the window at the
+/// **Why the exec gate is not used here**, which would close the window at the
 /// root by spawning inert and releasing only after the identity is durable — it
 /// is the right shape and it does not fit these two children:
 ///
@@ -258,14 +245,14 @@ const EX_HOST_FATAL: i32 = 70;
 ///   4. the gate's readiness fence is blocking, and this is an async orchestrator.
 ///
 /// Making it fit means giving the gate stdio and process-group knobs and an async
-/// handle — a change to shared D6 machinery in service of one caller.
+/// handle — a change to shared exec-gate machinery in service of one caller.
 ///
-/// **A11.1: closed instead by [`spawn_fenced`]**, the host-local equivalent. It
-/// keeps all four facts above true — it adds only a `pre_exec` closure, so stdio and
-/// process-group inheritance are untouched, the handles stay `tokio::process::Child`,
-/// and the blocking part runs on a releaser thread rather than the runtime. What is
-/// left for this budget to bound is how long a launch sits inert, not how long a
-/// stray child can outlive its record.
+/// **Closed instead by the spawn fence, [`spawn_fenced`]**, the host-local
+/// equivalent. It keeps all four facts above true — it adds only a `pre_exec`
+/// closure, so stdio and process-group inheritance are untouched, the handles stay
+/// `tokio::process::Child`, and the blocking part runs on a releaser thread rather
+/// than the runtime. What is left for this budget to bound is how long a launch
+/// sits inert, not how long a stray child can outlive its record.
 const RECORD_LOCK_BUDGET: Duration = Duration::from_secs(1);
 
 /// How long [`note_run_dir_claimed`] may wait for the launch-record lock.
@@ -285,8 +272,8 @@ const RECORD_LOCK_BUDGET: Duration = Duration::from_secs(1);
 /// inside the coordinator's own bring-up patience rather than hanging the pane.
 const CLAIM_RECORD_BUDGET: Duration = Duration::from_secs(5);
 
-/// Exit code when the D7 gate refused this host admission to its launch:
-/// `EX_TEMPFAIL`, matching what `internal-codex-host-preflight` already returns
+/// Exit code when the launch-coordination gate refused this host admission to its
+/// launch: `EX_TEMPFAIL`, matching what `internal-codex-host-preflight` already returns
 /// for the same refusal so one meaning has one number. It is not a failure of the
 /// session — there is no session — it is "this launch is not mine to run".
 ///
@@ -305,7 +292,7 @@ const EX_HOST_SIGNALLED: i32 = 130;
 
 /// The `internal-codex-host` subcommand: build the runtime, orchestrate the
 /// session, and exit with the resolved status. Machinery — never typed by a
-/// human; the coordinator spawns it into the pane (2e-2b).
+/// human; the coordinator spawns it into the pane.
 pub fn run_host(args: &[String]) -> ! {
     match run_host_inner(args) {
         Ok(code) => std::process::exit(code),
@@ -325,10 +312,9 @@ pub fn run_host(args: &[String]) -> ! {
 pub(crate) struct HostArgs {
     /// The codex binary to exec for BOTH the app-server and the TUI.
     ///
-    /// The host does **not** re-resolve, native-check or version-pin this path —
-    /// `codex::resolve_codex_bin` / `ensure_pinned_version` run upstream in the
-    /// launcher, which is what makes the reserved argv grammar's 0.147 grounding
-    /// apply. Stated plainly because it is a real premise:
+    /// The host does **not** re-resolve or native-check this path —
+    /// `codex::resolve_codex_bin` runs upstream in the launcher. Stated plainly
+    /// because it is a real premise:
     /// `internal-codex-host --codex /any/path` will exec that path twice. Same-uid,
     /// so not a privilege boundary — but not a guarantee this file makes.
     ///
@@ -337,18 +323,20 @@ pub(crate) struct HostArgs {
     /// checks were performed on, or it refuses.
     codex: PathBuf,
     /// The digest of the codex binary the upstream resolution inspected and
-    /// version-pinned (A7.1). Required — never defaulted, never derived here.
+    /// hashed (the executable-identity pin). Required — never defaulted, never
+    /// derived here.
     ///
     /// **Why the host cannot compute this itself.** Hashing `--codex` on arrival
     /// would pin whatever is at that path *now*, which is a statement about the
     /// host's own moment and says nothing about the file that was magic-checked and
     /// `--version`-pinned in another process some seconds earlier. That is precisely
-    /// the gap A7 names, re-opened one hop further down. The digest has to travel
-    /// with the path, from the process that did the inspecting.
+    /// the gap between the bytes checked and the bytes executed, re-opened one hop
+    /// further down. The digest has to travel with the path, from the process that
+    /// did the inspecting.
     ///
     /// **Why a missing one is a refusal.** An absent digest would mean falling back
     /// to trusting a pathname, silently, on the one dimension that decides which
-    /// code runs — the same reason no fingerprint dimension has a default here.
+    /// code runs — the same reason no dimension has a default here.
     /// [`crate::codex::verify_codex_identity`] is then re-run immediately before
     /// **each** of the two spawns, not once at parse time: the app-server and the
     /// TUI start at different moments, separated by the app-server's bring-up and
@@ -360,19 +348,18 @@ pub(crate) struct HostArgs {
     /// The isolated `CODEX_HOME` passed to both the app-server and the TUI.
     codex_home: PathBuf,
     /// The launch this host belongs to, and the nonce proving it was invited.
-    /// Both are required: they are what [`admit`] presents to the D7 gate, and a
-    /// host that cannot name its launch cannot be admitted to it.
+    /// Both are required: they are what [`admit`] presents to the launch-coordination
+    /// gate, and a host that cannot name its launch cannot be admitted to it.
     uid: String,
     nonce: String,
     /// The tmux socket the launch lives on. Needed only on the **refusal** path,
     /// where a host that was not admitted destroys its own uid's session rather
     /// than leaving a pane running for a launch that is already over.
     tmux_socket: String,
-    /// The durable launch-policy fingerprint the broker enforces.
-    fingerprint: LaunchFingerprint,
     /// Passthrough args appended to the TUI invocation, after `--`. Vetted
     /// against the reserved argv grammar at parse time (see [`parse_host_args`]).
     tui_args: Vec<String>,
+    wait_for_terminal: bool,
 }
 
 /// The five paths under the owned run dir. Derived once, before the dir exists.
@@ -410,13 +397,13 @@ impl Paths {
 /// Log files are deliberately absent: `SUN_LEN` constrains sockets alone.
 pub(crate) const SOCKET_NAMES: [&str; 3] = ["as.sock", "tui.sock", "ccd.sock"];
 
-/// Present this process to the D7 launch gate. `Ok(None)` means admitted and the
-/// caller proceeds; `Ok(Some(code))` means refused and the caller must exit with
-/// that code having created nothing.
+/// Present this process to the launch-coordination gate. `Ok(None)` means admitted
+/// and the caller proceeds; `Ok(Some(code))` means refused and the caller must exit
+/// with that code having created nothing.
 ///
-/// The gate itself is [`crate::codex_custodian::late_host_admission`] — the 2c
-/// primitive, called rather than reimplemented, so the lease rules (exclusive,
-/// taken over only from a *proven gone* incumbent) have exactly one
+/// The gate itself is [`crate::codex_custodian::late_host_admission`] — the
+/// custodian's primitive, called rather than reimplemented, so the lease rules
+/// (exclusive, taken over only from a *proven gone* incumbent) have exactly one
 /// implementation. A refusal also destroys this uid's own tmux session, which is
 /// what stops the refused pane from simply sitting there: the session should not
 /// exist, and this host is inside it.
@@ -468,16 +455,16 @@ fn refused_exit_code(_reason: &str, _cleanup: &str) -> i32 {
     EX_HOST_NOT_ADMITTED
 }
 
-/// Present this process to the D7 launch gate. `Ok(None)` means admitted and the
-/// caller proceeds; `Ok(Some(code))` means refused and the caller must exit with
-/// that code having created nothing. It may also never return — see
+/// Present this process to the launch-coordination gate. `Ok(None)` means admitted
+/// and the caller proceeds; `Ok(Some(code))` means refused and the caller must exit
+/// with that code having created nothing. It may also never return — see
 /// [`HostAction::ParkInert`].
 ///
-/// The gate itself is [`crate::codex_custodian::late_host_admission`] — the 2c
-/// primitive, called rather than reimplemented, so the lease rules have exactly
-/// one implementation. A refusal also destroys this uid's own tmux session, which
-/// is what stops the refused pane from simply sitting there: the session should
-/// not exist, and this host is inside it.
+/// The gate itself is [`crate::codex_custodian::late_host_admission`] — the
+/// custodian's primitive, called rather than reimplemented, so the lease rules have
+/// exactly one implementation. A refusal also destroys this uid's own tmux
+/// session, which is what stops the refused pane from simply sitting there: the
+/// session should not exist, and this host is inside it.
 fn admit(args: &HostArgs) -> Result<Option<i32>> {
     let outcome =
         crate::codex_custodian::late_host_admission(&args.uid, &args.nonce, &args.tmux_socket);
@@ -543,7 +530,7 @@ fn park_inert(args: &HostArgs, reason: &str) -> ! {
 fn run_host_inner(args: &[String]) -> Result<i32> {
     let parsed = parse_host_args(args)?;
 
-    // --- The D7 gate, run by THIS process, before anything exists ------------
+    // --- The launch-coordination gate, run by THIS process, before anything exists
     //
     // Ordering is the whole point and it is deliberately the first fallible thing
     // after argv: no run dir, no sockets, no children, and not even a tokio
@@ -599,17 +586,15 @@ fn run_host_inner(args: &[String]) -> Result<i32> {
 
 /// Parse the host's charter, fail-closed in every dimension.
 ///
-/// `--codex`, `--codex-sha256`, `--run-dir`, `--codex-home` and **all five fingerprint
-/// dimensions** (`--approval-policy`, `--approvals-reviewer`, `--sandbox`, `--hooks-enabled`,
-/// `--launch-cwd`) are required: the host applies no policy default, because a default is a
+/// `--codex`, `--codex-sha256`, `--run-dir`, `--codex-home`, `--uid`, `--nonce` and
+/// `--tmux-socket` are required: the host applies no default, because a default is a
 /// silent disagreement waiting to happen between the coordinator's durable launch
-/// record and what the broker actually enforces. Every flag takes a required,
-/// non-empty, control-character-free value; `--hooks-enabled` takes exactly
-/// `true` or `false`; any flag given twice is an error rather than a last-wins
-/// race.
+/// record and what the host is launched with. Every flag takes a required,
+/// non-empty, control-character-free value; any flag given twice is an error rather
+/// than a last-wins race.
 ///
 /// Everything after a bare `--` is passthrough for the TUI — and is validated
-/// against [`crate::codex::validate_codex_argv`], the **same** 2a reserved-argv
+/// against [`crate::codex::validate_codex_argv`], the **same** reserved-argv
 /// grammar `codeconnect codex` enforces. The host does not trust its caller: a
 /// refusal aborts before anything is created or spawned.
 ///
@@ -626,20 +611,17 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
     let mut tmux_socket: Option<String> = None;
     let mut run_dir: Option<PathBuf> = None;
     let mut codex_home: Option<PathBuf> = None;
-    let mut approval_policy: Option<String> = None;
-    let mut approvals_reviewer: Option<String> = None;
-    let mut sandbox: Option<String> = None;
-    let mut hooks_enabled: Option<bool> = None;
-    let mut launch_cwd: Option<String> = None;
     let mut tui_args = Vec::new();
+    let mut wait_for_terminal = None;
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let flag = arg.as_str();
         match flag {
+            "--wait-for-terminal" => set_once(&mut wait_for_terminal, flag, true)?,
             "--codex" => set_once(&mut codex, flag, PathBuf::from(value_of(&mut it, flag)?))?,
-            // A7.1: the identity of the bytes `--codex` must still be, checked
-            // against the same grammar the launcher writes it with.
+            // The executable-identity pin: the identity of the bytes `--codex` must
+            // still be, checked against the same grammar the launcher writes it with.
             "--codex-sha256" => {
                 let parsed = crate::codex::parse_codex_sha256(&value_of(&mut it, flag)?)
                     .with_context(|| flag.to_string())?;
@@ -654,19 +636,6 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
                 flag,
                 PathBuf::from(value_of(&mut it, flag)?),
             )?,
-            "--approval-policy" => set_once(&mut approval_policy, flag, value_of(&mut it, flag)?)?,
-            "--approvals-reviewer" => {
-                set_once(&mut approvals_reviewer, flag, value_of(&mut it, flag)?)?
-            }
-            "--sandbox" => set_once(&mut sandbox, flag, value_of(&mut it, flag)?)?,
-            "--hooks-enabled" => {
-                let parsed = parse_hooks_enabled(&value_of(&mut it, flag)?)?;
-                set_once(&mut hooks_enabled, flag, parsed)?;
-            }
-            // The workspace anchor: the CANONICAL cwd this session was
-            // launched in. The coordinator resolved it once; the host passes it through
-            // verbatim and never re-resolves, so the broker compares exact strings.
-            "--launch-cwd" => set_once(&mut launch_cwd, flag, value_of(&mut it, flag)?)?,
             // Everything past the boundary belongs to the TUI, verbatim.
             "--" => {
                 tui_args.extend(it.by_ref().cloned());
@@ -676,7 +645,8 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
         }
     }
 
-    // Single source of truth for what a caller may hand the TUI: the 2a grammar.
+    // Single source of truth for what a caller may hand the TUI: the reserved-argv
+    // grammar.
     // Reusing it (rather than restating it) is the point — the host cannot drift
     // from `codeconnect codex` on which flags are CodeConnect's to own.
     crate::codex::validate_codex_argv(&tui_args)
@@ -700,22 +670,8 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
         uid: uid.context("--uid <value> is required (the host must name its launch)")?,
         nonce: nonce.context("--nonce <value> is required (the host must prove it was invited)")?,
         tmux_socket: tmux_socket.context("--tmux-socket <value> is required")?,
-        fingerprint: LaunchFingerprint {
-            approval_policy: approval_policy
-                .context("--approval-policy <value> is required (the host applies no default)")?,
-            approvals_reviewer: approvals_reviewer.context(
-                "--approvals-reviewer <value> is required (the host applies no default)",
-            )?,
-            sandbox: sandbox
-                .context("--sandbox <value> is required (the host applies no default)")?,
-            hooks_enabled: hooks_enabled
-                .context("--hooks-enabled true|false is required (the host applies no default)")?,
-            launch_cwd: launch_cwd.context(
-                "--launch-cwd <canonical path> is required (the host applies no default, and \
-                 re-resolving it here would be a second, disagreeing canonicalization)",
-            )?,
-        },
         tui_args,
+        wait_for_terminal: wait_for_terminal.unwrap_or(false),
     })
 }
 
@@ -724,10 +680,10 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
 /// into a path), and not itself flag-shaped.
 ///
 /// `pub(crate)` because the **coordinator** builds this host's charter and parses
-/// its own with the same two helpers (2e-2b). One grammar, one place: a
-/// coordinator that validated its `--codex` / `--sandbox` / `--hooks-enabled`
-/// arguments more loosely than the host validates the same arguments would be a
-/// second grammar that can disagree with this one.
+/// its own with the same two helpers. One grammar, one place: a
+/// coordinator that validated its `--codex` / `--codex-home` arguments more loosely
+/// than the host validates the same arguments would be a second grammar that can
+/// disagree with this one.
 ///
 /// The shape check closes a swallowing hole. Without it `--codex --run-dir` sets
 /// `codex` to the literal `"--run-dir"` and eats the flag, and — the case that
@@ -735,7 +691,7 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
 /// passthrough boundary**, so every following token is re-read as a host flag.
 /// Those inputs happen to fail closed today via a later missing-flag error, but by
 /// accident of the error paths rather than by construction. No legitimate value
-/// here starts with `-`: all seven are paths or policy words.
+/// here starts with `-`: every one is a path or an identifier.
 pub(crate) fn value_of(it: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String> {
     let value = it
         .next()
@@ -755,20 +711,6 @@ pub(crate) fn value_of(it: &mut std::slice::Iter<'_, String>, flag: &str) -> Res
     Ok(value.clone())
 }
 
-/// The `--hooks-enabled` spelling, shared with the coordinator that writes it.
-///
-/// Never a silent default: an unrecognised spelling would otherwise decide hook
-/// trust by accident, and a coordinator that accepted `yes` while the host
-/// accepted only `true` would be a disagreement about a security dimension
-/// discovered at the pane rather than at the charter.
-pub(crate) fn parse_hooks_enabled(raw: &str) -> Result<bool> {
-    match raw {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        other => bail!("--hooks-enabled must be exactly \"true\" or \"false\", got {other:?}"),
-    }
-}
-
 /// Record a flag's value, refusing a second occurrence — a duplicate is an
 /// ambiguous charter, not a last-wins override. `pub(crate)` for the same
 /// one-grammar reason as [`value_of`].
@@ -782,10 +724,72 @@ pub(crate) fn set_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<
 
 // ------------------------------------------------------------- orchestration
 
+/// The TUI's command: a `--remote` client of this session's broker at `tui_sock`, with
+/// the caller's passthrough behind the fence and nothing of CodeConnect's own — no
+/// sandbox, no approval policy, no config — so it chooses them exactly as native codex
+/// does.
+fn tui_command(args: &HostArgs, tui_sock: &Path) -> Result<Command> {
+    // **The `--` fence, applied at the exec that actually runs.** Not in the coordinator
+    // and not at parse time: the process whose spawn this is, is the one that has to be
+    // sure — the same reason this function re-validates the passthrough rather than
+    // trusting its parent. See `codex::fence_positionals` for the measurement that makes
+    // a positional unable to dispatch, and for why the refusal table is no longer what
+    // the safety rests on.
+    let fenced = crate::codex::fence_positionals(&args.tui_args)
+        .map_err(|refusal| anyhow!("refused passthrough TUI argument: {refusal}"))?;
+    // A hosted `resume`/`fork` leads the fenced argv; codex reads it only in front of
+    // its options.
+    let (subcommand, fenced) = match fenced.split_first() {
+        Some((first, rest)) if crate::codex::HOSTED_SUBCOMMANDS.contains(&first.as_str()) => {
+            (Some(first), rest)
+        }
+        _ => (None, fenced.as_slice()),
+    };
+    let mut tui_cmd = Command::new(&args.codex);
+    tui_cmd
+        .args(subcommand)
+        .arg("--remote")
+        .arg(format!("unix://{}", tui_sock.display()))
+        .args(fenced)
+        .env("CODEX_HOME", &args.codex_home)
+        // The host reads `TMUX_PANE`; Codex must not see the pane at all. Its output
+        // reaches the terminal unchanged (`crate::attach`), so it behaves as it does
+        // in that terminal.
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        // Inherit stdio (the pane's tty) so this IS the session the user drives —
+        // and, deliberately, inherit the host's PROCESS GROUP too.
+        //
+        // The app-server gets its own group so cleanup can `killpg` a
+        // recorded pgid. The TUI must not, and this was measured rather than
+        // assumed: with `.process_group(0)` the real codex TUI comes up with
+        // `pgid == its own pid` while the pane's terminal keeps `tpgid == the
+        // host's group` — i.e. the TUI is a BACKGROUND process group on the tty it
+        // is supposed to own. It does not get stopped (it evidently blocks
+        // SIGTTIN), so nothing looks broken from the outside: the pane renders and
+        // the broker handshake succeeds. What breaks is the user's keyboard, which
+        // keeps going to the foreground group. Making it correct would mean the
+        // host also handing over terminal control with `tcsetpgrp`, and restoring
+        // it on every exit path — real terminal-ownership machinery, for a benefit
+        // already obtained without it.
+        //
+        // Nothing is lost for cleanup: the TUI's identity is recorded as
+        // (pid, birth, pgid) like the app-server's, and the custodian signals it by
+        // that verified identity. A group kill buys nothing here anyway, since the
+        // TUI's group would be the host's own.
+        //
+        // The spawn fence (`spawn_fenced`) preserves every one of those
+        // measured facts. It installs a `pre_exec` closure and touches nothing else —
+        // no stdio redirection, no `setpgid` — so the TUI still comes up on the pane's
+        // tty in the host's foreground process group, and the keyboard still works.
+        .kill_on_drop(true);
+    Ok(tui_cmd)
+}
+
 /// Bring the three parts up fail-closed, race them plus a host signal, tear
 /// everything down, and return the session's exit code.
 /// Build the run dir and its owner marker under a temp name, then publish the
-/// finished thing with one `rename` (A11.4).
+/// finished thing with one `rename` (the atomic run-dir publish).
 ///
 /// The invariant this buys: **a directory at the final run-dir path always carries
 /// its owner marker.** Nothing else can be observed there, because the only thing
@@ -877,8 +881,8 @@ fn create_run_dir_atomically(run_dir: &Path, uid: &str, launch_nonce: &str) -> R
     // And make the published name itself durable, so a crash cannot lose the dirent
     // the record already points at.
     //
-    // A11.7: this is the one step that runs AFTER the publish, so
-    // a failure here is a failure by a host that has ALREADY claimed the directory.
+    // For the run-dir claim gate, this is the one step that runs AFTER the publish,
+    // so a failure here is a failure by a host that has ALREADY claimed the directory.
     // Returning straight out would strand that claimed directory and leave the caller
     // exiting before it can either record the claim or sweep — a host that got past
     // the fence, leaving no trace that it did. Take the directory back down first, so
@@ -910,8 +914,8 @@ fn create_run_dir_atomically(run_dir: &Path, uid: &str, launch_nonce: &str) -> R
 /// silent. The module doc says the host *attempts* to remove the run dir, and an
 /// attempt that failed with no record is how a leak becomes invisible.
 ///
-/// **A11.5: fd-anchored, not path-addressed.** This used to be
-/// `remove_dir_all(&args.run_dir)`, which re-resolves the NAME at every step. The
+/// **Fd-anchored, not path-addressed.** A path-addressed
+/// `remove_dir_all(&args.run_dir)` would re-resolve the NAME at every step. The
 /// name is not an identity — [`crate::codex_coordinator::choose_run_dir`]
 /// truncates, so the derivation is many-to-one — and this host can still be inside
 /// its bounded teardown while a custodian removes the old inode and a colliding
@@ -971,21 +975,22 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
     // written inside it is what then makes the directory say whose it is, since its
     // NAME cannot (the derivation is many-to-one).
     //
-    // A11.4: the dir and its marker are built under a TEMP name and published by a
+    // The dir and its marker are built under a TEMP name and published by a
     // single `rename`, so no unmarked directory can ever exist at the final path.
-    // The old order — `mkdir(final)` then write the marker — left a window in which
-    // a SIGKILLed host stranded an unmarked dir at exactly the path the custodian
-    // later consults, and the custodian correctly refuses to delete a directory it
-    // cannot prove is the launch's. Publishing atomically makes that state
-    // structurally impossible rather than merely unlikely, which is why this is
-    // preferred over an age-bounded sweep of unmarked dirs (no new clock, no
+    // The other order — `mkdir(final)` then write the marker — leaves a window in
+    // which a SIGKILLed host strands an unmarked dir at exactly the path the
+    // custodian later consults, and the custodian correctly refuses to delete a
+    // directory it cannot prove is the launch's. Publishing atomically makes that
+    // state structurally impossible rather than merely unlikely, which is why this
+    // is preferred over an age-bounded sweep of unmarked dirs (no new clock, no
     // heuristic).
     create_run_dir_atomically(&args.run_dir, &args.uid, &args.nonce)?;
-    // A11.7: recording the claim is launch-fatal (see `note_run_dir_claimed`). A host
-    // that claimed the dir but cannot record it must not run on with the bit false —
-    // that is the exact state the gate's negative proof would misread as a fence
-    // refusal. Tear down the directory just created and exit fatal, so the only host
-    // that ever proceeds past here is one whose claim is on the record.
+    // The run-dir claim gate: recording the claim is launch-fatal (see
+    // `note_run_dir_claimed`). A host that claimed the dir but cannot record it must
+    // not run on with the bit false — that is the exact state the gate's negative
+    // proof would misread as a fence refusal. Tear down the directory just created
+    // and exit fatal, so the only host that ever proceeds past here is one whose
+    // claim is on the record.
     if let Err(err) = note_run_dir_claimed(&args) {
         eprintln!("codex-host: {err:#}");
         sweep_own_run_dir(&args.run_dir, &args.uid, &args.nonce);
@@ -993,6 +998,18 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
     }
 
     let outcome = run_session(&args, &paths, &mut signals).await;
+
+    // A TUI ended by a signal has printed its goodbye only if the signal came after it,
+    // so the host looks briefly. Best effort either way: a goodbye that cannot be
+    // restated stays as codex printed it.
+    if let Outcome::TuiExited(status) = &outcome {
+        let wait = if status.code().is_some() {
+            GOODBYE_WAIT
+        } else {
+            SIGNALLED_GOODBYE_WAIT
+        };
+        let _ = restate_goodbye(&args, &paths.tui_sock, wait).await;
+    }
 
     sweep_own_run_dir(&args.run_dir, &args.uid, &args.nonce);
 
@@ -1018,7 +1035,7 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
 /// Record, durably, that this host got past the run-dir claim.
 ///
 /// **LAUNCH-FATAL, not best-effort — the caller must refuse if this fails.** The
-/// bit it writes is read *negatively* by the A11.7 gate: a losing host with
+/// bit it writes is read *negatively* by the run-dir claim gate: a losing host with
 /// `host_claimed_run_dir == false` is taken as proof it was refused at the fence
 /// and never adopted the winner's directory. A best-effort write cannot support
 /// that proof. If this were allowed to fail-and-continue, a host that DID claim the
@@ -1037,12 +1054,13 @@ async fn orchestrate(args: HostArgs) -> Result<i32> {
 /// **What the false bit then licenses, stated exactly.** The invariant this buys is
 /// *no host enters `run_session` or spawns a child without its claim on the record* —
 /// so `host_claimed_run_dir == false` proves the host never got past the claim into
-/// the stages beyond it, which is what the A11.7 gate needs. It is NOT the stronger
-/// "this host never touched the directory": a host can still die between the
-/// `RENAME_EXCL` publish and this write (a SIGKILL, or the post-publish parent fsync
-/// failing — which `create_run_dir_atomically` now sweeps before returning, precisely
-/// so that case strands nothing). For the A11.7 *loser* the distinction cannot arise
-/// at all: it meets `EEXIST` at the publish and never owns a directory to claim.
+/// the stages beyond it, which is what the run-dir claim gate needs. It is NOT the
+/// stronger "this host never touched the directory": a host can still die between
+/// the `RENAME_EXCL` publish and this write (a SIGKILL, or the post-publish parent
+/// fsync failing — which `create_run_dir_atomically` now sweeps before returning,
+/// precisely so that case strands nothing). For the claim gate's *loser* the
+/// distinction cannot arise at all: it meets `EEXIST` at the publish and never
+/// owns a directory to claim.
 ///
 /// A bool, not the claimed `(dev, ino)`. `host_claimed_run_dir == false` on a
 /// loser directly refutes "the host got past the claim", which is the whole of
@@ -1325,22 +1343,17 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
             ))
         }
     };
-    // The broker's decision lines go to the log file as before, and the ONE line
-    // that explains a session that never started is kept in memory as well — the
-    // run dir is swept on the way out, and the record write that quotes it happens
-    // after the session is already over.
-    let first_refusal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let sink = match file_event_sink(&paths.broker_log) {
-        Ok(s) => refusal_watching_sink(s, Arc::clone(&first_refusal)),
+        Ok(s) => s,
         Err(err) => return Outcome::Fatal(format!("{err:#}")),
     };
 
-    // A7.1: the last check before these bytes become a process. Deliberately here,
-    // among the fallible-but-childless work and *before* the guard owns anything:
-    // a mismatch must abort with nothing spawned, since the entire point is that
-    // this file never runs. Re-derived rather than remembered — the digest was
-    // taken in the launcher, in another process, and the question now is about this
-    // instant.
+    // The executable-identity pin: the last check before these bytes become a
+    // process. Deliberately here, among the fallible-but-childless work and *before*
+    // the guard owns anything: a mismatch must abort with nothing spawned, since the
+    // entire point is that this file never runs. Re-derived rather than remembered —
+    // the digest was taken in the launcher, in another process, and the question now
+    // is about this instant.
     //
     // Inline and blocking, unlike its counterpart before the TUI spawn, and the
     // difference is the state of the world at each point. Here nothing is serving
@@ -1356,7 +1369,7 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     // guard that keeps them frozen. `frozen` below holds that guard across the whole
     // tail this check used to leave open:
     //
-    //   verify returns → `Command::spawn` → fork → the A11.1 fence rendezvous
+    //   verify returns → `Command::spawn` → fork → the spawn-fence rendezvous
     //   (the child reports its pid, and `record_child_pid` writes this child's
     //   identity DURABLY before the GO byte is sent) → GO → the child's `execve`
     //
@@ -1374,7 +1387,7 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     // not be read as one: `UF_IMMUTABLE` is owner-revocable (`chflags nouchg`), and a
     // writable fd opened BEFORE the freeze keeps writing straight through it — both
     // measured. That class is already out of scope by construction — invariant 1 in
-    // this module's doc, which defers to `codex::start` (A22) for what it covers —
+    // this module's doc, which defers to `codex::start` for what it covers —
     // and macOS offers nothing that would change it: there is no exec-by-descriptor
     // (`fexecve` is not even a symbol in libSystem; `execve("/dev/fd/N", …)` is
     // `EACCES`), and a private staging copy is equally writable by that same uid.
@@ -1388,7 +1401,7 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     // not-yet-faulted page — but codex is signed and hardened, and was measured
     // running with `CS_HARD | CS_KILL`, so a substituted page is refused and the
     // process KILLED rather than steered. Denial-of-service, not code execution, for
-    // a signed build. (A18/A20 number this gate "A7.1 executable hash-pin".)
+    // a signed build.
     //
     // **The record lands inside the verify, not after it.** The hash is a whole-file
     // read of a 210 MB executable — most of a second in a release build, about eight
@@ -1423,28 +1436,17 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
 
     // --- The first spawn. Nothing fallible may run before the guard owns it --
     //
-    // A11.1: spawned through the fence, so its identity is durable before it is ever
-    // allowed to become codex. The recording that used to follow the spawn now
-    // happens *inside* it, while the child is still parked before `execve`.
+    // Spawned through the spawn fence, so its identity is durable before it is ever
+    // allowed to become codex. The recording happens *inside* the spawn, while the
+    // child is still parked before `execve`, not after it.
     let mut appserver_cmd = Command::new(&args.codex);
     appserver_cmd
         .arg("app-server")
         .arg("--listen")
         .arg(format!("unix://{}", paths.as_sock.display()))
-        // **The one feature CodeConnect pins off, on the process that decides
-        // whether the model has the tool.** The conversation lives here — the TUI
-        // is a `--remote` client of this server — so this is where a feature that
-        // adds a model-callable tool takes effect, and it is set on the argv rather
-        // than assumed from the default because a shipping launch hands this
-        // process the operator's own `CODEX_HOME`, whose `config.toml` may turn it
-        // on. See `codex::PINNED_OFF_FEATURE` for the measurement and the reason.
-        //
-        // It rides ahead of nothing user-supplied: the app-server's argv is
-        // entirely this function's, so there is no passthrough that could restate
-        // the key after it.
-        .arg("-c")
-        .arg(crate::codex::pinned_off_feature_override())
         .env("CODEX_HOME", &args.codex_home)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(as_stderr_for_child))
@@ -1469,7 +1471,7 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         Ok(child) => child,
         // Launch-fatal. Nothing is up beyond this child and `Session` has not taken
         // it, so returning here drops it through `kill_on_drop`. A session whose
-        // processes cleanup cannot name is the leak this chunk exists to remove.
+        // processes cleanup cannot name is the leak this module exists to remove.
         // `frozen` also drops on this path, clearing the freeze — nothing ran — so
         // the claim is withdrawn first, exactly as on the success path. An early
         // return is where a claim most easily outlives its flag.
@@ -1520,13 +1522,18 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     // a pane that was torn down on request, which is the custodian's story to tell.
     // Neither is "the session never started", and wording them that way would put a
     // sentence in the record that is not true of them.
-    if matches!(outcome, Outcome::TuiExited(_)) && !session.thread_ever_bound() {
-        let quoted = first_refusal
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
-            .map(|line| crate::codex_coordinator::sanitize(&line));
-        let reason = no_thread_reason(quoted.as_deref(), preserved.as_deref());
+    let unbound_status = match &outcome {
+        Outcome::TuiExited(status) if !session.thread_ever_bound() => Some(*status),
+        _ => None,
+    };
+    if let Some(status) = unbound_status {
+        // A clean quit (Ctrl+C in the `resume` picker, or quitting a new session at
+        // once) is the user's choice, not a failure: no reason reaches the phone, and
+        // the launcher ends as quietly as native codex does.
+        let Some(reason) = unbound_exit_reason(status, preserved.as_deref()) else {
+            report_quit_before_thread(&args.uid);
+            return outcome;
+        };
         // Two writes, because they answer two different readers and only one of them
         // is still listening. `report_launch_without_a_thread` drives the RECORD to
         // `failed`, which is what the launcher is blocked on — and `to_failed`
@@ -1541,54 +1548,15 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     outcome
 }
 
-/// Wrap `sink` so the host keeps the **first** refusal the broker sent a leg.
-///
-/// A wrapper rather than a second responsibility inside [`file_event_sink`],
-/// because the two have different lifetimes: the file is closed with the run dir,
-/// and this outlives it.
-///
-/// # First, not last — measured on a live refused launch
-///
-/// A dying TUI produces more than one refusal. From a directory the owner's
-/// `~/.codex` marks `trust_level = "trusted"`, the preserved log of a session that
-/// never started holds, in this order:
-///
-/// ```text
-/// 317: Tui: refuse->synthetic error (thread/start: fingerprint refused (Conflict): params.sandbox: …)
-/// 319: Tui: refuse->synthetic error (thread/list: refused (NotAllowlisted))
-/// 320: Tui: refuse->synthetic error (thread/list: refused (NotAllowlisted))
-/// ```
-///
-/// The `thread/start` is the refusal that ended the session; the two `thread/list`
-/// refusals are what a TUI already on its way out asks next. Keeping the last
-/// match named the `thread/list` one, and the user's terminal then reported an
-/// allowlist problem that is not the bug — a red herring pointing away from the
-/// sandbox mismatch that actually caused it. In a session that never bound a
-/// thread the first synthetic-error refusal is the cause and everything after it
-/// is consequence, so the slot is written once and never overwritten.
-fn refusal_watching_sink(sink: EventSink, first_refusal: Arc<Mutex<Option<String>>>) -> EventSink {
-    Arc::new(move |line: &str| {
-        if line.contains(REFUSAL_MARKER) {
-            if let Ok(mut slot) = first_refusal.lock() {
-                if slot.is_none() {
-                    *slot = Some(line.to_string());
-                }
-            }
-        }
-        sink(line);
-    })
-}
-
 /// Copy this session's `broker.log` out of the disposable run dir and into
 /// `~/.codeconnect/logs/`, beside the supervisor and coordinator logs. Returns
 /// where it landed, or `None` if it could not be kept.
 ///
-/// **The run dir is ephemeral by design; the log is not.** Measured: a launch
-/// whose first `thread/start` the fingerprint refuses records that refusal in
-/// exactly one place — `<run_dir>/broker.log` — and every one of the host's own
-/// exit paths then removes the directory. The user is left with a pane that
-/// flickers, `[exited]`, and no artifact at all. Nothing else in the system holds
-/// that sentence.
+/// **The run dir is ephemeral by design; the log is not.** Measured: the broker's
+/// account of a session that ended early lives in exactly one place —
+/// `<run_dir>/broker.log` — and every one of the host's own exit paths then removes
+/// the directory. The user is left with a pane that flickers, `[exited]`, and no
+/// artifact at all. Nothing else in the system holds that account.
 ///
 /// Best-effort in the same literal sense as [`crate::supervisor`]'s `log_for`: a
 /// failure to keep a log must never change how a session ended, so every error is
@@ -1608,12 +1576,11 @@ fn refusal_watching_sink(sink: EventSink, first_refusal: Arc<Mutex<Option<String
 /// put an unbounded synchronous copy in the teardown path.
 ///
 /// The bound keeps a head and a tail rather than either alone, because the line that
-/// explains a failure is not where it seems it should be. MEASURED on the real
-/// refused launch this whole change exists for: the log is 332 lines and the causal
-/// `thread/start` refusal is **line 317** — the first ~316 are handshake, capability
-/// reads and bootstrap forwards. A head-only bound would therefore have thrown away
-/// precisely the sentence being preserved. The tail carries the verdict; the head
-/// carries the session's opening, which is what says which fingerprint it ran under.
+/// explains a failure is not where it seems it should be. MEASURED on a real failed
+/// launch: the log is 332 lines and the causal line is **line 317** — the first ~316
+/// are handshake, capability reads and bootstrap forwards. A head-only bound would
+/// therefore have thrown away precisely the sentence being preserved. The tail carries
+/// the verdict; the head carries the session's opening.
 ///
 /// [`PRESERVED_LOG_EDGE_BYTES`] each end. A whole failed launch is ~17 KB, so the
 /// common case — every case this feature is for — is copied entire and the bound
@@ -1670,31 +1637,24 @@ fn preserve_broker_log_into(dir: &Path, uid: &str, broker_log: &Path) -> Option<
     Some(dest)
 }
 
+/// The failure reason for a TUI that exited on its own before any thread bound, or
+/// `None` when it was quit cleanly (status 0) and the session ends without one.
+fn unbound_exit_reason(
+    status: std::process::ExitStatus,
+    broker_log: Option<&Path>,
+) -> Option<String> {
+    (!status.success()).then(|| no_thread_reason(broker_log))
+}
+
 /// The reason a launch is failed with when its TUI exited without a thread ever
-/// binding.
-///
-/// The preserved log path comes **before** the quoted refusal, and that ordering
-/// is load-bearing rather than stylistic: the launcher prints this line through
-/// `codex_coordinator::sanitize`, which bounds it at 300 characters, and the
-/// measured `thread/start` refusal is 232 characters on its own. Putting the path
-/// second would see it truncated away in exactly the case an operator needs it —
-/// leaving a message that describes a problem and names nothing to read about it.
-///
-/// So the refusal is the half that truncates, and that is the right half to lose
-/// the tail of: measured live, what survives the bound is
-/// `thread/start: fingerprint refused (Conflict): params.sandbox: a sandbox mode
-/// string(len=15) t…` — method, verdict, offending parameter and the value's
-/// length, which is the whole diagnosis. The rest is in the log this names.
-fn no_thread_reason(first_refusal: Option<&str>, broker_log: Option<&Path>) -> String {
+/// binding, naming the preserved broker log when there is one.
+fn no_thread_reason(broker_log: Option<&Path>) -> String {
     let mut reason = "the codex TUI exited without ever starting a thread".to_string();
     if let Some(path) = broker_log {
         reason.push_str(&format!(
             "; the broker's decision log is at {}",
             path.display()
         ));
-    }
-    if let Some(line) = first_refusal {
-        reason.push_str(&format!("; first refusal: {line}"));
     }
     reason
 }
@@ -1719,6 +1679,28 @@ fn report_launch_without_a_thread(uid: &str, reason: &str) {
             &lock,
             uid,
             reason,
+            crate::codex_launch::CleanupState::Pending,
+        );
+    }
+}
+
+/// End the launch of a TUI quit cleanly before any thread bound: mark the quit, then
+/// end a still-`pending` launch, so the coordinator stops waiting for a thread and the
+/// launcher, reading the mark, exits without printing the reason. The mark comes first,
+/// so a launcher that sees the launch ended also sees why. On a launch already `ready`
+/// the end is a no-op (`to_failed` refuses `ready → failed`) and the session ends like
+/// any other finished run, with no reason for the phone. See
+/// [`crate::codex_launch::LaunchRecord::codex_quit_before_thread`].
+///
+/// Best-effort, like [`report_launch_without_a_thread`]: a record this host cannot
+/// write is one the coordinator's own deadline still owns.
+fn report_quit_before_thread(uid: &str) {
+    if let Ok(lock) = crate::codex_launch::LaunchLock::acquire_bounded(uid, RECORD_LOCK_BUDGET) {
+        let _ = crate::codex_launch::note_codex_quit_before_thread(&lock, uid);
+        let _ = crate::codex_launch::to_failed(
+            &lock,
+            uid,
+            "the codex TUI was quit before it started a thread",
             crate::codex_launch::CleanupState::Pending,
         );
     }
@@ -1796,7 +1778,8 @@ fn note_thread_bound(uid: &str) -> Result<()> {
         .context("recording that a thread bound in the launch record")
 }
 
-/// The fixed-width frame a fenced child writes to report its own pid (A11.1).
+/// The fixed-width frame a fenced child writes to report its own pid (the spawn
+/// fence).
 ///
 /// Fixed width, never a delimiter scan, because the parent's copy of the write end
 /// is still open while it sits inside `spawn()` — so the read end can never see
@@ -1922,7 +1905,8 @@ unsafe fn fence_write_all(fd: std::os::unix::io::RawFd, buf: &[u8]) -> bool {
     true
 }
 
-/// Spawn `cmd` **inert** and release it only once its identity is durable (A11.1).
+/// Spawn `cmd` **inert** and release it only once its identity is durable (the
+/// spawn fence).
 ///
 /// This closes the spawn→record window at the root. Before it, the child was
 /// already running the target program by the time its pid could be read, so a host
@@ -1945,13 +1929,13 @@ unsafe fn fence_write_all(fd: std::os::unix::io::RawFd, buf: &[u8]) -> bool {
 /// while the child is fenced is byte-identical to the one read after it execs, and
 /// its pgid is already final because `process_group(0)` is applied *before* the
 /// `pre_exec` closure runs. So this records exactly what the custodian will later
-/// verify — the module doc's `[UNVERIFIED]` note on `execve` no longer applies here.
+/// verify (`the_recorded_birth_identity_survives_the_targets_execve`).
 ///
 /// **What this does NOT touch**, deliberately: stdio and process-group inheritance.
 /// The fence adds a `pre_exec` closure and nothing else, so the TUI still inherits
 /// the pane's tty and the host's process group — the measured dead-keyboard
 /// constraint at its spawn site is untouched — and the app-server still gets its own
-/// group. That is the whole reason this is a host-local fence rather than the D6
+/// group. That is the whole reason this is a host-local fence rather than the
 /// exec gate, which hardcodes both.
 fn spawn_fenced(cmd: &mut Command, args: &HostArgs, role: &str) -> Result<Child> {
     use std::os::unix::io::AsRawFd;
@@ -2076,7 +2060,8 @@ fn spawn_fenced(cmd: &mut Command, args: &HostArgs, role: &str) -> Result<Child>
     // Checked AFTER the spawn is unwrapped so the `Child` exists to be dropped —
     // `kill_on_drop` then reaps a child that was released but could not be used.
     let identity = recorded?;
-    // A11.1, readiness half — and `spawn()` returning `Ok` is NOT the proof.
+    // The spawn fence's readiness half — and `spawn()` returning `Ok` is NOT the
+    // proof.
     //
     // It was taken to be: the parent blocks on std's CLOEXEC error pipe until the
     // exec either succeeds or reports its errno, so `Ok` was read as "the exec
@@ -2169,7 +2154,8 @@ fn same_image(ours: &std::path::Path, theirs: &std::path::Path) -> Result<bool> 
     Ok(a.dev() == b.dev() && a.ino() == b.ino())
 }
 
-/// Refuse unless this child is **alive and past `execve`** (A11.1, readiness half).
+/// Refuse unless this child is **alive and past `execve`** (the spawn fence's
+/// readiness half).
 ///
 /// Two questions, and both are needed:
 ///
@@ -2224,14 +2210,14 @@ fn prove_past_execve(
 /// does NOT get to run teardown — SIGKILL, or an abort under `panic = "abort"` —
 /// and on those paths the custodian is the only actor left. A session that comes
 /// up with an unrecorded child is one whose processes nobody can name afterwards,
-/// which is the leak this whole chunk is about. So a failure here aborts the
+/// which is the leak this module exists to remove. So a failure here aborts the
 /// launch: no session is better than an unreapable one.
 ///
 /// A child whose birth or pgid cannot be read is an error rather than a partial
 /// entry: a `(pid, ?)` record is a bare number, and this codebase does not signal
 /// bare numbers.
 ///
-/// A11.1: called by [`spawn_fenced`] while the child is still parked before
+/// Called by [`spawn_fenced`] while the child is still parked before
 /// `execve`, so "recorded" now strictly precedes "running the target program".
 /// Write down a freeze this host is holding, so the custodian can undo it if this
 /// host does not live to undo it itself.
@@ -2244,7 +2230,7 @@ fn prove_past_execve(
 /// tells a peer's custodian to defer instead of clearing a guard out from under this
 /// launch, and what an operator reads a week later when codex refuses to update. A
 /// launch that holds the flag with none of that written down is precisely the
-/// invisible, unattributable freeze this whole chunk exists to abolish. So: no
+/// invisible, unattributable freeze this module exists to abolish. So: no
 /// record, no launch, and a refusal somebody can read.
 ///
 /// Called from inside the freeze, with the executable's own [`protocol::hash::
@@ -2381,7 +2367,7 @@ fn record_child_pid(
         argv_hash: String::new(),
         // Stamped by `record_host_child` from the verified lease holder.
         recorded_by: None,
-        // A11.1: NOT yet — the child is still parked before `execve`. Set by
+        // NOT yet — the child is still parked before `execve`. Set by
         // `confirm_child_exec` once `spawn()` proves it got past it.
         exec_confirmed: false,
     };
@@ -2393,18 +2379,19 @@ fn record_child_pid(
     // non-urgent writers use. A launch that cannot get the lock in a second is
     // failed, which is the same fail-closed answer as any other recording failure.
     //
-    // A11.1: for a child spawned through [`spawn_fenced`] that window is no longer a
-    // leak. The child is parked before `execve` until this write returns, so a host
-    // SIGKILLed here leaves a process that has not become codex and that dies on the
-    // release pipe's EOF. The budget still matters — it bounds how long the launch
-    // is held inert — but missing it now costs a slow launch, not a stray process.
+    // For a child spawned through the spawn fence, [`spawn_fenced`], that window is
+    // no longer a leak. The child is parked before `execve` until this write
+    // returns, so a host SIGKILLed here leaves a process that has not become codex
+    // and that dies on the release pipe's EOF. The budget still matters — it bounds
+    // how long the launch is held inert — but missing it now costs a slow launch,
+    // not a stray process.
     let lock = crate::codex_launch::LaunchLock::acquire_bounded(&args.uid, RECORD_LOCK_BUDGET)?;
     crate::codex_launch::record_host_child(&lock, &args.uid, &me, entry)
         .with_context(|| format!("recording {role} in the launch record"))?;
     Ok(identity)
 }
 
-/// Mark a recorded child **past `execve`** (A11.1, readiness half).
+/// Mark a recorded child **past `execve`** (the spawn fence's readiness half).
 ///
 /// Called only once [`prove_past_execve`] has SUCCEEDED — never on the strength of
 /// `Command::spawn()` returning `Ok`, which is measurably not the same claim: the
@@ -2427,6 +2414,226 @@ fn confirm_child_exec(
     let lock = crate::codex_launch::LaunchLock::acquire_bounded(&args.uid, RECORD_LOCK_BUDGET)?;
     crate::codex_launch::confirm_host_child_exec(&lock, &args.uid, &me, role, identity)
         .with_context(|| format!("confirming {role}'s exec in the launch record"))
+}
+
+/// Wait for the launching terminal to attach, so Codex's first color query is
+/// answered with that terminal's colors: the attach reports them to tmux for this
+/// pane in the same command list that attaches it (`crate::attach`), so once tmux
+/// counts the client they are in place.
+async fn wait_for_terminal(args: &HostArgs) -> Result<()> {
+    let pane = std::env::var("TMUX_PANE").context("terminal host has no tmux pane")?;
+    anyhow::ensure!(
+        terminal_id(&pane, '%'),
+        "terminal host has an invalid tmux pane"
+    );
+    let binary = crate::tmux::tmux_bin()?.canonicalize()?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = terminal_tmux(
+            &binary,
+            &args.tmux_socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &pane,
+                "#{pane_pid}|#{session_attached}",
+            ],
+        )
+        .await?;
+        let fields: Vec<_> = output.trim().split('|').collect();
+        anyhow::ensure!(fields.len() == 2, "invalid terminal attachment response");
+        anyhow::ensure!(
+            fields[0].parse::<u32>()? == std::process::id(),
+            "terminal attachment response belongs to another pane"
+        );
+        // Closing the launching terminal leaves the independently owned session
+        // free to start without a display, just as a detached launch does.
+        if fields[1].parse::<u32>()? > 0 || tokio::time::Instant::now() >= deadline {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn terminal_id(value: &str, prefix: char) -> bool {
+    value.strip_prefix(prefix).is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+async fn terminal_tmux(binary: &Path, socket: &str, argv: &[&str]) -> Result<String> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(1),
+        Command::new(binary)
+            .args(["-N", if socket.contains('/') { "-S" } else { "-L" }, socket])
+            .args(argv)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("tmux did not answer the terminal check")??;
+    anyhow::ensure!(
+        output.status.success(),
+        "tmux refused the terminal check: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    String::from_utf8(output.stdout).context("invalid tmux response")
+}
+
+/// The first words of every goodbye codex prints as a `--remote` client
+/// (`codex-rs/tui/src/app/exit_summary.rs`).
+const REMOTE_GOODBYE: &str = "Disconnected from this task.";
+
+/// How long the host looks for the TUI's goodbye in the pane once the TUI has exited.
+const GOODBYE_WAIT: Duration = Duration::from_millis(500);
+
+/// The same once a signal ended the TUI: a goodbye printed before the signal is
+/// already in the pane's tty.
+const SIGNALLED_GOODBYE_WAIT: Duration = Duration::from_millis(50);
+
+/// What codex's remote goodbye says that its direct-run goodbye repeats.
+#[derive(Debug, PartialEq)]
+struct Goodbye {
+    thread_id: String,
+    token_usage: Option<String>,
+}
+
+/// Replace the TUI's remote-client goodbye with the one codex prints run directly.
+///
+/// As a `--remote` client codex ends with "Disconnected from this task", a
+/// `Reconnect:` command for this session's socket and a way to stop its turn, none of
+/// which outlive the session. Run directly, with its thread started as the host's
+/// always is, it prints its token usage and then how to resume the session once it
+/// has a saved rollout, or its id. The pane's rows are the terminal's
+/// (`crate::attach`), so the host erases from the goodbye's first row and prints the
+/// direct run's lines there. Only a goodbye naming this session's `tui_sock` is
+/// codex's own: the same words in the transcript above it are not. A goodbye the host
+/// cannot find or read is left as codex printed it.
+async fn restate_goodbye(args: &HostArgs, tui_sock: &Path, wait: Duration) -> Result<()> {
+    let pane = std::env::var("TMUX_PANE").context("terminal host has no tmux pane")?;
+    let binary = crate::tmux::tmux_bin()?.canonicalize()?;
+    let socket = &args.tmux_socket;
+    let deadline = tokio::time::Instant::now() + wait;
+    let (row, goodbye) = loop {
+        let screen = terminal_tmux(&binary, socket, &["capture-pane", "-p", "-t", &pane]).await?;
+        let joined =
+            terminal_tmux(&binary, socket, &["capture-pane", "-p", "-J", "-t", &pane]).await?;
+        let row = screen
+            .lines()
+            .collect::<Vec<_>>()
+            .iter()
+            .rposition(|line| line.trim_start().starts_with(REMOTE_GOODBYE));
+        if let (Some(row), Some(goodbye)) = (row, parse_goodbye(&joined, tui_sock)) {
+            break (row, goodbye);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let resumable = rollout_is_resumable(&args.codex_home.join("sessions"), &goodbye.thread_id);
+    let name = resumable
+        .then(|| thread_name(&args.codex_home, &goodbye.thread_id))
+        .flatten();
+    let mut out = std::io::stdout().lock();
+    write!(
+        out,
+        "\x1b[{};1H\x1b[J{}",
+        row + 1,
+        direct_goodbye(&goodbye, resumable, name.as_deref())
+    )?;
+    out.flush()?;
+    Ok(())
+}
+
+/// The thread id and token usage in the pane's last remote goodbye, read from a
+/// capture whose wrapped lines are joined; `None` unless it reconnects to `tui_sock`.
+fn parse_goodbye(joined: &str, tui_sock: &Path) -> Option<Goodbye> {
+    let lines: Vec<&str> = joined.lines().map(str::trim).collect();
+    let start = lines
+        .iter()
+        .rposition(|line| line.starts_with(REMOTE_GOODBYE))?;
+    let tail = &lines[start..];
+    let reconnect = tail.iter().find(|line| line.starts_with("Reconnect:"))?;
+    let own = format!("unix://{} resume ", tui_sock.display());
+    let (_, after) = reconnect.split_once(&own)?;
+    let thread_id = after.split_whitespace().next()?;
+    if !thread_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return None;
+    }
+    let token_usage = tail
+        .iter()
+        .find(|line| line.starts_with("Token usage"))
+        .map(|line| line.replacen("Token usage so far:", "Token usage:", 1));
+    Some(Goodbye {
+        thread_id: thread_id.to_string(),
+        token_usage,
+    })
+}
+
+/// Whether the thread has a non-empty rollout under `sessions` — codex's own test
+/// for offering `codex resume` (`rollout_path_is_resumable`).
+fn rollout_is_resumable(sessions: &Path, thread_id: &str) -> bool {
+    let suffix = format!("-{thread_id}.jsonl");
+    let Ok(entries) = std::fs::read_dir(sessions) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => rollout_is_resumable(&path, thread_id),
+            Ok(kind) if kind.is_file() => {
+                entry.file_name().to_string_lossy().ends_with(&suffix)
+                    && entry.metadata().is_ok_and(|meta| meta.len() > 0)
+            }
+            _ => false,
+        }
+    })
+}
+
+/// The thread's latest name in codex's `session_index.jsonl`, without control
+/// characters.
+fn thread_name(codex_home: &Path, thread_id: &str) -> Option<String> {
+    let index = std::fs::read_to_string(codex_home.join("session_index.jsonl")).ok()?;
+    let name = index
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| entry["id"] == thread_id)
+        .find_map(|entry| entry["thread_name"].as_str().map(str::to_string))?;
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The lines codex prints when it exits run directly, in its colours.
+fn direct_goodbye(goodbye: &Goodbye, resumable: bool, name: Option<&str>) -> String {
+    let command = |text: &str| format!("\x1b[36m{text}\x1b[39m");
+    let mut lines = Vec::new();
+    if let Some(usage) = &goodbye.token_usage {
+        lines.push(usage.clone());
+    }
+    if resumable {
+        lines.push("To continue this session, run:".to_string());
+        lines.push(format!(
+            "  {}",
+            command(&format!("codex resume {}", goodbye.thread_id))
+        ));
+        if let Some(name) = name {
+            lines.push(format!(
+                "Or run {} and select {}.",
+                command("codex resume"),
+                command(name)
+            ));
+        }
+    } else {
+        lines.push(format!("Session ID: {}", goodbye.thread_id));
+    }
+    lines.iter().map(|line| format!("{line}\r\n")).collect()
 }
 
 /// The session proper, run under the teardown guard so it may use `?` freely.
@@ -2452,43 +2659,38 @@ async fn drive(
 
     // --- Step 2: the broker in front of the app-server ----------------------
     let factory = WsUdsUpstreamFactory::new(paths.as_sock.clone());
-    let broker = Broker::new(
-        paths.tui_sock.clone(),
-        paths.ccd_sock.clone(),
-        args.fingerprint.clone(),
-        factory,
-    )
-    .with_event_sink(Arc::clone(&session.log))
-    // The measurement instrument, off unless a live harness asked for it by setting
-    // `CC_CODEX_FRAME_TEE`, and — the containment that matters — not COMPILED unless
-    // this crate was built with its own `frame-tee` feature.
-    //
-    // Gated on CodeConnect's feature rather than only on the broker's, and the
-    // difference is not cosmetic: cargo unifies features across a dependency graph, so
-    // some other crate in a future build could turn on `codex-broker/frame-tee` while
-    // CodeConnect's own feature stays off. `FrameTee::from_env` would then read the
-    // environment even though nothing in this crate asked it to. Gating the CALL here
-    // makes the invariant local to the binary a user runs: no feature, no call, no read.
-    //
-    // A named path that will not open is fatal rather than silently off: a harness that
-    // asked for a capture and got an empty file would draw conclusions from frames
-    // nobody recorded. See `codex_broker::frame_tee`.
-    .with_frame_tee(if cfg!(feature = "frame-tee") {
-        match codex_broker::FrameTee::from_env() {
-            Ok(tee) => tee,
-            Err(why) => return Ok(Outcome::Fatal(why)),
-        }
-    } else {
-        codex_broker::FrameTee::off()
-    });
+    let broker = Broker::new(paths.tui_sock.clone(), paths.ccd_sock.clone(), factory)
+        .with_event_sink(Arc::clone(&session.log))
+        // The measurement instrument, off unless a live harness asked for it by setting
+        // `CC_CODEX_FRAME_TEE`, and — the containment that matters — not COMPILED unless
+        // this crate was built with its own `frame-tee` feature.
+        //
+        // Gated on CodeConnect's feature rather than only on the broker's, and the
+        // difference is not cosmetic: cargo unifies features across a dependency graph, so
+        // some other crate in a future build could turn on `codex-broker/frame-tee` while
+        // CodeConnect's own feature stays off. `FrameTee::from_env` would then read the
+        // environment even though nothing in this crate asked it to. Gating the CALL here
+        // makes the invariant local to the binary a user runs: no feature, no call, no read.
+        //
+        // A named path that will not open is fatal rather than silently off: a harness that
+        // asked for a capture and got an empty file would draw conclusions from frames
+        // nobody recorded. See `codex_broker::frame_tee`.
+        .with_frame_tee(if cfg!(feature = "frame-tee") {
+            match codex_broker::FrameTee::from_env() {
+                Ok(tee) => tee,
+                Err(why) => return Ok(Outcome::Fatal(why)),
+            }
+        } else {
+            codex_broker::FrameTee::off()
+        });
     // Taken LAST, after both builder methods above: they replace fields through
     // `Arc::get_mut` and would panic on a context this has already cloned. The
     // handle has to outlive the broker, since `serve` consumes it on the next line.
     let bound_thread = broker.bound_thread_probe();
     session.broker = Some(tokio::spawn(broker.serve()));
     session.bound_thread = Some(Arc::clone(&bound_thread));
-    // The coordinator is holding the launcher at the record until this says a
-    // thread bound, so start looking now rather than after the TUI is spawned:
+    // The coordinator is waiting for a bound thread before committing Ready,
+    // so start looking now rather than after the TUI is spawned:
     // nothing binds before the TUI exists, but the watcher's first successful poll
     // is what the healthy launch's extra ~225 ms is spent waiting for.
     session.thread_watcher = Some(spawn_thread_binding_watcher(args.uid.clone(), bound_thread));
@@ -2507,13 +2709,21 @@ async fn drive(
         bound = listeners => bound?,
     }
 
+    if args.wait_for_terminal {
+        tokio::select! {
+            biased;
+            name = signals.recv() => return Ok(Outcome::Signalled(name)),
+            ready = wait_for_terminal(args) => ready?,
+        }
+    }
+
     // --- Step 3: the real interactive TUI, foreground, inheriting our tty ----
     //
-    // A7.1, checked a SECOND time and not because the first was in doubt. Steps 1
-    // and 2 stand between the two spawns — the app-server's bring-up and the
-    // broker's bind, seconds of real time during which the path is not being
-    // watched — so the app-server's check says nothing about the file this is about
-    // to exec. Each exec gets its own verify, immediately before it.
+    // The executable-identity pin, checked a SECOND time and not because the first
+    // was in doubt. Steps 1 and 2 stand between the two spawns — the app-server's
+    // bring-up and the broker's bind, seconds of real time during which the path is
+    // not being watched — so the app-server's check says nothing about the file this
+    // is about to exec. Each exec gets its own verify, immediately before it.
     //
     // On a blocking thread, and raced against a signal, because by this point the
     // broker is SERVING. The verify is a whole-file read — measured at 0.478 / 0.459
@@ -2583,94 +2793,8 @@ async fn drive(
         // already gone, and the claim comes back through this scope's drop.
         Err(err) => return Err(err),
     };
-    // **The `--` fence, applied at the exec that actually runs.** Not in the coordinator
-    // and not at parse time: the process whose spawn this is, is the one that has to be
-    // sure — the same reason this function re-validates the passthrough rather than
-    // trusting its parent. See `codex::fence_positionals` for the measurement that makes
-    // a positional unable to dispatch, and for why the refusal table is no longer what
-    // the safety rests on.
-    let fenced = crate::codex::fence_positionals(&args.tui_args)
-        .map_err(|refusal| anyhow!("refused passthrough TUI argument: {refusal}"))?;
-    let mut tui_cmd = Command::new(&args.codex);
-    tui_cmd
-        .arg("--remote")
-        .arg(format!("unix://{}", paths.tui_sock.display()))
-        // **The sandbox CodeConnect owns, actually set on the process that asks for
-        // it.** The reserved grammar refuses a user-supplied `--sandbox` with
-        // "`--sandbox` is set by CodeConnect (the session sandbox policy)" — and
-        // until this line that sentence was FALSE. The TUI was spawned with no
-        // sandbox flag at all, so it chose its own from the project's `trust_level`
-        // in the user's `~/.codex/config.toml`: measured, a `trust_level =
-        // "trusted"` project produced a `thread/start` asserting
-        // `"sandbox":"workspace-write"` against a fingerprint pinned `read-only`,
-        // and the broker refused it (`params.sandbox` Conflict) — a launch the user
-        // could do nothing about, killed by a knob the grammar claimed to own and
-        // nobody set. The grammar's claim is now true by construction: the flag is
-        // on the argv of the process that sends the request, so the request carries
-        // this mode whatever the config says.
-        //
-        // The value is `args.fingerprint.sandbox` — the very string the broker
-        // asserts, handed to this host on its own argv — and not a second copy of
-        // `codex::LAUNCH_SANDBOX`. A separate constant could drift from the pin; a
-        // shared field cannot. If it is ever a mode codex does not know, codex
-        // refuses at parse time (`invalid value '…' for '--sandbox <SANDBOX_MODE>'
-        // [possible values: read-only, workspace-write, danger-full-access]`) and
-        // no session comes up, which is the correct outcome for a fingerprint the
-        // TUI could not have honoured.
-        //
-        // Measured on codex 0.153: `--sandbox` is accepted alongside `--remote` (a
-        // bad value gives the `invalid value` error above; an unrecognised flag
-        // gives `unexpected argument` instead, so the flag really is parsed here).
-        // There is deliberately no matching flag on the app-server spawn — `codex
-        // app-server --help` contains no `--sandbox` at all, because the sandbox is
-        // a PER-THREAD parameter carried on `thread/start`, which the TUI sends.
-        // Nobody should go looking for the other half; this is the whole of it.
-        //
-        // Before the fenced passthrough, so it is a flag rather than something that
-        // could be read as one of the TUI's own positionals.
-        .arg("--sandbox")
-        .arg(&args.fingerprint.sandbox)
-        // **The same feature pin as the app-server's, on the other process that
-        // loads the same config.** The tool the feature exposes is the app-server's
-        // to offer, so this half buys no additional safety on its own; what it buys
-        // is that neither process can read an operator's value for a key
-        // CodeConnect's grammar refuses at the command line, which is what makes
-        // "the launch is without it" a property of the launch rather than of one
-        // spawn's reading of where the tool list is built.
-        //
-        // Before the fenced passthrough, like `--sandbox` and for the extra reason
-        // that the fence's `--` turns everything behind it into prompt content.
-        .arg("-c")
-        .arg(crate::codex::pinned_off_feature_override())
-        .args(&fenced)
-        .env("CODEX_HOME", &args.codex_home)
-        // Inherit stdio (the pane's tty) so this IS the session the user drives —
-        // and, deliberately, inherit the host's PROCESS GROUP too.
-        //
-        // The app-server below gets its own group so cleanup can `killpg` a
-        // recorded pgid. The TUI must not, and this was measured rather than
-        // assumed: with `.process_group(0)` the real codex TUI comes up with
-        // `pgid == its own pid` while the pane's terminal keeps `tpgid == the
-        // host's group` — i.e. the TUI is a BACKGROUND process group on the tty it
-        // is supposed to own. It does not get stopped (it evidently blocks
-        // SIGTTIN), so nothing looks broken from the outside: the pane renders and
-        // the broker handshake succeeds. What breaks is the user's keyboard, which
-        // keeps going to the foreground group. Making it correct would mean the
-        // host also handing over terminal control with `tcsetpgrp`, and restoring
-        // it on every exit path — real terminal-ownership machinery, for a benefit
-        // already obtained without it.
-        //
-        // Nothing is lost for cleanup: the TUI's identity is recorded as
-        // (pid, birth, pgid) like the app-server's, and the custodian signals it by
-        // that verified identity. A group kill buys nothing here anyway, since the
-        // TUI's group would be the host's own.
-        //
-        // A11.1: the fence below preserves every one of those measured facts. It
-        // installs a `pre_exec` closure and touches nothing else — no stdio
-        // redirection, no `setpgid` — so the TUI still comes up on the pane's tty in
-        // the host's foreground process group, and the keyboard still works.
-        .kill_on_drop(true);
-    // A11.1: fenced, so the TUI's identity is durable before it can become codex.
+    let mut tui_cmd = tui_command(args, &paths.tui_sock)?;
+    // Fenced, so the TUI's identity is durable before it can become codex.
     // The spawn and the record are now one step, which is what removes the interval
     // in which a SIGKILLed host left a live, unrecorded TUI on the user's pane.
     let tui = match spawn_fenced(&mut tui_cmd, args, "tui") {
@@ -2766,7 +2890,7 @@ async fn drive(
             }
             resolve_outcome(Fired::Tui(report), as_state, broker_probe.is_finished())
         }
-        name = signals.recv() => {
+        name = signals.recv_while_tui_runs() => {
             // The SAME observation the TUI arm makes, for the same reason: a signal
             // does not tell you anything about the app-server, and fabricating
             // `Alive` here would let an upstream death racing a SIGTERM be reported
@@ -2934,8 +3058,9 @@ async fn kill_and_reap(child: &mut Child, budget: Duration) -> bool {
 
 // ------------------------------------------------------------------- signals
 
-/// The three signals that mean "this pane is going away", installed as one unit
-/// **before** the first spawn so bring-up itself is interruptible.
+/// The three signals that mean "this pane is going away" — SIGINT only until the TUI
+/// runs ([`Self::recv_while_tui_runs`]) — installed as one unit **before** the first
+/// spawn so bring-up itself is interruptible.
 struct Signals {
     term: Signal,
     int: Signal,
@@ -2965,6 +3090,17 @@ impl Signals {
         tokio::select! {
             _ = self.term.recv() => "SIGTERM",
             _ = self.int.recv() => "SIGINT",
+            _ = self.hup.recv() => "SIGHUP",
+        }
+    }
+
+    /// [`Self::recv`] while the TUI runs. The TUI shares the host's process group,
+    /// so a Ctrl-C the pane turns into SIGINT reaches it too, and it decides what
+    /// that means as it does run directly; the host follows its exit. A Ctrl-C
+    /// typed as the TUI quits would otherwise end the session as a signal.
+    async fn recv_while_tui_runs(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.term.recv() => "SIGTERM",
             _ = self.hup.recv() => "SIGHUP",
         }
     }
@@ -3103,7 +3239,7 @@ async fn wait_for_broker_listeners(
 /// trustworthy is the run dir having been exclusively created by this process
 /// moments earlier — which rules out stale residue and anything left by another
 /// uid, but is not a claim about the class invariant 1 puts out of scope. See
-/// invariant 1 in the module doc for the actual premise, and `codex::start` (A22)
+/// invariant 1 in the module doc for the actual premise, and `codex::start`
 /// for what that class is.
 fn is_ready_socket(path: &Path, mode: Option<u32>) -> bool {
     match std::fs::metadata(path) {
@@ -3182,6 +3318,19 @@ fn assert_sun_len(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_wait_is_an_optional_unique_host_flag() {
+        assert!(!parse_host_args(&complete(&[])).unwrap().wait_for_terminal);
+        assert!(
+            parse_host_args(&complete(&["--wait-for-terminal"]))
+                .unwrap()
+                .wait_for_terminal
+        );
+        assert!(
+            parse_host_args(&complete(&["--wait-for-terminal", "--wait-for-terminal"])).is_err()
+        );
+    }
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
@@ -3297,58 +3446,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **THE FIRST REFUSAL IS THE CAUSE; EVERYTHING AFTER IT IS CONSEQUENCE.**
-    ///
-    /// Replays the exact sequence a live refused launch wrote to `broker.log`: the
-    /// `thread/start` the fingerprint refused, then the two `thread/list` refusals a
-    /// TUI already on its way out produces. Keeping the last match put the
-    /// `thread/list` line in the user's terminal — an allowlist problem that is not
-    /// the bug, pointing an operator away from the sandbox mismatch that is.
-    ///
-    /// **Mutation:** change the sink's `slot.is_none()` guard back to an
-    /// unconditional write and this fails, naming `thread/list`.
-    #[test]
-    fn the_first_refusal_is_the_one_reported() {
-        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let recorder = Arc::clone(&seen);
-        let inner: EventSink = Arc::new(move |line: &str| {
-            recorder.lock().unwrap().push(line.to_string());
-        });
-        let refusal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let sink = refusal_watching_sink(inner, Arc::clone(&refusal));
-
-        sink("Tui: leg opened (conn 155)");
-        sink(
-            "Tui: refuse->synthetic error (thread/start: fingerprint refused (Conflict): \
-             params.sandbox: a sandbox mode string(len=15) that is not the fingerprint's \
-             \"read-only\") (conn 155)",
-        );
-        sink("Tui: refuse->synthetic error (thread/list: refused (NotAllowlisted)) (conn 155)");
-        sink("Tui: refuse->synthetic error (thread/list: refused (NotAllowlisted)) (conn 155)");
-
-        let kept = refusal.lock().unwrap().clone().expect("a refusal was seen");
-        assert!(
-            kept.contains("thread/start") && kept.contains("params.sandbox"),
-            "the causal refusal must be the one kept, not the fallout: {kept}"
-        );
-        // And the wrapper is a wrapper: every line still reaches the log unchanged,
-        // refusals included.
-        assert_eq!(
-            seen.lock().unwrap().len(),
-            4,
-            "watching the stream must not consume any of it"
-        );
-
-        // The reason names it, after the path — which is what survives `sanitize`'s
-        // 300-character bound (see `no_thread_reason`).
-        let reason = no_thread_reason(Some(&kept), Some(Path::new("/tmp/logs/broker-cc-1-U.log")));
-        let printed = crate::codex_coordinator::sanitize(&reason);
-        assert!(
-            printed.contains("/tmp/logs/broker-cc-1-U.log") && printed.contains("thread/start"),
-            "the printed line must name both the log and the causal refusal: {printed}"
-        );
-    }
-
     /// The minimum complete charter: every required flag, no passthrough.
     fn complete(extra: &[&str]) -> Vec<String> {
         let mut parts = vec![
@@ -3360,26 +3457,15 @@ mod tests {
             "/tmp/cc.tmux.sock",
             "--codex",
             "/usr/local/bin/codex",
-            // A7.1: the identity of the bytes at that path, as the launcher
-            // inspected them. Required — the host verifies it before each exec.
+            // The executable-identity pin: the identity of the bytes at that path, as
+            // the launcher inspected them. Required — the host verifies it before each
+            // exec.
             "--codex-sha256",
             "2222222222222222222222222222222222222222222222222222222222222222",
             "--run-dir",
             "/tmp/cc.host.1",
             "--codex-home",
             "/tmp/cc.home.1",
-            "--approval-policy",
-            "untrusted",
-            "--approvals-reviewer",
-            "user",
-            "--sandbox",
-            "read-only",
-            "--hooks-enabled",
-            "true",
-            // The fifth fingerprint dimension: the CANONICAL launch cwd the
-            // coordinator resolved. The host passes it through and never re-resolves it.
-            "--launch-cwd",
-            "/work/proj",
         ];
         parts.extend_from_slice(extra);
         argv(&parts)
@@ -3438,50 +3524,8 @@ mod tests {
         );
         assert_eq!(a.run_dir, PathBuf::from("/tmp/cc.host.1"));
         assert_eq!(a.codex_home, PathBuf::from("/tmp/cc.home.1"));
-        assert_eq!(a.fingerprint.approval_policy, "untrusted");
-        assert_eq!(a.fingerprint.approvals_reviewer, "user");
-        assert_eq!(a.fingerprint.sandbox, "read-only");
-        assert!(a.fingerprint.hooks_enabled);
-        assert_eq!(a.fingerprint.launch_cwd, "/work/proj");
         // Everything past `--` is the TUI's, verbatim.
         assert_eq!(a.tui_args, vec!["--search", "hello world"]);
-    }
-
-    #[test]
-    fn parses_explicit_fingerprint_dimensions() {
-        let a = parse_host_args(&argv(&[
-            "--uid",
-            "u",
-            "--nonce",
-            "n",
-            "--tmux-socket",
-            "/s",
-            "--codex",
-            "/c",
-            "--codex-sha256",
-            "2222222222222222222222222222222222222222222222222222222222222222",
-            "--run-dir",
-            "/r",
-            "--codex-home",
-            "/h",
-            "--approval-policy",
-            "on-request",
-            "--approvals-reviewer",
-            "codex",
-            "--sandbox",
-            "workspace-write",
-            "--hooks-enabled",
-            "false",
-            "--launch-cwd",
-            "/private/tmp/ws",
-        ]))
-        .unwrap();
-        assert_eq!(a.fingerprint.approval_policy, "on-request");
-        assert_eq!(a.fingerprint.approvals_reviewer, "codex");
-        assert_eq!(a.fingerprint.sandbox, "workspace-write");
-        assert!(!a.fingerprint.hooks_enabled);
-        assert_eq!(a.fingerprint.launch_cwd, "/private/tmp/ws");
-        assert!(a.tui_args.is_empty());
     }
 
     #[test]
@@ -3496,11 +3540,6 @@ mod tests {
             "--codex-sha256",
             "--run-dir",
             "--codex-home",
-            "--approval-policy",
-            "--approvals-reviewer",
-            "--launch-cwd",
-            "--sandbox",
-            "--hooks-enabled",
         ] {
             let full = complete(&[]);
             let mut kept = Vec::new();
@@ -3519,8 +3558,9 @@ mod tests {
         }
     }
 
-    /// A7.1 at the charter: the host will not run a binary it cannot check, and it
-    /// will not accept a digest in a shape it and the launcher could spell two ways.
+    /// The executable-identity pin at the charter: the host will not run a binary it
+    /// cannot check, and it will not accept a digest in a shape it and the launcher
+    /// could spell two ways.
     #[test]
     fn the_codex_digest_is_required_and_strictly_shaped() {
         // Absent: a refusal that says why, not a fall-back to trusting the path.
@@ -3614,47 +3654,20 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_values_are_strictly_parsed() {
+    fn values_are_strictly_parsed() {
         // A missing value is never a silent default.
-        assert!(parse_host_args(&argv(&[
-            "--codex",
-            "/c",
-            "--run-dir",
-            "/r",
-            "--codex-home",
-            "/h",
-            "--approval-policy"
-        ]))
-        .is_err());
+        assert!(
+            parse_host_args(&argv(&["--codex", "/c", "--run-dir", "/r", "--codex-home"])).is_err()
+        );
         // Empty and control-bearing values are refused.
         let mut empty = complete(&[]);
-        let idx = empty.iter().position(|a| a == "--sandbox").unwrap();
+        let idx = empty.iter().position(|a| a == "--codex-home").unwrap();
         empty[idx + 1] = String::new();
         assert!(parse_host_args(&empty).is_err());
         let mut ctrl = complete(&[]);
-        let idx = ctrl.iter().position(|a| a == "--approval-policy").unwrap();
-        ctrl[idx + 1] = "read\u{1b}[2Jonly".to_string();
+        let idx = ctrl.iter().position(|a| a == "--run-dir").unwrap();
+        ctrl[idx + 1] = "/tmp/\u{1b}[2Jrun".to_string();
         assert!(parse_host_args(&ctrl).is_err());
-    }
-
-    #[test]
-    fn hooks_enabled_accepts_only_true_or_false() {
-        for good in ["true", "false"] {
-            let mut a = complete(&[]);
-            let idx = a.iter().position(|x| x == "--hooks-enabled").unwrap();
-            a[idx + 1] = good.to_string();
-            assert!(parse_host_args(&a).is_ok(), "{good} should parse");
-        }
-        // The old lenient spellings are now errors, not silent truths.
-        for bad in ["1", "0", "yes", "no", "TRUE", "False", ""] {
-            let mut a = complete(&[]);
-            let idx = a.iter().position(|x| x == "--hooks-enabled").unwrap();
-            a[idx + 1] = bad.to_string();
-            assert!(
-                parse_host_args(&a).is_err(),
-                "--hooks-enabled {bad:?} must be refused, never defaulted"
-            );
-        }
     }
 
     #[test]
@@ -3666,10 +3679,6 @@ mod tests {
             ["--codex", "/other"],
             ["--run-dir", "/other"],
             ["--codex-home", "/other"],
-            ["--approval-policy", "never"],
-            ["--approvals-reviewer", "codex"],
-            ["--sandbox", "danger-full-access"],
-            ["--hooks-enabled", "false"],
         ] {
             assert!(
                 parse_host_args(&complete(&dup)).is_err(),
@@ -3679,24 +3688,17 @@ mod tests {
         }
     }
 
-    /// The host does not trust its caller: passthrough runs through the SAME 2a
-    /// reserved-argv grammar `codeconnect codex` uses, so the transport, the
-    /// working directory, profiles, approval controls and subcommands cannot be
-    /// smuggled in behind `--`.
+    /// The host does not trust its caller: passthrough runs through the SAME
+    /// reserved-argv grammar `codeconnect codex` uses, so the transport and
+    /// subcommands cannot be smuggled in behind `--`.
     #[test]
     fn passthrough_tui_args_are_vetted_by_the_reserved_grammar() {
         for refused in [
             vec!["--remote", "unix:///tmp/evil.sock"],
             vec!["--remote-auth-token-env", "TOKEN"],
-            vec!["--profile", "yolo"],
-            vec!["--dangerously-bypass-approvals-and-sandbox"],
-            vec!["--yolo"],
-            vec!["-a", "never"],
-            vec!["-C", "/"],
-            vec!["--config", "approval_policy=never"],
             vec!["exec"],
-            vec!["resume"],
-            vec!["--not-a-real-flag"],
+            vec!["review"],
+            vec!["--not-a-real-flag", "features"],
         ] {
             let mut parts = vec!["--"];
             parts.extend_from_slice(&refused);
@@ -3705,117 +3707,143 @@ mod tests {
                 "{refused:?} must be refused as TUI passthrough"
             );
         }
-        // Benign passthrough still rides through untouched.
-        let ok = parse_host_args(&complete(&["--", "--search", "--model", "gpt-5"])).unwrap();
-        assert_eq!(ok.tui_args, vec!["--search", "--model", "gpt-5"]);
+        // Everything else rides through untouched, the keyboard's own policy included.
+        let ok = parse_host_args(&complete(&["--", "--search", "--yolo", "-c", "a=b"])).unwrap();
+        assert_eq!(ok.tui_args, vec!["--search", "--yolo", "-c", "a=b"]);
+        let ok = parse_host_args(&complete(&["--", "resume", "--last"])).unwrap();
+        assert_eq!(ok.tui_args, vec!["resume", "--last"]);
     }
 
-    /// **The TUI is spawned with the FENCED argv, never the raw passthrough.**
-    ///
-    /// `codex::fence_positionals` is what makes a bare token unable to dispatch
-    /// (measured on both binaries; see its docs), and it only does that if this spawn
-    /// actually uses it. What has to be proven is the absence of the raw form at that
-    /// call site, which no unit test reaches by calling anything — the same reason
-    /// `codex::the_version_string_is_recorded_and_never_gates` reads its own source.
+    /// The TUI argv [`tui_command`] builds for `tui_args`, after the program.
+    fn tui_argv(tui_args: &[&str]) -> Vec<String> {
+        let mut charter: Vec<&str> = vec!["--"];
+        charter.extend_from_slice(tui_args);
+        let args = parse_host_args(&complete(&charter)).expect("a complete charter");
+        let cmd = tui_command(&args, Path::new("/tmp/cc.host.1/tui.sock")).expect("a command");
+        assert_eq!(cmd.as_std().get_program(), "/usr/local/bin/codex");
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// **The TUI is spawned with the FENCED argv, never the raw passthrough**, as a
+    /// `--remote` client of this session's broker. `codex::fence_positionals` is what
+    /// makes a bare token unable to dispatch (see its docs), and it only does that if
+    /// the spawn actually uses it.
     #[test]
     fn the_tui_is_spawned_with_the_fenced_argv() {
-        let src = include_str!("codex_host.rs");
-        let spawn = src
-            .split("let mut tui_cmd = Command::new(&args.codex);")
-            .nth(1)
-            .expect("the TUI spawn is in this file");
-        let spawn = &spawn[..spawn.find("CODEX_HOME").unwrap_or(spawn.len())];
-        assert!(
-            spawn.contains(".args(&fenced)"),
-            "the TUI spawn must pass the fenced argv: {spawn}"
-        );
-        assert!(
-            !spawn.contains("args.tui_args"),
-            "the raw passthrough must not reach the TUI spawn: {spawn}"
+        assert_eq!(
+            tui_argv(&["hi", "--search", "-m", "gpt-5"]),
+            vec![
+                "--remote",
+                "unix:///tmp/cc.host.1/tui.sock",
+                "--search",
+                "--model=gpt-5",
+                "--",
+                "hi",
+            ]
         );
     }
 
-    /// **THE SANDBOX THE GRAMMAR CLAIMS IS THE SANDBOX THE TUI IS SPAWNED WITH.**
-    ///
-    /// `codex::validate_codex_argv` refuses a user's `--sandbox` with "`--sandbox` is
-    /// set by CodeConnect (the session sandbox policy)". That sentence is only true
-    /// if this spawn sets it. Without the flag the TUI picks its mode from the
-    /// project's `trust_level`, and a `trusted` project sends
-    /// `"sandbox":"workspace-write"` at a fingerprint pinned `read-only` — a launch
-    /// the broker refuses and the user cannot fix.
-    ///
-    /// Read from source for the same reason as the fenced-argv test above: what has
-    /// to be proven is a property of the one call site, and no unit test reaches it.
-    /// The value is asserted to be the fingerprint's own field rather than a second
-    /// copy of `codex::LAUNCH_SANDBOX`, because two constants can drift and the flag
-    /// must never disagree with the pin the broker enforces.
-    ///
-    /// **Mutation:** delete the `.arg("--sandbox")` pair from the spawn and this
-    /// fails; spell the value as a literal or as `codex::LAUNCH_SANDBOX` and it
-    /// fails too.
+    /// The TUI never sees the host's tmux pane: its output reaches the terminal
+    /// unchanged, so it must behave as it does in that terminal.
     #[test]
-    fn the_tui_is_spawned_with_the_fingerprints_own_sandbox() {
-        let src = include_str!("codex_host.rs");
-        let spawn = src
-            .split("let mut tui_cmd = Command::new(&args.codex);")
-            .nth(1)
-            .expect("the TUI spawn is in this file");
-        let spawn = &spawn[..spawn.find("CODEX_HOME").unwrap_or(spawn.len())];
-        assert!(
-            spawn.contains(".arg(\"--sandbox\")"),
-            "the TUI spawn must set the sandbox CodeConnect claims to own: {spawn}"
+    fn the_tui_does_not_see_the_tmux_pane() {
+        let args = parse_host_args(&complete(&["--"])).expect("a complete charter");
+        let cmd = tui_command(&args, Path::new("/tmp/cc.host.1/tui.sock")).expect("a command");
+        let removed: Vec<_> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(removed, ["TMUX", "TMUX_PANE"]);
+    }
+
+    /// **`resume` and `fork` run as the broker's client too**: the subcommand comes
+    /// first, then `--remote`, then the fenced argv the launcher emitted.
+    #[test]
+    fn a_resume_or_fork_tui_names_its_subcommand_before_the_remote() {
+        assert_eq!(
+            tui_argv(&["resume", "--model=gpt-5", "--last"]),
+            vec![
+                "resume",
+                "--remote",
+                "unix:///tmp/cc.host.1/tui.sock",
+                "--model=gpt-5",
+                "--last",
+            ]
         );
-        assert!(
-            spawn.contains(".arg(&args.fingerprint.sandbox)"),
-            "the flag must carry the fingerprint's own value, so it cannot drift from \
-             the pin the broker enforces: {spawn}"
+        assert_eq!(
+            tui_argv(&["fork", "--", "0199-id", "carry on"]),
+            vec![
+                "fork",
+                "--remote",
+                "unix:///tmp/cc.host.1/tui.sock",
+                "--",
+                "0199-id",
+                "carry on",
+            ]
         );
     }
 
-    /// **THE FEATURE THE GRAMMAR REFUSES IS THE FEATURE BOTH SPAWNS PIN OFF.**
-    ///
-    /// `codex::validate_codex_argv` refuses a caller's own
-    /// `-c features.request_permissions_tool=…` by saying the session is launched
-    /// without it. That sentence is a claim about these two argvs: the operator's
-    /// `config.toml` is read by both processes and can set the key, so without the
-    /// pin the refusal would only stop the caller from asking for something the
-    /// config had already granted.
-    ///
-    /// Read from source for the same reason as the sandbox test above — what has to
-    /// be proven is a property of the call sites, and no unit test reaches them —
-    /// and the value is asserted to be the shared builder rather than a literal, so
-    /// the key the launch writes cannot drift from the key the grammar owns.
-    ///
-    /// **Mutation:** delete either `-c` pair, or spell the value as a literal
-    /// `"features.request_permissions_tool=false"`, and this fails.
+    /// **A clean quit before any thread is not a failure; any other unbound exit is.**
+    /// Ctrl+C in codex's `resume` picker exits with status 0 and prints nothing
+    /// (measured on 0.155.1), so the session ends with no reason. A non-zero status or
+    /// a signal keeps the failure report, naming the preserved broker log.
     #[test]
-    fn both_spawns_pin_the_permissions_feature_off() {
-        let src = include_str!("codex_host.rs");
-        for (site, marker) in [
-            (
-                "app-server",
-                "let mut appserver_cmd = Command::new(&args.codex);",
-            ),
-            ("TUI", "let mut tui_cmd = Command::new(&args.codex);"),
+    fn only_a_clean_quit_ends_an_unbound_session_without_a_reason() {
+        use std::os::unix::process::ExitStatusExt;
+        let log = Path::new("/logs/broker.log");
+        assert_eq!(
+            unbound_exit_reason(std::process::ExitStatus::from_raw(0), Some(log)),
+            None
+        );
+        for status in [
+            std::process::ExitStatus::from_raw(1 << 8),
+            std::process::ExitStatus::from_raw(libc::SIGKILL),
         ] {
-            let spawn = src
-                .split(marker)
-                .nth(1)
-                .unwrap_or_else(|| panic!("the {site} spawn is in this file"));
-            // Cut at the `.env` call rather than at the first mention of the
-            // name, so a comment that explains WHY the pin is there cannot end
-            // the window before the pin itself.
-            let spawn = &spawn[..spawn.find(".env(\"CODEX_HOME\"").unwrap_or(spawn.len())];
-            assert!(
-                spawn.contains(".arg(\"-c\")"),
-                "the {site} spawn must pin the feature CodeConnect claims to own: {spawn}"
-            );
-            assert!(
-                spawn.contains(".arg(crate::codex::pinned_off_feature_override())"),
-                "the {site} pin must carry the shared override, so it cannot drift from \
-                 the key the grammar refuses: {spawn}"
+            assert_eq!(
+                unbound_exit_reason(status, Some(log)).as_deref(),
+                Some(
+                    "the codex TUI exited without ever starting a thread; the broker's \
+                     decision log is at /logs/broker.log"
+                ),
+                "{status:?}"
             );
         }
+    }
+
+    /// **The TUI chooses its sandbox exactly as native codex does.**
+    ///
+    /// The spawn adds nothing of CodeConnect's own: the TUI picks its mode from the
+    /// user's config and the project's `trust_level`, the same as `codex` run by hand
+    /// in the same directory, and a phone's turn runs under whatever the keyboard's
+    /// thread has. Asserted on the arguments of the command [`tui_command`] builds —
+    /// the one the spawn runs — wherever in the builder they were added: no argument
+    /// starts with `--sandbox` or a single-dash `-s`, none contains `sandbox`, and there
+    /// is no `-c`/`--config`. The environment and the rest of the command are not
+    /// checked.
+    #[test]
+    fn the_tui_is_spawned_with_no_sandbox_of_its_own() {
+        let argv = tui_argv(&["hi"]);
+        assert_eq!(
+            argv,
+            vec!["--remote", "unix:///tmp/cc.host.1/tui.sock", "--", "hi"]
+        );
+        for arg in &argv {
+            assert!(
+                !arg.starts_with("--sandbox")
+                    && !(arg.starts_with("-s") && !arg.starts_with("--"))
+                    && !arg.contains("sandbox"),
+                "the TUI spawn sets a sandbox of its own ({arg}): {argv:?}"
+            );
+        }
+        assert!(
+            !argv.iter().any(|a| a == "-c" || a.starts_with("--config")),
+            "the TUI spawn sets no config of its own: {argv:?}"
+        );
     }
 
     /// The main race polls the broker's `JoinHandle` to completion on its
@@ -3921,7 +3949,7 @@ mod tests {
             vec!["--codex", "--run-dir", "/r"],
             vec!["--codex", "--"],
             vec!["--run-dir", "--codex-home", "/h"],
-            vec!["--sandbox", "--hooks-enabled", "true"],
+            vec!["--codex-home", "--uid", "u"],
         ] {
             let msg = match parse_host_args(&argv(&argv_parts)) {
                 Ok(_) => panic!("{argv_parts:?}: a flag-shaped value must be refused"),
@@ -4335,9 +4363,9 @@ mod tests {
     /// Readiness rests on owning the directory, so the host must refuse a run dir
     /// it did not create — that is what makes a planted `as.sock` impossible.
     ///
-    /// A11.4: asserted against `create_run_dir_atomically`, the function that
-    /// actually creates it, rather than against a bare `DirBuilder` call that no
-    /// longer appears on the path.
+    /// The atomic run-dir publish: asserted against `create_run_dir_atomically`, the
+    /// function that actually creates it, rather than against a bare `DirBuilder`
+    /// call that no longer appears on the path.
     ///
     /// **The destination is EMPTY, and that is the whole point.** A non-empty
     /// destination proves nothing about `RENAME_EXCL`: plain `rename(2)` already
@@ -4386,7 +4414,7 @@ mod tests {
     /// **Recording the run-dir claim is LAUNCH-FATAL, so `host_claimed_run_dir ==
     /// false` is a sound negative proof.**
     ///
-    /// The A11.7 loser-refusal gate reads that bit negatively: a losing host with the
+    /// The run-dir claim gate reads that bit negatively: a losing host with the
     /// bit false is taken as proof it was refused at the fence and never adopted the
     /// winner's directory. That only holds if a host which got PAST the claim — won
     /// its `mkdir` — always records it. Under the old best-effort write it did not: a
@@ -4443,13 +4471,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&staged);
     }
 
-    /// A11.5: the host's own teardown is bound to the directory it PROVED is its
-    /// own, not to the name it was handed.
+    /// Fd-anchored sweep: the host's own teardown is bound to the directory it
+    /// PROVED is its own, not to the name it was handed.
     ///
-    /// The collision this refuses is the one A11.7 names: the host is still inside
-    /// its bounded teardown when a custodian removes the old inode and a colliding
-    /// launch — the derivation is many-to-one, so two launches can land on one name
-    /// — publishes a fresh directory at exactly that path. A path-addressed
+    /// The collision this refuses is a run-dir name collision: the host is still
+    /// inside its bounded teardown when a custodian removes the old inode and a
+    /// colliding launch — the derivation is many-to-one, so two launches can land on
+    /// one name — publishes a fresh directory at exactly that path. A path-addressed
     /// `remove_dir_all` re-resolves the name and takes the replacement's bound
     /// sockets and logs with it. Staged here as the state that collision produces:
     /// a directory at our path whose marker names somebody else.
@@ -4494,7 +4522,7 @@ mod tests {
         );
     }
 
-    /// A11.4: the run dir is only ever observable WITH its owner marker.
+    /// The run dir is only ever observable WITH its owner marker.
     ///
     /// The window this closes: `mkdir(final)` followed by a separate marker write
     /// let a SIGKILLed host strand an unmarked directory at exactly the path the
@@ -4535,7 +4563,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A11.1: the pid frame is built by hand because `pre_exec` may not allocate.
+    /// The spawn fence's pid frame is built by hand because `pre_exec` may not
+    /// allocate.
     /// Hand-rolled integer formatting is exactly the kind of thing that is right
     /// for four years and then wrong for pid 1000000, so it is pinned here.
     #[test]
@@ -4555,7 +4584,7 @@ mod tests {
         assert_eq!(decode_fence_pid(&[0u8; FENCE_ID_LEN]), None);
     }
 
-    /// A11.1, the gate itself: a child whose identity could NOT be recorded never
+    /// The spawn fence itself: a child whose identity could NOT be recorded never
     /// becomes the target program.
     ///
     /// The window this closes: the child used to be running codex by the time its
@@ -4607,7 +4636,8 @@ mod tests {
         let _ = std::fs::remove_file(&witness);
     }
 
-    /// **A11.1, readiness half: what `exec_confirmed` is allowed to rest on.**
+    /// **The spawn fence's readiness half: what `exec_confirmed` is allowed to rest
+    /// on.**
     ///
     /// `spawn()` returning `Ok` is not it. What the parent observes is the CLOEXEC
     /// error pipe closing, and that happens both when `execve` closes it and when
@@ -4712,8 +4742,8 @@ mod tests {
         .expect_err("an unstat-able image is an unanswered question, not a difference");
     }
 
-    /// **A11.1, the window itself: a child that dies in the confirmation interval
-    /// is not confirmed.**
+    /// **The spawn fence's window itself: a child that dies in the confirmation
+    /// interval is not confirmed.**
     ///
     /// `spawn_fenced`'s own wiring, not just the predicate. The fence releases the
     /// child and the parent then has to get back out of `spawn()`; a child killed in
@@ -4778,7 +4808,7 @@ mod tests {
         );
     }
 
-    /// A11.4: a marker that cannot be written publishes NOTHING — neither the final
+    /// A marker that cannot be written publishes NOTHING — neither the final
     /// name nor the staging dir survives. A host that does not come up leaves
     /// nothing behind, and a claimed-but-unmarked directory is worse than none.
     #[test]
@@ -4858,5 +4888,145 @@ mod tests {
              `FreezeClaim::withdraw` and the definition itself. A hand-written call at \
              an exit is the pattern that left three of six exits wrong"
         );
+    }
+
+    const THREAD: &str = "01a0d852-0a6b-7fc0-b8a2-6f33a07e4968";
+    const TUI_SOCK: &str = "/tmp/cch.1YF36WVJXF.7eb1/tui.sock";
+
+    /// The goodbye codex 0.155.1 printed as a `--remote` client of `socket`, as a
+    /// joined capture shows it, with the TUI's history above it.
+    fn remote_goodbye(socket: &str, usage: Option<&str>) -> String {
+        let mut text = format!(
+            "  /review - review any changes and find issues\n\
+             Disconnected from this task. Any running work continues.\n\
+             Reconnect: codex --remote unix://{socket} resume {THREAD}\n\
+             Stop the current turn: run codex --remote unix://{socket} \
+             agents, select this task, and press ctrl + x.\n"
+        );
+        if let Some(usage) = usage {
+            text.push_str(usage);
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn a_remote_goodbye_yields_its_thread_and_the_direct_runs_usage_line() {
+        let own = Path::new(TUI_SOCK);
+        assert_eq!(
+            parse_goodbye(
+                &remote_goodbye(
+                    TUI_SOCK,
+                    Some("Token usage so far: total=1,204 input=1,000 output=204")
+                ),
+                own
+            ),
+            Some(Goodbye {
+                thread_id: THREAD.to_string(),
+                token_usage: Some("Token usage: total=1,204 input=1,000 output=204".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_goodbye(&remote_goodbye(TUI_SOCK, None), own),
+            Some(Goodbye {
+                thread_id: THREAD.to_string(),
+                token_usage: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_screen_without_this_sessions_whole_goodbye_is_left_alone() {
+        let own = Path::new(TUI_SOCK);
+        assert_eq!(parse_goodbye("  /review - review any changes\n", own), None);
+        assert_eq!(
+            parse_goodbye(
+                "Disconnected from this task. Any running work continues.\n",
+                own
+            ),
+            None,
+            "a goodbye still arriving has no thread to restate yet"
+        );
+        assert_eq!(
+            parse_goodbye(&remote_goodbye("/tmp/cch.OLD.0000/tui.sock", None), own),
+            None,
+            "a goodbye in the transcript, from another session, is not this one's"
+        );
+        assert_eq!(
+            parse_goodbye(
+                &format!(
+                    "Disconnected from this task. Any running work continues.\n\
+                     Reconnect: codex --remote unix://{TUI_SOCK} resume \x1b[31mx\n"
+                ),
+                own
+            ),
+            None,
+            "an id that is not one is never printed back"
+        );
+    }
+
+    #[test]
+    fn the_direct_goodbye_is_codex_s_own() {
+        let goodbye = Goodbye {
+            thread_id: THREAD.to_string(),
+            token_usage: Some("Token usage: total=5".to_string()),
+        };
+        assert_eq!(
+            direct_goodbye(&goodbye, true, Some("Fix the parser")),
+            format!(
+                "Token usage: total=5\r\nTo continue this session, run:\r\n  \
+                 \x1b[36mcodex resume {THREAD}\x1b[39m\r\nOr run \x1b[36mcodex resume\x1b[39m \
+                 and select \x1b[36mFix the parser\x1b[39m.\r\n"
+            )
+        );
+        assert_eq!(
+            direct_goodbye(&goodbye, false, None),
+            format!("Token usage: total=5\r\nSession ID: {THREAD}\r\n"),
+            "without a rollout codex names the session instead"
+        );
+        let empty = Goodbye {
+            thread_id: THREAD.to_string(),
+            token_usage: None,
+        };
+        assert_eq!(
+            direct_goodbye(&empty, false, None),
+            format!("Session ID: {THREAD}\r\n")
+        );
+    }
+
+    #[test]
+    fn only_a_non_empty_rollout_makes_a_thread_resumable_and_its_last_name_wins() {
+        let home = std::env::temp_dir().join(format!("cc-goodbye-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let day = home.join("sessions/2026/09/25");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join(format!("rollout-2026-09-25T14-42-47-{THREAD}.jsonl"));
+        std::fs::write(&rollout, "").unwrap();
+        assert!(!rollout_is_resumable(&home.join("sessions"), THREAD));
+        std::fs::write(&rollout, "{}\n").unwrap();
+        assert!(rollout_is_resumable(&home.join("sessions"), THREAD));
+        assert!(!rollout_is_resumable(
+            &home.join("sessions"),
+            "01a0d852-0000-0000-0000-000000000000"
+        ));
+        assert!(!rollout_is_resumable(&home.join("missing"), THREAD));
+
+        assert_eq!(thread_name(&home, THREAD), None);
+        std::fs::write(
+            home.join("session_index.jsonl"),
+            format!(
+                "{{\"id\":\"{THREAD}\",\"thread_name\":\"First\"}}\n\
+                 {{\"id\":\"other\",\"thread_name\":\"Other\"}}\n\
+                 not json\n\
+                 {{\"id\":\"{THREAD}\",\"thread_name\":\"Fix \\u001b[31mthe parser\"}}\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            thread_name(&home, THREAD).as_deref(),
+            Some("Fix [31mthe parser"),
+            "the latest name, with no control character reaching the terminal"
+        );
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }
