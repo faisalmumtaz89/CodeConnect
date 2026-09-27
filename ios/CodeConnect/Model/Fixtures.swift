@@ -398,13 +398,18 @@ enum Fixtures {
     /// placeholder id, so `SessionSummary.blockedOn.count` is the number of
     /// decisions that agent is really holding — which is what the fleet
     /// counts before a card's contents have reached the stream.
+    ///
+    /// Under `stacked`, `fx-4` is a Codex run — `agent` exactly as the daemon
+    /// sends it — so the fleet renders both agent tags side by side. Every
+    /// other session omits the key, which `SessionSummary` decodes as Claude.
     private static func sessionsJSON(now: Date, variant: Variant, cards: [Card]) -> String {
         let stamp = rfc3339(now)
         let summaries = (1...variant.sessionCount).map { index in
             let id = "fx-\(index)"
             let blocked = cards.filter { $0.sessionID == id }.map { quoted($0.requestID) }
+            let agent = variant == .stacked && index == 4 ? "\"agent\":\"codex\"," : ""
             return """
-                {"session_id":"\(id)","tmux_session":"\(id)",\
+                {"session_id":"\(id)","tmux_session":"\(id)",\(agent)\
                 "cwd":"/Users/dev/app-\(index)","project_label":"app-\(index)",\
                 "lifecycle":"live","link":"attached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\

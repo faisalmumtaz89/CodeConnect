@@ -617,7 +617,7 @@ struct ApprovalRow: View {
                     .offset(x: -dotGutter)
                     .accessibilityHidden(true)
                 }
-            CCBadge(risk: risk)
+            CCRiskTag(risk)
         }
     }
 

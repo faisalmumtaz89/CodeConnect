@@ -152,7 +152,7 @@ release build:
 | `-CC_FIXTURE deck` | replays daemon frames for three blocked agents at three risk classes |
 | `-CC_FIXTURE stacked` | the same fleet plus a **second decision on one agent** and a fifth agent **running a tool**. With one card per agent, "count the agents" and "count the cards" return the same number, so the fleet's headline and its accessory bar agreed by coincidence while counting different things; and with no Running band, a shell command set in proportional type could not be reached from a fixture at all |
 | `-CC_FIXTURE_LINK stale` | withholds the fixture's keep-alive `pong`, so `LinkHealth` crosses its 45-second `staleAfter` on its own and every action disables itself **with its reason**. Pairs with either fixture; without it, `stale` is unreachable under a fixture and therefore never rendered or tested |
-| `-CC_FIXTURE_CACHED <seconds>` | restages the fixture's fleet as one read off **disk** that many seconds ago, so the cached banner draws its age. Without it the cached fleet — the state where every wait clock ticks off data that arrived before launch, and a reader cannot tell an amber `5m40s` from a live one — could not be rendered or tested at all. Compose with `-CC_FIXTURE_LINK stale` for the **compound** banner the ladder was rebuilt for: the link's classification carrying the cache's age, one banner, both facts |
+| `-CC_FIXTURE_CACHED <seconds>` | restages the fixture's fleet as one read off **disk** that many seconds ago, so the cached banner draws its age. Without it the cached fleet — the state where every wait clock ticks off data that arrived before launch, and a reader cannot tell a `5m40s` read off disk from a live one — could not be rendered or tested at all. Compose with `-CC_FIXTURE_LINK stale` for the **compound** banner the ladder was rebuilt for: the link's classification carrying the cache's age, one banner, both facts |
 | `-CC_RENDER_PROBE YES` | adds a 1pt invisible element carrying the content-size category this process actually resolved to (`cc-render-probe`). The render harness reads it before it photographs anything — see *The render harness* below. Off by default so it cannot appear in a tree a product test is counting |
 | `-CC_DEEPLINK codeconnect://…` | delivers a deep link at launch, the same way a tapped notification does. `…/deck/<request-id>` opens a **named** card — a URL can name one; a notification cannot, and does not try — which is the only way to assert the read gate on one card without three drags and a postpone standing between the test and the assertion |
 | `-CC_BIOMETRICS allow\|deny\|cancel\|unavailable` | injects the Face ID *outcome*; the system sheet cannot be driven by XCUITest |
@@ -503,7 +503,7 @@ CC.duration micro .12 · small .18 · medium .22 · exit .24 · draw .30
             hold 1.2 · toast 1.4 · reduced .12
 CC.motion   micro small medium exit physical draw reduced standard linear(_:)
 
-CC.type    display title headline body callout footnote
+CC.type    display title headline rowTitle body callout footnote
            micro badgeLabel fieldLabel mono monoSmall
 ```
 
@@ -545,7 +545,7 @@ colour rule:
 
 **`CCTone`** (`neutral · success · info · warning · danger`) is the semantic
 axis. Domain enums map onto it in `CCDomain.swift` and nowhere else:
-`RiskClass.ccTone`, `FleetStatus.ccTone` / `.ccDotColor` / `.ccDotPulses`,
+`FleetStatus.ccTone` / `.ccDotColor` / `.ccDotPulses`,
 `ToolStatus.ccTone`, `LinkHealth.Level.ccTone`, `CapabilityBadge.ccTone`.
 
 **Motion honours Reduce Motion.** Use `.ccAnimation(_:value:)` rather than
@@ -564,9 +564,11 @@ haptic is not motion, and removing it removes information.
 | `CCButton` | `CCButton("Allow", icon:, variant: .primary/.secondary/.ghost/.destructive, size: .sm/.md/.lg, fullWidth:, isLoading:, disabledReason:) { }` |
 | `CCHoldButton` | `CCHoldButton("Hold to allow", tone: .danger, duration: 1.2, isLoading:, disabledReason:) { }` — ring around the button's own rect, soft ticks at 25/50/75%, rigid on commit, plus a VoiceOver activation |
 | `CCCard` | `CCCard { }` · `CCCard(header:content:)` · `CCCard(header:content:footer:)` — `padding:`, `contentColumn:`, `radius:`, `border:`. Its default puts content on the 52pt column; `contentColumn: false` gives a **centred** card four even edges |
-| `CCRow` | `CCRow(title, subtitle:, meta:, titleTruncation:, subtitleLineLimit:, showsChevron:, separator:, density:, isDimmed:, disabledReason:, accessibilityLabelText:, action:) { leading } trailing: { } meta: { }` — 64pt min, full-row target. **`meta` spans the whole row**, under the trailing accessory rather than beside it |
+| `CCRow` | `CCRow(title, titleStyle:, subtitle:, meta:, titleTruncation:, subtitleLineLimit:, showsChevron:, separator:, density:, isDimmed:, disabledReason:, accessibilityLabelText:, action:) { leading } trailing: { } meta: { }` — 64pt min, full-row target. **`meta` spans the whole row**, under the trailing accessory rather than beside it |
 | `CCFactRow` | `CCFactRow(label, value:, labelStyle: .prose/.identifier/.key, tone:, isUnmeasured:, age:, separator:)` · `CCFactRow(label) { value }` · `CCFactRow(label, detail: { })` — 48pt. Lands its own text on the 52pt column; no call site adds anything |
-| `CCBadge` | `CCBadge(text, icon:, tone:, count:, isSelected:, action:)` · `CCBadge(status:count:)` · `CCBadge(risk:)` · `CCBadge(capability:)` — **one construction**, and no `style:` to pick another: tint@12 fill, tint@40 border, full-strength label, radius 6. A badge is **20pt**; the same construction **with an `action`** is a control and is `CC.size.chip` 32 with a wider inset, because a chip is a thing you press. `danger` takes a 1.5pt edge and `risk: .high` a leading glyph; nothing takes a saturated fill |
+| `CCBadge` | `CCBadge(text, icon:, tone:, count:, isSelected:, action:)` · `CCBadge(status:count:)` · `CCBadge(capability:)` — **one construction**, and no `style:` to pick another: tint@12 fill, tint@40 border, full-strength label, radius 6. A badge is **20pt**; the same construction **with an `action`** is a control and is `CC.size.chip` 32 with a wider inset, because a chip is a thing you press. `danger` takes a 1.5pt edge; nothing takes a saturated fill |
+| `CCTag` | `CCTag(text, accessibilityText:)` · `CCTag(agent:)` — which agent a session is (`Claude Code`, `Codex`, or an unsupported agent's own word), on every fleet row and in the session header. No fill, 1pt `borderStrong`, 9pt semibold uppercase `textTertiary`, **15pt** tall, radius 4; wraps at accessibility sizes like `CCBadge` |
+| `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH. <rationale>` |
 | `CCCountChip` | `CCCountChip(3)` — the same construction with a number in it. Used by `CCSectionHeader`; never hand-rolled |
 | `CCStatusDot` | `CCStatusDot(color:size:isHollow:pulses:)` · `CCStatusDot(tone:…)` · `CCStatusDot(status:size:isCached:)` — scales with Dynamic Type to `CC.size.dotMaxScale` (8 → 14 at AX5) |
 | `CCFreshnessPill` | `CCFreshnessPill(health:action:)` — the only written copy of the freshness table: each `LinkHealth.level` maps to one dot, one mono label, whether actions are enabled, and which banner (if any) shows |
@@ -637,6 +639,11 @@ could drop them in their own commit, and every call site now has.
 badges, and **nothing written**) and `content` 36 (52 on screen — every text run
 there is). `gap` is the 20 between them, which is what a component adds to step
 from one to the other.
+
+**One row leaves the gutter empty on purpose:** a Fleet row with no dot — every
+row in the Blocked and Failed bands — drops the column and starts its title at
+the card's own content edge (32 on screen), so a band of dotless rows lines up
+as one column instead of holding an 8pt gutter nothing is drawn in.
 
 **A section-header label is text**, so it starts on 52 like everything else, and
 `CCSectionHeader` now places its own label there. It
@@ -770,7 +777,9 @@ measures.
   glyph. `running` renders white, not blue. Hollow dot = from cache.
 - Two left edges only: **32pt** (gutter — dots, glyphs and index badges, and
   nothing written) and **52pt** (every text run, section-header labels
-  included), and they are `CCColumn.gutter` / `CCColumn.content`. `CCRow`,
+  included), and they are `CCColumn.gutter` / `CCColumn.content`. The one
+  exception is a dotless Fleet row, whose title starts on 32 (see *Two left
+  edges, and the kit owns both*). `CCRow`,
   `CCStepRow`, `CCFactRow`, `CCSectionHeader` and `CCCard`'s own padding land on
   them automatically. **If you are writing a number to reach a column, you are
   about to double it** — place the component flush and let it do this.

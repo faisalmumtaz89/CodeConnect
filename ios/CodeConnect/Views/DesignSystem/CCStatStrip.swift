@@ -161,38 +161,26 @@ struct CCStatStrip: View {
 /// How long an agent has been held, in the one format the product uses for it.
 ///
 /// Lives beside `CCStatStrip` because it is the same kind of object: a number
-/// that is the headline rather than a caption. It is the only value on the Fleet
-/// set in `mono` (14) rather than `monoSmall` — a deliberate one-step
-/// promotion, because *how long somebody has been waiting on you* is the most
-/// important number on that screen.
+/// that is the headline rather than a caption.
 ///
-/// `warning`, monospaced digits, and it never rounds up: `4m12s` is a fact, not
-/// an estimate, and a clock that jumps a whole minute at a time reads as a
-/// stalled render rather than as elapsed time.
+/// **Always `textTertiary`, whatever the wait.** A long wait is not a different
+/// kind of fact from a short one, and the number already says how long it is;
+/// a hue on top of it restated the band the row sat in. Monospaced digits, and
+/// it never rounds up: `4m12s` is a fact, not an estimate, and a clock that
+/// jumps a whole minute at a time reads as a stalled render rather than as
+/// elapsed time.
 struct CCWaitClock: View {
     let since: Date
     let now: Date
     /// `"waiting"` on the card and the timeline row; nothing on a Fleet row,
     /// where the band header has already said what the number means.
     var prefix: String?
-    /// **The colour is a measurement, not a mood**, so `nil` — the default —
-    /// derives it from the wait itself and a caller does not get to have an
-    /// opinion without a reason.
-    ///
-    /// It shipped defaulting to `warning`, which meant `1m03s`, `3m03s` and
-    /// `5m03s` all printed the same `#F5A623`: a hue reporting nothing anybody
-    /// could act on, and three restatements of the band the row sat in.
-    /// The fleet row then fixed it *at the call site*, so the same 63-second
-    /// wait rendered neutral on the row and amber in the accessory bar twelve
-    /// hundred points below it — one fact, two colours, one screen. The rule
-    /// belongs to the component.
-    var tone: CCTone?
     var style: CCTextStyle = CC.type.mono
 
     var body: some View {
         Text(text)
             .ccType(style)
-            .foregroundStyle(measuredTone.color)
+            .foregroundStyle(CC.text.tertiary)
             .lineLimit(1)
             .accessibilityLabel(
                 "\(prefix ?? "waiting") \(Format.spokenAge(now.timeIntervalSince(since)))")
@@ -202,18 +190,6 @@ struct CCWaitClock: View {
         let clock = Self.clock(since: since, now: now)
         guard let prefix else { return clock }
         return "\(prefix) \(clock)"
-    }
-
-    private var measuredTone: CCTone {
-        tone ?? Self.tone(elapsed: now.timeIntervalSince(since))
-    }
-
-    /// The two points at which what you should do changes: two minutes, and
-    /// ten. Below the first, a wait is a wait.
-    static func tone(elapsed: TimeInterval) -> CCTone {
-        if elapsed >= 600 { return .danger }
-        if elapsed >= 120 { return .warning }
-        return .neutral
     }
 
     /// `12s` · `4m12s` · `2h04m` · `3d02h`. Two units, never three: the third is

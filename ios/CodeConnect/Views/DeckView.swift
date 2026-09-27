@@ -238,10 +238,7 @@ struct DeckView: View {
             .clipShape(RoundedRectangle(cornerRadius: CC.radius.xl, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: CC.radius.xl, style: .continuous)
-                    // The only coloured card border in the app, and only at HIGH.
-                    .strokeBorder(
-                        isTop ? cardBorder(card) : CC.color.border,
-                        lineWidth: CC.stroke.hairline)
+                    .strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
             }
             // Promotion up the stack: inset 8 → 0, y 8 → 0, opacity 0.55 → 1.
             .padding(.horizontal, CGFloat(index * 8))
@@ -286,12 +283,6 @@ struct DeckView: View {
             .combined(with: .opacity)
             .combined(with: .offset(y: -16))
             .animation(CC.motion.exit)
-    }
-
-    private func cardBorder(_ card: ApprovalItem) -> Color {
-        card.assessment(profile: model.daemonProfile).effective == .high
-            ? CC.color.danger.opacity(0.40)
-            : CC.color.border
     }
 
     /// A 10pt pulsing dot, the number, and the word. No `hand.raised.fill` —

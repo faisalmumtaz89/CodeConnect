@@ -373,9 +373,9 @@ struct DecisionCardView: View {
                     .ccType(CC.type.title)
                     .foregroundStyle(CC.text.primary)
                 Spacer(minLength: CC.space.xs)
-                CCBadge(risk: risk)
-                    // A badge is a piece of text that happens to have a border.
-                    // `CCBadge` publishes the spelled-out class ("Risk HIGH.
+                CCRiskTag(risk)
+                    // A tag is a piece of text that happens to have a border.
+                    // `CCRiskTag` publishes the spelled-out class ("Risk HIGH.
                     // Destructive, credentialed, or publishes something.") but
                     // its own element carries no trait, so assistive technology
                     // — and the approval tests, which read the same tree —
@@ -474,13 +474,11 @@ struct DecisionCardView: View {
                 }
 
                 // Two lines, not three sizes at three colours: the
-                // rationale in `callout` at the risk colour, the provenance in
-                // `monoSmall` `textTertiary`.
+                // rationale in `callout` `textSecondary`, the provenance in
+                // `monoSmall` `textTertiary`. Risk spends no hue; the tag says it.
                 Text(rationale)
                     .ccType(CC.type.callout)
-                    .foregroundStyle(
-                        risk.ccTone == .neutral ? CC.text.secondary : risk.ccTone.color
-                    )
+                    .foregroundStyle(CC.text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(assessment.provenance)
                     .ccType(CC.type.monoSmall)
