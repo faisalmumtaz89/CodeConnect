@@ -75,22 +75,21 @@ const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
 /// **from the same single read whose first four bytes produced the Mach-O verdict**
 /// (see [`inspect_candidate`]). Every site that is about to run this binary
 /// re-derives the digest from the path and refuses on a mismatch
-/// ([`verify_codex_identity`]), so a replacement anywhere along
-/// inspect → version → coordinator → app-server → TUI is caught rather than
-/// executed.
+/// ([`verify_codex_identity`]), so a replacement along inspect → version →
+/// coordinator → app-server → TUI is caught unless it lands between a site's check
+/// and its `execve`.
 ///
 /// # The hash alone was not enough, and that was measured, not argued
 ///
 /// A digest is taken through an **open file**; an `execve` is performed on a
-/// **pathname**. A hash of this binary is about half a second of wall clock
-/// (measured on the real 219,997,536-byte codex 0.147: 0.478 / 0.459 / 0.460 s
-/// through the release-built hasher, ~8 s unoptimised), and an atomic `rename`
-/// landing anywhere inside it leaves the read completely undisturbed — the fd still
-/// refers to the old vnode, the digest still equals the pin, the check *passes*, and
-/// the spawn that follows opens the name afresh and runs the replacement. That was
-/// staged end to end against the real binary: three of three runs the digest matched
-/// exactly and the substituted executable ran. So the window was never "the moment
-/// before the spawn"; it was the entire read, at every one of the three sites.
+/// **pathname**. A hash of this binary is a whole-file read (measured: 0.11 s for the
+/// 238 MB codex 0.157 on Apple silicon), and an atomic `rename` landing anywhere inside
+/// it leaves the read completely undisturbed — the fd still refers to the old vnode,
+/// the digest still equals the pin, the check *passes*, and the spawn that follows
+/// opens the name afresh and runs the replacement. That was staged end to end against
+/// the real binary (codex 0.147): three of three runs the digest matched exactly and
+/// the substituted executable ran. So the window was never "the moment before the
+/// spawn"; it was the entire read, at every one of the three sites.
 ///
 /// Both the resolution read ([`inspect_candidate`]) and every verification read
 /// ([`protocol::hash::sha256_file`]) therefore hold the fd open across a comparison
@@ -101,7 +100,7 @@ const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
 /// # What it still does **not** claim
 ///
 /// The residual is now the interval between that `stat` and the kernel's own open
-/// inside `execve` — microseconds rather than half a second — and on macOS it cannot
+/// inside `execve` — the spawn, not a whole-file read — and on macOS it cannot
 /// be closed at all, because there is no way to exec the handle that was hashed.
 /// Measured on this platform: `fexecve` is not declared anywhere in the SDK (a call
 /// to it fails to compile and `grep -rl fexecve` over the SDK headers matches
@@ -137,30 +136,26 @@ pub struct ResolvedCodex {
 /// attacker is deliberately **out of scope**, and this is the place to say so
 /// once, plainly, rather than to leave it implied by a dozen local caveats:
 ///
-/// **A hostile process already running as the user's own uid is not defended
-/// against.** It can `ptrace` this process, signal it, replace the binaries it is
-/// about to `execve`, revoke the `UF_IMMUTABLE` freeze
-/// ([`protocol::hash::FrozenExecutable`]) on the pinned executable, or hold a
-/// writable descriptor opened before that freeze was ever set. None of those has a
-/// userland answer on macOS: the mechanism that would close them — hashing a
-/// descriptor and then executing *that descriptor* — does not exist on this
-/// platform, and its absence was measured rather than assumed (`fexecve` is not
-/// declared in the SDK; `execve("/dev/fd/N", …)` returns `EACCES` for a readable
-/// handle and for an `O_EXEC` handle alike, and an `O_EXEC` handle cannot be read
-/// and so could never have been hashed). This is the same posture
-/// [`crate::codex_host`]'s invariant 1 already states for its run directory, and
-/// it is stated **there by reference to here** so the two cannot drift into two
-/// different boundaries.
+/// **A hostile process already running as the user's own uid is not defended against.**
+/// It can `ptrace` this process, signal it, or replace the binaries it is about to
+/// `execve`. None of those has a userland answer on macOS: the mechanism that would
+/// close them — hashing a descriptor and then executing *that descriptor* — does not
+/// exist on this platform, and its absence was measured rather than assumed (`fexecve`
+/// is not declared in the SDK; `execve("/dev/fd/N", …)` returns `EACCES` for a readable
+/// handle and for an `O_EXEC` handle alike, and an `O_EXEC` handle cannot be read and
+/// so could never have been hashed). This is the same posture [`crate::codex_host`]'s
+/// invariant 1 already states for its run directory, and it is stated **there by
+/// reference to here** so the two cannot drift into two different boundaries.
 ///
 /// **What is defended, and must stay defended:** every cross-uid vector, and — for
 /// **the direct pinned executable** — the benign update race. A `codex` install or
 /// update landing mid-launch changes the file the resolved `--codex` pathname names,
-/// and that is refused at all three exec sites ([`verify_codex_identity`], with the
-/// freeze held across each `execve`); `PATH`/`./` confusion is refused
-/// ([`require_absolute_codex`]); cross-boot pid reuse is refused by boot identity; a
-/// rolled-back daemon's storage is isolated; and the wire pins hold. Stated that
-/// narrowly on purpose: the claim is about the bytes behind one pathname, not about
-/// every race a launch can lose.
+/// and that is refused at all three exec sites ([`verify_codex_identity`], which
+/// leaves only the interval between its check and each `execve`); `PATH`/`./`
+/// confusion is refused ([`require_absolute_codex`]); cross-boot pid reuse is refused
+/// by boot identity; a rolled-back daemon's storage is isolated; and the wire pins
+/// hold. Stated that narrowly on purpose: the claim is about the bytes behind one
+/// pathname, not about every race a launch can lose.
 ///
 /// AMFI narrows one thing here and not another, and the difference is worth being
 /// exact about, because page-hash validation checks an image against **its own**
@@ -206,9 +201,6 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // Reserved grammar. A refused flag or subcommand surfaces here, naming what
     // was refused and why, before anything is created.
     let argv = scan_codex_argv(passthrough).map_err(|refusal| anyhow!("{refusal}"))?;
-    // **The freeze a previous launch could not give back is cleared HERE, before this
-    // one takes a freeze of its own.** See `clear_freezes_left_standing`.
-    clear_freezes_left_standing();
     // The binary must say what it is before it is hosted. See `probe_codex`.
     probe_codex(&resolved)?;
 
@@ -225,121 +217,6 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     ))?;
 
     launch(&resolved, &folder, &argv.normalized)
-}
-
-/// Retry, before this launch freezes anything of its own, the clears that were left
-/// owed on a codex binary — and say what came of each.
-///
-/// **This is one of the two production callers the recovery pass did not have**, and
-/// without one the pass was machinery that ran when somebody ran it. The counterexample
-/// it closes needs no attacker and no failure: a launch that set the `UF_IMMUTABLE`
-/// pin is `SIGKILL`ed inside the hash→exec window; a concurrent launch had adopted the
-/// same bit and an adopter never clears; the first launch's custodian stops waiting,
-/// keeps the claim standing and exits (which is right — a custodian that kept polling
-/// would be one idle process per leaked flag). The flag is then on a real binary with
-/// no live holder and no actor. `codex` still RUNS, but it cannot be updated, and the
-/// operator's way out was to work out for themselves that `chflags nouchg` was needed.
-/// Now the next launch takes it off.
-///
-/// **Why the launcher, when the daemon sweeps too.** The daemon's tick is slow on
-/// purpose and a Mac may have no daemon running at all. The launcher is the actor with
-/// the motive: it is about to hash and freeze the very file a leaked claim names, and
-/// an update refused because of a flag nobody owns is refused at exactly this moment.
-///
-/// **Why BEFORE the probe.** `probe_codex` holds the executable's own freeze lock for
-/// its whole run, and this pass needs that same lock to prove that no live holder
-/// stands behind the vnode. Run afterwards it would meet the launch's own lock, defer,
-/// and clear nothing; run inside it, it would be reasoning about a bit this process
-/// had just set. Before is the only position from which the answer is about anybody
-/// else.
-///
-/// **What it costs a launch that has nothing to repair, which is every healthy one.**
-/// A record with no freeze claim costs a read. A record whose claim names a holder that
-/// is NOT proven dead — the live launch case, and the only one a busy machine has —
-/// costs a liveness question and no lock at all: the holder is judged before the
-/// executable's lock is reached, so a concurrent launch's pin is never something this
-/// waits on. Only a claim whose holder is already proven dead reaches the lock. That
-/// one is bounded by the lock's own budget and the withdrawal's, and the PASS is
-/// bounded by [`crate::codex_launch::LAUNCH_FREEZE_SWEEP_BUDGET`] over all of them —
-/// per-step bounds multiply, and a launcher that inherited the product of them would
-/// be a human at a terminal waiting on other launches' wreckage with nothing said.
-///
-/// **What it does before the launch is admitted.** This runs ahead of the argv
-/// grammar and the daemon preflight, so a launch that goes on to refuse may already
-/// have taken a flag off a binary and withdrawn another launch's claim. That is not
-/// this launch acting early: it is repair of somebody else's wreckage, owed whatever
-/// this launch turns out to be, and it mints no uid, takes no tmux name and writes no
-/// record of its own — which is what the rollback arm's "a refusal creates nothing"
-/// is about. It cannot go later: the probe is what it must precede, and the probe is
-/// itself ahead of both gates.
-///
-/// **It cannot end a launch, and it cannot take one's pin off.** Every warrant is
-/// [`crate::codex_launch::resolve_standing_freeze`]'s — a holder proven dead by
-/// identity, the executable's lock held across the scan and the clear, no other record
-/// naming the vnode with a holder that is not proven dead, and an adopted claim
-/// licensing nothing but its own withdrawal. Anything short of all four leaves the
-/// flag exactly where it was. So the worst this can do is spend its bounded wait and
-/// say what it was waiting for, which is why nothing here is fallible to the caller.
-fn clear_freezes_left_standing() {
-    let deadline = std::time::Instant::now() + crate::codex_launch::LAUNCH_FREEZE_SWEEP_BUDGET;
-    crate::codex_launch::sweep_standing_freezes_each(deadline, &mut |action| {
-        if let Some(line) = launcher_line(&action) {
-            eprintln!("codeconnect: {line}");
-        }
-    });
-}
-
-/// What a launch says at the terminal about one thing the pass did, or `None` for
-/// the ones it says nothing about.
-///
-/// Split from the loop so the choice is a value a test can read: the whole subject
-/// here is which outcomes reach a human and which do not, and `eprintln!` from inside
-/// a function that shells out to a real codex is not something a test can see.
-fn launcher_line(action: &crate::codex_launch::SweepAction) -> Option<String> {
-    use crate::codex_launch::SweepAction;
-    match action {
-        // A flag coming off a real binary is worth reading, and this is the one
-        // place a human is present to read it.
-        SweepAction::FreezeClaimSettled { uid, what } => Some(format!("{uid}: {what}")),
-        // **The ordinary case is NOT printed here, and that is a decision about whose
-        // output this is.** A claim left standing is almost always a live launch
-        // running on those bytes, so on a machine with sessions on it this would be
-        // said on every launch, for ever, naming other sessions' uids at a terminal
-        // where somebody is waiting for a TUI. The distinction between a pass that
-        // said nothing and one that found nothing is owed by the daemon's pass, which
-        // has a log to put it in.
-        SweepAction::FreezeClaimStanding { .. } => None,
-        // **A record nobody could look at IS said, and it is not the same case.** One
-        // `launch.json` that will not parse makes every clear on the machine defer,
-        // for ever — so the flag stays on the binary, codex cannot be updated, and
-        // the launcher used to be silent about both halves of that. It is rare by
-        // construction (records are published by rename), so saying it does not
-        // reintroduce the per-launch noise the arm above avoids.
-        SweepAction::Skipped { uid, why } => Some(format!(
-            "{uid}'s launch record could not be examined: {why}"
-        )),
-        SweepAction::ScanFailed { what, why } => {
-            Some(format!("{what} could not be looked at: {why}"))
-        }
-        // Said, because this one explains an absence: a flag that is still on the
-        // binary and a pass that stopped before it got there.
-        SweepAction::RanOutOfTime { unreached } => Some(format!(
-            "gave up clearing leftover codex freezes after {:?} with {unreached} launch \
-             record(s) unexamined; if codex cannot be updated, the daemon's own pass will \
-             come back for it",
-            crate::codex_launch::LAUNCH_FREEZE_SWEEP_BUDGET
-        )),
-        // Unreachable by construction: `sweep_standing_freezes` repairs no record's
-        // lifecycle and takes no launch lock to be contended for. Stated as an arm
-        // rather than a `_`, because a wildcard here would silently absorb the day
-        // somebody widened that scope and put the launcher back in the business of
-        // filing other launches as failed on the path where a human is waiting for a
-        // TUI.
-        other => Some(format!(
-            "the pre-launch freeze pass returned {other:?}, which it has no authority to \
-             act on; it is reported and ignored"
-        )),
-    }
 }
 
 /// Refuse the launch when the daemon that is running cannot host Codex.
@@ -378,8 +255,8 @@ fn refuse_unless_hostable(support: crate::daemon::AgentSupport) -> Result<()> {
 ///
 /// 60s, which is what every live gate in this repo runs with, rather than the
 /// coordinator's own 30s fallback — which no live launch has ever been measured on.
-/// The work inside it is not small: the resolved codex is a 220 MB executable that
-/// gets frozen and re-hashed before each of three `execve`s (~0.5 s apiece), and an
+/// The work inside it is not small: the resolved codex is a 240 MB executable that
+/// gets re-hashed before each of three `execve`s, and an
 /// app-server has to come up and answer `initialize` before the TUI is spawned.
 const LAUNCH_DEADLINE_MS: u64 = 60_000;
 
@@ -434,6 +311,7 @@ fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Re
         tui_args: passthrough,
         terminal_size,
     });
+    let _held = crate::attach::hold_signal_keys();
     spawn_coordinator(&session_name, &session_uid, &charter)?;
 
     if terminal_size.is_some() {
@@ -450,9 +328,9 @@ fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Re
         // bounded line by `wait_on_record`, and it is the only account of the failure
         // that survives the runtime dir being swept — so it is reported as the record
         // holds it rather than wrapped in a second story about it.
-        // A TUI quit before any thread is the user leaving, as native codex's picker
-        // lets them: nothing to report.
-        crate::codex_coordinator::LaunchWait::Failed(_) if quit_before_thread(&session_uid) => {
+        // Codex quit while the launch was starting is the user leaving, as native
+        // codex's picker lets them: nothing to report.
+        crate::codex_coordinator::LaunchWait::Failed(_) if quit_while_starting(&session_uid) => {
             Ok(())
         }
         crate::codex_coordinator::LaunchWait::Failed(reason) => bail!("{reason}"),
@@ -470,12 +348,13 @@ fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Re
     }
 }
 
-/// Whether this launch ended because its TUI was quit cleanly before any thread
-/// bound — Ctrl+C in codex's `resume` picker exits with status 0 and prints nothing
-/// (measured on 0.155.1). See
-/// [`crate::codex_launch::LaunchRecord::codex_quit_before_thread`].
-fn quit_before_thread(uid: &str) -> bool {
-    crate::codex_launch::load(uid).is_ok_and(|record| record.codex_quit_before_thread)
+/// Whether this launch ended because it was quit while it was starting — Ctrl+C in
+/// codex's `resume` picker exits with status 0 and prints nothing (measured on 0.155.1),
+/// a Ctrl+C can end a startup prompt or a just-started session by SIGINT, and a Ctrl+C
+/// before the TUI runs ends the host. See
+/// [`crate::codex_launch::LaunchRecord::codex_quit_while_starting`].
+fn quit_while_starting(uid: &str) -> bool {
+    crate::codex_launch::load(uid).is_ok_and(|record| record.codex_quit_while_starting)
 }
 
 /// Own the attached client without moving it out of the terminal's foreground
@@ -517,7 +396,7 @@ fn wait_with_terminal(uid: &str, patience: Duration, poll: Duration) -> Result<(
             // A zero patience is a single observation, not a launch timeout.
             if !ready {
                 match crate::codex_coordinator::wait_on_record(uid, Duration::ZERO, poll) {
-                    LaunchWait::Failed(_) if quit_before_thread(uid) => return Ok(()),
+                    LaunchWait::Failed(_) if quit_while_starting(uid) => return Ok(()),
                     LaunchWait::Failed(reason) => bail!("{reason}"),
                     LaunchWait::Ready => ready = true,
                     LaunchWait::TimedOut => {}
@@ -845,8 +724,8 @@ enum CandidateIdentity {
 /// it has finished. That is the right trade: wrappers on this candidate list are
 /// shebang scripts of a few hundred bytes, and the alternative — peek, then hash —
 /// is the two-read hole this exists to close. The cost that matters is the native
-/// case, one whole-file read (measured: ~0.5 s for the 220 MB standalone codex in a
-/// release build, ~8 s unoptimised).
+/// case, one whole-file read (measured: 0.11 s for the 238 MB codex 0.157 on Apple
+/// silicon).
 ///
 /// # One read is not enough on its own: the name has to still be the file
 ///
@@ -854,7 +733,7 @@ enum CandidateIdentity {
 /// the same hole every verification site had. The digest and the verdict come out of
 /// a handle the kernel pinned at `open`; the thing they get attributed to is a
 /// *pathname* that the rest of the launch carries around and eventually `execve`s.
-/// An installer landing an atomic replacement half a second into the read leaves the
+/// An installer landing an atomic replacement partway through the read leaves the
 /// read undisturbed — and would mint a `ResolvedCodex` whose digest is a perfectly
 /// truthful statement about a file that this pathname no longer reaches, which every
 /// later verify would then dutifully confirm was "unchanged" only because the
@@ -1026,23 +905,15 @@ pub(crate) fn require_absolute_codex(path: &Path) -> Result<()> {
 /// **This is the executable-identity guard.** It stands immediately before each
 /// point where these bytes are about to become a running process, so that what
 /// runs is what was inspected and hashed rather than merely whatever was reachable
-/// through the same name. Three sites — [`probe_codex`]'s `--version` exec and the
-/// host's two spawns (`codex_host::run_session` and `codex_host::drive`) — all now
-/// the same flavour: **prevention with the freeze held across the exec.** A mismatch
-/// means nothing runs.
+/// through the same name: [`probe_codex`]'s `--version` exec and the host's two
+/// spawns (`codex_host::run_session` and `codex_host::drive`). A mismatch means
+/// nothing runs.
 ///
-/// **It returns a held freeze, and that is the point.** The digest is taken through
-/// a handle whose bytes are pinned immutable *before* the read and kept immutable in
-/// the returned [`protocol::hash::FrozenExecutable`]; the caller keeps that guard
-/// across its `execve` and drops it once the child is past exec. Against the vector
-/// this gate exists for — an install or update landing mid-launch — that makes the
-/// bytes verified here and the bytes the kernel loads the same frozen vnode, closing
-/// both holes a bare `(dev, ino)` comparison cannot: a same-inode content overwrite
-/// behind the reader, and a rename over the name after the check. It is deliberately
-/// **not** claimed against a hostile same-uid process, which can revoke the flag and
-/// is out of scope by construction. See [`protocol::hash::FrozenExecutable`] for the
-/// measurements behind all of that, the fallback when the freeze cannot be set, and
-/// the demand-paging residual after it is cleared.
+/// The digest is taken through [`protocol::hash::sha256_file`], which holds the
+/// descriptor open across a comparison of `(st_dev, st_ino)` between the handle and
+/// the name, so a rename landing inside the read is refused rather than hashed clean.
+/// What is left is the interval between that check and the kernel's own open inside
+/// `execve`; see [`ResolvedCodex`] for why macOS offers no way to close it.
 ///
 /// `when` names the moment, so a refusal tells an operator *where* in the launch the
 /// file moved rather than only that it did.
@@ -1056,42 +927,14 @@ pub(crate) fn require_absolute_codex(path: &Path) -> Result<()> {
 /// file that is not the one that runs, which is the whole gate lost to a spelling.
 /// The host enforces it (`codex_host::require_absolute_codex`) and resolution
 /// produces only canonical absolute paths.
-/// **`on_frozen` is where the freeze gets written down, and it runs while the hash
-/// is still being taken.** The digest is a whole-file read of a 210 MB executable —
-/// measured at 0.46 s in a release build and about eight seconds unoptimised — and
-/// the flag is on for all of it, so a caller that recorded the freeze from the
-/// return value left that whole interval with the bytes immutable and nothing
-/// durable saying so. A `SIGKILL` there, which is exactly the load-induced ending
-/// that produced the two real leaks, left a frozen binary with no claim for the
-/// custodian to act on. The callback runs with the flag already set and the digest
-/// not yet started, so every freeze site has to say what it records rather than
-/// being able to forget.
-///
-/// It runs even on the paths that go on to refuse: a freeze that is about to be
-/// dropped for a hash mismatch is still a freeze this process is holding, and a
-/// record written and withdrawn a moment later costs one file write. Being wrong in
-/// that direction is a stale claim the janitor's own checks discard; being wrong in
-/// the other is the leak.
-pub(crate) fn verify_codex_identity<F>(
-    path: &Path,
-    expected: &str,
-    when: &str,
-    hold: protocol::hash::LockHold,
-    on_frozen: F,
-) -> Result<protocol::hash::FrozenExecutable>
-where
-    F: FnOnce(&protocol::hash::FrozenExecutable) -> std::result::Result<(), String>,
-{
-    let (actual, frozen) = protocol::hash::freeze_and_hash_recording(path, hold, on_frozen)
-        .with_context(|| {
-            format!(
-                "re-reading the codex binary at {} to verify its identity {when}",
-                path.display()
-            )
-        })?;
+pub(crate) fn verify_codex_identity(path: &Path, expected: &str, when: &str) -> Result<()> {
+    let actual = protocol::hash::sha256_file(path).with_context(|| {
+        format!(
+            "re-reading the codex binary at {} to verify its identity {when}",
+            path.display()
+        )
+    })?;
     if actual != expected {
-        // `frozen` drops here, clearing the freeze: nothing was spawned, and the
-        // file this launch will not touch is left exactly as it was found.
         bail!(
             "the codex binary at {} is not the one this launch pinned: it hashed {expected} \
              when it was resolved and inspected, and hashes {actual} {when}. Refusing to run \
@@ -1101,10 +944,7 @@ where
             path.display()
         );
     }
-    // The freeze is HELD in the returned guard: the caller keeps it across its
-    // `execve` and drops it once the child is past exec, so the bytes hashed here are
-    // the bytes that run. See [`protocol::hash::FrozenExecutable`].
-    Ok(frozen)
+    Ok(())
 }
 
 /// The ordered candidate list, factored out so the precedence is unit-tested
@@ -1290,25 +1130,20 @@ fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
     rx
 }
 
-/// Exec `bin args` under a wall-clock budget and an output ceiling, with the caller
-/// holding the freeze, and return its stdout.
-///
-/// Split out so the caller can hold a verified freeze across it — see [`probe_codex`].
+/// Exec `bin args` under a wall-clock budget and an output ceiling, and return its
+/// stdout.
 ///
 /// **Bounded on purpose.** The binary being probed is whatever is installed at the codex
 /// path, and nothing has run it yet, so the probe cannot assume it behaves. A plain
-/// `output()` gives an unknown executable an unbounded hold on the launch *and* on the
-/// freeze — it can never exit, never close its pipes (a forked descendant inherits the
-/// write ends, so EOF never arrives), or stream until the launcher runs out of memory.
-/// Every wait here is against a deadline and every path attempts to kill the probe's
-/// whole process group, pipes collected FIRST so the kill always happens while the
-/// leader's pgid is provably not recycled.
-fn run_under_freeze(bin: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    run_bounded(bin, args, PROBE_BUDGET)
-}
-
-/// [`run_under_freeze`]'s body, with the budget a parameter so the boundedness itself can
-/// be tested without the test paying the production budget to observe it.
+/// `output()` gives an unknown executable an unbounded hold on the launch — it can never
+/// exit, never close its pipes (a forked descendant inherits the write ends, so EOF never
+/// arrives), or stream until the launcher runs out of memory. Every wait here is against
+/// a deadline and every path attempts to kill the probe's whole process group, pipes
+/// collected FIRST so the kill always happens while the leader's pgid is provably not
+/// recycled.
+///
+/// The budget is a parameter so the boundedness itself can be tested without the test
+/// paying [`PROBE_BUDGET`] to observe it.
 fn run_bounded(bin: &Path, args: &[&str], budget: Duration) -> Result<Vec<u8>> {
     use std::os::unix::process::CommandExt;
     let what = format!("{} {}", bin.display(), args.join(" "));
@@ -1360,132 +1195,19 @@ fn run_bounded(bin: &Path, args: &[&str], budget: Duration) -> Result<Vec<u8>> {
     Ok(stdout)
 }
 
-/// Ask the installed codex its version, under a held freeze, and refuse a binary that
-/// does not state one. The value itself decides nothing.
+/// Ask the installed codex its version and refuse a binary that does not state one. The
+/// value itself decides nothing.
 ///
-/// The answer is attributable to the pinned bytes only because the freeze is held across
-/// the exec: [`verify_codex_identity`] refuses a binary that is not the one resolution
-/// inspected, and the flag keeps it from being replaced while it runs.
+/// [`verify_codex_identity`] runs first, so a binary that is not the one resolution
+/// inspected is refused before it is ever exec'd.
 fn probe_codex(resolved: &ResolvedCodex) -> Result<()> {
     let bin = resolved.path.as_path();
-    // **The launcher's freeze has no record behind it, so the signal handler is the
-    // record.** This runs before a uid is minted: there is no launch record for a
-    // janitor to read, and the only thing that would put the flag back is the
-    // guard's own `Drop`. `SIGINT` runs no `Drop` — and with `panic = "abort"`
-    // neither would an unwind — so `Ctrl-C` here left `UF_IMMUTABLE` on the real
-    // codex binary every single time, invisibly, until the next update failed with
-    // `Operation not permitted`. Installed before the freeze is taken and armed from
-    // inside the verify, so the whole interval is covered: the flag goes on, the
-    // handler already knows how to take it off, and the hash — most of a second in a
-    // release build — happens under that cover rather than beside it.
-    protocol::hash::install_freeze_signal_release();
-    let frozen = verify_codex_identity(
-        bin,
-        &resolved.sha256,
-        "before `codex --version`",
-        // **The lock is held for the whole probe, and it is standing in for the record
-        // this site cannot write.** There is no uid yet, so nothing a custodian scans
-        // will ever name this freeze — and a custodian's scan-and-clear takes this same
-        // lock, so while it is held the clear cannot happen at all. Released at the
-        // empty record, the interval that follows (the 210 MB hash plus each exec
-        // below) was a freeze every custodian on the machine was free to undo, and a
-        // peer's stale record was enough to make one do it.
-        protocol::hash::LockHold::UntilReleased,
-        // Nothing durable to write: there is no uid yet, which is the whole reason
-        // this site needs the handler. The freeze arms the release itself, from
-        // inside `arm_then_freeze` and BEFORE the flag goes on, so the interval this
-        // callback used to be responsible for no longer exists.
-        |_| Ok(()),
-    )?;
-
-    let version_out = run_under_freeze(bin, &["--version"]);
-
-    // Cleared only after the child has exited, so the answer is attributable to the
-    // frozen bytes. A failure clears it too, with nothing having been admitted. The
-    // output is interpreted only after that: the identity check has already run, so a
-    // swapped binary is reported as swapped and never as an unreadable version.
-    drop(frozen);
-    let text = String::from_utf8_lossy(&version_out?).into_owned();
+    verify_codex_identity(bin, &resolved.sha256, "before `codex --version`")?;
+    let version_out = run_bounded(bin, &["--version"], PROBE_BUDGET)?;
+    let text = String::from_utf8_lossy(&version_out).into_owned();
     parse_codex_version(&text)
         .map(|_| ())
         .ok_or_else(|| anyhow!("could not read a version from `codex --version`: {text:?}"))
-}
-
-/// A **test-only stand-in for the launcher's probe freeze**
-/// (`internal-freeze-probe <path> <marker>`).
-///
-/// It does exactly what [`probe_codex`] does to the flag and nothing else: install
-/// the signal release, freeze `<path>` (which arms the release itself, before the
-/// flag goes on), touch `<marker>` so the test knows the freeze is on, and then
-/// block. The test sends a
-/// `SIGINT` — the ending that runs no `Drop`, and the one a `Ctrl-C` during a real
-/// launch delivers — and reads the file's flags afterwards.
-///
-/// A real launcher run cannot stand in for this: it needs a codex whose answers get
-/// past the probe, and the flag would then be cleared by the ordinary path rather than
-/// by the handler. This is the smallest process that has the
-/// property under test. Hidden machinery, never a human command.
-pub fn run_freeze_probe(args: &[String]) -> ! {
-    let (Some(path), Some(marker)) = (args.first(), args.get(1)) else {
-        eprintln!("internal-freeze-probe needs <path> <marker>");
-        std::process::exit(64);
-    };
-    protocol::hash::install_freeze_signal_release();
-    let frozen = match protocol::hash::freeze_and_hash_recording(
-        Path::new(path),
-        protocol::hash::LockHold::UntilReleased,
-        |_| Ok(()),
-    ) {
-        Ok((_digest, frozen)) => frozen,
-        Err(err) => {
-            eprintln!("internal-freeze-probe could not freeze {path}: {err}");
-            std::process::exit(65);
-        }
-    };
-    if !frozen.is_frozen() {
-        eprintln!("internal-freeze-probe could not set the flag on {path}");
-        std::process::exit(66);
-    }
-    // Only now: the marker means "the flag is on and armed", which is the state the
-    // test is about to interrupt.
-    let _ = std::fs::File::create(marker);
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-}
-
-/// A **test-only stand-in for a freezer holding the freeze lock**
-/// (`internal-freeze-lock-hold <path> <marker> <seconds>`).
-///
-/// A freezer holds `flock(LOCK_EX)` on the executable across its freeze and its
-/// record write; a custodian holds the same lock across its scan and its clear. The
-/// whole safety of the second depends on the first actually excluding it, and the two
-/// are always different PROCESSES — so an in-process test of the lock (which
-/// `protocol::hash` has) cannot say the thing that matters. This is the other half:
-/// a real second process that takes the lock, says so, and holds it.
-///
-/// It carries its own deadline rather than blocking forever: a hidden helper that
-/// outlived its test would be a lock nobody could see holding up every later launch on
-/// the machine. Hidden machinery, never a human command.
-pub fn run_freeze_lock_hold(args: &[String]) -> ! {
-    let (Some(path), Some(marker), Some(seconds)) = (args.first(), args.get(1), args.get(2)) else {
-        eprintln!("internal-freeze-lock-hold needs <path> <marker> <seconds>");
-        std::process::exit(64);
-    };
-    let held = match protocol::hash::FreezeLock::acquire(Path::new(path)) {
-        Ok(held) => held,
-        Err(why) => {
-            eprintln!("internal-freeze-lock-hold could not lock {path}: {why}");
-            std::process::exit(65);
-        }
-    };
-    // Only now: the marker means "the lock is held", which is the state the test is
-    // about to try to take it away from.
-    let _ = std::fs::File::create(marker);
-    let secs: u64 = seconds.parse().unwrap_or(5);
-    std::thread::sleep(std::time::Duration::from_secs(secs));
-    drop(held);
-    std::process::exit(0)
 }
 
 // --------------------------------------------------------- reserved argv grammar
@@ -1983,8 +1705,8 @@ fn looks_like_flag(token: &str) -> bool {
 /// What `codeconnect codex --help` (or `--version`, `-h`, `-V`, in any cluster) becomes:
 /// the answer is codex's, so it is codex that is run, exactly as the caller would have
 /// run it, inheriting stdio and handing back its exit status. The path is the codex a
-/// launch would choose ([`first_codex`]); the launch's hash and freeze protect a
-/// session this process hosts, and nothing is hosted here, so they are not paid.
+/// launch would choose ([`first_codex`]); the launch's hash protects a session this
+/// process hosts, and nothing is hosted here, so it is not paid.
 fn codex_itself(codex: &Path, args: &[String]) -> Command {
     let mut command = Command::new(codex);
     command.args(args);
@@ -1994,7 +1716,7 @@ fn codex_itself(codex: &Path, args: &[String]) -> Command {
 /// The codex a launch would choose, for help and version: the first candidate that
 /// is a native executable and not this binary, in the launch's own order
 /// ([`codex_candidates`], as [`resolve_codex_bin`] walks it), judged by its magic number
-/// alone — no hash, no freeze. When no candidate is native, the first existing one, so
+/// alone — no hash. When no candidate is native, the first existing one, so
 /// a machine with only a script shim still gets codex's help.
 fn first_codex(candidates: Vec<PathBuf>) -> Result<PathBuf> {
     let current = std::env::current_exe()
@@ -2460,117 +2182,6 @@ mod tests {
         );
     }
 
-    /// **A launch that could not look at a record has to say so, and a launch that
-    /// found a live one must not.**
-    ///
-    /// One `launch.json` that is not valid JSON at all makes `other_freeze_claim_on`
-    /// answer `Standing` for EVERY vnode on the machine, so no freeze anywhere is ever
-    /// cleared again — and the launcher swallowed both halves of that: the unreadable
-    /// record (`Skipped`) and the veto it caused (`FreezeClaimStanding`). The user got
-    /// a codex that could not be updated and not one word about why. A record that
-    /// could not be read is rare by construction, so saying it does not put the
-    /// per-launch noise back; a claim left standing is the ordinary live-launch case
-    /// on every busy machine, and stays the daemon's to log.
-    #[test]
-    fn a_launch_says_what_it_could_not_look_at_and_stays_quiet_about_what_it_is_waiting_for() {
-        use crate::codex_launch::SweepAction;
-        for unreadable in [
-            SweepAction::Skipped {
-                uid: "u".into(),
-                why: "corrupt or truncated".into(),
-            },
-            SweepAction::ScanFailed {
-                what: "u".into(),
-                why: "the record could not be stat'ed".into(),
-            },
-        ] {
-            let said = launcher_line(&unreadable).unwrap_or_else(|| {
-                panic!(
-                    "a record nobody could look at must be said: \
-                                           {unreadable:?}"
-                )
-            });
-            assert!(said.contains("u"), "and it must name the record: {said}");
-        }
-        assert!(
-            launcher_line(&SweepAction::FreezeClaimStanding {
-                uid: "u".into(),
-                why: "a live launch is behind the vnode".into(),
-            })
-            .is_none(),
-            "a claim left standing is the ordinary case and belongs in the daemon's log, \
-             not at a terminal on every launch"
-        );
-    }
-
-    /// **The launch clears freezes left standing BEFORE it takes one, and the
-    /// order is the whole of the fix.**
-    ///
-    /// `probe_codex` holds the executable's own freeze lock for its entire run, and
-    /// the pass needs that same lock to prove no live holder stands behind the vnode.
-    /// Run after the probe it would meet this launch's own lock, defer, and clear
-    /// nothing; run inside it, it would be reasoning about a bit this process had just
-    /// set. Before is the only position from which its answer is about anybody else.
-    ///
-    /// A source read for the same reason its neighbours are: `start` resolves a real
-    /// codex, shells out for each of its questions and preflights the daemon, so a unit
-    /// test cannot
-    /// reach the ordering inside it — and an ordering that regressed here would fail
-    /// silently, as a pass that runs on every launch and can never clear anything.
-    #[test]
-    fn the_launch_clears_freezes_left_standing_before_its_probe_takes_one() {
-        let start = production_fn("pub fn start(passthrough: &[String]) -> Result<()> {");
-
-        let sweep = start
-            .find("clear_freezes_left_standing()")
-            .expect("a launch must run the pass that clears a freeze left standing");
-        let probe = start
-            .find("probe_codex(")
-            .expect("a launch must probe the binary it is about to host");
-        assert!(
-            sweep < probe,
-            "the pass must run before the probe takes the lock it needs, or it can \
-             only ever defer to this launch's own freeze"
-        );
-    }
-
-    /// **The launcher's own freeze is armed for the ending that runs no `Drop`.**
-    ///
-    /// `probe_codex` takes a freeze before a uid exists, so no launch record names
-    /// it and no janitor can ever act on it; the guard's `Drop` is the whole of its
-    /// safety, and `SIGINT` — a keystroke away during a launch — runs no `Drop`. That
-    /// leaked `UF_IMMUTABLE` on the real binary on demand, every time.
-    ///
-    /// `exec_freeze_signal.rs` proves the mechanism end-to-end against a real process
-    /// and a real signal; what it cannot see is whether the PRODUCTION probe uses it.
-    /// This is that half: a source read, for the same reason
-    /// [`the_preflight_refuses_before_a_uid_or_a_tmux_name_is_taken`] is one — an
-    /// ordering inside a function that shells out to a real codex is not reachable
-    /// from a unit test, and a probe that quietly stopped installing the handler
-    /// would otherwise regress in silence.
-    #[test]
-    fn the_launch_probe_installs_the_signal_release_before_it_takes_the_freeze() {
-        let probe = production_fn("fn probe_codex(resolved: &ResolvedCodex) -> Result<()> {");
-
-        let install = probe
-            .find("install_freeze_signal_release()")
-            .expect("the launch probe must install the signal release");
-        let freeze = probe
-            .find("verify_codex_identity(")
-            .expect("the launch probe must take the freeze");
-        assert!(
-            install < freeze,
-            "the handler must be installed before the flag goes on, or the window \
-             between them is uncovered"
-        );
-        // The arming itself is no longer spelled here, and that is the fix rather
-        // than a gap: it used to be a call this callback had to remember, which left
-        // the interval between `fchflags` and the call uncovered. It now happens
-        // inside the freeze primitive, before the flag goes on, and is pinned there
-        // by `protocol::hash`'s own
-        // `the_freeze_arms_the_release_before_it_sets_the_flag`.
-    }
-
     /// The daemon preflight runs before ANY identity is minted.
     ///
     /// **This pins an ordering that only a source read can see.** `new-old-new-real.sh`
@@ -2843,14 +2454,8 @@ mod tests {
         let resolved = resolve_codex_bin(&config).expect("a native candidate resolves");
 
         // Unchanged: every exec site is free to proceed.
-        verify_codex_identity(
-            &resolved.path,
-            &resolved.sha256,
-            "in the unchanged case",
-            protocol::hash::LockHold::UntilReleased,
-            |_| Ok(()),
-        )
-        .expect("an untouched binary must verify");
+        verify_codex_identity(&resolved.path, &resolved.sha256, "in the unchanged case")
+            .expect("an untouched binary must verify");
 
         // The swap. Same path, same canonical name, different bytes — and still a
         // perfectly valid native Mach-O, so the magic check alone would wave it
@@ -2860,8 +2465,6 @@ mod tests {
             &resolved.path,
             &resolved.sha256,
             "immediately before the app-server spawn",
-            protocol::hash::LockHold::UntilReleased,
-            |_| Ok(()),
         )
         .expect_err("a replaced binary must be refused");
         let text = format!("{err:#}");
@@ -2887,26 +2490,15 @@ mod tests {
         // A truncation is a swap too — the digest covers the whole file, not a
         // prefix, so a binary that keeps its magic and loses its tail is refused.
         std::fs::write(&bin, [0xCFu8, 0xFA, 0xED, 0xFE]).unwrap();
-        assert!(verify_codex_identity(
-            &resolved.path,
-            &resolved.sha256,
-            "after truncation",
-            protocol::hash::LockHold::UntilReleased,
-            |_| Ok(())
-        )
-        .is_err());
+        assert!(
+            verify_codex_identity(&resolved.path, &resolved.sha256, "after truncation",).is_err()
+        );
 
         // And a file that is gone is a refusal, never a pass: "I could not check"
         // and "it is unchanged" must not share an answer.
         std::fs::remove_file(&bin).unwrap();
-        let err = verify_codex_identity(
-            &resolved.path,
-            &resolved.sha256,
-            "after deletion",
-            protocol::hash::LockHold::UntilReleased,
-            |_| Ok(()),
-        )
-        .expect_err("an unreadable binary must be refused");
+        let err = verify_codex_identity(&resolved.path, &resolved.sha256, "after deletion")
+            .expect_err("an unreadable binary must be refused");
         assert!(
             format!("{err:#}").contains("re-reading"),
             "the refusal must say the check itself failed: {err:#}"
@@ -2974,7 +2566,7 @@ mod tests {
     /// an observable fact rather than a sleep: a descriptor in this process standing
     /// open on the target's inode is proof `inspect_candidate` has opened it. The
     /// file is large enough that the swap lands hundreds of milliseconds short of
-    /// EOF, so the ordering holds by construction.
+    /// EOF in a debug build (tens in release), so the ordering holds by construction.
     #[test]
     fn a_binary_renamed_over_mid_inspection_is_never_resolved() {
         let root = tempdir();
@@ -3089,7 +2681,7 @@ mod tests {
     /// file does not match what was pinned.
     ///
     /// The refusal lands **before** the exec rather than after it. The bytes are
-    /// frozen and verified first, so a binary that does not match the pin never runs
+    /// verified first, so a binary that does not match the pin never runs
     /// as `codex --version` at all — no unpinned bytes are exec'd pre-gate. The
     /// `when` assertion below is what pins that ordering.
     ///
@@ -3119,8 +2711,8 @@ mod tests {
         assert!(
             text.contains("before `codex --version`"),
             "it must name the moment, so an operator can see the exec is guarded — and the \
-             moment is now BEFORE the exec, not after it: the bytes are frozen and verified \
-             first, so a mismatched pin never becomes a running `--version` at all: {text}"
+             moment is BEFORE the exec, not after it: the bytes are verified first, so a \
+             mismatched pin never becomes a running `--version` at all: {text}"
         );
     }
 
@@ -3457,7 +3049,7 @@ mod tests {
     /// (measured on 0.155.1), so the launcher returns success with nothing said. A
     /// launch that failed without that mark still reports its reason.
     #[test]
-    fn a_launch_quit_before_a_thread_ends_quietly() {
+    fn a_launch_quit_while_starting_ends_quietly() {
         use crate::codex_launch::{CleanupState, LaunchLock, NewLaunch};
         use protocol::proc_identity::{boot_identity, current_identity, monotonic_now_nanos};
         let ended = |uid: &str, quit: bool| {
@@ -3476,7 +3068,7 @@ mod tests {
             )
             .unwrap();
             if quit {
-                crate::codex_launch::note_codex_quit_before_thread(&lock, uid).unwrap();
+                crate::codex_launch::note_codex_quit_while_starting(&lock, uid).unwrap();
             }
             crate::codex_launch::to_failed(&lock, uid, "the reason", CleanupState::Pending)
                 .unwrap();
@@ -3882,7 +3474,6 @@ mod tests {
         for later in [
             "resolve_codex_bin(",
             "scan_codex_argv(",
-            "clear_freezes_left_standing()",
             "probe_codex(",
             "launch(&resolved",
         ] {
@@ -4008,7 +3599,7 @@ mod tests {
 
     /// **Help runs the codex a launch would choose**: the first native executable in the
     /// launch's own candidate order ([`codex_candidates`]), with none of the launch's
-    /// hash or freeze. A script shim earlier in the list is skipped exactly as a launch
+    /// hashing. A script shim earlier in the list is skipped exactly as a launch
     /// skips it; only when no native binary exists at all does help fall back to the
     /// first candidate, so a shim-only machine still gets codex's help. Nothing at all is
     /// a clear error.

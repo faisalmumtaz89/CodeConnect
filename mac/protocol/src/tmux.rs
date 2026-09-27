@@ -2009,8 +2009,9 @@ pub fn owned_liveness(socket: &str, uid: &str, pin: Option<&OwnedSession>) -> Ow
                 OwnedLiveness::Live
             }
             // A successful listing lacking our uid ⇒ proven gone — **on the server
-            // the session was resolved against, and on no other**. Unpinned (the
-            // Claude path) this is byte-for-byte the rule it always was. Pinned,
+            // the session was resolved against, and on no other**. Unpinned (a
+            // supervisor whose session could not be resolved as it started) this is
+            // byte-for-byte the rule it always was. Pinned,
             // the responder has to BE A: only its pid and birth can be checked,
             // because the row that carried the rest of the pin is the row that is
             // absent. That pair is what `server_gone_evidence` binds on too, and

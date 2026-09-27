@@ -26,6 +26,9 @@ Codex gets the environment of the shell you launched it from, not the tmux serve
 only `TERM` is tmux's. Codex does not see `TMUX` or `TMUX_PANE`: its output reaches
 your terminal unchanged, so it behaves as it does run there directly.
 Close the tab and it keeps running; `codeconnect attach <name>` brings it back.
+A Ctrl+C pressed while the session is still starting is held until your terminal is
+attached, then reaches Codex, so the launch quits as `codex` does rather than leaving a
+session running unseen.
 `codeconnect ls` lists what is running.
 Your terminal shows the session through CodeConnect's built-in tmux control-mode
 client, so Codex draws as it does run directly, and every key — `Ctrl-B`
@@ -43,9 +46,12 @@ When Codex exits, the session ends the way `codex` does run directly: its token 
 then `To continue this session, run: codex resume <id>` once the conversation is saved,
 or `Session ID: <id>` before it is. The hosted Codex UI is a client of the session's own
 server and says goodbye as one, with a reconnect command for a socket that closes with
-the session, so CodeConnect replaces that goodbye with the direct one. A Ctrl+C pressed
-while Codex is already quitting can stop it before it says goodbye; the screen then keeps
-what Codex drew.
+the session, so CodeConnect replaces that goodbye with the direct one. A Codex that
+runs on its background server (the default from 0.157) says `Disconnected from this
+task.` and `Reconnect: codex resume <id>` instead; a hosted session is not on that
+server, so it keeps the direct goodbye, as Codex does when it runs without one. A Ctrl+C
+pressed while Codex is already quitting can stop it before it says goodbye; the screen
+then keeps what Codex drew.
 
 ### What is passed through, and what is refused
 
@@ -68,8 +74,15 @@ session — same pane, same broker, and the phone follows the thread you resumed
 Their own options (`--last`, `--all`, a session id, a prompt) work as in Codex; `--cd` is
 the session's folder here too. `resume` or `fork` must be the first word that is not a
 flag; every word after it is a session id or your prompt. Leaving the picker with Ctrl+C
-(or quitting any Codex session before it starts a conversation) ends the launch quietly,
-as it does in Codex.
+(or quitting any Codex session while it is still starting) ends the launch quietly, as
+it does in Codex.
+
+Two things differ, because the hosted Codex UI is a client of the session's own server:
+it does not ask whether to trust the folder (an untrusted folder still runs under Codex's
+untrusted-folder restrictions), and its `resume`/`fork` picker and `--last` consider
+sessions from every folder, not this one first. Codex applies both only to a `--cd` handed
+to the client, and handing it one would move a session resumed from another folder into
+this one.
 
 Two kinds of argument are refused, before anything is created, with a message naming
 what was refused and why:
@@ -235,29 +248,30 @@ does not know is passed on unchanged but takes no spaced value (write `--flag=va
 a new subcommand is refused only once it is added to the launcher's list — until then the
 fence keeps it from being dispatched, and it reaches Codex as prompt text.
 
-### The freeze on the `codex` binary
+### The identity check on the `codex` binary
 
-macOS cannot run a program by file descriptor, so between hashing the `codex` binary and
-running it there is a window where an installer could swap the file. The launcher closes
-that window by setting the immutable flag (`uchg`) on the binary for the length of the
-launch, and clearing it once the session is past `exec`. It is a guard against a benign
-update landing mid-launch, not against a hostile process.
+The launcher hashes the `codex` binary when it finds it, and checks the hash again just
+before each time it runs it — for `--version`, for the app server and for the terminal
+UI. If `codex` is updated while a launch is starting, the check sees different bytes and
+the launch stops and says so; run `codeconnect codex` again once the update has finished.
+An update that lands after the last check and before that program starts is not caught:
+macOS cannot run a program from the file that was checked.
+It is a guard against a benign update landing mid-launch, not against a hostile process,
+and it never changes the file.
 
-The flag can be left standing in one case: the launcher is `SIGKILL`ed inside that window.
-Codex still **runs** with the flag on — but it cannot be **updated**, and `npm` or an
-installer will fail with `Operation not permitted`.
-
-Two things clear it without you:
-
-1. The next `codeconnect codex` clears leftover freezes as its very first act, before it
-   takes one of its own. It prints a line per repair, prefixed `codeconnect:`.
-2. The daemon sweeps once at startup and then every five minutes, and logs what it did
-   under `codex recovery:`.
-
-If you ever need to clear one by hand:
+CodeConnect 0.7.0 and 0.8.0 locked the binary (`uchg`) while they launched, and a launch
+killed at the wrong moment could leave it locked: `codex` still runs, but `npm` or an
+installer fails with `Operation not permitted`. To unlock it:
 
 ```sh
-chflags nouchg /path/to/codex
+chflags nouchg <the path named in the error>
+```
+
+The standalone installer keeps earlier releases, and the locked one may be one of them;
+this unlocks every release it keeps:
+
+```sh
+find ~/.codex/packages/standalone -flags +uchg -exec chflags nouchg {} +
 ```
 
 ## Quota
@@ -270,7 +284,7 @@ same account allowance as typing it at the Mac. There is no CodeConnect account,
 key and no separate meter.
 
 CodeConnect itself never starts a model turn. Everything it does around a session — the
-version probe, the hash and freeze, the recovery sweeps — is local work that opens no
+version probe, the hash, the recovery sweeps — is local work that opens no
 session and contacts no account.
 
 ## Troubleshooting
@@ -321,17 +335,15 @@ Two words in those sentences are worth knowing: **rejected** means nothing was s
 ### Lines in the daemon log
 
 The daemon's log lives under `~/.codeconnect/logs`. Four lines start with `codex recovery:`
-and all four are about leftover freezes on the `codex` binary:
+and all four are about the daemon's repair pass over Codex launches whose launcher and
+cleanup helper both died:
 
 | Line | What it means |
 |---|---|
-| `codex recovery: <the pass's own account>` | One line copied from the repair pass, e.g. that it cleared a freeze a dead launch left behind. Informational. |
-| `codex recovery: … the next pass asks again` | This repair pass did not finish. A freeze may still be sitting on the `codex` binary; the daemon retries in five minutes. |
+| `codex recovery: <the pass's own account>` | One line copied from the repair pass, e.g. that it recorded such a launch as failed and armed a new cleanup helper. Informational. |
+| `codex recovery: … the next pass asks again` | This repair pass did not finish. A launch may still be waiting for its cleanup; the daemon retries in five minutes. |
 | `codex recovery: the pass is completing again` | An earlier complaint has cleared. Healthy. |
 | `codex recovery: CODECONNECT_LAUNCHER_BIN names …, which is not a file` | You pointed that variable at a path that does not exist. The daemon ignored it. |
-
-If a pass keeps failing and `codex` will not update, clear the flag by hand — see
-[the freeze section](#the-freeze-on-the-codex-binary).
 
 Lines from a launch itself are prefixed `codeconnect:`, and the per-session repair helper
 writes to `~/.codeconnect/logs/codex-custodian-<uid>.log`.
@@ -362,7 +374,7 @@ disconnected. It is a fact about the **link**, not about whether the session is 
 | Symptom | Likely cause |
 |---|---|
 | The launch refuses and names a flag or subcommand | Only the interactive TUI is hosted, through CodeConnect's own transport. See [what is refused](#what-is-passed-through-and-what-is-refused). |
-| `npm`/installer cannot update `codex` — `Operation not permitted` | A freeze was left standing. Run `codeconnect codex` once, or `chflags nouchg /path/to/codex`. |
+| `npm`/installer cannot update `codex` — `Operation not permitted` | CodeConnect 0.7.0 or 0.8.0 left `codex` locked. See [the identity check](#the-identity-check-on-the-codex-binary) for the one command that unlocks it. |
 | No Stop button on a Codex session | Daemon below 1.17, or the link is not `subscribed`. |
 | No composer on a Codex session | Daemon below 1.18. |
 | Stop refused right after the Mac reconnected | Limit 1 above — the turn is doing tool work. Stop it at the Mac. |

@@ -318,14 +318,10 @@ async fn main() -> Result<()> {
         })
     };
 
-    // **The recovery pass for codex launches, which until now had no production
-    // caller at all.** A launch that took the `UF_IMMUTABLE` pin on the codex binary
-    // and did not survive to give it back leaves a flag with no live owner; codex still
-    // runs and can no longer be updated, and the only thing entitled to take the flag
-    // off is a later pass over the launch records. Nothing ran one, so "a later pass"
-    // meant an operator eventually working out that `chflags nouchg` was the answer.
-    // The launcher runs the freeze half of it before every launch; this is the half
-    // that does not need somebody to be launching anything.
+    // **The recovery pass for codex launches.** A launch whose coordinator and
+    // custodian both died leaves a record nobody is driving and cleanup nobody is
+    // doing; the pass files it as failed and arms a replacement custodian, and nothing
+    // else would ever look at it again.
     //
     // Its own task, one pass immediately and a slow tick behind it — the liveness
     // sweep's shape, for the liveness sweep's reasons. The launcher is resolved by the

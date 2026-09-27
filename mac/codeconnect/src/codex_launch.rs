@@ -469,59 +469,20 @@ pub struct LaunchRecord {
     /// operator is never sent to a file that was not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_unbound_exit: Option<String>,
-    /// **The TUI was quit, cleanly, before any thread bound** — it exited with status 0,
-    /// which is how the user leaves codex's `resume`/`fork` picker (Ctrl+C, measured on
-    /// 0.155.1: status 0, nothing printed) or quits a new session at once. Written by the
-    /// host at teardown, before it ends a still-`pending` launch; read by the launcher,
-    /// never cleared.
+    /// **The session was quit while its launch was still `pending`** — the TUI exited
+    /// with status 0, which is how the user leaves codex's `resume`/`fork` picker
+    /// (Ctrl+C, measured on 0.155.1: status 0, nothing printed) or quits a new session
+    /// at once, or a Ctrl+C ended it by SIGINT (at a startup prompt, or on a composer
+    /// that had just started a thread — silent or a plain goodbye in native codex too,
+    /// measured on 0.157.1), or a Ctrl+C reached the host before the TUI ran. Written by
+    /// the host at teardown, before it ends the launch; read by the launcher, never
+    /// cleared.
     ///
     /// It is not a failure: no reason is recorded for the phone
     /// ([`Self::codex_unbound_exit`] stays `None`), and a launcher that finds its launch
     /// ended with this set exits quietly, as the native command does.
     #[serde(default)]
-    pub codex_quit_before_thread: bool,
-    /// **A vnode freeze this launch is holding right now** on the pinned codex
-    /// executable — the exec hash-pin's `UF_IMMUTABLE`, written while the flag is
-    /// being taken and withdrawn before it is given back.
-    ///
-    /// The guard that sets the flag also clears it, on every ending the process can
-    /// run code for. `SIGKILL` is not one of those, and it is not a hypothetical:
-    /// under load, a killed host left the real `codex` binary immutable twice, and
-    /// a frozen `codex` cannot be updated until somebody works out why and runs
-    /// `chflags nouchg` by hand. The guard cannot survive its own process, so the
-    /// fact it holds is written somewhere that does — here — and the custodian,
-    /// which already outlives the host to clean up after exactly this kind of
-    /// death, undoes it.
-    ///
-    /// It carries the vnode and not just the name (see
-    /// [`protocol::hash::HeldFreeze`]): the clear happens in another process, at
-    /// another time, and a pathname by then may reach a different file — very
-    /// plausibly the codex update the operator ran once they found the binary
-    /// unwritable. Changing *that* file's flags would be a worse bug than the leak.
-    ///
-    /// `Some` is a claim about the present, not history, which is what makes it
-    /// safe to act on — and both ends of that claim are ordered so it cannot be
-    /// wrong in the dangerous direction. It is written from inside the freeze,
-    /// before the hash is taken rather than after it: the digest is a whole-file
-    /// read of a 210 MB executable, and recording afterwards left most of a second
-    /// (about eight, unoptimised) in which the bytes were immutable and nothing said
-    /// so. It is withdrawn before the guard is dropped, so a claim can never outlive
-    /// the flag it describes and point a janitor at a vnode the next launch has
-    /// since frozen for itself.
-    ///
-    /// The residual is what is left of the first window: the instant between
-    /// `fchflags` returning and this write. A host killed there leaks with no
-    /// record. Nothing durable can close it — the record cannot be written before
-    /// the flag is set without inviting the janitor to clear a freeze that was never
-    /// taken — and the clear is holder-checked, vnode-checked and flag-checked, so
-    /// the surviving failure mode is a leak that must be cleared by hand, never a
-    /// stray `chflags`.
-    ///
-    /// **It carries the HOLDER**, and that is what makes the clear safe rather than
-    /// merely careful: see [`protocol::hash::FreezeHolder`]. A record with no holder
-    /// is not read as "nobody is holding it".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exec_freeze: Option<protocol::hash::HeldFreeze>,
+    pub codex_quit_while_starting: bool,
     pub children: Vec<ChildEntry>,
     pub created_ms: i64,
 }
@@ -1120,8 +1081,7 @@ pub fn create_pending(_lock: &LaunchLock, new: NewLaunch) -> Result<LaunchRecord
         remain_on_exit_asserted: false,
         codex_thread_bound: false,
         codex_unbound_exit: None,
-        codex_quit_before_thread: false,
-        exec_freeze: None,
+        codex_quit_while_starting: false,
         children: Vec::new(),
         created_ms: new.created_ms,
     };
@@ -1388,17 +1348,15 @@ pub fn note_codex_thread_bound(_lock: &LaunchLock, uid: &str) -> Result<()> {
     store_atomic(uid, &record)
 }
 
-/// Note that the TUI was quit cleanly before any thread bound. See
-/// [`LaunchRecord::codex_quit_before_thread`].
-///
-/// **History, not state**, like [`note_codex_thread_bound`]: no `pending` guard, never
-/// cleared. Idempotent.
-pub fn note_codex_quit_before_thread(_lock: &LaunchLock, uid: &str) -> Result<()> {
+/// Note that the session was quit while its launch was still `pending`. See
+/// [`LaunchRecord::codex_quit_while_starting`]. A launch past `pending` is left as it
+/// is: its session was running, not starting. Never cleared; idempotent.
+pub fn note_codex_quit_while_starting(_lock: &LaunchLock, uid: &str) -> Result<()> {
     let mut record = load(uid)?;
-    if record.codex_quit_before_thread {
+    if record.state != LaunchState::Pending || record.codex_quit_while_starting {
         return Ok(());
     }
-    record.codex_quit_before_thread = true;
+    record.codex_quit_while_starting = true;
     store_atomic(uid, &record)
 }
 
@@ -1431,349 +1389,6 @@ pub fn note_session_observed(_lock: &LaunchLock, uid: &str) -> Result<()> {
     }
     record.session_observed = true;
     store_atomic(uid, &record)
-}
-
-/// Record that this launch is **holding** a vnode freeze on the pinned executable.
-///
-/// State, not history, unlike its neighbours here — it is written while the flag is
-/// going on and taken back before it comes off, because a janitor acting on it must
-/// be reading a claim about right now. See [`LaunchRecord::exec_freeze`] for both
-/// orderings and what each of them buys.
-///
-/// Called from inside the freeze, so it is the caller's business to hold a lock it
-/// already has and to treat a failure the way it treats any other recording failure
-/// on that path.
-pub fn note_exec_freeze_taken(
-    _lock: &LaunchLock,
-    uid: &str,
-    held: protocol::hash::HeldFreeze,
-) -> Result<()> {
-    let mut record = load(uid)?;
-    record.exec_freeze = Some(held);
-    store_atomic(uid, &record)
-}
-
-/// Record that the freeze is being released — called with the guard still held, an
-/// instant before it is dropped and the flag goes back as it was found.
-///
-/// Idempotent, and deliberately unconditional about *which* freeze it clears: at
-/// most one is ever held at a time (the app-server's is released before the TUI's
-/// is taken), so there is no second holder whose claim this could erase.
-pub fn note_exec_freeze_released(_lock: &LaunchLock, uid: &str) -> Result<()> {
-    let mut record = load(uid)?;
-    if record.exec_freeze.is_none() {
-        return Ok(());
-    }
-    record.exec_freeze = None;
-    store_atomic(uid, &record)
-}
-
-/// Whether some launch OTHER than this one still stands behind a freeze on the
-/// same vnode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OtherFreezeClaim {
-    /// No other launch record claims this vnode with a holder that could still be
-    /// running. The recorded holder's death is the whole warrant.
-    None,
-    /// One does — or a record could not be read to rule it out. Carries the reason,
-    /// because a deferred clear has to be able to say what it was waiting for.
-    Standing(String),
-}
-
-/// Only the field a freeze scan needs, read **without** the schema gate [`load`]
-/// applies.
-///
-/// The scan asks one question of somebody else's record — "are you holding a freeze
-/// on this vnode?" — and a record from another schema is still a record whose
-/// answer matters. Parsing the whole `LaunchRecord` would turn every schema bump
-/// into a reason to stop being able to see other launches' claims, which is the
-/// direction that fails open.
-#[derive(serde::Deserialize)]
-struct FreezeClaimProbe {
-    #[serde(default)]
-    exec_freeze: Option<protocol::hash::HeldFreeze>,
-}
-
-/// Whether any launch **other than** `except_uid` still stands behind a freeze on
-/// `(dev, ino)`.
-///
-/// # Why the holder's death is not enough on its own
-///
-/// A freeze record is a warrant for one vnode, and a vnode is not one freeze: the
-/// same executable is frozen again by the next launch, and the next, each time on
-/// the same `(dev, ino)`. So a record whose own holder is dead, matched against a
-/// file whose immutable bit is set, does not establish that the bit it is looking at
-/// is the bit that record is about — the bit may belong to a launch that started
-/// afterwards and is using it right now. Inode equality cannot tell successive
-/// freezes apart, and nothing in the record can either.
-///
-/// What can tell them apart is the set of records: the live launch that took the
-/// current freeze wrote one too. So before a clear, every other record is asked
-/// whether it names this vnode with a holder that is not proven dead — and one that
-/// does defers the clear, whatever this record's own holder did.
-///
-/// **Fail-closed on doubt.** A record that cannot be read or parsed reads as
-/// standing rather than absent: the dangerous direction here is clearing, and an
-/// unreadable record is the strongest hint that something is changing underneath.
-/// The caller bounds how long it will wait on that, so an unreadable record delays a
-/// clear rather than cancelling it forever.
-///
-/// **The caller holds the executable's own [`protocol::hash::FreezeLock`] across this
-/// scan AND the clear that follows it**, and that is what makes the scan's answer
-/// still true when the `chflags` lands. Without it the two are separate moments: a
-/// launch could publish its claim after this scan had passed its directory and before
-/// the clear, and the clear would then revoke a guard that by then existed. The lock
-/// is on the file, so a freezer cannot be between its `fchflags` and its record write
-/// while this runs.
-///
-/// No launch LOCK is taken — a different lock, and a different question. Blocking on
-/// the record lock a live host holds, in order to decide whether that host is live,
-/// is a question answering itself the slow way. `store_atomic` publishes by rename,
-/// so a reader sees a whole record or none.
-///
-/// **Fail-closed all the way down.** A directory that cannot be enumerated to the
-/// end, a record that cannot be stat'ed for any reason other than not being there,
-/// and a record that cannot be read or parsed all answer `Standing`.
-pub fn other_freeze_claim_on(except_uid: &str, dev: u64, ino: u64) -> OtherFreezeClaim {
-    let dir = sessions_root();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        // **Not "nobody else has a record".** The caller's own record lives in this
-        // directory and was read a moment ago, so a listing that fails now is a
-        // question that could not be asked — a descriptor shortfall, an I/O error —
-        // and not an answer. Reading it as absence is the one direction that lets a
-        // live launch's guard be revoked.
-        return OtherFreezeClaim::Standing(format!(
-            "{} could not be listed, so no other launch can be ruled out as the holder of \
-             the freeze on device {dev}/inode {ino}",
-            dir.display()
-        ));
-    };
-    for entry in entries {
-        // **An entry that could not be produced is not an entry that is not there.**
-        // `flatten()` dropped these, which made a directory this process could half
-        // read look like a directory with fewer launches in it — and fewer launches
-        // is the direction that licenses a clear.
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(err) => {
-                return OtherFreezeClaim::Standing(format!(
-                    "{} could not be enumerated to the end ({err}), so no other launch can be \
-                     ruled out as the holder of the freeze on device {dev}/inode {ino}",
-                    dir.display()
-                ))
-            }
-        };
-        // Lossy rather than skipped: a name this process cannot spell is still a
-        // directory whose record may claim this vnode, and the name is only ever used
-        // to say which record deferred the clear.
-        let uid = entry.file_name().to_string_lossy().into_owned();
-        if uid == except_uid {
-            continue;
-        }
-        let path = entry.path().join(RECORD_FILE);
-        // **`exists()` reads every failure as absence**, including the ones that mean
-        // "this process was not allowed to look". Asked properly: only the two errnos
-        // that genuinely say "there is nothing at this name" are an absence, and
-        // every other one defers.
-        match std::fs::symlink_metadata(&path) {
-            Ok(_) => {}
-            Err(err) if matches!(err.raw_os_error(), Some(libc::ENOENT) | Some(libc::ENOTDIR)) => {
-                continue
-            }
-            Err(err) => {
-                return OtherFreezeClaim::Standing(format!(
-                    "{uid}'s launch record could not be stat'ed ({err}), so it cannot be ruled \
-                     out as the holder of the freeze on device {dev}/inode {ino}"
-                ))
-            }
-        }
-        let probe = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<FreezeClaimProbe>(&bytes).ok());
-        let Some(probe) = probe else {
-            return OtherFreezeClaim::Standing(format!(
-                "{uid}'s launch record could not be read, so it cannot be ruled out as the \
-                 holder of the freeze on device {dev}/inode {ino}"
-            ));
-        };
-        let Some(held) = probe.exec_freeze else {
-            continue;
-        };
-        if held.dev != dev || held.ino != ino {
-            continue;
-        }
-        match held.holder {
-            Some(holder) if holder.is_provably_gone() => continue,
-            Some(holder) => {
-                return OtherFreezeClaim::Standing(format!(
-                    "{uid} claims a freeze on device {dev}/inode {ino} and its holder (pid {}) \
-                     is not proven dead",
-                    holder.identity.pid
-                ))
-            }
-            None => {
-                return OtherFreezeClaim::Standing(format!(
-                    "{uid} claims a freeze on device {dev}/inode {ino} and names no holder, so \
-                     nothing about it can be proven"
-                ))
-            }
-        }
-    }
-    OtherFreezeClaim::None
-}
-
-/// **What one attempt at a standing freeze claim came to** — the warrants and the
-/// `chflags`, with no policy about what to do next.
-///
-/// Two actors act on these claims and they must agree about every warrant: the
-/// custodian, which is armed for one launch and has a waiting budget, and the
-/// daemon's recovery sweep, which has neither and is the backstop for a custodian
-/// that died or gave up. A second copy of four warrants is a second copy that drifts,
-/// and the direction it drifts in is a flag taken off a live launch's binary.
-#[derive(Debug)]
-pub enum StandingFreeze {
-    /// **Not yet, and here is what it is waiting for.** The holder is not proven
-    /// dead, the lock could not be taken, or another launch still stands behind the
-    /// vnode. Every actor's answer to this is the same: come back.
-    Waiting(String),
-    /// **The claim is an ADOPTED one, so the flag was never this launch's.** Its
-    /// holder is gone, so the claim no longer stands behind the vnode for anybody and
-    /// may be withdrawn — but the bit belongs to whoever put it there, which includes
-    /// an operator's own `chflags uchg`, and no evidence that could ever arrive would
-    /// make it this record's to remove.
-    NotOursToClear,
-    /// Past every warrant. This is what the `chflags` itself came to.
-    Attempted(protocol::hash::FreezeClear),
-}
-
-/// Ask, for one standing claim, whether the flag it names may be taken off — and if
-/// so, take it off.
-///
-/// # The warrants, in order, and why each one is not the others
-///
-///   * **The holder is provably dead.** Not "its session was destroyed" and not "its
-///     children stopped" — the recorded `(pid, birth)` under the recorded boot, asked
-///     of the kernel the same way every other identity in this codebase is. A holder
-///     that is alive, stopped, or simply unreadable is a holder whose guard nobody may
-///     revoke: clearing the flag while its holder lives is precisely the failure the
-///     freeze was put there to prevent.
-///   * **The record says the bit is OURS.** An adopter found the bit already on and
-///     stood behind the vnode so that nobody would clear it out from under a running
-///     launch; it undertook nothing about the bit itself. A janitor inherits exactly
-///     the authority the guard that wrote the record had, and no more. See
-///     [`protocol::hash::FreezeOwnership`].
-///   * **The lock, taken BEFORE the scan and held through the clear.** This is what
-///     makes the scan's answer still true when the `chflags` lands: without it the two
-///     are separate moments, and a launch could publish its claim after the scan passed
-///     its directory and before the clear removed the bit it was relying on. Every
-///     freezer holds this same lock across its own freeze + record — and the launcher's
-///     probe, which writes no record at all, holds it across its whole run. See
-///     [`protocol::hash::FreezeLock`] and [`protocol::hash::LockHold`].
-///   * **Nobody else stands behind this vnode.** A dead holder proves this record is
-///     finished with the file; it does not prove the bit now set on the file is the bit
-///     this record is about. The same executable is frozen again by the next launch on
-///     the same `(dev, ino)`, and the only thing that can tell two successive freezes
-///     apart is the other launches' own records. See [`other_freeze_claim_on`].
-///
-/// `deadline` is the CALLER's, and it bounds the one wait here: the executable's lock.
-/// Per-step bounds add up, so a pass that let this wait out that lock's own budget on
-/// top of its own would be a pass whose stated bound was a floor.
-///
-/// # The lock this does NOT take
-///
-/// No launch lock. Neither caller holds one here: the custodian takes one afterwards
-/// to withdraw, and the sweep has already dropped the record's own lock (in the
-/// freeze-only scope it never took one at all). Taking it inside would make this
-/// order file-then-launch while every freezer's is launch-then-file. Left out, both
-/// callers keep the freezer's order and there is no cycle to have.
-///
-/// # The re-read this DOES make
-///
-/// `held` is the caller's snapshot, read before the lock. Between that read and this
-/// lock the record may have taken a **different** freeze — a replacement host on the
-/// same uid, which is the one writer `other_freeze_claim_on` cannot see, because it
-/// excludes `except_uid` by design. So the record is read again under the lock and
-/// the claim on it must still be the one this pass was handed. It is the same
-/// exact-claim check the withdrawal makes, asked before the `chflags` instead of
-/// after it: a claim that changed, or a record that cannot be read at all, is
-/// `Waiting` and nothing is touched.
-pub fn resolve_standing_freeze(
-    except_uid: &str,
-    held: &protocol::hash::HeldFreeze,
-    deadline: std::time::Instant,
-) -> StandingFreeze {
-    match held.holder.as_ref() {
-        Some(holder) if holder.is_provably_gone() => {}
-        Some(holder) => {
-            return StandingFreeze::Waiting(format!(
-                "the holder of the freeze on {} (pid {}) is not proven dead",
-                held.path, holder.identity.pid
-            ))
-        }
-        None => {
-            return StandingFreeze::Waiting(format!(
-                "the record of the freeze on {} names no holder, so nothing about it can be \
-                 proven",
-                held.path
-            ))
-        }
-    }
-    if held.ownership == protocol::hash::FreezeOwnership::Adopted {
-        return StandingFreeze::NotOursToClear;
-    }
-    let file_lock = match protocol::hash::FreezeLock::acquire_within(
-        std::path::Path::new(&held.path),
-        remaining(deadline),
-    ) {
-        Ok(lock) => lock,
-        // The name reaches nothing: the vnode this record describes is not there, so
-        // nothing is owed — the same ending a `NotOurs` from the clear itself has.
-        Err(protocol::hash::FreezeLockFailure::Missing(why)) => {
-            return StandingFreeze::Attempted(protocol::hash::FreezeClear::NotOurs(why))
-        }
-        // A question that could not be asked — a permission denied, a descriptor
-        // shortfall, or another participant (a live probe) holding the lock. Waiting,
-        // so whoever asked comes back; reading it as an answer is what licenses a
-        // clear on no evidence at all.
-        Err(protocol::hash::FreezeLockFailure::Unavailable(why)) => {
-            return StandingFreeze::Waiting(format!(
-                "the freeze on {} could not be locked: {why}",
-                held.path
-            ))
-        }
-    };
-    // **The record as it is NOW, under the lock, and not as the caller found it.**
-    // Everything below acts on the file; the only warrant for doing so is a claim
-    // this record still makes. See "The re-read this DOES make".
-    match load(except_uid) {
-        Ok(current) if current.exec_freeze.as_ref() == Some(held) => {}
-        Ok(current) => {
-            return StandingFreeze::Waiting(match current.exec_freeze.as_ref() {
-                Some(other) => format!(
-                    "{except_uid} claims a freeze on {} rather than the one this pass read on \
-                     {}, so the claim it read is no longer the record's and licenses nothing",
-                    other.path, held.path
-                ),
-                None => format!(
-                    "{except_uid} no longer claims the freeze on {} this pass read, so there \
-                     is nothing on the record to act under",
-                    held.path
-                ),
-            })
-        }
-        Err(err) => {
-            return StandingFreeze::Waiting(format!(
-                "{except_uid}'s record could not be re-read to confirm it still claims the \
-                 freeze on {} ({err:#}), and a question that could not be asked is not an \
-                 answer",
-                held.path
-            ))
-        }
-    }
-    if let OtherFreezeClaim::Standing(why) = other_freeze_claim_on(except_uid, held.dev, held.ino) {
-        return StandingFreeze::Waiting(why);
-    }
-    StandingFreeze::Attempted(protocol::hash::clear_held_freeze(held, &file_lock))
 }
 
 /// The two roles a host spawns, which cleanup must be able to address.
@@ -2887,24 +2502,6 @@ pub fn to_failed(
 /// Update just the cleanup disposition (e.g. a custodian marking `complete`).
 pub fn set_cleanup(_lock: &LaunchLock, uid: &str, cleanup: CleanupState) -> Result<()> {
     let mut record = load(uid)?;
-    // **`Complete` is the durable statement that nothing is owed, and a standing
-    // freeze claim is something owed.** Nothing re-arms a completed record — that is
-    // what the marker is FOR — so a `Complete` written over a claim that is still on a
-    // real binary is not merely wrong, it is permanent: no custodian is rearmed, no
-    // recovery pass looks again, and the flag comes off when a human eventually works
-    // out why codex will not update. The custodian's own arms hold the marker back
-    // already; this is the same rule where a caller that has not read those arms still
-    // cannot get it wrong.
-    if cleanup == CleanupState::Complete {
-        if let Some(held) = &record.exec_freeze {
-            bail!(
-                "{uid} still claims the vnode freeze on {}, so its cleanup cannot be marked \
-                 complete: the marker is what stops anybody looking again, and the flag is \
-                 still on the file",
-                held.path
-            );
-        }
-    }
     record.cleanup = cleanup;
     store_atomic(uid, &record)
 }
@@ -3119,14 +2716,6 @@ pub enum SweepAction {
     /// `failed{cleanup:pending}` whose custodian is gone: the caller should
     /// spawn a replacement custodian to finish cleanup.
     NeedsReplacementCustodian { uid: String },
-    /// A standing freeze claim was **dealt with**: the flag was cleared, or found to
-    /// be nobody's business of this record's, and the claim withdrawn. Carries what
-    /// happened, because a flag coming off a binary is worth reading.
-    FreezeClaimSettled { uid: String, what: String },
-    /// A standing freeze claim was left **standing**: its warrants are not complete
-    /// yet — most often a live launch behind the same vnode, which is the ordinary
-    /// healthy case and not a failure. Carries what it is waiting for.
-    FreezeClaimStanding { uid: String, why: String },
     /// The record could not be **examined** this pass — it could not be read or
     /// parsed. Nothing was done to it and nothing is known about it.
     ///
@@ -3157,18 +2746,17 @@ pub enum SweepAction {
     /// silence: a `read_dir` that failed became a successful empty pass, a `readdir`
     /// error was dropped, and `Path::exists()` read a permission denial as "there is no
     /// record here". A pass that could not look is not a pass that looked and found
-    /// nothing, and only the first of those leaves a flag on somebody's binary with
-    /// nobody coming back for it.
+    /// nothing, and only the first of those leaves a record's repair owed with nobody
+    /// coming back for it.
     ScanFailed { what: String, why: String },
     /// The pass reached its deadline with `unreached` records still unexamined.
     ///
-    /// **A pass needs an end, and the end has to be one it chooses.** Each standing
-    /// claim can cost the executable's lock budget and the withdrawal's, so a machine
-    /// with a batch of leaked claims can hold a pass for as long as there are claims —
-    /// in front of a launcher, that is a human waiting at a terminal with nothing said,
-    /// and in front of a daemon it is a child that gets killed part-way through a
-    /// record transition whose other half nobody then performs. Stopping between
-    /// records is the one place a pass can stop having done whole acts only.
+    /// **A pass needs an end, and the end has to be one it chooses.** Each record can
+    /// cost a wait for its launch lock, so a machine with many records can hold a pass
+    /// past the daemon's budget for the child that runs it, and that child gets killed
+    /// part-way through a record transition whose other half nobody then performs.
+    /// Stopping between records is the one place a pass can stop having done whole acts
+    /// only.
     RanOutOfTime { unreached: usize },
 }
 
@@ -3176,15 +2764,6 @@ pub enum SweepAction {
 /// reach. Well inside the daemon's own budget for the child that runs it, so the pass
 /// ends itself — having said what it did — rather than being killed with its account.
 pub const RECOVERY_SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// How long the freeze-only pass a launch runs spends before it gives up and says so.
-///
-/// Short, because it is in front of a human. The common case does not approach it: a
-/// record with no claim costs a read, and a claim whose holder is not proven dead is
-/// judged before any lock is reached, so a machine with live sessions on it pays a
-/// liveness question per session and nothing else. What can reach the budget is a
-/// batch of genuinely leaked claims, and those are what the daemon's pass is for.
-pub const LAUNCH_FREEZE_SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether a recorded identity is gone (a missing one counts as gone for sweep
 /// purposes — a guardian we never recorded cannot be relied on).
@@ -3197,22 +2776,6 @@ fn guardian_gone(id: Option<&ProcessIdentity>) -> bool {
     }
 }
 
-/// How much of a record one pass is entitled to repair.
-///
-/// The two scopes exist because the two callers are entitled to different things,
-/// and the difference is about what each can FOLLOW THROUGH on rather than about
-/// how thorough each wants to be. See [`sweep_standing_freezes_each`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SweepScope {
-    /// The record state machine AND the standing freeze claims.
-    Everything,
-    /// Standing freeze claims only: no record's lifecycle is repaired, and no launch
-    /// lock is taken. It still READS whole records — the claim is a field on one —
-    /// and it still writes the withdrawal of a claim it has finished with, under a
-    /// launch lock taken for that write alone.
-    FreezesOnly,
-}
-
 /// Scan every session's launch record and repair the ones a crash orphaned.
 /// Runs bounded and best-effort: an unreadable record is skipped (a future
 /// sweep, or the owning custodian, will get it), never guessed at.
@@ -3220,11 +2783,7 @@ enum SweepScope {
 /// This is the **backstop**, not the primary reaper: the pre-armed
 /// custodian handles the common case; the sweep exists for total-guardian-loss.
 pub fn recovery_sweep_each(on_action: &mut dyn FnMut(SweepAction)) {
-    sweep_records(
-        SweepScope::Everything,
-        std::time::Instant::now() + RECOVERY_SWEEP_BUDGET,
-        on_action,
-    );
+    sweep_records(std::time::Instant::now() + RECOVERY_SWEEP_BUDGET, on_action);
 }
 
 /// [`recovery_sweep_each`], collected. Test-only: a caller that waits for the whole
@@ -3237,81 +2796,14 @@ pub fn recovery_sweep() -> Vec<SweepAction> {
     actions
 }
 
-/// The freeze half of [`recovery_sweep_each`], for a caller that must not do the other
-/// half.
-///
-/// **Why a launcher gets this one and not the whole pass.** The full sweep's record
-/// transitions are only half of an act: a stale `pending` it CASes to
-/// `failed{cleanup:pending}` then needs a replacement custodian, and arranging one is
-/// the caller's job ([`crate::codex_custodian::run_sweep_once`]). A launcher that ran
-/// the full pass before its own probe would perform the durable half and leave the
-/// process half undone — a record flagged as guardianless with nobody flagged to act
-/// on it, which is worse than not having looked. It also has no business spawning a
-/// janitor per orphaned record on the path where a human is waiting for a TUI.
-///
-/// A standing freeze claim has no second half. The clear IS the act, the warrants are
-/// [`resolve_standing_freeze`]'s, and the launcher is about to freeze the very vnode a
-/// leaked claim names — so this is the one repair a launch is both entitled to and
-/// motivated to make. The daemon runs the whole pass on its own tick.
-///
-/// **The lock discipline is unchanged**, because it is the same code: each record is
-/// read under its own launch lock, the lock is dropped, and the executable's own
-/// [`protocol::hash::FreezeLock`] is taken across the scan and the clear. A launch
-/// that is live behind the vnode holds either that lock (the probe, for its whole run)
-/// or a record naming it (every recording site), and either one defers this pass.
-/// **Called BEFORE the caller takes a freeze of its own**, so it can never be waiting
-/// on its own lock.
-///
-/// **`deadline` bounds the pass, and it is the only bound.** It ends the pass between
-/// records, and it is also what each of the two waits inside a record — the
-/// executable's lock and the withdrawal's launch lock — is clamped to, so neither can
-/// add its own budget on top. Checked between records rather than inside them because
-/// every act here is whole; what the clamp buys is that a record STARTED near the
-/// deadline cannot then run past it. A record that claims no freeze — nearly all of
-/// them, and all of them on a healthy machine — costs a read; a claim whose holder is
-/// not proven dead is judged before any lock is reached, so a live launch's pin is
-/// never something this waits on.
-///
-/// Never produces [`SweepAction::FailedStalePending`],
-/// [`SweepAction::NeedsReplacementCustodian`] or [`SweepAction::Busy`]; the record
-/// transitions cannot be reached from here and no launch lock is taken to be contended
-/// for. Pinned by a test, because the type cannot say it.
-pub fn sweep_standing_freezes_each(
-    deadline: std::time::Instant,
-    on_action: &mut dyn FnMut(SweepAction),
-) {
-    sweep_records(SweepScope::FreezesOnly, deadline, on_action);
-}
-
-/// [`sweep_standing_freezes_each`], collected. Test-only, for the same reason
-/// [`recovery_sweep`] is — a caller that waits for the whole `Vec` learns nothing from
-/// a pass that is killed part-way through.
-#[cfg(test)]
-pub fn sweep_standing_freezes(deadline: std::time::Instant) -> Vec<SweepAction> {
-    let mut actions = Vec::new();
-    sweep_standing_freezes_each(deadline, &mut |action| actions.push(action));
-    actions
-}
-
 /// **Says each action at the moment it takes it**, rather than handing back an
-/// account when the pass is over.
-///
-/// The account is the only durable trace of a settled claim: the clear takes the flag
-/// off and the withdrawal takes the claim off the record, so a pass killed after it
-/// has done both and before it has spoken leaves nothing that says either happened.
-/// Both callers run under a kill — the daemon's child at its budget, a launcher at a
-/// keystroke — so a line owed at the end is a line the machine that needs it never
-/// gets.
-fn sweep_records(
-    scope: SweepScope,
-    deadline: std::time::Instant,
-    on_action: &mut dyn FnMut(SweepAction),
-) {
+/// account when the pass is over. The daemon kills the pass's process at its budget,
+/// so a line owed at the end is a line the machine that needs it never gets.
+fn sweep_records(deadline: std::time::Instant, on_action: &mut dyn FnMut(SweepAction)) {
     let dir = sessions_root();
     let mut records: Vec<String> = Vec::new();
     // **Every reading of "there is nothing here" has to be one the scan actually
-    // made**, which is the discipline `other_freeze_claim_on` already reads every
-    // other record with. The three fail-open forms this had — an empty `Vec` for a
+    // made.** The three fail-open forms this had — an empty `Vec` for a
     // root that could not be listed, `flatten()` on the entries, and `exists()` for
     // the record — all turn "I could not look" into "I looked and there was nothing
     // to do", and the caller's exit status then says everything owed was done.
@@ -3321,8 +2813,8 @@ fn sweep_records(
         // other errno is a question that could not be asked, but this one is an answer:
         // the directory is made by the first launch, so before there has been one there
         // is nothing here and nothing owed. Read as a failure it made a fresh install
-        // exit non-zero from the daemon's very first pass and print "could not be
-        // looked at" at the first launch, about a machine with nothing wrong with it.
+        // exit non-zero from the daemon's very first pass, about a machine with nothing
+        // wrong with it.
         //
         // `ENOTDIR` is deliberately NOT in that company: a file sitting where the
         // sessions root belongs means every record on the machine is unreachable, which
@@ -3348,7 +2840,7 @@ fn sweep_records(
             }
         };
         // Named lossily, because a name this process cannot spell is still a directory
-        // that may hold a claim — but NOT addressed: every read below builds a path
+        // that may hold a record — but NOT addressed: every read below builds a path
         // from the uid, and a lossy one reaches a different name or none.
         let Some(uid) = entry.file_name().to_str().map(str::to_string) else {
             on_action(SweepAction::ScanFailed {
@@ -3379,7 +2871,7 @@ fn sweep_records(
     }
     for (done, uid) in records.iter().enumerate() {
         // **Checked between records, which is the only place it can be checked.**
-        // Every act below is whole — a CAS, a `chflags`, a withdrawal — and half of
+        // Every act below is whole — a CAS and the actions it reports — and half of
         // one is worse than none of it, so the deadline ends the PASS rather than
         // interrupting a record.
         if std::time::Instant::now() >= deadline {
@@ -3389,37 +2881,23 @@ fn sweep_records(
             break;
         }
         let uid = uid.clone();
-        // **The launch lock is taken only by the scope that can change a lifecycle**,
-        // and it is WAITED for rather than tried once: see [`SWEEP_LAUNCH_LOCK_BUDGET`].
-        // It is what makes a read-then-CAS one decision; a pass that only settles
-        // freeze claims makes no such pair. Everything it goes on to do re-proves
-        // itself under the executable's own lock and re-reads the record under a
-        // fresh launch lock before withdrawing, and `store_atomic` publishes by
-        // rename, so an unlocked read sees a whole record or none — the same
-        // discipline `other_freeze_claim_on` has always read every other record
-        // with. Not taking it is not a saving: acquiring one CREATES the session
-        // directory and the lock file, so a launcher taking one per record per
-        // launch would write into every other launch's directory on its way to
-        // deciding it had nothing to do there, and would wait out a custodian that
-        // was busy with something else while a human waited for a TUI.
-        let lock = match scope {
-            SweepScope::FreezesOnly => None,
-            SweepScope::Everything => match LaunchLock::acquire_bounded(
-                &uid,
-                SWEEP_LAUNCH_LOCK_BUDGET.min(remaining(deadline)),
-            ) {
-                Ok(lock) => Some(lock),
-                Err(err) => {
-                    on_action(SweepAction::Busy {
-                        uid,
-                        why: format!(
-                            "the launch lock was still held after waiting for it, so this \
-                             record was not opened ({err:#})"
-                        ),
-                    });
-                    continue;
-                }
-            },
+        // The launch lock is WAITED for rather than tried once: see
+        // [`SWEEP_LAUNCH_LOCK_BUDGET`]. It is what makes a read-then-CAS one decision.
+        let lock = match LaunchLock::acquire_bounded(
+            &uid,
+            SWEEP_LAUNCH_LOCK_BUDGET.min(remaining(deadline)),
+        ) {
+            Ok(lock) => lock,
+            Err(err) => {
+                on_action(SweepAction::Busy {
+                    uid,
+                    why: format!(
+                        "the launch lock was still held after waiting for it, so this \
+                         record was not opened ({err:#})"
+                    ),
+                });
+                continue;
+            }
         };
         let record = match load(&uid) {
             Ok(record) => record,
@@ -3435,64 +2913,48 @@ fn sweep_records(
                 continue;
             }
         };
-        // **The record's own lifecycle is repaired only by a pass that can finish the
-        // job.** Every transition below is half of an act whose other half is a
-        // process the caller must spawn; a scope that cannot spawn one does not take
-        // the first half either. See [`sweep_standing_freezes_each`].
-        if let Some(lock) = lock.as_ref() {
-            match &record.state {
-                LaunchState::Pending => {
-                    let both_gone = guardian_gone(Some(&record.coordinator))
-                        && guardian_gone(record.custodian.as_ref());
-                    let expired = !matches!(deadline_expiry(&record), Expiry::Live);
-                    if (both_gone || expired)
-                        && to_failed(
-                            lock,
-                            &uid,
-                            "orphaned pending recovered by sweep",
-                            CleanupState::Pending,
-                        )
-                        .is_ok()
-                    {
-                        on_action(SweepAction::FailedStalePending { uid: uid.clone() });
-                        // It now needs cleanup; if no custodian can do it, flag.
-                        if guardian_gone(record.custodian.as_ref()) {
-                            on_action(SweepAction::NeedsReplacementCustodian { uid: uid.clone() });
-                        }
-                    }
-                }
-                LaunchState::Failed { .. } => {
-                    if record.cleanup == CleanupState::Pending
-                        && guardian_gone(record.custodian.as_ref())
-                    {
-                        on_action(SweepAction::NeedsReplacementCustodian { uid: uid.clone() });
-                    }
-                }
-                LaunchState::Ready => {
-                    // A committed session whose custodian has died has lost its
-                    // independent teardown authority: rearm one. Only a
-                    // *proven* dead custodian triggers this (fail-closed). But NOT if
-                    // the session was already torn down: a Ready teardown records a
-                    // durable marker (cleanup = Complete), so we
-                    // must NOT rearm a fresh custodian on every later sweep for a
-                    // session that is already gone.
-                    if record.cleanup != CleanupState::Complete
-                        && guardian_gone(record.custodian.as_ref())
-                    {
+        match &record.state {
+            LaunchState::Pending => {
+                let both_gone = guardian_gone(Some(&record.coordinator))
+                    && guardian_gone(record.custodian.as_ref());
+                let expired = !matches!(deadline_expiry(&record), Expiry::Live);
+                if (both_gone || expired)
+                    && to_failed(
+                        &lock,
+                        &uid,
+                        "orphaned pending recovered by sweep",
+                        CleanupState::Pending,
+                    )
+                    .is_ok()
+                {
+                    on_action(SweepAction::FailedStalePending { uid: uid.clone() });
+                    // It now needs cleanup; if no custodian can do it, flag.
+                    if guardian_gone(record.custodian.as_ref()) {
                         on_action(SweepAction::NeedsReplacementCustodian { uid: uid.clone() });
                     }
                 }
             }
-        }
-        // **A standing freeze claim is owed whatever state its launch is in**, so it
-        // is asked about for every record — but OUTSIDE the launch lock, and that is
-        // not a tidiness preference. See `settle_standing_freeze` for the ordering
-        // and what holding both the wrong way round costs a live launch. (`None` for
-        // the freeze-only scope, which never took one; the release is written the
-        // same way for both, because what must not happen is the same for both.)
-        drop(lock);
-        if let Some(action) = settle_standing_freeze(&uid, &record, deadline) {
-            on_action(action);
+            LaunchState::Failed { .. } => {
+                if record.cleanup == CleanupState::Pending
+                    && guardian_gone(record.custodian.as_ref())
+                {
+                    on_action(SweepAction::NeedsReplacementCustodian { uid: uid.clone() });
+                }
+            }
+            LaunchState::Ready => {
+                // A committed session whose custodian has died has lost its
+                // independent teardown authority: rearm one. Only a
+                // *proven* dead custodian triggers this (fail-closed). But NOT if
+                // the session was already torn down: a Ready teardown records a
+                // durable marker (cleanup = Complete), so we
+                // must NOT rearm a fresh custodian on every later sweep for a
+                // session that is already gone.
+                if record.cleanup != CleanupState::Complete
+                    && guardian_gone(record.custodian.as_ref())
+                {
+                    on_action(SweepAction::NeedsReplacementCustodian { uid: uid.clone() });
+                }
+            }
         }
     }
 }
@@ -3507,198 +2969,10 @@ fn sweep_records(
 const SWEEP_LAUNCH_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// **What is left of a pass's budget, and never a negative** — a deadline already
-/// past is nothing left, which makes every wait below it a single non-blocking try
+/// past is nothing left, which makes the launch-lock wait a single non-blocking try
 /// rather than an error the caller has to special-case.
 fn remaining(deadline: std::time::Instant) -> std::time::Duration {
     deadline.saturating_duration_since(std::time::Instant::now())
-}
-
-/// What one attempt at withdrawing a claim came to.
-#[derive(Debug)]
-pub enum FreezeWithdrawal {
-    /// The record said this claim, and now says none.
-    Withdrawn,
-    /// **The record no longer names the claim that was judged, so nothing was
-    /// written.** Carries why, because this is the one outcome a caller must not read
-    /// as "the record is clean now".
-    NotOurs(String),
-    /// The withdrawal was owed and could not be written. Carries why.
-    Failed(String),
-}
-
-/// Take `held` off `uid`'s record — **and only if `held` is still the claim on it.**
-///
-/// # Why every withdrawal goes through here
-///
-/// Clearing a flag and withdrawing the claim that named it are two moments, and the
-/// executable's lock is not held between them. In that gap a replacement host for the
-/// same uid can take a fresh freeze and record it. A withdrawal that simply blanked
-/// the field would then erase a LIVE holder's own record — and that record is the only
-/// thing telling the next janitor past those bytes that somebody is using them, so
-/// erasing it hands a running launch's binary to the first stale setter that asks. It
-/// is the same failure as clearing a live holder's flag, one step removed and harder
-/// to see.
-///
-/// Both actors reach it: the recovery pass after it settles a claim, and the custodian
-/// after its own. They had two copies of this write and only one of them checked; a
-/// second copy of a rule is a copy that drifts, and the direction it drifted in was a
-/// live launch losing its guard.
-///
-/// The claim is compared whole. Holder identity and boot are part of it, so a genuinely
-/// newer freeze cannot compare equal to an older one — and a byte-identical claim could
-/// only be republished by a holder that is still alive, which the death warrant refused
-/// long before this point.
-pub fn withdraw_exact_freeze_claim(
-    uid: &str,
-    held: &protocol::hash::HeldFreeze,
-    budget: std::time::Duration,
-) -> FreezeWithdrawal {
-    let lock = match LaunchLock::acquire_bounded(uid, budget) {
-        Ok(lock) => lock,
-        Err(err) => return FreezeWithdrawal::Failed(format!("{err:#}")),
-    };
-    let current = match load(uid) {
-        Ok(current) => current,
-        Err(err) => return FreezeWithdrawal::Failed(format!("{err:#}")),
-    };
-    match current.exec_freeze.as_ref() {
-        Some(now) if now == held => {}
-        Some(_) => {
-            return FreezeWithdrawal::NotOurs(format!(
-                "{uid} now names a different freeze claim from the one this pass dealt with, so \
-                 the record is left exactly as it is: blanking it would erase whatever holder is \
-                 standing behind {} now",
-                held.path
-            ))
-        }
-        None => {
-            return FreezeWithdrawal::NotOurs(format!(
-                "{uid} already claims no freeze, so there is nothing of this pass's to withdraw"
-            ))
-        }
-    }
-    match note_exec_freeze_released(&lock, uid) {
-        Ok(()) => FreezeWithdrawal::Withdrawn,
-        Err(err) => FreezeWithdrawal::Failed(format!("{err:#}")),
-    }
-}
-
-/// The most the sweep waits for a launch lock to withdraw a claim it has just dealt
-/// with — clamped by what is left of the pass's own deadline, whichever is less.
-/// Short: it holds no other lock at that point, the write is one rename, and a pass
-/// that cannot have it simply says so and asks again.
-const FREEZE_WITHDRAWAL_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Retry, from the recovery pass, the clear a launch's own custodian could not or did
-/// not finish — and withdraw the claim when there is nothing left owed on it.
-///
-/// **Why the sweep and not only the custodian.** The custodian is armed for one launch
-/// and has a budget: past it, it stops waiting, says so, and leaves the claim standing
-/// rather than writing off a flag that is still on a file. Something has to come back
-/// for that claim, and it cannot be the custodian that already gave up or the one that
-/// was killed. This pass is the backstop that already exists for exactly that shape of
-/// loss, and it runs with no budget at all — it simply asks again, every pass, until
-/// the warrants are met.
-///
-/// The warrants themselves are [`resolve_standing_freeze`]'s, shared with the custodian
-/// so the two actors cannot come to different conclusions about the same file.
-///
-/// **The lock order, which is the whole reason this runs outside the sweep's own
-/// launch lock.** Every other participant takes the executable's lock FIRST: a host's
-/// freeze takes it inside [`protocol::hash::freeze_and_hash_recording`] and then takes
-/// the launch lock from inside the recording callback; its withdrawal does the same;
-/// the custodian takes the file lock, drops it, and only then takes the launch lock.
-/// A sweep holding a launch lock while waiting up to `FREEZE_LOCK_BUDGET` for a file
-/// lock is that order inverted, in front of a host that waits one second for that
-/// launch lock — and a host whose freeze cannot be recorded does not continue, it
-/// REFUSES THE LAUNCH. So this holds nothing on the way in and takes a launch lock
-/// only to withdraw, which is the custodian's shape and never holds both.
-///
-/// The record it acts on is the snapshot the sweep read under the lock. That is a
-/// decision input rather than a licence: everything destructive below re-proves
-/// itself against the file and the other records at the moment it acts, under the
-/// executable's own lock, so a record that changed in between changes the answer
-/// rather than the act. A withdrawal that lands on a record which has since taken a
-/// NEW freeze is the one thing that would be wrong, and it cannot happen: the
-/// withdrawal is refused unless the claim on the record right now is still the one
-/// this pass dealt with.
-///
-/// `None` when the record claims no freeze, which is almost every record.
-fn settle_standing_freeze(
-    uid: &str,
-    record: &LaunchRecord,
-    deadline: std::time::Instant,
-) -> Option<SweepAction> {
-    let held = record.exec_freeze.as_ref()?;
-    let what = match resolve_standing_freeze(uid, held, deadline) {
-        // Not a failure, and usually not even a problem: the ordinary reading is a
-        // healthy launch running on those bytes right now. Reported so a sweep that
-        // did nothing can still say what it was waiting for.
-        StandingFreeze::Waiting(why) => {
-            return Some(SweepAction::FreezeClaimStanding {
-                uid: uid.to_string(),
-                why,
-            })
-        }
-        StandingFreeze::NotOursToClear => format!(
-            "{uid} adopted the freeze on {} rather than setting it, so the flag is left \
-             exactly as it was found and only the claim is withdrawn",
-            held.path
-        ),
-        StandingFreeze::Attempted(protocol::hash::FreezeClear::Failed(why)) => {
-            return Some(SweepAction::FreezeClaimStanding {
-                uid: uid.to_string(),
-                why: format!(
-                    "the clear of the freeze on {} was attempted and did not take: {why}. \
-                     Until it is cleared codex cannot be updated; `chflags nouchg {}` undoes \
-                     the flag",
-                    held.path, held.path
-                ),
-            })
-        }
-        StandingFreeze::Attempted(protocol::hash::FreezeClear::Cleared) => format!(
-            "cleared the vnode freeze {uid} left on {} (a launch that did not survive to \
-             clear its own, and a custodian that did not finish)",
-            held.path
-        ),
-        StandingFreeze::Attempted(protocol::hash::FreezeClear::NotOurs(why)) => {
-            format!("left the flags on {} alone: {why}", held.path)
-        }
-    };
-    // The claim goes only once the flag has been dealt with, and never before: a claim
-    // that outlived its flag would send every later reader back to a file this pass has
-    // already finished with, and a flag that outlived its claim would have nobody left
-    // to come back for it.
-    // **Only this claim** — [`withdraw_exact_freeze_claim`] is the one copy of that
-    // rule, and the custodian reaches the same one.
-    match withdraw_exact_freeze_claim(
-        uid,
-        held,
-        FREEZE_WITHDRAWAL_LOCK_BUDGET.min(remaining(deadline)),
-    ) {
-        FreezeWithdrawal::Withdrawn => {}
-        // Settled, not standing: this pass finished with the flag, and the claim on the
-        // record now belongs to somebody else's launch and is their business.
-        FreezeWithdrawal::NotOurs(why) => {
-            return Some(SweepAction::FreezeClaimSettled {
-                uid: uid.to_string(),
-                what: format!("{what}; the claim itself was left alone, because {why}"),
-            })
-        }
-        FreezeWithdrawal::Failed(why) => {
-            return Some(SweepAction::FreezeClaimStanding {
-                uid: uid.to_string(),
-                why: format!(
-                    "{what}, but the record still says the freeze is held and could not be \
-                     updated ({why}), so the claim is asked about again next pass"
-                ),
-            })
-        }
-    }
-    Some(SweepAction::FreezeClaimSettled {
-        uid: uid.to_string(),
-        what,
-    })
 }
 
 /// A stable hash of a spawn's argv, recorded with the child, so a spawn is durably
@@ -5376,75 +4650,6 @@ mod tests {
         );
     }
 
-    /// **A question the scan could not ask is not an answer that nobody is holding
-    /// the freeze.**
-    ///
-    /// This scan decides whether a custodian may `chflags` a file a live launch may be
-    /// relying on, so every reading that goes "there is no other claim" has to be a
-    /// reading it actually made. Two did not: `entries.flatten()` silently dropped an
-    /// entry the kernel refused to produce, and `path.exists()` reads a permission
-    /// denial or an I/O error on the stat as *the record is not there*. Both make a
-    /// directory this process can only half read look like a directory with fewer
-    /// launches in it — and fewer launches is precisely the direction that licenses a
-    /// clear.
-    ///
-    /// Staged with a real refusal: another launch's session directory is made
-    /// unreadable, so the record inside it cannot be stat'ed and its claim cannot be
-    /// ruled in or out.
-    /// **The one withdrawal both janitors reach refuses a claim it did not judge.**
-    ///
-    /// The sweep and the custodian each used to have their own copy of this write, and
-    /// only one of them checked. The direction the unchecked copy failed in is a live
-    /// launch losing the record that stands behind its bytes — so the rule lives in one
-    /// place now, and this is that place asked directly, from both sides: it withdraws
-    /// exactly what it judged, and refuses anything else without writing.
-    #[test]
-    fn an_exact_withdrawal_refuses_a_claim_the_record_no_longer_names() {
-        let uid = "exact-withdrawal";
-        let far = protocol::proc_identity::monotonic_now_nanos().unwrap() + 60_000_000_000;
-        let lock = LaunchLock::acquire(uid).unwrap();
-        create_pending(&lock, a_pending(uid, far)).unwrap();
-        let judged = protocol::hash::HeldFreeze {
-            path: "/nowhere/codex".into(),
-            dev: 7,
-            ino: 7,
-            original_flags: 0,
-            ownership: protocol::hash::FreezeOwnership::Set,
-            holder: None,
-        };
-        let mut replacement = judged.clone();
-        replacement.ino = 8;
-        note_exec_freeze_taken(&lock, uid, replacement.clone()).unwrap();
-        drop(lock);
-
-        let budget = std::time::Duration::from_secs(2);
-        let refused = withdraw_exact_freeze_claim(uid, &judged, budget);
-        assert!(
-            matches!(refused, FreezeWithdrawal::NotOurs(_)),
-            "a record naming a different claim licenses no write: {refused:?}"
-        );
-        assert_eq!(
-            load(uid).unwrap().exec_freeze,
-            Some(replacement.clone()),
-            "and the claim that IS on the record must be untouched"
-        );
-
-        // The same call, against the claim the record actually names, does withdraw.
-        let taken = withdraw_exact_freeze_claim(uid, &replacement, budget);
-        assert!(
-            matches!(taken, FreezeWithdrawal::Withdrawn),
-            "the claim it judged is the one it takes back: {taken:?}"
-        );
-        assert!(load(uid).unwrap().exec_freeze.is_none());
-
-        // And a record already claiming nothing is not a write either.
-        let again = withdraw_exact_freeze_claim(uid, &replacement, budget);
-        assert!(
-            matches!(again, FreezeWithdrawal::NotOurs(_)),
-            "nothing to withdraw is not a withdrawal: {again:?}"
-        );
-    }
-
     /// **A machine with no `sessions/` yet has no launches, and that is a healthy
     /// answer rather than a failed scan.**
     ///
@@ -5466,10 +4671,107 @@ mod tests {
             Vec::new(),
             "a machine with no launches on it owes nothing"
         );
+    }
+
+    /// **Only a launch still starting is marked quit.** A session that reached `ready`
+    /// was running, not starting, and a launch another process already failed keeps its
+    /// own reason: neither gets the mark.
+    #[test]
+    fn only_a_pending_launch_is_marked_quit_while_starting() {
+        let far = monotonic_now_nanos().unwrap() + 60_000_000_000;
+        let quit = |uid: &str| {
+            let lock = LaunchLock::acquire(uid).unwrap();
+            note_codex_quit_while_starting(&lock, uid).unwrap();
+            load(uid).unwrap().codex_quit_while_starting
+        };
+
+        let lock = LaunchLock::acquire("quit-pending").unwrap();
+        create_pending(&lock, a_pending("quit-pending", far)).unwrap();
+        drop(lock);
+        assert!(quit("quit-pending"), "a pending launch is marked");
+
+        let lock = LaunchLock::acquire("quit-failed").unwrap();
+        create_pending(&lock, a_pending("quit-failed", far)).unwrap();
+        to_failed(
+            &lock,
+            "quit-failed",
+            "its own reason",
+            CleanupState::Pending,
+        )
+        .unwrap();
+        drop(lock);
+        assert!(!quit("quit-failed"), "a failed launch keeps its own reason");
+
+        let lock = LaunchLock::acquire("quit-ready").unwrap();
+        let coord = current_identity().unwrap();
+        let mut np = a_pending("quit-ready", far);
+        np.coordinator = coord;
+        create_pending(&lock, np).unwrap();
+        arm(&lock, "quit-ready", live_custodian());
+        record_new_session_created(&lock, "quit-ready", fake_server_a(), false).unwrap();
+        let _up = make_host_ready(&lock, "quit-ready");
+        to_ready(&lock, "quit-ready", &coord).unwrap();
+        drop(lock);
+        assert!(!quit("quit-ready"), "a ready session is not marked");
+    }
+
+    /// **A pass has to be able to stop, and it has to stop between whole acts.**
+    ///
+    /// Each record can cost a wait for its launch lock, so per-step bounds multiply:
+    /// a machine with many records could hold the pass past the daemon's budget for
+    /// the child that runs it, and that child is killed part-way through. A deadline
+    /// already past means the pass does nothing at all and says how much it did not
+    /// reach — which is the shape that matters, because the alternative to stopping
+    /// between records is stopping inside one.
+    #[test]
+    fn a_pass_that_is_out_of_time_stops_between_records_and_says_what_it_did_not_reach() {
+        let uid = "out-of-time";
+        let lock = LaunchLock::acquire(uid).unwrap();
+        // Already past, so a pass that examined this record would file it as failed.
+        create_pending(&lock, a_pending(uid, 1)).unwrap();
+        drop(lock);
+
+        let mut actions = Vec::new();
+        sweep_records(std::time::Instant::now(), &mut |action| {
+            actions.push(action)
+        });
+
         assert_eq!(
-            sweep_standing_freezes(std::time::Instant::now() + std::time::Duration::from_secs(30)),
-            Vec::new(),
-            "and the launcher's pass must say nothing about it either"
+            actions,
+            vec![SweepAction::RanOutOfTime { unreached: 1 }],
+            "a pass with no time left must do nothing and account for what it skipped"
+        );
+        assert_eq!(
+            load(uid).unwrap().state,
+            LaunchState::Pending,
+            "and it must not have half-done the one record it did not examine"
+        );
+    }
+
+    /// **One held record cannot outlast the pass.** The launch-lock wait is clamped by
+    /// what is left of the pass's deadline, so a record whose lock is held throughout
+    /// costs the rest of the pass, not the full per-record budget on top of it.
+    #[test]
+    fn a_held_record_waits_no_longer_than_the_pass_has_left() {
+        let uid = "held-past-the-pass";
+        let lock = LaunchLock::acquire(uid).unwrap();
+        create_pending(&lock, a_pending(uid, 1)).unwrap();
+
+        let budget = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let mut actions = Vec::new();
+        sweep_records(started + budget, &mut |action| actions.push(action));
+        let took = started.elapsed();
+        drop(lock);
+
+        assert!(
+            matches!(actions.as_slice(), [SweepAction::Busy { uid: u, .. }] if u == uid),
+            "a record held for the whole pass is reported busy: {actions:?}"
+        );
+        assert!(
+            took < SWEEP_LAUNCH_LOCK_BUDGET,
+            "the wait must stop at the pass's deadline ({budget:?}), not run the full \
+             {SWEEP_LAUNCH_LOCK_BUDGET:?}: took {took:?}"
         );
     }
 
@@ -5506,9 +4808,8 @@ mod tests {
     /// The scan read every failure as absence: `Path::exists()` maps `EACCES` and
     /// `EIO` to "no record", so a session directory this process is refused simply
     /// vanishes from the pass — and the pass then exits clean having examined one
-    /// record fewer than the machine has. A freeze claim inside it is never looked at
-    /// again by anybody. `other_freeze_claim_on` was hardened against exactly this
-    /// reading; the sweep's own scan still had it.
+    /// record fewer than the machine has, and a repair owed inside it is never looked
+    /// at again by anybody.
     #[test]
     fn a_record_the_scan_cannot_stat_is_reported_rather_than_passed_over() {
         let blind = sessions_root().join("scanfail-blind");
@@ -5555,113 +4856,5 @@ mod tests {
                 .any(|a| matches!(a, SweepAction::ScanFailed { .. })),
             "a root that could not be enumerated must be said: {actions:?}"
         );
-    }
-
-    /// **`Complete` is a durable statement that nothing is owed, and a standing freeze
-    /// claim is something owed.**
-    ///
-    /// Nothing re-arms a completed record — that is the whole point of the marker, and
-    /// it is what makes a `Complete` written over a claim that is still on a real
-    /// binary permanent rather than merely wrong. The custodian's own arms already
-    /// hold the marker back; this is the same rule at the record layer, where a future
-    /// caller that has not read those arms still cannot get it wrong.
-    #[test]
-    fn a_record_still_claiming_a_freeze_can_never_be_marked_complete() {
-        let uid = "cleanup-vs-freeze";
-        let far = protocol::proc_identity::monotonic_now_nanos().unwrap() + 60_000_000_000;
-        let lock = LaunchLock::acquire(uid).unwrap();
-        create_pending(
-            &lock,
-            NewLaunch {
-                launch_nonce: "n".into(),
-                uid: uid.into(),
-                session_name: "cc-1".into(),
-                coordinator: current_identity().unwrap(),
-                boot: boot_identity().unwrap(),
-                deadline_monotonic_nanos: far,
-                created_ms: 1,
-            },
-        )
-        .unwrap();
-        note_exec_freeze_taken(
-            &lock,
-            uid,
-            protocol::hash::HeldFreeze {
-                path: "/nowhere/codex".into(),
-                dev: 1,
-                ino: 2,
-                original_flags: 0,
-                ownership: protocol::hash::FreezeOwnership::Set,
-                holder: None,
-            },
-        )
-        .unwrap();
-
-        let err = set_cleanup(&lock, uid, CleanupState::Complete)
-            .expect_err("a claim that still stands must refuse the marker");
-        let text = format!("{err:#}");
-        assert!(
-            text.contains("freeze"),
-            "the refusal must say what is still owed: {text}"
-        );
-        assert_ne!(load(uid).unwrap().cleanup, CleanupState::Complete);
-
-        // Every other transition is untouched: this is a rule about one marker.
-        set_cleanup(&lock, uid, CleanupState::Pending).unwrap();
-        assert_eq!(load(uid).unwrap().cleanup, CleanupState::Pending);
-
-        // And once the claim is withdrawn the marker goes on exactly as before.
-        note_exec_freeze_released(&lock, uid).unwrap();
-        set_cleanup(&lock, uid, CleanupState::Complete).unwrap();
-        assert_eq!(load(uid).unwrap().cleanup, CleanupState::Complete);
-    }
-
-    #[test]
-    fn a_record_the_scan_cannot_read_defers_rather_than_reading_as_no_claim() {
-        let lock = LaunchLock::acquire("scanhole-mine").unwrap();
-        create_pending(
-            &lock,
-            NewLaunch {
-                launch_nonce: "scanhole-nonce".into(),
-                uid: "scanhole-mine".into(),
-                session_name: "cc-1".into(),
-                coordinator: fake_identity(1),
-                boot: protocol::proc_identity::boot_identity().unwrap(),
-                deadline_monotonic_nanos: protocol::proc_identity::monotonic_now_nanos().unwrap()
-                    + 60_000_000_000,
-                created_ms: 1,
-            },
-        )
-        .unwrap();
-        drop(lock);
-
-        // A peer launch with a record of its own, whose contents this process is
-        // about to be unable to reach.
-        let peer = sessions_root().join("scanhole-peer");
-        std::fs::create_dir_all(&peer).unwrap();
-        std::fs::write(peer.join(RECORD_FILE), b"{}").unwrap();
-
-        assert_eq!(
-            other_freeze_claim_on("scanhole-mine", 7, 7),
-            OtherFreezeClaim::None,
-            "with every record readable and none of them claiming this vnode, there \
-             really is no other claim"
-        );
-
-        std::fs::set_permissions(&peer, std::os::unix::fs::PermissionsExt::from_mode(0o000))
-            .unwrap();
-        let verdict = other_freeze_claim_on("scanhole-mine", 7, 7);
-        std::fs::set_permissions(&peer, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-        match verdict {
-            OtherFreezeClaim::Standing(why) => assert!(
-                why.contains("scanhole-peer"),
-                "a deferral must name the record it could not read: {why}"
-            ),
-            OtherFreezeClaim::None => panic!(
-                "a record this process was refused must defer the clear, not read as \
-                 an absent claim"
-            ),
-        }
     }
 }

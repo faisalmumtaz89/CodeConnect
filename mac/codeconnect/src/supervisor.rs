@@ -155,9 +155,11 @@ pub struct SupervisorArgs {
     /// server answering on the same socket cannot supply a stranger's session
     /// under our uid.
     ///
-    /// `codeconnect claude` passes `None` and keeps exactly the behaviour it had:
-    /// it shares the fleet-wide server with every other Claude run, so its socket
-    /// going quiet really is indeterminate.
+    /// `codeconnect claude`'s supervisor pins the server its session is on as it
+    /// starts. That server is shared with every other Claude run, so its socket
+    /// going quiet is still indeterminate; its process proven dead is not, for the
+    /// same reason — and without the pin a killed server left the supervisor
+    /// polling `Unknown` for ever.
     pub server_a: Option<protocol::tmux::OwnedSession>,
 }
 

@@ -86,14 +86,6 @@ fn main() -> Result<()> {
         // touches a marker, so the exec-gate tests can fence `execve` on a real
         // target-side effect. Machinery, never typed by a human.
         "internal-gate-ack-probe" => exec_gate::run_ack_probe(rest),
-        // Hidden: a test-only stand-in for the launcher's probe freeze. It takes a
-        // vnode freeze the way `codex::probe_codex` does and then blocks, so a test
-        // can interrupt it and read the flag. Machinery, never typed by a human.
-        "internal-freeze-probe" => codex::run_freeze_probe(rest),
-        // Hidden: a test-only stand-in for a freezer holding the executable's freeze
-        // lock, so a test can prove a second PROCESS is excluded from it. Carries its
-        // own deadline. Machinery, never typed by a human.
-        "internal-freeze-lock-hold" => codex::run_freeze_lock_hold(rest),
         // Hidden: the launch coordinator (the supervisor in launch mode).
         // Spawned by the `codex` launcher before tmux exists; it owns the launch
         // record and every forward mutation, and stays on as the session's
@@ -513,6 +505,7 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
         other => bail!("{} sessions cannot be launched yet", other.as_str()),
     };
 
+    let _held = crate::attach::hold_signal_keys();
     tmux::new_session(
         &session_id,
         &cwd,
@@ -907,14 +900,22 @@ fn supervise(args: &[String]) -> Result<()> {
     let session_id = session_id.context("--session is required")?;
     let tmux_session = tmux_session.unwrap_or_else(|| session_id.clone());
     let cwd = cwd.unwrap_or_else(|| "/".to_string());
+    // A malformed value is dropped rather than forwarded: the daemon resolves the
+    // name instead, which is right, whereas a bad uid would mint a second identity
+    // for a session that has one.
+    let session_uid = session_uid.filter(|uid| protocol::uid::is_well_formed(uid));
+    // The server this session is on, pinned as the supervisor starts. A session
+    // cannot outlive the process hosting it, so that server proven dead — by pid and
+    // birth, never by socket silence — ends this session even on the fleet-wide
+    // server. Unresolvable, the probe is exactly as it was.
+    let server_a = session_uid.as_deref().and_then(|uid| {
+        protocol::tmux::resolve_owned_session(protocol::TMUX_SOCKET_NAME, uid).ok()
+    });
 
     supervisor::run(
         supervisor::SupervisorArgs {
             session_id,
-            // A malformed value is dropped rather than forwarded: the daemon
-            // resolves the name instead, which is right, whereas a bad uid
-            // would mint a second identity for a session that has one.
-            session_uid: session_uid.filter(|uid| protocol::uid::is_well_formed(uid)),
+            session_uid,
             tmux_session,
             // No flag, on purpose. `supervise` is spawned by `codeconnect
             // claude` and by nothing else — the Codex launch supervises itself,
@@ -926,10 +927,7 @@ fn supervise(args: &[String]) -> Result<()> {
             cwd,
             claude_bin,
             codex: None,
-            // A Claude run shares the fleet-wide tmux server with every other one,
-            // so there is no server whose death is this session's death, and no pin
-            // to hand over. `None` keeps the probe exactly as it was.
-            server_a: None,
+            server_a,
         },
         &Config::load(),
     )

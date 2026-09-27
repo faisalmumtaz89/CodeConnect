@@ -28,7 +28,10 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+# `asm`: a Codex launch hashes the ~240 MB codex binary four times. On Apple silicon it
+# selects the CPU's SHA-256 instructions (0.11 s a hash, not 0.95 s in this size-optimised
+# release build); on Intel it replaces the software fallback for CPUs without them.
+sha2 = { version = "0.10", features = ["asm"] }
 # One symbol: flock(2), for the update checker's cross-process throttle. The
 # kernel releases the lock when the holder dies, which is what deletes the
 # entire corpse/staleness/takeover protocol a file-based lock would need.

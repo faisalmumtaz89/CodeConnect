@@ -981,6 +981,35 @@ while True:
 /// branch), so the host is parked in its bounded socket wait when SIGTERM lands.
 #[test]
 fn signal_during_bringup_leaks_nothing() {
+    let record = signal_during_bringup("-TERM");
+    assert_eq!(
+        record["codex_quit_while_starting"],
+        serde_json::Value::Bool(false),
+        "SIGTERM is not a quit: {record}"
+    );
+    println!("PASS signal_during_bringup_leaks_nothing (exit 130, no children, run dir removed)");
+}
+
+/// Ctrl+C during bring-up ends the launch the way it ends native codex: as a quit,
+/// which the launcher leaves without printing a reason.
+#[test]
+fn ctrl_c_during_bringup_is_a_quit() {
+    let record = signal_during_bringup("-INT");
+    assert_eq!(
+        record["codex_quit_while_starting"],
+        serde_json::Value::Bool(true),
+        "the host must say the launch was quit: {record}"
+    );
+    assert_eq!(
+        record["state"]["Failed"]["reason"], "codex was quit while the session was starting",
+        "and end the launch with that reason: {record}"
+    );
+    println!("PASS ctrl_c_during_bringup_is_a_quit");
+}
+
+/// Park a host in its bounded socket wait, deliver `signal`, and return its launch
+/// record once it has exited having left nothing behind.
+fn signal_during_bringup(signal: &str) -> serde_json::Value {
     let python = python3();
     let fake_home = ScratchDir::new("fakehang");
     let codex_home = ScratchDir::new("homehang");
@@ -1009,7 +1038,7 @@ fn signal_during_bringup_leaks_nothing() {
     assert!(spawned, "the fake app-server child never appeared");
 
     let _ = Command::new("/bin/kill")
-        .args(["-TERM", &host.pid().to_string()])
+        .args([signal, &host.pid().to_string()])
         .status();
 
     let code = host.wait_code(Duration::from_secs(15));
@@ -1031,7 +1060,13 @@ fn signal_during_bringup_leaks_nothing() {
         "the run dir survived a signalled bring-up: {}",
         run.path.display()
     );
-    println!("PASS signal_during_bringup_leaks_nothing (exit 130, no children, run dir removed)");
+    let record = launch
+        .home
+        .join("sessions")
+        .join(&launch.uid)
+        .join("launch.json");
+    serde_json::from_slice(&std::fs::read(&record).expect("read the launch record"))
+        .expect("a JSON launch record")
 }
 
 /// The host owns its run dir: it refuses to adopt one it did not create, because

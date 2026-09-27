@@ -160,10 +160,9 @@ pub struct GateSpec {
     /// A gated child is spawned detached, with no terminal and no parent left
     /// reading it, so the default has always been to discard it — and for the two
     /// host children that is right: their diagnostics have their own logs. It is not
-    /// right for a child whose whole output is diagnostics. The custodian's account
-    /// of what it did to a leaked vnode freeze, including the `chflags nouchg` line
-    /// an operator needs to repair one by hand, went to `/dev/null` in every
-    /// shipping launch — written, formatted, and thrown away.
+    /// right for a child whose whole output is diagnostics: the custodian's account
+    /// of the cleanup it could not finish would go to `/dev/null` — written,
+    /// formatted, and thrown away.
     ///
     /// Named by the OWNER rather than opened by the child, so the file exists and is
     /// owner-only before the child runs and a child that dies in its first
@@ -593,8 +592,8 @@ pub const ACK_PROBE_STDERR: &str = "gate-ack-probe: this line is the test's evid
 /// silent, and a silent fall back to `/dev/null` is the same state this whole fix was
 /// about: a janitor whose entire product is an explanation, explaining into nothing,
 /// with nobody able to tell that from a janitor with nothing to say. One line here
-/// means the operator who later finds an unexplained frozen binary can at least see
-/// why there is no log to read.
+/// means the operator who later finds an unexplained leftover can at least see why
+/// there is no log to read.
 ///
 /// **WHOSE stderr that is, stated exactly, because it was previously stated wrongly.**
 /// This used to claim the line lands on "the launcher's, which somebody is looking at",
@@ -988,10 +987,9 @@ mod tests {
     ///
     /// Every gated child's stderr went to `/dev/null`, which is right for the two
     /// host children — their output has its own logs — and wrong for the custodian,
-    /// whose entire product is an explanation. Its account of a leaked vnode freeze,
-    /// including the `chflags nouchg` repair line, was written and discarded on every
-    /// shipping launch. Driven through the real `launch_gated` with the real gate
-    /// binary, because the routing is the thing under test.
+    /// whose entire product is an explanation. Driven through the real
+    /// `launch_gated` with the real gate binary, because the routing is the thing
+    /// under test.
     #[test]
     fn a_gated_child_s_stderr_reaches_the_owner_named_file_and_nobody_else_can_read_it() {
         use std::os::unix::fs::PermissionsExt;
