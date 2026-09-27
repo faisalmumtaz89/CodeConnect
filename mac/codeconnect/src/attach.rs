@@ -234,6 +234,42 @@ extern "C" fn leave_on_signal(signal: libc::c_int) {
     }
 }
 
+/// Keep the signal keys typed while a session is being started from ending this
+/// process. With `ISIG` off, Ctrl-C (and Ctrl-\\, Ctrl-Z) stays in the terminal's input
+/// as a byte, which [`Terminal::open`] reads and types into the pane, where it means
+/// what it means to the program there — instead of killing this process, or a helper it
+/// is running, and leaving the session running unseen. The guard puts the terminal
+/// back if no [`Terminal`] takes it over, and a signal that ends this process meanwhile
+/// puts it back first; `None` when stdin is not a terminal.
+pub fn hold_signal_keys() -> Option<SignalKeysHeld> {
+    let mut original = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut original) } != 0 {
+        return None;
+    }
+    for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
+        unsafe { libc::signal(signal, leave_on_signal as *const () as libc::sighandler_t) };
+    }
+    let held = without_signal_keys(*SAVED.get_or_init(|| original));
+    (unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &held) } == 0)
+        .then_some(SignalKeysHeld)
+}
+
+fn without_signal_keys(mut attributes: libc::termios) -> libc::termios {
+    attributes.c_lflag &= !libc::ISIG;
+    attributes
+}
+
+/// Restores the terminal [`hold_signal_keys`] changed.
+pub struct SignalKeysHeld;
+
+impl Drop for SignalKeysHeld {
+    fn drop(&mut self) {
+        if let Some(saved) = SAVED.get() {
+            unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, saved) };
+        }
+    }
+}
+
 extern "C" fn wake_on_resize(_: libc::c_int) {
     let fd = WAKE.load(Ordering::SeqCst);
     if fd >= 0 {
@@ -1207,6 +1243,48 @@ fn write_raw(fd: libc::c_int, mut bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Ctrl-C typed while the signal keys are held is a byte waiting in the input,
+    /// and it is still there, unchanged, once the terminal is made raw.
+    #[test]
+    fn a_ctrl_c_typed_while_signal_keys_are_held_reaches_the_raw_terminal_as_a_byte() {
+        let (mut main, mut side) = (-1, -1);
+        let opened = unsafe {
+            libc::openpty(
+                &mut main,
+                &mut side,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "openpty");
+        let mut attributes: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(side, &mut attributes) }, 0);
+        assert_ne!(
+            attributes.c_lflag & libc::ISIG,
+            0,
+            "a fresh pty sends signals"
+        );
+        let held = without_signal_keys(attributes);
+        assert_eq!(unsafe { libc::tcsetattr(side, libc::TCSANOW, &held) }, 0);
+
+        assert_eq!(unsafe { libc::write(main, [0x03u8].as_ptr().cast(), 1) }, 1);
+        let mut raw = held;
+        unsafe { libc::cfmakeraw(&mut raw) };
+        assert_eq!(unsafe { libc::tcsetattr(side, libc::TCSANOW, &raw) }, 0);
+        assert!(
+            readable(side, Duration::from_secs(2)).unwrap(),
+            "the byte is waiting"
+        );
+        let mut byte = [0u8; 8];
+        let read = unsafe { libc::read(side, byte.as_mut_ptr().cast(), byte.len()) };
+        assert_eq!(&byte[..read as usize], [0x03u8], "exactly the Ctrl-C");
+        unsafe {
+            libc::close(main);
+            libc::close(side);
+        }
+    }
 
     #[test]
     fn early_terminal_cleanup_reaps_a_stopped_client_without_signalling_its_group() {

@@ -3,6 +3,49 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A Claude session's end reaches the phone within seconds
+
+When the last session on CodeConnect's tmux server ended, or the server was stopped, a
+Claude session's supervisor could not tell the session was gone: it kept running and the
+phone showed the session live until the daemon's own sweep noticed. It now pins the
+server its session runs on and reports the end within a few seconds.
+
+## Ctrl+C while a session starts
+
+A Ctrl+C pressed while `codeconnect codex` or `codeconnect claude` is still starting is
+held until the terminal is attached and then reaches the agent as if typed there,
+instead of ending `codeconnect` and leaving the session running unseen, or printing an
+error. While it starts, a stuck launch can no longer be interrupted; it gives up on its
+own after at most about a minute. Quitting Codex just after it has started a
+conversation, before the launch finished, ends within about a second instead of waiting
+a minute for `launch deadline expired`, and a launch whose Codex host exits before it is
+ready (Ctrl+\ at start-up, a crash) fails in about a second, saying so.
+
+## Codex starts faster
+
+On Apple silicon, `codeconnect codex` checks the codex binary's identity with the CPU's
+SHA-256 instructions, so each of the four checks in a launch takes about 0.1 s instead of
+about 1 s.
+
+`codeconnect codex` no longer locks the codex binary while it launches. Changing the
+lock made macOS check codex over again before it next ran, which slowed launches and
+sometimes your next plain `codex`, and a launch killed at the wrong moment left codex
+locked so it could not update. The identity checks stay. Together, a hosted session
+reaches its composer in about a second, down from about 7.5 s (about 3.5 s of that from
+the faster checks). If an earlier version left
+codex locked (`npm` or an installer fails with `Operation not permitted`), unlock it with:
+
+```sh
+chflags nouchg <the path named in the error>
+```
+
+The standalone installer keeps earlier releases, and the locked one may be one of them;
+this unlocks every release it keeps:
+
+```sh
+find ~/.codex/packages/standalone -flags +uchg -exec chflags nouchg {} +
+```
+
 ## Hosted sessions look like the agent run directly
 
 `codeconnect claude`, `codeconnect codex` and `codeconnect attach` now show the session

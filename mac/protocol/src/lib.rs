@@ -616,11 +616,11 @@ pub const LAUNCHD_LABEL: &str = "com.codeconnect.ccd";
 ///
 /// **Here rather than in either crate that says it, because it is a seam between
 /// two binaries.** `ccd` cannot link the launcher — the launch records, their lock
-/// and the warrants for taking a `UF_IMMUTABLE` pin off a codex binary all live in
-/// a crate with no library — so the daemon asks for this pass by spawning
-/// `codeconnect` and naming it. A name spelled once in the dispatcher and again in
-/// the daemon is a seam that compiles either way and fails at run time, silently,
-/// as a recovery pass that never runs; spelled once it cannot come apart.
+/// and the rules for repairing them all live in a crate with no library — so the
+/// daemon asks for this pass by spawning `codeconnect` and naming it. A name spelled
+/// once in the dispatcher and again in the daemon is a seam that compiles either way
+/// and fails at run time, silently, as a recovery pass that never runs; spelled once
+/// it cannot come apart.
 pub const CODEX_SWEEP_SUBCOMMAND: &str = "internal-codex-sweep";
 
 /// Root of all CodeConnect state. `CODECONNECT_HOME` exists so tests never

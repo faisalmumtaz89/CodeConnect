@@ -10331,13 +10331,10 @@ pub(crate) fn logged_session_ref(reference: &str) -> std::borrow::Cow<'_, str> {
 /// The `codeconnect` launcher this daemon runs the recovery pass through.
 ///
 /// **Why a subprocess and not a function call.** The launch records are the
-/// launcher's — their lock, their schema, their atomic rename — and the warrants for
-/// taking an `UF_IMMUTABLE` pin off somebody's codex binary live in one function
-/// there, shared between the custodian and the sweep precisely so two actors cannot
-/// come to different conclusions about the same file. `ccd` does not depend on that
-/// crate and cannot: it is a binary crate with no library. A second copy of those
-/// warrants in this daemon would be the drift that discipline exists to prevent, and
-/// the direction it drifts in is a flag taken off a live launch's binary. So the
+/// launcher's — their lock, their schema, their atomic rename — and so are the rules
+/// for when a launch may be filed as failed and a replacement custodian armed. `ccd`
+/// does not depend on that crate and cannot: it is a binary crate with no library. A
+/// second copy of those rules in this daemon would be a copy that drifts. So the
 /// daemon asks the one process that owns the records to do it, and reads what it says.
 pub(crate) fn codex_launcher() -> Result<std::path::PathBuf, String> {
     launcher_among(
@@ -10483,8 +10480,8 @@ fn launcher_among(
     }
     looked.push(format!("{} (the install prefix)", installed.display()));
     Err(format!(
-        "no `codeconnect` launcher was found, so a codex launch record left holding a vnode \
-         freeze cannot be repaired from here; looked at {}",
+        "no `codeconnect` launcher was found, so codex launch records left without a \
+         guardian cannot be repaired from here; looked at {}",
         looked.join(", ")
     ))
 }
@@ -10631,12 +10628,12 @@ pub(crate) async fn sweep_codex_recovery(
 /// What the daemon has already said about the recovery pass, so it does not say it
 /// again.
 ///
-/// **Everything is said once.** A line about a claim the pass SETTLED is a distinct
-/// event and cannot repeat: settling a claim withdraws it, so the next pass has nothing
-/// to say about it. Every other line is a CONDITION — a claim still waited on, a record
-/// that could not be read, a launcher that is not there — and a condition holds until
-/// something changes. Repeating one every period for the life of a machine buries the
-/// events under it, which is the rule the liveness sweep follows and for its reason.
+/// **Everything is said once.** A line about a repair the pass MADE is a distinct
+/// event and cannot repeat: the repair changes the record, so the next pass has nothing
+/// to say about it. Every other line is a CONDITION — a record that could not be read,
+/// a launcher that is not there — and a condition holds until something changes.
+/// Repeating one every period for the life of a machine buries the events under it,
+/// which is the rule the liveness sweep follows and for its reason.
 #[derive(Debug, Default)]
 struct SweepLatch {
     said: Vec<String>,
@@ -10669,15 +10666,15 @@ fn report_codex_sweep(sweep: &CodexSweep, latch: &mut SweepLatch) {
 ///
 /// **The pass now is the startup recovery** and is the one that matters. Every launch
 /// record on this machine was written by a process a previous boot or a previous
-/// daemon was watching; a codex binary left immutable by a launch that did not survive
-/// to give the pin back stays immutable, and codex stays un-updatable, until something
-/// comes back for the claim. Before this, nothing did. The ticker behind it is the
-/// backstop for the claim that is leaked while this daemon is already up.
+/// daemon was watching; a launch whose coordinator and custodian both died stays
+/// pending, with its cleanup undone, until something comes back for it. The ticker
+/// behind it is the backstop for the launch that is orphaned while this daemon is
+/// already up.
 ///
 /// **Concurrently with the listeners, not before them**, exactly as the liveness sweep
 /// is and for its reason: this shells out, and holding the sockets shut for the length
 /// of a child would put a hole in the hook path on every restart. Nothing is lost by
-/// sweeping late — the flag has been on that file since before this process existed.
+/// sweeping late — the record has been orphaned since before this process existed.
 ///
 /// **The launcher is looked for on every tick, not once**, because "there is no
 /// launcher" is a state a machine leaves: a first install, an update mid-flight, a
@@ -10990,14 +10987,14 @@ mod tests {
     /// A stand-in launcher: a script that records the argv it was handed and then
     /// behaves as `body` says.
     ///
-    /// A stub rather than the real launcher, and the split is deliberate. What the
-    /// pass DOES to a standing freeze claim is proven in the crate that owns the
-    /// records, against real flags on a real file and real processes
-    /// (`codex_custodian`'s `..._clears_a_standing_claim_whose_holder_is_dead`).
-    /// What is left for this side is what a daemon can get wrong on its own: whether
-    /// it asks at all, whether it asks again, what it asks for, and what it does with
-    /// the answer. Driving the real launcher from here would prove those against the
-    /// operator's own `~/.codeconnect`, which the suite is not allowed to touch.
+    /// A stub rather than the real launcher, and the split is deliberate. What the pass
+    /// DOES to a record is proven in the crate that owns the records, against real
+    /// records and real processes (`codex_sweep_dispatch.rs` runs the built launcher's
+    /// subcommand). What is left for this side is what a daemon can get wrong on its
+    /// own: whether it asks at all, whether it asks again, what it asks for, and what
+    /// it does with the answer. Driving the real launcher from here would prove those
+    /// against the operator's own `~/.codeconnect`, which the suite is not allowed to
+    /// touch.
     fn a_stub_launcher(tag: &str, body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
@@ -11056,11 +11053,9 @@ mod tests {
     /// **A daemon that starts runs the recovery pass, without being asked.**
     ///
     /// Without it the pass is dispatchable machinery with no production caller, so a
-    /// codex binary left immutable by a launch that did not survive to give the pin
-    /// back stays immutable until an operator works out that `chflags nouchg` is the
-    /// answer. "A later pass" is as unconditional as somebody typing one. Every launch
-    /// record on this machine
-    /// predates this process; the pass at startup is what looks at them.
+    /// launch whose guardians both died stays pending with its cleanup undone. Every
+    /// launch record on this machine predates this process; the pass at startup is
+    /// what looks at them.
     #[tokio::test]
     async fn a_daemon_that_starts_runs_a_codex_recovery_pass() {
         let (program, ledger) = a_stub_launcher("startup", "exit 0");
@@ -11249,19 +11244,18 @@ mod tests {
     /// **A condition the pass repeats every tick is written into the log once.**
     ///
     /// Only the daemon's own complaint was latched; the pass's ACCOUNT was copied
-    /// unconditionally, on the reasoning that every line names a claim it dealt with
-    /// and each of those is a distinct event. That is not true of every line, and the
-    /// exceptions are permanent: a claim whose record names no holder can never be
-    /// settled, so the pass writes the same sentence about it on every pass, for ever
-    /// — 288 identical lines a day, in a log the daemon shares with everything else,
-    /// naming no remedy. A settled claim is genuinely new each time, because settling
-    /// it withdraws the claim; a condition is not, and is said when it starts and when
-    /// it changes.
+    /// unconditionally, on the reasoning that every line names a repair it made and
+    /// each of those is a distinct event. That is not true of every line, and the
+    /// exceptions are permanent: a record that cannot be read is never repaired, so the
+    /// pass writes the same sentence about it on every pass, for ever — 288 identical
+    /// lines a day, in a log the daemon shares with everything else. A repair is
+    /// genuinely new each time, because it changes the record; a condition is not, and
+    /// is said when it starts and when it changes.
     #[tokio::test]
     async fn a_condition_the_pass_repeats_every_tick_is_said_once() {
         let (program, _ledger) = a_stub_launcher(
             "repeats",
-            "echo 'codex-sweep: u1 still claims a vnode freeze — it names no holder' 1>&2\n\
+            "echo 'codex-sweep: u1 could not be examined: the record could not be read' 1>&2\n\
              exit 0",
         );
         let _stub = StubDir(program.clone());
@@ -11289,7 +11283,7 @@ mod tests {
         assert_eq!(
             logged
                 .iter()
-                .filter(|l| l.contains("still claims a vnode freeze"))
+                .filter(|l| l.contains("could not be examined"))
                 .count(),
             1,
             "three passes saying the same thing is one thing said: {logged:?}"

@@ -74,6 +74,10 @@ codeconnect claude             # start a session in the current directory
 codeconnect codex              # the same, for Codex
 ```
 
+When the session ends, `codeconnect claude` and `codeconnect codex` exit with status 0,
+whatever status the agent itself exited with; a script that needs that status should
+run `claude` or `codex` directly.
+
 The installer downloads the latest release, verifies its Developer ID
 signature before installing anything, and never uses sudo, edits your shell
 configuration, or enables a service. Prefer to read it first? It is plain

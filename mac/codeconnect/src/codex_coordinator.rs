@@ -1223,6 +1223,10 @@ struct BringupObservation {
     /// *not looked at*, which is not the same as "unknown" and must never be read
     /// as evidence either way.
     session: Option<protocol::tmux::OwnedLiveness>,
+    /// The host that reached this launch is proven gone, asked with the census. The pane's
+    /// command IS the host, so nothing can bring this launch up any more — and with
+    /// the pane kept after exit, the census alone would wait out the deadline.
+    host_exited: bool,
 }
 
 /// One poll's verdict.
@@ -1244,6 +1248,9 @@ enum BringupStep {
 ///     Everything else waits for the deadline, which the caller owns.
 fn bringup_step(obs: &BringupObservation) -> BringupStep {
     use protocol::tmux::OwnedLiveness;
+    if obs.host_exited {
+        return BringupStep::Failed("the codex host exited before the launch was ready".into());
+    }
     // A live HOST is a precondition of readiness, not one of the racing facts.
     // The sockets and the pane can both look right while the process that owns
     // them is gone: a unix socket inode outlives an abnormal exit, and the tmux
@@ -1522,6 +1529,15 @@ fn leg_is_serving(path: &std::path::Path) -> bool {
     serving
 }
 
+/// Whether the host that reached this launch is recorded and proven gone.
+fn host_has_exited(uid: &str) -> bool {
+    codex_launch::load(uid).is_ok_and(|record| {
+        record
+            .host_identity
+            .is_some_and(|host| liveness(&host) == Liveness::Gone)
+    })
+}
+
 /// Whether the launch record names a host whose process is **proven live**.
 ///
 /// Read from the record rather than passed in, because the host writes it: the
@@ -1687,7 +1703,8 @@ impl CoordinatorDeps for RealCoordinatorDeps {
             if sockets_bound {
                 censused_while_bound = true;
             }
-            let session = if newly_bound || census_due {
+            let look = newly_bound || census_due;
+            let session = if look {
                 last_census = Some(std::time::Instant::now());
                 Some(protocol::tmux::owned_liveness(
                     &self.tmux_socket,
@@ -1702,6 +1719,7 @@ impl CoordinatorDeps for RealCoordinatorDeps {
                 host_live,
                 run_dir_present,
                 session,
+                host_exited: look && host_has_exited(&self.uid),
             };
             match bringup_step(&observed) {
                 // The pane is up. That is not yet the thing the launcher is
@@ -4249,6 +4267,41 @@ mod tests {
 
     // --------------------------------------------------------- the bring-up
 
+    /// **Only a recorded host that is proven gone counts as exited.** No host yet is
+    /// not an exit, and neither is a live one.
+    #[test]
+    fn a_host_is_exited_only_when_recorded_and_proven_gone() {
+        let me = protocol::proc_identity::current_identity().unwrap();
+        let mut gone = me;
+        gone.birth.start_sec += 1;
+        for (uid, host, exited) in [
+            ("hostnone", None, false),
+            ("hostlive", Some(me), false),
+            ("hostgone", Some(gone), true),
+        ] {
+            let lock = codex_launch::LaunchLock::acquire(uid).unwrap();
+            codex_launch::create_pending(
+                &lock,
+                codex_launch::NewLaunch {
+                    launch_nonce: "n".into(),
+                    uid: uid.into(),
+                    session_name: "cc-1".into(),
+                    coordinator: me,
+                    boot: protocol::proc_identity::boot_identity().unwrap(),
+                    deadline_monotonic_nanos: protocol::proc_identity::monotonic_now_nanos()
+                        .unwrap()
+                        + 60_000_000_000,
+                    created_ms: 1,
+                },
+            )
+            .unwrap();
+            if let Some(host) = host {
+                codex_launch::note_host_reached_gate(&lock, uid, "n", &host).unwrap();
+            }
+            assert_eq!(host_has_exited(uid), exited, "{uid}");
+        }
+    }
+
     #[test]
     fn bringup_reports_ready_only_when_both_facts_are_proven() {
         use protocol::tmux::OwnedLiveness;
@@ -4260,6 +4313,7 @@ mod tests {
                 host_live: bound,
                 run_dir_present: present,
                 session,
+                host_exited: false,
             })
         };
 
@@ -4301,9 +4355,23 @@ mod tests {
                 host_live: false,
                 run_dir_present: true,
                 session: Some(OwnedLiveness::Live),
+                host_exited: false,
             }),
             BringupStep::KeepWaiting
         ));
+
+        // A host proven gone fails the launch at once, whatever the pane still shows:
+        // tmux keeps the pane after its command exits, so the census reads `Live`.
+        match bringup_step(&BringupObservation {
+            sockets_bound: false,
+            host_live: false,
+            run_dir_present: false,
+            session: Some(OwnedLiveness::Live),
+            host_exited: true,
+        }) {
+            BringupStep::Failed(why) => assert!(why.contains("host exited"), "{why}"),
+            _ => panic!("a launch whose host has exited must fail"),
+        }
 
         // The two proven-loss failures, each naming what it saw.
         let bound_but_gone = observe(true, true, Some(OwnedLiveness::Gone));
