@@ -12,7 +12,7 @@ enum CCRowDensity {
     /// 12pt of padding on a 64pt floor. Settings rows, sheet lists — chrome
     /// you read once, at arm's reach, having gone looking for it.
     case compact
-    /// 16pt on a 76pt floor: the fleet row, exactly
+    /// 16pt on a 76pt floor: a two-line `headline` row, exactly
     /// `16 + 22 + 4 + 18 + 16`. Three lines is normal here and the row is read
     /// at 2am without having gone looking for anything.
     case comfortable
@@ -54,6 +54,9 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     /// `CCField.isMono` encodes for input, applied to display: machine
     /// strings wear machine type, byte-for-byte.
     var titleIsMono: Bool = false
+    /// `headline` everywhere but the fleet, whose session names are
+    /// `rowTitle`.
+    var titleStyle: CCTextStyle = CC.type.headline
     var subtitle: String?
     /// **Which end of the title identifies it.** `.tail` on the fleet, whose
     /// title is a project: a directory somebody named is recognised by how it
@@ -94,8 +97,9 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     /// The height of the title's first line, scaled. Everything in the gutter
     /// and the trailing edge centres on *this*, not on the row — see
-    /// `content(pressed:)`.
-    @ScaledMetric(relativeTo: .headline) private var titleLine: CGFloat = 21
+    /// `content(pressed:)`. 21 for `headline`, in proportion for a smaller
+    /// title style, and on that style's own ramp.
+    @ScaledMetric private var titleLine: CGFloat
 
     /// Declared in the struct body rather than an extension on purpose: an
     /// initialiser in an extension does not suppress the synthesised
@@ -103,6 +107,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     init(
         _ title: String,
         titleIsMono: Bool = false,
+        titleStyle: CCTextStyle = CC.type.headline,
         subtitle: String? = nil,
         titleTruncation: Text.TruncationMode = .tail,
         subtitleLineLimit: Int? = 2,
@@ -119,6 +124,10 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     ) {
         self.title = title
         self.titleIsMono = titleIsMono
+        self.titleStyle = titleStyle
+        _titleLine = ScaledMetric(
+            wrappedValue: 21 * titleStyle.size / CC.type.headline.size,
+            relativeTo: titleStyle.relativeTo)
         self.subtitle = subtitle
         self.titleTruncation = titleTruncation
         self.subtitleLineLimit = subtitleLineLimit
@@ -285,7 +294,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             Text(title)
-                .ccType(titleIsMono ? CC.type.monoSmall : CC.type.headline)
+                .ccType(titleIsMono ? CC.type.monoSmall : titleStyle)
                 .foregroundStyle(isDimmed ? CC.text.tertiary : CC.text.primary)
                 .lineLimit(titleLineLimit)
                 .truncationMode(titleTruncation)

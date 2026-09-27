@@ -1,37 +1,34 @@
 import SwiftUI
 
 // =============================================================================
-//  CCBadge / CCStatusDot / CCFreshnessPill — how state gets on screen.
+//  CCBadge / CCTag / CCStatusDot / CCFreshnessPill — how state gets on screen.
 //
 //  "Status is one dot + one word. Never a coloured pill *and* a rail *and* an
-//  icon." These three are the entire vocabulary; a screen that needs a fourth
+//  icon." These four are the entire vocabulary; a screen that needs a fifth
 //  needs a conversation, not a one-off.
 // =============================================================================
 
 // MARK: - Badge
 
-/// Status, risk and capability all render through here, so a MEDIUM risk badge
-/// and a "Blocked" status badge cannot end up with different paddings.
+/// Status and capability both render through here, so a "Blocked" status badge
+/// and a "Control" badge cannot end up with different paddings. Risk does not:
+/// it is a `CCRiskTag`.
 ///
-/// **One construction, three tints, no exceptions.** Four shipped — saturated
-/// fill, muted fill + border, neutral fill + border, transparent + coloured
-/// border — which is why three risk badges measured as three unrelated objects
-/// rather than as one scale with three stops. There is no `style:` parameter to
-/// pick between them, because there is nothing left to pick.
+/// **One construction, one tint per tone, no exceptions.** There is no `style:`
+/// parameter to pick another, because there is nothing left to pick.
 /// ```
-/// fill   = tint @ 12% over surface     HIGH → #271212   MEDIUM → #261D0D
-/// border = tint @ 40%, 1pt             HIGH → #6C2526   MEDIUM → #684914
-/// label  = tint at full strength       HIGH → #FF4D4F   MEDIUM → #F5A623
+/// fill   = tint @ 12% over surface
+/// border = tint @ 40%, 1pt
+/// label  = tint at full strength
 /// radius = 6 (sm)     height = 20, scaled by Dynamic Type
 /// ```
 /// `neutral` substitutes `surfaceRaised` / `border` / `textSecondary`, so a
-/// stateless badge spends no colour at all — which is why `LOW` carries none.
+/// stateless badge spends no colour at all.
 ///
 /// Severity is expressed by the **label and the border**, never by mass: a
-/// `danger` badge takes a 1.5pt edge (`CC.stroke.emphasis`) and, at risk, a
-/// leading warning glyph. A saturated fill is reserved for
-/// `CCButton(.destructive)` at final confirmation, which is the only place in
-/// the product colour is allowed to dominate a whole control.
+/// `danger` badge takes a 1.5pt edge (`CC.stroke.emphasis`). A saturated fill
+/// is reserved for `CCButton(.destructive)` at final confirmation, which is the
+/// only place in the product colour is allowed to dominate a whole control.
 struct CCBadge: View {
     let text: String
     var icon: String?
@@ -214,6 +211,115 @@ struct CCCountChip: View {
             // The header's own accessibility label already carries the count;
             // a second element would read it twice.
             .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Tag
+
+/// **Which agent a session is** — a word in a hairline box, with no fill and no
+/// colour. Every session carries one, Claude included, so the tag is a fact
+/// about the row rather than an alarm about it.
+///
+/// ```
+/// fill   = none                 border = borderStrong, 1pt
+/// label  = textTertiary, 9pt semibold, uppercase, +0.6pt
+/// height = 15, inset 4, radius 4, scaled by Dynamic Type
+/// ```
+/// `CCRiskTag` is the same object with a different fill, so the two read as one
+/// family wherever they share a row.
+struct CCTag: View {
+    let text: String
+    let accessibilityText: String
+
+    init(_ text: String, accessibilityText: String) {
+        self.text = text
+        self.accessibilityText = accessibilityText
+    }
+
+    var body: some View {
+        CCTagChrome(
+            text: text, weight: .semibold, label: CC.text.tertiary,
+            fill: .clear, border: CC.color.borderStrong
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
+    }
+}
+
+/// **Risk, without colour.** `CCTag`'s construction, told apart by mass and
+/// brightness alone, so it survives greyscale and every form of colour
+/// blindness:
+///
+/// ```
+/// HIGH    solid   fill text.primary, label onAccent, bold
+/// MEDIUM  outline no fill, borderStrong 1pt, label textSecondary
+/// LOW     nothing — no view, no VoiceOver element
+/// ```
+/// HIGH is the only solid chip on the fleet, which is what makes it the first
+/// thing the eye lands on; MEDIUM is one step brighter than the agent tag
+/// beside it. LOW draws nothing because every approval is some risk and the
+/// boring ones do not need a word.
+struct CCRiskTag: View {
+    let risk: RiskClass
+
+    init(_ risk: RiskClass) {
+        self.risk = risk
+    }
+
+    var body: some View {
+        switch risk {
+        case .high:
+            tag(weight: .bold, label: CC.color.onAccent, fill: CC.text.primary, border: nil)
+        case .medium:
+            tag(
+                weight: .semibold, label: CC.text.secondary, fill: .clear,
+                border: CC.color.borderStrong)
+        case .low:
+            EmptyView()
+        }
+    }
+
+    private func tag(weight: Font.Weight, label: Color, fill: Color, border: Color?) -> some View {
+        CCTagChrome(text: risk.label, weight: weight, label: label, fill: fill, border: border)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Risk \(risk.label). \(risk.rationale)")
+    }
+}
+
+/// The one construction behind `CCTag` and `CCRiskTag`.
+private struct CCTagChrome: View {
+    let text: String
+    let weight: Font.Weight
+    let label: Color
+    let fill: Color
+    let border: Color?
+
+    /// 9pt on the caption ramp: a tag is smaller than a badge's 11pt, because it
+    /// annotates a line rather than heading one.
+    private static let style = CCTextStyle(
+        size: 9, lineHeight: 11, weight: .semibold, tracking: 0.6,
+        design: .default, relativeTo: .caption, documentedColor: nil)
+
+    @Environment(\.dynamicTypeSize) private var typeSize
+    /// 15 = 11 (the label's line box) + 2 above + 2 below.
+    @ScaledMetric(relativeTo: .caption) private var height: CGFloat = 15
+    @ScaledMetric(relativeTo: .caption) private var padding: CGFloat = 2
+    @ScaledMetric(relativeTo: .caption) private var inset: CGFloat = CC.space.xxs
+
+    var body: some View {
+        Text(text.uppercased())
+            .ccType(Self.style.weight(weight))
+            .foregroundStyle(label)
+            // `CCBadge`'s rule: one line and fixed width at normal sizes, two
+            // lines and free to wrap at accessibility sizes, so a tag never
+            // starves the line it leads.
+            .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, inset)
+            .padding(.vertical, padding)
+            .frame(minHeight: height)
+            .ccSurface(fill: fill, radius: 4, border: border)
+            .fixedSize(horizontal: !typeSize.isAccessibilitySize, vertical: true)
     }
 }
 

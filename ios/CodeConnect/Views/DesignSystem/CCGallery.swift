@@ -113,6 +113,7 @@ import SwiftUI
                 emptyStateSection
             case .indicators:
                 badgeSection
+                tagSection
                 dotSection
                 freshnessSection
             case .controls:
@@ -644,38 +645,34 @@ import SwiftUI
                     VStack(spacing: 0) {
                         CCRow(
                             "codeconnect",
+                            titleStyle: CC.type.rowTitle,
                             titleTruncation: .tail,
                             subtitleLineLimit: 1,
                             showsChevron: false,
                             density: .comfortable,
                             // The shipped label, in the shipped order
-                            // (`FleetView.accessibilityLabel`): place, status,
-                            // class, the class's *rationale*, the activity, the wait,
-                            // and the capability — which is announced on every
-                            // row whether or not the badge is drawn.
+                            // (`FleetView.accessibilityLabel`): place, agent,
+                            // status, class, the class's *rationale*, the
+                            // activity, the wait, and the capability — which is
+                            // announced on every row whether or not the badge is
+                            // drawn.
                             accessibilityLabelText:
-                                "codeconnect, Blocked, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes ago, control",
+                                "codeconnect, Claude Code session, Blocked, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes ago, control",
                             action: { lastAction = "fleet row" }
                         ) {
-                            // **No dot.** A blocked row draws none: the band
-                            // name, the band border and the clock already carry
-                            // the state, and the disc was a fourth copy of it.
-                            // The column is still 8pt wide, so the title does
-                            // not move — `FleetView.gutter` draws the same disc
-                            // in nothing.
-                            CCStatusDot(color: .clear, pulses: false)
+                            // **No dot, and no column.** A blocked row draws
+                            // none: the band name, its place in the list and the
+                            // clock already carry the state, so the title starts
+                            // at the card's content edge (`FleetRowView.content`).
+                            EmptyView()
                         } trailing: {
                             CCAdaptiveStack(
                                 horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs
                             ) {
-                                CCBadge(risk: .high)
-                                // No tone: `CCWaitClock` measures its own. The
-                                // specimen's wait is 4m12s, which is past the
-                                // two-minute step and therefore amber — one
-                                // stop of a three-stop scale, shown because it
-                                // was derived and not because it was asked for.
+                                CCRiskTag(.high)
                                 CCWaitClock(
-                                    since: Self.waitingSince, now: Date(), prefix: nil)
+                                    since: Self.waitingSince, now: Date(), prefix: nil,
+                                    style: CC.type.monoSmall)
                             }
                         } meta: {
                             VStack(alignment: .leading, spacing: CC.space.xxs) {
@@ -683,6 +680,7 @@ import SwiftUI
                                     horizontalSpacing: CC.space.xs, verticalSpacing: 2,
                                     verticalAlignment: .firstTextBaseline
                                 ) {
+                                    CCTag(agent: .claude)
                                     Text("Bash")
                                         .ccType(CC.type.footnote)
                                         .foregroundStyle(CC.text.primary)
@@ -866,7 +864,7 @@ import SwiftUI
                             CCMonoBlock("rm -rf node_modules && npm install")
                             Text("Writes files, installs, or reaches the network.")
                                 .ccType(CC.type.footnote)
-                                .foregroundStyle(CC.color.warning)
+                                .foregroundStyle(CC.text.secondary)
                         }
                     } footer: {
                         HStack {
@@ -874,7 +872,7 @@ import SwiftUI
                                 .ccType(CC.type.monoSmall)
                                 .foregroundStyle(CC.text.tertiary)
                             Spacer()
-                            CCBadge(risk: .medium)
+                            CCRiskTag(.medium)
                         }
                     }
 
@@ -909,21 +907,6 @@ import SwiftUI
                             CCBadge(status: status)
                         }
                     }
-                    // The finding this page exists to prove is fixed: HIGH was
-                    // a 100% `danger` fill with a black label — the primary
-                    // button's recipe — so a label nobody can press out-shouted
-                    // the button underneath it. Read this row left to right: the
-                    // three stops share a construction, and HIGH still leads on
-                    // its glyph, its 1.5pt edge and its word.
-                    labelled("risk, one scale, three stops; HIGH leads by glyph + edge") {
-                        CCBadge(risk: .low)
-                        CCBadge(risk: .medium)
-                        CCBadge(risk: .high)
-                    }
-                    labelled("…beside the primary it must not out-shout") {
-                        CCBadge(risk: .high)
-                        CCButton("Review", size: .sm) { lastAction = "review" }
-                    }
                     labelled("capability") {
                         CCBadge(capability: .control)
                         CCBadge(capability: .observe(reason: "No supervisor attached."))
@@ -941,6 +924,24 @@ import SwiftUI
                         CCBadge(
                             "since you looked", isSelected: true,
                             action: { lastAction = "toggle" })
+                    }
+                }
+            }
+        }
+
+        // MARK: Tags
+
+        private var tagSection: some View {
+            section("CCTag · CCRiskTag") {
+                VStack(alignment: .leading, spacing: CC.space.sm) {
+                    labelled("agent, on every session; no fill, no colour") {
+                        CCTag(agent: .claude)
+                        CCTag(agent: .codex)
+                    }
+                    labelled("risk by brightness: HIGH solid, MEDIUM outline, LOW draws nothing") {
+                        CCRiskTag(.high)
+                        CCRiskTag(.medium)
+                        CCRiskTag(.low)
                     }
                 }
             }
@@ -1918,7 +1919,7 @@ import SwiftUI
                     subtitle: "codeconnect · Bash",
                     onClose: { showing = false }
                 ) {
-                    CCBadge(risk: .high)
+                    CCRiskTag(.high)
                 } content: {
                     ScrollView {
                         VStack(alignment: .leading, spacing: CC.space.md) {

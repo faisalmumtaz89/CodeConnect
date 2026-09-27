@@ -22,15 +22,16 @@ struct SessionRoute: Hashable {
 ///  * **Visual weight follows urgency.** A row is two lines unless the third
 ///    carries something non-redundant. A calm fleet of eight running agents is
 ///    sixteen lines of text; two blockers grow exactly two rows.
-///  * **Colour is information.** The only coloured containers on the screen are
-///    the Blocked and Failed band borders, and they are doing real work — they
-///    draw the eye to the band that needs you without adding a glyph.
+///  * **Colour is information.** The only coloured container on the screen is
+///    the Failed band's border. Blocked is carried by its band, its position at
+///    the top and the headline, and risk by a tag that is brightness, not hue.
 ///  * **One banner, ever.** Every candidate goes to `CCBannerSlot` and it picks
 ///    by rank: rejected beats offline beats stale beats cached. Facts that lose
 ///    still appear per-element: a cached row gets a hollow dot, never the word
 ///    "cached".
 struct FleetView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
     /// The widest tool label on screen, so every command beside one starts on
     /// the same edge. Settles on the first pass and then stops changing, so it
     /// costs one extra layout and nothing after that.
@@ -227,8 +228,10 @@ struct FleetView: View {
     /// `Fleet` used to own the display slot: 32pt, white, the brightest thing on
     /// screen, and carrying no information at all — a tired reader learned the
     /// name of the app they had just opened. The name is now a `micro` eyebrow
-    /// and the state sentence has the display slot, so the reading order is
-    /// *how many need me* → *what is left* → *which agent*.
+    /// and the state sentence is the largest type on the screen, so the reading
+    /// order is *how many need me* → *what is left* → *which agent*. It is set
+    /// at `title` (22), not `display` (32), which leaves the rows below it room
+    /// to be read.
     private func scrollHeader(_ rows: [FleetRow]) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             Text("Fleet")
@@ -236,7 +239,9 @@ struct FleetView: View {
                 .foregroundStyle(CC.text.tertiary)
                 .accessibilityHidden(true)
             Text(headline(rows))
-                .ccType(CC.type.display)
+                // `title` caps at 30pt, below the eyebrow and the summary line at
+                // accessibility sizes, so there the sentence keeps `display`.
+                .ccType(typeSize.isAccessibilitySize ? CC.type.display : CC.type.title)
                 .foregroundStyle(CC.text.primary)
                 .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.numericText(countsDown: true))
@@ -377,11 +382,12 @@ struct FleetView: View {
         .padding(.bottom, CC.space.xl)
     }
 
-    /// The only coloured containers on the screen, and the only place the Fleet
-    /// spends a hue on something other than a dot.
+    /// The Failed band's is the only coloured container on the screen, and the
+    /// only place the Fleet spends a hue on something other than a dot. Blocked
+    /// is neutral like every other band: its place at the top of the list and
+    /// the headline above it already say it needs you.
     private func bandBorder(_ status: FleetStatus) -> Color {
         switch status {
-        case .blocked: return CC.color.warning.opacity(0.30)
         case .failed: return CC.color.danger.opacity(0.30)
         default: return CC.color.border
         }
@@ -879,7 +885,7 @@ struct BlockedCard: Equatable {
 
 // MARK: - Row
 
-/// **Five elements, four of them facts, and it adds the one that was missing.**
+/// **Six elements, five of them facts, and it adds the one that was missing.**
 ///
 /// The row this replaces spent nine visual elements on four facts: an amber dot,
 /// the place, an amber clock, `needs you: Bash`, `fx-1`, a `HIGH` chip, `HELD
@@ -891,10 +897,10 @@ struct BlockedCard: Equatable {
 ///
 /// ```
 /// app-1                                          HIGH   1m03s
-/// Bash · git push --force origin main
+/// CLAUDE CODE  Bash · git push --force origin main
 /// ```
 ///
-/// Two lines, which is exactly the 76pt row: `16 + 22 + 4 + 18 + 16`. The third
+/// Two lines, inside the 76pt row: `16 + 20 + 4 + 18 + 16`. The third
 /// line comes back only for a run that needs disambiguating from a namesake, a
 /// session whose capability disagrees with its band, or a run holding more than
 /// one decision — a third line has to carry something the two above it do not.
@@ -1205,37 +1211,16 @@ struct FleetRowView: View {
     }
 
     var body: some View {
-        CCRow(
-            // The place, always. A fleet is a set of places, and the place is
-            // the stable, scannable anchor — never the AI title, which is
-            // sometimes a sentence and sometimes a folder name.
-            placeName,
-            // A row's activity lives in `meta`, where the tool can be prose and
-            // the command it wants to run can be monospace. What stays here is
-            // the daemon's own *sentence* — a user message, an agent reply, a
-            // notice — which has no argument to set as code.
-            subtitle: activity == nil ? row.subtitle : nil,
-            // **From the front.** The title is a project — a directory
-            // somebody named — and a directory is recognised by how it starts.
-            // Trimming the middle of a long one returns
-            // `platform-s…nciliation…`, two elisions deep and readable as
-            // neither name; trimming the tail returns the beginning of the word
-            // the reader is looking for. Runs that share a project are told
-            // apart on the line below, not by the shape of this one.
-            titleTruncation: .tail,
-            subtitleLineLimit: 1,
-            showsChevron: false,
-            separator: separator,
-            density: .comfortable,
-            isDimmed: row.status == .ended,
-            accessibilityLabelText: accessibilityLabel,
-            action: action
-        ) {
-            gutter
-        } trailing: {
-            titleTrailing
-        } meta: {
-            metaBlock
+        Group {
+            if let dot = dotColour {
+                content {
+                    CCStatusDot(
+                        color: dot, isHollow: row.cachedAt != nil, pulses: false,
+                        accessibilityText: nil)
+                }
+            } else {
+                content { EmptyView() }
+            }
         }
         .accessibilityIdentifier("session-\(row.summary.sessionKey)")
         // The class as a *property*, so it survives any future label override —
@@ -1274,29 +1259,40 @@ struct FleetRowView: View {
         .task(id: clock) { await AgeTick.follow(clock) { lastTick = $0 } }
     }
 
-    /// **The dot is gone from the Blocked band**, where it was a fourth encoding
-    /// of a state the band header, the band border and the clock all carry — and
-    /// where five of them pulsed in unison. It stays where it discriminates:
-    /// hollow means *this row came off the disk*, which nothing else on the
-    /// screen says.
+    /// **The dot is gone from the Blocked and Failed bands**, where it was a
+    /// fourth encoding of a state the band header, its place in the list and the
+    /// clock all carry. It stays where it discriminates: hollow means *this row
+    /// came off the disk*, which nothing else on the screen says.
     ///
-    /// The column is 8pt wide either way. A row that drops its dot must not drag
-    /// its own title 20pt left of the row above it.
-    @ViewBuilder
-    private var gutter: some View {
-        if let dot = dotColour {
-            CCStatusDot(
-                color: dot, isHollow: row.cachedAt != nil, pulses: false, accessibilityText: nil)
-        } else {
-            // The same disc, drawn in nothing. A `Color.clear` in a hard-coded
-            // 8pt frame would have been simpler and wrong twice over: the dot
-            // scales with Dynamic Type now (`CC.size.dotMaxScale`), so a fixed
-            // frame would let it overflow its own column at AX5, and a blank
-            // gutter of a different width would drag the row's title 6pt off
-            // the column the row above it uses. `CCStatusDot` is the only thing
-            // that knows how wide this column is once type size has had its say.
-            CCStatusDot(color: .clear, pulses: false)
-        }
+    /// **So is its column.** A row with no dot starts its title at the card's
+    /// own content edge rather than holding an empty 8pt gutter: the band is
+    /// one kind of row, and every row in it lines up with the others.
+    private func content<Leading: View>(
+        @ViewBuilder leading: @escaping () -> Leading
+    ) -> some View {
+        CCRow(
+            // The place, always. A fleet is a set of places, and the place is
+            // the stable, scannable anchor — never the AI title, which is
+            // sometimes a sentence and sometimes a folder name.
+            placeName,
+            titleStyle: CC.type.rowTitle,
+            // **From the front.** The title is a project — a directory
+            // somebody named — and a directory is recognised by how it starts.
+            // Trimming the middle of a long one returns
+            // `platform-s…nciliation…`, two elisions deep and readable as
+            // neither name; trimming the tail returns the beginning of the word
+            // the reader is looking for. Runs that share a project are told
+            // apart on the line below, not by the shape of this one.
+            titleTruncation: .tail,
+            showsChevron: false,
+            separator: separator,
+            density: .comfortable,
+            isDimmed: row.status == .ended,
+            accessibilityLabelText: accessibilityLabel,
+            action: action,
+            leading: leading,
+            trailing: { titleTrailing },
+            meta: { metaBlock })
     }
 
     /// Nil where the band already says it and nothing else needs saying.
@@ -1313,10 +1309,11 @@ struct FleetRowView: View {
             // AX5, side by side the clock's fixed single line squeezed the badge
             // to about half its width and `HIGH` broke as `HIG` / `H`.
             CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
-                if let blocked { CCBadge(risk: blocked.risk) }
-                // The only value on this screen set in `mono` rather than
-                // `monoSmall`: the wait is the most important number here.
-                CCWaitClock(since: waitingSince, now: now, prefix: nil)
+                if let blocked { CCRiskTag(blocked.risk) }
+                // `monoSmall`, like every other age on the screen: the wait
+                // is set apart by where it sits, not by its size or a hue.
+                CCWaitClock(
+                    since: waitingSince, now: now, prefix: nil, style: CC.type.monoSmall)
             }
         } else {
             Text(freshness)
@@ -1326,35 +1323,16 @@ struct FleetRowView: View {
         }
     }
 
-    /// **Which agent this run is.**
-    ///
-    /// Drawn only for a run that is *not* Claude. A badge on every row would be
-    /// a word repeated two dozen times that discriminates nothing — the fleet
-    /// is overwhelmingly Claude, and a label everything carries is a label
-    /// nobody reads. An unsupported agent is named verbatim, because the
-    /// daemon's own word is the only true thing the phone can say about it.
-    @ViewBuilder
-    private var agentBadge: some View {
-        switch row.summary.agent {
-        case .claude:
-            EmptyView()
-        case .codex:
-            CCBadge("Codex", tone: .info, accessibilityText: "Codex session")
-        case .unsupported(let raw):
-            CCBadge(raw, tone: .neutral, accessibilityText: "\(raw) session")
-        }
-    }
-
     @ViewBuilder
     private var metaBlock: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
-            // The agent leads the activity line rather than sitting beside the
-            // title: the title row already carries the risk badge and the wait
-            // clock, and a third chip there pushed the age out of line with
-            // every Claude neighbour — the alignment failure the verification
-            // bar names by name.
+            // **Which agent this run is**, on every row, Claude included: a
+            // tag only some rows carry reads as an alarm on those rows, and a
+            // fleet that mixes agents is read by which one each row is. It
+            // leads the activity line rather than sitting beside the title,
+            // where the risk tag and the wait clock already are.
             CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
-                agentBadge
+                CCTag(agent: row.summary.agent)
                 if let activity {
                     activityLine(
                     activity,
@@ -1364,6 +1342,14 @@ struct FleetRowView: View {
                     // urgent, so it stays one step down and the *face* — prose
                     // against monospace — is what carries the distinction.
                         tone: blocked == nil ? CC.text.secondary : CC.text.primary)
+                } else {
+                    // The daemon's own *sentence* — a user message, an agent
+                    // reply, a notice — which has no argument to set as code.
+                    Text(row.subtitle)
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.secondary)
+                        .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
                 stopControl
@@ -1388,7 +1374,7 @@ struct FleetRowView: View {
     /// drifted into proportional type as a result.
     ///
     /// It gets the row's whole width, because `CCRow`'s `meta` slot now spans
-    /// under the badge and the clock rather than beside them.
+    /// under the risk tag and the clock rather than beside them.
     private func activityLine(
         _ card: FleetActivity, truncation: CCMonoTruncation, tone: Color
     ) -> some View {
@@ -1419,7 +1405,7 @@ struct FleetRowView: View {
     /// **Stop, on the row.**
     ///
     /// On the activity line rather than beside the title, deliberately: the
-    /// title row already carries the risk badge and the wait clock, and a third
+    /// title row already carries the risk tag and the wait clock, and a third
     /// control there pushed this row's age out of line with every Claude
     /// neighbour's — an alignment failure the HTML pass caught before any Swift
     /// was written.
@@ -1443,6 +1429,9 @@ struct FleetRowView: View {
             )
             .accessibilityIdentifier("stop-\(row.summary.sessionKey)")
             .accessibilityLabel("Stop the turn \(placeName) is running")
+            // Width goes to the control first, so its label never breaks beside
+            // the agent tag and the activity: the command truncates instead.
+            .layoutPriority(1)
         }
     }
 
@@ -1499,18 +1488,20 @@ struct FleetRowView: View {
     /// *replaces* what it gathered — which is correct, because the gathered
     /// version is a shuffled bag of fragments, but it means anything the
     /// children were publishing has to be re-stated here by hand. It was not:
-    /// `CCBadge(risk:)` publishes "Risk HIGH. Destructive, credentialed, or
+    /// the risk badge published "Risk HIGH. Destructive, credentialed, or
     /// publishes something." and the parent threw it away, so a sighted reader
     /// saw a red chip and a VoiceOver user could not tell a `Read` from a
     /// `git push --force` without opening it. On an app whose subject is risk
     /// triage that was the most consequential accessibility defect in the build.
     ///
-    /// Everything the row draws now survives: the class, the command, the
-    /// project, and the age in words. Capability is
+    /// Everything the row draws now survives: the agent, the class, the command,
+    /// the project, and the age in words. Capability is
     /// announced on **every** row regardless of visual suppression — screen
     /// readers read, they do not scan, and the economics are different.
     private var accessibilityLabel: String {
-        var parts = [row.label.spoken, row.status.label]
+        var parts = [
+            row.label.spoken, CCTag(agent: row.summary.agent).accessibilityText, row.status.label,
+        ]
         if let blocked {
             parts.append("risk \(blocked.risk.label)")
             parts.append(blocked.risk.rationale)

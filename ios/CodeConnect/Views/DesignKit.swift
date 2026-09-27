@@ -643,6 +643,12 @@ extension CC {
             size: 18, lineHeight: 25, weight: .semibold, tracking: 0,
             design: .default, relativeTo: .body, documentedColor: CC.text.primary)
 
+        /// 15/20 semibold. The fleet row's session name — one step under
+        /// `headline`, so a band of rows reads as a list rather than as titles.
+        static let rowTitle = CCTextStyle(
+            size: 15, lineHeight: 20, weight: .semibold, tracking: 0,
+            design: .default, relativeTo: .callout, documentedColor: CC.text.primary)
+
         /// 15/20 regular. Subtitles and secondary prose.
         static let callout = CCTextStyle(
             size: 15, lineHeight: 20, weight: .regular, tracking: 0,

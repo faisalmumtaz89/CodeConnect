@@ -8,35 +8,6 @@ import SwiftUI
 //  what stops "blocked" being amber on one screen and orange on the next.
 // =============================================================================
 
-extension RiskClass {
-    /// `low` carries **no colour at all**. A three-colour
-    /// risk scale trains the eye to see green as "fine", and there is no such
-    /// thing as a risk-free approval — only a boring one.
-    var ccTone: CCTone {
-        switch self {
-        case .low: return .neutral
-        case .medium: return .warning
-        case .high: return .danger
-        }
-    }
-
-    /// **HIGH is the one risk badge that carries a glyph**, and that is how it
-    /// out-ranks MEDIUM now that all three share one construction.
-    ///
-    /// It used to out-rank it by mass — a 100%-saturation `#FF4D4F` fill with a
-    /// `#000` label, which is the primary button's own recipe in another hue,
-    /// so the loudest object on the root screen was a label nobody can press.
-    /// Measured, the replacement is *not* automatically louder: `warning` on
-    /// its 12% fill is 8.27:1 and `danger` on its own is 5.41:1, so red alone
-    /// would have read as the quieter of the two. Three things restore the
-    /// order without touching the fill — the glyph, a 1.5pt border
-    /// (`CC.stroke.emphasis`), and the word itself, all of which survive
-    /// greyscale and every form of colour blindness. Mass does none of that.
-    var ccGlyph: String? {
-        self == .high ? "exclamationmark.triangle.fill" : nil
-    }
-}
-
 extension FleetStatus {
     /// The **badge** tone.
     ///
@@ -140,14 +111,6 @@ extension CCBadge {
             accessibilityText: status.label)
     }
 
-    init(risk: RiskClass) {
-        self.init(
-            risk.label,
-            icon: risk.ccGlyph,
-            tone: risk.ccTone,
-            accessibilityText: "Risk \(risk.label). \(risk.rationale)")
-    }
-
     /// Whether an answer typed here can actually reach the agent — reported,
     /// never assumed.
     init(capability: CapabilityBadge) {
@@ -161,6 +124,21 @@ extension CCBadge {
         // `showsCapability` refuses unsettled rows — but the type cannot make
         // that unrepresentable without losing the shared initializer, so the
         // guard lives at the render sites.
+    }
+}
+
+extension CCTag {
+    /// The agent tag. The tag's own names, not `AgentKind.displayName`: prose
+    /// says "Claude", the tag names the product the session runs. An
+    /// unsupported agent is the daemon's word, verbatim.
+    init(agent: AgentKind) {
+        let name: String
+        switch agent {
+        case .claude: name = "Claude Code"
+        case .codex: name = "Codex"
+        case .unsupported(let raw): name = raw
+        }
+        self.init(name, accessibilityText: "\(name) session")
     }
 }
 

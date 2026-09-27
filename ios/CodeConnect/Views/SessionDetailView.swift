@@ -579,15 +579,24 @@ struct SessionDetailView: View {
                     // positions — because the project name above it carries the
                     // same fact at full contrast, so nothing is only readable in
                     // the dimmed run. Head truncation so the tail survives:
-                    // `…/GitHub/CodeConnect` is the part that identifies.
-                    if let cwd = summary?.cwd {
-                        Text(cwd)
-                            .ccType(CC.type.monoSmall)
-                            .foregroundStyle(CC.text.disabled)
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                            .onLongPressGesture { CCPasteboard.copy(cwd) }
-                            .accessibilityLabel("Working directory, \(cwd)")
+                    // `…/GitHub/CodeConnect` is the part that identifies. The
+                    // agent tag leads it, as it leads the fleet row's activity
+                    // line, and keeps its width while the path gives way. At
+                    // accessibility sizes the two stack, as the fleet row's
+                    // do: on one line at AX5 the tag left the path `…-1`.
+                    if let summary {
+                        CCAdaptiveStack(
+                            horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs
+                        ) {
+                            CCTag(agent: summary.agent)
+                            Text(summary.cwd)
+                                .ccType(CC.type.monoSmall)
+                                .foregroundStyle(CC.text.disabled)
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                                .onLongPressGesture { CCPasteboard.copy(summary.cwd) }
+                                .accessibilityLabel("Working directory, \(summary.cwd)")
+                        }
                     }
                     // **An ended run is not a dead end.** Claude Code keeps its own
                     // transcript under `~/.claude/projects`, so the conversation
