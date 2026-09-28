@@ -244,8 +244,17 @@ struct RenderDriver {
     /// to be. Measured — the palette's caption climbed 326pt over twelve drags
     /// and then stopped, because eleven of them landed on nothing. A scroll
     /// view stays where it is while its content moves under it.
+    ///
+    /// Either kind of scroller: the palette is a scroll view, and the session
+    /// timeline is a `List`, which the accessibility tree calls a collection
+    /// view.
     func list(holding fragment: String, in app: XCUIApplication) -> XCUIElement {
-        app.scrollViews.containing(
+        app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "elementType == %lu OR elementType == %lu",
+                XCUIElement.ElementType.scrollView.rawValue,
+                XCUIElement.ElementType.collectionView.rawValue)
+        ).containing(
             NSPredicate(format: "label CONTAINS[c] %@", fragment)
         ).firstMatch
     }

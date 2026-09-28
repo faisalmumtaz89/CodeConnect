@@ -46,7 +46,7 @@ final class SessionKeyboardUITests: XCTestCase {
         // The app's own timeline, by name: `scrollViews.firstMatch` with the
         // keyboard up is the keyboard's input-assistant bar — also a scroll
         // view — and a coordinate tap on it presses keys. Measured.
-        let scroll = app.scrollViews["session-timeline"]
+        let scroll = app.collectionViews["session-timeline"]
         XCTAssertTrue(scroll.waitForExistence(timeout: 5))
         scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
 
@@ -62,8 +62,19 @@ final class SessionKeyboardUITests: XCTestCase {
     /// the copyable kind — rather than reflowing it into prose.
     func testShowMoreRevealsTheFencedCodeAsAMonoBlock() {
         let app = launchSession()
+        let timeline = app.collectionViews["session-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 20))
+        // The message sits above the tail, and a `List` exposes only the rows
+        // on screen: drag it into view before asking for its control.
         let showMore = app.buttons["Show more"]
-        XCTAssertTrue(showMore.waitForExistence(timeout: 20))
+        var attempts = 0
+        while !(showMore.exists && showMore.isHittable), attempts < 8 {
+            timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.25)).press(
+                forDuration: 0.05,
+                thenDragTo: timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.7)),
+                withVelocity: .default, thenHoldForDuration: 0.25)
+            attempts += 1
+        }
         showMore.tap()
 
         XCTAssertTrue(

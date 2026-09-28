@@ -15,7 +15,7 @@ import SwiftUI
 /// holds a closure, which is enough to stop SwiftUI proving two of its values
 /// equal. Every realized row therefore re-evaluated its body once a second.
 /// Measured on a 400-event timeline, untouched: **456 row bodies per second**,
-/// and a `LazyVStack` scrolled to its tail has realized all of them.
+/// when the timeline was a `LazyVStack` that had realized all of them.
 ///
 /// The one row that draws an age owns its own clock now — see `ApprovalRow` —
 /// so nothing here has a reason to change when only the time has.
@@ -271,14 +271,15 @@ struct AgentMessageRow: View {
                     // makes, for the same reason, and here it is a liveness
                     // property rather than a frame-budget one.
                     //
-                    // Expanded, this row is taller than the screen, and it
-                    // sits in the timeline's `LazyVStack`, whose content
-                    // height is an *estimate* derived from the rows it has
-                    // realized. Animating the toggle makes that estimate an
-                    // input to the animation's own target: the in-flight
-                    // frame moves the estimate, the estimate re-derives the
-                    // target, and the interpolation is restarted against it —
-                    // so 0.18s of easing need never finish. Measured on
+                    // Expanded, this row is taller than the screen, and the
+                    // timeline's content height is an *estimate* derived from
+                    // the rows it has realized — the `List` estimates as the
+                    // earlier `LazyVStack` did. Animating the toggle made that
+                    // estimate an input to the animation's own target: the
+                    // in-flight frame moved the estimate, the estimate
+                    // re-derived the target, and the interpolation restarted
+                    // against it — so 0.18s of easing need never finish.
+                    // Measured under the `LazyVStack` on
                     // iPhone 17 Pro / iOS 26.3.1 under `sample`: the whole
                     // main thread inside `GraphHost.flushTransactions` →
                     // `RootGeometry` → `sizeThatFits`, `propagate_dirty` the
@@ -363,6 +364,7 @@ struct ToolRow: View {
     /// The shared width every tool label on this screen is drawn into, so the
     /// commands beside them share one left edge. See `CCToolColumn`.
     @Environment(\.ccToolColumn) private var toolColumn
+    @Environment(\.tailWatch) private var tailWatch
 
     init(tool: ToolItem) {
         self.tool = tool
@@ -379,6 +381,7 @@ struct ToolRow: View {
         VStack(alignment: .leading, spacing: CC.space.xs) {
             Button {
                 guard hasDetail else { return }
+                if !expanded { tailWatch?.leave() }
                 withAnimation(CC.motion.small) { expanded.toggle() }
             } label: {
                 summaryLine

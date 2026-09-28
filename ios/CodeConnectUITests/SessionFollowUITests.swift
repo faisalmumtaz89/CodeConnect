@@ -58,16 +58,14 @@ final class SessionFollowUITests: XCTestCase {
 
     /// Bring "Show more" on screen and tap it — really on screen. The
     /// timeline opens at its tail with the long message a screen and a half
-    /// above; the button *exists* to a query long before it is under the
-    /// glass (an accessibility snapshot materializes the whole lazy stack),
-    /// and a tap at that stale frame lands on whatever is actually there.
+    /// above, and a `List` exposes only the rows it has on screen, so the
+    /// button does not exist to a query until the drags have brought it up.
     private func expandTheLongMessage(_ app: XCUIApplication, _ timeline: XCUIElement) {
         let showMore = app.buttons["Show more"]
-        XCTAssertTrue(showMore.waitForExistence(timeout: 10))
         let window = app.windows.firstMatch.frame
         var attempts = 0
         while attempts < 8 {
-            if showMore.isHittable && showMore.frame.minY >= window.minY
+            if showMore.exists && showMore.isHittable && showMore.frame.minY >= window.minY
                 && showMore.frame.maxY <= window.maxY
             {
                 break
@@ -88,7 +86,7 @@ final class SessionFollowUITests: XCTestCase {
     /// prove the main thread came back.
     func testShowMoreUnderTheKeyboardExpandsInOneStep() {
         let app = launchSession()
-        let timeline = app.scrollViews["session-timeline"]
+        let timeline = app.collectionViews["session-timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: 20))
 
         // Position first, focus second: the keyboard halves the window, the
@@ -100,7 +98,7 @@ final class SessionFollowUITests: XCTestCase {
         let window = app.windows.firstMatch.frame
         var attempts = 0
         while attempts < 8 {
-            if showMore.isHittable && showMore.frame.minY >= window.minY
+            if showMore.exists && showMore.isHittable && showMore.frame.minY >= window.minY
                 && showMore.frame.maxY <= window.maxY
             {
                 break
@@ -117,7 +115,9 @@ final class SessionFollowUITests: XCTestCase {
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
         attempts = 0
         while attempts < 6 {
-            if showMore.isHittable && showMore.frame.maxY < keyboard.frame.minY {
+            if showMore.exists && showMore.isHittable
+                && showMore.frame.maxY < keyboard.frame.minY
+            {
                 break
             }
             drag(timeline, fromY: 0.35, toY: 0.15)
@@ -129,8 +129,9 @@ final class SessionFollowUITests: XCTestCase {
 
         showMore.tap()
 
-        let showLess = app.buttons["Show less"]
-        XCTAssertTrue(showLess.waitForExistence(timeout: 5))
+        // The fence body only renders expanded, and it sits near the
+        // message's top — on screen, where "Show less" is not.
+        XCTAssertTrue(app.staticTexts["let seed = 0x5eed"].waitForExistence(timeout: 5))
 
         drag(timeline, fromY: 0.35, toY: 0.15)
         XCTAssertTrue(timeline.exists)
@@ -138,7 +139,7 @@ final class SessionFollowUITests: XCTestCase {
 
     func testScrollingBackToTheBottomClearsTheLatestPillWithoutATap() {
         let app = launchSession()
-        let timeline = app.scrollViews["session-timeline"]
+        let timeline = app.collectionViews["session-timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: 20))
         // Expand the long message so the timeline is decisively taller than
         // the screen — the only geometry in which the tail can be left.
@@ -170,7 +171,7 @@ final class SessionFollowUITests: XCTestCase {
 
     func testShowLessBringsTheCollapsedMessageBackUnderTheEyes() {
         let app = launchSession()
-        let timeline = app.scrollViews["session-timeline"]
+        let timeline = app.collectionViews["session-timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: 20))
         expandTheLongMessage(app, timeline)
 
@@ -221,14 +222,14 @@ final class SessionFollowUITests: XCTestCase {
     /// Not an assertion about a number nobody has measured — an instrument.
     func testMeasureTheGapAboveTheExpanderInBothStates() {
         let app = launchSession()
-        let timeline = app.scrollViews["session-timeline"]
+        let timeline = app.collectionViews["session-timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: 20))
 
         let showMore = app.buttons["Show more"]
         let window = app.windows.firstMatch.frame
         var attempts = 0
         while attempts < 8 {
-            if showMore.isHittable && showMore.frame.minY >= window.minY
+            if showMore.exists && showMore.isHittable && showMore.frame.minY >= window.minY
                 && showMore.frame.maxY <= window.maxY
             {
                 break
@@ -249,10 +250,9 @@ final class SessionFollowUITests: XCTestCase {
 
         showMore.tap()
         let showLess = app.buttons["Show less"]
-        XCTAssertTrue(showLess.waitForExistence(timeout: 5))
         attempts = 0
         while attempts < 16 {
-            if showLess.isHittable && showLess.frame.minY >= window.minY
+            if showLess.exists && showLess.isHittable && showLess.frame.minY >= window.minY
                 && showLess.frame.maxY <= window.maxY
             {
                 break
