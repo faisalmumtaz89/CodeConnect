@@ -3,6 +3,15 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A long session no longer freezes while scrolling — iPhone app
+
+Scrolling back down past a long expanded message or a long failed command could freeze
+the session screen for good. The timeline is now a list that measures only the rows on
+screen, and it no longer freezes; a 3000-event session opens as fast as before. The
+newest message now also stays in view when the keyboard opens, the phone rotates or the
+last row grows, while a reader who scrolled up, opened a message or output, or tapped
+the status bar is left where they chose to be. Long-pressing a message offers Copy only.
+
 ## A Claude session's end reaches the phone within seconds
 
 When the last session on CodeConnect's tmux server ended, or the server was stopped, a

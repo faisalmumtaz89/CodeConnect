@@ -30,9 +30,25 @@ final class ToolColumnUITests: XCTestCase {
     /// beside a tool name — a different construction with a different correct
     /// answer, and including it made this test fail on layout that is right.
     private func commandOrigins(_ app: XCUIApplication, containing needles: [String]) -> [CGFloat] {
-        let list = app.scrollViews.firstMatch
-        guard list.exists else { return [] }
+        let list = app.collectionViews["session-timeline"]
+        guard list.waitForExistence(timeout: 10) else { return [] }
         let bounds = list.frame
+        // The rows sit above the tail the screen opens on, and a `List` holds
+        // only the rows near its viewport: nudge the first one into the list's
+        // frame, a short drag at a time so the others stay in it too.
+        if let first = needles.first {
+            let row = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", first)).firstMatch
+            var attempts = 0
+            while !(row.exists && bounds.contains(CGPoint(x: row.frame.midX, y: row.frame.midY))),
+                attempts < 8
+            {
+                list.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.3)).press(
+                    forDuration: 0.05,
+                    thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.45)),
+                    withVelocity: .default, thenHoldForDuration: 0.25)
+                attempts += 1
+            }
+        }
         var origins: [CGFloat] = []
         for index in 0..<app.staticTexts.count {
             let element = app.staticTexts.element(boundBy: index)

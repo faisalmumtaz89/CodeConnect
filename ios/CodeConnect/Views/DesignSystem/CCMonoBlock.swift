@@ -86,6 +86,9 @@ struct CCMonoBlock: View {
     @Environment(\.ccColumnInset) private var columnInset
     /// A centred container has no gutter to hang into. See `columnHang`.
     @Environment(\.ccCentredContent) private var isCentred
+    /// Set inside the session timeline, where showing every line is choosing
+    /// to read them. See `EnvironmentValues.tailWatch`.
+    @Environment(\.tailWatch) private var tailWatch
 
     /// The copy affordance's chrome, on the same Dynamic Type ramp as the glyph
     /// inside it — and, crucially, as the trailing space reserved for it below.
@@ -547,6 +550,7 @@ struct CCMonoBlock: View {
         if isCollapsible, let lineLimit {
             Button {
                 CCHaptic.light.fire()
+                if !isExpanded { tailWatch?.leave() }
                 withAnimation(CC.motion.small) { isExpanded.toggle() }
             } label: {
                 Text(isExpanded ? "Show fewer lines" : "Show all \(runs.count) lines")

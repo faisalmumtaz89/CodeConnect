@@ -28,10 +28,10 @@ enum ComposerTemplates {
 /// `following` flips as `TailObserver` reads the scroll offset, and as
 /// `SessionDetailView` `@State` every flip re-evaluated the whole screen —
 /// timeline included. With a taller-than-screen row expanded, that re-entry
-/// re-windows the LazyVStack and re-lays the giant text: a measured limit
-/// cycle that pegged the main thread for 30s+ (AttributeGraph churn under
-/// `sample`; a build with no writes laid the same content out in under a
-/// second). As `@Observable` state read only by `TailPill`, a flip repaints
+/// re-windowed the `LazyVStack` the timeline then was and re-laid the giant
+/// text: a measured limit cycle that pegged the main thread for 30s+
+/// (AttributeGraph churn under `sample`; a build with no writes laid the same
+/// content out in under a second). As `@Observable` state read only by `TailPill`, a flip repaints
 /// one capsule and the timeline subtree is never re-entered — the cycle has
 /// no fuel.
 @MainActor
@@ -81,12 +81,11 @@ final class TailWatch {
         }
     }
 
-    /// The reader deliberately left the tail — dragged up, or expanded a
-    /// message to read it. The pill still waits out the debounce; the
-    /// follow-yank guard takes effect this instant. Self-correcting when
-    /// the intent turns out not to have left the tail at all (a short
-    /// expansion whose end stays on screen): the very next offset reading
-    /// at the bottom calls `arrive`.
+    /// The reader deliberately left the tail — scrolled up, or opened
+    /// something to read it. The pill still waits out the debounce; the
+    /// follow-yank guard and the re-pin's veto take effect this instant.
+    /// Only a reading that saw something move can undo it: a short expansion
+    /// whose end still reaches the bottom arrives again once it has laid out.
     func leave() {
         handAway = true
         depart()
@@ -98,15 +97,27 @@ final class TailWatch {
     /// verdict lands. A real departure meets the pill ~0.4s late.
     ///
     /// Called *without* `leave()` only when the tail slid away with no
-    /// deliberate act this side can name — a rotation, a keyboard reshape.
-    /// The two acts that *are* nameable — a hand-scroll up, and expanding a
-    /// message — go through `leave()`, so no event in the debounce window
-    /// can scroll a reader out of either.
-    func depart() {
+    /// deliberate act this side can name. The acts that *are* nameable — a
+    /// hand-scroll up, expanding a message, collapsing one — go through
+    /// `leave()`, so no event in the debounce window can scroll a reader out
+    /// of any of them.
+    ///
+    /// `repin` is for a reader who was following when the tail slid away:
+    /// the last row grew, the keyboard came up, the viewport changed shape.
+    /// Such a reader never left, so when the debounce runs out with the tail
+    /// still off screen the verdict puts it back rather than declaring them
+    /// away. The list does not keep its bottom through a change of size on its
+    /// own — measured: a failed command expanding at the tail left the view
+    /// 849pt short of it, and the keyboard covered the rows being replied to.
+    func depart(repin: (@MainActor () -> Void)? = nil) {
         verdict?.cancel()
         verdict = Task {
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
+            if let repin {
+                repin()
+                return
+            }
             // Guarded like `arrive`'s writes, and for the same reason:
             // Observation notifies on every set with no equality check, so an
             // unguarded `false` over `false` — one per row the reader scrolls
@@ -119,19 +130,36 @@ final class TailWatch {
     }
 }
 
+private struct TailWatchKey: EnvironmentKey {
+    static let defaultValue: TailWatch? = nil
+}
+
+extension EnvironmentValues {
+    /// The timeline's tail watch, for a row that grows on the reader's tap:
+    /// opening it is choosing to read, which must reach the watch before the
+    /// growth does, or the re-pin takes the reader to the end of it.
+    var tailWatch: TailWatch? {
+        get { self[TailWatchKey.self] }
+        set { self[TailWatchKey.self] = newValue }
+    }
+}
+
 /// Reads "is the reader at the bottom" off the hosting `UIScrollView`'s own
 /// content offset, and feeds `TailWatch`.
 ///
 /// UIKit introspection is the *last* resort, and every native route was
 /// measured broken on this OS before it was taken: scroll-offset preferences
-/// never fire; the tail sentinel's `onAppear`/`onDisappear` report the lazy
-/// window, which runs a screen past the viewport, so real departures went
-/// unnoticed and window-edge flapping livelocked layout; and
+/// never fire; the tail sentinel's `onAppear`/`onDisappear` report when a
+/// row is built, not whether it is on screen — under the `LazyVStack` the
+/// timeline once was, a window a screen past the viewport, so real
+/// departures went unnoticed and window-edge flapping livelocked layout; and
 /// `scrollPosition(id:)` over a taller-than-screen row froze the screen
 /// outright — frames identical 175 seconds apart. KVO on `contentOffset` is
 /// exact viewport truth, delivered outside SwiftUI's layout, and writes
 /// nothing SwiftUI lays out — the verdicts go through `TailWatch`'s deferred
-/// tasks and repaint one capsule.
+/// tasks and repaint one capsule, and the one thing it moves, a re-pin to
+/// the tail, is a UIKit scroll that runs after the debounce, never inside a
+/// layout pass.
 private struct TailObserver: UIViewRepresentable {
     let watch: TailWatch
 
@@ -141,9 +169,12 @@ private struct TailObserver: UIViewRepresentable {
     final class Probe: UIView {
         var watch: TailWatch
         private var watchers: [NSKeyValueObservation] = []
-        /// The last offset seen, for telling hand motion away from the tail
-        /// apart from content growing under a stationary reader.
+        /// The last geometry seen, for telling a scroll away from the tail
+        /// apart from content or a viewport changing size under a still reader.
         private var lastOffsetY = CGFloat.zero
+        private var lastContentSize = CGSize.zero
+        private var lastBoundsSize = CGSize.zero
+        private var lastInsets = UIEdgeInsets.zero
 
         init(watch: TailWatch) {
             self.watch = watch
@@ -183,7 +214,18 @@ private struct TailObserver: UIViewRepresentable {
 
         private func read(_ scrollView: UIScrollView) {
             let dy = scrollView.contentOffset.y - lastOffsetY
+            let grown = scrollView.contentSize.height - lastContentSize.height
+            let resized = scrollView.bounds.size != lastBoundsSize
+                || scrollView.adjustedContentInset != lastInsets
             lastOffsetY = scrollView.contentOffset.y
+            lastContentSize = scrollView.contentSize
+            lastBoundsSize = scrollView.bounds.size
+            lastInsets = scrollView.adjustedContentInset
+            // KVO fires on every set, changed or not. A reading that saw
+            // nothing move carries no news, and answering it with `arrive`
+            // undid a `leave` made an instant earlier, before the expansion
+            // it announced had laid out.
+            guard abs(dy) > 0.5 || grown != 0 || resized else { return }
             // Content shorter than the viewport has no "away" to be.
             let span = scrollView.contentSize.height
                 - (scrollView.bounds.height - scrollView.adjustedContentInset.bottom
@@ -198,13 +240,30 @@ private struct TailObserver: UIViewRepresentable {
             // rubber-banding; without it the verdict flaps at rest.
             if bottomEdge >= scrollView.contentSize.height - 32 {
                 watch.arrive()
-            } else if dy < -0.5 {
-                // The offset moved *up*: only a hand (or its deceleration)
-                // does that. Content growth and follow-scrolls move it down
-                // or not at all.
+            } else if scrollView.isTracking || scrollView.isDecelerating {
+                // A hand, or its deceleration: up is a departure the reader
+                // chose. The offset alone cannot say this — a viewport that
+                // grows upward (the header folding away for the keyboard)
+                // moves it up by the same amount with nobody touching it.
+                if dy < -0.5 { watch.leave() } else { watch.depart() }
+            } else if dy < -0.5, !resized, abs(grown) < -dy - 0.5 {
+                // Up by more than any change of size explains, with no hand:
+                // a scroll the reader asked for another way — the status bar,
+                // VoiceOver. As much their choice as a drag.
                 watch.leave()
-            } else {
+            } else if watch.isAway {
                 watch.depart()
+            } else {
+                // Nobody scrolled, and a reader who was following is off the
+                // tail: the content or the viewport changed size underneath.
+                watch.depart { [weak scrollView] in
+                    guard let scrollView else { return }
+                    let tail = scrollView.contentSize.height + scrollView.adjustedContentInset.bottom
+                        - scrollView.bounds.height
+                    guard tail > scrollView.contentOffset.y else { return }
+                    scrollView.setContentOffset(
+                        CGPoint(x: scrollView.contentOffset.x, y: tail), animated: true)
+                }
             }
         }
     }
@@ -233,9 +292,6 @@ struct SessionDetailView: View {
     /// clipped mid-word at AX5 and grew the header enough to push the pending
     /// card's own controls off screen.
     @Environment(\.dynamicTypeSize) private var screenTypeSize
-    /// The widest tool label in this timeline, so every command beside one
-    /// starts on the same edge. See `CCToolColumn`.
-    @State private var toolColumn: CGFloat = 0
     @State private var composeText = ""
     @State private var openApproval: ApprovalItem?
     @State private var composeResult: ComposeAttempt?
@@ -350,7 +406,12 @@ struct SessionDetailView: View {
             ZStack {
                 if surface == .timeline {
                     if let state {
-                        timeline(state)
+                        SessionTimeline(
+                            key: key, state: state, tailWatch: tailWatch,
+                            openApproval: $openApproval, showLinkDetail: $showLinkDetail,
+                            composerFocused: $composerFocused
+                        )
+                        .onAppear { openWantedApproval() }
                     } else {
                         notInTheList
                     }
@@ -795,175 +856,6 @@ struct SessionDetailView: View {
         (model.resolveSessionKey(reference: reference) ?? reference) == key
     }
 
-    // MARK: Timeline
-
-    private func timeline(_ state: SessionState) -> some View {
-        ScrollViewReader { proxy in
-            // The pill rides an overlay, never a stack: an overlay is
-            // positioned after its base and cannot feed back into the base's
-            // layout, while a ZStack sizes itself from all children — and
-            // that coupling, with an animated sibling over this scroll view,
-            // was measured as a permanent layout loop (identical frames 175s
-            // apart, ages frozen, `explicitAlignment` pegged in `sample`).
-            scrollBody(state, proxy: proxy)
-                .overlay(alignment: .bottomTrailing) { jumpToLatest(proxy) }
-        }
-    }
-
-    private func scrollBody(_ state: SessionState, proxy: ScrollViewProxy) -> some View {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    SessionBanner(state: state) { showLinkDetail = true }
-
-                    if state.headTruncated {
-                        // At its position in time — the very top — rather than
-                        // as a banner floated above the list.
-                        CCGapMarker(
-                            label: model.isLoadingEarlier(key)
-                                ? "Earlier history not loaded · Loading…"
-                                : "Earlier history not loaded · Load all",
-                            actionLabel: "Load the earlier events",
-                            action: model.isLoadingEarlier(key)
-                                ? nil : { model.loadEarlier(key: key) })
-                    }
-
-                    if state.timeline.isEmpty {
-                        emptyTimeline
-                    }
-
-                    ForEach(Array(state.timeline.enumerated()), id: \.element.id) { index, item in
-                        TimelineRow(
-                            item: item, profile: model.daemonProfile,
-                            // Fired *before* the collapse — see
-                            // `AgentMessageRow` — so the target is the row in
-                            // its expanded geometry, which is always reachable.
-                            // Anchored `.top`: the message the reader was
-                            // inside comes back under their eyes, and the
-                            // height that vanishes goes from below it.
-                            onCollapse: { id in
-                                proxy.scrollTo(id, anchor: .top)
-                            },
-                            // Expanding is choosing to read history: raise
-                            // the away guard this instant, or an event
-                            // landing in the next 400ms scrolls the reader
-                            // through the whole message they just opened.
-                            onExpand: { tailWatch.leave() }
-                        ) { approval in
-                            openApproval = approval
-                        }
-                        // 8pt inside a turn, 20pt between turns. One rule, and it
-                        // does more for readability than any amount of styling.
-                        .padding(.top, topSpacing(at: index, in: state.timeline))
-                        .id(item.id)
-
-                        if let gap = state.gap, index == gapIndex(state.timeline, gap: gap) {
-                            CCGapMarker(
-                                label: gap.message,
-                                actionLabel: "Dismiss this notice",
-                                action: { state.dismissGap() })
-                        }
-                    }
-
-                    // The scroll target for "go to the latest" — nothing but
-                    // an identity; the at-the-tail verdict lives in
-                    // `TailObserver`, off the real scroll offset. The list's
-                    // bottom breathing room rides inside this child so the
-                    // target includes it.
-                    Color.clear
-                        .frame(height: 1)
-                        .padding(.bottom, CC.space.lg)
-                        .id(Self.tailAnchor)
-                }
-                .padding(.horizontal, CC.space.md)
-                // Inside the scroll content on purpose: the probe walks its
-                // superviews to the hosting UIScrollView. See `TailObserver`
-                // for why the verdict reads UIKit's own offset.
-                .background(TailObserver(watch: tailWatch))
-            }
-            .scrollIndicators(.hidden)
-            // The Apple-standard dismissal pair. The drag tracks the keyboard
-            // interactively; the tap fires only where nothing more specific
-            // claims it — rows' buttons, links and text selection all win the
-            // gesture arbitration, so this is precisely "tapping the empty
-            // background" and never a stolen control tap.
-            .scrollDismissesKeyboard(.interactively)
-            // Simultaneous, not exclusive: with the keyboard up the visible
-            // timeline is mostly selectable text, which consumes an exclusive
-            // tap — measured, the "background" tap never fired. Simultaneous
-            // lets a tap on prose or true background dismiss while buttons
-            // keep winning their own taps; the keyboard-owning field itself is
-            // outside this subtree, so typing never self-dismisses.
-            .simultaneousGesture(TapGesture().onEnded { composerFocused = false })
-            // Named so a UI test can tell this scroll view from the keyboard's
-            // own input-assistant bar, which is also a scroll view and wins
-            // `firstMatch` while the keyboard is up — measured, and exactly the
-            // kind of impostor a coordinate tap then presses keys on.
-            .accessibilityIdentifier("session-timeline")
-            .ccCollectsToolColumn(into: $toolColumn)
-            .background(CC.color.bg)
-            .onChange(of: state.timeline.count) { old, new in
-                // `isAway`, not `!following`: events landing inside the
-                // departure debounce belong to "while you were away" too —
-                // gated on the settled flag alone they went uncounted and
-                // the pill said "Latest" over rows never seen.
-                guard tailWatch.isAway else { return }
-                tailWatch.newSinceLeaving += max(0, new - old)
-            }
-            // The follow trigger is the tail *item*, not the count: the
-            // builder merges some events into the row they belong to, so the
-            // last row can grow with no append — count would sit still while
-            // the anchor is pushed out of view, and following would silently
-            // end. Any change to the last item — new row or grown row — is
-            // exactly "the tail moved".
-            .onChange(of: state.timeline.last) { _, _ in
-                // `isAway`, not `following`: the settled flag lags a real
-                // departure by the debounce, and an event landing in that
-                // lag must not yank a reader who just scrolled up or just
-                // expanded a message back to the tail.
-                guard !tailWatch.isAway else { return }
-                withAnimation(CC.motion.medium) {
-                    proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
-                }
-            }
-            .onAppear {
-                proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
-                openWantedApproval()
-            }
-    }
-
-    private static let tailAnchor = "codeconnect.tail"
-
-    /// A turn boundary is a user message, a `turnComplete` or a `sessionEnded`.
-    private func topSpacing(at index: Int, in items: [TimelineItem]) -> CGFloat {
-        guard index > 0 else { return CC.space.xs }
-        if case .userMessage = items[index].content { return CC.space.lg }
-        if case .notice(let notice) = items[index - 1].content {
-            switch notice.kind {
-            case .turnComplete, .sessionEnded: return CC.space.lg
-            default: break
-            }
-        }
-        return CC.space.xs
-    }
-
-    /// Where in the log the discontinuity sits, so the marker can be drawn at
-    /// its position in time rather than at the top of the screen.
-    private func gapIndex(_ items: [TimelineItem], gap: GapNotice) -> Int {
-        items.lastIndex { $0.date <= gap.at } ?? max(0, items.count - 1)
-    }
-
-    private var emptyTimeline: some View {
-        // Anchored rather than centred, so the compose bar stays reachable —
-        // you can always talk to an agent.
-        CCEmptyState(
-            glyph: "clock",
-            title: "Nothing recorded yet",
-            message: "Events appear here as the agent works.")
-            // 96pt from the top of the list, counting the empty state's own
-            // 32pt of vertical padding.
-            .padding(.top, CC.space.xxxl + CC.space.md)
-    }
-
     private var notInTheList: some View {
         VStack {
             CCEmptyState(
@@ -976,16 +868,6 @@ struct SessionDetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.top, CC.space.xxl)
         .background(CC.color.bg)
-    }
-
-    private func jumpToLatest(_ proxy: ScrollViewProxy) -> some View {
-        TailPill(watch: tailWatch) {
-            CCHaptic.light.fire()
-            tailWatch.arrive()
-            withAnimation(CC.motion.medium) {
-                proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
-            }
-        }
     }
 
     // MARK: Compose
@@ -1191,6 +1073,252 @@ struct SessionDetailView: View {
                 // `.indeterminate`, the model kept the identity, so pressing
                 // send again is a recognisable retry, not a second typing.
                 break
+            }
+        }
+    }
+}
+
+/// The session's timeline: its own view, so what the rest of the screen holds
+/// — the draft being typed, the sheets, composer focus — does not re-run it.
+///
+/// Typing changes `SessionDetailView`'s state, and while this was a function
+/// of that view every such change re-ran the list: measured, 5 typed
+/// characters re-evaluated it 3 times, at ~22ms of main thread each on a
+/// 3000-row timeline. Its inputs are the session, the tail watch and bindings
+/// to the few things it sets, none of which typing touches.
+private struct SessionTimeline: View {
+    let key: String
+    let state: SessionState
+    let tailWatch: TailWatch
+    @Binding var openApproval: ApprovalItem?
+    @Binding var showLinkDetail: Bool
+    var composerFocused: FocusState<Bool>.Binding
+
+    @Environment(AppModel.self) private var model
+    /// The widest tool label in this timeline, so every command beside one
+    /// starts on the same edge. See `CCToolColumn`.
+    @State private var toolColumn: CGFloat = 0
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            // The pill rides an overlay, never a stack: an overlay is
+            // positioned after its base and cannot feed back into the base's
+            // layout, while a ZStack sizes itself from all children — and
+            // that coupling, with an animated sibling over this scroll view,
+            // was measured as a permanent layout loop (identical frames 175s
+            // apart, ages frozen, `explicitAlignment` pegged in `sample`).
+            scrollBody(proxy: proxy)
+                .overlay(alignment: .bottomTrailing) { jumpToLatest(proxy) }
+        }
+    }
+
+    private func scrollBody(proxy: ScrollViewProxy) -> some View {
+            // A `List`, drawn to look like a plain stack, **not** a
+            // `ScrollView` over a `LazyVStack`. The lazy stack estimated its
+            // content height from the rows it had realized, and a row taller
+            // than about half the screen — an expanded message, a failed
+            // tool's output — threw the estimate: scrolling back down over
+            // one, the reported height swung between 1439 and ~1870pt on every
+            // 9pt of offset, and the main thread then did not come back in the
+            // 400s a UI test waited (`sample`: one `GraphHost.flushTransactions`
+            // spinning in `LazySubviewPlacements` and the lazy cache's prefetch
+            // transactions). A collection view measures the rows it shows and
+            // was measured not to freeze on either kind of row. Measured in the
+            // app (-O build, simulator, main thread busy time, 3 runs each),
+            // opening a 3000-entry session costs what the lazy stack did —
+            // 0.57–0.61s against 0.53–0.62s — and a new event 77–82ms against
+            // 85–105ms; that holds only with one list row per entry, below. An
+            // eager `VStack` also cured the freeze but took ~3s to open 3000.
+            List {
+                Group {
+                    SessionBanner(state: state) { showLinkDetail = true }
+
+                    if state.headTruncated {
+                        // At its position in time — the very top — rather than
+                        // as a banner floated above the list.
+                        CCGapMarker(
+                            label: model.isLoadingEarlier(key)
+                                ? "Earlier history not loaded · Loading…"
+                                : "Earlier history not loaded · Load all",
+                            actionLabel: "Load the earlier events",
+                            action: model.isLoadingEarlier(key)
+                                ? nil : { model.loadEarlier(key: key) })
+                    }
+
+                    if state.timeline.isEmpty {
+                        emptyTimeline
+                    }
+
+                    // **One entry, one list row**, the gap marker folded into
+                    // the row it follows. A closure that yields one view or two
+                    // is a variable number of rows, and `List` then has to
+                    // evaluate every entry to count them: measured at 3000
+                    // entries, opening took 1.04–1.15s with the marker as a row
+                    // of its own and 0.57–0.61s with it folded in.
+                    ForEach(Array(state.timeline.enumerated()), id: \.element.id) { index, item in
+                        VStack(alignment: .leading, spacing: 0) {
+                            TimelineRow(
+                                item: item, profile: model.daemonProfile,
+                                // Fired *before* the collapse — see
+                                // `AgentMessageRow` — so the target is the row in
+                                // its expanded geometry, which is always reachable.
+                                // Anchored `.top`: the message the reader was
+                                // inside comes back under their eyes, and the
+                                // height that vanishes goes from below it.
+                                //
+                                // Collapsing is choosing where to read, too: the
+                                // guard goes up first, or the re-pin that brings a
+                                // following reader back to the tail would undo the
+                                // anchor.
+                                onCollapse: { id in
+                                    tailWatch.leave()
+                                    proxy.scrollTo(id, anchor: .top)
+                                },
+                                // Expanding is choosing to read history: raise
+                                // the away guard this instant, or an event
+                                // landing in the next 400ms scrolls the reader
+                                // through the whole message they just opened.
+                                onExpand: { tailWatch.leave() }
+                            ) { approval in
+                                openApproval = approval
+                            }
+                            // 8pt inside a turn, 20pt between turns. One rule, and it
+                            // does more for readability than any amount of styling.
+                            .padding(.top, topSpacing(at: index, in: state.timeline))
+
+                            if let gap = state.gap, index == gapIndex(state.timeline, gap: gap) {
+                                CCGapMarker(
+                                    label: gap.message,
+                                    actionLabel: "Dismiss this notice",
+                                    action: { state.dismissGap() })
+                            }
+                        }
+                        .id(item.id)
+                    }
+
+                    // The scroll target for "go to the latest" — nothing but
+                    // an identity; the at-the-tail verdict lives in
+                    // `TailObserver`, off the real scroll offset. The list's
+                    // bottom breathing room rides inside this child so the
+                    // target includes it.
+                    //
+                    // The probe rides this row because it must sit inside the
+                    // collection view to walk up to it. A row exists only near
+                    // the viewport, and this is the row that has to: every
+                    // arrival at the tail and every departure from it happens
+                    // with the tail on screen — a hand scrolling away, and
+                    // equally the tail sliding off under a still reader when
+                    // the last row grows or the keyboard shrinks the view,
+                    // which is the moment `TailObserver` re-pins it.
+                    Color.clear
+                        .frame(height: 1)
+                        .padding(.bottom, CC.space.lg)
+                        .background(TailObserver(watch: tailWatch))
+                        .id(Self.tailAnchor)
+                }
+                // No list chrome at all: the page margin the stack's padding
+                // gave, no separators, the screen's own ground, and rows as
+                // short as their content.
+                .listRowInsets(
+                    EdgeInsets(top: 0, leading: CC.space.md, bottom: 0, trailing: CC.space.md))
+                .listRowSeparator(.hidden)
+                .listRowBackground(CC.color.bg)
+            }
+            .listStyle(.plain)
+            .environment(\.defaultMinListRowHeight, 0)
+            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
+            // The Apple-standard dismissal pair. The drag tracks the keyboard
+            // interactively; the tap fires only where nothing more specific
+            // claims it — rows' buttons, links and text selection all win the
+            // gesture arbitration, so this is precisely "tapping the empty
+            // background" and never a stolen control tap.
+            .scrollDismissesKeyboard(.interactively)
+            // Simultaneous, not exclusive: with the keyboard up the visible
+            // timeline is mostly selectable text, which consumes an exclusive
+            // tap — measured, the "background" tap never fired. Simultaneous
+            // lets a tap on prose or true background dismiss while buttons
+            // keep winning their own taps; the keyboard-owning field itself is
+            // outside this subtree, so typing never self-dismisses.
+            .simultaneousGesture(TapGesture().onEnded { composerFocused.wrappedValue = false })
+            // Named so a UI test can tell this scroll view from the keyboard's
+            // own input-assistant bar, which is also a scroll view and wins
+            // `firstMatch` while the keyboard is up — measured, and exactly the
+            // kind of impostor a coordinate tap then presses keys on.
+            .accessibilityIdentifier("session-timeline")
+            // Rows that open more of themselves on a tap say so first, as a
+            // message's "Show more" does through `onExpand`.
+            .environment(\.tailWatch, tailWatch)
+            .ccCollectsToolColumn(into: $toolColumn)
+            .background(CC.color.bg)
+            .onChange(of: state.timeline.count) { old, new in
+                // `isAway`, not `!following`: events landing inside the
+                // departure debounce belong to "while you were away" too —
+                // gated on the settled flag alone they went uncounted and
+                // the pill said "Latest" over rows never seen.
+                guard tailWatch.isAway else { return }
+                tailWatch.newSinceLeaving += max(0, new - old)
+            }
+            // The follow trigger is the tail *item*, not the count: the
+            // builder merges some events into the row they belong to, so the
+            // last row can grow with no append — count would sit still while
+            // the anchor is pushed out of view, and following would silently
+            // end. Any change to the last item — new row or grown row — is
+            // exactly "the tail moved".
+            .onChange(of: state.timeline.last) { _, _ in
+                // `isAway`, not `following`: the settled flag lags a real
+                // departure by the debounce, and an event landing in that
+                // lag must not yank a reader who just scrolled up or just
+                // expanded a message back to the tail.
+                guard !tailWatch.isAway else { return }
+                withAnimation(CC.motion.medium) {
+                    proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
+                }
+            }
+            .onAppear {
+                proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
+            }
+    }
+
+    static let tailAnchor = "codeconnect.tail"
+
+    /// A turn boundary is a user message, a `turnComplete` or a `sessionEnded`.
+    private func topSpacing(at index: Int, in items: [TimelineItem]) -> CGFloat {
+        guard index > 0 else { return CC.space.xs }
+        if case .userMessage = items[index].content { return CC.space.lg }
+        if case .notice(let notice) = items[index - 1].content {
+            switch notice.kind {
+            case .turnComplete, .sessionEnded: return CC.space.lg
+            default: break
+            }
+        }
+        return CC.space.xs
+    }
+
+    /// Where in the log the discontinuity sits, so the marker can be drawn at
+    /// its position in time rather than at the top of the screen.
+    private func gapIndex(_ items: [TimelineItem], gap: GapNotice) -> Int {
+        items.lastIndex { $0.date <= gap.at } ?? max(0, items.count - 1)
+    }
+
+    private var emptyTimeline: some View {
+        // Anchored rather than centred, so the compose bar stays reachable —
+        // you can always talk to an agent.
+        CCEmptyState(
+            glyph: "clock",
+            title: "Nothing recorded yet",
+            message: "Events appear here as the agent works.")
+            // 96pt from the top of the list, counting the empty state's own
+            // 32pt of vertical padding.
+            .padding(.top, CC.space.xxxl + CC.space.md)
+    }
+
+    private func jumpToLatest(_ proxy: ScrollViewProxy) -> some View {
+        TailPill(watch: tailWatch) {
+            CCHaptic.light.fire()
+            tailWatch.arrive()
+            withAnimation(CC.motion.medium) {
+                proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
             }
         }
     }
