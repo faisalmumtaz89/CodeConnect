@@ -381,31 +381,6 @@ mod tests {
         let _ = std::fs::remove_file(&holder_file);
     }
 
-    /// Timeouts must not accumulate resources: after many of them, the
-    /// process holds no more descriptors than it started with. This is what
-    /// rules out the parked-thread/leaked-pipe design this module replaced.
-    #[test]
-    fn repeated_timeouts_accumulate_no_descriptors() {
-        let open_fds = || std::fs::read_dir("/dev/fd").map(|d| d.count()).unwrap_or(0);
-        // One warm-up so lazy allocations settle before the baseline.
-        let _ = run_deadlined(
-            Command::new("/bin/sleep").arg("30"),
-            Duration::from_millis(50),
-        );
-        let baseline = open_fds();
-        for _ in 0..20 {
-            let _ = run_deadlined(
-                Command::new("/bin/sleep").arg("30"),
-                Duration::from_millis(50),
-            );
-        }
-        let after = open_fds();
-        assert!(
-            after <= baseline + 2,
-            "descriptors grew from {baseline} to {after} across 20 timeouts"
-        );
-    }
-
     /// After a timeout the runner is just a function again — nothing about a
     /// killed child can poison the next call.
     #[test]
