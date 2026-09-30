@@ -3,6 +3,15 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A second daemon no longer cuts the running one off
+
+Starting `ccd` by hand while the daemon was already running used to delete the running
+daemon's socket as the second one gave up. The daemon kept running but nothing could
+reach it: sessions lost their link and the phone saw no new sessions until the daemon was
+restarted. A second `ccd` now stops before it opens the database or the socket, saying
+`another ccd is already running`, and the running daemon carries on as before.
+Restarting after a crash works as it did.
+
 ## Ctrl+Z stops Claude and Codex as it does run directly
 
 Ctrl+Z in `codeconnect claude`, `codeconnect codex` or `codeconnect attach` now stops

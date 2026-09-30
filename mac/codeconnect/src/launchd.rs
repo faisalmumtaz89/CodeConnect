@@ -124,11 +124,10 @@ fn install(args: &[String]) -> Result<()> {
     // An old job must be booted out before the file under it changes, or
     // launchd keeps running the previous program.
     //
-    // And it must be *gone* before the new one starts. Two daemons briefly
-    // sharing one `~/.codeconnect` is the one situation where both could open
-    // the event log at once, which is exactly the state the schema migration
-    // must never be run from. `bootout` returns before launchd has finished
-    // reaping, so the socket is what gets waited on.
+    // And it should be gone before the new one starts: while it still holds
+    // `ccd.lock` the new daemon refuses to start and waits out launchd's
+    // throttle. `bootout` returns before launchd has finished reaping, so the
+    // socket is what gets waited on.
     let booted = launchctl(&["bootout".into(), service_target(uid)])?;
     if booted.ok {
         wait_for_daemon_to_stop(Duration::from_secs(10))

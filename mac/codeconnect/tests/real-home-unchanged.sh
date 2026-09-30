@@ -53,7 +53,7 @@ inventory() {
             rel="${f#"$HOME_DIR"/}"
             base="$(basename "$rel")"
             case "$rel" in
-                ccd.sock|logs/ccd.out.log|logs/ccd.err.log) continue ;;
+                ccd.sock|ccd.lock|logs/ccd.out.log|logs/ccd.err.log) continue ;;
                 events.db|events.db-wal|events.db-shm|events.db-journal) continue ;;
             esac
             [ "$base" = ".DS_Store" ] && continue

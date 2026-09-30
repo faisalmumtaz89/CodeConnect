@@ -70,6 +70,9 @@ async fn main() -> Result<()> {
     // logs all land inside this tree, and a directory created under the umask
     // is readable by every other account on the Mac for as long as it exists.
     harden_state_dir(&root)?;
+    // Before the database, the token or the socket: all three belong to the
+    // daemon that already runs in this home, if one does.
+    claim_home(&root)?;
 
     let config = Config::load();
     // `Store::open` and `report_log_integrity` below are the only synchronous
@@ -399,6 +402,47 @@ async fn main() -> Result<()> {
 enum Stop {
     Signal,
     Task(String),
+}
+
+/// Take this home for this process, or refuse to start.
+///
+/// One `ccd` per home, decided before anything in it is opened. The socket
+/// probe in [`ipc_server`] comes too late to be that decision: a second daemon
+/// that reaches it has already run recovery against the live one's database,
+/// settling that daemon's in-flight answers as indeterminate, and when its
+/// listeners fail, the shutdown path unlinks the socket the live daemon is
+/// still serving — every hook and supervisor then fails to connect to a daemon
+/// that never stopped.
+///
+/// `flock(2)` on `ccd.lock`, held until the process exits. The kernel releases
+/// it however the process ends, `kill -9` included, so a crash leaves nothing
+/// to clean up and the next start takes the home at once.
+fn claim_home(root: &Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = root.join("ccd.lock");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            anyhow::bail!(
+                "another ccd is already running in {}; leaving it alone",
+                root.display()
+            );
+        }
+        return Err(err).with_context(|| format!("locking {}", path.display()));
+    }
+    // Never closed: the descriptor is the lock, and it has to outlive whatever
+    // `main` leaves running on the blocking pool when it returns.
+    std::mem::forget(file);
+    Ok(())
 }
 
 /// Establish — and repair — the owner-only boundary around `~/.codeconnect`.

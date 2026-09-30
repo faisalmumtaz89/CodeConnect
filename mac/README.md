@@ -526,9 +526,9 @@ code, because the two failures look identical from the outside.
 Installing stops whatever ccd is running, its own job included — the plist
 cannot be replaced under a live one. A daemon started by hand gets SIGTERM and a
 wait for the socket; a managed one gets `launchctl bootout` and the same wait.
-The wait is not cosmetic: two daemons briefly sharing one `~/.codeconnect` is
-the only situation where both could open the event log at once, which is the one
-state the schema migration must never run from. Nothing is lost either way — the
+Two daemons never share one `~/.codeconnect`: the new one refuses to start while
+the old one holds `ccd.lock`, and launchd starts it again a few seconds later. The
+wait lets the new one start at once instead. Nothing is lost either way — the
 sessions are in tmux and the log is in SQLite.
 
 `--no-takeover` refuses instead of stopping anything; `codeconnect daemon restart` picks
@@ -1015,6 +1015,13 @@ terminal tab ──exec──> tmux -L codeconnect (session cc-1) ──> real c
 
 `ccd` is never an agent's parent. Both the supervisor and the hooks **connect
 out** to it, so `kill -9 ccd` costs a reconnect and nothing else.
+
+One `ccd` per `~/.codeconnect`. Before it opens the database, the token or the
+socket, the daemon takes an exclusive `flock(2)` on `~/.codeconnect/ccd.lock`;
+a second `ccd` started in the same home exits at once with `another ccd is
+already running in …` and leaves the running daemon, its socket and its database
+untouched. The kernel drops the lock with the process, `kill -9` included, so
+the next start takes the home straight away and removes the stale socket.
 
 ## Configuration — `~/.codeconnect/config.json`
 
