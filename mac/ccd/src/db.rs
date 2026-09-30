@@ -396,6 +396,20 @@ impl Db {
         .await
     }
 
+    /// Give back a claim whose write was refused before it did anything. `false` when
+    /// the claim was already terminal.
+    pub async fn release_mutation(
+        &self,
+        operation_kind: &'static str,
+        session_uid: String,
+        client_request_id: String,
+    ) -> Result<bool> {
+        self.run(move |store| {
+            store.release_mutation(operation_kind, &session_uid, &client_request_id)
+        })
+        .await
+    }
+
     /// Make one claim terminal without being able to say what it did.
     pub async fn settle_mutation_indeterminate(
         &self,

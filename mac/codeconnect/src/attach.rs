@@ -36,6 +36,18 @@
 //! over the unused rows below, because Warp keeps any row the cursor has crossed
 //! in the block once the program erases it, and the session would then fill the
 //! window. A terminal that does not report its cursor gets every row instead.
+//!
+//! **Ctrl+Z.** The key reaches the agent like any other, and the agent stops itself
+//! as it does run directly: it is a job of the pane's own process ([`crate::job`]),
+//! which then writes [`crate::job::STOP_MARKER`] and sets `@codeconnect-stopped` on
+//! the pane. On the marker, or on a paint that finds the pane stopped, this client
+//! gives the terminal back and stops itself, so the user's shell prints its own job
+//! line; its tmux client stays attached meanwhile, which is what keeps the agent held.
+//! Resumed with `fg`, it takes the terminal again and asks tmux whether the agent is
+//! still stopped. If it is and the pane has not moved on, it names the row the shell
+//! left the cursor on (`@codeconnect-cursor`) and signals the pane's process, which
+//! puts the pane's cursor there and continues the agent, and the agent repaints itself;
+//! otherwise the pane is painted afresh first, as on attach.
 
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -71,7 +83,7 @@ const PAINT_FORMAT: &str = "#{pane_height} #{cursor_x} #{cursor_y} #{cursor_flag
      #{keypad_flag} #{mouse_standard_flag} #{mouse_button_flag} #{mouse_all_flag} \
      #{mouse_sgr_flag} #{mouse_utf8_flag} \
      #{?#{==:#{pane_key_mode},Ext 2},2,#{?#{==:#{pane_key_mode},Ext 1},1,0}} \
-     #{cursor_shape} #{cursor_blinking} \
+     #{?@codeconnect-stopped,1,0} #{cursor_shape} #{cursor_blinking} \
      #{?#{==:#{pane_title},#{host}},,#{pane_title}}";
 
 /// The user's terminal, in raw mode, with what it answered about itself.
@@ -106,12 +118,8 @@ impl Terminal {
         if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut original) } != 0 {
             return Err(std::io::Error::last_os_error()).context("reading terminal settings");
         }
-        let saved = *SAVED.get_or_init(|| original);
-        let mut raw = saved;
-        unsafe { libc::cfmakeraw(&mut raw) };
-        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("setting raw mode");
-        }
+        SAVED.get_or_init(|| original);
+        raw()?;
         for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
             unsafe { libc::signal(signal, leave_on_signal as *const () as libc::sighandler_t) };
         }
@@ -192,6 +200,40 @@ impl Terminal {
     }
 }
 
+/// Return once this process is the terminal's foreground job again.
+///
+/// A job continued in the background (`bg`, or `kill %1`, which continues it so it
+/// can die) must not touch the terminal: the kernel would stop it with SIGTTOU at
+/// once, and a signal handler ending this process on another thread would be stopped
+/// half-way with it. So it waits a moment for such a handler, then stops as a
+/// program run directly does when it reaches for a terminal it does not own.
+fn wait_for_foreground() {
+    loop {
+        for _ in 0..20 {
+            if unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) == libc::getpgrp() } {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        unsafe { libc::kill(libc::getpid(), libc::SIGTTOU) };
+    }
+}
+
+/// Put the terminal in raw mode, from the attributes it had before this process.
+fn raw() -> Result<()> {
+    let mut raw = *SAVED.get().expect("saved before raw");
+    unsafe { libc::cfmakeraw(&mut raw) };
+    // A job resumed in the background is stopped here by SIGTTOU until `fg`, and the
+    // call is then interrupted.
+    while unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error).context("setting raw mode");
+        }
+    }
+    Ok(())
+}
+
 impl Drop for Terminal {
     fn drop(&mut self) {
         unsafe { libc::signal(libc::SIGWINCH, libc::SIG_DFL) };
@@ -210,6 +252,11 @@ impl Drop for Terminal {
 /// session that ended under it, as tmux's own client does when it detaches.
 /// Only calls that are safe inside a signal handler.
 fn leave() {
+    // A viewer suspended in the shell already gave the terminal back; one ended while
+    // it is not the foreground job must not take it from the shell.
+    if unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) } != unsafe { libc::getpgrp() } {
+        return;
+    }
     if ALTERNATE.swap(false, Ordering::SeqCst) {
         write_raw(libc::STDOUT_FILENO, b"\x1b[?1049l");
     }
@@ -391,10 +438,11 @@ impl Client {
         let client = child.id() as libc::pid_t;
         let viewer = std::thread::spawn(move || {
             let typed = std::mem::take(&mut terminal.typed);
-            let result = View::new(session, pane, input, typed, terminal.row, client)
-                .run(output, terminal.wake[0]);
+            let wake = terminal.wake[0];
+            let mut view = View::new(session, pane, input, typed, terminal.row, client, terminal);
+            let result = view.run(output, wake);
             ATTACHED.store(-1, Ordering::SeqCst);
-            drop(terminal);
+            drop(view);
             result
         });
         Ok(Client {
@@ -463,6 +511,9 @@ enum Phase {
     Painting { replies: Vec<Vec<Vec<u8>>> },
     /// Pane output goes to the terminal.
     Streaming,
+    /// Back from a suspension: asking whether the agent is still stopped, and
+    /// whether the pane printed anything since this terminal last showed it.
+    Resuming { changed: bool },
 }
 
 struct View {
@@ -492,6 +543,13 @@ struct View {
     /// client's own command asked for it, and its lines.
     block: Option<(Vec<u8>, bool, Vec<Vec<u8>>)>,
     resized: bool,
+    /// Continue the stopped agent once the paint in progress is on the terminal.
+    resume_after_paint: bool,
+    /// Stop markers seen whose question to tmux is not answered yet.
+    confirming: usize,
+    /// Answers still to come to questions asked before this terminal was last stopped.
+    stale: usize,
+    terminal: Terminal,
 }
 
 impl View {
@@ -502,6 +560,7 @@ impl View {
         typed: Vec<u8>,
         row: Option<usize>,
         client: libc::pid_t,
+        terminal: Terminal,
     ) -> Self {
         View {
             session,
@@ -517,6 +576,10 @@ impl View {
             orphans: false,
             block: None,
             resized: false,
+            resume_after_paint: false,
+            confirming: 0,
+            stale: 0,
+            terminal,
         }
     }
 
@@ -635,7 +698,13 @@ impl View {
                     let mut out = Vec::with_capacity(bytes.len());
                     self.filter.feed(bytes, &mut out);
                     write_all(libc::STDOUT_FILENO, &out)?;
+                    if std::mem::take(&mut self.filter.stopped) {
+                        self.confirm_stop()?;
+                    }
                 } else {
+                    if let Phase::Resuming { changed, .. } = &mut self.phase {
+                        *changed = true;
+                    }
                     self.before_capture(&bytes);
                 }
             }
@@ -655,6 +724,46 @@ impl View {
                     .collect::<Vec<_>>()
                     .join("; ");
                 self.refused.get_or_insert(said);
+            }
+            return Ok(());
+        }
+        // Outside a paint, the commands this client sends (`send-keys`, `set-option`)
+        // answer with nothing, and its questions with one line.
+        if lines.is_empty() && !failed && !matches!(self.phase, Phase::Painting { .. }) {
+            return Ok(());
+        }
+        if self.stale > 0 {
+            self.stale -= 1;
+            return Ok(());
+        }
+        if self.confirming > 0 {
+            self.confirming -= 1;
+            if !failed && lines.first().map(Vec::as_slice) == Some(b"1") {
+                self.stale = std::mem::take(&mut self.confirming);
+                return self.suspend();
+            }
+            return Ok(());
+        }
+        if let Phase::Resuming { changed } = self.phase {
+            let answer = lines
+                .first()
+                .map(|line| String::from_utf8_lossy(line).into_owned());
+            let answer = answer.unwrap_or_default();
+            match answer.split_once(' ') {
+                Some((pid, "1")) if !failed && !changed => {
+                    self.phase = Phase::Streaming;
+                    self.flush_input()?;
+                    if let Ok(pid) = pid.parse::<libc::pid_t>() {
+                        unsafe { libc::kill(pid, libc::SIGUSR1) };
+                    }
+                }
+                // Stopped still, but the pane moved on while this terminal was away (another
+                // viewer resumed the agent): paint it, then continue the agent.
+                Some((_, "1")) if !failed => {
+                    self.resume_after_paint = true;
+                    self.ask_for_paint()?;
+                }
+                _ => self.ask_for_paint()?,
             }
             return Ok(());
         }
@@ -694,7 +803,63 @@ impl View {
         ALTERNATE.store(state.alternate, Ordering::SeqCst);
         write_all(libc::STDOUT_FILENO, &paint)?;
         self.phase = Phase::Streaming;
+        let resume = std::mem::take(&mut self.resume_after_paint);
+        // A marker in the paint is answered by the state read with it.
+        self.filter.stopped = false;
+        if state.stopped && !resume {
+            return self.suspend();
+        }
+        if state.stopped {
+            // The paint lined the terminal's rows up with the pane's: the agent resumes
+            // at the pane's own cursor.
+            return self.ask_whether_stopped(None);
+        }
         self.flush_input()
+    }
+
+    /// Ask whether the agent is still stopped, telling the pane's process which row
+    /// of the terminal the agent is to resume at (`None`: the pane's own cursor).
+    fn ask_whether_stopped(&mut self, row: Option<usize>) -> Result<()> {
+        let cursor = crate::job::CURSOR_OPTION;
+        let set = match row {
+            Some(row) => format!("set-option -p -t {} {cursor} '{}'", self.pane, row + 1),
+            None => format!("set-option -p -u -t {} {cursor}", self.pane),
+        };
+        let ask = format!(
+            "{set} ; display-message -p -t {} \"#{{pane_pid}} #{{?@codeconnect-stopped,1,0}}\"\n",
+            self.pane
+        );
+        self.phase = Phase::Resuming { changed: false };
+        self.send(ask.as_bytes())
+    }
+
+    /// A stop marker came through the pane: suspend only once tmux confirms the pane's
+    /// process marked it stopped, since anything the agent prints could spell the
+    /// marker. The pane's process marks it before it writes the marker.
+    fn confirm_stop(&mut self) -> Result<()> {
+        self.confirming += 1;
+        let ask = format!(
+            "display-message -p -t {} \"#{{?@codeconnect-stopped,1,0}}\"\n",
+            self.pane
+        );
+        self.send(ask.as_bytes())
+    }
+
+    /// The agent stopped: give the terminal back to the shell and stop this process
+    /// as its job. Once resumed (`fg`), take the terminal again and continue the
+    /// agent if it is still stopped, or paint the pane afresh if it is not.
+    fn suspend(&mut self) -> Result<()> {
+        leave();
+        unsafe { libc::kill(libc::getpid(), libc::SIGTSTP) };
+        wait_for_foreground();
+        raw()?;
+        self.terminal.ask()?;
+        self.row = self.terminal.row;
+        self.typed.append(&mut self.terminal.typed);
+        self.resized = true;
+        // Where the shell left the cursor, for the agent to resume at: the pane's
+        // process moves the pane's cursor there before it continues the agent.
+        self.ask_whether_stopped(self.row)
     }
 
     /// Ask for the pane's state, its capture, and the start of any escape
@@ -754,11 +919,15 @@ impl View {
         Ok(())
     }
 
+    /// Write a command to the tmux client. One that has already ended — its session
+    /// ended while this process was stopped in the shell — takes no more input, and
+    /// the client's own output then ends the attachment as it does when running.
     fn send(&mut self, line: &[u8]) -> Result<()> {
         if let Some(input) = self.input.as_mut() {
-            input
-                .write_all(line)
-                .context("writing to the tmux client")?;
+            match input.write_all(line) {
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => self.input = None,
+                written => written.context("writing to the tmux client")?,
+            }
         }
         Ok(())
     }
@@ -776,6 +945,7 @@ struct PaneState {
     keypad: bool,
     mouse: [bool; 5],
     key_mode: u8,
+    stopped: bool,
     cursor_shape: Option<u8>,
     title: String,
 }
@@ -783,7 +953,7 @@ struct PaneState {
 impl PaneState {
     fn parse(line: &[u8]) -> Option<Self> {
         let text = std::str::from_utf8(line).ok()?;
-        let mut fields = text.splitn(17, ' ');
+        let mut fields = text.splitn(18, ' ');
         let mut number = || fields.next()?.parse::<usize>().ok();
         let height = number()?;
         let cursor = (number()?, number()?);
@@ -791,6 +961,7 @@ impl PaneState {
             .map(|_| number().map(|value| value == 1))
             .collect::<Option<_>>()?;
         let key_mode = number()? as u8;
+        let stopped = number()? == 1;
         let shape = fields.next()?;
         let blinking = fields.next()? == "1";
         // tmux may trim the separator an empty title leaves at the end.
@@ -811,6 +982,7 @@ impl PaneState {
             keypad: flags[4],
             mouse: [flags[5], flags[6], flags[7], flags[8], flags[9]],
             key_mode,
+            stopped,
             cursor_shape,
             title,
         })
@@ -972,6 +1144,8 @@ fn follow_background(params: &[u8], background: &mut Option<Vec<u8>>) {
 struct Filter {
     state: Scan,
     held: Vec<u8>,
+    /// The pane's process wrote [`crate::job::STOP_MARKER`].
+    stopped: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
@@ -1096,13 +1270,18 @@ impl Filter {
             Scan::Dcs => {
                 self.held.push(byte);
                 let body = &self.held[2..];
-                if body == b"$q" {
+                let marker = &crate::job::STOP_MARKER[2..crate::job::STOP_MARKER.len() - 2];
+                if body == b"$q" || body == marker {
+                    self.stopped |= body == marker;
                     self.held.clear();
                     self.state = Scan::DcsDrop;
                 } else if body == b"tmux;" {
                     self.held.clear();
                     self.state = Scan::Passthrough;
-                } else if !b"$q".starts_with(body) && !b"tmux;".starts_with(body) {
+                } else if !b"$q".starts_with(body)
+                    && !b"tmux;".starts_with(body)
+                    && !marker.starts_with(body)
+                {
                     let last = self.held.pop().expect("just pushed");
                     self.release(out);
                     self.state = Scan::StringPass;
@@ -1416,6 +1595,28 @@ mod tests {
         }
     }
 
+    /// The pane's process marks a stopped agent in the stream; the mark never reaches
+    /// the terminal, whole or split across `%output` lines, and nothing else sets it.
+    #[test]
+    fn the_stop_marker_is_taken_out_of_the_stream_and_noted() {
+        let marked = [&b"a"[..], crate::job::STOP_MARKER, b"b"].concat();
+        for chunk in [marked.len(), 1] {
+            let mut filter = Filter::default();
+            let mut out = Vec::new();
+            for piece in marked.chunks(chunk) {
+                filter.feed(piece, &mut out);
+            }
+            assert_eq!(out, b"ab", "chunks of {chunk}");
+            assert!(filter.stopped, "chunks of {chunk}");
+        }
+        let other = b"\x1bP=codeconnect\x1b\\";
+        let mut filter = Filter::default();
+        let mut out = Vec::new();
+        filter.feed(other, &mut out);
+        assert!(!filter.stopped);
+        assert_eq!(out, other);
+    }
+
     #[test]
     fn tmux_passthrough_is_unwrapped_as_tmux_does() {
         let wrapped = b"\x1bPtmux;\x1b\x1b]52;c;aGk=\x07\x1b\\after";
@@ -1481,7 +1682,7 @@ mod tests {
 
     #[test]
     fn the_pane_state_is_read_as_tmux_writes_it() {
-        let read = state("30 2 10 1 0 1 1 1 0 1 0 1 0 2 bar 1 \u{2733} Claude Code");
+        let read = state("30 2 10 1 0 1 1 1 0 1 0 1 0 2 0 bar 1 \u{2733} Claude Code");
         assert_eq!(read.height, 30);
         assert_eq!(read.cursor, (2, 10));
         assert!(read.cursor_visible && !read.alternate && read.bracketed_paste);
@@ -1489,7 +1690,9 @@ mod tests {
         assert_eq!(read.key_mode, 2);
         assert_eq!(read.cursor_shape, Some(5));
         assert_eq!(read.title, "\u{2733} Claude Code");
-        assert_eq!(state("24 0 0 1 0 0 0 0 0 0 0 0 0 0 default 0").title, "");
+        assert!(!read.stopped);
+        assert!(state("24 0 0 1 0 0 0 0 0 0 0 0 0 0 1 default 0 ").stopped);
+        assert_eq!(state("24 0 0 1 0 0 0 0 0 0 0 0 0 0 0 default 0").title, "");
         assert!(PaneState::parse(b"24 0 0").is_none());
     }
 
@@ -1499,7 +1702,7 @@ mod tests {
             .iter()
             .map(|row| row.as_bytes().to_vec())
             .collect();
-        let modes = state("4 3 1 0 0 1 0 0 0 0 0 0 0 2 default 0 title");
+        let modes = state("4 3 1 0 0 1 0 0 0 0 0 0 0 2 0 default 0 title");
         // A fresh terminal: the history and the rows in use, then one row up so
         // the pane's first row is the terminal's first; never the unused rows.
         assert_eq!(
@@ -1507,7 +1710,7 @@ mod tests {
             b"old\r\nrow0\r\nrow1\x1b[0m\x1b[1S\x1b[0m\x1b[2;4H\x1b[?2004h\x1b[>4;2m\x1b]0;title\x07\x1b[?25l"
         );
         // Text above the cursor scrolls away with the history.
-        let plain = state("4 0 1 1 0 0 0 0 0 0 0 0 0 0 default 0 ");
+        let plain = state("4 0 1 1 0 0 0 0 0 0 0 0 0 0 0 default 0 ");
         assert_eq!(
             paint(&plain, &capture, Some(1)),
             b"old\r\nrow0\r\nrow1\x1b[0m\x1b[2S\x1b[0m\x1b[2;1H"
@@ -1520,11 +1723,11 @@ mod tests {
         // An empty pane in a fresh terminal writes nothing at all; a row of
         // plain spaces is as empty as a row of nothing.
         let empty = vec![Vec::new(), b"   ".to_vec(), Vec::new(), Vec::new()];
-        let blank = state("4 0 0 1 0 0 0 0 0 0 0 0 0 0 default 0 ");
+        let blank = state("4 0 0 1 0 0 0 0 0 0 0 0 0 0 0 default 0 ");
         assert_eq!(paint(&blank, &empty, Some(0)), b"\x1b[0m\x1b[1;1H");
         // The cursor below the last text keeps its row; here the terminal's
         // own scrolling already lines the rows up.
-        let low = state("4 0 3 1 0 0 0 0 0 0 0 0 0 0 default 0 ");
+        let low = state("4 0 3 1 0 0 0 0 0 0 0 0 0 0 0 default 0 ");
         assert_eq!(
             paint(&low, &capture, Some(0)),
             b"old\r\nrow0\r\nrow1\r\n\r\n\x1b[0m\x1b[4;1H"
@@ -1535,7 +1738,7 @@ mod tests {
             b"old\r\nrow0\r\nrow1\r\n\r\n\x1b[0m\x1b[2;1H"
         );
         // The alternate screen: its screen only, never the history under it.
-        let alternate = state("4 0 0 1 1 0 0 0 0 0 1 1 0 0 default 0 ");
+        let alternate = state("4 0 0 1 1 0 0 0 0 0 1 1 0 0 0 default 0 ");
         assert_eq!(
             paint(&alternate, &capture, Some(0)),
             b"\x1b[?1049h\x1b[H\x1b[2Jrow0\r\nrow1\r\n\r\n\x1b[0m\x1b[1;1H\x1b[?1003h\x1b[?1006h"

@@ -3,6 +3,29 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Ctrl+Z stops Claude and Codex as it does run directly
+
+Ctrl+Z in `codeconnect claude`, `codeconnect codex` or `codeconnect attach` now stops
+the agent: your shell prints its own `Stopped` line, and `fg` brings the agent back where
+it was, with what you had typed. Claude used to print its "suspended" message and then
+wait for ever, and Codex ignored the key. Codex stops whole, as it does run directly, so
+a running turn pauses too, and a message or Stop from the phone meanwhile is refused at
+once. Closing the tab, `exit` or `kill %1` while the agent is stopped ends the session,
+as it ends a stopped job run directly. The phone's Terminal tab never keeps a stopped
+agent held, since nobody can `fg` from it.
+
+A message or Stop sent from the phone while Codex is stopped is refused with a sentence
+saying Codex is paused at the Mac and continues after `fg` there, and the same message or
+Stop sent again after `fg` goes through once.
+
+A message or Stop from the phone that was refused before it reached Codex can now be
+sent again from the phone: for example while the session was busy or switching thread,
+or when the turn ended as you tapped. It used to be refused again for good, with "an
+earlier attempt to say this was refused" for a message and "an earlier request to stop
+that turn was refused" for a Stop. An answer from Codex that does not show whether it
+took the message or Stop, such as an internal error inside Codex, is now reported as not
+known rather than as a refusal, and is still never sent again.
+
 ## A long session no longer freezes while scrolling — iPhone app
 
 Scrolling back down past a long expanded message or a long failed command could freeze

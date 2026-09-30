@@ -22,6 +22,7 @@ mod exec_gate;
 /// own `~/.codeconnect`. See the module's own docs for what it watches.
 #[cfg(test)]
 mod home_guard;
+mod job;
 mod launchd;
 mod pair;
 mod sessions;
@@ -48,6 +49,12 @@ fn main() -> Result<()> {
         .is_some_and(|command| command == caller_env::SUBCOMMAND)
     {
         return caller_env::run(&raw[1..]);
+    }
+    if raw
+        .first()
+        .is_some_and(|command| command == job::SUBCOMMAND)
+    {
+        return job::run(&raw[1..]);
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = args

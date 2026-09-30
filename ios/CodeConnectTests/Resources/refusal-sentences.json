@@ -6,9 +6,9 @@
     "wire_code": "the app-server or the broker refused the write; the sentence carries their numeric code and never their message"
   },
   "counts": {
-    "link_state": 19,
+    "link_state": 21,
     "permanent": 43,
-    "total": 69,
+    "total": 71,
     "transient_local": 5,
     "wire_code": 2
   },
@@ -381,14 +381,28 @@
       "category": "wire_code",
       "id": "interrupt_wire_refused",
       "outcome": "rejected",
-      "text": "that stop was refused (code {n}) and nothing was changed; stop the turn at the Mac",
+      "text": "that stop was refused (code {n}) and nothing was changed; the turn can be stopped again from the phone",
       "verb": "interrupt"
     },
     {
       "category": "wire_code",
       "id": "compose_wire_refused",
       "outcome": "rejected",
-      "text": "that message was refused (code {n}) and nothing was changed; say it at the Mac",
+      "text": "that message was refused (code {n}) and nothing was changed; it can be sent again from the phone",
+      "verb": "compose"
+    },
+    {
+      "category": "link_state",
+      "id": "interrupt_paused",
+      "outcome": "rejected",
+      "text": "Codex is paused at the Mac (Ctrl+Z), so that stop was not sent; it continues after fg there, and the turn can be stopped then",
+      "verb": "interrupt"
+    },
+    {
+      "category": "link_state",
+      "id": "compose_paused",
+      "outcome": "rejected",
+      "text": "Codex is paused at the Mac (Ctrl+Z), so that message was not sent; it continues after fg there, and the message can be sent again then",
       "verb": "compose"
     },
     {

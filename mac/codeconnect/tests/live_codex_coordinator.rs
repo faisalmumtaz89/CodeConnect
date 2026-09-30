@@ -1211,9 +1211,9 @@ fn a_real_codex_tui_attaches_through_the_broker_from_inside_the_pane() {
     // The TUI must own the pane's terminal — `tpgid == pgid`.
     //
     // This is the sharpest gate in this file, and it is here because the obvious
-    // change breaks it silently. The host puts the app-server in its own process
-    // group so cleanup can address a recorded pgid; doing the same to the TUI
-    // measurably leaves it with `pgid == its own pid` while the tty keeps
+    // change breaks it silently. The TUI runs in a process group of its own, as
+    // the app-server does; without the terminal also being handed to that group it
+    // measurably comes up with `pgid == its own pid` while the tty keeps
     // `tpgid == the host's group`, i.e. a BACKGROUND process group on the terminal
     // it is supposed to own. Nothing visible fails — it is not even stopped, since
     // it blocks SIGTTIN — the pane renders, the broker handshake succeeds, and

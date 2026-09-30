@@ -775,8 +775,10 @@ pub const INTERRUPT_ABORTED: &str = "aborted";
 /// The turn ended for its own reasons while the ask was in flight. Nothing was
 /// stopped from here, and the record must not let anyone say otherwise.
 pub const INTERRUPT_TURN_ENDED: &str = "turn_ended";
-/// The write itself was refused — by the broker before a byte left, or by the
-/// app-server with an error. Proven not to have actuated.
+/// The write itself was refused. Written by earlier builds for every refusal from the
+/// wire, and read back from their rows: replayed, never re-sent. This build gives back a
+/// refusal that proves nothing reached Codex ([`Store::release_mutation`]) and records any
+/// other answer as `indeterminate`.
 pub const INTERRUPT_REFUSED: &str = "refused";
 
 /// **What a settled interrupt claim is replayed as, in the operator's words.**
@@ -831,7 +833,10 @@ pub const OPERATION_COMPOSE: &str = "compose";
 pub const COMPOSE_ROUTE_START: &str = "turn_start";
 /// A compose that joined the turn the session was already running.
 pub const COMPOSE_ROUTE_STEER: &str = "turn_steer";
-/// A compose the wire refused. Terminal, and replayed as a refusal rather than re-sent.
+/// A compose the wire refused. Written by earlier builds for every refusal from the wire,
+/// and read back from their rows: terminal, and replayed as a refusal rather than re-sent.
+/// This build gives back a refusal that proves nothing reached Codex
+/// ([`Store::release_mutation`]) and records any other answer as `indeterminate`.
 pub const COMPOSE_REFUSED: &str = "refused";
 
 /// **The recorded outcome of a compose that reached the model**, which is the route it
@@ -3744,6 +3749,27 @@ impl Store {
             ],
         )?;
         Ok(updated == 1)
+    }
+
+    /// **Give back a claim whose write was refused before it did anything**, so the same
+    /// id is a first attempt again: [`Store::release_text_mutation`]'s rule for the
+    /// generalized ledger. Only a claim still `applying` is removed; one already terminal
+    /// — `indeterminate` above all, which forbids a resend — is left as it is. Returns
+    /// whether this call removed it.
+    pub fn release_mutation(
+        &self,
+        operation_kind: &str,
+        session_uid: &str,
+        client_request_id: &str,
+    ) -> Result<bool> {
+        let conn = self.write();
+        let deleted = conn.execute(
+            "DELETE FROM mutation_ledger
+              WHERE operation_kind = ?1 AND session_uid = ?2 AND client_request_id = ?3
+                AND status = 'applying'",
+            params![operation_kind, session_uid, client_request_id],
+        )?;
+        Ok(deleted == 1)
     }
 
     /// **Make one claim terminal without being able to say what it did.**

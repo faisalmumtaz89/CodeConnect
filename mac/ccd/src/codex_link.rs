@@ -1569,9 +1569,11 @@ pub enum CodexAddressee {
     ///   * an accepted `thread/resume` — the link is `Subscribed` and this is moot
     ///     ([`Connection::attach_from_seed`] clears it);
     ///   * the turn's own terminal ([`Connection::note_terminal`]);
-    ///   * a WIRE REFUSAL of the start, which is evidence no turn was written at all — the
-    ///     proof is restored rather than dropped, because a refusal changes nothing about
-    ///     the thread the resume answer described.
+    ///   * a WIRE REFUSAL of the start that proves nothing reached Codex (a broker
+    ///     refusal, or -32600 / -32602 / -32001 from the app-server) — the proof is
+    ///     restored rather than dropped, because such a refusal changes nothing about the
+    ///     thread the resume answer described. Any other error answer leaves it spent:
+    ///     the turn may exist.
     ///
     /// And a fourth that is a stop rather than an exit: after [`COMPOSE_BUDGET`] the state
     /// is dropped, logged once, and the connection falls back to plain
@@ -1960,7 +1962,8 @@ pub(crate) enum InterruptReport {
 /// are the same sentence, and a settle that lost or failed breaks exactly that.
 #[derive(Debug)]
 enum Settlement {
-    /// This call wrote the terminal. What the phone is told is what the record says.
+    /// This call wrote the record — a terminal, or the release of a claim whose write was
+    /// refused. What the phone is told is what the record says.
     Recorded,
     /// **Something else made the claim terminal first**, and first-terminal-wins means
     /// that one stands. For an interrupt the other writer is a restart's recovery or a
@@ -2067,6 +2070,72 @@ fn wire_refusal_reason(frame: &Value, what: &str, remedy: &str) -> String {
     // that tells them apart and it is the part that is passed on.
     crate::codex_refusals::wire_refused(&code, what, remedy)
 }
+
+/// **Whether an error answering a write proves that nothing reached Codex.**
+///
+/// The phone reuses its request id for the same words, and for a Stop on the same turn, so
+/// a refusal recorded under that id is replayed at every resend. A claim is therefore given
+/// back when, and only when, the answer proves nothing was taken. Any other answer leaves
+/// what became of the ask unknown, and it is recorded and told as unknown: never sent
+/// again, and never described to the phone as a refusal that changed nothing.
+///
+/// What proves it, read from Codex's own source at the measured `rust-v0.153.4`:
+///
+///   * **`-32001` from the broker**, whatever its message. The broker composes each of its
+///     refusals in this process and writes nothing upstream (`codex_broker::refusal`,
+///     `codex_broker::relay::paused_refusal`). A rule-based refusal simply refuses the
+///     resend again.
+///   * **`-32001` from the app-server** is its transport turning a request away because the
+///     queue is full, before it is enqueued (`app-server-transport/src/transport/mod.rs`,
+///     `OVERLOADED_ERROR_CODE`, "Server overloaded; retry later.").
+///   * **`-32600` and `-32602`** are the app-server's checks before it submits anything —
+///     `invalid_request` and `invalid_params` in
+///     `app-server/src/request_processors/turn_processor.rs` (no active turn, a turn id that
+///     does not match, empty or oversized input), `app-server/src/error_code.rs`.
+///
+/// **`-32603` is not proof.** `turn_start` and `turn_steer` answer `internal_error("failed
+/// to submit turn input: …")` / `("failed to steer turn: …")` when the submission fails, and
+/// a submission can fail after the session queued it. It, and any code this build has not
+/// read, is unknown. So is an `error` that is not a JSON-RPC error object with an integer
+/// `code` and no `result` beside it: that is not evidence of anything, and beside a
+/// `result` it may be a success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireRefusal {
+    /// The broker's refusal while Codex is stopped at the Mac (Ctrl+Z), which lasts until
+    /// `fg` there. Given back, and the phone is told why.
+    Paused,
+    /// Proven not taken for another reason. Given back.
+    NotTaken,
+    /// Anything else: what became of the ask is not known. Recorded `indeterminate`, and
+    /// never sent again.
+    Unknown,
+}
+
+/// **Which [`WireRefusal`] this frame is.** The pause is told apart by the broker's own
+/// message, read here only to choose the phone's sentence and never passed on — see
+/// [`wire_refusal_reason`].
+fn wire_refusal(frame: &Value) -> WireRefusal {
+    let error = match (frame.get("error"), frame.get("result")) {
+        (Some(Value::Object(error)), None) => error,
+        _ => return WireRefusal::Unknown,
+    };
+    match error.get("code").and_then(Value::as_i64) {
+        Some(BROKER_POLICY_REFUSED)
+            if error.get("message").and_then(Value::as_str) == Some(BROKER_PAUSED_MESSAGE) =>
+        {
+            WireRefusal::Paused
+        }
+        Some(BROKER_POLICY_REFUSED | APP_SERVER_INVALID_REQUEST | APP_SERVER_INVALID_PARAMS) => {
+            WireRefusal::NotTaken
+        }
+        _ => WireRefusal::Unknown,
+    }
+}
+
+/// The app-server's JSON-RPC "invalid request" and "invalid params" codes
+/// (`app-server/src/error_code.rs`). See [`WireRefusal`].
+const APP_SERVER_INVALID_REQUEST: i64 = -32600;
+const APP_SERVER_INVALID_PARAMS: i64 = -32602;
 
 pub(crate) fn replayed_interrupt_report(outcome: &str, turn_id: &str) -> InterruptReport {
     if outcome == crate::store::INTERRUPT_ABORTED {
@@ -5133,9 +5202,10 @@ fn rings_the_doorbell(pending: &protocol::event::PendingEvent) -> bool {
 /// Is this answer the BROKER's own policy refusal, rather than the app-server's?
 ///
 /// Matched on the broker's synthetic code (`crate::codex_broker`'s `E_POLICY_REFUSED`,
-/// -32001) — a code the app-server does not emit, which is what makes the two
-/// distinguishable at all. The message text is deliberately not matched: it is the
-/// broker's own wording and pinning it here would couple two crates through prose.
+/// -32001). The app-server answers -32001 too, when its transport turns a request away
+/// as overloaded; that also calls for a retry rather than a reconnect, so matching both
+/// is right. The message text is deliberately not matched: it is the broker's own
+/// wording and pinning it here would couple two crates through prose.
 ///
 /// Narrow on purpose. It gates ONE behaviour — retry instead of reconnect — and every
 /// other unmeasured answer still takes the STOP-AND-AMEND branch.
@@ -5152,6 +5222,11 @@ fn is_broker_policy_refusal(frame: &Value) -> bool {
 /// ccd does not depend on that crate, so the constant is restated with the reason it must
 /// not drift.
 const BROKER_POLICY_REFUSED: i64 = -32001;
+
+/// The broker's message for a request refused while Codex is stopped at the Mac (Ctrl+Z).
+/// Mirrors `codex_broker::refusal::PAUSED_MESSAGE`, restated for
+/// [`BROKER_POLICY_REFUSED`]'s reason. Read to tell the pause apart; never passed on.
+const BROKER_PAUSED_MESSAGE: &str = "codex is paused at the Mac (Ctrl+Z); run fg there";
 
 impl Connection<'_> {
     /// The ccd role's handshake: `initialize`, then the one notification the leg
@@ -6808,8 +6883,10 @@ impl Connection<'_> {
     /// one). An interrupt has to wait for a terminal because its own answer carries
     /// nothing; a compose does not.
     ///
-    /// An **error** settles it as refused, and the reason a phone reads is built from the
-    /// CODE alone — see [`wire_refusal_reason`] for the measured message that is why.
+    /// An **error** gives the claim back when it proves nothing reached Codex, and is
+    /// recorded `indeterminate` otherwise (see [`WireRefusal`]). The reason a phone reads is built
+    /// from the CODE alone — see [`wire_refusal_reason`] for the measured message that is
+    /// why — or, for Codex paused at the Mac, is the catalogued sentence that says so.
     ///
     /// Returns whether the frame was this connection's to consume.
     async fn note_compose_response(&mut self, frame: &Value) -> bool {
@@ -6834,6 +6911,22 @@ impl Connection<'_> {
                 self.session.name,
                 held.thread_id
             );
+            // Given back only when nothing reached Codex; see [`WireRefusal`]. An answer
+            // that does not prove it leaves what became of the words unknown, and is
+            // recorded and told as the unreadable answer below is.
+            let refusal = wire_refusal(frame);
+            if refusal == WireRefusal::Unknown {
+                let settlement = self.abandon_compose_claim(&held).await;
+                self.report_settled_compose(
+                    &mut held,
+                    settlement,
+                    ComposeReport::Unknown(
+                        crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into(),
+                    ),
+                )
+                .await;
+                return true;
+            }
             // **A REFUSED START GIVES THE PROOF BACK.**
             //
             // The write created nothing — that is what a refusal is — so the fact the
@@ -6842,7 +6935,9 @@ impl Connection<'_> {
             // attempted. Dropping the state instead would leave the phone looking at a
             // plain `bound` session, and being told "the first turn was just started"
             // about a turn that was refused, for the rest of the budget: two sentences,
-            // both false, for a compose the operator can simply send again.
+            // both false, for a compose the operator can simply send again. Only a refusal
+            // that proves nothing was taken gets here: after one that does not, a turn may
+            // exist, and the spent proof stays spent.
             //
             // Restored only for the route and the thread it was spent on, and only while
             // it is still this connection's — the same comparison every other reader of
@@ -6853,14 +6948,16 @@ impl Connection<'_> {
                 self.start_in_flight = None;
                 self.not_ready_thread = Some(held.thread_id.clone());
             }
-            let settlement = self
-                .settle_compose_claim(&held, crate::store::COMPOSE_REFUSED)
-                .await;
-            let ordinary = ComposeReport::NotApplied(wire_refusal_reason(
-                frame,
-                crate::codex_refusals::COMPOSE_WIRE_SUBJECT,
-                crate::codex_refusals::COMPOSE_WIRE_REMEDY,
-            ));
+            let settlement = self.release_compose_claim(&held).await;
+            let ordinary = ComposeReport::NotApplied(if refusal == WireRefusal::Paused {
+                crate::codex_refusals::COMPOSE_PAUSED.to_string()
+            } else {
+                wire_refusal_reason(
+                    frame,
+                    crate::codex_refusals::COMPOSE_WIRE_SUBJECT,
+                    crate::codex_refusals::COMPOSE_WIRE_REMEDY,
+                )
+            });
             self.report_settled_compose(&mut held, settlement, ordinary)
                 .await;
             return true;
@@ -6987,6 +7084,34 @@ impl Connection<'_> {
             Err(err) => {
                 crate::log_error!(
                     "codex link for {}: could not settle the compose {}: {err:#}",
+                    self.session.name,
+                    crate::state::logged_request_id(&held.client_request_id)
+                );
+                Settlement::Unrecorded
+            }
+        }
+    }
+
+    /// Give back a compose claim whose write was refused, so the id is a first attempt
+    /// again.
+    async fn release_compose_claim(&self, held: &PendingCompose) -> Settlement {
+        match self
+            .daemon
+            .db
+            .release_mutation(
+                crate::store::OPERATION_COMPOSE,
+                self.session.uid.clone(),
+                held.client_request_id.clone(),
+            )
+            .await
+        {
+            Ok(true) => Settlement::Recorded,
+            Ok(false) => Settlement::Superseded,
+            // Logged here, and nowhere else, for [`Connection::settle_compose_claim`]'s
+            // reason.
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not release the refused compose {}: {err:#}",
                     self.session.name,
                     crate::state::logged_request_id(&held.client_request_id)
                 );
@@ -7169,10 +7294,10 @@ impl Connection<'_> {
     ///
     /// `result:{}` says the app-server accepted the ask and says nothing about the
     /// turn, so it is deliberately not a settlement: the entry stays open and the
-    /// turn's terminal settles it. An **error** is a settlement, and the only one
-    /// that can say the write changed nothing — the broker composes its refusals in
-    /// this process without writing upstream, and an app-server error is a refusal
-    /// it made before acting.
+    /// turn's terminal settles it. An **error** is the only answer that can say the
+    /// write changed nothing — the broker composes its refusals in this process without
+    /// writing upstream, and an app-server error is a refusal it made before acting — and
+    /// it is recorded or given back per [`WireRefusal`].
     ///
     /// Returns whether the frame was this connection's to consume.
     async fn note_interrupt_response(&mut self, frame: &Value) -> bool {
@@ -7200,24 +7325,36 @@ impl Connection<'_> {
             self.session.name,
             held.turn_id
         );
-        let settlement = self
-            .settle_interrupt_claim(&held, crate::store::INTERRUPT_REFUSED)
-            .await;
-        self.report_settled_interrupt(
-            &mut held,
-            settlement,
+        // Given back only when nothing reached Codex; see [`WireRefusal`]. An answer
+        // that does not prove it leaves what became of the Stop unknown.
+        let refusal = wire_refusal(frame);
+        let (settlement, ordinary) = match refusal {
+            WireRefusal::Unknown => (
+                self.abandon_interrupt_claim(&held).await,
+                InterruptReport::Unknown(
+                    crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into(),
+                ),
+            ),
+            WireRefusal::Paused => (
+                self.release_interrupt_claim(&held).await,
+                InterruptReport::NotApplied(crate::codex_refusals::INTERRUPT_PAUSED.to_string()),
+            ),
             // **The CODE, not the message** — see [`wire_refusal_reason`]. MEASURED on
             // 0.153.4: the app-server's refusal for a turn that has already ended is
             // `-32600 "expected active turn id X but found Y"`, and X is the turn the
             // session is really running. This sentence reaches a phone, which did not
             // send that id. `why` is logged just above, on the machine entitled to it.
-            InterruptReport::NotApplied(wire_refusal_reason(
-                frame,
-                crate::codex_refusals::INTERRUPT_WIRE_SUBJECT,
-                crate::codex_refusals::INTERRUPT_WIRE_REMEDY,
-            )),
-        )
-        .await;
+            WireRefusal::NotTaken => (
+                self.release_interrupt_claim(&held).await,
+                InterruptReport::NotApplied(wire_refusal_reason(
+                    frame,
+                    crate::codex_refusals::INTERRUPT_WIRE_SUBJECT,
+                    crate::codex_refusals::INTERRUPT_WIRE_REMEDY,
+                )),
+            ),
+        };
+        self.report_settled_interrupt(&mut held, settlement, ordinary)
+            .await;
         true
     }
 
@@ -7263,6 +7400,42 @@ impl Connection<'_> {
                     ),
                 )
                 .await;
+            }
+        }
+    }
+
+    /// Give back an interrupt claim whose write was refused, so the id is a first attempt
+    /// again.
+    async fn release_interrupt_claim(&self, held: &PendingInterrupt) -> Settlement {
+        match self
+            .daemon
+            .db
+            .release_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                self.session.uid.clone(),
+                held.client_request_id.clone(),
+            )
+            .await
+        {
+            Ok(true) => Settlement::Recorded,
+            Ok(false) => {
+                crate::log_warn!(
+                    "codex link for {}: the interrupt claim {} was already terminal when \
+                     its refusal arrived; the earlier terminal stands and is what the \
+                     caller is told",
+                    self.session.name,
+                    crate::state::logged_request_id(&held.client_request_id)
+                );
+                Settlement::Superseded
+            }
+            Err(err) => {
+                crate::log_error!(
+                    "codex link for {}: could not release the refused interrupt claim {}: \
+                     {err:#}",
+                    self.session.name,
+                    crate::state::logged_request_id(&held.client_request_id)
+                );
+                Settlement::Unrecorded
             }
         }
     }
@@ -10077,6 +10250,15 @@ mod tests {
         /// nothing. The connection therefore dies of [`COMPOSE_BUDGET`], which is the
         /// ordinary bound on an unanswered compose and is what makes the test terminate.
         NoRolloutAndTheStartIsNeverAnswered,
+        /// **[`ResumeAnswer::NoRolloutUntilAFirstTurn`], with Codex paused (Ctrl+Z) for
+        /// the first `turn/start`.** That one is answered with the broker's own pause
+        /// refusal, composed the way `codex_broker::relay` composes it, and never reaches
+        /// an app-server; every later one is accepted, as after `fg`.
+        NoRolloutAndTheFirstStartIsPaused,
+        /// **The same, with the first `turn/start` answered by the app-server's
+        /// internal error** (`-32603 "failed to submit turn input: …"`), which can follow
+        /// input it had already queued.
+        NoRolloutAndTheFirstStartFailsInside,
         /// A policy refusal no retry can fix.
         Refused,
         /// A `result` object with no `turns[]` anywhere — neither an error nor a
@@ -11012,6 +11194,9 @@ mod tests {
         // [`ResumeAnswer::NoRolloutUntilAFirstTurn`] turns on: before it, a resume is
         // refused not-ready; after it, the rollout exists and the resume succeeds.
         let mut first_turn_started = false;
+        // Has this leg refused its first `turn/start` yet? See
+        // [`ResumeAnswer::NoRolloutAndTheFirstStartIsPaused`].
+        let mut first_start_refused = false;
         while let Some(Ok(msg)) = ws.next().await {
             let Message::Text(text) = msg else { continue };
             let frame: Value = serde_json::from_str(&text)?;
@@ -12126,7 +12311,9 @@ mod tests {
                         }
                         // Not-ready until this leg has accepted a `turn/start`, and
                         // populated after it. See [`ResumeAnswer::NoRolloutUntilAFirstTurn`].
-                        ResumeAnswer::NoRolloutUntilAFirstTurn => {
+                        ResumeAnswer::NoRolloutUntilAFirstTurn
+                        | ResumeAnswer::NoRolloutAndTheFirstStartIsPaused
+                        | ResumeAnswer::NoRolloutAndTheFirstStartFailsInside => {
                             if first_turn_started {
                                 // **HELD FOR A BEAT, AND THE BEAT IS THE POINT.** Between
                                 // an accepted `turn/start` and the answer to the resume it
@@ -12295,7 +12482,33 @@ mod tests {
                 // **The measured `turn/start` answer, and only for the script whose
                 // subject it is.** Every other script leaves it unanswered, exactly as
                 // before: none of them writes one.
-                "turn/start" if matches!(answer, ResumeAnswer::NoRolloutUntilAFirstTurn) => {
+                "turn/start"
+                    if matches!(
+                        answer,
+                        ResumeAnswer::NoRolloutAndTheFirstStartIsPaused
+                            | ResumeAnswer::NoRolloutAndTheFirstStartFailsInside
+                    ) && !first_start_refused =>
+                {
+                    first_start_refused = true;
+                    let error = if matches!(answer, ResumeAnswer::NoRolloutAndTheFirstStartIsPaused)
+                    {
+                        json!({"code": codex_broker::refusal::E_POLICY_REFUSED,
+                               "message": codex_broker::refusal::PAUSED_MESSAGE})
+                    } else {
+                        json!({"code": -32603,
+                               "message": "failed to submit turn input: internal agent died"})
+                    };
+                    ws.send(Message::Text(json!({"id": id, "error": error}).to_string()))
+                        .await?;
+                }
+                "turn/start"
+                    if matches!(
+                        answer,
+                        ResumeAnswer::NoRolloutUntilAFirstTurn
+                            | ResumeAnswer::NoRolloutAndTheFirstStartIsPaused
+                            | ResumeAnswer::NoRolloutAndTheFirstStartFailsInside
+                    ) =>
+                {
                     first_turn_started = true;
                     ws.send(Message::Text(
                         json!({"id": id, "result": {"turn": {
@@ -19884,18 +20097,890 @@ mod tests {
             !reason.contains("expected active turn id"),
             "and neither must the message that carries it: {reason}"
         );
-        // Terminal, and terminal as a refusal: nothing was said, and a retry under this
-        // id replays that rather than saying it.
+        // Nothing was said, and the app-server judged a session that has since moved on:
+        // the claim is given back, so a retry under this id is judged afresh.
         assert_eq!(
             daemon
                 .store
                 .mutation_status(crate::store::OPERATION_COMPOSE, &session.uid, "req-stale")
                 .unwrap()
                 .map(|state| state.status),
-            Some(crate::store::AnswerStatus::Settled(
-                crate::store::COMPOSE_REFUSED.into()
-            ))
+            None
         );
+    }
+
+    /// The broker's refusal while Codex is stopped at the Mac (Ctrl+Z), as
+    /// `codex_broker::relay` composes it.
+    fn paused_refusal(wire_id: i64) -> Value {
+        json!({"id": wire_id, "error": {
+            "code": codex_broker::refusal::E_POLICY_REFUSED,
+            "message": codex_broker::refusal::PAUSED_MESSAGE,
+        }})
+    }
+
+    /// **A message refused while Codex is paused is not spent.** The broker refuses it
+    /// without writing a byte upstream, so the claim is released rather than recorded:
+    /// the phone keeps the same request id for the same words, and after `fg` that id
+    /// has to be a first attempt again. The phone is told Codex is paused and what
+    /// brings it back, not to say it at the Mac.
+    ///
+    /// **Mutation:** settle the claim `refused` again and the ledger assertions go red.
+    #[tokio::test]
+    async fn a_compose_refused_while_codex_is_paused_is_released_and_says_so() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C20".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        claim_a_compose(
+            &daemon,
+            &session.uid,
+            "req-paused",
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            "hello",
+        );
+        let outcome = insert_pending_compose_for_tests(
+            &conn.open_composes,
+            7101,
+            "req-paused",
+            LIFECYCLE_THREAD,
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            a_gate_guard().await,
+        );
+        assert!(conn.note_compose_response(&paused_refusal(7101)).await);
+        let ComposeReport::NotApplied(reason) = outcome.await.expect("the caller is told") else {
+            panic!("a paused refusal is a refusal")
+        };
+        assert!(
+            reason.contains("paused at the Mac") && reason.contains("fg"),
+            "the phone is told Codex is paused and that fg brings it back: {reason}"
+        );
+        assert!(
+            !reason.contains(codex_broker::refusal::PAUSED_MESSAGE),
+            "the broker's own message is never passed on: {reason}"
+        );
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(crate::store::OPERATION_COMPOSE, &session.uid, "req-paused")
+                .unwrap()
+                .map(|state| state.status),
+            None,
+            "nothing was sent, so nothing is recorded under the id"
+        );
+        claim_a_compose(
+            &daemon,
+            &session.uid,
+            "req-paused",
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            "hello",
+        );
+    }
+
+    /// **The same for a Stop.** The phone keeps the Stop's request id for the same turn,
+    /// so a Stop refused while Codex was paused must be a first attempt after `fg`.
+    ///
+    /// **Mutation:** settle the claim `refused` again and the ledger assertions go red.
+    #[tokio::test]
+    async fn an_interrupt_refused_while_codex_is_paused_is_released_and_says_so() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C21".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        claim_an_interrupt(&daemon, &session.uid, "req-stop-paused", APPROVAL_TURN);
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9101,
+            "req-stop-paused",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        assert!(conn.note_interrupt_response(&paused_refusal(9101)).await);
+        let InterruptReport::NotApplied(reason) = outcome.await.expect("the caller is told") else {
+            panic!("a paused refusal is a refusal")
+        };
+        assert!(
+            reason.contains("paused at the Mac") && reason.contains("fg"),
+            "the phone is told Codex is paused and that fg brings it back: {reason}"
+        );
+        assert_eq!(
+            daemon
+                .store
+                .mutation_status(
+                    crate::store::OPERATION_INTERRUPT,
+                    &session.uid,
+                    "req-stop-paused"
+                )
+                .unwrap()
+                .map(|state| state.status),
+            None,
+            "nothing was sent, so nothing is recorded under the id"
+        );
+        claim_an_interrupt(&daemon, &session.uid, "req-stop-paused", APPROVAL_TURN);
+    }
+
+    /// **An unknown outcome stays unknown.** A claim a restart's recovery already made
+    /// `indeterminate` is never released by a refusal arriving after it, because
+    /// "unknown" is the one record that forbids a resend.
+    ///
+    /// **Mutation:** drop the `applying` guard from the release and the ledger assertions
+    /// go red.
+    #[tokio::test]
+    async fn an_unknown_claim_is_never_released_by_a_refusal() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C22".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        let status = |kind: &str, id: &str| {
+            daemon
+                .store
+                .mutation_status(kind, &session.uid, id)
+                .unwrap()
+                .map(|state| state.status)
+        };
+
+        for (id, wire) in [("req-unknown", 7103), ("req-unknown-paused", 7104)] {
+            claim_a_compose(
+                &daemon,
+                &session.uid,
+                id,
+                crate::store::COMPOSE_ROUTE_START,
+                None,
+                "hello",
+            );
+            assert!(daemon
+                .store
+                .settle_mutation_indeterminate(
+                    crate::store::OPERATION_COMPOSE,
+                    &session.uid,
+                    id,
+                    &protocol::time::now_rfc3339(),
+                )
+                .unwrap());
+            let outcome = insert_pending_compose_for_tests(
+                &conn.open_composes,
+                wire,
+                id,
+                LIFECYCLE_THREAD,
+                crate::store::COMPOSE_ROUTE_START,
+                None,
+                a_gate_guard().await,
+            );
+            let frame = if id == "req-unknown" {
+                json!({"id": wire, "error": {"code": -32600, "message": "stale"}})
+            } else {
+                paused_refusal(wire)
+            };
+            assert!(conn.note_compose_response(&frame).await);
+            assert!(
+                matches!(
+                    outcome.await.expect("the caller is told"),
+                    ComposeReport::Unknown(_)
+                ),
+                "the record says unknown, and that is what the phone is told"
+            );
+            assert_eq!(
+                status(crate::store::OPERATION_COMPOSE, id),
+                Some(crate::store::AnswerStatus::Indeterminate),
+                "an unknown outcome is never released: it may have been delivered"
+            );
+        }
+
+        claim_an_interrupt(&daemon, &session.uid, "req-stop-unknown", APPROVAL_TURN);
+        assert!(daemon
+            .store
+            .settle_mutation_indeterminate(
+                crate::store::OPERATION_INTERRUPT,
+                &session.uid,
+                "req-stop-unknown",
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap());
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            9102,
+            "req-stop-unknown",
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        assert!(conn.note_interrupt_response(&paused_refusal(9102)).await);
+        let _ = outcome.await.expect("the caller is told");
+        assert_eq!(
+            status(crate::store::OPERATION_INTERRUPT, "req-stop-unknown"),
+            Some(crate::store::AnswerStatus::Indeterminate),
+            "an unknown Stop is never released either"
+        );
+    }
+
+    /// What one error frame answering a phone compose leaves behind: what the phone is
+    /// told, the ledger row, and what a resend under the same id gets from the claim.
+    async fn compose_meets(
+        conn: &mut Connection<'_>,
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+        wire_id: i64,
+        frame: Value,
+    ) -> (
+        ComposeReport,
+        Option<crate::store::AnswerStatus>,
+        crate::store::MutationClaim,
+    ) {
+        claim_a_compose(
+            daemon,
+            uid,
+            request_id,
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            "hello",
+        );
+        let outcome = insert_pending_compose_for_tests(
+            &conn.open_composes,
+            wire_id,
+            request_id,
+            LIFECYCLE_THREAD,
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            a_gate_guard().await,
+        );
+        assert!(conn.note_compose_response(&frame).await);
+        let report = outcome.await.expect("the caller is told");
+        let status = daemon
+            .store
+            .mutation_status(crate::store::OPERATION_COMPOSE, uid, request_id)
+            .unwrap()
+            .map(|state| state.status);
+        let resend = daemon
+            .store
+            .claim_mutation(
+                crate::store::OPERATION_COMPOSE,
+                uid,
+                request_id,
+                &crate::store::ClaimedMaterial {
+                    thread_id: LIFECYCLE_THREAD.into(),
+                    generation: 1,
+                    route: crate::store::COMPOSE_ROUTE_START.into(),
+                    target_turn_id: None,
+                    claimed_hash: protocol::hash::compose_hash(uid, "hello"),
+                },
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        (report, status, resend)
+    }
+
+    /// The same for a phone Stop.
+    async fn interrupt_meets(
+        conn: &mut Connection<'_>,
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        request_id: &str,
+        wire_id: i64,
+        frame: Value,
+    ) -> (
+        InterruptReport,
+        Option<crate::store::AnswerStatus>,
+        crate::store::MutationClaim,
+    ) {
+        claim_an_interrupt(daemon, uid, request_id, APPROVAL_TURN);
+        let outcome = insert_pending_interrupt_for_tests(
+            &conn.open_interrupts,
+            wire_id,
+            request_id,
+            LIFECYCLE_THREAD,
+            APPROVAL_TURN,
+            a_gate_guard().await,
+        );
+        assert!(conn.note_interrupt_response(&frame).await);
+        let report = outcome.await.expect("the caller is told");
+        let status = daemon
+            .store
+            .mutation_status(crate::store::OPERATION_INTERRUPT, uid, request_id)
+            .unwrap()
+            .map(|state| state.status);
+        let resend = daemon
+            .store
+            .claim_mutation(
+                crate::store::OPERATION_INTERRUPT,
+                uid,
+                request_id,
+                &crate::store::ClaimedMaterial {
+                    thread_id: LIFECYCLE_THREAD.into(),
+                    generation: 1,
+                    route: crate::store::INTERRUPT_ROUTE.into(),
+                    target_turn_id: Some(APPROVAL_TURN.into()),
+                    claimed_hash: "h".into(),
+                },
+                &protocol::time::now_rfc3339(),
+            )
+            .unwrap();
+        (report, status, resend)
+    }
+
+    /// **Every broker refusal is given back.** The broker composes each of them in this
+    /// process and writes nothing upstream (`codex_broker::refusal`), so none spends the
+    /// id: the busy, moving, too-many-turns, stale-steer and stale-Stop refusals may well
+    /// admit the same ask a moment later, and a rule-based one simply refuses it again.
+    /// The phone is told it can send again from the phone, and never the broker's text.
+    ///
+    /// **Mutation:** record any `-32001` refusal `refused` and a row reads back
+    /// `Settled`, with the resend replayed instead of claimed.
+    #[tokio::test]
+    async fn every_broker_refusal_is_given_back() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C24".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        let broker = |wire: i64, message: &str| {
+            json!({"id": wire, "error": {
+                "code": codex_broker::refusal::E_POLICY_REFUSED,
+                "message": message,
+            }})
+        };
+        let composes = [
+            "turn refused: this session is already running a turn",
+            "turn refused: a thread switch is in progress on this session",
+            "turn refused: too many turns are already in flight",
+            "steer refused: it does not name the turn this session is running",
+            "turn refused: it does not name this session's bound thread",
+            "method refused: not permitted for this connection",
+        ];
+        for (n, message) in composes.into_iter().enumerate() {
+            let id = format!("req-broker-{n}");
+            let (report, status, resend) = compose_meets(
+                &mut conn,
+                &daemon,
+                &session.uid,
+                &id,
+                7200 + n as i64,
+                broker(7200 + n as i64, message),
+            )
+            .await;
+            let ComposeReport::NotApplied(reason) = report else {
+                panic!("{message}: a refusal is a refusal")
+            };
+            assert_eq!(status, None, "{message}: nothing reached Codex, so no row");
+            assert_eq!(
+                resend,
+                crate::store::MutationClaim::Claimed,
+                "{message}: the same id is a first attempt again"
+            );
+            assert!(
+                reason.contains("sent again from the phone") && !reason.contains("at the Mac"),
+                "{message}: {reason}"
+            );
+            assert!(!reason.contains(message), "{message}: {reason}");
+        }
+        for (n, message) in [
+            "interrupt refused: it does not name a running turn of this session",
+            "method refused: not permitted for this connection",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("req-broker-stop-{n}");
+            let (report, status, resend) = interrupt_meets(
+                &mut conn,
+                &daemon,
+                &session.uid,
+                &id,
+                9200 + n as i64,
+                broker(9200 + n as i64, message),
+            )
+            .await;
+            let InterruptReport::NotApplied(reason) = report else {
+                panic!("{message}: a refusal is a refusal")
+            };
+            assert_eq!(status, None, "{message}: nothing reached Codex, so no row");
+            assert_eq!(resend, crate::store::MutationClaim::Claimed, "{message}");
+            assert!(
+                reason.contains("from the phone") && !reason.contains("at the Mac"),
+                "{message}: {reason}"
+            );
+        }
+    }
+
+    /// **App-server errors: given back only where Codex's own source shows nothing was
+    /// taken.** `-32600` and `-32602` are its checks before it submits anything, and
+    /// `-32001` is its transport turning a request away when the queue is full.
+    /// `-32603` can follow input that was already queued, and any other code is one this
+    /// build has not read: for both, what became of the ask is not known, so it is
+    /// recorded unknown, the phone is told so, and the same id is never written again.
+    ///
+    /// **Mutation:** release `-32603` (or every code) and its row reads back empty with
+    /// the resend claimed; record `-32001`, `-32600` or `-32602` and those rows read back
+    /// terminal; record a kept one as a refusal and it reads back `Settled`.
+    #[tokio::test]
+    async fn app_server_errors_are_given_back_only_where_nothing_was_taken() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C25".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        let cases = [
+            (-32600, "no active turn to steer", true),
+            (-32602, "Input exceeds the maximum length", true),
+            (-32001, "Server overloaded; retry later.", true),
+            (
+                -32603,
+                "failed to submit turn input: internal agent died",
+                false,
+            ),
+            (-32601, "method not found", false),
+            (-32000, "a code this build has not read", false),
+        ];
+        for (n, (code, message, given_back)) in cases.into_iter().enumerate() {
+            let wire = 7300 + n as i64;
+            let frame = json!({"id": wire, "error": {"code": code, "message": message}});
+            let id = format!("req-app-{n}");
+            let (report, status, resend) =
+                compose_meets(&mut conn, &daemon, &session.uid, &id, wire, frame.clone()).await;
+            if given_back {
+                let ComposeReport::NotApplied(reason) = report else {
+                    panic!("{code}: a refusal nothing took is a refusal: {report:?}")
+                };
+                assert!(
+                    reason.contains(&format!("(code {code})")),
+                    "{code}: {reason}"
+                );
+                assert!(!reason.contains(message), "{code}: {reason}");
+                assert_eq!(status, None, "{code}: nothing was taken, so no row");
+                assert_eq!(resend, crate::store::MutationClaim::Claimed, "{code}");
+                assert!(
+                    reason.contains("sent again from the phone"),
+                    "{code}: {reason}"
+                );
+            } else {
+                assert_eq!(
+                    report,
+                    ComposeReport::Unknown(
+                        crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into()
+                    ),
+                    "{code}: what became of it is not known, and the phone is told so"
+                );
+                assert_eq!(
+                    status,
+                    Some(crate::store::AnswerStatus::Indeterminate),
+                    "{code}: recorded unknown"
+                );
+                assert!(
+                    matches!(resend, crate::store::MutationClaim::Indeterminate { .. }),
+                    "{code}: the same id is never written again"
+                );
+            }
+            let wire = 9300 + n as i64;
+            let frame = json!({"id": wire, "error": {"code": code, "message": message}});
+            let (report, status, resend) = interrupt_meets(
+                &mut conn,
+                &daemon,
+                &session.uid,
+                &format!("req-app-stop-{n}"),
+                wire,
+                frame,
+            )
+            .await;
+            if given_back {
+                assert_eq!(status, None, "{code}: a Stop nothing took leaves no row");
+                assert_eq!(resend, crate::store::MutationClaim::Claimed, "{code}");
+            } else {
+                assert_eq!(
+                    report,
+                    InterruptReport::Unknown(
+                        crate::codex_refusals::INTERRUPT_ALREADY_SENT_UNKNOWN.into()
+                    ),
+                    "{code}: a Stop whose fate is not known is told so"
+                );
+                assert_eq!(
+                    status,
+                    Some(crate::store::AnswerStatus::Indeterminate),
+                    "{code}: a Stop recorded unknown"
+                );
+                assert!(
+                    matches!(resend, crate::store::MutationClaim::Indeterminate { .. }),
+                    "{code}: and never sent again"
+                );
+            }
+        }
+    }
+
+    /// **Only a proper JSON-RPC error is read as one.** An `error` that is null, a string,
+    /// an object with no integer `code`, or one beside a `result` is not evidence that
+    /// nothing was taken — beside a `result` it may even be a success — so what became of
+    /// the ask is not known: it is recorded unknown and never given back.
+    ///
+    /// **Mutation:** give back any frame carrying an `error` key and these rows read back
+    /// empty, with the resend claimed; record them as refusals and they read back
+    /// `Settled`.
+    #[tokio::test]
+    async fn a_malformed_error_is_never_given_back() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C26".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        let frames = [
+            json!({"id": 7400, "result": {"turn": {"id": "t"}}, "error": null}),
+            json!({"id": 7401, "error": "boom"}),
+            json!({"id": 7402, "error": {"message": "no code"}}),
+            json!({"id": 7403, "error": {"code": "-32600", "message": "a string code"}}),
+            json!({"id": 7404, "result": {}, "error": {"code": -32600, "message": "both"}}),
+        ];
+        for (n, frame) in frames.into_iter().enumerate() {
+            let wire = frame["id"].as_i64().unwrap();
+            let (report, status, resend) = compose_meets(
+                &mut conn,
+                &daemon,
+                &session.uid,
+                &format!("req-odd-{n}"),
+                wire,
+                frame.clone(),
+            )
+            .await;
+            assert_eq!(
+                report,
+                ComposeReport::Unknown(crate::codex_refusals::COMPOSE_ALREADY_SENT_UNKNOWN.into()),
+                "{frame}: the phone is told it is not known"
+            );
+            assert_eq!(
+                status,
+                Some(crate::store::AnswerStatus::Indeterminate),
+                "{frame}: recorded unknown"
+            );
+            assert!(
+                matches!(resend, crate::store::MutationClaim::Indeterminate { .. }),
+                "{frame}: never written again"
+            );
+        }
+    }
+
+    /// **Only a refusal that proves nothing was taken gives a spent start proof back.**
+    /// After an internal error a turn may exist, so the connection keeps treating the
+    /// start as in flight rather than admitting another start on the strength of a proof
+    /// the write spent.
+    ///
+    /// **Mutation:** give the proof back on every error and the first half goes red.
+    #[tokio::test]
+    async fn an_unknown_start_keeps_its_proof_spent() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C27".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        for (n, code, given_back) in [(0, -32603, false), (1, -32600, true)] {
+            conn.start_in_flight = Some(StartInFlight {
+                thread_id: LIFECYCLE_THREAD.into(),
+                deadline: Instant::now() + Duration::from_secs(60),
+            });
+            conn.not_ready_thread = None;
+            let frame = json!({"id": 7500 + n, "error": {"code": code, "message": "m"}});
+            let _ = compose_meets(
+                &mut conn,
+                &daemon,
+                &session.uid,
+                &format!("req-proof-{n}"),
+                7500 + n,
+                frame,
+            )
+            .await;
+            if given_back {
+                assert!(conn.start_in_flight.is_none(), "{code}");
+                assert_eq!(
+                    conn.not_ready_thread.as_deref(),
+                    Some(LIFECYCLE_THREAD),
+                    "{code}: nothing was started, so the proof is back"
+                );
+            } else {
+                assert!(
+                    conn.start_in_flight.is_some() && conn.not_ready_thread.is_none(),
+                    "{code}: a turn may exist, so the proof stays spent"
+                );
+            }
+        }
+    }
+
+    /// **A resend racing the refusal writes nothing twice.** A retry that reaches the link
+    /// while the refused attempt is still open joins it and is told the same refusal; a
+    /// claim taken while the refused attempt still holds the row finds it `applying` and
+    /// writes nothing; once the row is released, the next attempt claims it afresh and
+    /// exactly one attempt can.
+    ///
+    /// **Mutation:** release the row before the attempt is taken out of the open set, or
+    /// let a claim succeed over an `applying` row, and an assertion goes red.
+    #[tokio::test]
+    async fn a_resend_racing_a_paused_refusal_is_written_at_most_once() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000C23".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            LIFECYCLE_THREAD,
+            1,
+        );
+        claim_a_compose(
+            &daemon,
+            &session.uid,
+            "req-race",
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            "hello",
+        );
+        let first = insert_pending_compose_for_tests(
+            &conn.open_composes,
+            7105,
+            "req-race",
+            LIFECYCLE_THREAD,
+            crate::store::COMPOSE_ROUTE_START,
+            None,
+            a_gate_guard().await,
+        );
+        // The retry arrives while the refused attempt is open, and joins it.
+        let (reply, joined) = tokio::sync::oneshot::channel();
+        assert!(conn
+            .join_open_compose(ComposeRequest {
+                client_request_id: "req-race".into(),
+                upstream_epoch: 1,
+                thread_id: LIFECYCLE_THREAD.into(),
+                generation: 1,
+                text: "hello".into(),
+                claimed_hash: "hash-of-req-race".into(),
+                reply,
+                gate: a_gate_guard().await,
+            })
+            .is_none());
+        // A claim taken while the row is still the refused attempt's writes nothing.
+        let material = crate::store::ClaimedMaterial {
+            thread_id: LIFECYCLE_THREAD.into(),
+            generation: 1,
+            route: crate::store::COMPOSE_ROUTE_START.into(),
+            target_turn_id: None,
+            claimed_hash: protocol::hash::compose_hash(&session.uid, "hello"),
+        };
+        let claim = || {
+            daemon
+                .store
+                .claim_mutation(
+                    crate::store::OPERATION_COMPOSE,
+                    &session.uid,
+                    "req-race",
+                    &material,
+                    &protocol::time::now_rfc3339(),
+                )
+                .unwrap()
+        };
+        assert!(matches!(
+            claim(),
+            crate::store::MutationClaim::Indeterminate { .. }
+        ));
+
+        assert!(conn.note_compose_response(&paused_refusal(7105)).await);
+        for told in [first.await, joined.await] {
+            assert!(
+                matches!(told.expect("told"), ComposeReport::NotApplied(ref why) if why.contains("paused at the Mac")),
+                "both waiters hear the one refusal"
+            );
+        }
+        assert!(conn.open_composes.lock().unwrap().is_empty());
+        // Released: the next attempt is a first attempt, and only one attempt is.
+        assert_eq!(claim(), crate::store::MutationClaim::Claimed);
+        assert!(matches!(
+            claim(),
+            crate::store::MutationClaim::Indeterminate { .. }
+        ));
+    }
+
+    /// **A Codex session registered the way its coordinator registers it**, on a
+    /// stand-in broker leg answering per `answer`, and the phone's compose entry point
+    /// (`Daemon::compose`, which `ws_server` calls with the phone's frame as it is),
+    /// asked three times under one id. Returns the three answers and every `turn/start`
+    /// the leg saw.
+    async fn drive_one_id_three_times(
+        answer: ResumeAnswer,
+    ) -> ([protocol::ws::ComposeResult; 3], Vec<Value>) {
+        let _serialized = ONE_LEG_AT_A_TIME.lock().await;
+        let leg = ScriptedLeg::start(answer, true);
+        let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
+        let (daemon, _db) = linked_daemon(&session);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<protocol::ipc::DaemonFrame>(
+            protocol::config::Config::default().ipc_write_queue,
+        );
+        daemon
+            .register_supervisor(
+                RegisterSession {
+                    session_id: session.name.clone(),
+                    session_uid: Some(session.uid.clone()),
+                    tmux_session: session.name.clone(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/work".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(leg.path.to_string_lossy().into_owned()),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(Mutex::new(std::collections::HashMap::new())),
+            )
+            .await
+            .expect("the coordinator's registration is accepted");
+        // Two not-ready answers: the link has bound and learned the thread has no
+        // rollout, so a start is admitted.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while leg.requests("thread/resume").len() < 2 {
+            assert!(Instant::now() < deadline, "the link never asked to resume");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let text = "Reply with the single word amber and nothing else.";
+        let hash = protocol::hash::compose_hash(&session.name, text);
+        let say = || daemon.compose(&session.name, "say-once", text.to_string(), &hash);
+        let answers = [say().await, say().await, say().await];
+        let starts = leg.requests("turn/start");
+        drop(leg);
+        (answers, starts)
+    }
+
+    /// **A phone resend after `fg`, end to end through the daemon.** The first
+    /// `turn/start` meets the broker's pause refusal; the phone sends the same words
+    /// under the same id after `fg`; the start is written again, accepted, and a third
+    /// ask under the id replays it rather than writing a third.
+    ///
+    /// **Mutation:** settle a paused refusal `refused` and the second ask replays the
+    /// refusal instead of reaching the leg.
+    #[tokio::test]
+    async fn the_same_message_after_fg_is_sent_once() {
+        let ([paused, after_fg, again], starts) =
+            drive_one_id_three_times(ResumeAnswer::NoRolloutAndTheFirstStartIsPaused).await;
+        assert!(
+            matches!(after_fg, protocol::ws::ComposeResult::Started { .. }),
+            "after fg the same words under the same id are sent: {after_fg:?}"
+        );
+        let protocol::ws::ComposeResult::Rejected { reason } = &paused else {
+            panic!("the paused broker refuses the first: {paused:?}")
+        };
+        assert!(
+            reason.contains("paused at the Mac") && reason.contains("fg"),
+            "{reason}"
+        );
+        assert!(
+            matches!(again, protocol::ws::ComposeResult::Duplicate { .. }),
+            "and a third ask replays the start rather than writing it again: {again:?}"
+        );
+        assert_eq!(
+            starts.len(),
+            2,
+            "one refused while paused, one accepted after fg, none after: {starts:?}"
+        );
+    }
+
+    /// **An internal error is never resent.** `-32603` can follow input the app-server
+    /// had already queued, so the phone is told what became of it is not known, the same
+    /// id is answered from the record on every later ask, and the leg sees one
+    /// `turn/start` only.
+    ///
+    /// **Mutation:** give back a `-32603` and the second ask writes a second start; answer
+    /// it as a refusal and the phone is told nothing happened.
+    #[tokio::test]
+    async fn a_message_met_by_an_internal_error_is_never_sent_again() {
+        let (answers, starts) =
+            drive_one_id_three_times(ResumeAnswer::NoRolloutAndTheFirstStartFailsInside).await;
+        for answer in &answers {
+            assert!(
+                matches!(answer, protocol::ws::ComposeResult::Indeterminate { .. }),
+                "{answers:?}"
+            );
+        }
+        assert_eq!(starts.len(), 1, "written once and never again: {starts:?}");
     }
 
     /// **The replay rule: a retry replays the SNAPSHOT and never becomes a steer.**
@@ -23603,6 +24688,12 @@ mod tests {
             codex_broker::relay::RESPONSE_DISPOSITION
         );
         assert_eq!(HEAD_NOTICE, codex_broker::relay::HEAD_NOTICE);
+        // And the refusal the pause is told apart by.
+        assert_eq!(
+            BROKER_POLICY_REFUSED,
+            codex_broker::refusal::E_POLICY_REFUSED
+        );
+        assert_eq!(BROKER_PAUSED_MESSAGE, codex_broker::refusal::PAUSED_MESSAGE);
     }
 
     /// **A write the broker could not put on the socket is not a lost race.**

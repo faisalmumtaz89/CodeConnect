@@ -6,7 +6,7 @@
 //! absent from `recorded`.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -360,7 +360,7 @@ fn start_broker_with_events() -> Harness {
 /// A broker whose upstream is the **production pump** over a transport that never
 /// reads, with a short write budget so the bound can be watched expiring.
 fn start_broker_stalled(budget: Duration) -> Harness {
-    start_broker_with(false, Some(budget), StalledUpstreamFactory::default())
+    start_broker_with(false, Some(budget), None, StalledUpstreamFactory::default())
 }
 
 /// The same, with the c2s queue in front of the parked pump narrowed to `queue` slots,
@@ -369,6 +369,7 @@ fn start_broker_stalled_behind_a_full_queue(budget: Duration, queue: usize) -> H
     start_broker_with(
         false,
         Some(budget),
+        None,
         StalledUpstreamFactory {
             queue,
             ..Default::default()
@@ -377,7 +378,12 @@ fn start_broker_stalled_behind_a_full_queue(budget: Duration, queue: usize) -> H
 }
 
 fn start_broker_inner(record_events: bool) -> Harness {
-    start_broker_with(record_events, None, ())
+    start_broker_with(record_events, None, None, ())
+}
+
+/// A broker told through `paused` whether Codex is stopped at the Mac.
+fn start_broker_paused(paused: Arc<AtomicBool>) -> Harness {
+    start_broker_with(false, None, Some(paused), ())
 }
 
 /// What a harness needs from the factory it is built over.
@@ -398,6 +404,7 @@ impl HarnessFactory for () {
 fn start_broker_with<H: HarnessFactory>(
     record_events: bool,
     budget: Option<Duration>,
+    paused: Option<Arc<AtomicBool>>,
     which: H,
 ) -> Harness {
     static N: AtomicU32 = AtomicU32::new(0);
@@ -416,6 +423,9 @@ fn start_broker_with<H: HarnessFactory>(
     let mut broker = Broker::new(tui_sock.clone(), ccd_sock.clone(), factory);
     if let Some(budget) = budget {
         broker = broker.with_upstream_write_budget(budget);
+    }
+    if let Some(paused) = paused {
+        broker = broker.with_pause(paused);
     }
     if record_events {
         let sink = Arc::clone(&events);
@@ -539,6 +549,114 @@ async fn the_phone_leg_forwards_an_allowlisted_read_and_refuses_a_bypass_with_ze
     assert!(
         !rec.iter().any(|m| m.contains("command/exec")),
         "command/exec must reach zero upstream bytes",
+    );
+}
+
+/// While Codex is stopped at the Mac its app-server cannot answer, so a phone request
+/// on an open link is refused at once, with nothing written upstream; once it runs
+/// again the same request goes through.
+#[tokio::test]
+async fn a_paused_codex_refuses_the_phone_at_once_and_forwards_nothing() {
+    let paused = Arc::new(AtomicBool::new(false));
+    let h = start_broker_paused(Arc::clone(&paused));
+    let mut ws = connect(&h.ccd_sock).await;
+    ws.send(Message::Text(
+        r#"{"method":"thread/loaded/list","id":1,"params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded_after(&h.state, 1).await.len(),
+        1,
+        "the link is open"
+    );
+
+    paused.store(true, Ordering::SeqCst);
+    ws.send(Message::Text(
+        r#"{"method":"thread/loaded/list","id":2,"params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(v["id"], 2);
+    assert_eq!(v["error"]["code"], -32001);
+    assert_eq!(v["error"]["message"], codex_broker::refusal::PAUSED_MESSAGE);
+    settle().await;
+    assert_eq!(
+        h.state.recorded.lock().unwrap().len(),
+        1,
+        "nothing went upstream"
+    );
+
+    paused.store(false, Ordering::SeqCst);
+    ws.send(Message::Text(
+        r#"{"method":"thread/loaded/list","id":3,"params":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let rec = recorded_after(&h.state, 2).await;
+    assert_eq!(rec.len(), 2);
+    assert!(rec[1].contains(r#""id":3"#), "{rec:?}");
+}
+
+/// An app-server that never answers a connection: Codex's own, stopped at the Mac.
+#[derive(Default)]
+struct StoppedUpstreamFactory {
+    connects: Arc<AtomicU32>,
+}
+
+impl HarnessFactory for StoppedUpstreamFactory {
+    type Fac = StoppedUpstreamFactory;
+    fn build(self, _state: &Arc<FakeState>) -> StoppedUpstreamFactory {
+        self
+    }
+}
+
+impl UpstreamFactory for StoppedUpstreamFactory {
+    fn connect(&self) -> ConnectFuture {
+        self.connects.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::pending())
+    }
+}
+
+/// A phone link that connects while Codex is stopped is answered too, `initialize`
+/// included, exactly as an open one is, without ever connecting to the stopped
+/// app-server; once Codex runs again it is connected.
+#[tokio::test]
+async fn a_new_phone_link_while_codex_is_paused_is_refused_without_connecting() {
+    let paused = Arc::new(AtomicBool::new(true));
+    let connects = Arc::new(AtomicU32::new(0));
+    let factory = StoppedUpstreamFactory {
+        connects: Arc::clone(&connects),
+    };
+    let h = start_broker_with(false, None, Some(Arc::clone(&paused)), factory);
+    let mut ws = connect(&h.ccd_sock).await;
+    ws.send(Message::Text(
+        r#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codeconnect-ccd","title":"t","version":"0"}}}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let v = next_frame(&mut ws).await;
+    assert_eq!(v["id"], 1);
+    assert_eq!(v["error"]["code"], -32001);
+    assert_eq!(v["error"]["message"], codex_broker::refusal::PAUSED_MESSAGE);
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        0,
+        "nothing connected upstream"
+    );
+
+    paused.store(false, Ordering::SeqCst);
+    for _ in 0..100 {
+        if connects.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        1,
+        "connected once Codex runs again"
     );
 }
 
