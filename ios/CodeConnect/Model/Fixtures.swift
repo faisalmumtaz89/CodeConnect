@@ -69,6 +69,12 @@ enum Fixtures {
         /// band stays eager: a lazy rewrite would be machinery spent on two
         /// milliseconds a row.
         case ended45
+        /// `fx-5`'s turn ending in a finished command whose output is 60
+        /// lines, past the 40 a tool output shows before "Show all". The one
+        /// fixture where that button sits at the tail with its block's top
+        /// above the screen — the geometry where the list used to carry the
+        /// reader to the last line. `SessionShowAllUITests` exists for it.
+        case longOutput
 
         init?(_ raw: String?) {
             guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -77,7 +83,7 @@ enum Fixtures {
 
         var cards: [Card] {
             switch self {
-            case .deck, .ended, .ended45: return deckCards
+            case .deck, .ended, .ended45, .longOutput: return deckCards
             case .stacked: return deckCards + [stackedCard]
             }
         }
@@ -87,7 +93,7 @@ enum Fixtures {
             switch self {
             case .ended: return 8
             case .ended45: return 45
-            case .deck, .stacked: return 0
+            case .deck, .stacked, .longOutput: return 0
             }
         }
 
@@ -99,7 +105,7 @@ enum Fixtures {
         var sessionCount: Int {
             switch self {
             case .deck, .ended, .ended45: return 4
-            case .stacked: return 5
+            case .stacked, .longOutput: return 5
             }
         }
 
@@ -168,10 +174,15 @@ enum Fixtures {
         for json in confirmedFactsJSON(now: now) {
             if let event = decode(json) { messages.append(event) }
         }
-        if variant.hasRunningTool {
+        if variant.hasRunningTool || variant == .longOutput {
             // In order, so `fx-5` reads as Running: the turn's last item has
             // to be the tool call.
             for json in turnJSON(now: now) {
+                if let event = decode(json) { messages.append(event) }
+            }
+        }
+        if variant == .longOutput {
+            for json in longOutputJSON(now: now) {
                 if let event = decode(json) { messages.append(event) }
             }
         }
@@ -566,6 +577,36 @@ enum Fixtures {
             "kind":"tool_call","source":"hook",\
             "payload":{"tool_use_id":"toolu_fixture_soak8","tool_name":"Bash",\
             "tool_input":{"command":"./soak/run.sh --pass 8"}}}}
+            """,
+        ]
+    }
+
+    /// A finished `cargo test` with 60 lines of output, then one more call:
+    /// the event a reader who opened the output is away for.
+    private static func longOutputJSON(now: Date) -> [String] {
+        let stamp = rfc3339(now)
+        let output = (1...60)
+            .map { String(format: "test soak::pass_%02d ... ok", $0) }
+            .joined(separator: "\n")
+        return [
+            """
+            {"type":"event","event":{"seq":25,"session_id":"fx-5","ts":"\(stamp)",\
+            "kind":"tool_call","source":"hook",\
+            "payload":{"tool_use_id":"toolu_fixture_cargo","tool_name":"Bash",\
+            "tool_input":{"command":"cargo test soak"}}}}
+            """,
+            """
+            {"type":"event","event":{"seq":26,"session_id":"fx-5","ts":"\(stamp)",\
+            "kind":"tool_result","source":"transcript",\
+            "payload":{"message":{"content":[{"type":"tool_result",\
+            "tool_use_id":"toolu_fixture_cargo","is_error":false,\
+            "content":\(quoted(output))}]}}}}
+            """,
+            """
+            {"type":"event","event":{"seq":27,"session_id":"fx-5","ts":"\(stamp)",\
+            "kind":"tool_call","source":"hook",\
+            "payload":{"tool_use_id":"toolu_fixture_after","tool_name":"Bash",\
+            "tool_input":{"command":"./soak/report.sh"}}}}
             """,
         ]
     }

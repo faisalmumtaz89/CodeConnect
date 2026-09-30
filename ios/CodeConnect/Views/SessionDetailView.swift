@@ -50,6 +50,10 @@ final class TailWatch {
     /// (nothing renders it) and raw on purpose — the debounce is for the
     /// pill; intent must not wait.
     @ObservationIgnored private(set) var handAway = false
+    /// The reader opened a row to read it and its growth has not landed yet.
+    /// See `open`. Cleared by `TailObserver` when the growth lands, when a
+    /// hand scrolls, or when its probe attaches; and by `arrive`.
+    @ObservationIgnored var opening = false
 
     /// Away for every purpose but the pill's own visibility: the follow
     /// suppresses on this, and the "N new" counter counts on it. `following`
@@ -73,6 +77,7 @@ final class TailWatch {
     /// whichever verdict survives writes once, between transactions.
     func arrive() {
         handAway = false
+        opening = false
         verdict?.cancel()
         verdict = Task {
             guard !Task.isCancelled else { return }
@@ -89,6 +94,21 @@ final class TailWatch {
     func leave() {
         handAway = true
         depart()
+    }
+
+    /// The reader opened a row to read it — "Show all", a tool's output, a
+    /// message's "Show more". Leaving, and one thing more: when a row whose
+    /// top is above the viewport grows, the collection view can keep what is
+    /// below the row where it was, moving the offset down by all the row
+    /// grew, and the reader then lands on the end of what they opened
+    /// (measured: line 1 of a 180-line output went from -179pt to -3020pt,
+    /// offset and content both +2841pt in one layout pass, at the tail and
+    /// away from it alike).
+    /// `TailObserver` gives that move back, so the top of what they opened
+    /// stays where they saw it.
+    func open() {
+        opening = true
+        leave()
     }
 
     /// Departure also outwaits one follow animation (0.22s): appending a row
@@ -157,9 +177,13 @@ extension EnvironmentValues {
 /// outright — frames identical 175 seconds apart. KVO on `contentOffset` is
 /// exact viewport truth, delivered outside SwiftUI's layout, and writes
 /// nothing SwiftUI lays out — the verdicts go through `TailWatch`'s deferred
-/// tasks and repaint one capsule, and the one thing it moves, a re-pin to
-/// the tail, is a UIKit scroll that runs after the debounce, never inside a
-/// layout pass.
+/// tasks and repaint one capsule. It moves the offset in two cases only. The
+/// re-pin to the tail is a UIKit scroll that runs after the debounce, never
+/// inside a layout pass. The give-back of the collection view's own move for
+/// a row the reader opened (see `TailWatch.open`) runs from the probe's own
+/// `layoutSubviews`, later in the same layout pass, never from inside the
+/// collection view's call: made from there, the move was re-applied at once —
+/// measured, 191 moves and 1.3s of main thread for one tap.
 private struct TailObserver: UIViewRepresentable {
     let watch: TailWatch
 
@@ -175,6 +199,16 @@ private struct TailObserver: UIViewRepresentable {
         private var lastContentSize = CGSize.zero
         private var lastBoundsSize = CGSize.zero
         private var lastInsets = UIEdgeInsets.zero
+        /// The collection view's move of the offset for a row the reader
+        /// opened, to be given back from `layoutSubviews`. See `read`.
+        private var giveBack: (scrollView: UIScrollView, dy: CGFloat)?
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard let giveBack else { return }
+            self.giveBack = nil
+            giveBack.scrollView.contentOffset.y -= giveBack.dy
+        }
 
         init(watch: TailWatch) {
             self.watch = watch
@@ -189,11 +223,16 @@ private struct TailObserver: UIViewRepresentable {
             super.didMoveToWindow()
             guard window != nil else {
                 watchers = []
+                giveBack = nil
                 return
             }
             var view = superview
             while view != nil, !(view is UIScrollView) { view = view?.superview }
             guard let scrollView = view as? UIScrollView else { return }
+            // A row opened while this probe was out of the window grew where
+            // it could not see, and the first reading below is `.initial`: its
+            // move from zero must not be taken for the collection view's.
+            watch.opening = false
             // All three geometry inputs, not offset alone: expanding the
             // last message grows `contentSize` under an unchanged offset,
             // and a keyboard or rotation reshapes `bounds` — either moves
@@ -226,6 +265,28 @@ private struct TailObserver: UIViewRepresentable {
             // undid a `leave` made an instant earlier, before the expansion
             // it announced had laid out.
             guard abs(dy) > 0.5 || grown != 0 || resized else { return }
+            // A row the reader opened is growing, and until it has grown no
+            // reading is a verdict: what moves in between moved for the tap.
+            // A move of the offset down is the collection view's (see
+            // `TailWatch.open`), made from inside its own layout call, and is
+            // given back from this view's layout, later in the same pass.
+            // Given back from here, inside that call, it is made again at
+            // once — measured: 191 moves and 1.3s of main thread. The landed
+            // growth is judged as usual, or, when a move is being given back,
+            // by the reading the give-back makes. A hand ends all of it.
+            if watch.opening {
+                if scrollView.isTracking || scrollView.isDecelerating {
+                    watch.opening = false
+                    giveBack = nil
+                } else {
+                    if grown > 0.5 { watch.opening = false }
+                    if dy > 0.5 {
+                        giveBack = (scrollView, (giveBack?.dy ?? 0) + dy)
+                        setNeedsLayout()
+                    }
+                    if watch.opening || giveBack != nil { return }
+                }
+            }
             // Content shorter than the viewport has no "away" to be.
             let span = scrollView.contentSize.height
                 - (scrollView.bounds.height - scrollView.adjustedContentInset.bottom
@@ -1178,7 +1239,7 @@ private struct SessionTimeline: View {
                                 // the away guard this instant, or an event
                                 // landing in the next 400ms scrolls the reader
                                 // through the whole message they just opened.
-                                onExpand: { tailWatch.leave() }
+                                onExpand: { tailWatch.open() }
                             ) { approval in
                                 openApproval = approval
                             }

@@ -381,7 +381,7 @@ struct ToolRow: View {
         VStack(alignment: .leading, spacing: CC.space.xs) {
             Button {
                 guard hasDetail else { return }
-                if !expanded { tailWatch?.leave() }
+                if !expanded { tailWatch?.open() }
                 withAnimation(CC.motion.small) { expanded.toggle() }
             } label: {
                 summaryLine
