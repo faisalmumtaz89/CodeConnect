@@ -874,6 +874,17 @@ final class AppModel {
             let lateApprovalsMS = UserDefaults.standard.integer(
                 forKey: "CC_FIXTURE_LATE_APPROVALS_MS")
             var frames = Fixtures.frames(variant: variant)
+            // **`-CC_FIXTURE_LATE_EVENT_MS <n>` is an event arriving while the
+            // reader is on screen.** The stream's last frame is delivered `n` ms
+            // after the rest, so a UI test can act first and then see how that
+            // event is counted. `SessionShowAllUITests` is what drives it.
+            let lateEventMS = UserDefaults.standard.integer(forKey: "CC_FIXTURE_LATE_EVENT_MS")
+            if lateEventMS > 0, let last = frames.popLast() {
+                Task { @MainActor [weak connection] in
+                    try? await Task.sleep(for: .milliseconds(lateEventMS))
+                    connection?.injectForTesting(last)
+                }
+            }
             if lateApprovalsMS > 0,
                 let first = frames.firstIndex(where: {
                     if case .event(let event) = $0 { return event.kind == .approvalRequest }

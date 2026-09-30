@@ -550,7 +550,7 @@ struct CCMonoBlock: View {
         if isCollapsible, let lineLimit {
             Button {
                 CCHaptic.light.fire()
-                if !isExpanded { tailWatch?.leave() }
+                if !isExpanded { tailWatch?.open() }
                 withAnimation(CC.motion.small) { isExpanded.toggle() }
             } label: {
                 Text(isExpanded ? "Show fewer lines" : "Show all \(runs.count) lines")

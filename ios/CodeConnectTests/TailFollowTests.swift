@@ -23,6 +23,17 @@ final class TailFollowTests: XCTestCase {
             "the pill's own flag still owes the debounce — it must not flicker")
     }
 
+    /// Opening a row to read it is leaving, plus a mark that the growth about
+    /// to land is the reader's own (see `TailObserver`), which arriving ends.
+    func testOpenLeavesAndMarksTheGrowthUntilArrival() {
+        let watch = TailWatch()
+        watch.open()
+        XCTAssertTrue(watch.handAway, "opening is leaving: the yank guard is up this instant")
+        XCTAssertTrue(watch.opening, "the growth to come is the reader's")
+        watch.arrive()
+        XCTAssertFalse(watch.opening, "back at the tail, no growth is pending")
+    }
+
     func testArriveClearsTheGuardAndRestoresFollowingImmediatelyOnItsTask() async {
         let watch = TailWatch()
         watch.leave()
