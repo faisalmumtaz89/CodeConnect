@@ -66,9 +66,9 @@ pub(crate) type Snapshot = BTreeMap<PathBuf, FileEntry>;
 /// `everything-i-wrote.DS_Store` at any depth. Neither hole would ever be noticed,
 /// because the failure mode of an over-wide exclusion is silence.
 ///
-/// So: the daemon's database files by name, its socket, its two logs, and `.DS_Store`
-/// as a whole FILE NAME at any depth (Finder's, and it appears whenever somebody opens
-/// the folder). Everything else in the home, at every depth, is watched.
+/// So: the daemon's database files by name, its socket, its lock, its two logs, and
+/// `.DS_Store` as a whole FILE NAME at any depth (Finder's, and it appears whenever
+/// somebody opens the folder). Everything else in the home, at every depth, is watched.
 fn is_the_daemons_own(relative: &Path) -> bool {
     let Some(name) = relative.to_str() else {
         return false;
@@ -76,6 +76,7 @@ fn is_the_daemons_own(relative: &Path) -> bool {
     if matches!(
         name,
         "ccd.sock"
+            | "ccd.lock"
             | "logs/ccd.out.log"
             | "logs/ccd.err.log"
             | "events.db"
@@ -291,6 +292,7 @@ mod tests {
     fn the_exclusions_are_exact_names_and_do_not_swallow_their_neighbours() {
         let excluded = [
             "ccd.sock",
+            "ccd.lock",
             "logs/ccd.out.log",
             "logs/ccd.err.log",
             "events.db",
@@ -311,6 +313,7 @@ mod tests {
             "everything-i-wrote.DS_Store",
             "logs/ccd.out.log.1",
             "ccd.sock.old",
+            "ccd.lock.old",
             "logs/supervisor-cc-1.log",
         ];
         for name in watched {
