@@ -291,7 +291,9 @@ pub fn next_session_name() -> Result<String> {
 ///
 /// The caller's environment reaches the pane through a private file in
 /// `session_dir` (see [`crate::caller_env`]), so the agent sees what it would see
-/// run directly, not what the tmux server was started with.
+/// run directly, not what the tmux server was started with. The agent then runs as
+/// a job of the pane's own process ([`crate::job`]), so Ctrl+Z stops it as a shell's
+/// job stops.
 ///
 /// `argv` is passed as separate arguments through `sh -c '…' "$0" "$@"` so no
 /// user argument is ever interpolated into a shell string. The shell unsets
@@ -328,6 +330,7 @@ pub fn new_session(
     }
     command.arg("--");
     command.args(crate::caller_env::pane_prefix(&exe, &caller));
+    command.arg(&exe).arg(crate::job::SUBCOMMAND);
     command.args(claude_terminal_wrapper(std::env::var_os("TERM")));
     for arg in argv {
         command.arg(arg);

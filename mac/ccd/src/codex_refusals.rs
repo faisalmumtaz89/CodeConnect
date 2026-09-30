@@ -42,8 +42,8 @@
 //!
 //! # Fragments
 //!
-//! Four of the values below are not sentences: the two `_SUBJECT`/`_REMEDY`
-//! halves the wire refusal is assembled from, and the two `_CONNECTION_ENDED`
+//! Six of the values below are not sentences: the `_SUBJECT` and `_REMEDY`
+//! parts the wire refusals are assembled from, and the two `_CONNECTION_ENDED`
 //! causes a settlement prefixes. They carry no row of their own — they appear
 //! inside the sentence they help build, which is the row.
 
@@ -345,11 +345,29 @@ pub(crate) const COMPOSE_ID_REUSED: &str =
 
 pub(crate) const INTERRUPT_WIRE_SUBJECT: &str = "that stop";
 
-pub(crate) const INTERRUPT_WIRE_REMEDY: &str = "stop the turn at the Mac";
-
 pub(crate) const COMPOSE_WIRE_SUBJECT: &str = "that message";
 
-pub(crate) const COMPOSE_WIRE_REMEDY: &str = "say it at the Mac";
+/// The remedies. A wire refusal reaches the phone only when it proves nothing reached
+/// Codex, and its claim is given back, so the same ask from the phone is a first attempt
+/// again.
+pub(crate) const INTERRUPT_WIRE_REMEDY: &str = "the turn can be stopped again from the phone";
+
+pub(crate) const COMPOSE_WIRE_REMEDY: &str = "it can be sent again from the phone";
+
+// ---- The broker's refusal while Codex is stopped at the Mac (Ctrl+Z) -----------
+//
+// Its own sentence rather than the code, because the remedy is not the wire refusal's:
+// Codex comes back with `fg` at the Mac, and the same ask is a first attempt then. The
+// broker's message is how the daemon tells this refusal apart, and like every refuser's
+// message it is never passed on.
+
+pub(crate) const INTERRUPT_PAUSED: &str =
+    "Codex is paused at the Mac (Ctrl+Z), so that stop was not sent; it continues after \
+     fg there, and the turn can be stopped then";
+
+pub(crate) const COMPOSE_PAUSED: &str =
+    "Codex is paused at the Mac (Ctrl+Z), so that message was not sent; it continues after \
+     fg there, and the message can be sent again then";
 
 // ---- After the write, when the evidence is missing or contradicts ------------
 
@@ -874,6 +892,20 @@ pub(crate) fn catalogue() -> Vec<Refusal> {
             "rejected",
             "wire_code",
             wire_refused("{n}", COMPOSE_WIRE_SUBJECT, COMPOSE_WIRE_REMEDY),
+        ),
+        row(
+            "interrupt_paused",
+            "interrupt",
+            "rejected",
+            "link_state",
+            INTERRUPT_PAUSED.to_string(),
+        ),
+        row(
+            "compose_paused",
+            "compose",
+            "rejected",
+            "link_state",
+            COMPOSE_PAUSED.to_string(),
         ),
         row(
             "interrupt_turn_ended_itself",

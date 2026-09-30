@@ -130,6 +130,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -236,9 +237,9 @@ const EX_HOST_FATAL: i32 = 70;
 ///      inherits that across `execve`. The TUI must inherit the **pane's tty** (it
 ///      is the session the user drives) and the app-server's stderr must reach the
 ///      held log file the bring-up error path reads back;
-///   2. the gate `setpgid(0, 0)`s every child. That is wanted for the app-server
-///      and is exactly what must NOT happen to the TUI, which has to stay in the
-///      pane's foreground process group or lose the keyboard (measured);
+///   2. the gate `setpgid(0, 0)`s every child and hands none of them the terminal.
+///      The TUI's group of its own must also be made the pane's foreground group, or
+///      it loses the keyboard (measured);
 ///   3. the race that ends this session `wait()`s on `tokio::process::Child`
 ///      handles with `kill_on_drop`; the gate owns a `std::process::Child` and
 ///      hands back only an identity;
@@ -757,31 +758,16 @@ fn tui_command(args: &HostArgs, tui_sock: &Path) -> Result<Command> {
         // in that terminal.
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
-        // Inherit stdio (the pane's tty) so this IS the session the user drives —
-        // and, deliberately, inherit the host's PROCESS GROUP too.
+        // Inherit stdio (the pane's tty) so this IS the session the user drives. The
+        // TUI runs as the host's job, in a process group of its own that is handed the
+        // pane's terminal (`crate::job::in_foreground`, registered after the fence by
+        // `spawn_fenced`): a group of its own, so Ctrl+Z stops it as it does run
+        // directly; handed the terminal, because a group of its own without it is a
+        // BACKGROUND group on the tty (measured: `pgid == its own pid`, `tpgid == the
+        // host's group`), which renders and handshakes but never gets the keyboard.
         //
-        // The app-server gets its own group so cleanup can `killpg` a
-        // recorded pgid. The TUI must not, and this was measured rather than
-        // assumed: with `.process_group(0)` the real codex TUI comes up with
-        // `pgid == its own pid` while the pane's terminal keeps `tpgid == the
-        // host's group` — i.e. the TUI is a BACKGROUND process group on the tty it
-        // is supposed to own. It does not get stopped (it evidently blocks
-        // SIGTTIN), so nothing looks broken from the outside: the pane renders and
-        // the broker handshake succeeds. What breaks is the user's keyboard, which
-        // keeps going to the foreground group. Making it correct would mean the
-        // host also handing over terminal control with `tcsetpgrp`, and restoring
-        // it on every exit path — real terminal-ownership machinery, for a benefit
-        // already obtained without it.
-        //
-        // Nothing is lost for cleanup: the TUI's identity is recorded as
-        // (pid, birth, pgid) like the app-server's, and the custodian signals it by
-        // that verified identity. A group kill buys nothing here anyway, since the
-        // TUI's group would be the host's own.
-        //
-        // The spawn fence (`spawn_fenced`) preserves every one of those
-        // measured facts. It installs a `pre_exec` closure and touches nothing else —
-        // no stdio redirection, no `setpgid` — so the TUI still comes up on the pane's
-        // tty in the host's foreground process group, and the keyboard still works.
+        // Its identity is recorded as (pid, birth, pgid) like the app-server's, and the
+        // custodian signals it by that verified identity, as a group it leads.
         .kill_on_drop(true);
     Ok(tui_cmd)
 }
@@ -1407,7 +1393,7 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     // being up. The coordinator commits `ready` once the broker's legs are bound,
     // which is strictly after this point, so a session that is ever declared ready
     // has a recorded, signalable app-server behind it.
-    let appserver = match spawn_fenced(&mut appserver_cmd, args, "app-server") {
+    let appserver = match spawn_fenced(&mut appserver_cmd, args, "app-server", false) {
         Ok(child) => child,
         // Launch-fatal. Nothing is up beyond this child and `Session` has not taken
         // it, so returning here drops it through `kill_on_drop`. A session whose
@@ -1891,13 +1877,12 @@ unsafe fn fence_write_all(fd: std::os::unix::io::RawFd, buf: &[u8]) -> bool {
 /// `pre_exec` closure runs. So this records exactly what the custodian will later
 /// verify (`the_recorded_birth_identity_survives_the_targets_execve`).
 ///
-/// **What this does NOT touch**, deliberately: stdio and process-group inheritance.
-/// The fence adds a `pre_exec` closure and nothing else, so the TUI still inherits
-/// the pane's tty and the host's process group — the measured dead-keyboard
-/// constraint at its spawn site is untouched — and the app-server still gets its own
-/// group. That is the whole reason this is a host-local fence rather than the
-/// exec gate, which hardcodes both.
-fn spawn_fenced(cmd: &mut Command, args: &HostArgs, role: &str) -> Result<Child> {
+/// **What this does NOT touch**, deliberately: stdio and process groups. The fence
+/// adds a `pre_exec` closure, and for a `foreground` child the terminal hand-over after
+/// it, so a child that is never released never takes the pane's terminal; the process
+/// group each child gets is its command's own. That is the whole reason this is a
+/// host-local fence rather than the exec gate, which hardcodes both.
+fn spawn_fenced(cmd: &mut Command, args: &HostArgs, role: &str, foreground: bool) -> Result<Child> {
     use std::os::unix::io::AsRawFd;
     let (id_r, id_w) = fence_pipe()?;
     let (go_r, go_w) = fence_pipe()?;
@@ -1937,6 +1922,10 @@ fn spawn_fenced(cmd: &mut Command, args: &HostArgs, role: &str) -> Result<Child>
             libc::close(go_r);
             Ok(())
         });
+    }
+    // After the fence: a child that is never released never takes the terminal.
+    if foreground {
+        crate::job::in_foreground(cmd.as_std_mut());
     }
 
     // Read HERE, on the calling thread, and carried into the releaser: both of
@@ -2491,7 +2480,9 @@ async fn drive(
 
     // --- Step 2: the broker in front of the app-server ----------------------
     let factory = WsUdsUpstreamFactory::new(paths.as_sock.clone());
+    let paused = Arc::new(AtomicBool::new(false));
     let broker = Broker::new(paths.tui_sock.clone(), paths.ccd_sock.clone(), factory)
+        .with_pause(Arc::clone(&paused))
         .with_event_sink(Arc::clone(&session.log))
         // The measurement instrument, off unless a live harness asked for it by setting
         // `CC_CODEX_FRAME_TEE`, and — the containment that matters — not COMPILED unless
@@ -2583,12 +2574,27 @@ async fn drive(
             .context("the codex identity check panicked before the TUI spawn"),
     };
     verified.and_then(|inner| inner)?;
+    crate::job::prepare()?;
     let mut tui_cmd = tui_command(args, &paths.tui_sock)?;
     // Fenced, so the TUI's identity is durable before it can become codex.
     // The spawn and the record are now one step, which is what removes the interval
     // in which a SIGKILLed host left a live, unrecorded TUI on the user's pane.
-    let tui = spawn_fenced(&mut tui_cmd, args, "tui")
+    let tui = spawn_fenced(&mut tui_cmd, args, "tui", true)
         .with_context(|| format!("spawning the codex TUI ({})", args.codex.display()))?;
+    if let (Some(tui_pid), Some(appserver)) = (tui.id(), session.appserver.id()) {
+        // Codex stops whole, as it does run directly: the app-server stops with the TUI,
+        // and the phone is refused rather than left waiting on it.
+        let appserver = appserver as libc::pid_t;
+        crate::job::watch(tui_pid as libc::pid_t, move |stopped| {
+            if stopped {
+                paused.store(true, Ordering::SeqCst);
+                unsafe { libc::killpg(appserver, libc::SIGSTOP) };
+            } else {
+                unsafe { libc::killpg(appserver, libc::SIGCONT) };
+                paused.store(false, Ordering::SeqCst);
+            }
+        });
+    }
     session.tui = Some(tui);
 
     // --- Step 4: race the two children, the broker, and a host signal -------
@@ -2871,10 +2877,10 @@ impl Signals {
         }
     }
 
-    /// [`Self::recv`] while the TUI runs. The TUI shares the host's process group,
-    /// so a Ctrl-C the pane turns into SIGINT reaches it too, and it decides what
-    /// that means as it does run directly; the host follows its exit. A Ctrl-C
-    /// typed as the TUI quits would otherwise end the session as a signal.
+    /// [`Self::recv`] while the TUI runs. The TUI is the terminal's foreground job,
+    /// so a Ctrl-C the pane turns into SIGINT reaches it, and it decides what that
+    /// means as it does run directly; the host follows its exit. A SIGINT sent to the
+    /// host by other means meanwhile would otherwise end the session as a signal.
     async fn recv_while_tui_runs(&mut self) -> &'static str {
         tokio::select! {
             _ = self.term.recv() => "SIGTERM",
@@ -4403,7 +4409,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        let err = spawn_fenced(&mut cmd, &args, "witness")
+        let err = spawn_fenced(&mut cmd, &args, "witness", false)
             .expect_err("an unrecordable child must fail the spawn");
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
@@ -4572,7 +4578,7 @@ mod tests {
             .stderr(Stdio::null());
 
         kill_next_child_after_go();
-        let err = spawn_fenced(&mut cmd, &args, "app-server")
+        let err = spawn_fenced(&mut cmd, &args, "app-server", false)
             .expect_err("a child that died in the confirmation window must not be confirmed");
 
         // THE GATE. Without the exec proof on this path, `spawn()` returned `Ok`,

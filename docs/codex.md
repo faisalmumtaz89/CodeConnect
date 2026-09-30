@@ -26,6 +26,17 @@ Codex gets the environment of the shell you launched it from, not the tmux serve
 only `TERM` is tmux's. Codex does not see `TMUX` or `TMUX_PANE`: its output reaches
 your terminal unchanged, so it behaves as it does run there directly.
 Close the tab and it keeps running; `codeconnect attach <name>` brings it back.
+Ctrl+Z stops Codex as it does run directly: the Codex UI and the server behind it both
+stop, a turn that is running pauses with them, and your shell prints its own job line;
+`fg` brings Codex back where it was. While it is stopped, a message or Stop from the
+phone is refused at once, saying Codex is paused at the Mac and continues after `fg`
+there, and nothing reaches Codex. The refusal does not use the message or the Stop up:
+sent again after `fg`, it goes through once. A link the daemon opens meanwhile is
+answered the same way, its `initialize` included, and connects once Codex runs again. An approval answered on the phone
+meanwhile is not a request: it is passed to Codex, which acts on it after `fg`.
+Closing the tab, `exit` or `kill %1` while it is stopped ends the session, as they end
+a stopped `codex`. The phone's Terminal tab never keeps a stopped Codex held: a Ctrl+Z
+typed there with no terminal at the Mac attached is let go at once.
 A Ctrl+C pressed while the session is still starting is held until your terminal is
 attached, then reaches Codex, so the launch quits as `codex` does rather than leaving a
 session running unseen.
@@ -136,8 +147,8 @@ phone drew the screen and the moment you press it.
 |---|---|
 | Stopped | The turn reached its aborted end. |
 | Already asked | This exact ask had already run. The turn was not stopped twice. |
-| Refused, with a sentence | Nothing was sent at all, and the sentence says why. |
-| Not known | The stop was issued and the Mac stopped watching before it saw what happened. **It is never retried for you.** Look at the Mac. |
+| Refused, with a sentence | Nothing was sent, and the sentence says why. Tapping Stop again is a new try — unless the sentence reports how an earlier tap for that turn already ended (it was refused, or the turn ended on its own), which the daemon answers from its record without sending anything. |
+| Not known | The stop was issued, and the Mac either stopped watching before it saw what happened or got an answer from Codex that does not show whether it was taken. **It is never retried for you.** Look at the Mac. |
 
 ### Say something
 
@@ -153,8 +164,8 @@ happens depends on whether the session is busy:
 | Started | The session was idle and your words began a new turn. |
 | Joined | A turn was running and your words went into it. |
 | Already said | This exact message had already been sent. Nothing was said twice. |
-| Refused, with a sentence | Nothing was said, and the sentence says why. |
-| Not known | It was written and the outcome was never seen. **Never retried for you** — saying the same thing twice cannot be undone. |
+| Refused, with a sentence | Nothing was said, and the sentence says why. Sending the same words again is a new try — unless the sentence reports an earlier attempt under the same request, which the daemon answers from its record without sending anything. |
+| Not known | It was written, and the outcome was never seen or Codex's answer does not show whether it was taken. **Never retried for you** — saying the same thing twice cannot be undone. |
 
 ## What your phone cannot do
 
@@ -312,24 +323,24 @@ below. `codeconnect ls` shows what is running in tmux even when the daemon is do
 
 ### The refusal sentence on the phone
 
-When a Stop or a message is refused, the phone shows the Mac's own sentence. There are 69
+When a Stop or a message is refused, the phone shows the Mac's own sentence. There are 71
 of them and they fall into four kinds. Which kind it is tells you whether trying again is
 worth anything:
 
 | Kind | How many | What it means | Try again? |
 |---|---|---|---|
-| Link state | 19 | A fact about the Mac's control link right now — reconnecting, not yet watching the thread, no link at all. | Yes, shortly. |
+| Link state | 21 | A fact about the Mac's control link right now — reconnecting, not yet watching the thread, no link at all — or Codex paused at the Mac with Ctrl+Z. | Yes, shortly (after `fg` for a pause). |
 | This Mac's own store | 5 | A local lookup or record failed **before** anything was sent. Nothing reached Codex. | Yes. Then check the Mac. |
 | Settled | 43 | The ask was wrong, the id is spent, or the outcome is already recorded. | No. |
-| Wire code | 2 | Codex or the broker refused the write, and the sentence carries their numeric code — never their message. | No. Do it at the Mac. |
+| Wire code | 2 | Codex, or CodeConnect's own broker rules, refused the write in a way that proves nothing reached Codex, and the sentence carries the numeric code — never the refuser's message. | Yes, from the phone. A refusal by a rule refuses again. |
 
 Every sentence is written in one place in the daemon and emitted as
 [`fixtures/codex/refusal-sentences.json`](../fixtures/codex/refusal-sentences.json), which
-a build gate compares byte for byte. If you want the exact wording of all 69, read that
+a build gate compares byte for byte. If you want the exact wording of all 71, read that
 file.
 
 Two words in those sentences are worth knowing: **rejected** means nothing was sent, and
-**indeterminate** means it was sent and nobody saw the result. 52 of the 69 are the first,
+**indeterminate** means it was sent and nobody saw the result. 54 of the 71 are the first,
 17 are the second.
 
 ### Lines in the daemon log
@@ -344,6 +355,11 @@ cleanup helper both died:
 | `codex recovery: … the next pass asks again` | This repair pass did not finish. A launch may still be waiting for its cleanup; the daemon retries in five minutes. |
 | `codex recovery: the pass is completing again` | An earlier complaint has cleared. Healthy. |
 | `codex recovery: CODECONNECT_LAUNCHER_BIN names …, which is not a file` | You pointed that variable at a path that does not exist. The daemon ignored it. |
+
+A Codex stopped with Ctrl+Z before its conversation is saved (no turn yet) makes the
+daemon's link log one `STOP-AND-AMEND — thread/resume … answered with something this
+build cannot read`: the broker refused the link's own resume while Codex was stopped.
+The link reconnects by itself once `fg` brings Codex back.
 
 Lines from a launch itself are prefixed `codeconnect:`, and the per-session repair helper
 writes to `~/.codeconnect/logs/codex-custodian-<uid>.log`.

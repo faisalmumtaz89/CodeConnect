@@ -57,10 +57,10 @@
 //!
 //! An earlier draft claimed that because the host spawns both children into its
 //! own process group, one `kill-session` reaches the host *and* the app-server
-//! *and* the TUI. **Both halves were wrong.** The app-server is deliberately in
-//! its OWN process group (`process_group(0)`, so cleanup can address a recorded
-//! pgid); only the TUI shares the host's, because it must stay in the pane's
-//! foreground group or lose the keyboard. And the signal claim was measured false:
+//! *and* the TUI. **Both halves were wrong.** Each child is in its OWN process
+//! group (`process_group(0)`): the app-server so cleanup can address a recorded
+//! pgid, and the TUI so Ctrl+Z stops it as the pane's foreground job
+//! ([`crate::job`]). And the signal claim was measured false:
 //! killing the host under an otherwise-live tmux server left the `app-server`
 //! running roughly one time in ten, permanently, more often under load.
 //!

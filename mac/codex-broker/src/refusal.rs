@@ -81,6 +81,10 @@ pub struct Env<'a> {
 /// app-server's, which never emits it, so it must not change.
 pub const E_POLICY_REFUSED: i64 = -32001;
 
+/// What a phone request is told while Codex is stopped at the Mac (Ctrl+Z): the
+/// app-server is stopped too, so a forwarded request would wait for `fg`.
+pub const PAUSED_MESSAGE: &str = "codex is paused at the Mac (Ctrl+Z); run fg there";
+
 /// What the relay must do with a classified client→server message. The relay owns the
 /// original bytes; `Forward` means "send those exact bytes upstream".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1216,7 +1220,12 @@ fn classify_response(env: &Env, id: &RequestId) -> RelayAction {
 /// The frame is shape-identical to the app-server's own errors: `{"id": …, "error":
 /// {"code": …, "message": …}}`, with no `jsonrpc` member (codex omits it in both
 /// directions).
-fn refuse_request(id: Option<RequestId>, code: i64, message: &str, note: String) -> RelayAction {
+pub(crate) fn refuse_request(
+    id: Option<RequestId>,
+    code: i64,
+    message: &str,
+    note: String,
+) -> RelayAction {
     match id {
         Some(id) => {
             let frame = json!({

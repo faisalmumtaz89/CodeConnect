@@ -76,6 +76,10 @@ static SOCK_SEQ: AtomicU32 = AtomicU32::new(0);
 /// the charter pins is taken over the file itself and must stay the same.
 const TUI_EXITS_MARKER: &str = "tui-exits";
 
+/// The file that tells [`write_fake_codex`]'s TUI branch to stop itself as Codex does
+/// on Ctrl+Z, a moment after it starts.
+const TUI_STOPS_MARKER: &str = "tui-stops";
+
 fn tmux_bin() -> PathBuf {
     for cand in [
         "/opt/homebrew/bin/tmux",
@@ -588,7 +592,7 @@ fn write_fake_codex(dir: &Path, python: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = format!(
         r#"#!{}
-import os, socket, sys, time
+import os, signal, socket, sys, time
 
 argv = sys.argv[1:]
 if argv and argv[0] == "app-server":
@@ -627,12 +631,16 @@ if not (argv and argv[0] == "app-server"):
         time.sleep(2)
         with open(marker) as status:
             sys.exit(int(status.read()))
+    if os.path.exists(os.path.join(here, "{stops}")):
+        time.sleep(2)
+        os.kill(0, signal.SIGTSTP)
 
 while True:
     time.sleep(3600)
 "#,
         python.display(),
-        marker = TUI_EXITS_MARKER
+        marker = TUI_EXITS_MARKER,
+        stops = TUI_STOPS_MARKER
     );
     let path = dir.join("fake-codex");
     std::fs::write(&path, script).expect("write fake codex");
@@ -1081,6 +1089,136 @@ fn a_tui_that_dies_without_binding_a_thread_fails_the_launch_and_keeps_the_broke
         )),
         "the coordinator must not stay as the supervisor of a launch that failed"
     );
+}
+
+/// A request from the phone's link, as ccd sends it, over `run`'s `ccd.sock`: the
+/// answer's `error` object, or `None` when nothing answered within five seconds.
+fn phone_request(run: &Path) -> Option<serde_json::Value> {
+    let script = r#"
+import base64, json, os, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect(sys.argv[1])
+key = base64.b64encode(os.urandom(16)).decode()
+s.sendall(("GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+           "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % key).encode())
+head = b""
+while b"\r\n\r\n" not in head:
+    head += s.recv(1)
+body = json.dumps({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "codeconnect-ccd", "title": "t", "version": "0"}}}).encode()
+mask = os.urandom(4)
+s.sendall(bytes([0x81, 0x80 | 126]) + len(body).to_bytes(2, "big") + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(body)))
+def exact(n):
+    got = b""
+    while len(got) < n:
+        got += s.recv(n - len(got))
+    return got
+first = exact(2)
+size = first[1] & 0x7f
+size = int.from_bytes(exact(2), "big") if size == 126 else int.from_bytes(exact(8), "big") if size == 127 else size
+print(exact(size).decode())
+"#;
+    let out = Command::new(python3())
+        .args(["-c", script])
+        .arg(run.join("ccd.sock"))
+        .output()
+        .expect("run the phone request");
+    let answer: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    answer.get("error").cloned()
+}
+
+/// **Ctrl+Z stops Codex whole, and the phone is told so at once.** The TUI stops
+/// itself as Codex does on Ctrl+Z while a viewer at the Mac is attached: the host
+/// holds the stop, stops the app-server with it, and the broker refuses a new phone
+/// link's request at once rather than connecting it to a server that cannot answer.
+/// The viewer's `fg` (SIGUSR1 to the pane's process) continues both.
+///
+/// **Mutation:** without `.with_pause` in `codex_host`, the request is never
+/// answered and the refusal assertion fails.
+#[test]
+fn a_stopped_codex_stops_its_app_server_and_refuses_the_phone() {
+    let uid = "01JQXV9K7B8N4M2P6R3T5W9YQZ";
+    let sb = Sandbox::new("stops", uid);
+    sb.keepalive();
+    std::fs::write(sb.codex.parent().unwrap().join(TUI_STOPS_MARKER), "").unwrap();
+    let run = sb.expected_run_dir(uid);
+    let mut coord = sb.spawn_coordinator(uid);
+    assert!(wait_until(Duration::from_secs(30), || sb.has_session("cc-1")));
+    // The viewer at the Mac: a control client that is not the phone's (`ignore-size`).
+    let mut viewer = Command::new(&sb.tmux)
+        .args([
+            "-S",
+            sb.sock.to_str().unwrap(),
+            "-f",
+            "/dev/null",
+            "-C",
+            "attach",
+            "-t",
+            "=cc-1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("attach a viewer");
+    let state = |pid: i32| {
+        let out = Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let child = |role: &str| {
+        sb.host_children(uid)
+            .into_iter()
+            .find(|(r, _, _)| r == role)
+            .map(|(_, pid, _)| pid)
+    };
+    assert!(wait_until(Duration::from_secs(30), || child("tui")
+        .is_some()
+        && child("app-server").is_some()));
+    let (tui, appserver) = (child("tui").unwrap(), child("app-server").unwrap());
+    assert!(
+        wait_until(Duration::from_secs(20), || state(tui).starts_with('T')
+            && state(appserver).starts_with('T')),
+        "the TUI and the app-server stop together: tui {} app-server {}",
+        state(tui),
+        state(appserver)
+    );
+    let refused = phone_request(&run).expect("the phone's request is answered while stopped");
+    assert_eq!(refused["code"], -32001, "{refused}");
+    assert_eq!(
+        refused["message"], "codex is paused at the Mac (Ctrl+Z); run fg there",
+        "{refused}"
+    );
+
+    let host = Command::new(&sb.tmux)
+        .args([
+            "-S",
+            sb.sock.to_str().unwrap(),
+            "display-message",
+            "-p",
+            "-t",
+            "=cc-1:",
+            "#{pane_pid}",
+        ])
+        .output()
+        .expect("read the pane's process");
+    let host: i32 = String::from_utf8_lossy(&host.stdout)
+        .trim()
+        .parse()
+        .unwrap();
+    unsafe { libc::kill(host, libc::SIGUSR1) };
+    assert!(
+        wait_until(Duration::from_secs(10), || !state(tui).starts_with('T')
+            && !state(appserver).starts_with('T')),
+        "fg continues both: tui {} app-server {}",
+        state(tui),
+        state(appserver)
+    );
+    let _ = viewer.kill();
+    let _ = viewer.wait();
+    let _ = coord.kill();
+    let _ = coord.wait();
 }
 
 /// **A TUI quit cleanly before any thread ends the session quietly.** Ctrl+C in

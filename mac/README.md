@@ -48,6 +48,20 @@ screen from `capture-pane`, restores the cursor, the pane title and the modes tm
 tracks, and never replays earlier output. It also sets `scroll-on-clear off` on the
 pane, so a screen the agent clears is not kept in the history a later attach paints.
 
+Ctrl+Z stops the agent as it does run directly. The agent runs as a job of the pane's
+own process (`codeconnect internal-job` for Claude, the host for Codex), so its stop is
+real; the attachment then stops too, and your shell prints its own job line. `fg`
+resumes the attachment, which asks the pane's process to continue the agent, and the
+agent repaints itself. Every attachment showing a stopped agent stops with it, and one
+that attaches to a stopped agent stops at once. Closing the tab, `exit` or `kill %1`
+while the agent is stopped ends the session, as a stopped job ends when its terminal
+goes, and so does the session or the tmux server going away. The phone's terminal tab
+is not an attachment here: nobody can `fg` from it, so it never keeps a stopped agent
+held, and a Ctrl+Z typed on the phone with no attachment at the Mac is let go at once
+(one typed there while a Mac attachment is open stops the agent as if typed at the Mac).
+Anything the agent prints that looks like the stop marker stops nothing: the attachment
+first asks tmux whether the pane really is stopped.
+
 ## Codex sessions
 
 ```sh

@@ -26,7 +26,7 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -107,6 +107,9 @@ struct Ctx<F: UpstreamFactory> {
     /// **How long a leg waits for the proof that its answer was written.**
     /// [`UPSTREAM_WRITE_BUDGET`], except where an integration test shortens it.
     write_budget: std::time::Duration,
+    /// Set while Codex is stopped at the Mac: phone requests are refused, not forwarded
+    /// to an app-server that cannot answer until `fg`.
+    paused: Arc<AtomicBool>,
     log: EventSink,
     /// The measurement instrument. Off in production and unaskable from the shipping
     /// launcher; see [`crate::frame_tee`]. When off, every `record` below is an
@@ -397,6 +400,7 @@ impl<F: UpstreamFactory> Broker<F> {
                 next_conn: AtomicU64::new(1),
                 head_fanout: std::sync::Mutex::new(HeadFanout::default()),
                 write_budget: UPSTREAM_WRITE_BUDGET,
+                paused: Arc::new(AtomicBool::new(false)),
                 log: Arc::new(|_| {}),
                 tee: FrameTee::off(),
             }),
@@ -414,6 +418,12 @@ impl<F: UpstreamFactory> Broker<F> {
         Arc::get_mut(&mut self.ctx)
             .expect("no clones yet")
             .write_budget = budget;
+        self
+    }
+
+    /// Share the flag that says Codex is stopped at the Mac.
+    pub fn with_pause(mut self, paused: Arc<AtomicBool>) -> Self {
+        Arc::get_mut(&mut self.ctx).expect("no clones yet").paused = paused;
         self
     }
 
@@ -514,6 +524,14 @@ async fn handle_connection<F: UpstreamFactory>(
     ctx: Arc<Ctx<F>>,
 ) -> anyhow::Result<()> {
     let mut ws = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config())).await?;
+    // A frame that arrived as Codex ran again, read while the leg was held.
+    let mut first = None;
+    if role == Role::Ccd {
+        match wait_out_pause(&ctx, conn, &mut ws).await? {
+            Held::Closed => return Ok(()),
+            Held::Running(frame) => first = frame,
+        }
+    }
     let mut up = ctx.factory.connect().await?;
     let mut seen_initialize = false;
     // This leg's own view over the shared fanout arbiter: the s2c stream registers the
@@ -528,6 +546,29 @@ async fn handle_connection<F: UpstreamFactory>(
     // `a_tui_leg_is_neither_replayed_a_head_nor_able_to_trigger_one`.
     let wake = Arc::new(tokio::sync::Notify::new());
     let mut head_wake = Some(Arc::clone(&wake));
+    match first {
+        Some(Message::Text(text)) => {
+            ctx.tee.record(conn.0, "c2s", &text);
+            if handle_text(
+                role,
+                conn,
+                &ctx,
+                &caps,
+                &mut ws,
+                &up,
+                &mut seen_initialize,
+                &mut head_wake,
+                text,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+        }
+        // No phone-leg binary form (refusal matrix): zero bytes, close.
+        Some(Message::Binary(_)) => return Ok(()),
+        _ => {}
+    }
 
     loop {
         tokio::select! {
@@ -657,6 +698,63 @@ async fn handle_connection<F: UpstreamFactory>(
     Ok(())
 }
 
+/// How a held phone leg ends.
+enum Held {
+    Closed,
+    /// Codex runs again; the frame read as it did, still to be handled.
+    Running(Option<Message>),
+}
+
+/// Hold a new phone leg while Codex is stopped at the Mac, rather than connect it to an
+/// app-server that cannot answer until `fg`: each request is refused as it is on an
+/// open leg, anything else is dropped, and the leg is connected once Codex runs again.
+async fn wait_out_pause<F, S>(
+    ctx: &Ctx<F>,
+    conn: ConnId,
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+) -> anyhow::Result<Held>
+where
+    F: UpstreamFactory,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    while ctx.paused.load(Ordering::SeqCst) {
+        tokio::select! {
+            inbound = ws.next() => match inbound {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return Ok(Held::Closed),
+                Some(Ok(frame)) if !ctx.paused.load(Ordering::SeqCst) => {
+                    return Ok(Held::Running(Some(frame)));
+                }
+                Some(Ok(Message::Text(text))) => {
+                    let shape = crate::message::classify_shape(&WsPayload::Text(text));
+                    if let Shape::Request { id, .. } = shape {
+                        if let RelayAction::SyntheticError { frame, .. } = paused_refusal(id) {
+                            (ctx.log)(&format!(
+                                "Ccd: refuse->synthetic error (codex is paused at the Mac) (conn {conn})"
+                            ));
+                            ws.send(Message::Text(frame)).await?;
+                        }
+                    }
+                }
+                Some(Ok(_)) => {}
+            },
+            () = tokio::time::sleep(PAUSE_POLL) => {}
+        }
+    }
+    Ok(Held::Running(None))
+}
+
+/// How often a phone leg held by [`wait_out_pause`] looks whether Codex runs again.
+const PAUSE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn paused_refusal(id: Option<RequestId>) -> RelayAction {
+    crate::refusal::refuse_request(
+        id,
+        crate::refusal::E_POLICY_REFUSED,
+        crate::refusal::PAUSED_MESSAGE,
+        "codex is paused at the Mac".to_string(),
+    )
+}
+
 /// Watch (keyboard) or classify (phone) one whole text message and act. Returns `Ok(true)`
 /// when the leg must close.
 #[allow(clippy::too_many_arguments)]
@@ -760,6 +858,14 @@ where
                     note: "keyboard passthrough",
                 }
             }
+        }
+        Role::Ccd
+            if ctx.paused.load(Ordering::SeqCst) && matches!(shape, Shape::Request { .. }) =>
+        {
+            let Shape::Request { id, .. } = shape else {
+                unreachable!("matched as a request")
+            };
+            paused_refusal(id)
         }
         Role::Ccd => {
             let env = Env {
