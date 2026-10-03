@@ -121,6 +121,11 @@ pub fn read_pgid(pid: i32) -> Option<i32> {
     Some(read_bsdinfo(pid)?.pbi_pgid as i32)
 }
 
+/// The parent of `pid`, off the same `proc_bsdinfo` answer.
+pub fn read_ppid(pid: i32) -> Option<i32> {
+    Some(read_bsdinfo(pid)?.pbi_ppid as i32)
+}
+
 /// The current process's own identity, read the same way every other
 /// process's is — no shortcut through `getpid` alone, because a child records
 /// itself with this and the owner must be able to reproduce it byte for byte.

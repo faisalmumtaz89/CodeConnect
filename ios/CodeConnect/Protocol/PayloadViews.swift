@@ -97,6 +97,15 @@ extension Event {
     var approvalCard: ApprovalCard? { payload["card"]?.decoded(ApprovalCard.self) }
     var approvalOutcome: AnswerOutcome? { payload.decoded(AnswerOutcome.self) }
 
+    /// A `question_hold` event: which question card it is about, and whether
+    /// the phone can answer it now.
+    var questionHoldChange: (requestID: String, hold: QuestionHold)? {
+        guard kind == .questionHold, let requestID = payload["request_id"]?.stringValue,
+            let hold = payload["question_hold"]?.stringValue
+        else { return nil }
+        return (requestID, QuestionHold(wire: hold))
+    }
+
     /// **What became of a Codex approval.**
     ///
     /// A Codex `approval_resolved` payload is a **bare `CodexResolution`** —
@@ -328,6 +337,9 @@ enum ToolSummary {
             guard let changes = input["changes"]?.arrayValue, !changes.isEmpty else { return nil }
             if changes.count == 1 { return changes[0]["path"]?.stringValue }
             return "\(changes.count) files"
+        // Claude's question: what it asks, never the JSON carrying it.
+        case "AskUserQuestion":
+            return input["questions"]?.arrayValue?.first?["question"]?.stringValue
         case "TodoWrite":
             guard let todos = input["todos"]?.arrayValue else { return nil }
             return "\(todos.count) item\(todos.count == 1 ? "" : "s")"

@@ -1,0 +1,21 @@
+
+ ▐▛███▛█   Claude Code v2.1.286
+▝▜██████▀  Opus 5.5 · API Usage Billing
+ ▝▝   ▝▝   /scratch/work
+
+
+❯ SCEN:q4 go
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Snapshots  ☐ Checks  ☐ Archive  ☐ Layout  ✔ Submit  →
+
+How should snapshots be stored?
+
+❯ 1. Dedupe with hardlinks (Recommended)
+     Saves space
+  2. Delete all snapshots
+     Frees everything
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

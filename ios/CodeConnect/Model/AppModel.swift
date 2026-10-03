@@ -837,6 +837,21 @@ final class AppModel {
                 applyCodexFixture(state)
                 return
             }
+            // `-CC_QUESTION <state>` stages one Claude question card, for the
+            // same reason: a state of one session and its daemon's age, not a
+            // shape of fleet. Answers resolve locally, as under `-CC_FIXTURE`.
+            if let state = QuestionFixtures.State(
+                UserDefaults.standard.string(forKey: "CC_QUESTION"))
+            {
+                fixturesActive = true
+                connection.fixtureAnswers = true
+                connection.simulateConnectedForTesting()
+                for message in QuestionFixtures.frames(state: state) {
+                    connection.injectForTesting(message)
+                }
+                keepFixtureLinkFresh()
+                return
+            }
             // `-CC_FIXTURE stacked` is the same fleet with one agent holding two
             // decisions — the state where "count the agents" and "count the
             // cards" stop agreeing.
@@ -2091,7 +2106,9 @@ final class AppModel {
         }
         if let mismatch = Self.decisionMismatch(
             decision: decision, agent: agent,
-            resolvesCodexCards: daemonProfile.resolvesCodexCards)
+            resolvesCodexCards: daemonProfile.resolvesCodexCards,
+            isQuestion: item.card.toolName == QuestionCard.toolName,
+            answersQuestions: daemonProfile.answersQuestions)
         {
             return .rejected(mismatch)
         }
@@ -2111,17 +2128,37 @@ final class AppModel {
     /// `.text` is **not** silent any more — it is Claude's deny-with-a-reason
     /// path, which types free text into a composer a Codex session does not
     /// have, and "the control is not drawn" is a view fact, not a guarantee.
+    ///
+    /// **A Claude question takes only `answers` and `decline`, and only from a
+    /// daemon that understands them.** `allow` or an option on Claude's
+    /// `AskUserQuestion` types keys that pick answers nobody chose; this refuses
+    /// them on the send path whatever the daemon advertises.
     static func decisionMismatch(
-        decision: AnswerDecision, agent: AgentKind, resolvesCodexCards: Bool = true
+        decision: AnswerDecision, agent: AgentKind, resolvesCodexCards: Bool = true,
+        isQuestion: Bool = false, answersQuestions: Bool = false
     ) -> String? {
         switch (agent, decision) {
+        case (.claude, .answers), (.claude, .decline):
+            guard isQuestion else {
+                return "Answers are for Claude's questions; this card is not one, "
+                    + "so nothing was sent."
+            }
+            guard answersQuestions else {
+                return "This Mac's CodeConnect is too old to answer Claude's questions from the "
+                    + "phone, so nothing was sent. Answer at the Mac."
+            }
+            return nil
+        case (.claude, _) where isQuestion:
+            return "Claude is asking a question, which is answered by choosing its answers, "
+                + "so nothing was sent."
         case (.codex, _) where !resolvesCodexCards:
             // **Old daemons.** Below minor 19 the resolution carries no `request_id`, so
             // an answered card can never be retired. A card that cannot be
             // retired must not be answered from here, by any vocabulary.
             return "This Mac's CodeConnect is too old to answer a Codex card from the phone, "
                 + "so nothing was sent. Update it, or answer at the Mac."
-        case (.codex, .allow), (.codex, .deny), (.codex, .option), (.codex, .text):
+        case (.codex, .allow), (.codex, .deny), (.codex, .option), (.codex, .text),
+            (.codex, .answers), (.codex, .decline):
             return "A Codex card is answered by naming one of the options it offered, "
                 + "so nothing was sent."
         case (.claude, .optionId):
@@ -2414,12 +2451,17 @@ final class AppModel {
 
     /// The daemon reports refusals in prose; these are the two that mean
     /// something specific to the user rather than "try again".
-    private static func classify(rejection reason: String) -> AnswerAttempt {
+    static func classify(rejection reason: String) -> AnswerAttempt {
         let lowered = reason.lowercased()
         if lowered.contains("not on screen") {
             return .answeredAtKeyboard(reason)
         }
         if lowered.contains("already-resolved") || lowered.contains("already being applied") {
+            return .answeredAtKeyboard(reason)
+        }
+        // A question the Mac answered first: Claude took the keyboard's answer
+        // and the phone's was not used.
+        if lowered.contains("answered at the mac") {
             return .answeredAtKeyboard(reason)
         }
         if lowered.contains("stale payload_hash") || lowered.contains("out of date") {

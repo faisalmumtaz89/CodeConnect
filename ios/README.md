@@ -152,6 +152,7 @@ release build:
 | `-CC_FIXTURE deck` | replays daemon frames for three blocked agents at three risk classes |
 | `-CC_FIXTURE stacked` | the same fleet plus a **second decision on one agent** and a fifth agent **running a tool**. With one card per agent, "count the agents" and "count the cards" return the same number, so the fleet's headline and its accessory bar agreed by coincidence while counting different things; and with no Running band, a shell command set in proportional type could not be reached from a fixture at all |
 | `-CC_FIXTURE longOutput` | the `deck` fleet plus `fx-5`'s turn ending in a finished command with **60 lines of output** and one more call after it. The only fixture with a tool output past its 40-line "Show all", which at the tail is the geometry where the timeline once carried the reader to the last line |
+| `-CC_QUESTION <state>` | one Claude session holding a four-question `AskUserQuestion` card from a minor-21 daemon — `held`, `at-mac`, `ended`, `answered`, or `old-mac` (minor 20, no `question_card`). See *Claude's questions* |
 | `-CC_FIXTURE_LATE_EVENT_MS <n>` | delivers the fixture's last frame `n` ms after the rest: an event that arrives while the reader is on screen, so a test can act first and then see whether it is followed or counted as "N new" |
 | `-CC_FIXTURE_LINK stale` | withholds the fixture's keep-alive `pong`, so `LinkHealth` crosses its 45-second `staleAfter` on its own and every action disables itself **with its reason**. Pairs with either fixture; without it, `stale` is unreachable under a fixture and therefore never rendered or tested |
 | `-CC_FIXTURE_CACHED <seconds>` | restages the fixture's fleet as one read off **disk** that many seconds ago, so the cached banner draws its age. Without it the cached fleet — the state where every wait clock ticks off data that arrived before launch, and a reader cannot tell a `5m40s` read off disk from a live one — could not be rendered or tested at all. Compose with `-CC_FIXTURE_LINK stale` for the **compound** banner the ladder was rebuilt for: the link's classification carrying the cache's age, one banner, both facts |
@@ -437,6 +438,59 @@ cleared by a turn abort or completion, retired, timed out, written-outcome-unkno
 each Stop state (offered, aborted, link down, refused late, indeterminate), each compose
 outcome (started, steered, duplicate, rejected, indeterminate), the replayed turn
 stream, and two older-daemon states that prove the controls hide rather than fail.
+
+## Claude's questions
+
+Claude Code asks every `AskUserQuestion` through a `PermissionRequest`, so the
+question arrives as an approval card — and an Allow on it typed keys that picked
+options nobody chose. This build never offers Allow or an option on such a card,
+under any daemon (`DecisionCardView.answerSurface`), and refuses to send either on
+the send path as well (`AppModel.decisionMismatch`).
+
+**Protocol minor 21 answers it as a question.** A daemon at minor 21 that
+advertises `question_card` (`DaemonProfile.answersQuestions`) gets
+`Views/QuestionCardView.swift` instead of the approval layout, for any
+`AskUserQuestion` card whose questions reproduce the hashed text (anything less
+falls back to the approval layout, read-only):
+
+* one step per question — header chip, question, options — then a **Review** step
+  listing every answer; with one question, Submit sits on the question itself;
+* single choice: radio rows plus **Other**, which opens a text field; several
+  choices: checkboxes plus Other, sent in the order they were tapped; a question
+  whose options carry a `preview` draws the chosen option's preview in a
+  monospace block under it and offers **Notes** — no other question does — and,
+  as the Mac's preview layout has no "Type something", no Other;
+* **Submit** (live only when every question has an answer), **Decline** (as
+  Escape at the Mac: the main conversation's turn stops; a background agent's
+  question is denied and the agent carries on) and **Reply instead** (the words reach Claude
+  in place of an answer and the turn goes on). A HIGH card's Submit takes Face ID,
+  as Allow does.
+
+The answer is option **indices**, never labels: `{"type":"answers","answers":
+[{"selected":[…],"other"?,"notes"?}, …]}` or `{"type":"decline","message"?}`
+(`AnswerDecision`, `Model/QuestionCard.swift`). The daemon builds Claude's answer
+from the question it stored and returns it through Claude's held hook; nothing is
+typed.
+
+Whether the phone may answer is the card's `question_hold` — `held`, `at_mac` or
+`ended` — and a later `question_hold` event for the same request overrides it
+(`ApprovalItem.questionHold`). Only `held` is answerable. Every other state shows
+the questions read-only and says why (`QuestionCardStatus`): *Asking at the Mac*,
+*Answer at the Mac* (the phone's hold ended, or the hold is missing or unknown),
+*too old* (no `question_card`), *Answered on iPhone* with what was sent,
+*Answered at the Mac*, *Declined*. A refusal saying the question was "answered at
+the Mac" is the Mac winning the race, and reads as answered at the keyboard.
+
+| Fixture | Where it runs | What it pins |
+|---|---|---|
+| `fixtures/claude/minor-21-wire.json` | **test bundle only** (`CodeConnectTests/Resources/`, byte-identical copy) | The five minor-21 events ccd emits — a held card, the phone's answer, a hold ended, a card at the Mac, an answer at the Mac — decoded through the app's types; the phone's encoded answer equals the fixture's `decision` (`QuestionCardTests`). |
+
+`-CC_QUESTION held|at-mac|ended|answered|old-mac` stages one session holding the
+live 2.1.286 four-question card in a minor-21 daemon's shape, its words lengthened
+to the worst case (`Model/QuestionFixtures.swift`, DEBUG only); answers resolve
+locally as under `-CC_FIXTURE`. `QuestionCardUITests` answers it end to end, and
+nine `question-*` render scenarios photograph each step, Review, and every
+read-only state.
 
 ## Not built yet
 

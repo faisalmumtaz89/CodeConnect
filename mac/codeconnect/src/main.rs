@@ -32,6 +32,7 @@ mod tmux;
 mod update_check;
 mod update_install;
 mod update_release;
+mod viewer_link;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

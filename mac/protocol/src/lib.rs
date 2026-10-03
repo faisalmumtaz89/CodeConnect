@@ -502,7 +502,26 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     [`event::SessionSummary`] is byte-identical to minor 19, and a decoder that
 ///     treats the field as an opaque string — which is what the phone's unrecognised
 ///     arm does — reads both minors with one code path.
-pub const PROTOCOL_MINOR: u32 = 20;
+///   * `21` — **Claude's `AskUserQuestion` is answered from the phone.**
+///
+///     Claude Code asks every such question through a `PermissionRequest`, so it
+///     used to arrive as an ordinary approval whose Allow typed keys that picked
+///     options nobody chose. Additive, and a client written against minor 20 needs
+///     all of it:
+///       - [`ws::Capabilities::question_card`] — this daemon understands the rest.
+///       - [`ws::ApprovalCard::question_hold`] — on a question card only: whether
+///         the phone can answer it now ([`ws::QuestionHold`]). It changes while the
+///         card is open; each change is a `question_hold` event
+///         (`{request_id, question_hold}`), and the latest one wins.
+///       - [`ws::AnswerDecision::Answers`] and [`ws::AnswerDecision::Decline`] —
+///         the only decisions a question card takes. The daemon returns them
+///         through Claude's held hook; nothing is typed.
+///
+///     What changed for every client, including older ones: `allow` and `option`
+///     on a question card are refused before anything is claimed or typed, and
+///     `deny` on one is a decline. A minor-20 phone still shows the question as an
+///     approval; nothing it can tap chooses an answer for the person.
+pub const PROTOCOL_MINOR: u32 = 21;
 
 #[cfg(test)]
 mod ledger_tests {

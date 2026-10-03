@@ -140,11 +140,23 @@ async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()
     // what tells us the supervisor is gone, and detaching by name would detach
     // whichever run currently holds it.
     let mut registered: Option<crate::state::Registration> = None;
+    let mut viewer: Option<u64> = None;
 
-    let result = read_loop(&daemon, &mut reader, &tx, &inflight, &mut registered).await;
+    let result = read_loop(
+        &daemon,
+        &mut reader,
+        &tx,
+        &inflight,
+        &mut registered,
+        &mut viewer,
+    )
+    .await;
 
     if let Some(registration) = registered {
         daemon.unregister_supervisor(&registration).await;
+    }
+    if let Some(viewer) = viewer {
+        daemon.unregister_viewer(viewer).await;
     }
     drop(tx);
     let _ = writer.await;
@@ -157,6 +169,7 @@ async fn read_loop(
     tx: &mpsc::Sender<DaemonFrame>,
     inflight: &Inflight,
     registered: &mut Option<crate::state::Registration>,
+    viewer: &mut Option<u64>,
 ) -> Result<()> {
     loop {
         let Some(line) = read_line_limited(reader, MAX_FRAME_BYTES).await? else {
@@ -193,11 +206,49 @@ async fn read_loop(
         }
 
         match frame {
+            ClientFrame::Hook(post) if post.wait => {
+                // A waiting cc-hook sends this one frame and reads one reply, so
+                // the next thing this connection can do is close — which, while a
+                // question is held, is Claude ending the hook.
+                let mut gone = PeerGone(Some(Box::pin(read_line_limited(reader, MAX_FRAME_BYTES))));
+                let outcome = daemon.handle_hook_held(post, &mut gone).await;
+                let _ = tx
+                    .send(DaemonFrame::HookReply {
+                        decision: outcome.decision,
+                    })
+                    .await;
+                if let Some(tmux_session) = outcome.hidden_session {
+                    // The viewers keep swallowing keys until the hook has
+                    // returned, so no key reaches Claude before the question it
+                    // would answer is on screen.
+                    (&mut gone).await;
+                    daemon.hidden_hold_over(&tmux_session).await;
+                }
+                return Ok(());
+            }
             ClientFrame::Hook(post) => {
-                let wait = post.wait;
-                let decision = daemon.handle_hook(post).await;
-                if wait {
-                    let _ = tx.send(DaemonFrame::HookReply { decision }).await;
+                daemon.handle_hook(post).await;
+            }
+            ClientFrame::Viewer {
+                tmux_session,
+                client_pid,
+            } => {
+                if viewer.is_none() {
+                    *viewer = Some(
+                        daemon
+                            .register_viewer(tmux_session, client_pid, tx.clone())
+                            .await,
+                    );
+                }
+            }
+            ClientFrame::ViewerFocus { focused } => {
+                if let Some(viewer) = *viewer {
+                    daemon.viewer_focus(viewer, focused).await;
+                }
+            }
+            ClientFrame::ViewerKey => {
+                if let Some(viewer) = *viewer {
+                    daemon.viewer_key(viewer).await;
                 }
             }
             ClientFrame::Register(info) => {
@@ -465,6 +516,30 @@ async fn read_loop(
             ClientFrame::DaemonInfo => {
                 let _ = tx.send(DaemonFrame::Daemon(daemon.info().await)).await;
             }
+        }
+    }
+}
+
+/// Resolves once the connection's next read finishes — for a cc-hook that has
+/// sent its frame, the connection closing — and stays resolved.
+struct PeerGone<F>(Option<std::pin::Pin<Box<F>>>);
+
+impl<F: std::future::Future> std::future::Future for PeerGone<F> {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let Some(read) = self.0.as_mut() else {
+            return std::task::Poll::Ready(());
+        };
+        match read.as_mut().poll(cx) {
+            std::task::Poll::Ready(_) => {
+                self.0 = None;
+                std::task::Poll::Ready(())
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 }
@@ -984,6 +1059,95 @@ mod tests {
             lifecycle(&sessions, &uid),
             protocol::event::Lifecycle::Exited,
             "the run's own supervisor reported its own end"
+        );
+    }
+
+    /// **A held question learns that Claude ended its hook from the connection
+    /// alone.** cc-hook keeps a waiting connection open until it exits (Claude
+    /// SIGTERMs it on Escape, an interrupt or the session ending), so the daemon
+    /// watches the read side while it holds. Open, the question stays held;
+    /// closed, the card stops offering answers nothing could deliver.
+    #[tokio::test]
+    async fn a_held_question_ends_when_its_hook_connection_closes() {
+        let (daemon, socket) = served_daemon().await;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        let hook = |event: &str, extra: serde_json::Value, wait: bool| {
+            let mut payload = serde_json::json!({
+                "hook_event_name": event,
+                "prompt_id": "p1",
+                "tool_name": "AskUserQuestion",
+                "tool_input": {"questions": [{"question": "Which?", "header": "H",
+                    "options": [{"label": "A"}, {"label": "B"}]}]},
+            });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::to_string(&ClientFrame::Hook(protocol::ipc::HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.into()),
+                event: event.into(),
+                payload,
+                wait,
+                holds_questions: wait,
+            }))
+            .unwrap()
+        };
+        let send = |line: String| {
+            let socket = socket.clone();
+            async move {
+                let mut stream = UnixStream::connect(&socket).await.unwrap();
+                stream.write_all(line.as_bytes()).await.unwrap();
+                stream.write_all(b"\n").await.unwrap();
+                stream
+            }
+        };
+        drop(
+            send(hook(
+                "PreToolUse",
+                serde_json::json!({"tool_use_id": "toolu_q"}),
+                false,
+            ))
+            .await,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let held = send(hook("PermissionRequest", serde_json::json!({}), true)).await;
+
+        let events = |kind: &str| {
+            daemon
+                .store
+                .events_after(uid, 0, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind.as_str() == kind)
+                .map(|event| event.payload)
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..200 {
+            if !events("approval_request").is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let card = &events("approval_request")[0]["card"];
+        assert_eq!(card["request_id"], "toolu_q");
+        assert_eq!(card["question_hold"], "held");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            events("question_hold").is_empty(),
+            "held while the hook lives"
+        );
+
+        drop(held);
+        for _ in 0..200 {
+            if !events("question_hold").is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            events("question_hold"),
+            vec![serde_json::json!({"request_id": "toolu_q", "question_hold": "ended"})]
         );
     }
 }

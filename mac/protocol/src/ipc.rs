@@ -125,6 +125,26 @@ pub enum ClientFrame {
     /// outlive its process and name a pid that now belongs to something else,
     /// and `codeconnect daemon install` uses this answer to send a signal.
     DaemonInfo,
+    /// A `codeconnect` viewer showing a session in a terminal tab (minor 21).
+    ///
+    /// The connection stays open for the life of the viewer and carries only the
+    /// two frames below. Its closing is the viewer going away. `tmux_session` is
+    /// tmux's own id for the session (`$N`) on CodeConnect's server, and
+    /// `client_pid` the viewer's tmux client, so the daemon can tell this viewer
+    /// from anyone else attached to the session.
+    Viewer {
+        tmux_session: String,
+        client_pid: i32,
+    },
+    /// The viewer's terminal tab came to the front (`true`) or left it, as the
+    /// terminal reported it with focus reporting (DECSET 1004).
+    ViewerFocus {
+        focused: bool,
+    },
+    /// Someone typed into the viewer while a background agent's question was
+    /// held for the phone. The viewer swallowed the bytes (or passed a Ctrl+C or
+    /// Ctrl+Z on); the daemon releases the question to the Mac.
+    ViewerKey,
 }
 
 impl ClientFrame {
@@ -279,6 +299,14 @@ pub enum DaemonFrame {
         ssh_key_removed: AlwaysFalse,
     },
     Daemon(DaemonInfo),
+    /// To a viewer: whether a background agent's question in its session is held
+    /// for the phone (minor 21). While `held`, the viewer swallows what is typed
+    /// and reports it with [`ClientFrame::ViewerKey`]. `false` is sent only once
+    /// the held hook has returned, so a key can never reach Claude before the
+    /// question it would answer is on screen.
+    HiddenHold {
+        held: bool,
+    },
 }
 
 /// One run that `codeconnect sessions prune` removed, and what went with it.
@@ -371,6 +399,12 @@ pub struct HookPost {
     /// True when the agent is blocked until we answer.
     #[serde(default)]
     pub wait: bool,
+    /// This cc-hook waits for a question's answer without a bound of its own and
+    /// keeps the connection open until it exits, so the connection closing means
+    /// Claude ended the hook (minor 21). Absent from an older cc-hook, whose
+    /// question is then not held.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds_questions: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1267,6 +1301,7 @@ mod tests {
             event: "PermissionRequest".into(),
             payload: serde_json::json!({"tool_name": "Bash"}),
             wait: true,
+            holds_questions: false,
         });
         let line = serde_json::to_string(&frame).unwrap();
         assert!(line.contains("\"type\":\"hook\""));

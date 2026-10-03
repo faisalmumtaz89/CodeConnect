@@ -1,0 +1,432 @@
+{
+  "answered_at_mac": {
+    "kind": "approval_resolved",
+    "payload": {
+      "applied_via": "send_keys",
+      "decision": {
+        "answers": [],
+        "type": "answers"
+      },
+      "detail": "the question was answered at the Mac",
+      "request_id": "toolu_fake_7440824",
+      "resolved_at": "2026-10-03T00:00:00.000Z",
+      "resolved_by": "local",
+      "session_id": "cc-1"
+    },
+    "seq": 5,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "source_event_id": "resolved:toolu_fake_7440824",
+    "ts": "2026-10-03T00:00:00.000Z"
+  },
+  "answered_from_phone": {
+    "kind": "approval_resolved",
+    "payload": {
+      "applied_via": "hook_return",
+      "decision": {
+        "answers": [
+          {
+            "selected": [
+              0
+            ]
+          },
+          {
+            "selected": [
+              0,
+              2
+            ]
+          },
+          {
+            "other": "Archive it under docs/plans, café ☕"
+          },
+          {
+            "notes": "wider screens only",
+            "selected": [
+              1
+            ]
+          }
+        ],
+        "type": "answers"
+      },
+      "detail": "returned through Claude's question hook",
+      "request_id": "toolu_fake_7440824",
+      "resolved_at": "2026-10-03T00:00:00.000Z",
+      "resolved_by": "phone",
+      "session_id": "cc-1"
+    },
+    "seq": 4,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "source_event_id": "resolved:toolu_fake_7440824",
+    "ts": "2026-10-03T00:00:00.000Z"
+  },
+  "at_mac_request": {
+    "kind": "approval_request",
+    "payload": {
+      "card": {
+        "display_text": "AskUserQuestion\n{\"questions\":[{\"header\":\"Snapshots\",\"multiSelect\":false,\"options\":[{\"description\":\"Saves space\",\"label\":\"Dedupe with hardlinks (Recommended)\"},{\"description\":\"Frees everything\",\"label\":\"Delete all snapshots\"}],\"question\":\"How should snapshots be stored?\"},{\"header\":\"Checks\",\"multiSelect\":true,\"options\":[{\"description\":\"fast\",\"label\":\"Unit tests\"},{\"description\":\"style\",\"label\":\"Lint\"},{\"description\":\"slow\",\"label\":\"Soak test\"}],\"question\":\"Which checks should run before release?\"},{\"header\":\"Archive\",\"multiSelect\":false,\"options\":[{\"description\":\"untracked\",\"label\":\"Keep on disk (Recommended)\"},{\"description\":\"tracked\",\"label\":\"Commit it\"}],\"question\":\"Where should the plan archive go?\"},{\"header\":\"Layout\",\"multiSelect\":false,\"options\":[{\"description\":\"one column\",\"label\":\"Stacked\",\"preview\":\"+------+\\n| A    |\\n+------+\\n| B    |\\n+------+\"},{\"description\":\"two columns\",\"label\":\"Side by side\",\"preview\":\"+---+---+\\n| A | B |\\n+---+---+\"}],\"question\":\"Which layout do you prefer?\"}]}",
+        "generation": 1,
+        "identity_bound": false,
+        "payload_hash": "40ec0770a725f3e8108c36a146835286253b6dbccc1c9588d9c86b6692b2a012",
+        "permission_mode": "acceptEdits",
+        "prompt_id": "2815cdf6-f68a-4e3f-afe4-abd479eaf8d6",
+        "question_hold": "at_mac",
+        "request_id": "toolu_fake_7440824",
+        "risk": {
+          "class": "medium"
+        },
+        "tool_input": {
+          "questions": [
+            {
+              "header": "Snapshots",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "Saves space",
+                  "label": "Dedupe with hardlinks (Recommended)"
+                },
+                {
+                  "description": "Frees everything",
+                  "label": "Delete all snapshots"
+                }
+              ],
+              "question": "How should snapshots be stored?"
+            },
+            {
+              "header": "Checks",
+              "multiSelect": true,
+              "options": [
+                {
+                  "description": "fast",
+                  "label": "Unit tests"
+                },
+                {
+                  "description": "style",
+                  "label": "Lint"
+                },
+                {
+                  "description": "slow",
+                  "label": "Soak test"
+                }
+              ],
+              "question": "Which checks should run before release?"
+            },
+            {
+              "header": "Archive",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "untracked",
+                  "label": "Keep on disk (Recommended)"
+                },
+                {
+                  "description": "tracked",
+                  "label": "Commit it"
+                }
+              ],
+              "question": "Where should the plan archive go?"
+            },
+            {
+              "header": "Layout",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "one column",
+                  "label": "Stacked",
+                  "preview": "+------+\n| A    |\n+------+\n| B    |\n+------+"
+                },
+                {
+                  "description": "two columns",
+                  "label": "Side by side",
+                  "preview": "+---+---+\n| A | B |\n+---+---+"
+                }
+              ],
+              "question": "Which layout do you prefer?"
+            }
+          ]
+        },
+        "tool_name": "AskUserQuestion"
+      },
+      "hook": {
+        "cwd": "/scratch/work",
+        "effort": {
+          "level": "medium"
+        },
+        "hook_event_name": "PermissionRequest",
+        "permission_mode": "acceptEdits",
+        "prompt_id": "2815cdf6-f68a-4e3f-afe4-abd479eaf8d6",
+        "session_id": "93aabdcc-a3ba-47a5-9d76-a56a81c8abf0",
+        "tool_input": {
+          "questions": [
+            {
+              "header": "Snapshots",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "Saves space",
+                  "label": "Dedupe with hardlinks (Recommended)"
+                },
+                {
+                  "description": "Frees everything",
+                  "label": "Delete all snapshots"
+                }
+              ],
+              "question": "How should snapshots be stored?"
+            },
+            {
+              "header": "Checks",
+              "multiSelect": true,
+              "options": [
+                {
+                  "description": "fast",
+                  "label": "Unit tests"
+                },
+                {
+                  "description": "style",
+                  "label": "Lint"
+                },
+                {
+                  "description": "slow",
+                  "label": "Soak test"
+                }
+              ],
+              "question": "Which checks should run before release?"
+            },
+            {
+              "header": "Archive",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "untracked",
+                  "label": "Keep on disk (Recommended)"
+                },
+                {
+                  "description": "tracked",
+                  "label": "Commit it"
+                }
+              ],
+              "question": "Where should the plan archive go?"
+            },
+            {
+              "header": "Layout",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "one column",
+                  "label": "Stacked",
+                  "preview": "+------+\n| A    |\n+------+\n| B    |\n+------+"
+                },
+                {
+                  "description": "two columns",
+                  "label": "Side by side",
+                  "preview": "+---+---+\n| A | B |\n+---+---+"
+                }
+              ],
+              "question": "Which layout do you prefer?"
+            }
+          ]
+        },
+        "tool_name": "AskUserQuestion",
+        "transcript_path": "/scratch/cfg/projects/-scratch-work/93aabdcc-a3ba-47a5-9d76-a56a81c8abf0.jsonl"
+      }
+    },
+    "seq": 3,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "hook",
+    "source_event_id": "perm:toolu_fake_7440824",
+    "ts": "2026-10-03T00:00:00.000Z"
+  },
+  "held_request": {
+    "kind": "approval_request",
+    "payload": {
+      "card": {
+        "display_text": "AskUserQuestion\n{\"questions\":[{\"header\":\"Snapshots\",\"multiSelect\":false,\"options\":[{\"description\":\"Saves space\",\"label\":\"Dedupe with hardlinks (Recommended)\"},{\"description\":\"Frees everything\",\"label\":\"Delete all snapshots\"}],\"question\":\"How should snapshots be stored?\"},{\"header\":\"Checks\",\"multiSelect\":true,\"options\":[{\"description\":\"fast\",\"label\":\"Unit tests\"},{\"description\":\"style\",\"label\":\"Lint\"},{\"description\":\"slow\",\"label\":\"Soak test\"}],\"question\":\"Which checks should run before release?\"},{\"header\":\"Archive\",\"multiSelect\":false,\"options\":[{\"description\":\"untracked\",\"label\":\"Keep on disk (Recommended)\"},{\"description\":\"tracked\",\"label\":\"Commit it\"}],\"question\":\"Where should the plan archive go?\"},{\"header\":\"Layout\",\"multiSelect\":false,\"options\":[{\"description\":\"one column\",\"label\":\"Stacked\",\"preview\":\"+------+\\n| A    |\\n+------+\\n| B    |\\n+------+\"},{\"description\":\"two columns\",\"label\":\"Side by side\",\"preview\":\"+---+---+\\n| A | B |\\n+---+---+\"}],\"question\":\"Which layout do you prefer?\"}]}",
+        "generation": 1,
+        "identity_bound": false,
+        "payload_hash": "40ec0770a725f3e8108c36a146835286253b6dbccc1c9588d9c86b6692b2a012",
+        "permission_mode": "acceptEdits",
+        "prompt_id": "2815cdf6-f68a-4e3f-afe4-abd479eaf8d6",
+        "question_hold": "held",
+        "request_id": "toolu_fake_7440824",
+        "risk": {
+          "class": "medium"
+        },
+        "tool_input": {
+          "questions": [
+            {
+              "header": "Snapshots",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "Saves space",
+                  "label": "Dedupe with hardlinks (Recommended)"
+                },
+                {
+                  "description": "Frees everything",
+                  "label": "Delete all snapshots"
+                }
+              ],
+              "question": "How should snapshots be stored?"
+            },
+            {
+              "header": "Checks",
+              "multiSelect": true,
+              "options": [
+                {
+                  "description": "fast",
+                  "label": "Unit tests"
+                },
+                {
+                  "description": "style",
+                  "label": "Lint"
+                },
+                {
+                  "description": "slow",
+                  "label": "Soak test"
+                }
+              ],
+              "question": "Which checks should run before release?"
+            },
+            {
+              "header": "Archive",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "untracked",
+                  "label": "Keep on disk (Recommended)"
+                },
+                {
+                  "description": "tracked",
+                  "label": "Commit it"
+                }
+              ],
+              "question": "Where should the plan archive go?"
+            },
+            {
+              "header": "Layout",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "one column",
+                  "label": "Stacked",
+                  "preview": "+------+\n| A    |\n+------+\n| B    |\n+------+"
+                },
+                {
+                  "description": "two columns",
+                  "label": "Side by side",
+                  "preview": "+---+---+\n| A | B |\n+---+---+"
+                }
+              ],
+              "question": "Which layout do you prefer?"
+            }
+          ]
+        },
+        "tool_name": "AskUserQuestion"
+      },
+      "hook": {
+        "cwd": "/scratch/work",
+        "effort": {
+          "level": "medium"
+        },
+        "hook_event_name": "PermissionRequest",
+        "permission_mode": "acceptEdits",
+        "prompt_id": "2815cdf6-f68a-4e3f-afe4-abd479eaf8d6",
+        "session_id": "93aabdcc-a3ba-47a5-9d76-a56a81c8abf0",
+        "tool_input": {
+          "questions": [
+            {
+              "header": "Snapshots",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "Saves space",
+                  "label": "Dedupe with hardlinks (Recommended)"
+                },
+                {
+                  "description": "Frees everything",
+                  "label": "Delete all snapshots"
+                }
+              ],
+              "question": "How should snapshots be stored?"
+            },
+            {
+              "header": "Checks",
+              "multiSelect": true,
+              "options": [
+                {
+                  "description": "fast",
+                  "label": "Unit tests"
+                },
+                {
+                  "description": "style",
+                  "label": "Lint"
+                },
+                {
+                  "description": "slow",
+                  "label": "Soak test"
+                }
+              ],
+              "question": "Which checks should run before release?"
+            },
+            {
+              "header": "Archive",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "untracked",
+                  "label": "Keep on disk (Recommended)"
+                },
+                {
+                  "description": "tracked",
+                  "label": "Commit it"
+                }
+              ],
+              "question": "Where should the plan archive go?"
+            },
+            {
+              "header": "Layout",
+              "multiSelect": false,
+              "options": [
+                {
+                  "description": "one column",
+                  "label": "Stacked",
+                  "preview": "+------+\n| A    |\n+------+\n| B    |\n+------+"
+                },
+                {
+                  "description": "two columns",
+                  "label": "Side by side",
+                  "preview": "+---+---+\n| A | B |\n+---+---+"
+                }
+              ],
+              "question": "Which layout do you prefer?"
+            }
+          ]
+        },
+        "tool_name": "AskUserQuestion",
+        "transcript_path": "/scratch/cfg/projects/-scratch-work/93aabdcc-a3ba-47a5-9d76-a56a81c8abf0.jsonl"
+      }
+    },
+    "seq": 3,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "hook",
+    "source_event_id": "perm:toolu_fake_7440824",
+    "ts": "2026-10-03T00:00:00.000Z"
+  },
+  "hold_ended": {
+    "kind": "question_hold",
+    "payload": {
+      "question_hold": "ended",
+      "request_id": "toolu_fake_7440824"
+    },
+    "seq": 4,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "daemon",
+    "source_event_id": "hold:toolu_fake_7440824:ended",
+    "ts": "2026-10-03T00:00:00.000Z"
+  }
+}

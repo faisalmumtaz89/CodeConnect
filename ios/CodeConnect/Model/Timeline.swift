@@ -74,6 +74,10 @@ struct ApprovalItem: Sendable, Hashable, Identifiable {
     var paneSnapshot: String?
     /// The daemon's own classification, or nil on a daemon too old to send one.
     var risk: WireRisk?
+    /// Whether the phone can answer this `AskUserQuestion` card now: the latest
+    /// of the card's own `question_hold` and the `question_hold` events after
+    /// it. Nil on every other card and from a daemon below minor 21.
+    var questionHold: QuestionHold? = nil
 
     /// Whether this card is still waiting on a human. **Either** ending
     /// retires it: a card the Mac already answered is not pending just because
@@ -163,6 +167,7 @@ enum TimelineBuilder {
         var resultsByToolUse: [String: ToolOutcome] = [:]
         var outcomesByRequest: [String: AnswerOutcome] = [:]
         var codexResolutionsByRequest: [String: CodexResolution] = [:]
+        var holdsByRequest: [String: (seq: UInt64, hold: QuestionHold)] = [:]
         var panesByPrompt: [String: String] = [:]
         var hookToolCallIDs: Set<String> = []
         var approvalPromptIDs: Set<String> = []
@@ -190,6 +195,10 @@ enum TimelineBuilder {
                 }
             case .approvalRequest:
                 if let promptID = event.approvalCard?.promptID { approvalPromptIDs.insert(promptID) }
+            case .questionHold:
+                if let change = event.questionHoldChange {
+                    holdsByRequest[change.requestID] = (event.seq, change.hold)
+                }
             case .notification:
                 if let pane = event.paneSnapshot,
                     let promptID = event.payload["prompt_id"]?.stringValue
@@ -362,7 +371,10 @@ enum TimelineBuilder {
                                 outcome: outcomesByRequest[card.requestID],
                                 codexResolution: codexResolutionsByRequest[card.requestID],
                                 paneSnapshot: card.promptID.flatMap { panesByPrompt[$0] },
-                                risk: card.risk ?? event.declaredRisk))))
+                                risk: card.risk ?? event.declaredRisk,
+                                questionHold: holdsByRequest[card.requestID]
+                                    .flatMap { $0.seq > event.seq ? $0.hold : nil }
+                                    ?? card.questionHold))))
 
             case .approvalResolved:
                 break  // shown on the card it resolves
@@ -424,8 +436,10 @@ enum TimelineBuilder {
                                     ?? event.payload.prettyJSONString,
                                 severity: .failure))))
 
-            case .resync, .usage, .reasoning, .other:
-                break  // resync is a banner, not a row; usage/reasoning are noise
+            case .resync, .usage, .reasoning, .questionHold, .other:
+                // resync is a banner, not a row; usage/reasoning are noise; a
+                // question hold is shown on the card it is about
+                break
             }
         }
 
@@ -504,8 +518,8 @@ enum TimelineBuilder {
             return nil
         }
         switch answer.decision {
-        case .deny: return .denied
-        case .allow, .option, .optionId, .text, .unrecognised: return nil
+        case .deny, .decline: return .denied
+        case .allow, .option, .optionId, .text, .answers, .unrecognised: return nil
         }
     }
 

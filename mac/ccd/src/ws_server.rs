@@ -2900,6 +2900,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         // This is populated for the phone with the client work that can render what
         // naming an agent opens onto.
         supported_agents: Vec::new(),
+        question_card: true,
     }
 }
 

@@ -1,0 +1,33 @@
+{
+ "agent_id": "a02422e26e1da95bb",
+ "agent_type": "fork",
+ "cwd": "/scratch/work",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PermissionRequest",
+ "permission_mode": "bubble",
+ "prompt_id": "a6660e4a-dc44-45ff-9f2c-f6356dde8f8d",
+ "session_id": "4a704df5-1017-4aa0-ae34-758b8c1cefe8",
+ "tool_input": {
+  "questions": [
+   {
+    "header": "Color",
+    "multiSelect": false,
+    "options": [
+     {
+      "description": "A warm color",
+      "label": "Red"
+     },
+     {
+      "description": "A cool color",
+      "label": "Blue"
+     }
+    ],
+    "question": "Which color should the button be?"
+   }
+  ]
+ },
+ "tool_name": "AskUserQuestion",
+ "transcript_path": "/scratch/cfg/projects/-scratch-work/4a704df5-1017-4aa0-ae34-758b8c1cefe8.jsonl"
+}

@@ -3,6 +3,46 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Answer Claude's questions from the phone
+
+When Claude asks you to choose (its `AskUserQuestion`), the phone now shows the question
+itself instead of an approval with Allow and Deny: every question, its options and their
+descriptions, multiple choice where Claude allows it, "Other" in your own words wherever
+the Mac offers it, and the preview with a notes field where Claude offers one. Submit sends your answer to Claude as
+if you had chosen at the Mac; Decline does what Escape does (stops the turn, or for a background agent's question
+denies it and lets the agent carry on); Reply instead hands
+Claude your words in place of an answer. The question stays on the Mac at the same time,
+and whichever answers first wins. Nothing is typed into the Mac's dialog.
+
+Before, Allow on such a question typed keys that chose options you never picked: on a
+question with several parts it picked the first answer of the first question, ticked a box
+in the second, and left Claude waiting while the phone said "Approved". A phone that has
+not been updated still shows the old card, but Allow on a question is now refused and
+nothing is chosen; Deny still declines it.
+
+A question asked by a background agent is drawn by Claude only after CodeConnect lets it
+go, so it waits for the phone only while you are away: no `codeconnect` tab of that
+session in front with keyboard or mouse use in the last 10 seconds. Bring the tab to the
+front, or start typing in it, and the question appears there. What you type from then
+until you pause for a second is discarded, so a line typed on coming back never answers a
+question you have not seen. Ctrl+C and Ctrl+Z reach Claude while it waits just as they do
+otherwise, in any keyboard mode or layout. A terminal that does not report which tab is in front counts as always in
+front. If the tab is also shown by something CodeConnect cannot see into, such as a plain
+`tmux attach`, even one attached after the question was asked, the question goes to the
+Mac.
+
+A question whose text the Mac's dialog would show differently from what Claude wrote —
+invisible characters, more than eight accents or joiners stacked on one letter, emoji with
+a style selector — is answered at the Mac only; the phone says so. Questions in scripts written
+with combining marks, such as Hindi, Thai or Hebrew with points, and joined emoji are
+answered from the phone. The phone's notification for a question says "Asking you a
+question"; a push relay that does not know questions yet rings it as an approval.
+
+A question now waits on the phone for as long as Claude waits for it. Sessions started
+before this update keep the old two-minute window, after which the card says to answer at
+the Mac. The README's claim that Claude answers an unanswered question by itself after
+about a minute was wrong for current Claude Code and is gone.
+
 ## A second daemon no longer cuts the running one off
 
 Starting `ccd` by hand while the daemon was already running used to delete the running
