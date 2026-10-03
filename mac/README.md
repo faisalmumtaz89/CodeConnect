@@ -827,7 +827,7 @@ gate then refuses.
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
 `send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`,
-`codex_compose` and `supported_agents` so the app disables
+`codex_compose`, `question_card` and `supported_agents` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -866,7 +866,11 @@ approval; `>= 17` honours `interrupt` and adds `codex_interrupt`; `>= 18` adds
 `bound_not_started`. All additive, and Codex-only:
 `codex_interrupt` and `codex_compose` are build facts about the daemon, so a
 client scopes both controls by the session's own `agent` and `codex_link` as
-well. See `protocol/src/lib.rs` for the authoritative ledger.
+well. `>= 21` answers Claude's `AskUserQuestion` from the phone: the
+`question_card` capability, `ApprovalCard.question_hold` (`held`, `at_mac`,
+`ended`, updated by `question_hold` events), and the `answers` and `decline`
+decisions; `allow` and `option` on a question card are refused for every client.
+See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run
 by `session_uid` and never by `session_id` — a tmux name is handed to the next
@@ -1033,7 +1037,7 @@ Every field is optional. The defaults are what the daemon is validated against.
 | `ws_bind` | tailnet IP | Explicit bind address; otherwise `tailscale ip -4`, else loopback. The QR host is never one known to point somewhere else: bound to loopback the daemon advertises loopback and `codeconnect pair` refuses to print a code, and bound off the tailnet it drops a name this Mac's resolver puts at another address — see [Pairing](#pairing) and [TLS](#tls). |
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
 | `gate_hook` | `"PermissionRequest"` | Which hook waits for the daemon. `"PreToolUse"` or `"none"` also valid. |
-| `hold_ms` | `0` | How long to hold the gate hook for a phone answer. `0` = never hold. |
+| `hold_ms` | `0` | How long to hold the gate hook for a phone answer. `0` = never hold. Claude's own questions (`AskUserQuestion`) are always held for as long as Claude asks them, whatever this says. |
 | `unreachable_ask` | `false` | When the daemon is unreachable, make PreToolUse return `ask` with our reason. Renders the reason to the operator, at the cost of prompting on every tool call. |
 | `input_box_needles` | the composer's box | Whitespace-insensitive needles proving the composer is ready, replacing the shape check. By default the composer is recognised by the box Claude draws it in — its `❯` prompt row directly under a rule of box-drawing horizontals — because the footer hints are dropped as soon as the mode hint or a subagent count needs the room. |
 | `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |

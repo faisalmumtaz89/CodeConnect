@@ -1592,6 +1592,30 @@ pub fn reverify_owned_client(client_pid: i32, expected: &OwnedSession) -> Result
     }
 }
 
+/// The pid of every tmux client attached to the session stamped `uid`.
+///
+/// `Err` whenever the answer could be incomplete — no tmux, an unresolvable
+/// session, a failed or truncated listing — because a caller deciding whether
+/// anyone else is watching must not read a failure as "nobody".
+pub fn session_client_pids(socket: &str, uid: &str) -> Result<Vec<i32>, String> {
+    let session = resolve_owned_session(socket, uid).map_err(|err| format!("{err:?}"))?;
+    let bin = tmux_bin().ok_or_else(|| "tmux not found".to_string())?;
+    let argv = list_clients_argv(socket).ok_or_else(|| "socket not addressable".to_string())?;
+    let (ok, stdout, stderr, truncated) = run_probe(&bin, &argv)?;
+    if !ok {
+        return Err(format!("could not list clients: {}", stderr.trim()));
+    }
+    if truncated {
+        return Err("tmux client listing was truncated".into());
+    }
+    Ok(stdout
+        .lines()
+        .filter_map(parse_client_line)
+        .filter(|(_, session_id)| *session_id == session.session_id)
+        .map(|(pid, _)| pid)
+        .collect())
+}
+
 /// The argv for `kill-session` targeting an exact internal id (`$N`). The id is
 /// [`is_session_id`]-checked before it reaches here, so interpolating it into
 /// the `=`-anchored target is safe by construction.

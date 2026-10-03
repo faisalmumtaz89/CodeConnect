@@ -470,7 +470,7 @@ enum RenderCatalog {
     /// Ordered the way a reader meets them: the fleet, the decision, the
     /// session, the diff, the terminal, the trust screen, then the kit's own
     /// gallery — which is the only reachable render several components have.
-    static let all: [RenderScenario] = product + codex + gallery
+    static let all: [RenderScenario] = product + codex + questions + gallery
 
     static let product: [RenderScenario] = [
         RenderScenario(
@@ -1493,6 +1493,204 @@ enum RenderCatalog {
                 try driver.require(
                     driver.element(containing: "too old", in: app),
                     "the composer's reason, on first open")
+            }),
+    ]
+
+    // =========================================================================
+    //  Claude's question card — `AskUserQuestion` answered from the phone.
+    //
+    //  Seeded through `-CC_QUESTION <state>`: one session holding the live
+    //  2.1.286 four-question card in a minor-21 daemon's shape, its words
+    //  lengthened to the worst case (labels that wrap, `café ☕`, the real
+    //  previews). The steps are *tapped* to, through the real card, so each
+    //  render is what a reader reaches.
+    // =========================================================================
+
+    /// One question-card scenario: the session opened by deep link, the card
+    /// opened from its own timeline row.
+    private static func questionScenario(
+        _ name: String, state: String, purpose: String, opensWith button: String = "Review",
+        reach: @escaping (XCUIApplication, RenderDriver) throws -> Void
+    ) -> RenderScenario {
+        RenderScenario(
+            name: "question-\(name)", purpose: purpose,
+            arguments: ["-CC_QUESTION", state, "-CC_DEEPLINK", "codeconnect://session/qx-1"],
+            reach: { app, driver in
+                let open = app.buttons[button].firstMatch
+                try driver.requireExists(open, "the question's \(button) button")
+                try tapPastTheTailPill(app, driver, open, "the \(button) button on screen")
+                try driver.requireExists(
+                    driver.element(containing: "Claude has 4 questions", in: app),
+                    "the question card")
+                try reach(app, driver)
+            })
+    }
+
+    /// Taps a control on the card at its top edge, once that edge is in view
+    /// between the sheet's chrome and the pinned bar.
+    ///
+    /// Never through `RenderDriver.require`'s drag: it starts on the option
+    /// rows and a press there toggles one. Never a bare `tap()` either —
+    /// XCUITest taps an element's centre, which at AX5 is a row taller than the
+    /// screen or a field behind the bar, where the tap lands on `Next`. The card
+    /// is scrolled by a drag in its left margin, outside every row.
+    private static func tapQuestion(
+        _ app: XCUIApplication, _ driver: RenderDriver, _ identifier: String
+    ) throws {
+        let control = app.buttons[identifier].firstMatch
+        try driver.requireExists(control, identifier)
+        if identifier == "question-next" {
+            control.tap()
+        } else {
+            try tapTop(app, control, identifier)
+        }
+    }
+
+    private static func tapTop(
+        _ app: XCUIApplication, _ element: XCUIElement, _ what: String
+    ) throws {
+        let bar = app.buttons.matching(
+            NSPredicate(
+                format: "identifier IN %@", ["question-next", "question-submit", "question-back"])
+        ).allElementsBoundByIndex.map(\.frame.minY).min() ?? app.frame.maxY
+        // The sheet's own chrome ends where its title does.
+        let top = app.staticTexts["Decision"].firstMatch.frame.maxY
+        let reach: CGFloat = 44
+        let margin = app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: 12, dy: app.frame.height * 0.45))
+        func inView() -> Bool {
+            element.frame.minY >= top && element.frame.minY + reach <= bar
+        }
+        for _ in 0..<10 where !inView() {
+            let travel: CGFloat = element.frame.minY + reach > bar ? -200 : 200
+            margin.press(forDuration: 0.05, thenDragTo: margin.withOffset(CGVector(dx: 0, dy: travel)))
+        }
+        guard inView() else { throw RenderFailure.offScreen(what, frame: element.frame) }
+        element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0))
+            .withOffset(CGVector(dx: 0, dy: reach / 2)).tap()
+    }
+
+    /// Types into the "Other" field just opened.
+    private static func typeOther(
+        _ app: XCUIApplication, _ driver: RenderDriver, _ text: String
+    ) throws {
+        let field = try driver.requireExists(app.textFields["Other"], "the Other field")
+        try tapTop(app, field, "the Other field")
+        app.typeText(text + "\n")
+    }
+
+    /// The Other field, by what was typed into it.
+    private static func typedOther(_ fragment: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "value CONTAINS %@", fragment)).firstMatch
+    }
+
+    /// Answers questions `0..<count` with the daemon fixture's own choices.
+    private static func answerQuestions(
+        _ app: XCUIApplication, _ driver: RenderDriver, through count: Int
+    ) throws {
+        let steps: [() throws -> Void] = [
+            { try tapQuestion(app, driver, "question-0-option-0") },
+            {
+                try tapQuestion(app, driver, "question-1-option-0")
+                try tapQuestion(app, driver, "question-1-option-2")
+            },
+            {
+                try tapQuestion(app, driver, "question-2-other")
+                try typeOther(app, driver, "Archive it under docs/plans, café ☕")
+            },
+            { try tapQuestion(app, driver, "question-3-option-1") },
+        ]
+        for step in steps.prefix(count) {
+            try step()
+            try tapQuestion(app, driver, "question-next")
+        }
+    }
+
+    static let questions: [RenderScenario] = [
+        questionScenario(
+            "step-single", state: "held",
+            purpose: "question 1 of 4: a single choice with two long labels, nothing chosen yet",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "Question 1 of 4", in: app), "the step's own count")
+                guard !app.buttons["Allow"].exists else {
+                    throw RenderFailure.unreachable("a question card must never offer Allow")
+                }
+            }),
+        questionScenario(
+            "step-multi-other", state: "held",
+            purpose: "question 2: several choices kept in tap order, plus Other with café ☕",
+            reach: { app, driver in
+                try answerQuestions(app, driver, through: 1)
+                try tapQuestion(app, driver, "question-1-option-2")
+                try tapQuestion(app, driver, "question-1-option-0")
+                try tapQuestion(app, driver, "question-1-other")
+                try typeOther(app, driver, "Fuzz for an hour, café ☕")
+                try driver.require(typedOther("Fuzz for an hour", in: app), "the typed Other answer")
+            }),
+        questionScenario(
+            "step-other", state: "held",
+            purpose: "question 3: Other chosen and typed, the single choice cleared",
+            reach: { app, driver in
+                try answerQuestions(app, driver, through: 2)
+                try tapQuestion(app, driver, "question-2-option-0")
+                try tapQuestion(app, driver, "question-2-other")
+                try typeOther(app, driver, "Archive it under docs/plans, café ☕")
+                try driver.require(typedOther("Archive it under", in: app), "the typed Other answer")
+            }),
+        questionScenario(
+            "step-preview", state: "held",
+            purpose: "question 4: the chosen option's preview under it, and the Notes field",
+            reach: { app, driver in
+                try answerQuestions(app, driver, through: 3)
+                try tapQuestion(app, driver, "question-3-option-1")
+                try driver.require(
+                    app.descendants(matching: .any)["question-3-preview"].firstMatch,
+                    "the preview under the chosen option")
+            }),
+        questionScenario(
+            "review", state: "held",
+            purpose: "Review: every answer before it is sent, Submit live",
+            reach: { app, driver in
+                try answerQuestions(app, driver, through: 4)
+                try driver.require(app.buttons["question-submit"].firstMatch, "Submit")
+                try driver.require(
+                    driver.element(containing: "Review your answers", in: app), "the review list")
+            }),
+        questionScenario(
+            "at-mac", state: "at-mac",
+            purpose: "read-only: Claude is asking at the Mac, the questions shown whole",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "Asking at the Mac", in: app), "the card's status")
+            }),
+        questionScenario(
+            "ended", state: "ended",
+            purpose: "read-only: the phone's hold ended — answer at the Mac",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "no longer be answered from the phone", in: app),
+                    "the card's status")
+            }),
+        questionScenario(
+            "old-mac", state: "old-mac",
+            purpose: "read-only on a minor-20 Mac: no Allow, and why",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "too old to answer", in: app), "the card's status")
+                guard !app.buttons["Allow"].exists else {
+                    throw RenderFailure.unreachable("an old Mac's question must not offer Allow")
+                }
+            }),
+        questionScenario(
+            "answered", state: "answered",
+            purpose: "answered on this iPhone, confirmed by the Mac, with what was sent",
+            opensWith: "View",
+            reach: { app, driver in
+                try driver.require(
+                    driver.element(containing: "Claude has your answers", in: app),
+                    "the card's status")
             }),
     ]
 

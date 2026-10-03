@@ -8,7 +8,9 @@
 //!    which is behaviourally identical to the hook not being installed at all.
 //! 2. **Never block longer than promised.** Reaching the daemon is bounded by
 //!    `--connect-timeout-ms` (default 200ms) and waiting for a decision by
-//!    `--gate-timeout-ms`. Observability events do not wait at all.
+//!    `--gate-timeout-ms`. Observability events do not wait at all. The one
+//!    exception is Claude's own question (`AskUserQuestion`): it is held for as
+//!    long as Claude waits on this hook, and Claude's hook timeout is the bound.
 //!
 //! Diagnostics go to a log file, never to stderr: hook stderr is surfaced in the
 //! transcript and would pollute the session the user is trying to work in.
@@ -131,6 +133,9 @@ fn run() {
     let input: HookInput = serde_json::from_value(payload.clone()).unwrap_or_default();
     let event_name = resolve_event(&args, &input);
     let session_id = resolve_session(&args, &input);
+    let question = args.gate
+        && event_name == HookEventName::PermissionRequest
+        && input.tool_name.as_deref() == Some(protocol::hook::ASK_USER_QUESTION);
 
     let post = HookPost {
         session_id,
@@ -138,9 +143,10 @@ fn run() {
         event: event_name.as_str().to_string(),
         payload,
         wait: args.gate,
+        holds_questions: args.gate,
     };
 
-    let decision = match post_to_daemon(&args, &post) {
+    let decision = match post_to_daemon(&args, &post, question) {
         Ok(decision) => decision,
         Err(reason) => {
             debug_log(&format!("daemon path failed: {reason}"));
@@ -230,7 +236,11 @@ fn fallback_decision(args: &Args, event: &HookEventName, reason: &str) -> HookDe
 
 /// Post the frame and, for gate events, wait for the daemon's decision.
 /// `Err(reason)` means "no decision from the daemon" — never a hard failure.
-fn post_to_daemon(args: &Args, post: &HookPost) -> Result<HookDecision, String> {
+///
+/// A question waits with no deadline of its own. The daemon reads this
+/// connection closing as Claude ending the hook, so a gate connection is
+/// never half-closed: it stays open until this process exits.
+fn post_to_daemon(args: &Args, post: &HookPost, question: bool) -> Result<HookDecision, String> {
     let mut stream = connect_with_timeout(&args.socket, args.connect_timeout)
         .ok_or_else(|| "connect".to_string())?;
 
@@ -248,14 +258,13 @@ fn post_to_daemon(args: &Args, post: &HookPost) -> Result<HookDecision, String> 
         .and_then(|()| stream.write_all(b"\n"))
         .and_then(|()| stream.flush())
         .map_err(|err| format!("write: {err}"))?;
-    // Half-close so the daemon sees a clean end-of-request even if it reads to EOF.
-    let _ = stream.shutdown(Shutdown::Write);
-
     if !args.gate {
+        // Half-close so the daemon sees a clean end-of-request even if it reads to EOF.
+        let _ = stream.shutdown(Shutdown::Write);
         return Ok(HookDecision::passthrough());
     }
 
-    let _ = stream.set_read_timeout(Some(args.gate_timeout));
+    let _ = stream.set_read_timeout((!question).then_some(args.gate_timeout));
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
     match reader.read_line(&mut response) {

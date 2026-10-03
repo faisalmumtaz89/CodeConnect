@@ -48,6 +48,18 @@
 //! left the cursor on (`@codeconnect-cursor`) and signals the pane's process, which
 //! puts the pane's cursor there and continues the agent, and the agent repaints itself;
 //! otherwise the pane is painted afresh first, as on attach.
+//!
+//! **Focus and held questions.** The client turns focus reporting (DECSET 1004) on
+//! in the terminal at attach and on every resume, and tells `ccd` whether the tab
+//! is in front ([`crate::viewer_link`]). The terminal's reports are taken out of its
+//! input and reach the pane only while the pane has asked for them itself; a pane
+//! turning them off never turns them off in the terminal. While `ccd` holds a
+//! background agent's question for the phone, what is typed is swallowed and
+//! reported instead, so a key meant for the composer never answers a question the
+//! user has not seen, and typing goes on being swallowed until it pauses for a
+//! second, so the rest of a line that released the question never lands in it.
+//! Ctrl+C and Ctrl+Z still reach the pane, in any keyboard mode, so interrupt
+//! and suspend keep working.
 
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -60,6 +72,8 @@ use anyhow::{bail, Context, Result};
 
 use protocol::tmux::{reply_block_close, reply_block_open, send_keys_line, ControlLine};
 
+use crate::viewer_link::ViewerLink;
+
 /// How long the terminal has to answer the colour and cursor questions. Every
 /// terminal answers DA1, which ends the wait as soon as the others are in.
 const HANDSHAKE_BUDGET: Duration = Duration::from_secs(1);
@@ -71,6 +85,21 @@ const HANDSHAKE_QUERY: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[6n\x1b[c";
 /// The most input bytes one `send-keys` command carries; the phone's carrier
 /// measured this size safe on tmux's parser stack.
 const SEND_KEYS_CHUNK: usize = 1024;
+
+/// Focus reporting on: the terminal writes [`FOCUS_IN`] and [`FOCUS_OUT`].
+const FOCUS_ON: &[u8] = b"\x1b[?1004h";
+const FOCUS_IN: &[u8] = b"\x1b[I";
+const FOCUS_OUT: &[u8] = b"\x1b[O";
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// How long typing must pause before keys reach the pane again once a hold has
+/// ended or a key was swallowed. A question released by coming back to the tab
+/// — the tab coming to the front, or the first key typed — is drawn a few
+/// milliseconds later: a line typed straight away would land in it, and its
+/// Enter would choose. The line is swallowed and discarded instead, and the
+/// question is on screen before the next key counts.
+const SWALLOW_UNTIL_PAUSE: Duration = Duration::from_secs(1);
 
 /// The pane state an attach paint asks tmux for; see [`View::ask_for_paint`]. The
 /// capture keeps
@@ -143,22 +172,23 @@ impl Terminal {
             typed: Vec::new(),
             wake,
         };
-        terminal.ask()?;
+        terminal.ask(libc::STDIN_FILENO, libc::STDOUT_FILENO)?;
         Ok(terminal)
     }
 
-    fn ask(&mut self) -> Result<()> {
-        write_all(libc::STDOUT_FILENO, HANDSHAKE_QUERY)?;
+    /// Ask the terminal on `output` about itself, read its answers from `input`,
+    /// then turn its focus reporting on.
+    fn ask(&mut self, input: libc::c_int, output: libc::c_int) -> Result<()> {
+        write_all(output, HANDSHAKE_QUERY)?;
         let deadline = Instant::now() + HANDSHAKE_BUDGET;
         let mut replies = Replies::default();
         let mut buffer = [0u8; 512];
         while !replies.done && Instant::now() < deadline {
             let wait = deadline.saturating_duration_since(Instant::now());
-            if !readable(libc::STDIN_FILENO, wait)? {
+            if !readable(input, wait)? {
                 break;
             }
-            let read =
-                unsafe { libc::read(libc::STDIN_FILENO, buffer.as_mut_ptr().cast(), buffer.len()) };
+            let read = unsafe { libc::read(input, buffer.as_mut_ptr().cast(), buffer.len()) };
             if read <= 0 {
                 break;
             }
@@ -168,7 +198,7 @@ impl Terminal {
         self.row = replies.row;
         self.typed = replies.typed;
         self.typed.extend_from_slice(&replies.pending);
-        Ok(())
+        write_all(output, FOCUS_ON)
     }
 
     /// The commands that run in the attach itself, each as its argument list:
@@ -524,6 +554,8 @@ struct View {
     filter: Filter,
     /// Keys typed before the paint was done, sent once it is.
     typed: Vec<u8>,
+    keys: Keys,
+    link: ViewerLink,
     /// The terminal's cursor row before the paint.
     row: Option<usize>,
     /// The tmux client's pid.
@@ -562,13 +594,16 @@ impl View {
         client: libc::pid_t,
         terminal: Terminal,
     ) -> Self {
-        View {
+        let link = ViewerLink::start(protocol::socket_path(), session.clone(), client);
+        let mut view = View {
             session,
             pane,
             input: Some(input),
             phase: Phase::Attaching,
             filter: Filter::default(),
-            typed,
+            typed: Vec::new(),
+            keys: Keys::default(),
+            link,
             row,
             client,
             refused: None,
@@ -580,7 +615,9 @@ impl View {
             confirming: 0,
             stale: 0,
             terminal,
-        }
+        };
+        view.typed_in(&typed);
+        view
     }
 
     fn run(&mut self, mut output: ChildStdout, wake: libc::c_int) -> Result<()> {
@@ -627,7 +664,7 @@ impl View {
                     stdin_open = false;
                     self.input = None;
                 } else {
-                    self.typed.extend_from_slice(&buffer[..read as usize]);
+                    self.typed_in(&buffer[..read as usize]);
                     self.flush_input()?;
                 }
             }
@@ -849,13 +886,16 @@ impl View {
     /// as its job. Once resumed (`fg`), take the terminal again and continue the
     /// agent if it is still stopped, or paint the pane afresh if it is not.
     fn suspend(&mut self) -> Result<()> {
+        self.link.focus(false);
         leave();
         unsafe { libc::kill(libc::getpid(), libc::SIGTSTP) };
         wait_for_foreground();
         raw()?;
-        self.terminal.ask()?;
+        self.terminal.ask(libc::STDIN_FILENO, libc::STDOUT_FILENO)?;
         self.row = self.terminal.row;
-        self.typed.append(&mut self.terminal.typed);
+        self.link.focus(true);
+        let typed = std::mem::take(&mut self.terminal.typed);
+        self.typed_in(&typed);
         self.resized = true;
         // Where the shell left the cursor, for the agent to resume at: the pane's
         // process moves the pane's cursor there before it continues the agent.
@@ -902,6 +942,28 @@ impl View {
         }
     }
 
+    /// Take a read of the terminal's input: its focus reports go to `ccd`, and
+    /// its keys wait for the pane unless a question is held.
+    fn typed_in(&mut self, bytes: &[u8]) {
+        let typed = self.keys.feed(
+            bytes,
+            self.filter.pane_focus,
+            self.link.held(),
+            self.link.released_at(),
+        );
+        self.take(typed);
+    }
+
+    fn take(&mut self, mut typed: Typed) {
+        if let Some(focused) = typed.focus {
+            self.link.focus(focused);
+        }
+        if typed.while_held {
+            self.link.key();
+        }
+        self.typed.append(&mut typed.keys);
+    }
+
     /// Send held keys and a pending resize, once the paint is done.
     fn flush_input(&mut self) -> Result<()> {
         if !matches!(self.phase, Phase::Streaming) {
@@ -931,6 +993,147 @@ impl View {
         }
         Ok(())
     }
+}
+
+/// The terminal's input, with its focus reports taken out and what is typed
+/// while a question is held swallowed. A terminal writes a key's sequence whole,
+/// so one is read whole; inside a bracketed paste every byte is text, and a
+/// paste's end mark split across reads is joined. Whether a paste is swallowed
+/// is decided at its start, so the pane never gets half of one.
+#[derive(Default)]
+struct Keys {
+    /// The start of a paste's end mark that a read ended in.
+    pending: Vec<u8>,
+    /// Inside a paste: whether it is swallowed.
+    paste: Option<bool>,
+    /// When a key was last swallowed: until typing pauses, keys still are.
+    swallowed_at: Option<Instant>,
+}
+
+/// What a read of the terminal comes to.
+#[derive(Default, Debug, PartialEq)]
+struct Typed {
+    /// The bytes for the pane.
+    keys: Vec<u8>,
+    /// The terminal's last focus report: `true` in front.
+    focus: Option<bool>,
+    /// Something was typed while a question was held.
+    while_held: bool,
+    /// A key, not a mouse report, was swallowed.
+    typing: bool,
+}
+
+impl Keys {
+    /// `pane_focus`: the pane asked for focus reports; `held`: a question is
+    /// held; `released_at`: when `ccd` last ended a hold.
+    fn feed(
+        &mut self,
+        bytes: &[u8],
+        pane_focus: bool,
+        held: bool,
+        released_at: Option<Instant>,
+    ) -> Typed {
+        let mut input = std::mem::take(&mut self.pending);
+        input.extend_from_slice(bytes);
+        let lately = |at: Option<Instant>| at.is_some_and(|at| at.elapsed() < SWALLOW_UNTIL_PAUSE);
+        let held = held || lately(self.swallowed_at) || lately(released_at);
+        let typed = self.scan(&input, pane_focus, held);
+        if typed.typing {
+            self.swallowed_at = Some(Instant::now());
+        }
+        typed
+    }
+
+    fn scan(&mut self, input: &[u8], pane_focus: bool, held: bool) -> Typed {
+        let mut typed = Typed::default();
+        let mut at = 0;
+        while at < input.len() {
+            let rest = &input[at..];
+            if self.paste.is_some() && rest.len() < PASTE_END.len() && PASTE_END.starts_with(rest) {
+                self.pending = rest.to_vec();
+                break;
+            }
+            if self.paste.is_none() && (rest.starts_with(FOCUS_IN) || rest.starts_with(FOCUS_OUT)) {
+                typed.focus = Some(rest.starts_with(FOCUS_IN));
+                if pane_focus {
+                    typed.keys.extend_from_slice(&rest[..FOCUS_IN.len()]);
+                }
+                at += FOCUS_IN.len();
+                continue;
+            }
+            let length = match self.paste {
+                None if rest.starts_with(PASTE_START) => {
+                    self.paste = Some(held);
+                    PASTE_START.len()
+                }
+                None => control_sequence(rest).unwrap_or(1),
+                Some(_) if rest.starts_with(PASTE_END) => PASTE_END.len(),
+                Some(_) => 1,
+            };
+            let piece = &rest[..length];
+            let swallowed = match self.paste {
+                Some(swallowed) => swallowed,
+                None => held && !signal_key(piece),
+            };
+            if piece == PASTE_END {
+                self.paste = None;
+            }
+            typed.while_held |= held || swallowed;
+            typed.typing |= swallowed && !mouse_report(piece);
+            if !swallowed {
+                typed.keys.extend_from_slice(piece);
+            }
+            at += length;
+        }
+        typed
+    }
+}
+
+/// The length of the control sequence (`CSI` … final byte) `input` starts with,
+/// when all of it is there.
+fn control_sequence(input: &[u8]) -> Option<usize> {
+    let body = input.strip_prefix(b"\x1b[")?;
+    let end = body.iter().position(|byte| !(0x20..=0x3f).contains(byte))?;
+    (0x40..=0x7e).contains(&body[end]).then_some(2 + end + 1)
+}
+
+/// Ctrl+C or Ctrl+Z, in any form a terminal types them: the plain byte, or a
+/// kitty keyboard protocol (`CSI key[:shifted[:base]];mods u`) or
+/// modifyOtherKeys (`CSI 27;mods;key ~`) report whose key, or base-layout key,
+/// is `c` or `z` and whose only modifier is Ctrl, lock keys aside.
+fn signal_key(piece: &[u8]) -> bool {
+    if matches!(piece, [0x03] | [0x1a]) {
+        return true;
+    }
+    let Some(body) = piece
+        .strip_prefix(b"\x1b[")
+        .and_then(|body| std::str::from_utf8(body).ok())
+    else {
+        return false;
+    };
+    let fields: Vec<&str> = body[..body.len() - 1].split(';').collect();
+    let (key, modifiers) = match (body.as_bytes().last(), fields.as_slice()) {
+        (Some(b'u'), [key, modifiers, ..]) => (*key, *modifiers),
+        (Some(b'~'), ["27", modifiers, key]) => (*key, *modifiers),
+        _ => return false,
+    };
+    const CAPS_AND_NUM_LOCK: u32 = 64 | 128;
+    let ctrl_only = modifiers
+        .split(':')
+        .next()
+        .and_then(|bits| bits.parse::<u32>().ok())
+        .is_some_and(|bits| bits.saturating_sub(1) & !CAPS_AND_NUM_LOCK == 4);
+    let mut codes = key.split(':');
+    let (code, base) = (codes.next(), codes.nth(1));
+    ctrl_only
+        && [code, base]
+            .iter()
+            .any(|key| matches!(key, Some("99" | "122")))
+}
+
+/// A mouse report (SGR): the pane's mouse tracking, not typing.
+fn mouse_report(piece: &[u8]) -> bool {
+    piece.starts_with(b"\x1b[<") && matches!(piece.last(), Some(b'M' | b'm'))
 }
 
 /// What tmux records about a pane that a new terminal has to be told.
@@ -1146,6 +1349,8 @@ struct Filter {
     held: Vec<u8>,
     /// The pane's process wrote [`crate::job::STOP_MARKER`].
     stopped: bool,
+    /// The pane turned focus reporting on (DECSET 1004).
+    pane_focus: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
@@ -1214,7 +1419,7 @@ impl Filter {
                 if (0x40..=0x7e).contains(&byte) {
                     if !self.control_answered_by_tmux() {
                         self.track_screen();
-                        out.extend_from_slice(&self.held);
+                        self.pass_control(out);
                     }
                     self.held.clear();
                     self.state = Scan::Ground;
@@ -1336,6 +1541,27 @@ impl Filter {
 
     fn release(&mut self, out: &mut Vec<u8>) {
         out.append(&mut self.held);
+    }
+
+    /// Pass the held control sequence, following the pane's focus mode. The
+    /// terminal's stays on, so a reset that names it reaches the terminal without it.
+    fn pass_control(&mut self, out: &mut Vec<u8>) {
+        if let Some((&set @ (b'h' | b'l'), [b'?', modes @ ..])) = self.held[2..].split_last() {
+            let modes: Vec<&[u8]> = modes.split(|&b| b == b';').collect();
+            if modes.contains(&&b"1004"[..]) {
+                self.pane_focus = set == b'h';
+                if set == b'l' {
+                    let rest: Vec<&[u8]> = modes.into_iter().filter(|m| *m != b"1004").collect();
+                    if !rest.is_empty() {
+                        out.extend_from_slice(b"\x1b[?");
+                        out.extend_from_slice(&rest.join(&b';'));
+                        out.push(b'l');
+                    }
+                    return;
+                }
+            }
+        }
+        out.extend_from_slice(&self.held);
     }
 
     /// Whether the held control sequence is a query tmux answers for the pane.
@@ -1674,6 +1900,299 @@ mod tests {
         replies.feed(b"\x1b]10;rgb:e4e4/eeee/f5f5\x1b\\\x1b[?62c");
         assert_eq!(replies.typed, b"\x1b");
         assert_eq!(replies.colours, ["\x1b]10;rgb:e4e4/eeee/f5f5\x1b\\"]);
+    }
+
+    /// The terminal is asked about itself, and only then told to report focus.
+    #[test]
+    fn focus_reporting_is_turned_on_once_the_terminal_has_answered() {
+        let (mut main, mut side) = (-1, -1);
+        let opened = unsafe {
+            libc::openpty(
+                &mut main,
+                &mut side,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "openpty");
+        let mut attributes: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(side, &mut attributes) }, 0);
+        unsafe { libc::cfmakeraw(&mut attributes) };
+        assert_eq!(
+            unsafe { libc::tcsetattr(side, libc::TCSANOW, &attributes) },
+            0
+        );
+        let answer = b"\x1b[?62c";
+        assert_eq!(
+            unsafe { libc::write(main, answer.as_ptr().cast(), answer.len()) },
+            answer.len() as isize
+        );
+        let mut terminal = std::mem::ManuallyDrop::new(Terminal {
+            size: (80, 24),
+            colours: Vec::new(),
+            row: None,
+            typed: Vec::new(),
+            wake: [-1, -1],
+        });
+        terminal.ask(side, side).unwrap();
+        let mut written = Vec::new();
+        let mut buffer = [0u8; 256];
+        while readable(main, Duration::from_millis(200)).unwrap() {
+            let read = unsafe { libc::read(main, buffer.as_mut_ptr().cast(), buffer.len()) };
+            assert!(read > 0);
+            written.extend_from_slice(&buffer[..read as usize]);
+        }
+        assert_eq!(written, [HANDSHAKE_QUERY, b"\x1b[?1004h"].concat());
+        unsafe {
+            libc::close(main);
+            libc::close(side);
+        }
+    }
+
+    fn typed(keys: &mut Keys, bytes: &[u8], pane_focus: bool, held: bool) -> Typed {
+        keys.feed(bytes, pane_focus, held, None)
+    }
+
+    #[test]
+    fn a_focus_report_never_reaches_a_pane_that_did_not_ask() {
+        let typed = typed(&mut Keys::default(), b"a\x1b[Ib\x1b[Oc", false, false);
+        assert_eq!(typed.keys, b"abc");
+    }
+
+    #[test]
+    fn the_viewer_learns_focus_in_and_out() {
+        let mut keys = Keys::default();
+        assert_eq!(typed(&mut keys, b"\x1b[O", false, false).focus, Some(false));
+        assert_eq!(typed(&mut keys, b"\x1b[I", false, false).focus, Some(true));
+        assert_eq!(typed(&mut keys, b"x", false, false).focus, None);
+        assert_eq!(
+            typed(&mut keys, b"\x1b[I\x1b[O", false, false).focus,
+            Some(false),
+            "the last report counts"
+        );
+    }
+
+    /// The pane's focus reports, on and then off: it gets the terminal's reports
+    /// byte for byte while on, and its reset never turns them off in the terminal.
+    #[test]
+    fn the_pane_s_focus_mode_is_followed_and_kept_off_the_terminal() {
+        let mut filter = Filter::default();
+        let mut keys = Keys::default();
+        let mut out = Vec::new();
+        filter.feed(b"\x1b[?1004h", &mut out);
+        assert_eq!(out, b"\x1b[?1004h");
+        let report = typed(&mut keys, b"\x1b[Ix\x1b[O", filter.pane_focus, false);
+        assert_eq!(report.keys, b"\x1b[Ix\x1b[O");
+        assert_eq!(report.focus, Some(false));
+        out.clear();
+        filter.feed(b"a\x1b[?1004lb", &mut out);
+        assert_eq!(out, b"ab");
+        let report = typed(&mut keys, b"\x1b[Ix", filter.pane_focus, false);
+        assert_eq!(report.keys, b"x");
+        assert_eq!(report.focus, Some(true));
+    }
+
+    #[test]
+    fn a_reset_that_names_focus_reaches_the_terminal_without_it() {
+        for (pane, terminal) in [
+            (&b"\x1b[?1004;2004l"[..], &b"\x1b[?2004l"[..]),
+            (b"\x1b[?2004;1004;1l", b"\x1b[?2004;1l"),
+            (b"\x1b[?1004l", b""),
+            (b"\x1b[?10041l", b"\x1b[?10041l"),
+            (b"\x1b[?1004;2004h", b"\x1b[?1004;2004h"),
+        ] {
+            assert_eq!(filtered(&[pane]), terminal, "{pane:?}");
+            let pieces: Vec<&[u8]> = pane.chunks(1).collect();
+            assert_eq!(filtered(&pieces), terminal, "{pane:?} split");
+        }
+    }
+
+    /// An Esc key reaches the pane as it is read, never kept waiting for what
+    /// might follow it.
+    #[test]
+    fn an_esc_is_sent_at_once() {
+        let mut keys = Keys::default();
+        assert_eq!(typed(&mut keys, b"\x1b", false, false).keys, b"\x1b");
+        assert!(keys.pending.is_empty());
+    }
+
+    /// A paste's end mark split across reads is joined: a paste's bytes always
+    /// follow, so waiting for them costs nothing, and a missed end would leave
+    /// every later key inside the paste.
+    #[test]
+    fn a_paste_s_end_split_across_reads_is_joined() {
+        for split in 1..PASTE_END.len() {
+            let mut keys = Keys::default();
+            let start = [PASTE_START, b"p", &PASTE_END[..split]].concat();
+            let mut sent = typed(&mut keys, &start, false, false).keys;
+            assert_eq!(
+                sent,
+                [PASTE_START, b"p"].concat(),
+                "{split}: the mark waits"
+            );
+            let after = typed(
+                &mut keys,
+                &[&PASTE_END[split..], b"x"].concat(),
+                false,
+                true,
+            );
+            assert!(keys.paste.is_none(), "{split}: the paste ended");
+            sent.extend(after.keys);
+            assert_eq!(sent, [PASTE_START, b"p", PASTE_END].concat(), "{split}");
+        }
+    }
+
+    #[test]
+    fn a_report_inside_a_paste_is_text() {
+        let paste = b"\x1b[200~x\x1b[Iy\x1b[O\x1b[201~\x1b[I";
+        let typed_whole = typed(&mut Keys::default(), paste, false, false);
+        assert_eq!(typed_whole.keys, &paste[..paste.len() - 3]);
+        assert_eq!(
+            typed_whole.focus,
+            Some(true),
+            "only the report after the paste"
+        );
+    }
+
+    /// A paste that starts while a question is held is swallowed to its end, even
+    /// once the hold is gone; one that starts unheld reaches the pane whole.
+    #[test]
+    fn a_paste_is_swallowed_whole_or_not_at_all() {
+        let mut keys = Keys::default();
+        let start = typed(&mut keys, b"\x1b[200~ab", false, true);
+        assert!(start.keys.is_empty() && start.while_held);
+        assert!(typed(&mut keys, b"c\x03d\x1b[20", false, false)
+            .keys
+            .is_empty());
+        let end = typed(&mut keys, b"1~", false, false);
+        assert!(end.keys.is_empty());
+        assert!(end.while_held, "the swallowed end is reported");
+        let mut keys = Keys::default();
+        let start = typed(&mut keys, b"\x1b[200~ab", false, false);
+        assert_eq!(start.keys, b"\x1b[200~ab");
+        let end = typed(&mut keys, b"c\x1b[201~d", false, true);
+        assert_eq!(end.keys, b"c\x1b[201~");
+        assert!(end.while_held);
+    }
+
+    /// The first key of a line releases a held question and is swallowed; the
+    /// rest of the line, typed while Claude draws the question, is swallowed
+    /// too. Keys reach the pane again once typing has paused, and mouse reports
+    /// do not keep the pause going.
+    #[test]
+    fn a_line_that_releases_a_question_is_swallowed_to_its_pause() {
+        let mut keys = Keys::default();
+        let first = typed(&mut keys, b"g", false, true);
+        assert!(first.keys.is_empty() && first.while_held);
+        let rest = typed(&mut keys, b"o\r", false, false);
+        assert!(
+            rest.keys.is_empty(),
+            "the hold is gone, the line is not over"
+        );
+        assert_eq!(typed(&mut keys, b"\x03", false, false).keys, b"\x03");
+        let paused = Instant::now() - SWALLOW_UNTIL_PAUSE - Duration::from_millis(1);
+        keys.swallowed_at = Some(paused);
+        let moved = typed(&mut keys, b"\x1b[<35;10;5M", false, true);
+        assert!(moved.keys.is_empty() && moved.while_held);
+        assert_eq!(
+            keys.swallowed_at,
+            Some(paused),
+            "a mouse report is not typing"
+        );
+        assert_eq!(typed(&mut keys, b"1", false, false).keys, b"1");
+        assert_eq!(
+            typed(&mut Keys::default(), b"go\r", false, false).keys,
+            b"go\r",
+            "nothing held, nothing swallowed"
+        );
+    }
+
+    /// A question released by anything but a swallowed key — the tab coming to
+    /// the front, the phone, a client that attached — is drawn a few
+    /// milliseconds after the release: a line typed then is swallowed to its
+    /// pause just the same.
+    #[test]
+    fn a_line_typed_just_after_a_release_is_swallowed_to_its_pause() {
+        let mut keys = Keys::default();
+        let released = Some(Instant::now());
+        assert!(keys.feed(b"go", false, false, released).keys.is_empty());
+        assert!(keys.feed(b"\r", false, false, released).keys.is_empty());
+        let long_ago = Some(Instant::now() - SWALLOW_UNTIL_PAUSE - Duration::from_millis(1));
+        let mut keys = Keys::default();
+        assert_eq!(keys.feed(b"go\r", false, false, long_ago).keys, b"go\r");
+    }
+
+    /// Ctrl+C and Ctrl+Z in the kitty keyboard protocol and modifyOtherKeys, as
+    /// Claude asks Warp and other terminals for, pass while a question is held:
+    /// with Caps or Num Lock on, and on a keyboard layout whose key is not `c`
+    /// or `z` but whose base-layout key is. Other modified keys do not.
+    #[test]
+    fn encoded_ctrl_c_and_ctrl_z_pass_while_a_question_is_held() {
+        for key in [
+            &b"\x1b[99;5u"[..],
+            b"\x1b[122;5u",
+            b"\x1b[99;69u",
+            b"\x1b[99;133u",
+            b"\x1b[122;197u",
+            b"\x1b[1089::99;5u",
+            b"\x1b[1103::122;5u",
+            b"\x1b[27;5;99~",
+            b"\x1b[27;5;122~",
+        ] {
+            let held = typed(
+                &mut Keys::default(),
+                &[b"a", key, b"b"].concat(),
+                false,
+                true,
+            );
+            assert_eq!(held.keys, key, "{key:?}");
+        }
+        for key in [
+            &b"\x1b[99;6u"[..],
+            b"\x1b[99;3u",
+            b"\x1b[100;5u",
+            b"\x1b[1089;5u",
+            b"\x1b[27;6;99~",
+            b"\x1b[A",
+        ] {
+            assert!(
+                typed(&mut Keys::default(), key, false, true)
+                    .keys
+                    .is_empty(),
+                "{key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_c_and_ctrl_z_pass_while_a_question_is_held() {
+        let held = typed(&mut Keys::default(), b"a\x03b\x1a\r\x1b", false, true);
+        assert_eq!(held.keys, b"\x03\x1a");
+        assert!(held.while_held);
+        assert!(
+            typed(&mut Keys::default(), b"\x1b", false, true)
+                .keys
+                .is_empty(),
+            "an Esc is swallowed"
+        );
+    }
+
+    /// With no question held every key reaches the pane byte for byte, in one read
+    /// or a byte at a time.
+    #[test]
+    fn keys_pass_byte_for_byte_when_nothing_is_held() {
+        let input: &[u8] =
+            b"plain\r\x7f\x1b[A\x1bOP\x1b\x1b[1;5D\xe2\x9c\xb3\x03\x1a\x1b[200~p\x03\x1b[201~\x1b[2~\x1b";
+        let whole = typed(&mut Keys::default(), input, false, false);
+        assert_eq!(whole.keys, input);
+        assert!(!whole.while_held);
+        let mut keys = Keys::default();
+        let mut bytewise = Vec::new();
+        for piece in input.chunks(1) {
+            bytewise.append(&mut typed(&mut keys, piece, false, false).keys);
+        }
+        assert_eq!(bytewise, input);
     }
 
     fn state(line: &str) -> PaneState {

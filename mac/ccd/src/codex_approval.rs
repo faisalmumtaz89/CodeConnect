@@ -1144,6 +1144,7 @@ impl Approval {
             // see, so there is no prompt to bind and nothing that would make
             // this true.
             identity_bound: false,
+            question_hold: None,
         }
     }
 }

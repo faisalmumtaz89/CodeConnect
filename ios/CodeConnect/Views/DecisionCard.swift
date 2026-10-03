@@ -176,6 +176,11 @@ struct DecisionCardView: View {
             let options = CodexCard.options(in: card.toolInput)
             return options.isEmpty ? .noneAnswerable : .codexOptions(options)
         case .claude:
+            // **Claude's question is never Allow and never an option.** Either
+            // types keys that pick answers nobody chose. A question this phone
+            // can read is answered on `QuestionCardView`; one it cannot is
+            // read-only here.
+            guard card.toolName != QuestionCard.toolName else { return .noneAnswerable }
             let pane = paneSnapshot.map(PaneOptions.parse) ?? []
             // The count test, unchanged. For Claude's ordinary two-item prompt
             // the rows *are* Allow and Deny drawn a second time in a second
@@ -239,6 +244,29 @@ struct DecisionCardView: View {
     }
 
     var body: some View {
+        if let questions = Self.questionCard(card: approval.card, agent: sessionAgent) {
+            QuestionCardView(
+                approval: approval, questions: questions, onSettled: onSettled,
+                comeBackToThis: comeBackToThis)
+        } else {
+            approvalBody
+        }
+    }
+
+    /// **The question this card asks, when the phone can show it as asked.**
+    ///
+    /// Claude's `AskUserQuestion`, on a card whose structured `tool_input`
+    /// reproduces the hashed text — the questions drawn are then provably the
+    /// ones the daemon sent. Anything less falls back to the approval layout,
+    /// read-only (`answerSurface`), showing the daemon's exact text.
+    static func questionCard(card: ApprovalCard, agent: AgentKind?) -> QuestionCard? {
+        guard agent == .claude, card.verification.hashMatchesDisplayText,
+            card.verification.renderMatchesDisplayText
+        else { return nil }
+        return QuestionCard(card: card)
+    }
+
+    private var approvalBody: some View {
         ScrollView {
             // Deliberately **not** a `LazyVStack`. The gate used to rely on one:
             // a 1pt marker with `onAppear` was nested inside a lazy child on the
@@ -1769,13 +1797,15 @@ struct DecisionCardView: View {
 
     /// What a decision would have been called on the wire, in the words the
     /// control the reader just pressed uses.
-    private static func sampleNotice(for decision: AnswerDecision) -> String {
+    static func sampleNotice(for decision: AnswerDecision) -> String {
         let sent: String
         switch decision {
         case .allow: sent = "Approve"
         case .deny: sent = "Deny"
         case .option(let index): sent = "option \(index)"
         case .optionId(let id): sent = "option \(id)"
+        case .answers: sent = "your answers"
+        case .decline: sent = "Decline"
         case .text, .unrecognised: sent = "this answer"
         }
         return "In a live session this would send \(sent) to your Mac."

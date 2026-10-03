@@ -33,6 +33,7 @@ notify = { workspace = true }
 # frames. See `terminal.rs` for the carrier itself.
 base64 = { workspace = true }
 libc = { workspace = true }
+unicode-general-category = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }

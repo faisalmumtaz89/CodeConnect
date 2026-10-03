@@ -47,8 +47,8 @@ use protocol::ipc::{
 };
 use protocol::pairing::DeviceSummary;
 use protocol::ws::{
-    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, ApprovalCard, ResolvedBy,
-    SendTextResult,
+    AnswerDecision, AnswerOutcome, AnswerPath, AnswerResult, ApprovalCard, QuestionHold,
+    ResolvedBy, SendTextResult,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
@@ -78,6 +78,13 @@ const LOCAL_RESOLVE_MISSES: u32 = 2;
 /// supervisor below this ignores the `expect` field, so an approval sent to one
 /// would be typed against a screen nobody checked.
 const SUPERVISOR_MINOR_PROMPT_IDENTITY: u32 = 3;
+
+/// The supervisor feature level whose session settings give the
+/// `PermissionRequest` hook the longest timeout, about 24.8 days. In a session
+/// it launched, Claude ending a held question's hook means the question is
+/// gone; in an older one it can also be the old two-minute timeout, with the
+/// question still up.
+const SUPERVISOR_MINOR_QUESTION_TIMEOUT: u32 = 21;
 
 /// The supervisor feature level that runs the composer-recovery postcondition.
 ///
@@ -434,6 +441,14 @@ impl LivenessSweep {
 
 #[derive(Default)]
 struct Inner {
+    /// Registered `codeconnect` viewers, by connection.
+    viewers: HashMap<u64, ViewerEntry>,
+    next_viewer: u64,
+    /// Background agents' questions held for the phone, and the tmux session
+    /// (`$N`) each one is in.
+    hidden_holds: HashMap<ApprovalId, String>,
+    /// Whether the presence poll is running.
+    presence_polling: bool,
     /// Per-device floor between deliberate test pushes. A stolen credential
     /// must not become an APNs harassment primitive, and 30 seconds costs a
     /// legitimate tester nothing.
@@ -1587,6 +1602,44 @@ struct PendingApproval {
     /// the fail-toward-the-human direction: the card is still shown, and the
     /// person at the keyboard still has it in front of them.
     prompt: Option<PromptFingerprint>,
+    /// Set on an `AskUserQuestion` card, and only there.
+    question: Option<QuestionState>,
+}
+
+/// What the daemon knows about a question card beyond the card itself.
+#[derive(Default)]
+struct QuestionState {
+    /// Asked by a background agent rather than the main conversation.
+    fork: bool,
+    /// What the phone's answer is waiting on once it is in Claude's hands: the
+    /// `PostToolUse` for this request, whose `tool_input` says whose answer
+    /// Claude ran with.
+    confirm: Option<oneshot::Sender<serde_json::Value>>,
+}
+
+/// How long a phone answer waits for the `PostToolUse` that says Claude ran
+/// with it. Measured at ~35 ms on 2.1.286; the margin is for a loaded Mac.
+const QUESTION_CONFIRM: Duration = Duration::from_secs(5);
+
+/// How long a phone decline waits for a `PostToolUse` that would say the Mac
+/// answered first. A decline produces none of its own.
+const QUESTION_DECLINE_SETTLE: Duration = Duration::from_secs(2);
+
+/// What [`Daemon::handle_hook_held`] hands back to the connection that posted
+/// the hook.
+pub struct HookOutcome {
+    pub decision: HookDecision,
+    /// A background agent's question was held in this session: once the hook's
+    /// connection has closed, its viewers are told it is no longer held.
+    pub hidden_session: Option<String>,
+}
+
+/// A `codeconnect` viewer registered for presence.
+struct ViewerEntry {
+    tmux_session: String,
+    client_pid: i32,
+    focused: bool,
+    frames: mpsc::Sender<DaemonFrame>,
 }
 
 /// The run tmux says is holding a name, when it named one at all.
@@ -2034,7 +2087,7 @@ impl Daemon {
                     claims.len()
                 );
                 for claim in claims {
-                    self.settle_indeterminate(&claim).await;
+                    self.settle_indeterminate(&claim, None).await;
                 }
             }
             Ok(_) => {}
@@ -2112,6 +2165,8 @@ impl Daemon {
 
                 let mut inner = self.inner.lock().await;
                 let mut restored = 0usize;
+                // Held questions whose hooks died with the previous process.
+                let mut unheld = Vec::new();
                 for row in rows {
                     let Ok(card) = serde_json::from_str::<ApprovalCard>(&row.card) else {
                         crate::log_error!(
@@ -2142,6 +2197,13 @@ impl Daemon {
                         .entry(row.session_uid.clone())
                         .or_insert(0);
                     *generation = (*generation).max(current).max(row.generation);
+                    // The hook that held it was this process's connection, and
+                    // it is gone: Claude has the question at the Mac now.
+                    if card.question_hold == Some(QuestionHold::Held) {
+                        unheld.push((row.session_uid.clone(), row.request_id.clone()));
+                    }
+                    let question = (card.tool_name == protocol::hook::ASK_USER_QUESTION)
+                        .then(QuestionState::default);
                     inner.pending.insert(
                         (row.session_uid.clone(), row.request_id.clone()),
                         PendingApproval {
@@ -2161,9 +2223,15 @@ impl Daemon {
                             // Deliberately not carried across the restart: it
                             // described a screen this process never saw.
                             prompt: None,
+                            question,
                         },
                     );
                     restored += 1;
+                }
+                drop(inner);
+                for (uid, request_id) in unheld {
+                    self.set_question_hold(&(uid, request_id), QuestionHold::Ended)
+                        .await;
                 }
                 crate::log_info!(
                     "recovery: {restored} approval card(s) restored; each is re-checked against \
@@ -2225,8 +2293,14 @@ impl Daemon {
         self.recover_codex_composes().await;
     }
 
-    /// Record a claimed-but-unsettled answer as a terminal unknown.
-    async fn settle_indeterminate(&self, claim: &AnswerClaim) {
+    /// Record a claimed-but-unsettled answer as a terminal unknown: one a
+    /// stopped daemon left behind, or, with `unconfirmed`, one this daemon sent
+    /// that way and never saw land.
+    async fn settle_indeterminate(
+        &self,
+        claim: &AnswerClaim,
+        unconfirmed: Option<(AnswerPath, &str)>,
+    ) {
         let session = SessionKey::new(&claim.session_uid, &claim.session_id);
         let decision =
             serde_json::from_str::<AnswerDecision>(&claim.decision).unwrap_or(AnswerDecision::Deny);
@@ -2235,13 +2309,20 @@ impl Daemon {
             session_id: session.name.clone(),
             decision,
             resolved_by: ResolvedBy::Phone,
-            applied_via: AnswerPath::SendKeys,
+            applied_via: unconfirmed.map_or(AnswerPath::SendKeys, |(via, _)| via),
             resolved_at: protocol::time::now_rfc3339(),
-            detail: Some(format!(
-                "the daemon stopped between typing this answer and recording it (claimed at {}); \
-                 whether it reached the agent was never observed, and it will not be typed again",
-                claim.started_at
-            )),
+            detail: Some(match unconfirmed {
+                Some((_, reason)) => format!(
+                    "{reason}; whether it reached the agent was never observed, and it will not \
+                     be sent again"
+                ),
+                None => format!(
+                    "the daemon stopped between typing this answer and recording it (claimed at \
+                     {}); whether it reached the agent was never observed, and it will not be \
+                     typed again",
+                    claim.started_at
+                ),
+            }),
             inferred: false,
             indeterminate: true,
         };
@@ -2785,19 +2866,50 @@ impl Daemon {
 
     /// The hook path. Returns what cc-hook should print.
     pub async fn handle_hook(self: &Arc<Self>, post: HookPost) -> HookDecision {
-        match self.handle_hook_inner(post).await {
-            Ok(decision) => decision,
+        self.handle_hook_held(post, &mut std::future::pending())
+            .await
+            .decision
+    }
+
+    /// [`Daemon::handle_hook`], for a hook posted on a connection the caller
+    /// watches: `gone` resolves when the hook's connection closes, which for a
+    /// held question means Claude ended the hook.
+    pub async fn handle_hook_held(
+        self: &Arc<Self>,
+        post: HookPost,
+        gone: &mut (dyn std::future::Future<Output = ()> + Send + Unpin),
+    ) -> HookOutcome {
+        match self.handle_hook_inner(post, gone).await {
+            Ok(outcome) => outcome,
             Err(err) => {
                 crate::log_error!("hook ingest failed: {err:#}");
                 // Our failure must never look like a denial.
-                HookDecision::passthrough()
+                HookOutcome {
+                    decision: HookDecision::passthrough(),
+                    hidden_session: None,
+                }
             }
         }
     }
 
-    async fn handle_hook_inner(self: &Arc<Self>, post: HookPost) -> Result<HookDecision> {
+    async fn handle_hook_inner(
+        self: &Arc<Self>,
+        post: HookPost,
+        gone: &mut (dyn std::future::Future<Output = ()> + Send + Unpin),
+    ) -> Result<HookOutcome> {
         let input: HookInput = serde_json::from_value(post.payload.clone()).unwrap_or_default();
         let event_name = HookEventName::parse(&post.event);
+
+        // A question's tool ran: settled before anything is written, so a slow
+        // database cannot let the end of the turn, written later, close the
+        // question as declined while this waits to be written.
+        let question_ran = event_name == HookEventName::PostToolUse
+            && input.tool_name.as_deref() == Some(protocol::hook::ASK_USER_QUESTION);
+        if question_ran {
+            if let Some(uid) = post.session_uid.as_deref() {
+                self.note_question_ran(uid, &input).await;
+            }
+        }
 
         let Some(session) = self
             .ensure_session(&post.session_id, post.session_uid.as_deref(), &input)
@@ -2805,8 +2917,15 @@ impl Daemon {
         else {
             // Deleted while the hook was in flight; there is nothing to file it
             // under and nothing to decide. Claude proceeds as if unobserved.
-            return Ok(HookDecision::passthrough());
+            return Ok(HookOutcome {
+                decision: HookDecision::passthrough(),
+                hidden_session: None,
+            });
         };
+
+        if event_name == HookEventName::Stop && main_thread(&post.payload) {
+            self.main_thread_moved(&session).await;
+        }
 
         match &event_name {
             HookEventName::PreToolUse => {
@@ -2830,7 +2949,7 @@ impl Daemon {
             }
             HookEventName::PermissionRequest => {
                 return self
-                    .handle_permission_request(&session, &post, &input)
+                    .handle_permission_request(&session, &post, &input, gone)
                     .await;
             }
             HookEventName::Notification => {
@@ -2855,14 +2974,17 @@ impl Daemon {
                 }
                 self.ingest(hook_event(&session, &event_name, &post.payload, &input))
                     .await?;
+                if question_ran && post.session_uid.is_none() {
+                    self.note_question_ran(&session.uid, &input).await;
+                }
             }
         }
 
-        if post.wait {
-            // A gate event we do not specifically handle still must not hang.
-            return Ok(HookDecision::passthrough());
-        }
-        Ok(HookDecision::passthrough())
+        // A gate event we do not specifically handle still must not hang.
+        Ok(HookOutcome {
+            decision: HookDecision::passthrough(),
+            hidden_session: None,
+        })
     }
 
     async fn handle_permission_request(
@@ -2870,7 +2992,14 @@ impl Daemon {
         session: &SessionKey,
         post: &HookPost,
         input: &HookInput,
-    ) -> Result<HookDecision> {
+        gone: &mut (dyn std::future::Future<Output = ()> + Send + Unpin),
+    ) -> Result<HookOutcome> {
+        let decided = |decision| {
+            Ok(HookOutcome {
+                decision,
+                hidden_session: None,
+            })
+        };
         // **Refused before the card is built, let alone written**, and this is
         // the one of the three [`Daemon::shared_ledgers_admit`] refusals that
         // does NOT lift with the approval observer.
@@ -2909,7 +3038,7 @@ impl Daemon {
                     session.uid,
                     row.agent.as_str()
                 );
-                return Ok(HookDecision::passthrough());
+                return decided(HookDecision::passthrough());
             }
             // Absent means the row was deleted between `ensure_session` and here.
             // There is no non-Claude run to protect and no agent to read; the
@@ -2928,6 +3057,9 @@ impl Daemon {
             correlation_key(&session.uid, input)
                 .and_then(|key| inner.tool_use_ids.get(&key).cloned())
         };
+        // Joined to its `tool_use_id`, the id a question's `PostToolUse` names —
+        // the only way to learn whose answer Claude ran with.
+        let joined = request_id.is_some();
 
         // Fall back to a deterministic id derived from the exact request, so a
         // build that never emits `tool_use_id` still gets stable idempotency.
@@ -2944,6 +3076,24 @@ impl Daemon {
         // decide how alarming to look is a second implementation to keep in
         // step. It is a rendering hint, never a gate.
         let risk = protocol::risk::classify(&tool_name, &tool_input);
+
+        // A question is held for the phone only when every part of answering it
+        // can be checked: this cc-hook waits and reports its own end, the answer
+        // can be confirmed, and the phone's answer would be the keyboard's.
+        let question =
+            (tool_name == protocol::hook::ASK_USER_QUESTION).then(|| !main_thread(&post.payload));
+        let holdable =
+            post.wait && post.holds_questions && joined && crate::question::answerable(&tool_input);
+        let (question_hold, hidden_session) = match question {
+            None => (None, None),
+            Some(_) if !holdable => (Some(QuestionHold::AtMac), None),
+            Some(false) => (Some(QuestionHold::Held), None),
+            Some(true) => match self.hideable(&session.uid).await {
+                Some(tmux_session) => (Some(QuestionHold::Held), Some(tmux_session)),
+                None => (Some(QuestionHold::AtMac), None),
+            },
+        };
+        let held_question = question_hold == Some(QuestionHold::Held);
 
         let card = ApprovalCard {
             request_id: request_id.clone(),
@@ -2966,6 +3116,7 @@ impl Daemon {
             // Not yet: the prompt is not on screen when this hook fires. Bound a
             // few hundred milliseconds later, and announced when it is.
             identity_bound: false,
+            question_hold,
         };
         let generation = card.generation;
 
@@ -2986,31 +3137,39 @@ impl Daemon {
                 "duplicate PermissionRequest for {request_id} in {}; state left alone",
                 session.name
             );
-            return Ok(HookDecision::ask(
+            return decided(HookDecision::ask(
                 "CodeConnect: mirrored to your phone; answer here or there",
             ));
         };
 
+        // A question is never held by `hold_ms`: holding a background agent's
+        // question hides it from the Mac, and an ordinary allow cannot answer one.
         let hold = Duration::from_millis(self.config.hold_ms);
-        let (responder_tx, responder_rx) = if hold.is_zero() {
-            (None, None)
-        } else {
-            let (tx, rx) = oneshot::channel::<HookDecision>();
-            (Some(tx), Some(rx))
-        };
+        let (responder_tx, responder_rx) =
+            if held_question || (question.is_none() && !hold.is_zero()) {
+                let (tx, rx) = oneshot::channel::<HookDecision>();
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
 
         // A new structured request means the previous prompt is gone: Claude
         // asks one thing at a time, so whatever was on screen has been answered
         // or withdrawn. Recording the new generation is what makes an older card
         // un-answerable; superseding is what stops it sitting on the phone
         // pretending it can still be tapped.
-        self.inner
-            .lock()
-            .await
-            .prompt_generation
-            .insert(session.uid.clone(), generation);
-        self.supersede_older_cards(session, generation, &request_id)
-            .await;
+        //
+        // Except a background agent's question while it is held: nothing is on
+        // screen for it, so whatever is on screen is still the current prompt.
+        if hidden_session.is_none() {
+            self.inner
+                .lock()
+                .await
+                .prompt_generation
+                .insert(session.uid.clone(), generation);
+            self.supersede_older_cards(session, generation, &request_id)
+                .await;
+        }
 
         let created_ms = protocol::time::now_unix_ms();
         let label = self.effective_project_label(&session.uid).await;
@@ -3043,6 +3202,10 @@ impl Daemon {
                     tool_ran: false,
                     generation,
                     prompt: None,
+                    question: question.map(|fork| QuestionState {
+                        fork,
+                        confirm: None,
+                    }),
                 },
             );
         }
@@ -3065,7 +3228,7 @@ impl Daemon {
                 request_id,
                 session.name
             );
-            return Ok(HookDecision::ask(
+            return decided(HookDecision::ask(
                 "CodeConnect: this session was removed from the fleet; answer at the keyboard",
             ));
         }
@@ -3106,7 +3269,11 @@ impl Daemon {
                     // card itself states — with the matched pattern beside it,
                     // which a lock screen has no room for and Apple has no
                     // business holding.
-                    kind: crate::apns::PushKind::Approval,
+                    kind: if question.is_some() {
+                        crate::apns::PushKind::Question
+                    } else {
+                        crate::apns::PushKind::Approval
+                    },
                     // See `describing`: the count belongs to the moment of
                     // ringing, not the moment of admission.
                     blocked_sessions: 0,
@@ -3130,15 +3297,427 @@ impl Daemon {
         // On claude 2.1.220 this `ask` renders nothing for PermissionRequest —
         // it is the semantically correct answer, and it costs nothing.
         let Some(rx) = responder_rx else {
-            return Ok(HookDecision::ask(
+            return decided(HookDecision::ask(
                 "CodeConnect: mirrored to your phone; answer here or there",
             ));
         };
-        match tokio::time::timeout(hold, rx).await {
-            Ok(Ok(decision)) => Ok(decision),
-            _ => Ok(HookDecision::ask(
-                "CodeConnect: held for you but no answer arrived, deferring to local operator",
-            )),
+        if !held_question {
+            return match tokio::time::timeout(hold, rx).await {
+                Ok(Ok(decision)) => decided(decision),
+                _ => decided(HookDecision::ask(
+                    "CodeConnect: held for you but no answer arrived, deferring to local operator",
+                )),
+            };
+        }
+
+        let id: ApprovalId = (session.uid.clone(), request_id.clone());
+        if let Some(tmux_session) = &hidden_session {
+            self.inner
+                .lock()
+                .await
+                .hidden_holds
+                .insert(id.clone(), tmux_session.clone());
+            self.tell_viewers(tmux_session, true).await;
+            self.ensure_presence_poll();
+        }
+        // Held until the phone answers, the question is answered or released at
+        // the Mac, or Claude ends the hook. No timer of ours: the question lasts
+        // as long as Claude's own hook timeout.
+        let decision = tokio::select! {
+            answered = rx => answered.unwrap_or_else(|_| HookDecision::passthrough()),
+            () = &mut *gone => {
+                self.question_hook_ended(&id).await;
+                HookDecision::passthrough()
+            }
+        };
+        if hidden_session.is_some() {
+            self.inner.lock().await.hidden_holds.remove(&id);
+        }
+        Ok(HookOutcome {
+            decision,
+            hidden_session,
+        })
+    }
+
+    /// The tmux session (`$N`) a background agent's question in this run may be
+    /// held in, or `None` when it must go to the Mac: someone is at the Mac, or
+    /// the session cannot be seen well enough to be sure nobody is watching.
+    ///
+    /// Nobody is watching when no viewer of the session is in the front tab with
+    /// recent input, and every tmux client on the session is either a registered
+    /// viewer or this daemon's own (the phone's terminal). Any other client —
+    /// a viewer from before an upgrade, a plain `tmux attach` — cannot report
+    /// where it is, so the question is shown where it can be seen.
+    async fn hideable(&self, session_uid: &str) -> Option<String> {
+        let tmux_session = self.only_viewers_watch(session_uid).await?;
+        let inner = self.inner.lock().await;
+        let present = crate::presence::at_the_mac(
+            inner
+                .viewers
+                .values()
+                .any(|viewer| viewer.tmux_session == tmux_session && viewer.focused),
+            crate::presence::hid_idle(),
+        );
+        (!present).then_some(tmux_session)
+    }
+
+    /// The tmux session (`$N`) of this run, when every client on it is a
+    /// registered viewer or this daemon's own.
+    async fn only_viewers_watch(&self, session_uid: &str) -> Option<String> {
+        let uid = session_uid.to_string();
+        let (owned, clients) = tokio::task::spawn_blocking(move || {
+            let socket = protocol::TMUX_SOCKET_NAME;
+            (
+                protocol::tmux::resolve_owned_session(socket, &uid),
+                protocol::tmux::session_client_pids(socket, &uid),
+            )
+        })
+        .await
+        .ok()?;
+        let tmux_session = owned.ok()?.session_id;
+        let clients = clients.ok()?;
+        let inner = self.inner.lock().await;
+        let viewers: Vec<&ViewerEntry> = inner
+            .viewers
+            .values()
+            .filter(|viewer| viewer.tmux_session == tmux_session)
+            .collect();
+        let unknown = clients.iter().any(|pid| {
+            !viewers.iter().any(|viewer| viewer.client_pid == *pid) && !crate::presence::ours(*pid)
+        });
+        (!unknown).then_some(tmux_session)
+    }
+
+    /// Tell every viewer of `tmux_session` whether a background agent's question
+    /// there is held for the phone.
+    async fn tell_viewers(&self, tmux_session: &str, held: bool) {
+        let frames: Vec<mpsc::Sender<DaemonFrame>> = {
+            let inner = self.inner.lock().await;
+            inner
+                .viewers
+                .values()
+                .filter(|viewer| viewer.tmux_session == tmux_session)
+                .map(|viewer| viewer.frames.clone())
+                .collect()
+        };
+        for frame in frames {
+            let _ = frame.send(DaemonFrame::HiddenHold { held }).await;
+        }
+    }
+
+    /// A held background question's hook has returned and its connection has
+    /// closed: its viewers may stop swallowing keys, unless another question in
+    /// the same session is still held.
+    pub async fn hidden_hold_over(&self, tmux_session: &str) {
+        let still_held = self
+            .inner
+            .lock()
+            .await
+            .hidden_holds
+            .values()
+            .any(|held| held == tmux_session);
+        if !still_held {
+            self.tell_viewers(tmux_session, false).await;
+        }
+    }
+
+    /// Watch presence while any background question is held, and release each
+    /// one to the Mac the moment someone is at it.
+    fn ensure_presence_poll(self: &Arc<Self>) {
+        let daemon = Arc::clone(self);
+        tokio::spawn(async move {
+            {
+                let mut inner = daemon.inner.lock().await;
+                if inner.presence_polling {
+                    return;
+                }
+                inner.presence_polling = true;
+            }
+            for tick in 1u32.. {
+                tokio::time::sleep(crate::presence::POLL).await;
+                // A client that attached after the question was held — a plain
+                // `tmux attach`, an older viewer — cannot say where it is.
+                if tick % crate::presence::CLIENT_CHECK_TICKS == 0 {
+                    let held: Vec<(ApprovalId, String)> = daemon
+                        .inner
+                        .lock()
+                        .await
+                        .hidden_holds
+                        .iter()
+                        .map(|(id, tmux_session)| (id.clone(), tmux_session.clone()))
+                        .collect();
+                    for (id, tmux_session) in held {
+                        if daemon.only_viewers_watch(&id.0).await.as_ref() != Some(&tmux_session) {
+                            daemon.release_hidden(&id).await;
+                        }
+                    }
+                }
+                let watched: Vec<(ApprovalId, bool)> = {
+                    let mut inner = daemon.inner.lock().await;
+                    if inner.hidden_holds.is_empty() {
+                        inner.presence_polling = false;
+                        return;
+                    }
+                    inner
+                        .hidden_holds
+                        .iter()
+                        .map(|(id, tmux_session)| {
+                            let focused = inner.viewers.values().any(|viewer| {
+                                viewer.focused && viewer.tmux_session == *tmux_session
+                            });
+                            (id.clone(), focused)
+                        })
+                        .collect()
+                };
+                if !crate::presence::at_the_mac(
+                    watched.iter().any(|(_, focused)| *focused),
+                    crate::presence::hid_idle(),
+                ) {
+                    continue;
+                }
+                for (id, _) in watched.into_iter().filter(|(_, focused)| *focused) {
+                    daemon.release_hidden(&id).await;
+                }
+            }
+        });
+    }
+
+    /// Hand a held background question to the Mac: its hook returns with no
+    /// decision, and Claude draws the question there. A phone answer already
+    /// in flight is left to finish; first answer wins.
+    async fn release_hidden(&self, id: &ApprovalId) {
+        let responder = {
+            let mut inner = self.inner.lock().await;
+            match inner.pending.get_mut(id) {
+                Some(entry) if !entry.claimed => entry.responder.take(),
+                _ => None,
+            }
+        };
+        if let Some(responder) = responder {
+            let _ = responder.send(HookDecision::passthrough());
+            crate::log_info!("{} released to the Mac: someone is at it", id.1);
+            self.set_question_hold(id, QuestionHold::AtMac).await;
+        }
+    }
+
+    /// Claude ended the hook holding this question. From a session whose hook
+    /// timeout is the longest (about 24.8 days), that means the question itself
+    /// is gone — Escape or the session ending. From an older session
+    /// it may be the old two-minute timeout, after which the question is still
+    /// on the Mac, so the card only stops being answerable.
+    async fn question_hook_ended(&self, id: &ApprovalId) {
+        let Some(session) = self
+            .inner
+            .lock()
+            .await
+            .pending
+            .get(id)
+            .map(|entry| entry.session.clone())
+        else {
+            return;
+        };
+        let current_settings = self
+            .supervisor_minor(&session.uid)
+            .await
+            .is_some_and(|minor| minor >= SUPERVISOR_MINOR_QUESTION_TIMEOUT);
+        // A phone answer that claims the card meanwhile, up to the moment this
+        // takes it, makes it back off.
+        if current_settings {
+            self.resolve_without_phone(
+                &id.1,
+                &session,
+                AnswerDecision::Decline { message: None },
+                ResolvedBy::Local,
+                "the question was closed at the Mac (Escape or the session ending) before \
+                 the phone answered it",
+                true,
+            )
+            .await;
+        }
+        // Not closed: an older session's question may still be on the Mac, or a
+        // phone answer claimed the card first and will find the hook gone.
+        // Either way the phone can no longer answer it.
+        if self.inner.lock().await.pending.contains_key(id) {
+            self.set_question_hold(id, QuestionHold::Ended).await;
+        }
+    }
+
+    /// The main conversation went on while one of its questions was held, so
+    /// the question is no longer at the Mac although Claude neither ran the
+    /// tool nor ended the hook ("Chat about this" does that). Only the end of the
+    /// turn is proof the question is gone. A tool asked for in the same message
+    /// as the question fires its `PreToolUse` and `PermissionRequest` at the
+    /// same moment as the question's (measured on 2.1.286), its dialog waiting
+    /// behind the question's, and either can reach the daemon after the
+    /// question. Let the hook go and close the card.
+    async fn main_thread_moved(&self, session: &SessionKey) {
+        let gone: Vec<(ApprovalId, oneshot::Sender<HookDecision>)> = {
+            let mut inner = self.inner.lock().await;
+            inner
+                .pending
+                .iter_mut()
+                .filter(|(id, entry)| {
+                    id.0 == session.uid
+                        && !entry.claimed
+                        && entry
+                            .question
+                            .as_ref()
+                            .is_some_and(|question| !question.fork)
+                })
+                .filter_map(|(id, entry)| Some((id.clone(), entry.responder.take()?)))
+                .collect()
+        };
+        for (id, responder) in gone {
+            let _ = responder.send(HookDecision::passthrough());
+            self.resolve_without_phone(
+                &id.1,
+                session,
+                AnswerDecision::Decline { message: None },
+                ResolvedBy::Local,
+                "the question was closed at the Mac before the phone answered it",
+                true,
+            )
+            .await;
+        }
+    }
+
+    /// Record and announce a change in whether the phone can answer a question.
+    async fn set_question_hold(&self, id: &ApprovalId, hold: QuestionHold) {
+        let (session, card, generation, created_ms) = {
+            let mut inner = self.inner.lock().await;
+            let Some(entry) = inner.pending.get_mut(id) else {
+                return;
+            };
+            entry.card.question_hold = Some(hold);
+            (
+                entry.session.clone(),
+                entry.card.clone(),
+                entry.generation,
+                entry.created_ms,
+            )
+        };
+        self.persist_pending(&session, &card, generation, created_ms)
+            .await;
+        let event = PendingEvent::new(
+            &session,
+            EventKind::Other("question_hold".into()),
+            serde_json::json!({ "request_id": id.1, "question_hold": hold }),
+            Source::Daemon,
+        )
+        .with_source_event_id(format!(
+            "hold:{}:{}",
+            id.1,
+            serde_json::to_value(hold)
+                .ok()
+                .and_then(|word| word.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        ));
+        if let Err(err) = self.ingest(event).await {
+            crate::log_error!("could not record the question hold for {}: {err:#}", id.1);
+        }
+    }
+
+    /// A question's tool ran. Whoever answered it, Claude now has its answer:
+    /// a phone answer waiting on this learns which one it was, and a hook still
+    /// held because the Mac answered first is let go.
+    async fn note_question_ran(&self, session_uid: &str, input: &HookInput) {
+        let Some(tool_use_id) = input.tool_use_id.clone() else {
+            return;
+        };
+        let ran_with = input.tool_input.clone().unwrap_or(serde_json::Value::Null);
+        let mut inner = self.inner.lock().await;
+        let Some(entry) = inner
+            .pending
+            .get_mut(&(session_uid.to_string(), tool_use_id))
+        else {
+            return;
+        };
+        let Some(question) = entry.question.as_mut() else {
+            return;
+        };
+        entry.tool_ran = true;
+        if let Some(confirm) = question.confirm.take() {
+            let _ = confirm.send(ran_with);
+        } else if let Some(responder) = entry.responder.take() {
+            let _ = responder.send(HookDecision::passthrough());
+        }
+    }
+
+    /// A `codeconnect` viewer registered for presence. Told at once if a
+    /// question is already held in its session.
+    pub async fn register_viewer(
+        &self,
+        tmux_session: String,
+        client_pid: i32,
+        frames: mpsc::Sender<DaemonFrame>,
+    ) -> u64 {
+        let (id, held) = {
+            let mut inner = self.inner.lock().await;
+            inner.next_viewer += 1;
+            let id = inner.next_viewer;
+            let held = inner
+                .hidden_holds
+                .values()
+                .any(|held| *held == tmux_session);
+            inner.viewers.insert(
+                id,
+                ViewerEntry {
+                    tmux_session,
+                    client_pid,
+                    focused: false,
+                    frames: frames.clone(),
+                },
+            );
+            (id, held)
+        };
+        if held {
+            let _ = frames.send(DaemonFrame::HiddenHold { held: true }).await;
+        }
+        id
+    }
+
+    pub async fn unregister_viewer(&self, viewer: u64) {
+        self.inner.lock().await.viewers.remove(&viewer);
+    }
+
+    /// The viewer's tab came to the front or left it. Coming to the front with
+    /// recent input is someone at the Mac: their session's held questions go
+    /// there now rather than at the next poll.
+    pub async fn viewer_focus(&self, viewer: u64, focused: bool) {
+        let tmux_session = {
+            let mut inner = self.inner.lock().await;
+            let Some(entry) = inner.viewers.get_mut(&viewer) else {
+                return;
+            };
+            entry.focused = focused;
+            entry.tmux_session.clone()
+        };
+        if crate::presence::at_the_mac(focused, crate::presence::hid_idle()) {
+            self.release_session(&tmux_session).await;
+        }
+    }
+
+    /// Someone typed into a viewer while its session's question was held.
+    pub async fn viewer_key(&self, viewer: u64) {
+        let tmux_session = match self.inner.lock().await.viewers.get(&viewer) {
+            Some(entry) => entry.tmux_session.clone(),
+            None => return,
+        };
+        self.release_session(&tmux_session).await;
+    }
+
+    async fn release_session(&self, tmux_session: &str) {
+        let held: Vec<ApprovalId> = self
+            .inner
+            .lock()
+            .await
+            .hidden_holds
+            .iter()
+            .filter(|(_, held)| *held == tmux_session)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in held {
+            self.release_hidden(&id).await;
         }
     }
 
@@ -3170,6 +3749,9 @@ impl Daemon {
                         && request_id != keep
                         && entry.generation < generation
                         && !entry.claimed
+                        // A held question is answered through its own hook, not
+                        // the screen, so a newer prompt does not replace it.
+                        && entry.card.question_hold != Some(QuestionHold::Held)
                 })
                 .map(|((_, request_id), _)| request_id.clone())
                 .collect()
@@ -3938,6 +4520,7 @@ impl Daemon {
                     // so remote actuation stays refused for the reason the field
                     // exists rather than by a second rule.
                     prompt: None,
+                    question: None,
                 },
             );
         }
@@ -6141,7 +6724,7 @@ impl Daemon {
                     logged_request_id(request_id),
                     claim.started_at
                 );
-                self.settle_indeterminate(&claim).await;
+                self.settle_indeterminate(&claim, None).await;
                 self.inner.lock().await.pending.remove(&id);
                 return match self
                     .db
@@ -6171,7 +6754,7 @@ impl Daemon {
 
         // 3. Claim in memory so a local resolution racing us backs off, and
         //    check that this card is still the prompt on screen.
-        let (session, card, responder, expect) = {
+        let (session, card, responder, expect, question_send) = {
             let mut inner = self.inner.lock().await;
             let current = inner
                 .prompt_generation
@@ -6188,10 +6771,19 @@ impl Daemon {
                     reason: "stale payload_hash: the card you answered is out of date".into(),
                 };
             }
+            // A question is answered through the hook Claude holds for it, or not
+            // at all: no keystroke stands for an answer, so every decision that
+            // would type one is refused here, before anything is claimed.
+            let question_send = match question_hook_decision(entry, &decision) {
+                Ok(send) => send,
+                Err(reason) => return AnswerResult::Rejected { reason },
+            };
             // Belt and braces against the superseding sweep above: an entry that
             // was mid-injection when a newer prompt arrived is deliberately left
-            // in place, and must still not be answerable afterwards.
-            if entry.generation < current {
+            // in place, and must still not be answerable afterwards. A held
+            // question is exempt: its answer goes to its own hook, never to the
+            // screen.
+            if question_send.is_none() && entry.generation < current {
                 return AnswerResult::Rejected {
                     reason: format!(
                         "this card is for prompt {} and the run is now on prompt {current}; \
@@ -6201,11 +6793,19 @@ impl Daemon {
                 };
             }
             entry.claimed = true;
+            let question_send = question_send.map(|hook| {
+                let (confirm_tx, confirm_rx) = oneshot::channel();
+                if let Some(question) = entry.question.as_mut() {
+                    question.confirm = Some(confirm_tx);
+                }
+                (hook, confirm_rx)
+            });
             (
                 entry.session.clone(),
                 entry.card.clone(),
                 entry.responder.take(),
                 entry.prompt.clone(),
+                question_send,
             )
         };
 
@@ -6225,9 +6825,24 @@ impl Daemon {
                 "could not claim {} durably: {err:#}",
                 logged_request_id(request_id)
             );
+            // Nothing was sent, so a held hook is still waiting. If the question
+            // ran meanwhile — answered at the Mac while the write waited — the
+            // hook is the Mac's to let go, and the local-resolution sweep closes
+            // the card as the Mac's; otherwise both stay this card's for the
+            // next answer.
             let mut inner = self.inner.lock().await;
             if let Some(entry) = inner.pending.get_mut(&id) {
                 entry.claimed = false;
+                if let Some(question) = entry.question.as_mut() {
+                    question.confirm = None;
+                }
+                if entry.tool_ran {
+                    if let Some(responder) = responder {
+                        let _ = responder.send(HookDecision::passthrough());
+                    }
+                } else {
+                    entry.responder = responder;
+                }
             }
             return AnswerResult::Rejected {
                 reason: "could not record that this answer is being applied; nothing was typed"
@@ -6236,10 +6851,19 @@ impl Daemon {
         }
 
         // 5. Apply.
-        let (applied_via, detail) = match self
-            .apply_decision(&session, &decision, responder, expect)
-            .await
-        {
+        let via = if question_send.is_some() {
+            AnswerPath::HookReturn
+        } else {
+            AnswerPath::SendKeys
+        };
+        let actuation = match question_send {
+            Some((hook, confirm)) => Self::apply_question(responder, hook, confirm).await,
+            None => {
+                self.apply_decision(&session, &decision, responder, expect)
+                    .await
+            }
+        };
+        let (applied_via, detail) = match actuation {
             Actuation::Applied { via, detail } => (via, detail),
             // The supervisor said no *before* injecting, so we know nothing was
             // typed. The claim is released and the card is answerable again.
@@ -6265,7 +6889,13 @@ impl Daemon {
                     "{request_id}: the supervisor never confirmed the injection ({reason}); \
                      recording it as indeterminate rather than allowing a retry"
                 );
-                self.settle_indeterminate(&claim).await;
+                // A typed answer keeps the restart's wording; a hook return the
+                // daemon handed over and never saw land says so.
+                self.settle_indeterminate(
+                    &claim,
+                    (via == AnswerPath::HookReturn).then_some((via, reason.as_str())),
+                )
+                .await;
                 self.inner.lock().await.pending.remove(&id);
                 return match self
                     .db
@@ -6383,10 +7013,12 @@ impl Daemon {
                 AnswerDecision::Allow => Some(HookDecision {
                     decision: Decision::Allow,
                     reason: Some("Approved from iPhone".into()),
+                    ..HookDecision::passthrough()
                 }),
                 AnswerDecision::Deny => Some(HookDecision {
                     decision: Decision::Deny,
                     reason: Some("Denied from iPhone".into()),
+                    ..HookDecision::passthrough()
                 }),
                 _ => None,
             };
@@ -6420,6 +7052,10 @@ impl Daemon {
                      so nothing was typed"
                         .into(),
                 );
+            }
+            // Only a question card takes these, and it never reaches this path.
+            AnswerDecision::Answers { .. } | AnswerDecision::Decline { .. } => {
+                return Actuation::Refused(NOT_A_QUESTION.into());
             }
         };
 
@@ -6524,6 +7160,51 @@ impl Daemon {
             // this is never treated as "nothing happened", which is what would
             // let the next tap type again.
             Err(SupervisorFailure::Unanswered(reason)) => Actuation::Unknown(reason),
+        }
+    }
+
+    /// Hand a question's answer to the hook Claude holds for it, and learn
+    /// whether Claude ran with it.
+    ///
+    /// Claude takes the first complete answer and discards the other, so the
+    /// hook accepting ours proves nothing: the `PostToolUse` that follows says
+    /// whose answer it was. An answer confirmed is applied; one contradicted was
+    /// beaten by the Mac and is refused, nothing having changed. A decline has no
+    /// `PostToolUse` of its own, so it is applied unless one arrives.
+    async fn apply_question(
+        responder: Option<oneshot::Sender<HookDecision>>,
+        hook: HookDecision,
+        confirm: oneshot::Receiver<serde_json::Value>,
+    ) -> Actuation {
+        let answered_at_mac = "this question was answered at the Mac first, so the phone's \
+                               answer was not used";
+        let Some(responder) = responder else {
+            return Actuation::Refused(NOT_HELD.into());
+        };
+        let sent = hook.updated_input.clone();
+        if responder.send(hook).is_err() {
+            return Actuation::Refused(
+                "Claude stopped waiting for the phone's answer before it was sent; nothing was \
+                 sent. Answer at the Mac."
+                    .into(),
+            );
+        }
+        let applied = Actuation::Applied {
+            via: AnswerPath::HookReturn,
+            detail: Some("returned through Claude's question hook".into()),
+        };
+        match sent {
+            Some(sent) => match tokio::time::timeout(QUESTION_CONFIRM, confirm).await {
+                Ok(Ok(ran_with)) if crate::question::same_answer(&sent, &ran_with) => applied,
+                Ok(Ok(_)) => Actuation::Refused(answered_at_mac.into()),
+                _ => Actuation::Unknown(
+                    "Claude was handed the answer but never said which answer it ran with".into(),
+                ),
+            },
+            None => match tokio::time::timeout(QUESTION_DECLINE_SETTLE, confirm).await {
+                Ok(Ok(_)) => Actuation::Refused(answered_at_mac.into()),
+                _ => applied,
+            },
         }
     }
 
@@ -9524,7 +10205,12 @@ impl Daemon {
                     // `serverRequest` open until something answers it, so a Codex
                     // approval does not go stale. The frames that settle it are what
                     // retire the card.
-                    p.agent.is_claude() && !p.claimed && now - p.created_ms > max_age_ms
+                    p.agent.is_claude()
+                        && !p.claimed
+                        && now - p.created_ms > max_age_ms
+                        // A held question waits as long as Claude does; it has
+                        // no answer to expire into.
+                        && p.card.question_hold != Some(QuestionHold::Held)
                 })
                 .map(|((_, request_id), p)| (request_id.clone(), p.session.clone()))
                 .collect()
@@ -9590,18 +10276,23 @@ impl Daemon {
         // `codex_pending_approvals` — leaving the card on the phone with the only
         // thing that could retire it already gone from memory. A Codex card is
         // retired by the frames that actually settle it, on the link.
-        let candidates: Vec<(String, SessionKey, bool, i64)> = {
+        //
+        // A question held for the phone is not judged from the pane at all: its
+        // hook says when it ends, and a background agent's is not on the pane.
+        let candidates: Vec<(String, SessionKey, bool, i64, bool)> = {
             let inner = self.inner.lock().await;
             inner
                 .pending
                 .iter()
                 .filter(|(_, p)| !p.claimed && p.agent.is_claude())
+                .filter(|(_, p)| p.tool_ran || p.card.question_hold != Some(QuestionHold::Held))
                 .map(|((_, request_id), p)| {
                     (
                         request_id.clone(),
                         p.session.clone(),
                         p.tool_ran,
                         p.created_ms,
+                        p.question.is_some(),
                     )
                 })
                 .collect()
@@ -9611,13 +10302,28 @@ impl Daemon {
         }
 
         // The tool ran: resolve immediately, no pane reading required.
-        for (request_id, session, _, _) in candidates.iter().filter(|(_, _, ran, _)| *ran) {
+        for (request_id, session, _, _, question) in
+            candidates.iter().filter(|(_, _, ran, _, _)| *ran)
+        {
+            let (decision, detail) = if *question {
+                (
+                    AnswerDecision::Answers {
+                        answers: Vec::new(),
+                    },
+                    "the question was answered at the Mac",
+                )
+            } else {
+                (
+                    AnswerDecision::Allow,
+                    "the tool ran, so it was approved at the keyboard",
+                )
+            };
             self.resolve_without_phone(
                 request_id,
                 session,
-                AnswerDecision::Allow,
+                decision,
                 ResolvedBy::Local,
-                "the tool ran, so it was approved at the keyboard",
+                detail,
                 false,
             )
             .await;
@@ -9626,8 +10332,8 @@ impl Daemon {
         // One capture per run, however many approvals are outstanding on it.
         let mut sessions: Vec<SessionKey> = candidates
             .iter()
-            .filter(|(_, _, tool_ran, created)| !tool_ran && now - created > grace)
-            .map(|(_, session, _, _)| session.clone())
+            .filter(|(_, _, tool_ran, created, _)| !tool_ran && now - created > grace)
+            .map(|(_, session, _, _, _)| session.clone())
             .collect();
         sessions.sort_by(|a, b| a.uid.cmp(&b.uid));
         sessions.dedup_by(|a, b| a.uid == b.uid);
@@ -9672,7 +10378,10 @@ impl Daemon {
                         .pending
                         .iter()
                         .filter(|((uid, _), entry)| {
-                            uid == &session.uid && entry.prompt.is_none() && !entry.claimed
+                            uid == &session.uid
+                                && entry.prompt.is_none()
+                                && !entry.claimed
+                                && entry.card.question_hold != Some(QuestionHold::Held)
                         })
                         .map(|((_, request_id), entry)| (request_id.clone(), entry.generation))
                         .collect()
@@ -9694,6 +10403,7 @@ impl Daemon {
                         || entry.claimed
                         || entry.tool_ran
                         || now - entry.created_ms <= grace
+                        || entry.card.question_hold == Some(QuestionHold::Held)
                     {
                         continue;
                     }
@@ -10149,6 +10859,88 @@ impl Daemon {
             device: summary,
             token_revoked,
         })
+    }
+}
+
+/// Why a decision cannot answer a question card.
+const QUESTION_NEEDS_CARD: &str = "Claude is asking you a question. Answer it at the Mac, or \
+                                   update CodeConnect to answer it here. Nothing was typed.";
+
+/// Why a question decision cannot answer an ordinary card.
+const NOT_A_QUESTION: &str = "this answers a question, and this card is not one; nothing was sent";
+
+/// Why a question card cannot be answered from the phone right now.
+const NOT_HELD: &str = "this question is not being held for the phone (Claude is showing it at \
+                        the Mac); answer it there. Nothing was sent.";
+
+/// A hook from the main conversation rather than a background agent.
+fn main_thread(payload: &serde_json::Value) -> bool {
+    payload
+        .get("agent_id")
+        .is_none_or(serde_json::Value::is_null)
+}
+
+/// What a decision does to this card, decided before anything is claimed.
+///
+/// `Ok(Some)` is the hook decision a held question is answered with. `Ok(None)`
+/// is an ordinary card's decision, or a deny on a question the phone cannot
+/// hold, which is typed as Escape exactly as before. Anything else is refused.
+fn question_hook_decision(
+    entry: &PendingApproval,
+    decision: &AnswerDecision,
+) -> Result<Option<HookDecision>, String> {
+    // Escape at the main conversation's dialog interrupts the turn; at a
+    // background agent's it denies the question and the agent carries on.
+    let declined = || HookDecision {
+        interrupt: entry
+            .question
+            .as_ref()
+            .is_some_and(|question| !question.fork),
+        decision: Decision::Deny,
+        reason: Some("Declined from iPhone".into()),
+        ..HookDecision::passthrough()
+    };
+    if entry.question.is_none() {
+        return match decision {
+            AnswerDecision::Answers { .. } | AnswerDecision::Decline { .. } => {
+                Err(NOT_A_QUESTION.into())
+            }
+            _ => Ok(None),
+        };
+    }
+    match decision {
+        AnswerDecision::Allow
+        | AnswerDecision::Option { .. }
+        | AnswerDecision::Text { .. }
+        | AnswerDecision::OptionId { .. } => return Err(QUESTION_NEEDS_CARD.into()),
+        _ if entry.tool_ran => {
+            return Err("this question was already answered at the Mac; nothing was sent".into())
+        }
+        _ => {}
+    }
+    let held = entry.card.question_hold == Some(QuestionHold::Held) && entry.responder.is_some();
+    match decision {
+        AnswerDecision::Deny if !held => Ok(None),
+        _ if !held => Err(NOT_HELD.into()),
+        AnswerDecision::Answers { answers } => {
+            crate::question::updated_input(&entry.card.tool_input, answers)
+                .map(|input| {
+                    Some(HookDecision {
+                        decision: Decision::Allow,
+                        updated_input: Some(input),
+                        ..HookDecision::passthrough()
+                    })
+                })
+                .map_err(|reason| format!("{reason}. Nothing was sent."))
+        }
+        AnswerDecision::Decline {
+            message: Some(message),
+        } if !message.trim().is_empty() => Ok(Some(HookDecision {
+            decision: Decision::Deny,
+            reason: Some(message.clone()),
+            ..HookDecision::passthrough()
+        })),
+        _ => Ok(Some(declined())),
     }
 }
 
@@ -12714,6 +13506,7 @@ mod tests {
                     "tool_input": tool_input,
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         format!(
@@ -12754,6 +13547,7 @@ mod tests {
                     "tool_use_id": tool_use_id,
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
     }
@@ -12984,6 +13778,7 @@ mod tests {
                     "tool_use_id": "toolu_legacy",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         assert_eq!(
@@ -13005,6 +13800,7 @@ mod tests {
                 event: "SessionStart".into(),
                 payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         let sessions = daemon.sessions().await.unwrap();
@@ -13098,6 +13894,7 @@ mod tests {
                     "tool_input": tool_input,
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         format!(
@@ -13293,6 +14090,7 @@ mod tests {
                             "tool_input": tool_input,
                         }),
                         wait: true,
+                        holds_questions: false,
                     })
                     .await
             })
@@ -13446,6 +14244,7 @@ mod tests {
                 event: "Stop".into(),
                 payload: json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"}),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         let events = daemon.store.events_after(TEST_UID, 0, 10).unwrap();
@@ -13469,6 +14268,7 @@ mod tests {
                 event: "SessionStart".into(),
                 payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         daemon
@@ -13837,6 +14637,7 @@ mod tests {
                 "cwd": "/tmp",
             }),
             wait: false,
+            holds_questions: false,
         }
     }
 
@@ -13958,6 +14759,7 @@ mod tests {
             tool_ran: false,
             generation: 0,
             prompt: None,
+            question: None,
         }
     }
 
@@ -14051,6 +14853,7 @@ mod tests {
                     "tool_input": { "command": "echo hi" },
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         tokio::time::sleep(Duration::from_millis(700)).await;
@@ -14069,6 +14872,7 @@ mod tests {
                     "cwd": "/srv/dev/after",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         daemon
@@ -14083,6 +14887,7 @@ mod tests {
                     "cwd": "/srv/dev/other",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
 
@@ -14114,6 +14919,7 @@ mod tests {
                     "tool_input": { "command": "echo hi" },
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         tokio::time::sleep(Duration::from_millis(700)).await;
@@ -14161,6 +14967,7 @@ mod tests {
                     "cwd": "/srv/dev/other",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         tokio::time::sleep(Duration::from_millis(700)).await;
@@ -14257,6 +15064,7 @@ mod tests {
                     "tool_input": { "command": "echo hi" },
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         // Past the decision's own grace, so what follows is counted alone.
@@ -14275,6 +15083,7 @@ mod tests {
                     "cwd": "/srv/dev/ledger",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
 
@@ -14326,6 +15135,7 @@ mod tests {
                     "cwd": "/tmp",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         // A tool starts while the card waits — the run moved.
@@ -14341,6 +15151,7 @@ mod tests {
                     "cwd": "/tmp",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
 
@@ -14415,6 +15226,7 @@ mod tests {
                     "cwd": "/tmp",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         // The structured request for that same prompt, arriving afterwards.
@@ -14458,6 +15270,7 @@ mod tests {
                     "cwd": "/tmp",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
 
@@ -14490,6 +15303,7 @@ mod tests {
                     "cwd": "/tmp",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
 
@@ -14526,6 +15340,7 @@ mod tests {
                     "cwd": "/tmp",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         let row = daemon.store.find_session("claude:push-1").unwrap().unwrap();
@@ -14634,6 +15449,7 @@ mod tests {
                     "cwd": "/tmp",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await; // the twin: silent
         raise_prompt(&daemon, TEST_UID, "p-1", "echo one").await; // replay: silent
@@ -14731,6 +15547,7 @@ mod tests {
                 event: "SessionStart".into(),
                 payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         let adopted = daemon
@@ -14750,6 +15567,7 @@ mod tests {
                 event: "SessionStart".into(),
                 payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         let hosted = daemon.store.get_session(TEST_UID).unwrap().unwrap();
@@ -14821,6 +15639,7 @@ mod tests {
             event: event.into(),
             payload: json!({"hook_event_name": event, "cwd": "/tmp"}),
             wait: false,
+            holds_questions: false,
         };
         daemon.handle_hook(adopt("SessionStart")).await;
         let first = daemon.store.find_session("claude:conv-1").unwrap().unwrap();
@@ -14870,6 +15689,7 @@ mod tests {
                     "transcript_path": "/tmp/conv-2.jsonl"
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         let row = daemon.store.find_session("claude:conv-2").unwrap().unwrap();
@@ -18325,6 +19145,7 @@ mod tests {
             event: "Stop".into(),
             payload: json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"}),
             wait: false,
+            holds_questions: false,
         };
         claude.handle_hook(stop()).await;
         claude
@@ -20165,6 +20986,7 @@ mod tests {
                         event: "SessionStart".into(),
                         payload: json!({"hook_event_name": "SessionStart", "cwd": "/tmp"}),
                         wait: false,
+                        holds_questions: false,
                     })
                     .await;
             }
@@ -20546,6 +21368,7 @@ mod tests {
                     "tool_input": {"command": "rm -rf /tmp/build"},
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
 
@@ -20574,6 +21397,7 @@ mod tests {
                     "tool_input": {"file_path": "/tmp/x"},
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         let event = daemon
@@ -20606,6 +21430,7 @@ mod tests {
                     "tool_use_id": "toolu_local",
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         daemon
@@ -20620,6 +21445,7 @@ mod tests {
                     "tool_input": tool_input,
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         "toolu_local".to_string()
@@ -20646,6 +21472,7 @@ mod tests {
                     "tool_use_id": request_id,
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         daemon.sweep_local_resolutions().await;
@@ -20723,6 +21550,7 @@ mod tests {
                     "tool_use_id": request_id,
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         daemon.sweep_local_resolutions().await;
@@ -22232,6 +23060,7 @@ mod tests {
                     "tool_input": { "command": "touch /tmp/a" },
                 }),
                 wait: false,
+                holds_questions: false,
             })
             .await;
         let before = ledger_rows(&db, uid);
@@ -22564,6 +23393,7 @@ mod tests {
                     "tool_input": { "command": "touch /tmp/a" },
                 }),
                 wait: true,
+                holds_questions: false,
             })
             .await;
 
@@ -26249,6 +27079,7 @@ mod tests {
             risk: None,
             generation: 1,
             identity_bound: false,
+            question_hold: None,
         };
         // A live receiver, because a held hook is the case that writes the most:
         // with a responder to answer through, `apply_decision` needs no supervisor
@@ -26271,6 +27102,7 @@ mod tests {
                 project_label: "cc-1".into(),
                 generation: 1,
                 prompt: None,
+                question: None,
             },
         );
 
@@ -26396,6 +27228,7 @@ mod tests {
             risk: None,
             generation: 1,
             identity_bound: false,
+            question_hold: None,
         };
         daemon.inner.lock().await.pending.insert(
             (uid.to_string(), request_id.to_string()),
@@ -26414,6 +27247,7 @@ mod tests {
                 project_label: "cc-1".into(),
                 generation: 1,
                 prompt: None,
+                question: None,
             },
         );
 
@@ -27559,5 +28393,1218 @@ mod tests {
             daemon.inner.lock().await.pending.is_empty(),
             "and leaves nothing in memory to ring about"
         );
+    }
+
+    // --------------------------------------------- AskUserQuestion (minor 21)
+
+    /// A live 2.1.286 session's hooks for one 4-question `AskUserQuestion`.
+    const QUESTION_HOOKS: &str = include_str!("../../../fixtures/claude/askuq-4q-2.1.286.jsonl");
+    /// The same question answered at the keyboard: its `PostToolUse`.
+    const QUESTION_KEYBOARD: &str =
+        include_str!("../../../fixtures/claude/askuq-4q-keyboard-posttooluse-2.1.286.json");
+    /// The question dialog on the pane, as 2.1.286 draws it.
+    const QUESTION_PANE: &str = include_str!("../../../fixtures/claude/askuq-4q-pane-2.1.286.txt");
+
+    fn question_hook(event: &str) -> serde_json::Value {
+        QUESTION_HOOKS
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|hook| hook["hook_event_name"] == event)
+            .unwrap()
+    }
+
+    fn question_input() -> serde_json::Value {
+        question_hook("PermissionRequest")["tool_input"].clone()
+    }
+
+    fn question_hash() -> String {
+        protocol::hash::approval_payload_hash("AskUserQuestion", &question_input())
+    }
+
+    /// The `tool_use_id` the fixture's `PreToolUse` names, which the card is
+    /// joined to and the `PostToolUse` names again.
+    const QUESTION_ID: &str = "toolu_fake_7440824";
+
+    /// The choices the keyboard made in the fixture.
+    fn keyboard_choices() -> Vec<protocol::ws::QuestionAnswer> {
+        use protocol::ws::QuestionAnswer;
+        vec![
+            QuestionAnswer {
+                selected: vec![0],
+                ..Default::default()
+            },
+            QuestionAnswer {
+                selected: vec![0, 2],
+                ..Default::default()
+            },
+            QuestionAnswer {
+                other: Some("Archive it under docs/plans, café ☕".into()),
+                ..Default::default()
+            },
+            QuestionAnswer {
+                selected: vec![1],
+                notes: Some("wider screens only".into()),
+                other: None,
+            },
+        ]
+    }
+
+    fn post(uid: &str, payload: serde_json::Value, wait: bool) -> HookPost {
+        HookPost {
+            session_id: "cc-1".into(),
+            session_uid: Some(uid.to_string()),
+            event: payload["hook_event_name"].as_str().unwrap().to_string(),
+            payload,
+            wait,
+            holds_questions: wait,
+        }
+    }
+
+    /// A question held the way cc-hook holds one, on a connection whose closing
+    /// the test controls: dropping the returned sender is Claude ending the hook.
+    struct HeldQuestion {
+        hook: tokio::task::JoinHandle<HookOutcome>,
+        end_hook: oneshot::Sender<()>,
+    }
+
+    async fn raise_question(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        agent_id: Option<&str>,
+        holds_questions: bool,
+    ) -> HeldQuestion {
+        daemon
+            .handle_hook(post(uid, question_hook("PreToolUse"), false))
+            .await;
+        let mut request = question_hook("PermissionRequest");
+        if let Some(agent_id) = agent_id {
+            request["agent_id"] = json!(agent_id);
+            request["agent_type"] = json!("fork");
+        }
+        let mut request = post(uid, request, true);
+        request.holds_questions = holds_questions;
+        let (end_hook, ended) = oneshot::channel::<()>();
+        let hook = {
+            let daemon = Arc::clone(daemon);
+            tokio::spawn(async move {
+                let mut gone = Box::pin(async move {
+                    let _ = ended.await;
+                });
+                daemon.handle_hook_held(request, &mut gone).await
+            })
+        };
+        let id = (uid.to_string(), QUESTION_ID.to_string());
+        for _ in 0..200 {
+            let ready = daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .get(&id)
+                .is_some_and(|entry| {
+                    entry.responder.is_some()
+                        || entry.card.question_hold != Some(QuestionHold::Held)
+                });
+            if ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        HeldQuestion { hook, end_hook }
+    }
+
+    /// The held hook's answer, failing the test rather than hanging it when the
+    /// hook is never let go.
+    async fn returned(hook: tokio::task::JoinHandle<HookOutcome>) -> HookOutcome {
+        tokio::time::timeout(Duration::from_secs(10), hook)
+            .await
+            .expect("the held hook never returned")
+            .unwrap()
+    }
+
+    async fn question_ran(daemon: &Arc<Daemon>, uid: &str, tool_input: serde_json::Value) {
+        let mut ran = question_hook("PostToolUse");
+        ran["tool_input"] = tool_input;
+        daemon.handle_hook(post(uid, ran, false)).await;
+    }
+
+    fn card_hold(daemon: &Daemon, uid: &str) -> Option<QuestionHold> {
+        daemon
+            .inner
+            .try_lock()
+            .unwrap()
+            .pending
+            .get(&(uid.to_string(), QUESTION_ID.to_string()))
+            .and_then(|entry| entry.card.question_hold)
+    }
+
+    async fn answer_question(daemon: &Arc<Daemon>, decision: AnswerDecision) -> AnswerResult {
+        daemon
+            .answer(QUESTION_ID, &question_hash(), decision, Some("cc-1"))
+            .await
+    }
+
+    /// **The bug this unit exists for.** Claude asks every `AskUserQuestion`
+    /// through a `PermissionRequest`, so it arrived as an approval, and Allow
+    /// typed `1` and Enter into the question dialog: measured live, that picked
+    /// the first question's first option and ticked a box in the second, and
+    /// nobody had chosen either. Both answer paths are covered, the typed one
+    /// (no held hook) and the hook-return one (`hold_ms`): nothing a decision
+    /// meant for a permission can do is done to a question.
+    #[tokio::test]
+    async fn allow_on_a_question_card_chooses_nothing_in_either_answer_path() {
+        for hold_ms in [0, 5_000] {
+            let daemon = daemon_with(Config {
+                hold_ms,
+                ..Config::default()
+            });
+            let uid = TEST_UID;
+            let supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+            // An older cc-hook: the question is not held, which is exactly the
+            // card an older phone answers.
+            let raised = raise_question(&daemon, uid, None, false).await;
+            assert!(
+                wait_bound(&daemon, uid, QUESTION_ID).await,
+                "the dialog binds"
+            );
+
+            for decision in [
+                AnswerDecision::Allow,
+                AnswerDecision::Option { index: 1 },
+                AnswerDecision::Text { text: "1".into() },
+            ] {
+                match answer_question(&daemon, decision.clone()).await {
+                    AnswerResult::Rejected { reason } => assert!(
+                        reason.contains("asking you a question"),
+                        "{decision:?}: {reason}"
+                    ),
+                    other => panic!("hold_ms {hold_ms}, {decision:?} must be refused: {other:?}"),
+                }
+            }
+            assert!(
+                supervisor.typed().is_empty(),
+                "hold_ms {hold_ms}: typed {:?}",
+                supervisor.typed()
+            );
+            assert!(
+                daemon
+                    .store
+                    .answer_claim(uid, QUESTION_ID)
+                    .unwrap()
+                    .is_none(),
+                "nothing was claimed"
+            );
+            assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::AtMac));
+            // Deny is still Escape, as it always was for this card.
+            match answer_question(&daemon, AnswerDecision::Deny).await {
+                AnswerResult::Applied { outcome } => {
+                    assert_eq!(outcome.applied_via, AnswerPath::SendKeys)
+                }
+                other => panic!("deny must still escape: {other:?}"),
+            }
+            assert_eq!(supervisor.typed(), vec!["\u{1b}".to_string()]);
+            drop(raised.end_hook);
+        }
+    }
+
+    /// The phone's answer goes back through the held hook as exactly what the
+    /// keyboard produces, and is recorded as applied only once the
+    /// `PostToolUse` shows Claude ran with it. Nothing is typed.
+    #[tokio::test]
+    async fn a_held_question_is_answered_through_its_hook_and_confirmed_by_its_result() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                answer_question(
+                    &daemon,
+                    AnswerDecision::Answers {
+                        answers: keyboard_choices(),
+                    },
+                )
+                .await
+            })
+        };
+        let returned = returned(raised.hook).await.decision;
+        assert_eq!(returned.decision, Decision::Allow);
+        let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
+        let sent = returned.updated_input.expect("an answer carries its input");
+        assert_eq!(sent["answers"], keyboard["tool_input"]["answers"]);
+        assert_eq!(sent["annotations"], keyboard["tool_input"]["annotations"]);
+
+        // Claude runs the tool with what it was handed.
+        question_ran(&daemon, uid, sent).await;
+        match answering.await.unwrap() {
+            AnswerResult::Applied { outcome } => {
+                assert_eq!(outcome.resolved_by, ResolvedBy::Phone);
+                assert_eq!(outcome.applied_via, AnswerPath::HookReturn);
+            }
+            other => panic!("the confirmed answer is applied: {other:?}"),
+        }
+        assert!(supervisor.typed().is_empty(), "{:?}", supervisor.typed());
+        // One answer per request: a second tap replays the first.
+        assert!(matches!(
+            answer_question(
+                &daemon,
+                AnswerDecision::Answers {
+                    answers: keyboard_choices()
+                }
+            )
+            .await,
+            AnswerResult::Duplicate { .. }
+        ));
+    }
+
+    /// First complete answer wins, in both orders. The Mac first: its
+    /// `PostToolUse` lets the held hook go and the phone's later answer is
+    /// refused. The phone's answer racing a Mac answer that Claude took first:
+    /// the `PostToolUse` carries the Mac's choices, and the phone is told so.
+    #[tokio::test]
+    async fn the_first_complete_answer_wins_whichever_end_gives_it() {
+        let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
+
+        // The Mac first.
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
+        assert_eq!(
+            returned(raised.hook).await.decision.decision,
+            Decision::Passthrough,
+            "the held hook is let go without a decision"
+        );
+        match answer_question(
+            &daemon,
+            AnswerDecision::Answers {
+                answers: keyboard_choices(),
+            },
+        )
+        .await
+        {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("answered at the Mac"), "{reason}")
+            }
+            other => panic!("the late phone answer is refused: {other:?}"),
+        }
+        daemon.sweep_local_resolutions().await;
+        let (_, outcome) = daemon
+            .db
+            .get_answer(uid.to_string(), QUESTION_ID.to_string())
+            .await
+            .unwrap()
+            .expect("resolved");
+        assert_eq!(outcome.resolved_by, ResolvedBy::Local);
+        assert!(!outcome.inferred, "a tool result is an observation");
+
+        // The phone's answer, beaten inside Claude by the Mac's.
+        let daemon = test_daemon();
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let mut other = keyboard_choices();
+        other[0].selected = vec![1];
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                answer_question(&daemon, AnswerDecision::Answers { answers: other }).await
+            })
+        };
+        assert_eq!(
+            returned(raised.hook).await.decision.decision,
+            Decision::Allow
+        );
+        question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
+        match answering.await.unwrap() {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("answered at the Mac first"), "{reason}")
+            }
+            other => panic!("the beaten answer is not applied: {other:?}"),
+        }
+        assert!(daemon
+            .store
+            .answer_claim(uid, QUESTION_ID)
+            .unwrap()
+            .is_none());
+    }
+
+    /// Claude validates nothing in a hook's answer (measured: two answers of
+    /// four, and a label from nowhere, are both taken), so a bad one is refused
+    /// here, before anything is claimed, and the question stays answerable.
+    #[tokio::test]
+    async fn an_incomplete_answer_is_refused_and_the_question_stays_held() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let mut partial = keyboard_choices();
+        partial.truncate(2);
+        match answer_question(&daemon, AnswerDecision::Answers { answers: partial }).await {
+            AnswerResult::Rejected { reason } => assert!(reason.contains("2 answer(s) for 4")),
+            other => panic!("{other:?}"),
+        }
+        {
+            let inner = daemon.inner.lock().await;
+            let entry = inner
+                .pending
+                .get(&(uid.to_string(), QUESTION_ID.to_string()))
+                .unwrap();
+            assert!(!entry.claimed);
+            assert!(entry.responder.is_some(), "the hook is still held");
+        }
+        assert!(daemon
+            .store
+            .answer_claim(uid, QUESTION_ID)
+            .unwrap()
+            .is_none());
+        assert!(!raised.hook.is_finished());
+        drop(raised.end_hook);
+    }
+
+    /// A decline without words is Escape (`interrupt`: the turn stops); with
+    /// words it hands Claude the words and the turn goes on. An older phone's
+    /// Deny on a held question is the first.
+    #[tokio::test]
+    async fn a_decline_stops_the_turn_and_a_reply_hands_claude_the_words() {
+        for (decision, interrupt, message) in [
+            (AnswerDecision::Decline { message: None }, true, None),
+            (AnswerDecision::Deny, true, None),
+            (
+                AnswerDecision::Decline {
+                    message: Some("use the staging bucket".into()),
+                },
+                false,
+                Some("use the staging bucket"),
+            ),
+        ] {
+            let daemon = test_daemon();
+            let uid = TEST_UID;
+            let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+            let raised = raise_question(&daemon, uid, None, true).await;
+            let answering = {
+                let daemon = Arc::clone(&daemon);
+                let decision = decision.clone();
+                tokio::spawn(async move { answer_question(&daemon, decision).await })
+            };
+            let returned = returned(raised.hook).await.decision;
+            assert_eq!(returned.decision, Decision::Deny, "{decision:?}");
+            assert_eq!(returned.interrupt, interrupt, "{decision:?}");
+            assert!(returned.updated_input.is_none());
+            if let Some(message) = message {
+                assert_eq!(returned.reason.as_deref(), Some(message));
+            }
+            match answering.await.unwrap() {
+                AnswerResult::Applied { outcome } => {
+                    assert_eq!(outcome.applied_via, AnswerPath::HookReturn)
+                }
+                other => panic!("{decision:?}: {other:?}"),
+            }
+        }
+    }
+
+    /// A background agent's question declined from the phone is denied the way
+    /// Escape at its dialog denies it, without an interrupt: an interrupt stops
+    /// the agent and leaves it waiting on a tool result forever.
+    #[tokio::test]
+    async fn a_background_agent_s_decline_lets_the_agent_carry_on() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let id = (uid.to_string(), QUESTION_ID.to_string());
+        daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .get_mut(&id)
+            .and_then(|entry| entry.question.as_mut())
+            .unwrap()
+            .fork = true;
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                answer_question(&daemon, AnswerDecision::Decline { message: None }).await
+            })
+        };
+        let returned = returned(raised.hook).await.decision;
+        assert_eq!(returned.decision, Decision::Deny);
+        assert!(!returned.interrupt);
+        assert!(matches!(
+            answering.await.unwrap(),
+            AnswerResult::Applied { .. }
+        ));
+    }
+
+    /// "Chat about this" at the Mac denies the question without running the
+    /// tool or ending the hook. The end of the main conversation's turn shows
+    /// the question is gone: the hook is let go and the card closed, so the
+    /// phone is not left answering a question that no longer exists. A
+    /// background agent's events, and the question's own, prove nothing about
+    /// the main conversation's question.
+    #[tokio::test]
+    async fn the_main_conversation_moving_on_ends_its_held_question() {
+        {
+            let moved_on = question_hook("Stop");
+            let daemon = test_daemon();
+            let uid = TEST_UID;
+            let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+            let raised = raise_question(&daemon, uid, None, true).await;
+
+            let mut agent_event = moved_on.clone();
+            agent_event["agent_id"] = json!("a02422e26e1da95bb");
+            if let Some(input) = agent_event["tool_input"].as_object_mut() {
+                input.insert("command".into(), json!("false"));
+            }
+            daemon.handle_hook(post(uid, agent_event, false)).await;
+            daemon
+                .handle_hook(post(uid, question_hook("PreToolUse"), false))
+                .await;
+            assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
+
+            daemon.handle_hook(post(uid, moved_on.clone(), false)).await;
+            assert_eq!(
+                returned(raised.hook).await.decision.decision,
+                Decision::Passthrough
+            );
+            let id = (uid.to_string(), QUESTION_ID.to_string());
+            assert!(!daemon.inner.lock().await.pending.contains_key(&id));
+            match answer_question(
+                &daemon,
+                AnswerDecision::Answers {
+                    answers: keyboard_choices(),
+                },
+            )
+            .await
+            {
+                AnswerResult::Duplicate { outcome, .. } => {
+                    assert_eq!(outcome.resolved_by, ResolvedBy::Local);
+                    assert!(outcome.inferred);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// Only the end of the main conversation's turn closes its question. A
+    /// replayed `PermissionRequest` for the question itself, a `PostToolUse`
+    /// late for an earlier tool, and the `PreToolUse` and `PermissionRequest`
+    /// of a tool asked for in the same message, which Claude fires together
+    /// with the question's, prove nothing.
+    #[tokio::test]
+    async fn a_replayed_request_or_a_late_sibling_leaves_the_question_held() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let mut late_result = question_hook("PostToolUse");
+        late_result["tool_use_id"] = json!("toolu_fake_earlier");
+        late_result["tool_name"] = json!("Bash");
+        daemon.handle_hook(post(uid, late_result, false)).await;
+        let mut sibling = question_hook("PreToolUse");
+        sibling["tool_use_id"] = json!("toolu_fake_sibling");
+        sibling["tool_name"] = json!("Read");
+        sibling["tool_input"] = json!({ "file_path": "/etc/hosts" });
+        daemon.handle_hook(post(uid, sibling.clone(), false)).await;
+        let mut sibling_request = question_hook("PermissionRequest");
+        sibling_request["tool_name"] = sibling["tool_name"].clone();
+        sibling_request["tool_input"] = sibling["tool_input"].clone();
+        daemon.handle_hook(post(uid, sibling_request, false)).await;
+        daemon
+            .handle_hook(post(uid, question_hook("PermissionRequest"), false))
+            .await;
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
+        assert!(!raised.hook.is_finished());
+    }
+
+    /// Claude ending the hook while a phone answer has the card claimed — the
+    /// claim landing at any moment before the close takes the card: the close
+    /// backs off for the claim, and the claim then finds the hook gone. The
+    /// card must not be left held with nothing holding it.
+    #[tokio::test]
+    async fn the_hook_ending_under_a_phone_claim_does_not_leave_the_card_held() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let id = (uid.to_string(), QUESTION_ID.to_string());
+        daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .get_mut(&id)
+            .unwrap()
+            .claimed = true;
+        drop(raised.end_hook);
+        returned(raised.hook).await;
+        daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .get_mut(&id)
+            .unwrap()
+            .claimed = false;
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Ended));
+    }
+
+    /// A phone answer whose claim cannot be written sends nothing and lets go
+    /// of nothing: the question stays held, and the next answer is taken —
+    /// from the phone, or at the Mac, whose answer releases the hook.
+    #[tokio::test]
+    async fn a_claim_that_cannot_be_recorded_leaves_the_question_held() {
+        for mac_answers in [false, true] {
+            claim_fails_then(mac_answers).await;
+        }
+    }
+
+    async fn claim_fails_then(mac_answers: bool) {
+        let (store, path) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let sql = rusqlite::Connection::open(&path).unwrap();
+        sql.execute_batch(
+            "CREATE TRIGGER no_room BEFORE INSERT ON answer_claims \
+             BEGIN SELECT RAISE(FAIL, 'database or disk is full'); END;",
+        )
+        .unwrap();
+        match answer_question(&daemon, AnswerDecision::Decline { message: None }).await {
+            AnswerResult::Rejected { reason } => {
+                assert!(reason.contains("nothing was typed"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!raised.hook.is_finished());
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
+        sql.execute_batch("DROP TRIGGER no_room").unwrap();
+        if mac_answers {
+            let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
+            question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
+            assert_eq!(
+                returned(raised.hook).await.decision.decision,
+                Decision::Passthrough
+            );
+            return;
+        }
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                answer_question(&daemon, AnswerDecision::Decline { message: None }).await
+            })
+        };
+        assert_eq!(
+            returned(raised.hook).await.decision.decision,
+            Decision::Deny
+        );
+        assert!(matches!(
+            answering.await.unwrap(),
+            AnswerResult::Applied { .. }
+        ));
+    }
+
+    /// A phone answer Claude takes from the hook but never runs with — the
+    /// question was gone at the Mac, "Chat about this" before the turn ended —
+    /// is recorded as unknown, as handed to Claude and never confirmed, never as
+    /// a daemon that stopped while typing.
+    #[tokio::test]
+    async fn an_answer_claude_never_confirms_is_recorded_as_unknown() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                answer_question(
+                    &daemon,
+                    AnswerDecision::Answers {
+                        answers: keyboard_choices(),
+                    },
+                )
+                .await
+            })
+        };
+        assert_eq!(
+            returned(raised.hook).await.decision.decision,
+            Decision::Allow
+        );
+        match answering.await.unwrap() {
+            AnswerResult::Duplicate { outcome, .. } => {
+                assert!(outcome.indeterminate);
+                assert_eq!(outcome.applied_via, AnswerPath::HookReturn);
+                let detail = outcome.detail.unwrap_or_default();
+                assert!(detail.contains("never said which answer"), "{detail}");
+                assert!(!detail.contains("daemon stopped"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The Mac answers while a phone answer's claim waits on a write that then
+    /// fails, and the turn ends before the writes clear: Claude ran with the
+    /// Mac's answer, so the hook is let go and the card closes as answered at
+    /// the Mac — not held for an answer that can no longer count, and not
+    /// declined by the end of the turn.
+    #[tokio::test]
+    async fn a_mac_answer_during_a_failing_claim_closes_the_card_as_the_mac_s() {
+        let (store, path) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        // The claim's write waits on another process's lock, then fails.
+        let foreign = rusqlite::Connection::open(&path).unwrap();
+        foreign
+            .execute_batch(
+                "CREATE TRIGGER no_room BEFORE INSERT ON answer_claims \
+                 BEGIN SELECT RAISE(FAIL, 'database or disk is full'); END; \
+                 BEGIN IMMEDIATE;",
+            )
+            .unwrap();
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                answer_question(
+                    &daemon,
+                    AnswerDecision::Answers {
+                        answers: keyboard_choices(),
+                    },
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mac = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
+                question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let turn_ended = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .handle_hook(post(uid, question_hook("Stop"), false))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        foreign.execute_batch("ROLLBACK").unwrap();
+        let refused = answering.await.unwrap();
+        mac.await.unwrap();
+        turn_ended.await.unwrap();
+        assert!(
+            matches!(refused, AnswerResult::Rejected { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            returned(raised.hook).await.decision.decision,
+            Decision::Passthrough
+        );
+        daemon.sweep_local_resolutions().await;
+        match answer_question(&daemon, AnswerDecision::Decline { message: None }).await {
+            AnswerResult::Duplicate { outcome, .. } => {
+                assert_eq!(outcome.resolved_by, ResolvedBy::Local);
+                assert_eq!(
+                    outcome.decision,
+                    AnswerDecision::Answers {
+                        answers: Vec::new()
+                    }
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The same race with the other process's lock held throughout: the phone
+    /// hears its answer refused when the claim's write gives up, not after the
+    /// Mac's record of the question waits out the same lock, and that record
+    /// is made once the lock clears.
+    #[tokio::test]
+    async fn a_failing_claim_is_answered_without_waiting_on_the_mac_s_record() {
+        let (store, path) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let foreign = rusqlite::Connection::open(&path).unwrap();
+        foreign.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                answer_question(
+                    &daemon,
+                    AnswerDecision::Answers {
+                        answers: keyboard_choices(),
+                    },
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mac = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
+                question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
+            })
+        };
+        // The claim gives up after the store's five-second busy wait; the
+        // record behind it would take that again per write.
+        let refused = tokio::time::timeout(Duration::from_secs(8), answering).await;
+        foreign.execute_batch("ROLLBACK").unwrap();
+        mac.await.unwrap();
+        let refused = refused
+            .expect("the reply waited on the Mac's record")
+            .unwrap();
+        assert!(
+            matches!(refused, AnswerResult::Rejected { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(
+            returned(raised.hook).await.decision.decision,
+            Decision::Passthrough
+        );
+        let recorded = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                daemon.sweep_local_resolutions().await;
+                if let Some(event) =
+                    approval_events(&daemon, uid, EventKind::ApprovalResolved).pop()
+                {
+                    return event.payload;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the Mac's answer was never recorded");
+        assert_eq!(recorded["resolved_by"], "local");
+        assert_eq!(
+            recorded["decision"],
+            serde_json::json!({"type": "answers", "answers": []})
+        );
+    }
+
+    /// A question answered at the Mac is settled the moment its `PostToolUse`
+    /// arrives, before anything is written: with the database locked by another
+    /// process, the held hook is let go at once, not after the write waits.
+    #[tokio::test]
+    async fn a_question_s_result_is_settled_before_anything_is_written() {
+        let (store, path) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let foreign = rusqlite::Connection::open(&path).unwrap();
+        foreign.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mac = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
+                question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
+            })
+        };
+        let released = tokio::time::timeout(Duration::from_secs(2), raised.hook).await;
+        foreign.execute_batch("ROLLBACK").unwrap();
+        mac.await.unwrap();
+        assert_eq!(
+            released
+                .expect("the hook waited on the write")
+                .unwrap()
+                .decision
+                .decision,
+            Decision::Passthrough
+        );
+    }
+
+    /// A question's doorbell says it is a question, not an approval.
+    #[tokio::test]
+    async fn a_question_rings_as_a_question() {
+        let (daemon, capture) = capture_daemon();
+        let _raised = raise_question(&daemon, TEST_UID, None, true).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings = capture.0.lock().unwrap();
+        assert_eq!(rings.len(), 1, "{rings:?}");
+        assert_eq!(rings[0].0.kind, crate::apns::PushKind::Question);
+    }
+
+    /// A background agent's question is not the main conversation's: the main
+    /// conversation going on says nothing about it.
+    #[tokio::test]
+    async fn the_main_conversation_moving_on_leaves_a_background_question_held() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let id = (uid.to_string(), QUESTION_ID.to_string());
+        daemon
+            .inner
+            .lock()
+            .await
+            .pending
+            .get_mut(&id)
+            .and_then(|entry| entry.question.as_mut())
+            .unwrap()
+            .fork = true;
+        daemon
+            .handle_hook(post(uid, question_hook("Stop"), false))
+            .await;
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
+        assert!(!raised.hook.is_finished());
+    }
+
+    /// Claude ending a held question's hook — Escape or the session ending —
+    /// closes the card, from a session whose hook timeout is Claude's
+    /// maximum. From an older session it may be the old two-minute timeout with
+    /// the question still on the Mac, so the card only stops being answerable.
+    #[tokio::test]
+    async fn the_hook_ending_closes_the_card_or_ends_its_hold() {
+        for (minor, resolved) in [(protocol::PROTOCOL_MINOR, true), (20, false)] {
+            let daemon = test_daemon();
+            let uid = TEST_UID;
+            let _supervisor = attach_speaking(&daemon, "cc-1", uid, QUESTION_PANE, "", minor).await;
+            let raised = raise_question(&daemon, uid, None, true).await;
+            drop(raised.end_hook);
+            assert_eq!(
+                returned(raised.hook).await.decision.decision,
+                Decision::Passthrough
+            );
+            let answer = daemon
+                .db
+                .get_answer(uid.to_string(), QUESTION_ID.to_string())
+                .await
+                .unwrap();
+            if resolved {
+                let (_, outcome) = answer.expect("closed");
+                assert_eq!(outcome.resolved_by, ResolvedBy::Local);
+                assert_eq!(outcome.decision, AnswerDecision::Decline { message: None });
+                assert!(outcome.inferred);
+            } else {
+                assert!(answer.is_none());
+                assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Ended));
+                assert!(daemon
+                    .store
+                    .events_after(uid, 0, 1000)
+                    .unwrap()
+                    .iter()
+                    .any(
+                        |event| event.kind == EventKind::Other("question_hold".into())
+                            && event.payload["question_hold"] == "ended"
+                    ));
+                match answer_question(
+                    &daemon,
+                    AnswerDecision::Answers {
+                        answers: keyboard_choices(),
+                    },
+                )
+                .await
+                {
+                    AnswerResult::Rejected { reason } => {
+                        assert!(reason.contains("not being held"), "{reason}")
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
+    }
+
+    /// A held background agent's question waits as long as Claude does: the
+    /// 15-minute expiry, a newer prompt from the main conversation, and the pane
+    /// sweep (which would read the idle composer behind it as "answered") leave
+    /// it alone, and it is still answerable after all three.
+    #[tokio::test]
+    async fn a_held_question_outlasts_expiry_newer_prompts_and_the_pane_sweep() {
+        let daemon = daemon_with(Config {
+            local_resolve_grace_ms: 1_000,
+            ..Config::default()
+        });
+        let uid = TEST_UID;
+        let supervisor = attach(&daemon, "cc-1", uid, COMPOSER_PANE, "").await;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        {
+            let mut inner = daemon.inner.lock().await;
+            let entry = inner
+                .pending
+                .get_mut(&(uid.to_string(), QUESTION_ID.to_string()))
+                .unwrap();
+            entry.question.as_mut().unwrap().fork = true;
+            // Backdated so every age check is past its limit.
+            entry.created_ms -= 3_600_000;
+        }
+
+        daemon.expire_stale_approvals(0).await;
+        raise_prompt(&daemon, uid, "p-next", "git status").await;
+        for _ in 0..3 {
+            daemon.sweep_local_resolutions().await;
+        }
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
+        assert!(!raised.hook.is_finished());
+
+        let answering = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                answer_question(
+                    &daemon,
+                    AnswerDecision::Answers {
+                        answers: keyboard_choices(),
+                    },
+                )
+                .await
+            })
+        };
+        let sent = returned(raised.hook).await.decision.updated_input.unwrap();
+        question_ran(&daemon, uid, sent).await;
+        assert!(matches!(
+            answering.await.unwrap(),
+            AnswerResult::Applied { .. }
+        ));
+        assert!(supervisor.typed().is_empty());
+    }
+
+    /// A restart takes the held hook's connection with it: the question is at
+    /// the Mac, and the card says so instead of offering answers nothing can
+    /// deliver.
+    #[tokio::test]
+    async fn a_restart_ends_the_phone_s_hold() {
+        let store = shared_store();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = TEST_UID;
+        let _raised = raise_question(&daemon, uid, None, true).await;
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
+
+        let restarted = daemon_on(store, Config::default());
+        restarted.recover().await;
+        assert_eq!(card_hold(&restarted, uid), Some(QuestionHold::Ended));
+        assert!(restarted
+            .store
+            .events_after(uid, 0, 1000)
+            .unwrap()
+            .iter()
+            .any(
+                |event| event.kind == EventKind::Other("question_hold".into())
+                    && event.payload["question_hold"] == "ended"
+            ));
+    }
+
+    /// A background agent's question is drawn on the Mac only after its hook
+    /// returns, so it is held only while the daemon can see nobody is at the
+    /// Mac. Here it cannot see the session at all (no tmux), and so it does not
+    /// hide the question: the hook returns at once and the card is read-only.
+    #[tokio::test]
+    async fn a_background_question_the_daemon_cannot_see_around_goes_to_the_mac() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let raised = raise_question(&daemon, uid, Some("a02422e26e1da95bb"), true).await;
+        let outcome = returned(raised.hook).await;
+        assert_eq!(outcome.decision.decision, Decision::Ask);
+        assert_eq!(outcome.hidden_session, None);
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::AtMac));
+    }
+
+    /// The viewer half of a background question's hold: a viewer is told the
+    /// question is held when it registers, its first key hands the question to
+    /// the Mac (the hook returns with no decision, the card goes read-only),
+    /// and it is told the hold is over only once the hook has returned.
+    #[tokio::test]
+    async fn a_viewer_key_hands_a_held_background_question_to_the_mac() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let raised = raise_question(&daemon, uid, None, true).await;
+        let id = (uid.to_string(), QUESTION_ID.to_string());
+        daemon
+            .inner
+            .lock()
+            .await
+            .hidden_holds
+            .insert(id.clone(), "$7".into());
+
+        let (frames, mut told) = mpsc::channel(8);
+        let viewer = daemon.register_viewer("$7".into(), 4242, frames).await;
+        assert!(matches!(
+            told.try_recv(),
+            Ok(DaemonFrame::HiddenHold { held: true })
+        ));
+        let (other_frames, mut other) = mpsc::channel(8);
+        daemon
+            .register_viewer("$8".into(), 4343, other_frames)
+            .await;
+
+        daemon.viewer_key(viewer).await;
+        assert_eq!(
+            returned(raised.hook).await.decision.decision,
+            Decision::Passthrough
+        );
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::AtMac));
+        match answer_question(
+            &daemon,
+            AnswerDecision::Answers {
+                answers: keyboard_choices(),
+            },
+        )
+        .await
+        {
+            AnswerResult::Rejected { reason } => assert!(reason.contains("not being held")),
+            other => panic!("{other:?}"),
+        }
+
+        assert!(told.try_recv().is_err(), "not before the hook has closed");
+        daemon.inner.lock().await.hidden_holds.remove(&id);
+        daemon.hidden_hold_over("$7").await;
+        assert!(matches!(
+            told.try_recv(),
+            Ok(DaemonFrame::HiddenHold { held: false })
+        ));
+        assert!(
+            other.try_recv().is_err(),
+            "another session's viewer is not told"
+        );
+        daemon.unregister_viewer(viewer).await;
+        assert!(!daemon.inner.lock().await.viewers.contains_key(&viewer));
+    }
+
+    /// **What a phone reads for Claude's questions, as this build emits it.**
+    ///
+    /// `fixtures/claude/minor-21-wire.json` is the daemon's own bytes for every
+    /// question state the phone renders — a held card answered from the phone, a
+    /// hold that ended, a card at the Mac, and a question answered there — driven
+    /// through the production path from a live 2.1.286 question. The phone
+    /// decodes exactly this file in its tests, so a change to any of these shapes
+    /// must change the file, in the diff. Only clock reads are normalised.
+    #[tokio::test]
+    async fn the_minor_21_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-21-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        for key in [
+            "held_request",
+            "answered_from_phone",
+            "hold_ended",
+            "at_mac_request",
+            "answered_at_mac",
+        ] {
+            let _: Event = serde_json::from_value(committed[key].clone()).expect(key);
+        }
+        let card: ApprovalCard =
+            serde_json::from_value(committed["held_request"]["payload"]["card"].clone()).unwrap();
+        assert_eq!(card.question_hold, Some(QuestionHold::Held));
+        let outcome: AnswerOutcome =
+            serde_json::from_value(committed["answered_from_phone"]["payload"].clone()).unwrap();
+        assert_eq!(
+            outcome.decision,
+            AnswerDecision::Answers {
+                answers: keyboard_choices()
+            }
+        );
+        assert_eq!(
+            committed["hold_ended"]["payload"],
+            json!({"request_id": QUESTION_ID, "question_hold": "ended"})
+        );
+        assert_eq!(
+            derived_minor_21_wire().await,
+            committed,
+            "the committed minor-21 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_21_wire_fixture, then copy it over \
+             ios/CodeConnectTests/Resources/minor-21-wire.json"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-21-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_21_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_21_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-21-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    async fn derived_minor_21_wire() -> serde_json::Value {
+        let uid = TEST_UID;
+        let event = |daemon: &Daemon, kind: EventKind| {
+            let mut events = approval_events(daemon, uid, kind.clone());
+            assert_eq!(events.len(), 1, "one {kind:?}");
+            serde_json::to_value(events.remove(0)).unwrap()
+        };
+        let keyboard: serde_json::Value = serde_json::from_str(QUESTION_KEYBOARD).unwrap();
+
+        // Held, and answered from the phone.
+        let answered = test_daemon();
+        let _supervisor = attach(&answered, "cc-1", uid, QUESTION_PANE, "").await;
+        let raised = raise_question(&answered, uid, None, true).await;
+        let answering = {
+            let daemon = Arc::clone(&answered);
+            tokio::spawn(async move {
+                answer_question(
+                    &daemon,
+                    AnswerDecision::Answers {
+                        answers: keyboard_choices(),
+                    },
+                )
+                .await
+            })
+        };
+        let sent = returned(raised.hook).await.decision.updated_input.unwrap();
+        question_ran(&answered, uid, sent).await;
+        assert!(matches!(
+            answering.await.unwrap(),
+            AnswerResult::Applied { .. }
+        ));
+
+        // Held, then Claude ended the hook in a session from before this build.
+        let ended = test_daemon();
+        let _supervisor = attach_speaking(&ended, "cc-1", uid, QUESTION_PANE, "", 20).await;
+        let raised = raise_question(&ended, uid, None, true).await;
+        drop(raised.end_hook);
+        returned(raised.hook).await;
+
+        // Never held (an older cc-hook), and answered at the Mac.
+        let at_mac = test_daemon();
+        let _supervisor = attach(&at_mac, "cc-1", uid, QUESTION_PANE, "").await;
+        raise_question(&at_mac, uid, None, false).await;
+        question_ran(&at_mac, uid, keyboard["tool_input"].clone()).await;
+        at_mac.sweep_local_resolutions().await;
+
+        let mut out = json!({
+            "held_request": event(&answered, EventKind::ApprovalRequest),
+            "answered_from_phone": event(&answered, EventKind::ApprovalResolved),
+            "hold_ended": event(&ended, EventKind::Other("question_hold".into())),
+            "at_mac_request": event(&at_mac, EventKind::ApprovalRequest),
+            "answered_at_mac": event(&at_mac, EventKind::ApprovalResolved),
+        });
+        fn normalise(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, slot) in map.iter_mut() {
+                        if matches!(key.as_str(), "ts" | "resolved_at") {
+                            let was = slot.as_str().unwrap_or_default();
+                            assert!(
+                                was.len() == 24 && was.ends_with('Z'),
+                                "{key} was expected to be a clock read, and is {slot}"
+                            );
+                            *slot = json!("2026-10-03T00:00:00.000Z");
+                        } else {
+                            normalise(slot);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(normalise),
+                _ => {}
+            }
+        }
+        normalise(&mut out);
+        out
     }
 }

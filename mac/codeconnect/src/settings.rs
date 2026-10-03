@@ -102,9 +102,15 @@ fn build(
     // The gate: the one event where the agent waits for us.
     if let Some(gate) = config.gate_event() {
         let gate_name = gate.as_str().to_string();
-        // Claude kills the hook at this timeout; cc-hook self-bounds strictly
-        // earlier, so the timeout is a backstop that should never be reached.
-        let timeout_secs = config.gate_timeout_ms.div_ceil(1000) + 10;
+        // Claude kills the hook at this timeout. cc-hook bounds every wait of its
+        // own strictly earlier, except a question on `PermissionRequest`, which is
+        // held for the phone as long as Claude asks it: there the timeout is the
+        // bound, and it is the largest Claude can safely be given.
+        let timeout_secs = if gate == protocol::hook::HookEventName::PermissionRequest {
+            protocol::hook::CLAUDE_HOOK_TIMEOUT_MAX_SECS
+        } else {
+            config.gate_timeout_ms.div_ceil(1000) + 10
+        };
         hooks.insert(
             gate_name.clone(),
             json!([{
@@ -252,16 +258,31 @@ mod tests {
     fn claude_timeout_is_a_backstop_beyond_our_own_deadline() {
         let config = Config {
             gate_timeout_ms: 120_000,
+            gate_hook: "PreToolUse".into(),
             ..Config::default()
         };
         let document = plan(&config);
-        let timeout = document["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"]
+        let timeout = document["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"]
             .as_u64()
             .unwrap();
         assert!(
             timeout > 120,
             "claude must not kill the hook first: {timeout}"
         );
+    }
+
+    /// A question is held for as long as Claude asks it, so the gate on
+    /// `PermissionRequest` gets the largest timeout whose milliseconds fit the
+    /// 32-bit timer Claude arms it with.
+    #[test]
+    fn a_held_question_lasts_as_long_as_claude_lets_a_hook_run() {
+        let document = plan(&Config::default());
+        assert_eq!(
+            document["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"].as_u64(),
+            Some(2_147_483)
+        );
+        assert!(2_147_483_u64 * 1000 <= i32::MAX as u64);
+        assert!(2_147_484_u64 * 1000 > i32::MAX as u64);
     }
 
     #[test]

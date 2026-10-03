@@ -79,6 +79,12 @@ Each block starts from the repository root.
    Wait for CI to go green on that commit before tagging it — a tag is a
    claim the commit builds, and CI is the proof.
 
+   If the release changes `mac/push-relay`, deploy the relay from this commit
+   first ([`ops/push-relay/README.md`](ops/push-relay/README.md#deploy-and-rollback))
+   and confirm its `/readyz` reports this commit's SHA before tagging. A Mac
+   ahead of the relay still works — it rings a kind the relay refuses as one
+   it accepts — but says less than it should until the relay catches up.
+
 4. **Tag. The push builds and verifies a draft — it never publishes.**
 
    Pushing the tag starts `.github/workflows/release.yml`, which pins the
