@@ -3,6 +3,45 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Answer Claude's questions from the phone
+
+When Claude asks you to choose (its `AskUserQuestion`), the phone now shows the question
+itself instead of an approval with Allow and Deny: every question, its options and their
+descriptions, multiple choice where Claude allows it, "Other" in your own words wherever
+the Mac offers it, and the preview with a notes field where Claude offers one. Submit sends your answer to Claude as
+if you had chosen at the Mac; Decline does what Escape does (stops the turn, or for a background agent's question
+denies it and lets the agent carry on). The question stays on the Mac at the same time,
+and whichever answers first wins. Nothing is typed into the Mac's dialog. A decline is
+marked unconfirmed, as Claude does not say when it takes one.
+
+Before, Allow on such a question typed keys that chose options you never picked: on a
+question with several parts it picked the first answer of the first question, ticked a box
+in the second, and left Claude waiting while the phone said "Approved". A phone that has
+not been updated still shows the old card: its Deny declines a question waiting on the
+phone, and nothing else it sends is typed into a question.
+
+A question asked by a background agent is drawn by Claude only after CodeConnect lets it
+go, so it waits for the phone only while you are away from the Mac: no keyboard or mouse
+use anywhere on it in the last 10 seconds. Touch the keyboard or mouse and the question
+appears at the Mac a moment later (0.08 to 0.15 s from the input, measured). Nothing
+holds back what you type: keys typed as it appears are Claude's to handle, as when a
+question pops up while you type, so a key arriving as the dialog first draws is dropped
+and one a moment later answers it. If the daemon stops while such a question waits,
+Claude asks it at the Mac.
+
+A question whose text the Mac's dialog would show differently from what Claude wrote —
+invisible characters, more than eight accents or joiners stacked on one letter, emoji with
+a style selector — is answered at the Mac only; the phone says so. A preview the Mac does not
+show, being longer than 2,000 UTF-16 units, is not checked, and the answer leaves it out,
+as the Mac's does. Questions in scripts written
+with combining marks, such as Hindi, Thai or Hebrew with points, and joined emoji are
+answered from the phone. The phone's notification for a question says "Asking you a
+question"; a push relay that does not know questions yet rings it as an approval.
+
+A question now waits on the phone for as long as Claude waits for it. Sessions started
+before this update keep the old two-minute window, after which the card says to answer at
+the Mac.
+
 ## A second daemon no longer cuts the running one off
 
 Starting `ccd` by hand while the daemon was already running used to delete the running

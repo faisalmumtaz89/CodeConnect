@@ -1,0 +1,178 @@
+{
+ "session_id": "4cfa341f-dc90-4526-8cba-04b574bc4db7",
+ "transcript_path": "/scratch/cfg/projects/-scratch-work/4cfa341f-dc90-4526-8cba-04b574bc4db7.jsonl",
+ "cwd": "/scratch/work",
+ "prompt_id": "55f00269-9177-4e25-8f78-fc8a96dbdbbf",
+ "permission_mode": "auto",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "AskUserQuestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "How should snapshots be stored?",
+    "header": "Snapshots",
+    "options": [
+     {
+      "label": "Dedupe with hardlinks (Recommended)",
+      "description": "Saves space"
+     },
+     {
+      "label": "Delete all snapshots",
+      "description": "Frees everything"
+     }
+    ],
+    "multiSelect": false
+   },
+   {
+    "question": "Which checks should run before release?",
+    "header": "Checks",
+    "options": [
+     {
+      "label": "Unit tests",
+      "description": "fast"
+     },
+     {
+      "label": "Lint",
+      "description": "style"
+     },
+     {
+      "label": "Soak test",
+      "description": "slow"
+     }
+    ],
+    "multiSelect": true
+   },
+   {
+    "question": "Where should the plan archive go?",
+    "header": "Archive",
+    "options": [
+     {
+      "label": "Keep on disk (Recommended)",
+      "description": "untracked"
+     },
+     {
+      "label": "Commit it",
+      "description": "tracked"
+     }
+    ],
+    "multiSelect": false
+   },
+   {
+    "question": "Which layout do you prefer?",
+    "header": "Layout",
+    "options": [
+     {
+      "label": "Stacked",
+      "description": "one column",
+      "preview": "+------+\n| A    |\n+------+\n| B    |\n+------+"
+     },
+     {
+      "label": "Side by side",
+      "description": "two columns",
+      "preview": "+---+---+\n| A | B |\n+---+---+"
+     }
+    ],
+    "multiSelect": false
+   }
+  ],
+  "answers": {
+   "How should snapshots be stored?": "Dedupe with hardlinks (Recommended)",
+   "Which checks should run before release?": "Unit tests, Soak test",
+   "Where should the plan archive go?": "Archive it under docs/plans, café ☕",
+   "Which layout do you prefer?": "Side by side"
+  },
+  "annotations": {
+   "Which layout do you prefer?": {
+    "preview": "+---+---+\n| A | B |\n+---+---+",
+    "notes": "wider screens only"
+   }
+  }
+ },
+ "tool_response": {
+  "questions": [
+   {
+    "question": "How should snapshots be stored?",
+    "header": "Snapshots",
+    "options": [
+     {
+      "label": "Dedupe with hardlinks (Recommended)",
+      "description": "Saves space"
+     },
+     {
+      "label": "Delete all snapshots",
+      "description": "Frees everything"
+     }
+    ],
+    "multiSelect": false
+   },
+   {
+    "question": "Which checks should run before release?",
+    "header": "Checks",
+    "options": [
+     {
+      "label": "Unit tests",
+      "description": "fast"
+     },
+     {
+      "label": "Lint",
+      "description": "style"
+     },
+     {
+      "label": "Soak test",
+      "description": "slow"
+     }
+    ],
+    "multiSelect": true
+   },
+   {
+    "question": "Where should the plan archive go?",
+    "header": "Archive",
+    "options": [
+     {
+      "label": "Keep on disk (Recommended)",
+      "description": "untracked"
+     },
+     {
+      "label": "Commit it",
+      "description": "tracked"
+     }
+    ],
+    "multiSelect": false
+   },
+   {
+    "question": "Which layout do you prefer?",
+    "header": "Layout",
+    "options": [
+     {
+      "label": "Stacked",
+      "description": "one column",
+      "preview": "+------+\n| A    |\n+------+\n| B    |\n+------+"
+     },
+     {
+      "label": "Side by side",
+      "description": "two columns",
+      "preview": "+---+---+\n| A | B |\n+---+---+"
+     }
+    ],
+    "multiSelect": false
+   }
+  ],
+  "answers": {
+   "How should snapshots be stored?": "Dedupe with hardlinks (Recommended)",
+   "Which checks should run before release?": "Unit tests, Soak test",
+   "Where should the plan archive go?": "Archive it under docs/plans, café ☕",
+   "Which layout do you prefer?": "Side by side"
+  },
+  "annotations": {
+   "Which layout do you prefer?": {
+    "preview": "+---+---+\n| A | B |\n+---+---+",
+    "notes": "wider screens only"
+   }
+  }
+ },
+ "tool_use_id": "toolu_fake_7342005",
+ "duration_ms": 0
+}

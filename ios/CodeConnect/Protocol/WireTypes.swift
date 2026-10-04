@@ -419,6 +419,10 @@ enum EventKind: Sendable, Hashable {
     case userMessage, agentMessage, reasoning
     case usage, error
     case resync, linkState
+    /// A minor-21 daemon's change to whether the phone may answer an
+    /// `AskUserQuestion` card: `{request_id, question_hold}`. The latest one for
+    /// a request wins over the card's own value.
+    case questionHold
     case other(String)
 
     var rawValue: String {
@@ -438,6 +442,7 @@ enum EventKind: Sendable, Hashable {
         case .error: return "error"
         case .resync: return "resync"
         case .linkState: return "link_state"
+        case .questionHold: return "question_hold"
         case .other(let raw): return raw
         }
     }
@@ -459,6 +464,7 @@ enum EventKind: Sendable, Hashable {
         case "error": self = .error
         case "resync": self = .resync
         case "link_state": self = .linkState
+        case "question_hold": self = .questionHold
         default: self = .other(rawValue)
         }
     }
@@ -818,6 +824,11 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// phone that sent one would wait on a typed reply that is never coming.
     /// Hiding the button is not the same thing as not transmitting.
     var codexCompose: Bool { advertises(["codex_compose"]) }
+    /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
+    /// 21): its question cards carry `question_hold` and it takes the
+    /// `answers` and `decline` decisions. Absent is false — an older daemon
+    /// shows the question as an ordinary approval.
+    var questionCard: Bool { advertises(["question_card"]) }
     /// Which agents this daemon hosts. **Omitted entirely while it would only
     /// name Claude** (`ws.rs`), so empty and absent both read as `["claude"]`.
     var supportedAgents: [String] {
@@ -855,6 +866,14 @@ enum AnswerDecision: Sendable, Hashable {
     /// rather than position. Additive to `option`.
     case optionId(String)
     case text(String)
+    /// Answers to Claude's `AskUserQuestion`, one per question in card order
+    /// (minor 21). The daemon builds Claude's answer from the question it
+    /// stored and these indices; nothing is typed.
+    case answers([QuestionAnswer])
+    /// Decline an `AskUserQuestion` (minor 21), as Escape at its dialog does:
+    /// the main conversation's turn stops, and a background agent's question
+    /// is denied while the agent carries on.
+    case decline
     /// A decision kind a newer daemon knows about and this build does not.
     /// Never sent — only received, inside a recorded outcome. Throwing here
     /// instead would make the *whole* `answer_result` frame undecodable, and the
@@ -865,7 +884,7 @@ enum AnswerDecision: Sendable, Hashable {
 
 extension AnswerDecision: Codable {
     private enum CodingKeys: String, CodingKey {
-        case type, index, text
+        case type, index, text, answers
         case optionId = "option_id"
     }
 
@@ -877,6 +896,8 @@ extension AnswerDecision: Codable {
         case "option": self = .option(index: try c.decode(UInt32.self, forKey: .index))
         case "option_id": self = .optionId(try c.decode(String.self, forKey: .optionId))
         case "text": self = .text(try c.decode(String.self, forKey: .text))
+        case "answers": self = .answers(try c.decode([QuestionAnswer].self, forKey: .answers))
+        case "decline": self = .decline
         case let other: self = .unrecognised(other)
         }
     }
@@ -897,6 +918,11 @@ extension AnswerDecision: Codable {
         case .text(let text):
             try c.encode("text", forKey: .type)
             try c.encode(text, forKey: .text)
+        case .answers(let answers):
+            try c.encode("answers", forKey: .type)
+            try c.encode(answers, forKey: .answers)
+        case .decline:
+            try c.encode("decline", forKey: .type)
         case .unrecognised(let raw):
             try c.encode(raw, forKey: .type)
         }
@@ -909,8 +935,88 @@ extension AnswerDecision: Codable {
         case .option(let index): return "Chose option \(index)"
         case .optionId(let id): return "Chose option \(id)"
         case .text: return "Replied with text"
+        case .answers: return "Answered"
+        case .decline: return "Declined"
         case .unrecognised(let raw): return "Answered (\(raw))"
         }
+    }
+}
+
+/// One question's answer on an `AskUserQuestion` card — `protocol::ws::QuestionAnswer`.
+///
+/// `selected` is 0-based option indices **in the order they were chosen**, and
+/// is omitted when empty, as the daemon writes it. Single-select: exactly one of
+/// one index or `other`. Multi-select: indices plus at most one `other`. `notes`
+/// only on a single-select question whose options carry a preview.
+struct QuestionAnswer: Codable, Sendable, Hashable {
+    var selected: [UInt32] = []
+    var other: String?
+    var notes: String?
+
+    private enum CodingKeys: String, CodingKey { case selected, other, notes }
+
+    init(selected: [UInt32] = [], other: String? = nil, notes: String? = nil) {
+        self.selected = selected
+        self.other = other
+        self.notes = notes
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        selected = try c.decodeIfPresent([UInt32].self, forKey: .selected) ?? []
+        other = try c.decodeIfPresent(String.self, forKey: .other)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        if !selected.isEmpty { try c.encode(selected, forKey: .selected) }
+        try c.encodeIfPresent(other, forKey: .other)
+        try c.encodeIfPresent(notes, forKey: .notes)
+    }
+}
+
+/// Whether the phone can answer an `AskUserQuestion` card now (minor 21) —
+/// `protocol::ws::QuestionHold`.
+enum QuestionHold: Sendable, Hashable {
+    /// Claude is waiting on the daemon: the phone can answer. For the main
+    /// conversation the Mac shows the same question, and the first complete
+    /// answer wins.
+    case held
+    /// The question is on the Mac and only the Mac can answer it.
+    case atMac
+    /// The phone's hold ended; the question may still be open at the Mac.
+    case ended
+    /// A word this build does not know. Never answerable.
+    case unrecognised(String)
+
+    init(wire: String) {
+        switch wire {
+        case "held": self = .held
+        case "at_mac": self = .atMac
+        case "ended": self = .ended
+        default: self = .unrecognised(wire)
+        }
+    }
+
+    var wire: String {
+        switch self {
+        case .held: return "held"
+        case .atMac: return "at_mac"
+        case .ended: return "ended"
+        case .unrecognised(let raw): return raw
+        }
+    }
+}
+
+extension QuestionHold: Codable {
+    init(from decoder: Decoder) throws {
+        self.init(wire: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(wire)
     }
 }
 
@@ -1423,6 +1529,10 @@ struct ApprovalCard: Codable, Sendable, Hashable {
     /// feature level 1; absent on older daemons. Interpreting it is
     /// `RiskAssessment`'s job, not this type's.
     let risk: WireRisk?
+    /// On an `AskUserQuestion` card from a minor-21 daemon only: whether the
+    /// phone can answer it as the card was raised. A later `question_hold`
+    /// event overrides it — see `ApprovalItem.questionHold`.
+    var questionHold: QuestionHold? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestID = "request_id"
@@ -1434,6 +1544,7 @@ struct ApprovalCard: Codable, Sendable, Hashable {
         case promptID = "prompt_id"
         case permissionMode = "permission_mode"
         case risk
+        case questionHold = "question_hold"
     }
 }
 

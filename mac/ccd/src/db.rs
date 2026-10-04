@@ -108,6 +108,7 @@ db_ops! {
     /// Append one fact. `None` means it was a duplicate.
     fn append_event(pending: PendingEvent) -> Option<Event>;
     fn max_seq(session_uid: String) -> u64;
+    fn hook_event_seq(session_uid: String, source_event_id: String) -> Option<u64>;
     fn count_events_of_kind(session_uid: String, kind: EventKind) -> u64;
     fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;

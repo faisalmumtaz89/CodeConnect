@@ -143,6 +143,7 @@ For ordinary relay notifications:
 - Body is one of:
 
   - `Waiting on an approval`
+  - `Asking you a question`
   - `Waiting for your input`
   - `Finished a turn`
   - `Waiting for you`
@@ -150,7 +151,8 @@ For ordinary relay notifications:
 
 - Badge is the bounded blocked-run count.
 - `interruption-level` remains `time-sensitive`.
-- `codeconnect.kind` remains one of `approval`, `input`, `done`, or `idle`.
+- `codeconnect.kind` remains one of `approval`, `input`, `done`, or `idle`; a question is routed as `approval`.
+- The doorbell DTO's `kind` is one of `approval`, `question`, `input`, `done`, or `idle`. A relay that does not know `question` refuses it as `malformed`, and the daemon then sends the same doorbell as `approval`.
 - Sound and fixed ordinary/test collapse IDs remain.
 - Test notifications retain the existing fixed test copy and `codeconnect_test` marker.
 
@@ -164,7 +166,7 @@ A Notification Service Extension is rejected. It cannot reliably reach the Mac w
 
 The public statement should say:
 
-> When relay-backed notifications are enabled, your daemon sends CodeConnect’s push relay only the APNs token and environment, an opaque token-bound credential, one of four fixed event kinds, a blocked-run count, a test marker when applicable, and ordinary network metadata. The relay never receives project names, session identifiers, commands, file paths, diffs, or conversation content; it builds a generic notification and forwards it to Apple.
+> When relay-backed notifications are enabled, your daemon sends CodeConnect’s push relay only the APNs token and environment, an opaque token-bound credential, one of five fixed event kinds, a blocked-run count, a test marker when applicable, and ordinary network metadata. The relay never receives project names, session identifiers, commands, file paths, diffs, or conversation content; it builds a generic notification and forwards it to Apple.
 
 The adjacent paragraph should disclose that enrollment sends an App Attest attestation (key ID, challenge, token, and environment) and that the relay retains content-free relay state and short-lived operational records: the verified public key and receipt, an assertion counter and its trust state, a hash of the App Attest key ID, the attestation environment, the attested bundle version, the validation category, the APNs environment, the credential generation, the APNs token and credential hashes, the binding status and any terminal reason, timestamps, internal row relationships, expiring challenge hashes, and opaque rate buckets.
 
@@ -356,7 +358,7 @@ A relay runtime compromise can generate malicious notification text with the sto
 
 The following remain daemon-side and unchanged:
 
-- Trigger mapping and the four `PushKind` values.
+- Trigger mapping and the five `PushKind` values.
 - `PushGate` ambient latch.
 - Per-device delivered/seen watermarks.
 - Permission-prompt twin deduplication.
@@ -599,7 +601,7 @@ The container build context is `mac/` so workspace manifests and path dependenci
 - Token and credential rotation is atomic; duplicate token ownership cannot mix credentials.
 - Revoked rows never target.
 - Late 410 or environment correction cannot alter a replacement tuple.
-- Exact DTO tests across all four kinds prove project label, session UID, device ID, exclusions, paths, and arbitrary copy are absent.
+- Exact DTO tests across all five kinds prove project label, session UID, device ID, exclusions, paths, and arbitrary copy are absent.
 - Relay `Accepted` is not returned until the mock downstream APNs response arrives.
 - Queue ordering, latest-doorbell replacement, test queue bound, and retirement tests run against both direct and relay attempt closures.
 - Existing `push_gate`, state, 400 ms grace, trigger, aggregation, and seen-filter tests remain unchanged and green.

@@ -371,6 +371,12 @@ pub struct HookPost {
     /// True when the agent is blocked until we answer.
     #[serde(default)]
     pub wait: bool,
+    /// This cc-hook waits for a question's answer without a bound of its own and
+    /// keeps the connection open until it exits, so the connection closing means
+    /// Claude ended the hook (minor 21). Absent from an older cc-hook, whose
+    /// question is then not held.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds_questions: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1267,6 +1273,7 @@ mod tests {
             event: "PermissionRequest".into(),
             payload: serde_json::json!({"tool_name": "Bash"}),
             wait: true,
+            holds_questions: false,
         });
         let line = serde_json::to_string(&frame).unwrap();
         assert!(line.contains("\"type\":\"hook\""));

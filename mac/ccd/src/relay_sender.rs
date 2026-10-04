@@ -368,6 +368,17 @@ fn environment_named(value: &str) -> Option<ApnsEnvironment> {
     }
 }
 
+/// How a relay that does not know the `question` kind refuses it.
+const OLD_RELAY_REFUSAL: &str = "the relay answered 400 malformed";
+
+/// A question's doorbell, as the approval doorbell an older relay knows.
+fn as_approval(document: &str) -> Option<String> {
+    let mut document: serde_json::Value = serde_json::from_str(document).ok()?;
+    let kind = document.get_mut("notification")?.get_mut("kind")?;
+    (kind == "question").then(|| *kind = "approval".into())?;
+    Some(document.to_string())
+}
+
 /// The ordinary doorbell, as the relay's closed schema.
 ///
 /// **The generic fields and no others.** There is no project label here, no
@@ -391,7 +402,12 @@ fn doorbell_document(target: &PushTarget, hint: &PushHint) -> String {
         "environment": target.environment.as_str(),
         "notification": {
             "type": "doorbell",
-            "kind": hint.kind.tag(),
+            // The relay words the alert itself, so it is told a question is
+            // one; it routes the tap as an approval.
+            "kind": match hint.kind {
+                crate::apns::PushKind::Question => "question",
+                kind => kind.tag(),
+            },
             "blocked_count": blocked,
         }
     })
@@ -450,7 +466,16 @@ impl RelayPushSender {
                 .context("this device registered no relay credential"));
         };
 
-        let reply = transport.post(credential.clone(), document).await?;
+        let reply = transport.post(credential.clone(), document.clone()).await?;
+        // A relay from before questions had words of their own refuses the
+        // kind as malformed, before it reads anything else. The same doorbell
+        // then rings as an approval, as questions always did, rather than not
+        // at all.
+        let refused_as_old = read(&reply) == RelayOutcome::Refused(OLD_RELAY_REFUSAL.into());
+        let reply = match refused_as_old.then(|| as_approval(&document)).flatten() {
+            Some(approval) => transport.post(credential.clone(), approval).await?,
+            None => reply,
+        };
         match read(&reply) {
             RelayOutcome::Accepted {
                 apns_id,
@@ -718,6 +743,7 @@ mod tests {
     fn the_document_carries_the_generic_fields_and_nothing_else() {
         for (kind, tag) in [
             (PushKind::Approval, "approval"),
+            (PushKind::Question, "question"),
             (PushKind::NeedsInput, "input"),
             (PushKind::Completed, "done"),
             (PushKind::Idle, "idle"),
@@ -995,6 +1021,83 @@ mod tests {
                 environment,
             ));
         }
+    }
+
+    /// A question's doorbell to a relay from before `question` existed, which
+    /// refuses the kind as malformed: it is sent once more as an approval, and
+    /// delivered. A relay that knows `question` is asked once. A question's
+    /// other refusals, and every other kind's, are not sent twice.
+    #[tokio::test]
+    async fn an_older_relay_rings_a_question_as_an_approval() {
+        let document = doorbell_document(&target(), &hint_of(PushKind::Question));
+        let kind = |body: &str| {
+            serde_json::from_str::<serde_json::Value>(body).unwrap()["notification"]["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let accepted = r#"{"outcome":"accepted","apns_id":"A1"}"#;
+        let old = FakeRelay::answering(vec![
+            reply(400, r#"{"error":"malformed"}"#),
+            reply(200, accepted),
+        ]);
+        let registry = FakeRegistry::over(target());
+        let delivered =
+            RelayPushSender::deliver(Arc::clone(&old) as _, registry, target(), document.clone())
+                .await
+                .expect("delivered as an approval");
+        assert_eq!(delivered.as_deref(), Some("A1"));
+        let asked: Vec<String> = old
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, b)| kind(b))
+            .collect();
+        assert_eq!(asked, ["question", "approval"]);
+
+        let new = FakeRelay::answering(vec![reply(200, accepted)]);
+        RelayPushSender::deliver(
+            Arc::clone(&new) as _,
+            FakeRegistry::over(target()),
+            target(),
+            document.clone(),
+        )
+        .await
+        .expect("delivered as a question");
+        let asked: Vec<String> = new
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, b)| kind(b))
+            .collect();
+        assert_eq!(asked, ["question"]);
+
+        for (document, refusal) in [
+            (document.clone(), reply(503, r#"{"error":"unavailable"}"#)),
+            (
+                doorbell_document(&target(), &hint_of(PushKind::Approval)),
+                reply(400, r#"{"error":"malformed"}"#),
+            ),
+        ] {
+            let relay = FakeRelay::answering(vec![refusal]);
+            assert!(RelayPushSender::deliver(
+                Arc::clone(&relay) as _,
+                FakeRegistry::over(target()),
+                target(),
+                document
+            )
+            .await
+            .is_err());
+            assert_eq!(relay.asked.lock().unwrap().len(), 1);
+        }
+    }
+
+    fn hint_of(kind: PushKind) -> PushHint {
+        let mut hint = hint(1);
+        hint.kind = kind;
+        hint
     }
 
     async fn attempt(relay: Arc<FakeRelay>, registry: Arc<FakeRegistry>) -> Result<Option<String>> {
