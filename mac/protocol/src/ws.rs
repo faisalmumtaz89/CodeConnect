@@ -172,10 +172,9 @@ impl ClientFeatures {
     /// not understand, and agreeing about a name is not the same as being able
     /// to act on it.
     ///
-    /// **OpenCode grants nothing either.** This build can name it, but no daemon
-    /// hosts it, and a name the daemon knows is not one it can act on until it
-    /// hosts it: a client advertising `["opencode"]` is vouching for runs that do
-    /// not exist.
+    /// **OpenCode grants nothing either.** A daemon observes an OpenCode run and
+    /// nothing on it can be answered or typed from a phone yet, so a client
+    /// advertising `["opencode"]` is vouching for an ability no run offers.
     pub fn supports(&self, agent: &crate::agent::AgentKind) -> bool {
         if matches!(
             agent,
@@ -2275,8 +2274,8 @@ mod tests {
         };
         assert!(!codex_only.supports(&crate::agent::AgentKind::Claude));
         assert!(codex_only.supports(&crate::agent::AgentKind::Codex));
-        // OpenCode is a name this build knows but no daemon hosts, so even a
-        // client that advertised it is granted nothing for it.
+        // OpenCode runs are observed only, so even a client that advertised the
+        // agent is granted nothing for it.
         let opencode_only = ClientFeatures {
             agents: vec![crate::agent::AgentKind::Opencode],
         };

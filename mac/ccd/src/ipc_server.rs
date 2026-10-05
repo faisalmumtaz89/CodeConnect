@@ -2,7 +2,9 @@
 //!
 //! Both client kinds are served by one uniform loop: every connection gets a
 //! writer task fed by an mpsc channel, so a hook reply and a supervisor request
-//! travel the same path and nothing has to own the socket exclusively.
+//! travel the same path and nothing has to own the socket exclusively. An
+//! OpenCode plugin's connection leaves the loop at its hello and is served by
+//! [`crate::opencode_link`] from then on, over the same writer.
 //!
 //! Connections are inbound-only. The daemon never dials a session, which is
 //! what keeps it out of the agents' parent chain.
@@ -111,6 +113,9 @@ type Inflight =
     Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<protocol::ipc::SupervisorResult>>>>;
 
 async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
+    // Read off the accepted socket before it is split: the OpenCode admission
+    // compares it with the pid the plugin claims.
+    let peer = peer_pid(&stream);
     let (read_half, mut write_half) = stream.into_split();
     // Bounded, and the bound is the point. This used to be an unbounded
     // channel, so a client that stopped reading — a `codeconnect ls` suspended with
@@ -141,7 +146,7 @@ async fn handle_connection(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()
     // whichever run currently holds it.
     let mut registered: Option<crate::state::Registration> = None;
 
-    let result = read_loop(&daemon, &mut reader, &tx, &inflight, &mut registered).await;
+    let result = read_loop(&daemon, &mut reader, &tx, &inflight, &mut registered, peer).await;
 
     if let Some(registration) = registered {
         daemon.unregister_supervisor(&registration).await;
@@ -157,6 +162,7 @@ async fn read_loop(
     tx: &mpsc::Sender<DaemonFrame>,
     inflight: &Inflight,
     registered: &mut Option<crate::state::Registration>,
+    peer: Option<i32>,
 ) -> Result<()> {
     loop {
         let Some(line) = read_line_limited(reader, MAX_FRAME_BYTES).await? else {
@@ -472,15 +478,10 @@ async fn read_loop(
             ClientFrame::DaemonInfo => {
                 let _ = tx.send(DaemonFrame::Daemon(daemon.info().await)).await;
             }
-            ClientFrame::OpencodeHello(_) => {
-                // No OpenCode run registers with this daemon, so no nonce can
-                // name one. Not final: the plugin backs off and dials again.
-                let _ = tx
-                    .send(DaemonFrame::OpencodeRefused {
-                        reason: "no OpenCode run is registered under this nonce".into(),
-                        r#final: false,
-                    })
-                    .await;
+            // From here on the connection is the plugin's link, admitted or not:
+            // it never carries a `ClientFrame` again.
+            ClientFrame::OpencodeHello(hello) => {
+                crate::opencode_link::serve(daemon, hello, peer, reader, tx).await;
                 return Ok(());
             }
         }
@@ -496,6 +497,27 @@ async fn read_line_limited(
     reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
     max: usize,
 ) -> Result<Option<Vec<u8>>> {
+    Ok(read_frame(reader, max).await?.map(|(line, _)| line))
+}
+
+/// [`read_line_limited`] for the OpenCode link, which has no use for a line the
+/// peer did not finish: a partial frame at EOF is dropped, and the link ends.
+pub(crate) async fn read_link_line(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    max: usize,
+) -> Result<Option<Vec<u8>>> {
+    Ok(read_frame(reader, max)
+        .await?
+        .filter(|(_, terminated)| *terminated)
+        .map(|(line, _)| line))
+}
+
+/// One line, and whether its newline arrived: a line cut by EOF is still
+/// returned, unterminated.
+async fn read_frame(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    max: usize,
+) -> Result<Option<(Vec<u8>, bool)>> {
     let mut out: Vec<u8> = Vec::new();
     loop {
         let (eof, found, used) = {
@@ -518,15 +540,47 @@ async fn read_line_limited(
         };
         reader.consume(used);
         if eof {
-            return Ok(if out.is_empty() { None } else { Some(out) });
+            return Ok((!out.is_empty()).then_some((out, false)));
         }
         if found {
-            return Ok(Some(out));
+            return Ok(Some((out, true)));
         }
         if out.len() > max {
             bail!("frame exceeds {max} bytes");
         }
     }
+}
+
+/// The pid of the process at the other end of `stream`, as the kernel recorded
+/// it when that process connected (`getsockopt(SOL_LOCAL, LOCAL_PEERPID)`).
+///
+/// The one platform call the OpenCode admission rests on: every other check it
+/// makes starts from this pid. `None` when the kernel would not answer, and
+/// always on a platform other than macOS, where this option does not exist; an
+/// OpenCode hello over a connection without a peer pid is refused.
+#[cfg(target_os = "macos")]
+fn peer_pid(stream: &UnixStream) -> Option<i32> {
+    use std::os::fd::AsRawFd;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: `getsockopt` writes at most `len` bytes into `pid`, a live local
+    // of exactly that size, and reports the length it wrote back in `len`.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            &mut pid as *mut libc::pid_t as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    let whole = len as usize == std::mem::size_of::<libc::pid_t>();
+    (rc == 0 && whole && pid > 0).then_some(pid)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn peer_pid(_stream: &UnixStream) -> Option<i32> {
+    None
 }
 
 #[cfg(test)]
@@ -642,6 +696,7 @@ mod tests {
             started_at: protocol::time::now_rfc3339(),
             protocol_minor: protocol::PROTOCOL_MINOR,
             exit_replay: false,
+            opencode_nonce: None,
         });
         serde_json::to_string(&frame).unwrap()
     }
@@ -830,6 +885,7 @@ mod tests {
             started_at: started_at.to_string(),
             protocol_minor: protocol::PROTOCOL_MINOR,
             exit_replay: false,
+            opencode_nonce: None,
         }
     }
 
@@ -1002,6 +1058,44 @@ mod tests {
             lifecycle(&sessions, &uid),
             protocol::event::Lifecycle::Exited,
             "the run's own supervisor reported its own end"
+        );
+    }
+
+    /// The kernel names the process at the other end of a unix socket; here, both
+    /// ends are this process.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_peer_of_a_unix_socket_is_the_process_that_connected() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        assert_eq!(peer_pid(&ours), Some(std::process::id() as i32));
+    }
+
+    /// The link reads whole lines only: what follows the last newline when the
+    /// peer hangs up is not a frame.
+    #[tokio::test]
+    async fn a_line_cut_by_the_end_of_the_stream_is_not_a_link_frame() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let (read, _) = ours.into_split();
+        let (_, mut write) = theirs.into_split();
+        write.write_all(b"one\ntw").await.unwrap();
+        drop(write);
+        let mut reader = BufReader::new(read);
+        assert_eq!(
+            read_link_line(&mut reader, 64).await.unwrap().as_deref(),
+            Some(&b"one"[..])
+        );
+        assert_eq!(read_link_line(&mut reader, 64).await.unwrap(), None);
+
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let (read, _) = ours.into_split();
+        let (_, mut write) = theirs.into_split();
+        write.write_all(b"tw").await.unwrap();
+        drop(write);
+        let mut reader = BufReader::new(read);
+        assert_eq!(
+            read_line_limited(&mut reader, 64).await.unwrap().as_deref(),
+            Some(&b"tw"[..]),
+            "the other readers keep the cut line, as they always have"
         );
     }
 

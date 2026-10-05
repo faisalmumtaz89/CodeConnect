@@ -26,11 +26,7 @@ mod legacy_credentials;
 mod liveness;
 mod log;
 mod logrotate;
-/// The OpenCode link's frames and their mapping to facts. Pure, and read only
-/// by their tests until the IPC server hands an admitted plugin link to them.
-#[cfg(test)]
 mod opencode_adapter;
-#[cfg(test)]
 mod opencode_link;
 mod presence;
 mod project_label;

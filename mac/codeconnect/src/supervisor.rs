@@ -1880,6 +1880,7 @@ fn registration_frame(args: &SupervisorArgs, started_at: &str) -> RegisterSessio
         // silently ignores the prompt fingerprint must not be handed one.
         protocol_minor: protocol::PROTOCOL_MINOR,
         exit_replay: false,
+        opencode_nonce: None,
     }
 }
 

@@ -1211,6 +1211,63 @@ pub fn resolve_owned_session(socket: &str, uid: &str) -> Result<OwnedSession, Re
     }
 }
 
+/// The process of the first pane of the session `uid` owns: what tmux started
+/// the session with, `#{pane_pid}`. For a hosted run that is `codeconnect
+/// internal-job`, the parent of the agent it spawned.
+///
+/// "First" by tmux's pane id, which only grows on a server, so a pane split off
+/// the session later is never mistaken for it. Bounded like every tmux call here; a
+/// failed or truncated answer is `Unavailable`, never a pid.
+pub fn pane_pid(socket: &str, uid: &str) -> Result<i32, ResolveError> {
+    let session = resolve_owned_session(socket, uid)?;
+    let bin = tmux_bin().ok_or_else(|| ResolveError::Unavailable("tmux not found".into()))?;
+    let [flag, value] = server_args(socket)
+        .ok_or_else(|| ResolveError::Unavailable(format!("{socket:?} is not addressable")))?;
+    let argv = [
+        flag,
+        value,
+        "list-panes".to_string(),
+        "-s".to_string(),
+        "-t".to_string(),
+        session.session_id,
+        "-F".to_string(),
+        "#{pane_id} #{pane_pid}".to_string(),
+    ];
+    let (ok, stdout, stderr, truncated) =
+        run_probe(&bin, &argv).map_err(ResolveError::Unavailable)?;
+    if !ok {
+        return match classify_absence(&stderr) {
+            SessionPresence::Gone => Err(ResolveError::NotHosted),
+            other => Err(ResolveError::Unavailable(format!("{other:?}"))),
+        };
+    }
+    if truncated {
+        return Err(ResolveError::Unavailable(
+            "tmux pane listing was truncated at the capture cap".into(),
+        ));
+    }
+    first_pane_pid(&stdout)
+        .ok_or_else(|| ResolveError::Unavailable(format!("unreadable pane listing {stdout:?}")))
+}
+
+/// The pid of the lowest-numbered pane in a `#{pane_id} #{pane_pid}` listing.
+/// `None` for an empty listing or any line that is not exactly that shape.
+fn first_pane_pid(stdout: &str) -> Option<i32> {
+    let mut first: Option<(u64, i32)> = None;
+    for line in stdout.lines().filter(|line| !line.is_empty()) {
+        let (id, pid) = line.split_once(' ')?;
+        let id: u64 = id.strip_prefix('%')?.parse().ok()?;
+        let pid: i32 = pid.parse().ok()?;
+        if pid <= 0 {
+            return None;
+        }
+        if first.is_none_or(|(lowest, _)| id < lowest) {
+            first = Some((id, pid));
+        }
+    }
+    first.map(|(_, pid)| pid)
+}
+
 /// The pure post-probe half of [`resolve_owned_session`], split out so the
 /// fail-closed handling of a failed probe, a **truncated** census, and the
 /// row-level parse are all directly testable without a live
@@ -2411,6 +2468,24 @@ mod tests {
         );
         assert_eq!(send_keys_line("$3", b""), "send-keys -t $3 -H\n");
         assert_eq!(resize_line(120, 40), "refresh-client -C 120x40\n");
+    }
+
+    #[test]
+    fn the_first_pane_is_the_lowest_pane_id_and_a_malformed_listing_names_none() {
+        assert_eq!(first_pane_pid("%3 4242\n"), Some(4242));
+        // A pane split off later has a higher id, whatever order tmux lists it in.
+        assert_eq!(first_pane_pid("%9 5150\n%3 4242\n%12 6000\n"), Some(4242));
+        for listing in [
+            "",
+            "\n",
+            "%3\n",
+            "3 4242\n",
+            "%3 4242 x\n",
+            "%3 0\n",
+            "%3 4242\n%x 1\n",
+        ] {
+            assert_eq!(first_pane_pid(listing), None, "{listing:?}");
+        }
     }
 
     #[test]

@@ -146,6 +146,8 @@ db_ops! {
         device_id: String,
         epoch: String,
     ) -> Option<crate::store::PushRegistration>;
+    fn opencode_turns(session_uid: String) -> Vec<(String, String, bool)>;
+    fn opencode_open_cards(session_uid: String) -> Vec<(String, String)>;
     fn recover_text_mutations(at: String) -> usize;
     fn orphan_event_count() -> u64;
 }

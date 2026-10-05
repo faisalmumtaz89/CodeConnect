@@ -2020,6 +2020,7 @@ async fn register_the_run_on(
                 started_at: protocol::time::now_rfc3339(),
                 protocol_minor: protocol::PROTOCOL_MINOR,
                 exit_replay: false,
+                opencode_nonce: None,
             },
             tx,
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -6889,6 +6890,7 @@ impl CcdChild {
             started_at: protocol::time::now_rfc3339(),
             protocol_minor: protocol::PROTOCOL_MINOR,
             exit_replay: false,
+            opencode_nonce: None,
         });
         let mut line = serde_json::to_vec(&frame).expect("the registration serializes");
         line.push(b'\n');

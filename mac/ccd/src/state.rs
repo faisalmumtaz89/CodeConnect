@@ -688,6 +688,49 @@ struct Inner {
     /// Empty in production today for a second reason as well as the usual one: a
     /// Claude registration carries no control link, so it can owe no install.
     stalled_codex_installs: HashMap<String, StalledCodexInstall>,
+    /// Every registered OpenCode run that has not ended, keyed by `session_uid`:
+    /// what its plugin's hello is admitted against, and its link. Created by the
+    /// run's registration, dropped when the run ends or is removed.
+    opencode: HashMap<String, OpencodeRun>,
+    /// Plugin nonce → the `session_uid` of the run it was written for.
+    opencode_nonces: HashMap<String, String>,
+}
+
+/// One OpenCode run, as its plugin link needs it. See [`crate::opencode_link`].
+struct OpencodeRun {
+    session: SessionKey,
+    nonce: String,
+    cwd: String,
+    tmux_socket: String,
+    /// The run's own directory, where the pane records the OpenCode process.
+    dir: std::path::PathBuf,
+    /// The OpenCode process the run's first admission linked, for the life of
+    /// the run: `(pid, start)`.
+    pin: Option<(i32, protocol::ipc::OpencodeStart)>,
+    link: Option<LiveLink>,
+    /// The OpenCode session the live link last said the keyboard shows.
+    head: Option<String>,
+    observer: Arc<Mutex<crate::opencode_link::Observer>>,
+}
+
+/// The connection that is a run's link now. Dropping it tells that
+/// connection it no longer is.
+struct LiveLink {
+    id: String,
+    activation: u64,
+    _stop: oneshot::Sender<()>,
+}
+
+/// How long a registered OpenCode run may go without its plugin being admitted
+/// before its timeline says the plugin never connected.
+const OPENCODE_CONNECT_BACKSTOP: Duration = Duration::from_secs(15);
+
+/// The shape of a plugin nonce: 128 bits as 32 lowercase hex digits.
+fn is_opencode_nonce(nonce: &str) -> bool {
+    nonce.len() == 32
+        && nonce
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// An install a registration was forced to skip, with everything
@@ -1050,6 +1093,21 @@ impl Inner {
     /// the same gate can tell.
     fn note_row_write(&mut self, session_uid: &str) {
         *self.row_writes.entry(session_uid.to_string()).or_insert(0) += 1;
+    }
+
+    /// Take an OpenCode run out of the daemon, nonce and all. Its link, if it
+    /// has one, stops when the returned run is dropped.
+    fn forget_opencode_run(&mut self, session_uid: &str) -> Option<OpencodeRun> {
+        let run = self.opencode.remove(session_uid)?;
+        self.opencode_nonces.remove(&run.nonce);
+        Some(run)
+    }
+
+    /// The run `session_uid` when `link` is its live link.
+    fn opencode_link_of(&mut self, session_uid: &str, link: &str) -> Option<&mut OpencodeRun> {
+        self.opencode
+            .get_mut(session_uid)
+            .filter(|run| run.link.as_ref().is_some_and(|live| live.id == link))
     }
 
     /// Put a link in the slot — **and this is the transaction's linearization
@@ -1926,10 +1984,16 @@ impl Daemon {
     /// [`Daemon::shared_ledgers_admit`], which used to be defined in terms of
     /// this list and no longer is, precisely so that admitting the agent and
     /// splitting those four tables stay separate decisions.
+    ///
+    /// **OpenCode is hosted for observation.** Its registration carries the
+    /// nonce its plugin dials back with, and [`crate::opencode_link`] turns the
+    /// link into the run's timeline. Nothing on such a run is actuated: every
+    /// verb a phone can aim at it is refused by its own agent arm.
     pub fn supported_agents(&self) -> Vec<protocol::agent::AgentKind> {
         vec![
             protocol::agent::AgentKind::Claude,
             protocol::agent::AgentKind::Codex,
+            protocol::agent::AgentKind::Opencode,
         ]
     }
 
@@ -7685,6 +7749,48 @@ impl Daemon {
             );
         }
 
+        // **The OpenCode nonce belongs to an OpenCode registration, and only to
+        // one.** It is how the run's plugin is found again when it dials in, so a
+        // run without one could be listed and never observed, and a nonce on any
+        // other agent's frame names nothing that will ever dial.
+        let opencode = matches!(info.agent, protocol::agent::AgentKind::Opencode);
+        match (&info.opencode_nonce, opencode) {
+            (None, true) => anyhow::bail!(
+                "refusing to register {}: an OpenCode registration carries no plugin nonce, \
+                 so its plugin could never be admitted",
+                info.session_id
+            ),
+            (Some(_), false) => anyhow::bail!(
+                "refusing to register {}: a {} registration carried an OpenCode nonce",
+                info.session_id,
+                info.agent.as_str()
+            ),
+            (Some(nonce), true) if !is_opencode_nonce(nonce) => anyhow::bail!(
+                "refusing to register {}: the OpenCode nonce is not 32 lowercase hex digits",
+                info.session_id
+            ),
+            _ => {}
+        }
+        if opencode
+            && (info.codex_generation.is_some()
+                || info.codex_thread_id.is_some()
+                || info.codex_socket.is_some())
+        {
+            anyhow::bail!(
+                "refusing to register {}: an OpenCode registration carried Codex identity fields",
+                info.session_id
+            );
+        }
+        if let Some(nonce) = info.opencode_nonce.as_deref() {
+            let holder = self.inner.lock().await.opencode_nonces.get(nonce).cloned();
+            if holder.is_some_and(|holder| holder != uid) {
+                anyhow::bail!(
+                    "refusing to register {}: its OpenCode nonce already names another run",
+                    info.session_id
+                );
+            }
+        }
+
         // **The control-link fact, and the Codex mirror of the guard above.** A
         // Codex registration must name the broker's ccd leg and the generation its
         // frames are attributed to, or this daemon would install a session it can
@@ -8530,6 +8636,11 @@ impl Daemon {
                 .release_owed_codex_install(&session.uid, epoch);
             return Err(err);
         }
+        if !info.exit_replay {
+            if let Some(nonce) = &info.opencode_nonce {
+                self.install_opencode_run(&session, nonce, &info).await;
+            }
+        }
         crate::log_info!(
             "supervisor registered for {} ({}) speaking minor {}",
             session.name,
@@ -8665,6 +8776,215 @@ impl Daemon {
         );
         if let Err(err) = self.ingest(pending).await {
             crate::log_error!("failed to record detach: {err:#}");
+        }
+    }
+
+    // ------------------------------------------------------- OpenCode runs
+
+    /// Hold an OpenCode run from its registration on.
+    ///
+    /// A re-registration of the same launch — a supervisor reconnecting, or a
+    /// restarted daemon hearing from it again — keeps what the run has: its pin,
+    /// its live link and its observer. A run new to this daemon starts from the
+    /// log, whose open cards it is told about, and starts the backstop for a
+    /// plugin that never dials.
+    async fn install_opencode_run(
+        self: &Arc<Self>,
+        session: &SessionKey,
+        nonce: &str,
+        info: &RegisterSession,
+    ) {
+        let dir = protocol::session_dir(&info.session_id, &session.uid);
+        {
+            let mut inner = self.inner.lock().await;
+            if let Some(run) = inner
+                .opencode
+                .get_mut(&session.uid)
+                .filter(|run| run.nonce == nonce)
+            {
+                run.cwd = info.cwd.clone();
+                run.tmux_socket = info.tmux_socket.clone();
+                run.dir = dir;
+                return;
+            }
+        }
+        let open_cards = match self.db.opencode_open_cards(session.uid.clone()).await {
+            Ok(cards) => cards,
+            Err(err) => {
+                crate::log_warn!(
+                    "could not read the open OpenCode cards of {}: {err:#}",
+                    session.name
+                );
+                Vec::new()
+            }
+        };
+        let observer = crate::opencode_link::Observer::new(session.clone(), &open_cards);
+        {
+            let mut inner = self.inner.lock().await;
+            inner.forget_opencode_run(&session.uid);
+            inner
+                .opencode_nonces
+                .insert(nonce.to_string(), session.uid.clone());
+            inner.opencode.insert(
+                session.uid.clone(),
+                OpencodeRun {
+                    session: session.clone(),
+                    nonce: nonce.to_string(),
+                    cwd: info.cwd.clone(),
+                    tmux_socket: info.tmux_socket.clone(),
+                    dir,
+                    pin: None,
+                    link: None,
+                    head: None,
+                    observer: Arc::new(Mutex::new(observer)),
+                },
+            );
+        }
+        let daemon = Arc::clone(self);
+        let (uid, nonce) = (session.uid.clone(), nonce.to_string());
+        tokio::spawn(async move {
+            tokio::time::sleep(OPENCODE_CONNECT_BACKSTOP).await;
+            daemon.opencode_backstop(&uid, &nonce).await;
+        });
+    }
+
+    /// A run whose plugin has never been admitted says so in its timeline. The
+    /// plugin may be disabled, may have failed to load, or may never have found
+    /// the process it runs in; from here those look the same. Nothing is written
+    /// for a run that has ended, was relaunched, or was linked even once.
+    pub(crate) async fn opencode_backstop(&self, session_uid: &str, nonce: &str) {
+        let session = {
+            let inner = self.inner.lock().await;
+            match inner.opencode.get(session_uid) {
+                Some(run) if run.nonce == nonce && run.pin.is_none() => run.session.clone(),
+                _ => return,
+            }
+        };
+        crate::log_warn!(
+            "the OpenCode plugin of {} did not connect within {OPENCODE_CONNECT_BACKSTOP:?}",
+            session.name
+        );
+        crate::opencode_link::record_link_state(
+            self,
+            &session,
+            &format!("link:{session_uid}:never"),
+            "detached",
+            crate::opencode_link::NEVER,
+        )
+        .await;
+    }
+
+    /// The registered, not-ended OpenCode run `nonce` names.
+    pub(crate) async fn opencode_candidate(
+        &self,
+        nonce: &str,
+    ) -> Option<crate::opencode_link::Candidate> {
+        let inner = self.inner.lock().await;
+        let run = inner.opencode.get(inner.opencode_nonces.get(nonce)?)?;
+        Some(crate::opencode_link::Candidate {
+            session: run.session.clone(),
+            cwd: run.cwd.clone(),
+            tmux_socket: run.tmux_socket.clone(),
+            dir: run.dir.clone(),
+        })
+    }
+
+    /// The last two steps of the admission, under the lock that holds the link:
+    /// the pin, then the takeover. A refusal here leaves the run as it was.
+    pub(crate) async fn opencode_admit(
+        &self,
+        session_uid: &str,
+        hello: &protocol::ipc::OpencodeHello,
+    ) -> std::result::Result<crate::opencode_link::Admitted, crate::opencode_link::Refusal> {
+        use crate::opencode_link::Refusal;
+        let mut inner = self.inner.lock().await;
+        let Some(run) = inner
+            .opencode
+            .get_mut(session_uid)
+            .filter(|run| run.nonce == hello.nonce)
+        else {
+            return Err(Refusal::again(
+                "no OpenCode run is registered under this nonce",
+            ));
+        };
+        let process = (hello.pid, hello.start);
+        if run.pin.is_some_and(|pin| pin != process) {
+            return Err(Refusal::last(
+                "this run is linked to another OpenCode process",
+            ));
+        }
+        if run
+            .link
+            .as_ref()
+            .is_some_and(|live| hello.activation < live.activation)
+        {
+            return Err(Refusal::last(
+                "a newer activation of the plugin in this OpenCode is linked",
+            ));
+        }
+        let link =
+            protocol::uid::new().map_err(|_| Refusal::again("the daemon could not name a link"))?;
+        let (stop_tx, stop) = oneshot::channel();
+        run.pin = Some(process);
+        // The connection this replaces learns it is no longer the link when its
+        // half of the channel is dropped here.
+        run.link = Some(LiveLink {
+            id: link.clone(),
+            activation: hello.activation,
+            _stop: stop_tx,
+        });
+        Ok(crate::opencode_link::Admitted {
+            link,
+            observer: Arc::clone(&run.observer),
+            stop,
+        })
+    }
+
+    /// Whether `link` is still the live link of the run.
+    pub(crate) async fn opencode_link_is_current(&self, session_uid: &str, link: &str) -> bool {
+        self.inner
+            .lock()
+            .await
+            .opencode_link_of(session_uid, link)
+            .is_some()
+    }
+
+    /// The OpenCode session the run's keyboard shows, as its live link says.
+    pub(crate) async fn opencode_head(&self, session_uid: &str, link: &str, head: Option<String>) {
+        if let Some(run) = self.inner.lock().await.opencode_link_of(session_uid, link) {
+            run.head = head;
+        }
+    }
+
+    /// `link` closed. True when it was the run's live link, which the run then
+    /// no longer has; false for a link already replaced or a run that ended.
+    pub(crate) async fn opencode_link_closed(&self, session_uid: &str, link: &str) -> bool {
+        let mut inner = self.inner.lock().await;
+        let Some(run) = inner.opencode_link_of(session_uid, link) else {
+            return false;
+        };
+        run.link = None;
+        run.head = None;
+        true
+    }
+
+    /// The OpenCode run has ended: it leaves the daemon, its link stops, and
+    /// what its observer was holding back only for order is written. Every turn
+    /// it had open stays outcome-unknown.
+    async fn end_opencode_run(&self, session: &SessionKey) {
+        let Some(run) = self.inner.lock().await.forget_opencode_run(&session.uid) else {
+            return;
+        };
+        let observer = Arc::clone(&run.observer);
+        drop(run);
+        let facts = observer.lock().await.adapter.session_end();
+        for fact in facts {
+            if let Err(err) = self.ingest(fact).await {
+                crate::log_error!(
+                    "failed to record what {} held at its end: {err:#}",
+                    session.name
+                );
+            }
         }
     }
 
@@ -8932,6 +9252,8 @@ impl Daemon {
         // gate — so "every writer bumps this" is a property of the type rather than a
         // habit two of them happen to share. See [`Inner::row_writes`].
         self.inner.lock().await.note_row_write(&session.uid);
+        // What an OpenCode run's observer still held belongs ahead of its end.
+        self.end_opencode_run(session).await;
         let payload = match reason {
             Some(reason) => serde_json::json!({"exit_code": exit_code, "reason": reason}),
             None => serde_json::json!({"exit_code": exit_code}),
@@ -9585,8 +9907,11 @@ impl Daemon {
                 // `NoLink` and reports `none` on its own, so the two fields are
                 // independently true rather than one derived from the other.
                 codex_link: addressee.wire_link(),
-                // Nothing in this build learns which OpenCode session a run is showing.
-                opencode_session_id: None,
+                // What the run's live plugin link last said its keyboard shows.
+                opencode_session_id: inner
+                    .opencode
+                    .get(&row.session_uid)
+                    .and_then(|run| run.head.clone()),
             });
         }
         out
@@ -9957,6 +10282,7 @@ impl Daemon {
         Ok(match outcome {
             crate::store::DeleteOutcome::Deleted { events } => {
                 crate::log_info!("deleted session {session_uid} and {events} event(s) on request");
+                self.inner.lock().await.forget_opencode_run(session_uid);
                 // Nothing left to ring about, and stale latches must not leak
                 // onto a future run.
                 self.push_gate.evict_session(session_uid);
@@ -10019,8 +10345,10 @@ impl Daemon {
         };
         let removed = self.db.prune_exited_sessions(protect, dry_run).await?;
         if !dry_run {
+            let mut inner = self.inner.lock().await;
             for row in &removed {
                 self.push_gate.evict_session(&row.session_uid);
+                inner.forget_opencode_run(&row.session_uid);
             }
         }
         if !removed.is_empty() && !dry_run {
@@ -12840,6 +13168,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -12876,6 +13205,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -13306,6 +13636,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::clone(&inflight),
@@ -14796,6 +15127,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -15596,6 +15928,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -15654,6 +15987,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -15666,13 +16000,14 @@ mod tests {
     /// installed on any arm. Absence still means Claude and works.
     ///
     /// The arms do not fail for one reason, and the test checks each against
-    /// the reason it fails for. `gemini`, the present empty string and `opencode` are
+    /// the reason it fails for. `gemini` and the present empty string are
     /// refused by `supported_agents()`: this daemon does not host them. **Codex
-    /// is not one of those any more** — it joined that list when its coordinator
-    /// became able to send a registration — so its arm passes the agent gate and
-    /// is refused one guard further down, because the frame `try_register` builds
-    /// names no control-link socket and a session this daemon cannot observe is
-    /// one it will not list ([`crate::codex_link::ControlLink::from_registration`]).
+    /// and OpenCode are not among those** — each joined that list when a
+    /// registration of it became observable — so their arms pass the agent gate
+    /// and are refused one guard further down, because the frame `try_register`
+    /// builds names neither a control-link socket nor a plugin nonce, and a
+    /// session this daemon cannot observe is one it will not list
+    /// ([`crate::codex_link::ControlLink::from_registration`]).
     ///
     /// **The reason is asserted per arm because `is_err()` was not enough.** This
     /// test was written to go red the day Codex was admitted, and it did not: the
@@ -15704,7 +16039,8 @@ mod tests {
             (
                 "01K1B3XQ8ZC0DE5FGH7JKMNP04",
                 AgentKind::Opencode,
-                "is not supported by this daemon",
+                // The agent is supported; the frame names no plugin to admit.
+                "carries no plugin nonce",
             ),
         ] {
             assert!(protocol::uid::is_well_formed(uid), "{uid}");
@@ -15885,6 +16221,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -16003,6 +16340,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -18242,6 +18580,7 @@ mod tests {
             started_at: protocol::time::now_rfc3339(),
             protocol_minor: protocol::PROTOCOL_MINOR,
             exit_replay: false,
+            opencode_nonce: None,
         };
         let link = crate::codex_link::ControlLink::from_registration(&frame(Some("th-at-launch")))
             .unwrap()
@@ -18388,6 +18727,7 @@ mod tests {
             started_at: protocol::time::now_rfc3339(),
             protocol_minor: protocol::PROTOCOL_MINOR,
             exit_replay: false,
+            opencode_nonce: None,
         }
     }
 
@@ -19177,6 +19517,7 @@ mod tests {
                         started_at: protocol::time::now_rfc3339(),
                         protocol_minor: protocol::PROTOCOL_MINOR,
                         exit_replay: false,
+                        opencode_nonce: None,
                     },
                     tx,
                     Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -19246,6 +19587,7 @@ mod tests {
                         started_at: protocol::time::now_rfc3339(),
                         protocol_minor: protocol::PROTOCOL_MINOR,
                         exit_replay: false,
+                        opencode_nonce: None,
                     },
                     tx,
                     Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -19384,6 +19726,7 @@ mod tests {
                 started_at: protocol::time::now_rfc3339(),
                 protocol_minor: protocol::PROTOCOL_MINOR,
                 exit_replay: false,
+                opencode_nonce: None,
             },
             tx,
             Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -19518,6 +19861,7 @@ mod tests {
             started_at: protocol::time::now_rfc3339(),
             protocol_minor: protocol::PROTOCOL_MINOR,
             exit_replay: false,
+            opencode_nonce: None,
         };
         async move {
             daemon
@@ -20965,6 +21309,7 @@ mod tests {
                         started_at: protocol::time::now_rfc3339(),
                         protocol_minor: protocol::PROTOCOL_MINOR,
                         exit_replay: false,
+                        opencode_nonce: None,
                     },
                     tx,
                     Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -22429,6 +22774,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -22925,6 +23271,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -22967,6 +23314,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -23187,6 +23535,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -23235,6 +23584,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -23302,16 +23652,14 @@ mod tests {
 
     /// **An OpenCode run is refused by every verb, before anything is claimed.**
     ///
-    /// This daemon knows the name and hosts nothing under it, so the row is
-    /// staged rather than registered. Every verb a phone can aim at a run is
+    /// The row is staged rather than registered: what is under test is the
+    /// verbs, not the link. Every verb a phone can aim at a run is
     /// asked, the free text an older phone sends included, and each refusal
     /// names the agent. Nothing reaches the four shared ledgers, not even as an
     /// insert later cleaned up, and nothing is claimed in `mutation_ledger`.
     ///
     /// **Mutation:** move `Opencode` into the Codex arm of `answer` and the
-    /// answer half goes red; add it to `supported_agents` and the registration
-    /// arm of `a_registration_for_an_unsupported_agent_is_refused_with_no_trace`
-    /// goes red.
+    /// answer half goes red.
     #[tokio::test]
     async fn an_opencode_run_is_refused_by_every_verb_before_any_claim() {
         use protocol::ws::{ComposeResult, InterruptResult};
@@ -24445,6 +24793,7 @@ mod tests {
                     started_at: started_at.to_string(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(std::sync::Mutex::new(HashMap::new())),

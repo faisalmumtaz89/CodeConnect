@@ -121,6 +121,12 @@ pub fn read_pgid(pid: i32) -> Option<i32> {
     Some(read_bsdinfo(pid)?.pbi_pgid as i32)
 }
 
+/// Read the parent process id of `pid` off the same `proc_bsdinfo` answer.
+/// `None` when the process does not exist or the kernel could not be queried.
+pub fn read_ppid(pid: i32) -> Option<i32> {
+    Some(read_bsdinfo(pid)?.pbi_ppid as i32)
+}
+
 /// The current process's own identity, read the same way every other
 /// process's is — no shortcut through `getpid` alone, because a child records
 /// itself with this and the owner must be able to reproduce it byte for byte.
@@ -256,6 +262,19 @@ mod tests {
         let me = current_identity().expect("this process has a birth identity");
         assert_eq!(me.pid, std::process::id() as i32);
         assert_eq!(liveness(&me), Liveness::Alive);
+    }
+
+    #[test]
+    fn a_child_names_its_parent_and_a_missing_pid_names_none() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep");
+        let parent = read_ppid(child.id() as i32);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(parent, Some(std::process::id() as i32));
+        assert_eq!(read_ppid(0x3FFF_FFFF), None);
     }
 
     #[test]

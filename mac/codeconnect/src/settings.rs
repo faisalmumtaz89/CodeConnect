@@ -81,7 +81,7 @@ pub fn write_for_session(
     config: &Config,
 ) -> Result<SettingsPlan> {
     let hook_bin = hook_binary()?;
-    let dir = protocol::sessions_dir().join(format!("{session_id}-{session_uid}"));
+    let dir = protocol::session_dir(session_id, session_uid);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join("settings.json");
 

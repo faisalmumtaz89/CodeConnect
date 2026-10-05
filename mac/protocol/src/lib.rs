@@ -532,11 +532,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///       - [`event::SessionSummary::opencode_session_id`] — the OpenCode session
 ///         (`ses_…`) the run's keyboard is showing. Omitted when there is none, so a
 ///         summary of a Claude or Codex run is byte-identical to minor 21.
+///       - A daemon at this minor may list `opencode` in its
+///         [`ipc::DaemonFrame::SupportedAgents`] answer, accepts a registration of
+///         the agent carrying [`ipc::RegisterSession::opencode_nonce`], and fills
+///         `opencode_session_id` from the run's live link.
 ///
-///     At minor 22 no daemon hosts OpenCode: [`ws::Capabilities::supported_agents`]
-///     is unchanged, a registration naming the agent is refused, and an advertised
-///     `opencode` grants a client nothing, so no frame a minor-22 daemon sends carries
-///     the new words.
+///     An OpenCode run is observed and nothing more: [`ws::Capabilities::supported_agents`]
+///     is unchanged, and an advertised `opencode` grants a client nothing, because
+///     nothing on such a run can be answered or typed from the phone.
 pub const PROTOCOL_MINOR: u32 = 22;
 
 #[cfg(test)]
@@ -764,6 +767,12 @@ pub fn tls_dir() -> PathBuf {
 
 pub fn sessions_dir() -> PathBuf {
     root_dir().join("sessions")
+}
+
+/// One run's own directory, named by its tmux name and its uid. The uid is what
+/// keeps it the run's: the name is reused by the next session.
+pub fn session_dir(session_id: &str, session_uid: &str) -> PathBuf {
+    sessions_dir().join(format!("{session_id}-{session_uid}"))
 }
 
 pub fn logs_dir() -> PathBuf {

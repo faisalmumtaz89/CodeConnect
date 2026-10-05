@@ -503,6 +503,12 @@ pub struct RegisterSession {
     /// generations, which is why the guard is inert on the Claude path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_generation: Option<u64>,
+    /// The locator written into this run's OpenCode plugin options, as 32
+    /// lowercase hex digits: the plugin's hello names its run by it. Present on an
+    /// OpenCode registration and on no other. Absent from an older supervisor, and
+    /// left out when there is none, so an older daemon reads the frame unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_nonce: Option<String>,
     pub started_at: String,
     /// What this supervisor is able to honour, as [`crate::PROTOCOL_MINOR`].
     ///
@@ -984,6 +990,39 @@ mod tests {
         let s = serde_json::to_string(&codex).unwrap();
         assert!(s.contains(r#""agent":"codex""#), "{s}");
         assert_eq!(serde_json::from_str::<RegisterSession>(&s).unwrap(), codex);
+    }
+
+    /// The OpenCode nonce is additive both ways: a frame from a supervisor that
+    /// never heard of it decodes with none, a frame without one is written exactly
+    /// as an older daemon expects it, and an OpenCode frame carries it through.
+    #[test]
+    fn the_opencode_nonce_is_optional_on_the_wire_in_both_directions() {
+        use crate::agent::AgentKind;
+        let older: RegisterSession = serde_json::from_str(
+            r#"{"session_id":"cc-1","tmux_session":"cc-1","tmux_socket":"codeconnect",
+                "cwd":"/tmp","supervisor_pid":42,"agent":"codex","codex_generation":1,
+                "started_at":"t"}"#,
+        )
+        .expect("a registration from before the nonce still decodes");
+        assert_eq!(older.opencode_nonce, None);
+        let s = serde_json::to_string(&older).unwrap();
+        assert!(!s.contains("opencode_nonce"), "{s}");
+
+        let opencode = RegisterSession {
+            agent: AgentKind::Opencode,
+            codex_generation: None,
+            opencode_nonce: Some("0123456789abcdef0123456789abcdef".into()),
+            ..older
+        };
+        let s = serde_json::to_string(&opencode).unwrap();
+        assert!(
+            s.contains(r#""opencode_nonce":"0123456789abcdef0123456789abcdef""#),
+            "{s}"
+        );
+        assert_eq!(
+            serde_json::from_str::<RegisterSession>(&s).unwrap(),
+            opencode
+        );
     }
 
     /// The pre-`Register` negotiation pair round-trips, and an absent agent in a

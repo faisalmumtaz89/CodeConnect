@@ -1594,6 +1594,72 @@ impl Store {
         Ok(filed)
     }
 
+    /// Every turn this OpenCode run has filed a root fact for: `(turn, root
+    /// session, closed)`, where closed means a TurnComplete was filed for it.
+    ///
+    /// The root is read off the fact's key, `<session>:<suffix>`, of a fact that
+    /// is not a subagent's: those carry `subagent_session` and are keyed by the
+    /// child.
+    pub fn opencode_turns(&self, session_uid: &str) -> Result<Vec<(String, String, bool)>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT turn_id, MIN(source_event_id), MAX(kind = ?3)
+               FROM events
+              WHERE session_uid = ?1 AND source = ?2
+                AND turn_id IS NOT NULL AND source_event_id IS NOT NULL
+                AND json_extract(payload, '$.subagent_session') IS NULL
+              GROUP BY turn_id",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                session_uid,
+                Source::Opencode.as_str(),
+                EventKind::TurnComplete.as_str()
+            ],
+            |row| {
+                let key: String = row.get(1)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    key.split_once(':')
+                        .map(|(root, _)| root)
+                        .unwrap_or(&key)
+                        .to_string(),
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+    }
+
+    /// The OpenCode cards this run holds open: `(request id, key)` of every
+    /// `approval_request` with no `approval_resolved` for the same request.
+    pub fn opencode_open_cards(&self, session_uid: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT asked.item_id, asked.source_event_id
+               FROM events AS asked
+              WHERE asked.session_uid = ?1 AND asked.source = ?2 AND asked.kind = ?3
+                AND asked.item_id IS NOT NULL AND asked.source_event_id IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM events AS resolved
+                     WHERE resolved.session_uid = asked.session_uid
+                       AND resolved.source = asked.source
+                       AND resolved.kind = ?4
+                       AND resolved.item_id = asked.item_id)
+              ORDER BY asked.seq",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                session_uid,
+                Source::Opencode.as_str(),
+                EventKind::ApprovalRequest.as_str(),
+                EventKind::ApprovalResolved.as_str()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+    }
+
     /// The sequence number of the event a hook filed under `source_event_id`
     /// in this run, read on the dedup index.
     pub fn hook_event_seq(&self, session_uid: &str, source_event_id: &str) -> Result<Option<u64>> {

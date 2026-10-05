@@ -9115,6 +9115,7 @@ mod tests {
             started_at: protocol::time::now_rfc3339(),
             protocol_minor: protocol::PROTOCOL_MINOR,
             exit_replay: false,
+            opencode_nonce: None,
         }
     }
 
@@ -20906,6 +20907,7 @@ mod tests {
                     started_at: protocol::time::now_rfc3339(),
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     exit_replay: false,
+                    opencode_nonce: None,
                 },
                 tx,
                 Arc::new(Mutex::new(std::collections::HashMap::new())),
