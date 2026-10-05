@@ -130,6 +130,10 @@ pub struct SupervisorArgs {
     /// this producer cannot build that frame at all, rather than building it and
     /// being refused a round trip later.
     pub codex: Option<CodexSeat>,
+    /// The OpenCode identity this supervisor registers with, or `None` for any
+    /// other agent. The daemon refuses an OpenCode registration with no plugin
+    /// nonce, so the seat carries both or nothing.
+    pub opencode: Option<OpencodeSeat>,
     /// The tmux server this session was resolved against, when the caller has
     /// proven one.
     ///
@@ -177,6 +181,16 @@ pub struct CodexSeat {
     /// The thread visit this registration's frames are attributed to. A
     /// fresh launch is the first visit, so the coordinator sends 1.
     pub generation: u64,
+}
+
+/// What an OpenCode supervisor knows about the session it hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpencodeSeat {
+    /// The pinned `opencode` executable the pane runs, for `agent_bin`.
+    pub opencode_bin: String,
+    /// The nonce in the session's plugin options, by which the daemon admits the
+    /// plugin to this run.
+    pub nonce: String,
 }
 
 /// The connection `serve_once` is currently blocked on, so the liveness thread
@@ -1829,12 +1843,13 @@ fn report_exit_retrying(
 ///
 /// **The agent is read off the seat, never named twice.** A Claude run has no
 /// seat and carries no Codex field; a Codex run carries its identity and no
-/// `claude_bin`. All three halves matter to the daemon, which refuses a Claude
-/// registration carrying Codex identity fields, a Codex one missing them, and a
-/// Codex one carrying a Claude binary — so building this frame from one `Option`
-/// is what makes every one of those refusals unreachable from here rather than a
-/// round trip away. The third of them was documented before it existed; it is in
-/// `ccd::state::Daemon::register_supervisor` now, beside the other two.
+/// `claude_bin`; an OpenCode run carries its binary and plugin nonce and nothing
+/// of the other two. Each part matters to the daemon, which refuses a Claude
+/// registration carrying Codex identity fields, a Codex one missing them, a
+/// Codex one carrying a Claude binary, an OpenCode one without a nonce and a
+/// nonce on any other — so building this frame from the seats is what makes every
+/// one of those refusals unreachable from here rather than a round trip away. All
+/// of them are in `ccd::state::Daemon::register_supervisor`.
 ///
 /// **No thread id, deliberately.** The launch never learns one: the thread is
 /// created by the TUI after the app-server is up, is verified inside the broker
@@ -1845,22 +1860,33 @@ fn report_exit_retrying(
 /// priority fact it has (`ccd::state::Inner::seed_codex_carry`). Sending a hint
 /// this side cannot observe would be inventing evidence; `None` is what is true.
 fn registration_frame(args: &SupervisorArgs, started_at: &str) -> RegisterSession {
-    let (agent, agent_bin, claude_bin, codex_socket, codex_generation) = match &args.codex {
-        None => (
-            protocol::agent::AgentKind::Claude,
-            args.claude_bin.clone(),
-            args.claude_bin.clone(),
-            None,
-            None,
-        ),
-        Some(seat) => (
-            protocol::agent::AgentKind::Codex,
-            Some(seat.codex_bin.clone()),
-            None,
-            Some(seat.ccd_socket.clone()),
-            Some(seat.generation),
-        ),
-    };
+    let (agent, agent_bin, claude_bin, codex_socket, codex_generation, opencode_nonce) =
+        match (&args.codex, &args.opencode) {
+            (None, None) => (
+                protocol::agent::AgentKind::Claude,
+                args.claude_bin.clone(),
+                args.claude_bin.clone(),
+                None,
+                None,
+                None,
+            ),
+            (Some(seat), _) => (
+                protocol::agent::AgentKind::Codex,
+                Some(seat.codex_bin.clone()),
+                None,
+                Some(seat.ccd_socket.clone()),
+                Some(seat.generation),
+                None,
+            ),
+            (None, Some(seat)) => (
+                protocol::agent::AgentKind::Opencode,
+                Some(seat.opencode_bin.clone()),
+                None,
+                None,
+                None,
+                Some(seat.nonce.clone()),
+            ),
+        };
     RegisterSession {
         session_id: args.session_id.clone(),
         session_uid: args.session_uid.clone(),
@@ -1880,7 +1906,7 @@ fn registration_frame(args: &SupervisorArgs, started_at: &str) -> RegisterSessio
         // silently ignores the prompt fingerprint must not be handed one.
         protocol_minor: protocol::PROTOCOL_MINOR,
         exit_replay: false,
-        opencode_nonce: None,
+        opencode_nonce,
     }
 }
 
@@ -2239,6 +2265,7 @@ mod tests {
             cwd: "/tmp".into(),
             claude_bin: None,
             codex: None,
+            opencode: None,
             server_a: None,
         };
         let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
@@ -2313,6 +2340,7 @@ mod tests {
                 ccd_socket: "/tmp/s.sock".into(),
                 generation: 1,
             }),
+            opencode: None,
             server_a: None,
         };
         let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
@@ -2484,6 +2512,7 @@ mod tests {
                 ccd_socket: "/tmp/s.sock".into(),
                 generation: 1,
             }),
+            opencode: None,
             server_a: None,
         }
     }
@@ -2748,6 +2777,7 @@ mod tests {
             cwd: "/tmp".into(),
             claude_bin: None,
             codex: None,
+            opencode: None,
             server_a: None,
         };
         let config = Config::load();
@@ -2833,6 +2863,7 @@ mod tests {
             cwd: "/tmp".into(),
             claude_bin: None,
             codex: None,
+            opencode: None,
             server_a: None,
         };
         let config = Config::load();
@@ -2926,6 +2957,7 @@ mod tests {
             cwd: "/tmp".into(),
             claude_bin: None,
             codex: None,
+            opencode: None,
             server_a: None,
         };
         let config = Config::load();
@@ -4618,6 +4650,7 @@ means the full history gets re-read on your next message.
             cwd: "/tmp/project".into(),
             claude_bin: None,
             codex: None,
+            opencode: None,
             server_a: None,
         };
         let registration = registration_frame(&args, "2026-07-31T00:00:00Z");
@@ -4747,6 +4780,7 @@ means the full history gets re-read on your next message.
                 ccd_socket: "/tmp/s.sock".into(),
                 generation: 1,
             }),
+            opencode: None,
             server_a: None,
         };
         registration_frame(&args, "2026-08-28T00:00:00.000Z")
@@ -4782,6 +4816,7 @@ means the full history gets re-read on your next message.
             cwd: registration.cwd.clone(),
             claude_bin: None,
             codex: None,
+            opencode: None,
             server_a: None,
         };
         serve_once(
@@ -5017,6 +5052,7 @@ means the full history gets re-read on your next message.
             cwd: "/tmp/project".into(),
             claude_bin: None,
             codex: None,
+            opencode: None,
             server_a: None,
         };
         let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
@@ -5113,6 +5149,7 @@ means the full history gets re-read on your next message.
             cwd: "/tmp".into(),
             claude_bin: Some("/usr/local/bin/claude".into()),
             codex: None,
+            opencode: None,
             server_a: None,
         };
         let frame = registration_frame(&args, "2026-07-31T00:00:00Z");
@@ -5126,6 +5163,52 @@ means the full history gets re-read on your next message.
         // this on its copy and only there; a live registration that claimed to
         // be a replay would be refused the session it is asking to host.
         assert!(!frame.exit_replay);
+    }
+
+    /// **An OpenCode frame names its agent, its binary and its plugin nonce, and
+    /// nothing of Claude or Codex** — the frame the daemon's registration admits,
+    /// built by the producer.
+    #[test]
+    fn an_opencode_registration_carries_its_nonce_and_no_other_agent_s_fields() {
+        let args = SupervisorArgs {
+            session_id: "cc-5".into(),
+            session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR".into()),
+            tmux_session: "cc-5".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/Users/ada/project".into(),
+            claude_bin: None,
+            codex: None,
+            opencode: Some(OpencodeSeat {
+                opencode_bin: "/opt/opencode".into(),
+                nonce: "0123456789abcdef0123456789abcdef".into(),
+            }),
+            server_a: None,
+        };
+        let frame = registration_frame(&args, "2026-10-05T00:00:00Z");
+        assert_eq!(frame.agent, protocol::agent::AgentKind::Opencode);
+        assert_eq!(frame.agent_bin.as_deref(), Some("/opt/opencode"));
+        assert_eq!(
+            frame.opencode_nonce.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(frame.claude_bin, None);
+        assert_eq!(frame.codex_socket, None);
+        assert_eq!(frame.codex_generation, None);
+        assert_eq!(frame.codex_thread_id, None);
+        assert_eq!(frame.cwd, "/Users/ada/project");
+        assert!(!frame.exit_replay);
+
+        // The same run on a Claude seat carries no nonce.
+        let claude = registration_frame(
+            &SupervisorArgs {
+                claude_bin: Some("/usr/local/bin/claude".into()),
+                opencode: None,
+                ..args
+            },
+            "2026-10-05T00:00:00Z",
+        );
+        assert_eq!(claude.agent, protocol::agent::AgentKind::Claude);
+        assert_eq!(claude.opencode_nonce, None);
     }
 
     #[test]

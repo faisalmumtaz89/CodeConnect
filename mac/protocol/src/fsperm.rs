@@ -84,6 +84,24 @@ pub fn create_private(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+/// Create `path` for writing, `0600`, failing with `AlreadyExists` if anything —
+/// a file, a directory, a symlink — is already there.
+///
+/// For a file whose contents are trusted because this process wrote them: with
+/// `O_EXCL` nothing that existed before the call is ever opened, so a file or a
+/// link planted at the name in advance is refused rather than written through.
+/// The mode is set on the descriptor as well, since the umask may have narrowed
+/// the one `open` was given.
+pub fn create_private_new(path: &Path) -> io::Result<fs::File> {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(FILE_MODE)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(FILE_MODE))?;
+    Ok(file)
+}
+
 /// Make sure `path` exists and is `0600`, without disturbing its contents.
 ///
 /// Used ahead of a library that will create the file itself under the umask —
@@ -254,6 +272,44 @@ mod tests {
         write_private(&path, b"new").unwrap();
         assert_eq!(mode_of(&path).unwrap(), 0o600);
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn a_new_private_file_is_owner_only_and_never_opens_what_was_there() {
+        use std::io::Write;
+        let root = scratch("new");
+        let path = root.join("tui.json");
+        create_private_new(&path)
+            .and_then(|mut file| file.write_all(b"ours"))
+            .unwrap();
+        assert_eq!(mode_of(&path).unwrap(), 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "ours");
+
+        // A second creation, a directory and a link at the name are all refused,
+        // and what they point at is untouched.
+        let err = create_private_new(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "ours");
+        fs::create_dir(root.join("dir")).unwrap();
+        assert_eq!(
+            create_private_new(&root.join("dir")).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        let target = root.join("victim");
+        fs::write(&target, b"theirs").unwrap();
+        std::os::unix::fs::symlink(&target, root.join("link")).unwrap();
+        assert_eq!(
+            create_private_new(&root.join("link")).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        let dangling = root.join("dangling");
+        std::os::unix::fs::symlink(root.join("absent"), &dangling).unwrap();
+        assert_eq!(
+            create_private_new(&dangling).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(!root.join("absent").exists());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "theirs");
     }
 
     #[test]

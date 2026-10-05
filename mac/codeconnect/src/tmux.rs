@@ -293,7 +293,8 @@ pub fn next_session_name() -> Result<String> {
 /// `session_dir` (see [`crate::caller_env`]), so the agent sees what it would see
 /// run directly, not what the tmux server was started with. The agent then runs as
 /// a job of the pane's own process ([`crate::job`]), so Ctrl+Z stops it as a shell's
-/// job stops.
+/// job stops; `job_args` are that process's own options, ahead of the agent's
+/// command. Claude passes none.
 ///
 /// `argv` is passed as separate arguments through `sh -c '…' "$0" "$@"` so no
 /// user argument is ever interpolated into a shell string. The shell unsets
@@ -306,6 +307,7 @@ pub fn new_session(
     name: &str,
     cwd: &str,
     env: &[(String, String)],
+    job_args: &[OsString],
     argv: &[String],
     session_dir: &std::path::Path,
     size: Option<(u16, u16)>,
@@ -329,12 +331,13 @@ pub fn new_session(
         command.arg("-e").arg(format!("{key}={value}"));
     }
     command.arg("--");
-    command.args(crate::caller_env::pane_prefix(&exe, &caller));
-    command.arg(&exe).arg(crate::job::SUBCOMMAND);
-    command.args(claude_terminal_wrapper(std::env::var_os("TERM")));
-    for arg in argv {
-        command.arg(arg);
-    }
+    command.args(pane_command(
+        &exe,
+        &caller,
+        job_args,
+        std::env::var_os("TERM"),
+        argv,
+    ));
 
     // The startup deadline, not the operational one: this command may be the
     // one that forks the server and reads its config.
@@ -354,6 +357,25 @@ pub fn new_session(
         eprintln!("codeconnect: could not hide the tmux status bar for {name}");
     }
     Ok(())
+}
+
+/// The pane's command: take on the caller's environment from `caller`, become the
+/// agent's job control with `job_args`, then run `argv` through the terminal
+/// wrapper. `exe` is this binary and `term` the caller's `TERM`.
+fn pane_command(
+    exe: &std::path::Path,
+    caller: &std::path::Path,
+    job_args: &[OsString],
+    term: Option<OsString>,
+    argv: &[String],
+) -> Vec<OsString> {
+    let mut command: Vec<OsString> = crate::caller_env::pane_prefix(exe, caller).into();
+    command.push(exe.into());
+    command.push(crate::job::SUBCOMMAND.into());
+    command.extend(job_args.iter().cloned());
+    command.extend(claude_terminal_wrapper(term));
+    command.extend(argv.iter().map(OsString::from));
+    command
 }
 
 /// This binary, which the pane runs first to take on the caller's environment.
@@ -1199,6 +1221,66 @@ mod tests {
         );
     }
 
+    /// **Claude's whole pane command, byte for byte.** It runs with no job options,
+    /// and an agent's job options go between `internal-job` and the terminal
+    /// wrapper, never anywhere else.
+    #[test]
+    fn the_claude_pane_command_is_byte_identical() {
+        let exe = std::path::Path::new("/opt/codeconnect/bin/codeconnect");
+        let caller = std::path::Path::new("/home/u/.codeconnect/sessions/cc-1-UID/environment");
+        let argv = [
+            "/usr/local/bin/claude".to_string(),
+            "--settings".to_string(),
+            "/home/u/.codeconnect/sessions/cc-1-UID/settings.json".to_string(),
+            "--resume".to_string(),
+        ];
+        let claude = pane_command(
+            exe,
+            caller,
+            &[],
+            Some(OsString::from("xterm-256color")),
+            &argv,
+        );
+        assert_eq!(
+            claude,
+            [
+                "/opt/codeconnect/bin/codeconnect",
+                "internal-caller-environment",
+                "/home/u/.codeconnect/sessions/cc-1-UID/environment",
+                "/opt/codeconnect/bin/codeconnect",
+                "internal-job",
+                "/usr/bin/env",
+                "-u",
+                "TMUX",
+                "-u",
+                "TMUX_PANE",
+                "-u",
+                "TERM",
+                "TERM=xterm-256color",
+                "/bin/sh",
+                "-c",
+                r#"unset CLAUDE_CODE_CHILD_SESSION; exec "$0" "$@""#,
+                "/usr/local/bin/claude",
+                "--settings",
+                "/home/u/.codeconnect/sessions/cc-1-UID/settings.json",
+                "--resume",
+            ]
+            .map(OsString::from)
+        );
+        let job_args = ["--opencode-dir", "/d"].map(OsString::from);
+        let with_options = pane_command(
+            exe,
+            caller,
+            &job_args,
+            Some(OsString::from("xterm-256color")),
+            &argv,
+        );
+        let mut expected = claude[..5].to_vec();
+        expected.extend(job_args);
+        expected.extend_from_slice(&claude[5..]);
+        assert_eq!(with_options, expected);
+    }
+
     #[test]
     fn claude_gets_the_caller_s_term_and_not_the_pane_s_tmux() {
         use std::os::unix::ffi::OsStringExt;
@@ -1276,6 +1358,7 @@ mod tests {
         let created = new_session(
             &name,
             "/tmp",
+            &[],
             &[],
             &[
                 "/bin/sh".to_string(),

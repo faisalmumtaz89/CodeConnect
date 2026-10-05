@@ -2052,6 +2052,7 @@ fn supervise_ready_session(deps: &RealCoordinatorDeps) -> Result<()> {
                 // counts visits off the broker's own stream.
                 generation: 1,
             }),
+            opencode: None,
             // **The server this launch was pinned to, handed on.** The coordinator
             // resolved it before it brought the wrapper up and has judged every
             // bring-up poll against it; the supervisor half needs the same pin for

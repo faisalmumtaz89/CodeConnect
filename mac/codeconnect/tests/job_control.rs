@@ -362,3 +362,71 @@ fn the_job_ends_as_its_agent_ends() {
     use std::os::unix::process::ExitStatusExt;
     assert_eq!(run("kill -TERM $$").signal(), Some(libc::SIGTERM));
 }
+
+/// **An OpenCode pane's job**: it starts the agent only while the pinned binary
+/// still hashes to its digest, publishes the agent's own pid in the session
+/// directory, and takes the session's files with it however the agent ends,
+/// leaving the rest of the directory alone.
+#[test]
+fn an_opencode_job_publishes_its_agent_and_takes_its_files_with_it() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = std::env::temp_dir().join(format!("ccj-oc-{}", protocol::uid::new().unwrap()));
+    protocol::fsperm::private_dir(&dir).unwrap();
+    let binary = Path::new("/bin/sh");
+    let pinned = protocol::hash::sha256_file(binary).unwrap();
+    let session_files = ["codeconnect-opencode.js", "tui.json"];
+    let run = |digest: &str, script: &str| {
+        for name in session_files.iter().chain(&["environment"]) {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let script = script.replace("DIR", &dir.display().to_string());
+        Command::new(env!("CARGO_BIN_EXE_codeconnect"))
+            .arg("internal-job")
+            .arg("--opencode-dir")
+            .arg(&dir)
+            .arg("--verify")
+            .arg(binary)
+            .arg(digest)
+            .args(["/bin/sh", "-c", &script])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+    };
+    let left = || {
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+
+    let ended = run(
+        &pinned,
+        "while [ ! -e DIR/agent.json ]; do sleep 0.05; done; \
+         cp DIR/agent.json DIR/seen; echo $$ > DIR/pid; exit 3",
+    );
+    assert_eq!(ended.code(), Some(3));
+    let seen: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("seen")).unwrap()).unwrap();
+    let pid: i64 = std::fs::read_to_string(dir.join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(seen["pid"], pid, "the published pid is the agent's own");
+    assert!(seen["start"]["sec"].is_i64() && seen["start"]["usec"].is_i64());
+    assert_eq!(left(), ["environment", "pid", "seen"]);
+
+    let ended = run(&pinned, "kill -TERM $$");
+    assert_eq!(ended.signal(), Some(libc::SIGTERM));
+    assert_eq!(left(), ["environment", "pid", "seen"]);
+
+    let other = "0".repeat(64);
+    let ended = run(&other, "touch DIR/ran");
+    assert_eq!(ended.code(), Some(1), "a binary that changed does not run");
+    assert_eq!(left(), ["environment", "pid", "seen"]);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}

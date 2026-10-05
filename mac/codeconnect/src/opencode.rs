@@ -27,7 +27,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use protocol::agent::AgentKind;
 use protocol::config::Config;
 
-use crate::codex::{candidates_for, first_native, resolve_native_binary, OPENCODE};
+use crate::codex::{candidates_for, first_native, resolve_native_binary, ResolvedBinary, OPENCODE};
 
 /// Reads one environment variable. The process environment in production; a table
 /// in tests, so a classification never depends on the machine running it.
@@ -39,7 +39,7 @@ pub(crate) type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 /// the pinned native binary, then refuses a disabled CodeConnect plugin, a daemon
 /// socket path too long to dial, and a daemon that cannot host OpenCode — every
 /// refusal before a session identity, a tmux name or a file exists — and then hands
-/// the launch to [`crate::start_agent`].
+/// the launch to [`crate::start_agent`], which plans it with [`plan_launch`].
 pub fn start(args: &[String]) -> Result<()> {
     let config = Config::load();
     let cwd = std::env::current_dir().context("reading the current directory")?;
@@ -63,14 +63,140 @@ pub fn start(args: &[String]) -> Result<()> {
 
     // Binary first, as for Claude and Codex: a missing or unusable executable
     // surfaces before any other check.
-    resolve_native_binary(&OPENCODE, config.opencode_bin.as_deref())?;
+    let binary = resolve_native_binary(&OPENCODE, config.opencode_bin.as_deref())?;
     if let Some(path) = plugin_disabled(&folder, &env, &protocol::home_dir()) {
         bail!("{}", OpencodeRefusal::PluginDisabled { path });
     }
-    socket_fits(&protocol::socket_path()).map_err(|refusal| anyhow!("{refusal}"))?;
+    let socket = protocol::socket_path();
+    socket_fits(&socket).map_err(|refusal| anyhow!("{refusal}"))?;
     crate::daemon::refuse_unless_hostable(crate::daemon::agent_support(&AgentKind::Opencode))?;
 
-    crate::start_agent(AgentKind::Opencode, args)
+    crate::start_agent(
+        &config,
+        crate::Agent::Opencode(Hosted {
+            binary,
+            folder,
+            socket,
+        }),
+        args,
+    )
+}
+
+/// A hosted launch that passed every check: the pinned executable, the folder
+/// OpenCode opens, and the daemon socket its plugin dials.
+pub(crate) struct Hosted {
+    binary: ResolvedBinary,
+    folder: PathBuf,
+    socket: PathBuf,
+}
+
+/// The CodeConnect plugin, as OpenCode loads it from the session directory.
+pub(crate) const PLUGIN_FILE: &str = "codeconnect-opencode.js";
+
+/// OpenCode's TUI settings for the session: the plugin and its options.
+pub(crate) const TUI_CONFIG_FILE: &str = "tui.json";
+
+/// The agent's pid and start time, published by the pane's job once OpenCode runs,
+/// and read by the plugin beside it.
+pub(crate) const AGENT_FILE: &str = "agent.json";
+
+/// The session directory's OpenCode files, which end with the session.
+pub(crate) const SESSION_FILES: [&str; 3] = [PLUGIN_FILE, TUI_CONFIG_FILE, AGENT_FILE];
+
+const PLUGIN_SOURCE: &str = include_str!("../opencode-plugin/codeconnect-opencode.js");
+
+/// Plan a hosted launch: write the session's plugin and settings, and run the
+/// pinned `opencode` with the argv unchanged.
+///
+/// The pane gets one variable, `OPENCODE_TUI_CONFIG`, naming the settings that
+/// load the plugin. Its job verifies the binary again right before starting it
+/// and publishes the agent's identity in the session directory. The supervisor
+/// registers the run under the plugin's nonce and the folder OpenCode opens,
+/// which is the folder the plugin reports.
+pub(crate) fn plan_launch(
+    hosted: &Hosted,
+    session_id: &str,
+    session_uid: &str,
+    passthrough: &[String],
+) -> Result<crate::AgentLaunchPlan> {
+    let dir = protocol::session_dir(session_id, session_uid);
+    let (plan, tui_config) = plan_in(hosted, &dir, &mint_nonce()?, passthrough)?;
+    write_session_files(&dir, &tui_config)?;
+    Ok(plan)
+}
+
+/// The plan for a session directory `dir` and plugin `nonce`, and the `tui.json`
+/// to write there. Every path is checked to be text before anything is written.
+fn plan_in(
+    hosted: &Hosted,
+    dir: &Path,
+    nonce: &str,
+    passthrough: &[String],
+) -> Result<(crate::AgentLaunchPlan, String)> {
+    let binary = utf8(&hosted.binary.path)?;
+    let tui_config = tui_config(utf8(&hosted.socket)?, nonce);
+    let mut argv = vec![binary.to_string()];
+    argv.extend(passthrough.iter().cloned());
+    let os = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+    let plan = crate::AgentLaunchPlan {
+        argv,
+        env: vec![(
+            "OPENCODE_TUI_CONFIG".to_string(),
+            utf8(&dir.join(TUI_CONFIG_FILE))?.to_string(),
+        )],
+        job_args: os(&[
+            "--opencode-dir",
+            utf8(dir)?,
+            "--verify",
+            binary,
+            &hosted.binary.sha256,
+        ]),
+        supervisor_seat: os(&["--opencode-bin", binary, "--opencode-nonce", nonce]),
+        registered_cwd: Some(utf8(&hosted.folder)?.to_string()),
+        session_dir: dir.to_path_buf(),
+    };
+    Ok((plan, tui_config))
+}
+
+/// A path that has to travel as text: in an argv the pane reads back, in the
+/// environment, or in JSON.
+fn utf8(path: &Path) -> Result<&str> {
+    path.to_str()
+        .with_context(|| format!("{} is not valid UTF-8", path.display()))
+}
+
+/// The plugin's nonce: 128 random bits as 32 lowercase hex digits. It names the
+/// run to the daemon; it is not a secret.
+fn mint_nonce() -> Result<String> {
+    let bytes = protocol::secret::random_bytes::<16>().context("reading random bytes")?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// The session's `tui.json`: the plugin, named relative to the file so OpenCode
+/// loads it from the session directory, with the daemon socket and the nonce as
+/// its options.
+fn tui_config(socket: &str, nonce: &str) -> String {
+    let text = |value: &str| serde_json::Value::from(value).to_string();
+    format!(
+        r#"{{"plugin":[[{},{{"socket":{},"nonce":{}}}]]}}"#,
+        text(&format!("./{PLUGIN_FILE}")),
+        text(socket),
+        text(nonce)
+    )
+}
+
+/// Write the plugin and `tui_config` into the private directory `dir`. Each file is
+/// created new and owner-only; one already there refuses the launch.
+fn write_session_files(dir: &Path, tui_config: &str) -> Result<()> {
+    use std::io::Write;
+    protocol::fsperm::private_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
+    for (name, contents) in [(PLUGIN_FILE, PLUGIN_SOURCE), (TUI_CONFIG_FILE, tui_config)] {
+        let path = dir.join(name);
+        protocol::fsperm::create_private_new(&path)
+            .and_then(|mut file| file.write_all(contents.as_bytes()))
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// What `codeconnect opencode <args>` does with an argv that is not refused.
@@ -1125,6 +1251,154 @@ mod tests {
             "{\"a\": \"//x\", \"b\": \"/*y*/\", \"c\": \"\\\"//\"} "
         );
         assert_eq!(strip_jsonc("[1, 2 ,\n]"), "[1, 2 ]");
+    }
+
+    const NONCE: &str = "0123456789abcdef0123456789abcdef";
+    const SHA256: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+    fn hosted(folder: &Path) -> Hosted {
+        Hosted {
+            binary: ResolvedBinary {
+                path: PathBuf::from("/opt/homebrew/lib/node_modules/opencode-ai/bin/opencode.exe"),
+                sha256: SHA256.to_string(),
+            },
+            folder: folder.to_path_buf(),
+            socket: PathBuf::from("/Users/ada/.codeconnect/ccd.sock"),
+        }
+    }
+
+    /// **The settings OpenCode is pointed at, exactly.** One plugin, named relative
+    /// to the file so OpenCode loads it from the session directory, with the
+    /// daemon socket and the nonce as its options. A path that needs escaping is
+    /// escaped, so the file stays the JSON it says.
+    #[test]
+    fn the_tui_settings_name_the_plugin_beside_them_with_its_options() {
+        assert_eq!(
+            tui_config("/Users/ada/.codeconnect/ccd.sock", NONCE),
+            r#"{"plugin":[["./codeconnect-opencode.js",{"socket":"/Users/ada/.codeconnect/ccd.sock","nonce":"0123456789abcdef0123456789abcdef"}]]}"#
+        );
+        let odd = "/Users/a \"b\"\\c/ccd.sock";
+        let parsed: serde_json::Value = serde_json::from_str(&tui_config(odd, NONCE)).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({"plugin": [["./codeconnect-opencode.js", {"socket": odd, "nonce": NONCE}]]})
+        );
+    }
+
+    /// The nonce is 128 bits, in the shape the daemon accepts: 32 lowercase hex.
+    #[test]
+    fn a_nonce_is_32_lowercase_hex_digits_and_fresh_each_time() {
+        let nonce = mint_nonce().unwrap();
+        assert_eq!(nonce.len(), 32);
+        assert!(nonce
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert_ne!(nonce, mint_nonce().unwrap());
+    }
+
+    /// **The session files are private and never written over.** The directory is
+    /// `0700`, each file `0600` and created new: a second launch into the same
+    /// directory, or a file or link already at a name, refuses rather than
+    /// writing through it.
+    #[test]
+    fn the_session_files_are_private_and_never_written_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new();
+        let dir = scratch.0.join("sessions/cc-1-UID");
+        let settings = tui_config("/s/ccd.sock", NONCE);
+        write_session_files(&dir, &settings).unwrap();
+        let mode = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join(PLUGIN_FILE)), 0o600);
+        assert_eq!(mode(&dir.join(TUI_CONFIG_FILE)), 0o600);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(PLUGIN_FILE)).unwrap(),
+            PLUGIN_SOURCE
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(TUI_CONFIG_FILE)).unwrap(),
+            settings
+        );
+
+        let again = write_session_files(&dir, &tui_config("/s/ccd.sock", &"f".repeat(32)));
+        assert!(again.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(TUI_CONFIG_FILE)).unwrap(),
+            settings
+        );
+
+        let planted = scratch.0.join("planted");
+        let target = scratch.0.join("target");
+        std::fs::write(&target, "theirs").unwrap();
+        std::fs::create_dir(&planted).unwrap();
+        std::os::unix::fs::symlink(&target, planted.join(TUI_CONFIG_FILE)).unwrap();
+        let refused = write_session_files(&planted, &settings).unwrap_err();
+        assert_eq!(
+            refused
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "theirs");
+    }
+
+    /// **The pane runs the pinned binary with the argv unchanged**, and is given one
+    /// variable. Its job is told the session directory and the binary's identity;
+    /// the supervisor is told the binary and the nonce; the run registers the
+    /// folder OpenCode opens, which is the folder its plugin reports.
+    #[test]
+    fn the_plan_runs_the_pinned_binary_with_the_argv_unchanged() {
+        let folder = Path::new("/Users/ada/project");
+        let dir = Path::new("/Users/ada/.codeconnect/sessions/cc-2-UID");
+        let passthrough = argv(&["-m", "mock/model", "--", "run"]);
+        let (plan, settings) = plan_in(&hosted(folder), dir, NONCE, &passthrough).unwrap();
+        let binary = "/opt/homebrew/lib/node_modules/opencode-ai/bin/opencode.exe";
+        assert_eq!(plan.argv, argv(&[binary, "-m", "mock/model", "--", "run"]));
+        assert_eq!(
+            plan.env,
+            vec![(
+                "OPENCODE_TUI_CONFIG".to_string(),
+                "/Users/ada/.codeconnect/sessions/cc-2-UID/tui.json".to_string()
+            )]
+        );
+        let os = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            plan.job_args,
+            os(&[
+                "--opencode-dir",
+                "/Users/ada/.codeconnect/sessions/cc-2-UID",
+                "--verify",
+                binary,
+                SHA256
+            ])
+        );
+        assert_eq!(
+            plan.supervisor_seat,
+            os(&["--opencode-bin", binary, "--opencode-nonce", NONCE])
+        );
+        assert_eq!(plan.registered_cwd.as_deref(), Some("/Users/ada/project"));
+        assert_eq!(plan.session_dir, dir);
+        assert_eq!(
+            settings,
+            tui_config("/Users/ada/.codeconnect/ccd.sock", NONCE)
+        );
+    }
+
+    /// A path that cannot travel as text is refused before a file is written.
+    #[test]
+    fn a_path_that_is_not_text_is_refused_before_anything_is_written() {
+        use std::os::unix::ffi::OsStrExt;
+        let folder = PathBuf::from(std::ffi::OsStr::from_bytes(b"/Users/ada/\xff"));
+        let dir = Path::new("/nonexistent/sessions/cc-3-UID");
+        assert!(plan_in(&hosted(&folder), dir, NONCE, &[]).is_err());
+        assert!(!dir.exists());
     }
 
     /// **Every refusal lands before anything exists.** `start` classifies, resolves

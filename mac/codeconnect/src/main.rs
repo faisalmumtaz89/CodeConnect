@@ -393,20 +393,32 @@ fn explain_retired(retired: RetiredCommand) -> ! {
     std::process::exit(RETIRED_EXIT_CODE);
 }
 
-/// The agent-varying pieces of a launch: the resolved binary, the exact argv and
-/// env the tmux session runs. Built by an agent-specific planner so the pieces
-/// that differ between agents live in one place. The `claude` planner reproduces
-/// byte-for-byte what shipped — proven by the launcher test and the fixture
-/// replay — and it is the only planner today; another agent's launch path lands
-/// with that agent, not before.
+/// Which agent a launch is for, with what its planner needs: the agent's resolved
+/// executable and whatever else its entry point established.
+enum Agent {
+    Claude(PathBuf),
+    /// Resolved, pinned and checked by [`opencode::start`].
+    Opencode(opencode::Hosted),
+}
+
+/// The agent-varying pieces of a launch: the exact argv and env the tmux session
+/// runs, the pane job's options, and the supervisor's agent seat. Built by an
+/// agent-specific planner so the pieces that differ between agents live in one
+/// place. The `claude` planner reproduces byte-for-byte what shipped — proven by
+/// the launcher test and the fixture replay; the OpenCode planner is
+/// [`opencode::plan_launch`].
 struct AgentLaunchPlan {
-    /// The resolved agent binary, passed on to the supervisor.
-    binary: PathBuf,
     /// argv[0] is the binary; the rest is agent flags plus the caller's passthrough.
     argv: Vec<String>,
     env: Vec<(String, String)>,
-    /// The session's private directory, where the settings document lives.
+    /// The session's private directory, where the agent's own files live.
     session_dir: PathBuf,
+    /// Options for the pane's `internal-job`, ahead of the agent's command.
+    job_args: Vec<std::ffi::OsString>,
+    /// The supervisor's flags naming the agent's binary and identity.
+    supervisor_seat: Vec<std::ffi::OsString>,
+    /// The folder the run registers, when it is not the launcher's directory.
+    registered_cwd: Option<String>,
 }
 
 /// The exact argv and env a Claude session runs — a **pure** function, so the
@@ -450,7 +462,7 @@ fn claude_argv_and_env(
 
 /// Plan a Claude launch around an **already-resolved** binary: write the
 /// control-plane settings document and assemble the byte-identical argv/env. The
-/// binary is resolved separately and first (see `start_agent`), so a missing
+/// binary is resolved separately and first (see `start_claude`), so a missing
 /// binary fails before any session state exists — the pre-seam ordering.
 fn plan_claude_launch(
     config: &Config,
@@ -468,36 +480,33 @@ fn plan_claude_launch(
         .context("the settings document has a directory")?
         .to_path_buf();
     Ok(AgentLaunchPlan {
-        binary: binary.to_path_buf(),
         argv,
         env,
         session_dir,
+        job_args: Vec::new(),
+        supervisor_seat: vec!["--claude-bin".into(), binary.into()],
+        registered_cwd: None,
     })
 }
 
 fn start_claude(passthrough: &[String]) -> Result<()> {
-    start_agent(protocol::agent::AgentKind::Claude, passthrough)
+    let config = Config::load();
+    // **Binary first.** Resolving the agent's executable is the first thing that
+    // can fail, and it must fail before a tmux name is taken or a session
+    // identity minted — exactly as the pre-seam launcher did, so a missing
+    // binary surfaces the same way it always has.
+    let binary = resolve_claude_bin(&config)?;
+    start_agent(&config, Agent::Claude(binary), passthrough)
 }
 
 /// Launch an agent session: mint the identity, plan the agent-varying pieces,
 /// create the tmux session, and hand ownership to the supervisor. Everything
 /// outside the plan — the identity, the tmux session, the advisories, the
-/// attach — is agent-agnostic; the plan is where an agent differs. Only Claude
-/// has a planner today; any other agent is refused before anything is spawned.
-fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Result<()> {
-    let config = Config::load();
-
-    // **Binary first.** Resolving the agent's executable is the first thing that
-    // can fail, and it must fail before a tmux name is taken or a session
-    // identity minted — exactly as the pre-seam launcher did, so a missing
-    // binary surfaces the same way it always has. This is the agent-varying
-    // binary-resolution step; a non-Claude agent is refused here, before any
-    // state exists.
-    let binary = match &agent {
-        protocol::agent::AgentKind::Claude => resolve_claude_bin(&config)?,
-        other => bail!("{} sessions cannot be launched yet", other.as_str()),
-    };
-
+/// attach — is agent-agnostic; the plan is where an agent differs.
+///
+/// Each agent's entry point has resolved its executable before calling this, so
+/// nothing here runs for a launch whose binary is missing.
+fn start_agent(config: &Config, agent: Agent, passthrough: &[String]) -> Result<()> {
     let cwd = std::env::current_dir().context("reading the current directory")?;
     let cwd = cwd.to_string_lossy().to_string();
 
@@ -508,11 +517,12 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     let session_uid = protocol::uid::new().context("minting a session uid")?;
 
     let plan = match &agent {
-        protocol::agent::AgentKind::Claude => {
-            plan_claude_launch(&config, &binary, &session_id, &session_uid, passthrough)?
+        Agent::Claude(binary) => {
+            plan_claude_launch(config, binary, &session_id, &session_uid, passthrough)?
         }
-        // Unreachable: a non-Claude agent already bailed at binary resolution.
-        other => bail!("{} sessions cannot be launched yet", other.as_str()),
+        Agent::Opencode(hosted) => {
+            opencode::plan_launch(hosted, &session_id, &session_uid, passthrough)?
+        }
     };
 
     let _held = crate::attach::hold_signal_keys();
@@ -520,6 +530,7 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
         &session_id,
         &cwd,
         &plan.env,
+        &plan.job_args,
         &plan.argv,
         &plan.session_dir,
         tmux::terminal_size(),
@@ -528,7 +539,12 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     )
     .with_context(|| format!("creating tmux session {session_id}"))?;
 
-    spawn_supervisor(&session_id, &session_uid, &cwd, &plan.binary)?;
+    spawn_supervisor(
+        &session_id,
+        &session_uid,
+        plan.registered_cwd.as_deref().unwrap_or(&cwd),
+        &plan.supervisor_seat,
+    )?;
 
     // After the session and supervisor exist, before the attach:
     // the hold below delays only the *display*, never the session it is
@@ -847,11 +863,14 @@ fn asciify(text: &str) -> String {
 /// the terminal and that client later dies, the supervisor is reparented to
 /// launchd and keeps running. This is the standard daemonisation shape, and it
 /// is reachable from safe Rust.
+///
+/// `seat` names the agent: `--claude-bin PATH`, or `--opencode-bin PATH
+/// --opencode-nonce HEX`.
 fn spawn_supervisor(
     session_id: &str,
     session_uid: &str,
     cwd: &str,
-    claude_bin: &std::path::Path,
+    seat: &[std::ffi::OsString],
 ) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
@@ -877,8 +896,7 @@ fn spawn_supervisor(
         .arg(session_id)
         .arg("--cwd")
         .arg(cwd)
-        .arg("--claude-bin")
-        .arg(claude_bin)
+        .args(seat)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
@@ -891,11 +909,26 @@ fn spawn_supervisor(
 }
 
 fn supervise(args: &[String]) -> Result<()> {
+    let mut args = supervisor_args(args)?;
+    // The server this session is on, pinned as the supervisor starts. A session
+    // cannot outlive the process hosting it, so that server proven dead — by pid and
+    // birth, never by socket silence — ends this session even on the fleet-wide
+    // server. Unresolvable, the probe is exactly as it was.
+    args.server_a = args.session_uid.as_deref().and_then(|uid| {
+        protocol::tmux::resolve_owned_session(protocol::TMUX_SOCKET_NAME, uid).ok()
+    });
+    supervisor::run(args, &Config::load())
+}
+
+/// What `supervise`'s flags say, before anything is asked of tmux.
+fn supervisor_args(args: &[String]) -> Result<supervisor::SupervisorArgs> {
     let mut session_id = None;
     let mut session_uid = None;
     let mut tmux_session = None;
     let mut cwd = None;
     let mut claude_bin = None;
+    let mut opencode_bin = None;
+    let mut opencode_nonce = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -904,6 +937,8 @@ fn supervise(args: &[String]) -> Result<()> {
             "--tmux-session" => tmux_session = it.next().cloned(),
             "--cwd" => cwd = it.next().cloned(),
             "--claude-bin" => claude_bin = it.next().cloned(),
+            "--opencode-bin" => opencode_bin = it.next().cloned(),
+            "--opencode-nonce" => opencode_nonce = it.next().cloned(),
             _ => {}
         }
     }
@@ -914,33 +949,36 @@ fn supervise(args: &[String]) -> Result<()> {
     // name instead, which is right, whereas a bad uid would mint a second identity
     // for a session that has one.
     let session_uid = session_uid.filter(|uid| protocol::uid::is_well_formed(uid));
-    // The server this session is on, pinned as the supervisor starts. A session
-    // cannot outlive the process hosting it, so that server proven dead — by pid and
-    // birth, never by socket silence — ends this session even on the fleet-wide
-    // server. Unresolvable, the probe is exactly as it was.
-    let server_a = session_uid.as_deref().and_then(|uid| {
-        protocol::tmux::resolve_owned_session(protocol::TMUX_SOCKET_NAME, uid).ok()
-    });
+    // Both or neither. This parser ignores what it does not recognise, so one of
+    // the two alone would otherwise register an OpenCode run as a Claude one.
+    let opencode = match (opencode_bin, opencode_nonce) {
+        (Some(opencode_bin), Some(nonce)) => Some(supervisor::OpencodeSeat {
+            opencode_bin,
+            nonce,
+        }),
+        (None, None) => None,
+        _ => bail!("--opencode-bin and --opencode-nonce go together"),
+    };
 
-    supervisor::run(
-        supervisor::SupervisorArgs {
-            session_id,
-            session_uid,
-            tmux_session,
-            // No flag, on purpose. `supervise` is spawned by `codeconnect
-            // claude` and by nothing else — the Codex launch supervises itself,
-            // in the coordinator process, so the seat and the socket travel as
-            // values rather than as argv. Adding `--agent` here would be a
-            // user-facing surface with no caller, on a parser that silently
-            // ignores what it does not recognise.
-            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
-            cwd,
-            claude_bin,
-            codex: None,
-            server_a,
-        },
-        &Config::load(),
-    )
+    Ok(supervisor::SupervisorArgs {
+        session_id,
+        session_uid,
+        tmux_session,
+        // No flag, on purpose. `supervise` is spawned by `codeconnect claude` and
+        // `codeconnect opencode`, both on the private server, and by nothing else
+        // — the Codex launch supervises itself, in the coordinator process, so its
+        // seat and socket travel as values rather than as argv. The agent is named
+        // by its seat's flags (`--claude-bin`, or `--opencode-bin` with
+        // `--opencode-nonce`); adding `--agent` or `--tmux-socket` here would be a
+        // user-facing surface with no caller, on a parser that silently ignores
+        // what it does not recognise.
+        tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+        cwd,
+        claude_bin,
+        codex: None,
+        opencode,
+        server_a: None,
+    })
 }
 
 fn attach(args: &[String]) -> Result<()> {
@@ -1106,6 +1144,59 @@ mod tests {
             &[],
         );
         assert_eq!(bare, vec!["claude", "--settings", "/s.json"]);
+    }
+
+    /// **`supervise` reads the agent off its seat flags.** `--claude-bin` alone is
+    /// a Claude seat; `--opencode-bin` with `--opencode-nonce` an OpenCode one; one
+    /// of the OpenCode pair alone is refused rather than registered as Claude.
+    #[test]
+    fn the_supervisor_seat_is_read_off_its_flags() {
+        let base = [
+            "--session",
+            "cc-4",
+            "--session-uid",
+            "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "--tmux-session",
+            "cc-4",
+            "--cwd",
+            "/Users/ada/project",
+        ];
+        let with = |seat: &[&str]| {
+            let words: Vec<&str> = base.iter().chain(seat).copied().collect();
+            supervisor_args(&argv(&words))
+        };
+
+        let claude = with(&["--claude-bin", "/usr/local/bin/claude"]).unwrap();
+        assert_eq!(claude.claude_bin.as_deref(), Some("/usr/local/bin/claude"));
+        assert_eq!(claude.codex, None);
+        assert_eq!(claude.opencode, None);
+        assert_eq!(claude.cwd, "/Users/ada/project");
+        assert_eq!(claude.tmux_socket, protocol::TMUX_SOCKET_NAME);
+
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let opencode =
+            with(&["--opencode-bin", "/opt/opencode", "--opencode-nonce", nonce]).unwrap();
+        assert_eq!(opencode.claude_bin, None);
+        assert_eq!(
+            opencode.opencode,
+            Some(supervisor::OpencodeSeat {
+                opencode_bin: "/opt/opencode".into(),
+                nonce: nonce.into(),
+            })
+        );
+
+        for half in [
+            &["--opencode-bin", "/opt/opencode"][..],
+            &["--opencode-nonce", nonce],
+            &[
+                "--claude-bin",
+                "/usr/local/bin/claude",
+                "--opencode-nonce",
+                nonce,
+            ],
+        ] {
+            assert!(with(half).is_err(), "{half:?}");
+        }
     }
 
     /// Whether a bare command name resolves on this machine's `PATH`.
