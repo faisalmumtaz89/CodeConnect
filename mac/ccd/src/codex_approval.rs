@@ -211,7 +211,7 @@ pub(crate) fn observe_only_reason(method: &str) -> &'static str {
 /// decode at all. Cutting here instead keeps the card a card, and the cut is
 /// made **before** the hash so the text on the phone is still provably the text
 /// that was hashed.
-const MAX_COMMAND_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_COMMAND_BYTES: usize = 8 * 1024;
 /// The same ceiling for one file's diff.
 const MAX_DIFF_BYTES: usize = 16 * 1024;
 /// And a ceiling on how many files one card describes, so a thousand-file patch
@@ -762,7 +762,7 @@ fn optional(params: &Value, key: &str) -> Option<String> {
 /// same 8192-byte prefix, hashed to the same `payload_hash`. The card was then
 /// a statement about neither of them. With the digest the hash commits to every
 /// byte the app-server proposed, whether or not the phone is shown it.
-fn bounded(text: &str, max: usize) -> String {
+pub(crate) fn bounded(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }

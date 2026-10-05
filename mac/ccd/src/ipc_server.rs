@@ -472,6 +472,17 @@ async fn read_loop(
             ClientFrame::DaemonInfo => {
                 let _ = tx.send(DaemonFrame::Daemon(daemon.info().await)).await;
             }
+            ClientFrame::OpencodeHello(_) => {
+                // No OpenCode run registers with this daemon, so no nonce can
+                // name one. Not final: the plugin backs off and dials again.
+                let _ = tx
+                    .send(DaemonFrame::OpencodeRefused {
+                        reason: "no OpenCode run is registered under this nonce".into(),
+                        r#final: false,
+                    })
+                    .await;
+                return Ok(());
+            }
         }
     }
 }

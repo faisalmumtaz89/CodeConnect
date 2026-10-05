@@ -12,6 +12,8 @@
 //! take a session with it: the daemon is an observer, and killing an observer
 //! must never kill what it was observing.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::event::SessionSummary;
@@ -125,6 +127,67 @@ pub enum ClientFrame {
     /// outlive its process and name a pid that now belongs to something else,
     /// and `codeconnect daemon install` uses this answer to send a signal.
     DaemonInfo,
+    /// The first line of the CodeConnect plugin running inside an OpenCode TUI.
+    ///
+    /// Sent on a fresh connection and never by a supervisor or the shim. Once the
+    /// daemon admits it, the connection stops carrying `ClientFrame`s and becomes
+    /// that run's observation link; the plugin's frames after the welcome have a
+    /// grammar of their own.
+    OpencodeHello(OpencodeHello),
+}
+
+/// Who is dialling, as the OpenCode plugin states it. Every field is a claim the
+/// daemon checks against the kernel and its own registration before admitting
+/// the link; none of it is trusted on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpencodeHello {
+    /// The plugin's link grammar. Only version 1 exists.
+    pub wire: u32,
+    /// The 128-bit locator CodeConnect wrote into the run's plugin options, as 32
+    /// lowercase hex digits. It names a run; it proves nothing.
+    pub nonce: String,
+    /// The OpenCode process the plugin runs in.
+    pub pid: i32,
+    /// That process's birth time, as CodeConnect recorded it after starting
+    /// OpenCode. A pid alone can be reused; the pair cannot.
+    pub start: OpencodeStart,
+    /// Counts plugin activations inside one OpenCode process, from 1. A plugin
+    /// reload is a new activation of the same process.
+    pub activation: u64,
+    /// The folder OpenCode opened, or `null` when the plugin could not read it.
+    pub directory: Option<String>,
+    /// Whether the plugin found every OpenCode API member it uses.
+    pub api: OpencodeApi,
+}
+
+/// A process birth time as the plugin spells it: seconds and microseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpencodeStart {
+    pub sec: i64,
+    pub usec: i64,
+}
+
+/// The plugin's load-time check of the OpenCode API it relies on. A link whose
+/// check failed is still admitted, and observes only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpencodeApi {
+    pub ok: bool,
+    /// The members that were absent or of the wrong type, by their `api.…` path.
+    pub missing: Vec<String>,
+    /// OpenCode's own version, when the API reported one.
+    pub version: Option<String>,
+}
+
+/// Where the plugin's snapshot of one root session starts.
+///
+/// `from: null` asks for the session from its start, and is written out as
+/// `null` rather than left out: the plugin drops an entry whose `from` is
+/// missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpencodeBound {
+    pub from: Option<String>,
+    /// Whether the message named by `from` is itself part of the window.
+    pub inclusive: bool,
 }
 
 impl ClientFrame {
@@ -279,6 +342,27 @@ pub enum DaemonFrame {
         ssh_key_removed: AlwaysFalse,
     },
     Daemon(DaemonInfo),
+    /// The OpenCode plugin's hello was admitted: the connection is now that run's
+    /// observation link. Sent to the plugin only.
+    OpencodeWelcome {
+        /// The daemon's name for this link.
+        link: String,
+        /// Per root session, where the plugin's first snapshot starts.
+        acked: BTreeMap<String, OpencodeBound>,
+    },
+    /// The OpenCode plugin's hello was refused, or its link is being closed.
+    /// Sent to the plugin only.
+    OpencodeRefused {
+        reason: String,
+        /// The plugin stops dialling for this activation. `false` asks it to try
+        /// again later, for a refusal that may not hold then.
+        r#final: bool,
+    },
+    /// Asks the OpenCode plugin on this link for a fresh full snapshot, from the
+    /// bounds given. Sent to the plugin only.
+    OpencodeResync {
+        acked: BTreeMap<String, OpencodeBound>,
+    },
 }
 
 /// One run that `codeconnect sessions prune` removed, and what went with it.
@@ -1633,5 +1717,121 @@ mod tests {
             SupervisorRequest::SendText { submit, .. } => assert!(submit),
             other => panic!("wrong request: {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------ OpenCode link
+
+    const LINK_V1: &str = include_str!("../../../fixtures/opencode/link-v1-frames.jsonl");
+
+    /// The contract file's rows that are this crate's frames: every hello the
+    /// plugin writes and every frame the daemon writes back.
+    fn link_rows() -> Vec<(String, serde_json::Value)> {
+        LINK_V1
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let row: serde_json::Value = serde_json::from_str(line).expect("a JSON row");
+                (
+                    row["dir"].as_str().unwrap().to_string(),
+                    row["frame"].clone(),
+                )
+            })
+            .filter(|(dir, frame)| dir == "ccd" || frame.get("t").is_none())
+            .collect()
+    }
+
+    #[test]
+    fn every_opencode_hello_and_reply_in_the_contract_decodes_and_encodes_back_unchanged() {
+        let (mut hellos, mut replies) = (0, 0);
+        for (dir, frame) in link_rows() {
+            let again = if dir == "plugin" {
+                hellos += 1;
+                let decoded: ClientFrame = serde_json::from_value(frame.clone())
+                    .unwrap_or_else(|err| panic!("{err}: {frame}"));
+                assert!(matches!(decoded, ClientFrame::OpencodeHello(_)), "{frame}");
+                serde_json::to_value(&decoded).unwrap()
+            } else {
+                replies += 1;
+                let decoded: DaemonFrame = serde_json::from_value(frame.clone())
+                    .unwrap_or_else(|err| panic!("{err}: {frame}"));
+                serde_json::to_value(&decoded).unwrap()
+            };
+            assert_eq!(
+                again, frame,
+                "the frame must survive a decode and an encode"
+            );
+        }
+        assert_eq!(
+            (hellos, replies),
+            (3, 3),
+            "the contract's hellos and daemon frames"
+        );
+    }
+
+    #[test]
+    fn a_hello_whose_api_check_failed_still_decodes_and_says_what_is_missing() {
+        let (_, frame) = link_rows()
+            .into_iter()
+            .find(|(_, f)| f["api"]["ok"] == false)
+            .expect("the contract carries an observe-only hello");
+        let ClientFrame::OpencodeHello(hello) = serde_json::from_value(frame).unwrap() else {
+            panic!("not a hello");
+        };
+        assert!(!hello.api.ok);
+        assert_eq!(hello.api.version, None);
+        assert_eq!(
+            hello.api.missing,
+            ["api.client.question.list", "api.app.version"]
+        );
+    }
+
+    #[test]
+    fn a_hello_from_a_newer_plugin_still_decodes() {
+        let line = r#"{"type":"opencode_hello","wire":1,"nonce":"0123456789abcdef0123456789abcdef",
+            "pid":4242,"start":{"sec":1700000000,"usec":123456},"activation":3,"directory":null,
+            "api":{"ok":true,"missing":[],"version":"1.19.0","extra":1},"later":"field"}"#;
+        match frame_from(line) {
+            ClientFrame::OpencodeHello(hello) => {
+                assert_eq!(hello.activation, 3);
+                assert_eq!(hello.directory, None);
+                assert_eq!(
+                    hello.start,
+                    OpencodeStart {
+                        sec: 1700000000,
+                        usec: 123456
+                    }
+                );
+            }
+            other => panic!("wrong frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_opencode_replies_are_spelled_as_the_plugin_reads_them() {
+        let refused = serde_json::to_value(DaemonFrame::OpencodeRefused {
+            reason: "stale start time".into(),
+            r#final: true,
+        })
+        .unwrap();
+        assert_eq!(
+            refused,
+            serde_json::json!({"type":"opencode_refused","reason":"stale start time","final":true})
+        );
+
+        // The plugin keeps an acked entry only when `from` is a string or null.
+        let resync = serde_json::to_value(DaemonFrame::OpencodeResync {
+            acked: BTreeMap::from([(
+                "ses_a".to_string(),
+                OpencodeBound {
+                    from: None,
+                    inclusive: false,
+                },
+            )]),
+        })
+        .unwrap();
+        assert_eq!(
+            resync,
+            serde_json::json!({"type":"opencode_resync","acked":{"ses_a":{"from":null,"inclusive":false}}})
+        );
     }
 }
