@@ -551,13 +551,14 @@ async fn read_frame(
     }
 }
 
-/// The pid of the process at the other end of `stream`, as the kernel recorded
-/// it when that process connected (`getsockopt(SOL_LOCAL, LOCAL_PEERPID)`).
+/// The pid the kernel reports for the peer of `stream`
+/// (`getsockopt(SOL_LOCAL, LOCAL_PEERPID)`).
 ///
-/// The one platform call the OpenCode admission rests on: every other check it
-/// makes starts from this pid. `None` when the kernel would not answer, and
-/// always on a platform other than macOS, where this option does not exist; an
-/// OpenCode hello over a connection without a peer pid is refused.
+/// The OpenCode admission takes nothing more from it than that pid, and checks
+/// the rest itself: the pid's parent and its start time. `None` when the kernel
+/// would not answer, and always on a platform other than macOS, where this
+/// option does not exist; an OpenCode hello over a connection without a peer
+/// pid is refused.
 #[cfg(target_os = "macos")]
 fn peer_pid(stream: &UnixStream) -> Option<i32> {
     use std::os::fd::AsRawFd;

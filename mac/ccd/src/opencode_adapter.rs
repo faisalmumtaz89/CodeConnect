@@ -279,7 +279,8 @@ pub(crate) struct OpencodeAdapter {
     open_at_sync: Option<HashSet<String>>,
     /// Cleared at `settled`: open cards the snapshot did not list as pending.
     clear_due: Vec<String>,
-    /// Root → the last agent and model a user message was sent with.
+    /// Root → the last agent and model a user message was sent with, as the
+    /// line a change says.
     selection: HashMap<String, String>,
     selection_seen: HashSet<String>,
     /// Roots with a message this adapter could not put in a turn since the
@@ -392,8 +393,18 @@ impl OpencodeAdapter {
     }
 
     /// A card the store holds open, told to an adapter that has not seen it
-    /// asked — the daemon restarted — so a snapshot can still clear it.
-    pub(crate) fn restore_open_card(&mut self, request_id: &str, session: &str, kind: RequestKind) {
+    /// asked — the daemon restarted — so a snapshot can still clear it, in the
+    /// turn it was asked in.
+    pub(crate) fn restore_open_card(
+        &mut self,
+        request_id: &str,
+        session: &str,
+        kind: RequestKind,
+        turn: Option<String>,
+    ) {
+        self.request_turn
+            .entry(request_id.to_string())
+            .or_insert(turn);
         if !self.open_cards.iter().any(|c| c.request_id == request_id) {
             self.open_cards.push(OpenCard {
                 request_id: request_id.to_string(),
@@ -401,6 +412,21 @@ impl OpencodeAdapter {
                 kind,
             });
         }
+    }
+
+    /// The last agent and model a root's prompts were sent with, as the store
+    /// recorded it, told to an adapter that has not seen them — the daemon
+    /// restarted — so the next prompt is compared with it.
+    pub(crate) fn restore_selection(&mut self, root: &str, line: &str) {
+        self.selection
+            .entry(root.to_string())
+            .or_insert_with(|| line.to_string());
+    }
+
+    /// Whether the agent and model of `root`'s last prompt are known, so its
+    /// next prompt can be compared with them.
+    pub(crate) fn knows_selection(&self, root: &str) -> bool {
+        self.selection.contains_key(root)
     }
 
     /// A snapshot is beginning (`sync_begin`). The cards open now are the only
@@ -2518,7 +2544,7 @@ mod tests {
         }
 
         /// The cards the store holds open: asked, never resolved.
-        fn open_cards(&self) -> Vec<(String, String, RequestKind)> {
+        fn open_cards(&self) -> Vec<(String, String, RequestKind, Option<String>)> {
             let resolved: HashSet<&str> = self
                 .events
                 .iter()
@@ -2537,7 +2563,8 @@ mod tests {
                     } else {
                         RequestKind::Permission
                     };
-                    (e.item_id.clone().unwrap(), session.to_string(), kind)
+                    let id = e.item_id.clone().unwrap();
+                    (id, session.to_string(), kind, e.turn_id.clone())
                 })
                 .collect()
         }
@@ -2588,8 +2615,8 @@ mod tests {
 
         fn daemon_restart(&mut self) {
             self.retire();
-            for (id, session, kind) in self.store.open_cards() {
-                self.adapter.restore_open_card(&id, &session, kind);
+            for (id, session, kind, turn) in self.store.open_cards() {
+                self.adapter.restore_open_card(&id, &session, kind, turn);
             }
         }
 

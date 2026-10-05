@@ -694,6 +694,10 @@ struct Inner {
     opencode: HashMap<String, OpencodeRun>,
     /// Plugin nonce → the `session_uid` of the run it was written for.
     opencode_nonces: HashMap<String, String>,
+    /// How long a run new to this daemon waits for its plugin before its
+    /// timeline says the plugin never connected; `None` is
+    /// [`OPENCODE_CONNECT_BACKSTOP`].
+    opencode_backstop: Option<Duration>,
 }
 
 /// One OpenCode run, as its plugin link needs it. See [`crate::opencode_link`].
@@ -1095,11 +1099,18 @@ impl Inner {
         *self.row_writes.entry(session_uid.to_string()).or_insert(0) += 1;
     }
 
-    /// Take an OpenCode run out of the daemon, nonce and all. Its link, if it
-    /// has one, stops when the returned run is dropped.
+    /// Take an OpenCode run out of the daemon, and its nonce while the nonce
+    /// names it. Its link, if it has one, stops when the returned run is
+    /// dropped.
     fn forget_opencode_run(&mut self, session_uid: &str) -> Option<OpencodeRun> {
         let run = self.opencode.remove(session_uid)?;
-        self.opencode_nonces.remove(&run.nonce);
+        if self
+            .opencode_nonces
+            .get(&run.nonce)
+            .is_some_and(|holder| holder == session_uid)
+        {
+            self.opencode_nonces.remove(&run.nonce);
+        }
         Some(run)
     }
 
@@ -7781,16 +7792,6 @@ impl Daemon {
                 info.session_id
             );
         }
-        if let Some(nonce) = info.opencode_nonce.as_deref() {
-            let holder = self.inner.lock().await.opencode_nonces.get(nonce).cloned();
-            if holder.is_some_and(|holder| holder != uid) {
-                anyhow::bail!(
-                    "refusing to register {}: its OpenCode nonce already names another run",
-                    info.session_id
-                );
-            }
-        }
-
         // **The control-link fact, and the Codex mirror of the guard above.** A
         // Codex registration must name the broker's ccd leg and the generation its
         // frames are attributed to, or this daemon would install a session it can
@@ -7841,6 +7842,37 @@ impl Daemon {
         // path, which is the lock ordering this type already uses.
         let gate = self.registration_gate(&uid).await;
         let _acceptance = gate.lock().await;
+
+        // **One nonce, one launch.** A nonce another run holds is not this
+        // run's. A uid is minted per launch, so only that launch registers a
+        // held run again, and with the same nonce; another nonce would take the
+        // link and the pin of a process still running. Checked under the gate,
+        // which orders the registrations of this uid; a run of another uid can
+        // still take the nonce under its own gate, so the install checks again.
+        if let Some(nonce) = info.opencode_nonce.as_deref() {
+            let inner = self.inner.lock().await;
+            if inner
+                .opencode_nonces
+                .get(nonce)
+                .is_some_and(|holder| *holder != uid)
+            {
+                anyhow::bail!(
+                    "refusing to register {}: its OpenCode nonce already names another run",
+                    info.session_id
+                );
+            }
+            if inner
+                .opencode
+                .get(&uid)
+                .is_some_and(|run| run.nonce != nonce)
+            {
+                anyhow::bail!(
+                    "refusing to register {}: {uid} is a live OpenCode run launched with \
+                     another plugin nonce",
+                    info.session_id
+                );
+            }
+        }
 
         // **The answer quiesce is taken LATER — just above the stake — not here**
         //. All of the accept/reject preparation below (the row re-read,
@@ -8786,8 +8818,8 @@ impl Daemon {
     /// A re-registration of the same launch — a supervisor reconnecting, or a
     /// restarted daemon hearing from it again — keeps what the run has: its pin,
     /// its live link and its observer. A run new to this daemon starts from the
-    /// log, whose open cards it is told about, and starts the backstop for a
-    /// plugin that never dials.
+    /// log, read once here ([`crate::opencode_link::Logged`]), and starts the
+    /// backstop for a plugin that never dials.
     async fn install_opencode_run(
         self: &Arc<Self>,
         session: &SessionKey,
@@ -8808,20 +8840,23 @@ impl Daemon {
                 return;
             }
         }
-        let open_cards = match self.db.opencode_open_cards(session.uid.clone()).await {
-            Ok(cards) => cards,
-            Err(err) => {
-                crate::log_warn!(
-                    "could not read the open OpenCode cards of {}: {err:#}",
-                    session.name
-                );
-                Vec::new()
-            }
-        };
-        let observer = crate::opencode_link::Observer::new(session.clone(), &open_cards);
+        let logged = crate::opencode_link::Logged::read(self, session).await;
+        let observer = crate::opencode_link::Observer::new(session.clone(), logged);
         {
             let mut inner = self.inner.lock().await;
-            inner.forget_opencode_run(&session.uid);
+            // The registration's check, again where it counts: a run of
+            // another uid may have taken the nonce since.
+            if inner
+                .opencode_nonces
+                .get(nonce)
+                .is_some_and(|holder| *holder != session.uid)
+            {
+                crate::log_error!(
+                    "not observing {}: its OpenCode nonce names another run",
+                    session.name
+                );
+                return;
+            }
             inner
                 .opencode_nonces
                 .insert(nonce.to_string(), session.uid.clone());
@@ -8842,10 +8877,26 @@ impl Daemon {
         }
         let daemon = Arc::clone(self);
         let (uid, nonce) = (session.uid.clone(), nonce.to_string());
+        let wait = self.opencode_backstop_wait().await;
         tokio::spawn(async move {
-            tokio::time::sleep(OPENCODE_CONNECT_BACKSTOP).await;
+            tokio::time::sleep(wait).await;
             daemon.opencode_backstop(&uid, &nonce).await;
         });
+    }
+
+    /// How long a run new to this daemon waits for its plugin before
+    /// [`Daemon::opencode_backstop`].
+    pub(crate) async fn opencode_backstop_wait(&self) -> Duration {
+        self.inner
+            .lock()
+            .await
+            .opencode_backstop
+            .unwrap_or(OPENCODE_CONNECT_BACKSTOP)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_opencode_backstop_wait(&self, wait: Duration) {
+        self.inner.lock().await.opencode_backstop = Some(wait);
     }
 
     /// A run whose plugin has never been admitted says so in its timeline. The
@@ -8853,15 +8904,16 @@ impl Daemon {
     /// the process it runs in; from here those look the same. Nothing is written
     /// for a run that has ended, was relaunched, or was linked even once.
     pub(crate) async fn opencode_backstop(&self, session_uid: &str, nonce: &str) {
-        let session = {
+        let (session, wait) = {
             let inner = self.inner.lock().await;
+            let wait = inner.opencode_backstop.unwrap_or(OPENCODE_CONNECT_BACKSTOP);
             match inner.opencode.get(session_uid) {
-                Some(run) if run.nonce == nonce && run.pin.is_none() => run.session.clone(),
+                Some(run) if run.nonce == nonce && run.pin.is_none() => (run.session.clone(), wait),
                 _ => return,
             }
         };
         crate::log_warn!(
-            "the OpenCode plugin of {} did not connect within {OPENCODE_CONNECT_BACKSTOP:?}",
+            "the OpenCode plugin of {} did not connect within {wait:?}",
             session.name
         );
         crate::opencode_link::record_link_state(
@@ -8966,6 +9018,29 @@ impl Daemon {
         run.link = None;
         run.head = None;
         true
+    }
+
+    /// Nonce → uid as the daemon finds a plugin, and uid → nonce of every run
+    /// it holds.
+    #[cfg(test)]
+    pub(crate) async fn opencode_nonce_table(
+        &self,
+    ) -> (
+        std::collections::BTreeMap<String, String>,
+        std::collections::BTreeMap<String, String>,
+    ) {
+        let inner = self.inner.lock().await;
+        let runs = inner
+            .opencode
+            .iter()
+            .map(|(uid, run)| (uid.clone(), run.nonce.clone()))
+            .collect();
+        let nonces = inner
+            .opencode_nonces
+            .iter()
+            .map(|(nonce, uid)| (nonce.clone(), uid.clone()))
+            .collect();
+        (nonces, runs)
     }
 
     /// The OpenCode run has ended: it leaves the daemon, its link stops, and

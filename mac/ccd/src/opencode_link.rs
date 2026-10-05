@@ -781,8 +781,9 @@ pub(crate) const NEVER: &str = "the CodeConnect plugin did not connect (OpenCode
                                 disabled, or the plugin failed to load)";
 
 /// What one run's link keeps from one connection to the next: the mapper, the
-/// plugin's sequence mark, and a snapshot being assembled. Held by one frame at
-/// a time, so a connection that took over waits for its predecessor's frame.
+/// plugin's sequence mark, a snapshot being assembled, and the run's turns.
+/// Held by one frame at a time, so a connection that took over waits for its
+/// predecessor's frame.
 pub(crate) struct Observer {
     pub(crate) adapter: OpencodeAdapter,
     seq: SeqFilter,
@@ -790,15 +791,68 @@ pub(crate) struct Observer {
     /// A fresh snapshot was asked for on this connection and no `settled` has
     /// arrived since.
     resync_asked: bool,
+    /// The turns the log holds for the run, kept as facts are recorded; `None`
+    /// until the log could be read.
+    turns: Option<Turns>,
+}
+
+/// What the log holds of a run that an observer starts from, read when the
+/// daemon first holds the run.
+#[derive(Debug, Default)]
+pub(crate) struct Logged {
+    /// `(request id, fact key, turn)` of each card still open.
+    open_cards: Vec<(String, String, Option<String>)>,
+    /// `(fact key, line)` of each model change, oldest first.
+    model_changes: Vec<(String, String)>,
+    /// `(turn, root, closed)` of each turn; `None` when it could not be read.
+    turns: Option<Vec<(String, String, bool)>>,
+}
+
+impl Logged {
+    /// Read from the log. What cannot be read is logged and left empty.
+    pub(crate) async fn read(daemon: &Daemon, session: &SessionKey) -> Logged {
+        let uid = || session.uid.clone();
+        let warn = |what: &str, err: anyhow::Error| {
+            crate::log_warn!("could not read the {what} of {}: {err:#}", session.name);
+        };
+        let open_cards = daemon
+            .db
+            .opencode_open_cards(uid())
+            .await
+            .unwrap_or_else(|err| {
+                warn("open OpenCode cards", err);
+                Vec::new()
+            });
+        let model_changes = daemon
+            .db
+            .opencode_model_changes(uid())
+            .await
+            .unwrap_or_else(|err| {
+                warn("OpenCode model changes", err);
+                Vec::new()
+            });
+        let turns = daemon
+            .db
+            .opencode_turns(uid())
+            .await
+            .map_err(|err| warn("OpenCode turns", err))
+            .ok();
+        Logged {
+            open_cards,
+            model_changes,
+            turns,
+        }
+    }
 }
 
 impl Observer {
-    /// A fresh observer for `session`, told which cards the log holds open —
-    /// `(request id, fact key)` — so a snapshot can still clear them after a
-    /// daemon restart.
-    pub(crate) fn new(session: SessionKey, open_cards: &[(String, String)]) -> Self {
+    /// A fresh observer for `session`, told what the log holds of it: the
+    /// cards open, so a snapshot can still clear them; each root's last model,
+    /// so a change is still said; and the turns, which the welcome and every
+    /// resync acknowledge.
+    pub(crate) fn new(session: SessionKey, logged: Logged) -> Self {
         let mut adapter = OpencodeAdapter::new(session);
-        for (request_id, key) in open_cards {
+        for (request_id, key, turn) in logged.open_cards {
             let Some((asked_in, rest)) = key.split_once(':') else {
                 continue;
             };
@@ -809,14 +863,49 @@ impl Observer {
             } else {
                 continue;
             };
-            adapter.restore_open_card(request_id, asked_in, kind);
+            adapter.restore_open_card(&request_id, asked_in, kind, turn);
+        }
+        for (key, line) in logged.model_changes.iter().rev() {
+            if let Some((root, _)) = key.split_once(':') {
+                adapter.restore_selection(root, line);
+            }
         }
         Observer {
             adapter,
             seq: SeqFilter::default(),
             sync: None,
             resync_asked: false,
+            turns: logged.turns.map(Turns::from_log),
         }
+    }
+
+    /// Where each root's next snapshot starts. The log is read here only when
+    /// it could not be read before.
+    ///
+    /// A root whose last agent and model this observer does not know — the
+    /// daemon restarted and the log says no change — is acked from its newest
+    /// closed turn inclusive, so the snapshot brings that turn's prompt and
+    /// with it the choice the next prompt is compared with. What the snapshot
+    /// repeats of that turn is already in the log under the same keys.
+    async fn acked(
+        &mut self,
+        daemon: &Daemon,
+        session_uid: &str,
+    ) -> BTreeMap<String, OpencodeBound> {
+        if self.turns.is_none() {
+            match daemon.db.opencode_turns(session_uid.to_string()).await {
+                Ok(turns) => self.turns = Some(Turns::from_log(turns)),
+                Err(err) => {
+                    crate::log_warn!("could not read the OpenCode turns of {session_uid}: {err:#}");
+                }
+            }
+        }
+        let adapter = &self.adapter;
+        let mut acked = self.turns.as_ref().map(Turns::acked).unwrap_or_default();
+        for (root, bound) in &mut acked {
+            bound.inclusive |= !adapter.knows_selection(root);
+        }
+        acked
     }
 }
 
@@ -870,10 +959,9 @@ pub(crate) trait Witness: Send + Sync {
     fn parent(&self, pid: i32) -> Option<i32>;
     /// When `pid` started.
     fn start(&self, pid: i32) -> Option<OpencodeStart>;
-    /// The process of the first pane of the tmux session the run `uid` owns:
-    /// `Ok(None)` when tmux answered and no such session exists, `Err` when tmux
-    /// could not be asked.
-    fn pane(&self, tmux_socket: &str, uid: &str) -> Result<Option<i32>, String>;
+    /// The process of the first pane of the tmux session the run `uid` owns,
+    /// as [`protocol::tmux::pane_pid`] answers it.
+    fn pane(&self, tmux_socket: &str, uid: &str) -> Result<i32, protocol::tmux::ResolveError>;
     /// The OpenCode process the run's `agent.json` records: its pid and start.
     fn recorded(&self, dir: &Path) -> Option<(i32, OpencodeStart)>;
 }
@@ -894,15 +982,16 @@ impl Witness for Kernel {
         })
     }
 
-    fn pane(&self, tmux_socket: &str, uid: &str) -> Result<Option<i32>, String> {
-        match protocol::tmux::pane_pid(tmux_socket, uid) {
-            Ok(pid) => Ok(Some(pid)),
-            Err(protocol::tmux::ResolveError::Unavailable(why)) => Err(why),
-            Err(_) => Ok(None),
-        }
+    fn pane(&self, tmux_socket: &str, uid: &str) -> Result<i32, protocol::tmux::ResolveError> {
+        protocol::tmux::pane_pid(tmux_socket, uid)
     }
 
+    /// Read through one descriptor: opened without following a link and
+    /// without waiting for a writer, then judged by what it is, not by what
+    /// the name pointed at a moment before.
     fn recorded(&self, dir: &Path) -> Option<(i32, OpencodeStart)> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
         /// The file is a few dozen bytes; anything larger is not one the pane wrote.
         const MOST: u64 = 4096;
         #[derive(Deserialize)]
@@ -910,12 +999,23 @@ impl Witness for Kernel {
             pid: i32,
             start: OpencodeStart,
         }
-        let path = dir.join("agent.json");
-        let meta = std::fs::symlink_metadata(&path).ok()?;
+        // A FIFO or a device opens at once under `O_NONBLOCK`, and is refused
+        // below as not a regular file.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(dir.join("agent.json"))
+            .ok()?;
+        let meta = file.metadata().ok()?;
         if !meta.is_file() || meta.len() > MOST {
             return None;
         }
-        let recorded: Recorded = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        let mut bytes = Vec::new();
+        file.take(MOST + 1).read_to_end(&mut bytes).ok()?;
+        if bytes.len() as u64 > MOST {
+            return None;
+        }
+        let recorded: Recorded = serde_json::from_slice(&bytes).ok()?;
         Some((recorded.pid, recorded.start))
     }
 }
@@ -927,7 +1027,7 @@ impl Witness for Kernel {
 ///   1. the link grammar is version 1;
 ///   2. the nonce names a registered OpenCode run that has not ended — not a
 ///      final refusal, because the supervisor may not have registered yet;
-///   3. the connection's peer, as the kernel saw it connect, is the pid the
+///   3. the pid the kernel reports for the connection's peer is the pid the
 ///      hello names;
 ///   4. that process's parent is the first pane's process of the run's own tmux
 ///      session, so an `opencode` the agent's shell started is refused;
@@ -939,7 +1039,8 @@ impl Witness for Kernel {
 ///   8. a live link of the same process is taken over: its connection closes,
 ///      and nothing it says afterwards is read.
 ///
-/// A refused hello changes nothing, a live link least of all.
+/// Steps 3 to 6 get [`VERIFY_BUDGET`]; a check that takes longer is refused,
+/// not final. A refused hello changes nothing, a live link least of all.
 pub(crate) async fn serve(
     daemon: &Arc<Daemon>,
     hello: OpencodeHello,
@@ -977,12 +1078,13 @@ pub(crate) async fn serve_with(
         }
     };
     let link = admitted.link.clone();
-    {
+    let acked = {
         let mut observer = admitted.observer.lock().await;
         observer.seq.admitted(&hello);
         observer.sync = None;
         observer.resync_asked = false;
-    }
+        observer.acked(daemon, &run.session.uid).await
+    };
     record_link_state(
         daemon,
         &run.session,
@@ -991,7 +1093,6 @@ pub(crate) async fn serve_with(
         &attached_reason(&hello.api),
     )
     .await;
-    let acked = acked_of(daemon, &run.session.uid).await;
     let _ = tx
         .send(DaemonFrame::OpencodeWelcome {
             link: link.clone(),
@@ -1061,6 +1162,12 @@ pub(crate) async fn serve_with(
     }
 }
 
+/// How long steps 3 to 6 may take. Each tmux call they make is bounded at one
+/// second, and the rest are reads of the kernel and of a file of a few dozen
+/// bytes. The plugin waits 3 s for its answer to a hello, so a refusal for
+/// time arrives while it still listens, and it dials again.
+const VERIFY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Steps 1 to 8 of [`serve`]'s admission.
 async fn admit(
     daemon: &Arc<Daemon>,
@@ -1081,9 +1188,18 @@ async fn admit(
     };
     let checked = {
         let (hello, run) = (hello.clone(), run.clone());
-        tokio::task::spawn_blocking(move || verify(witness, &hello, peer, &run)).await
+        let blocking = tokio::task::spawn_blocking(move || verify(witness, &hello, peer, &run));
+        tokio::time::timeout(VERIFY_BUDGET, blocking).await
     };
-    checked.unwrap_or_else(|_| Err(Refusal::last("the OpenCode process could not be checked")))?;
+    match checked {
+        Ok(Ok(verified)) => verified?,
+        Ok(Err(_)) => return Err(Refusal::last("the OpenCode process could not be checked")),
+        Err(_) => {
+            return Err(Refusal::again(format!(
+                "the OpenCode process could not be checked within {VERIFY_BUDGET:?}"
+            )))
+        }
+    }
     let admitted = daemon.opencode_admit(&run.session.uid, hello).await?;
     Ok((run, admitted))
 }
@@ -1091,7 +1207,8 @@ async fn admit(
 /// Steps 3 to 6: the hello's claims against the kernel, tmux, the run's
 /// recorded start and its folder. Every answer that was read and does not
 /// match is final: none of them changes for the same process. Only a tmux that
-/// could not be asked is not.
+/// could not be asked, or that names more than one session for the run, is
+/// not.
 fn verify(
     witness: &dyn Witness,
     hello: &OpencodeHello,
@@ -1103,13 +1220,23 @@ fn verify(
             "the process on this connection is not the OpenCode process the hello names",
         ));
     }
-    // A tmux that could not be asked proves nothing either way, and may answer
-    // the next dial.
-    let pane = witness
-        .pane(&run.tmux_socket, &run.session.uid)
-        .map_err(|why| {
-            Refusal::again(format!("the run's terminal could not be checked ({why})"))
-        })?;
+    // A tmux that could not be asked, or that holds more than one session for
+    // the run, proves nothing either way, and may answer the next dial.
+    let pane = match witness.pane(&run.tmux_socket, &run.session.uid) {
+        Ok(pid) => Some(pid),
+        Err(protocol::tmux::ResolveError::NotHosted) => None,
+        Err(protocol::tmux::ResolveError::IdentityMismatch(why)) => {
+            return Err(Refusal::again(format!(
+                "the run's terminal is ambiguous: more than one tmux session carries \
+                 this run ({why})"
+            )))
+        }
+        Err(protocol::tmux::ResolveError::Unavailable(why)) => {
+            return Err(Refusal::again(format!(
+                "the run's terminal could not be checked ({why})"
+            )))
+        }
+    };
     if pane.is_none() || witness.parent(hello.pid) != pane {
         return Err(Refusal::last(
             "this OpenCode is not the one CodeConnect started in the run's pane",
@@ -1178,7 +1305,7 @@ async fn step(
                 // The facts are made durable before the adapter forgets what it
                 // held open: they are all that is left of it afterwards.
                 Some((facts, staged)) => {
-                    if record(daemon, facts).await {
+                    if record(daemon, &mut observer.turns, facts).await {
                         observer.adapter.apply_resync(staged);
                     }
                 }
@@ -1194,7 +1321,7 @@ async fn step(
         LinkFrame::Settled { .. } => {
             observer.resync_asked = false;
             let facts = observer.adapter.settle();
-            record(daemon, facts).await;
+            record(daemon, &mut observer.turns, facts).await;
         }
         LinkFrame::Ev { .. } | LinkFrame::Stub { .. } | LinkFrame::CardStub { .. } => {
             if let LinkFrame::Stub {
@@ -1215,7 +1342,7 @@ async fn step(
                 );
             }
             let facts = observer.adapter.ingest(&frame);
-            record(daemon, facts).await;
+            record(daemon, &mut observer.turns, facts).await;
         }
     }
     if observer.adapter.take_resync_request() {
@@ -1235,18 +1362,26 @@ async fn ask_resync(
     if std::mem::replace(&mut observer.resync_asked, true) {
         return;
     }
-    let acked = acked_of(daemon, &run.session.uid).await;
+    let acked = observer.acked(daemon, &run.session.uid).await;
     let _ = tx.send(DaemonFrame::OpencodeResync { acked }).await;
 }
 
-/// Each fact into the log, in the order made. False when one could not be
-/// written.
-async fn record(daemon: &Daemon, facts: Vec<PendingEvent>) -> bool {
+/// Each fact into the log, in the order made, and into the run's turns once
+/// it is there. False when one could not be written.
+async fn record(daemon: &Daemon, turns: &mut Option<Turns>, facts: Vec<PendingEvent>) -> bool {
     let mut whole = true;
     for fact in facts {
-        if let Err(err) = daemon.ingest(fact).await {
-            crate::log_error!("opencode link: a fact could not be recorded: {err:#}");
-            whole = false;
+        let counted = Turns::counted(&fact);
+        match daemon.ingest(fact).await {
+            Ok(_) => {
+                if let (Some(turns), Some(counted)) = (turns.as_mut(), counted) {
+                    turns.note(counted);
+                }
+            }
+            Err(err) => {
+                crate::log_error!("opencode link: a fact could not be recorded: {err:#}");
+                whole = false;
+            }
         }
     }
     whole
@@ -1291,31 +1426,67 @@ fn attached_reason(api: &OpencodeApi) -> String {
     )
 }
 
-async fn acked_of(daemon: &Daemon, session_uid: &str) -> BTreeMap<String, OpencodeBound> {
-    match daemon.db.opencode_turns(session_uid.to_string()).await {
-        Ok(turns) => acked(&turns),
-        Err(err) => {
-            crate::log_warn!("could not read the OpenCode turns of {session_uid}: {err:#}");
-            BTreeMap::new()
+/// The turns of a run, as [`crate::store::Store::opencode_turns`] reads them
+/// from the log: turn → its root, and whether its TurnComplete is there.
+#[derive(Debug, Default)]
+pub(crate) struct Turns(BTreeMap<String, (String, bool)>);
+
+impl Turns {
+    /// From the log's `(turn, root, closed)` rows.
+    fn from_log(rows: Vec<(String, String, bool)>) -> Turns {
+        Turns(
+            rows.into_iter()
+                .map(|(turn, root, closed)| (turn, (root, closed)))
+                .collect(),
+        )
+    }
+
+    /// What a fact tells of its turn — `(turn, root, closed)` — when it
+    /// counts. Only a turn's facts on its root do, as in the log's reading: a
+    /// subagent's carry `subagent_session`.
+    fn counted(fact: &PendingEvent) -> Option<(String, String, bool)> {
+        let (Some(turn), Some(key)) = (&fact.turn_id, &fact.source_event_id) else {
+            return None;
+        };
+        if fact.source != Source::Opencode || !fact.payload["subagent_session"].is_null() {
+            return None;
         }
+        let root = key.split_once(':').map_or(key.as_str(), |(root, _)| root);
+        let closed = fact.kind == EventKind::TurnComplete;
+        Some((turn.clone(), root.to_string(), closed))
+    }
+
+    /// A counted fact, now in the log.
+    fn note(&mut self, (turn, root, closed): (String, String, bool)) {
+        self.0.entry(turn).or_insert((root, false)).1 |= closed;
+    }
+
+    fn acked(&self) -> BTreeMap<String, OpencodeBound> {
+        acked(
+            self.0
+                .iter()
+                .map(|(turn, (root, closed))| (turn.as_str(), root.as_str(), *closed)),
+        )
     }
 }
 
 /// Where each root's next snapshot starts, from the turns the log holds —
 /// `(turn, root, closed)`: after its newest closed turn, or, while none of its
 /// turns is closed, from its oldest turn, inclusive.
-pub(crate) fn acked(turns: &[(String, String, bool)]) -> BTreeMap<String, OpencodeBound> {
+pub(crate) fn acked<'a>(
+    turns: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+) -> BTreeMap<String, OpencodeBound> {
     let mut closed: BTreeMap<&str, &str> = BTreeMap::new();
     let mut open: BTreeMap<&str, &str> = BTreeMap::new();
     for (turn, root, done) in turns {
-        if *done {
+        if done {
             let newest = closed.entry(root).or_insert(turn);
-            if turn.as_str() > *newest {
+            if turn > *newest {
                 *newest = turn;
             }
         } else {
             let oldest = open.entry(root).or_insert(turn);
-            if turn.as_str() < *oldest {
+            if turn < *oldest {
                 *oldest = turn;
             }
         }
@@ -1651,6 +1822,7 @@ mod tests {
     // ------------------------------------------------------------ the live link
 
     use protocol::agent::AgentKind;
+    use protocol::tmux::ResolveError;
     use serde_json::json;
     use tokio::io::AsyncWriteExt;
     use tokio::net::UnixStream;
@@ -1731,27 +1903,55 @@ mod tests {
         (uid, registration)
     }
 
-    /// Admission's view of the world, the same for every pid it is asked about.
-    #[derive(Clone, Copy)]
+    /// Admission's view of the world.
+    #[derive(Clone)]
     struct Fake {
         parent: Option<i32>,
         start: Option<OpencodeStart>,
-        pane: Result<Option<i32>, &'static str>,
+        pane: Result<i32, ResolveError>,
         recorded: Option<(i32, OpencodeStart)>,
+        /// How long tmux takes to answer.
+        wait: std::time::Duration,
     }
 
-    impl Witness for Fake {
-        fn parent(&self, _: i32) -> Option<i32> {
-            self.parent
+    /// A [`Fake`] that answers only questions about the process a hello names
+    /// and the run its nonce names, and fails the admission on any other.
+    struct Asked {
+        world: Fake,
+        pid: i32,
+        run: Option<Candidate>,
+    }
+
+    impl Asked {
+        fn run(&self) -> &Candidate {
+            self.run
+                .as_ref()
+                .expect("a question about a run the nonce names")
         }
-        fn start(&self, _: i32) -> Option<OpencodeStart> {
-            self.start
+    }
+
+    impl Witness for Asked {
+        fn parent(&self, pid: i32) -> Option<i32> {
+            assert_eq!(pid, self.pid, "the parent of another process");
+            self.world.parent
         }
-        fn pane(&self, _: &str, _: &str) -> Result<Option<i32>, String> {
-            self.pane.map_err(str::to_string)
+        fn start(&self, pid: i32) -> Option<OpencodeStart> {
+            assert_eq!(pid, self.pid, "the start of another process");
+            self.world.start
         }
-        fn recorded(&self, _: &Path) -> Option<(i32, OpencodeStart)> {
-            self.recorded
+        fn pane(&self, tmux_socket: &str, uid: &str) -> Result<i32, ResolveError> {
+            let run = self.run();
+            assert_eq!(
+                (tmux_socket, uid),
+                (run.tmux_socket.as_str(), run.session.uid.as_str()),
+                "the pane of another run"
+            );
+            std::thread::sleep(self.world.wait);
+            self.world.pane.clone()
+        }
+        fn recorded(&self, dir: &Path) -> Option<(i32, OpencodeStart)> {
+            assert_eq!(dir, self.run().dir, "the record of another run");
+            self.world.recorded
         }
     }
 
@@ -1760,8 +1960,9 @@ mod tests {
         Fake {
             parent: Some(PANE),
             start: Some(hello.start),
-            pane: Ok(Some(PANE)),
+            pane: Ok(PANE),
             recorded: Some((hello.pid, hello.start)),
+            wait: std::time::Duration::ZERO,
         }
     }
 
@@ -1783,7 +1984,11 @@ mod tests {
             let (read, _) = ours.into_split();
             let (_, write) = plugin.into_split();
             let (tx, replies) = mpsc::channel(64);
-            let witness: &'static Fake = Box::leak(Box::new(witness));
+            let witness: &'static Asked = Box::leak(Box::new(Asked {
+                world: witness,
+                pid: hello.pid,
+                run: daemon.opencode_candidate(&hello.nonce).await,
+            }));
             let daemon = Arc::clone(daemon);
             let served = tokio::spawn(async move {
                 let mut reader = BufReader::new(read);
@@ -1908,30 +2113,30 @@ mod tests {
         };
         let peer = Some(4242);
         says(
-            refusal(with(&|h| h.wire = 2), world, peer).await,
+            refusal(with(&|h| h.wire = 2), world.clone(), peer).await,
             "link version 1, not 2",
             true,
         );
         says(
-            refusal(with(&|h| h.nonce = "f".repeat(32)), world, peer).await,
+            refusal(with(&|h| h.nonce = "f".repeat(32)), world.clone(), peer).await,
             "no OpenCode run is registered under this nonce",
             false,
         );
         for peer in [None, Some(4243)] {
             says(
-                refusal(good.clone(), world, peer).await,
+                refusal(good.clone(), world.clone(), peer).await,
                 "not the OpenCode process",
                 true,
             );
         }
         let nested = Fake {
             parent: Some(PANE + 1),
-            ..world
+            ..world.clone()
         };
         let paneless = Fake {
-            pane: Ok(None),
+            pane: Err(ResolveError::NotHosted),
             parent: None,
-            ..world
+            ..world.clone()
         };
         for witness in [nested, paneless] {
             says(
@@ -1940,28 +2145,42 @@ mod tests {
                 true,
             );
         }
-        // tmux could not be asked: the plugin dials again, and nothing else
-        // was decided.
+        // tmux could not be asked, or named two sessions for the run: the
+        // plugin dials again, and nothing else was decided.
         let unasked = Fake {
-            pane: Err("tmux did not answer within 1000ms"),
-            ..world
+            pane: Err(ResolveError::Unavailable(
+                "tmux did not answer within 1000ms".into(),
+            )),
+            ..world.clone()
         };
         says(
             refusal(good.clone(), unasked, peer).await,
             "the run's terminal could not be checked (tmux did not answer within 1000ms)",
             false,
         );
+        let ambiguous = Fake {
+            pane: Err(ResolveError::IdentityMismatch(
+                "2 sessions carry the uid".into(),
+            )),
+            ..world.clone()
+        };
+        says(
+            refusal(good.clone(), ambiguous, peer).await,
+            "the run's terminal is ambiguous: more than one tmux session carries this run \
+             (2 sessions carry the uid)",
+            false,
+        );
         let reborn = Fake {
             start: Some(OpencodeStart { sec: 1, usec: 7 }),
-            ..world
+            ..world.clone()
         };
         let misrecorded = Fake {
             recorded: Some((4243, good.start)),
-            ..world
+            ..world.clone()
         };
         let unrecorded = Fake {
             recorded: None,
-            ..world
+            ..world.clone()
         };
         for witness in [reborn, misrecorded, unrecorded] {
             says(
@@ -1972,7 +2191,12 @@ mod tests {
         }
         for directory in [Some("/Users/ada/other".to_string()), None] {
             says(
-                refusal(with(&|h| h.directory = directory.clone()), world, peer).await,
+                refusal(
+                    with(&|h| h.directory = directory.clone()),
+                    world.clone(),
+                    peer,
+                )
+                .await,
                 "a different folder",
                 true,
             );
@@ -2085,14 +2309,15 @@ mod tests {
     #[test]
     fn a_root_is_acked_after_its_newest_closed_turn_or_from_its_oldest_open_one() {
         let turn = |turn: &str, root: &str, closed: bool| (turn.into(), root.into(), closed);
-        let acked = acked(&[
+        let acked = Turns::from_log(vec![
             turn("msg_02", "ses_a", true),
             turn("msg_05", "ses_a", true),
             turn("msg_07", "ses_a", false),
             turn("msg_03", "ses_a", false),
             turn("msg_09", "ses_b", false),
             turn("msg_04", "ses_b", false),
-        ]);
+        ])
+        .acked();
         let bound = |from: &str, inclusive: bool| OpencodeBound {
             from: Some(from.into()),
             inclusive,
@@ -2104,13 +2329,14 @@ mod tests {
                 ("ses_b".to_string(), bound("msg_04", true)),
             ])
         );
-        assert!(super::acked(&[]).is_empty());
+        assert!(Turns::default().acked().is_empty());
     }
 
     #[tokio::test]
     async fn the_welcome_acks_each_root_from_the_turns_in_the_log() {
-        let daemon = daemon();
-        let (uid, _registration) = register(&daemon).await;
+        let db = fresh_database();
+        let before = daemon_on(&db);
+        let (uid, _registration) = register(&before).await;
         let session = SessionKey::new(uid.clone(), "cc-1");
         let fact = |kind: EventKind, key: &str, turn: &str, payload: Value| {
             PendingEvent::new(&session, kind, payload, Source::Opencode)
@@ -2150,22 +2376,29 @@ mod tests {
                 json!({}),
             ),
         ] {
-            daemon.ingest(pending).await.unwrap();
+            before.ingest(pending).await.unwrap();
         }
+        // A daemon that starts holding the run finds them in the log.
+        let daemon = daemon_on(&db);
+        try_register(&daemon, opencode_frame(&uid, Some(NONCE)))
+            .await
+            .unwrap();
         let hello = hello_for(4242, 1_700_000_000, 1);
         let mut plugin = Plugin::dial(&daemon, honest(&hello), hello, Some(4242)).await;
         let (_, acked) = plugin.welcome().await;
         assert_eq!(
             serde_json::to_value(&acked).unwrap(),
+            // Whose model ses_a last used is not in the log: its newest
+            // closed turn is read again, to learn it.
             json!({
-                "ses_a": {"from": "msg_01", "inclusive": false},
+                "ses_a": {"from": "msg_01", "inclusive": true},
                 "ses_b": {"from": "msg_02", "inclusive": true},
             })
         );
     }
 
-    /// The timer that calls this is [`OPENCODE_CONNECT_BACKSTOP`] long; what it
-    /// writes, and when it writes nothing, is all decided here.
+    /// What the backstop writes, and when it writes nothing, is all decided
+    /// here; the timer that calls it is tested on its own.
     #[tokio::test]
     async fn a_plugin_that_never_dials_is_reported_and_one_that_did_is_not() {
         let silent = daemon();
@@ -2364,16 +2597,18 @@ mod tests {
     }
 
     /// A card the log holds open is cleared by the first snapshot that does not
-    /// list it, even when the daemon that saw it asked has since restarted.
+    /// list it, in the turn it was asked in, even when the daemon that saw it
+    /// asked has since restarted.
     #[tokio::test]
     async fn a_card_open_in_the_log_is_cleared_by_a_snapshot_after_a_restart() {
         let db = fresh_database();
         let before = daemon_on(&db);
         let (uid, _registration) = register(&before).await;
         let (mut plugin, _) = admitted(&before, hello_for(4242, 1_700_000_000, 1)).await;
+        plugin.send(&prompted(1, "msg_01", "m1")).await;
         plugin
             .send(
-                &json!({"t": "ev", "seq": 1, "type": "permission.asked", "properties": {
+                &json!({"t": "ev", "seq": 2, "type": "permission.asked", "properties": {
                 "id": "per_01", "sessionID": "ses_a", "permission": "bash",
                 "patterns": ["make"], "metadata": {"command": "make"}, "always": [],
                 "tool": {"messageID": "msg_01", "callID": "call_1"}}}),
@@ -2382,7 +2617,11 @@ mod tests {
         plugin.hang_up().await;
         assert_eq!(
             before.db.opencode_open_cards(uid.clone()).await.unwrap(),
-            [("per_01".to_string(), "ses_a:perm:per_01".to_string())]
+            [(
+                "per_01".to_string(),
+                "ses_a:perm:per_01".to_string(),
+                Some("msg_01".to_string())
+            )]
         );
 
         // A new daemon on the same log; the supervisor registers the run again.
@@ -2402,17 +2641,21 @@ mod tests {
             plugin.send(&frame).await;
         }
         plugin.hang_up().await;
-        let cleared: Vec<Value> = daemon
+        let cleared: Vec<(Option<String>, Value)> = daemon
             .store
             .events_after(&uid, 0, 1000)
             .unwrap()
             .into_iter()
             .filter(|e| e.kind == EventKind::ApprovalResolved)
-            .map(|e| e.payload)
+            .map(|e| (e.turn_id, e.payload))
             .collect();
         assert_eq!(
             cleared,
-            [json!({"request_id": "per_01", "status": "cleared", "cause": "superseded"})]
+            [(
+                Some("msg_01".to_string()),
+                json!({"request_id": "per_01", "status": "cleared", "cause": "superseded"})
+            )],
+            "cleared in the turn it was asked in"
         );
         assert!(daemon.db.opencode_open_cards(uid).await.unwrap().is_empty());
     }
@@ -2540,5 +2783,534 @@ mod tests {
             .unwrap();
         assert!(summary.blocked_on.is_empty());
         assert_eq!(summary.agent, AgentKind::Opencode);
+    }
+
+    // ------------------------------------------------------------ agent.json
+
+    fn run_dir() -> PathBuf {
+        let dir = fresh_database().with_extension("run");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path that outlives the call.
+        let made = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo {path:?}");
+    }
+
+    const RECORD: &str = r#"{"pid":4242,"start":{"sec":1700000000,"usec":7}}"#;
+    const RECORDED: (i32, OpencodeStart) = (
+        4242,
+        OpencodeStart {
+            sec: 1_700_000_000,
+            usec: 7,
+        },
+    );
+
+    /// `Kernel::recorded`, on a thread of its own that must answer in time.
+    fn recorded_in_time(dir: &Path) -> Option<(i32, OpencodeStart)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = dir.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(Kernel.recorded(&dir));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("reading agent.json never waits")
+    }
+
+    #[test]
+    fn agent_json_is_read_only_as_a_small_regular_file_and_never_waits() {
+        let dir = run_dir();
+        let path = dir.join("agent.json");
+        std::fs::write(&path, RECORD).unwrap();
+        assert_eq!(recorded_in_time(&dir), Some(RECORDED));
+
+        std::fs::remove_file(&path).unwrap();
+        fifo(&path);
+        assert_eq!(recorded_in_time(&dir), None, "a FIFO");
+
+        let elsewhere = run_dir();
+        fifo(&elsewhere.join("pipe"));
+        std::fs::write(elsewhere.join("agent.json"), RECORD).unwrap();
+        for target in ["pipe", "agent.json"] {
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(elsewhere.join(target), &path).unwrap();
+            assert_eq!(recorded_in_time(&dir), None, "a link to {target}");
+        }
+
+        std::fs::remove_file(&path).unwrap();
+        let mut padded = RECORD.as_bytes().to_vec();
+        padded.resize(4096, b' ');
+        std::fs::write(&path, &padded).unwrap();
+        assert_eq!(recorded_in_time(&dir), Some(RECORDED), "4 KiB is the most");
+        padded.push(b' ');
+        std::fs::write(&path, &padded).unwrap();
+        assert_eq!(recorded_in_time(&dir), None, "over 4 KiB");
+    }
+
+    /// The file swapped for a FIFO between any two steps of the read, over and
+    /// over: every read answers, with the record or with nothing.
+    #[test]
+    fn agent_json_swapped_for_a_fifo_under_the_reader_never_holds_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = run_dir();
+        let path = dir.join("agent.json");
+        std::fs::write(&path, RECORD).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (dir, path, stop) = (dir.clone(), path.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let (file, pipe) = (dir.join("file.tmp"), dir.join("pipe.tmp"));
+                while !stop.load(Ordering::Relaxed) {
+                    std::fs::write(&file, RECORD).unwrap();
+                    std::fs::rename(&file, &path).unwrap();
+                    fifo(&pipe);
+                    std::fs::rename(&pipe, &path).unwrap();
+                }
+            })
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                let mut reads = 0u64;
+                while std::time::Instant::now() < deadline {
+                    let read = Kernel.recorded(&dir);
+                    assert!(read.is_none() || read == Some(RECORDED), "{read:?}");
+                    reads += 1;
+                }
+                let _ = tx.send(reads);
+            });
+        }
+        let finished = rx.recv_timeout(std::time::Duration::from_secs(10));
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        if finished.is_err() {
+            // A reader held in a FIFO's open is let go by a writer.
+            use std::os::unix::fs::OpenOptionsExt;
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path);
+        }
+        let reads = finished.expect("a read was held by a FIFO");
+        assert!(reads > 100, "{reads} reads");
+    }
+
+    // ------------------------------------------------------- registration
+
+    /// How long a test daemon waits for a plugin before its backstop speaks.
+    const SHORT: std::time::Duration = std::time::Duration::from_millis(250);
+
+    async fn hurried() -> Arc<Daemon> {
+        let daemon = daemon();
+        daemon.set_opencode_backstop_wait(SHORT).await;
+        daemon
+    }
+
+    /// A registration of a live run under another nonce is not that run's
+    /// launch. It is refused, and the run keeps its nonce, its pin and its
+    /// link.
+    #[tokio::test]
+    async fn a_live_run_registered_again_under_another_nonce_keeps_its_link() {
+        let daemon = hurried().await;
+        let (uid, _registration) = register(&daemon).await;
+        let (mut plugin, link) = admitted(&daemon, hello_for(4242, 1_700_000_000, 1)).await;
+        let other = "fedcba9876543210fedcba9876543210";
+        let again = try_register(&daemon, opencode_frame(&uid, Some(other))).await;
+
+        assert!(
+            daemon.opencode_link_is_current(&uid, &link).await,
+            "the live link is still the run's"
+        );
+        assert!(daemon.opencode_candidate(other).await.is_none());
+        tokio::time::sleep(SHORT * 2).await;
+        assert!(
+            link_rows(&daemon, &uid)
+                .iter()
+                .all(|(key, _)| !key.ends_with(":never")),
+            "{:?}",
+            link_rows(&daemon, &uid)
+        );
+        let (_redial, _) = admitted(&daemon, hello_for(4242, 1_700_000_000, 2)).await;
+        assert!(plugin.reply().await.is_none(), "taken over by the redial");
+        let refused = again.expect_err("refused").to_string();
+        assert!(refused.contains("another plugin nonce"), "{refused}");
+    }
+
+    /// The same launch registering again — a supervisor reconnecting — leaves
+    /// the run exactly as it was.
+    #[tokio::test]
+    async fn the_same_launch_registered_again_keeps_its_link_and_its_pin() {
+        let daemon = hurried().await;
+        let (uid, _registration) = register(&daemon).await;
+        let (mut plugin, link) = admitted(&daemon, hello_for(4242, 1_700_000_000, 1)).await;
+        try_register(&daemon, opencode_frame(&uid, Some(NONCE)))
+            .await
+            .expect("the same launch registers again");
+        assert!(daemon.opencode_link_is_current(&uid, &link).await);
+        tokio::time::sleep(SHORT * 2).await;
+        assert!(link_rows(&daemon, &uid)
+            .iter()
+            .all(|(key, _)| !key.ends_with(":never")));
+        plugin
+            .send(
+                &json!({"t": "head", "seq": 1, "route": "session", "session_id": "ses_a",
+                "directory": FOLDER}),
+            )
+            .await;
+        until(|| async { head(&daemon, &uid).await.as_deref() == Some("ses_a") }).await;
+        let other = hello_for(5151, 1_700_000_100, 1);
+        let mut intruder = Plugin::dial(&daemon, honest(&other), other, Some(5151)).await;
+        assert!(matches!(
+            intruder.reply().await,
+            Some(DaemonFrame::OpencodeRefused { r#final: true, .. })
+        ));
+    }
+
+    /// Two runs registering with one nonce at once: one of them holds it, and
+    /// the daemon finds that run, and only it, under the nonce.
+    #[tokio::test]
+    async fn one_nonce_names_one_run_however_its_registrations_race() {
+        for _ in 0..20 {
+            let daemon = daemon();
+            let (a, b) = (protocol::uid::new().unwrap(), protocol::uid::new().unwrap());
+            let _ = tokio::join!(
+                try_register(&daemon, opencode_frame(&a, Some(NONCE))),
+                try_register(&daemon, opencode_frame(&b, Some(NONCE))),
+            );
+            let (nonces, runs) = daemon.opencode_nonce_table().await;
+            let holders: Vec<&String> = runs
+                .iter()
+                .filter(|(_, nonce)| nonce.as_str() == NONCE)
+                .map(|(uid, _)| uid)
+                .collect();
+            assert_eq!(holders.len(), 1, "{runs:?}");
+            assert_eq!(nonces.get(NONCE), Some(holders[0]), "{nonces:?}");
+        }
+    }
+
+    // ------------------------------------------------------- the backstop
+
+    #[tokio::test]
+    async fn the_backstop_speaks_once_its_wait_passes_without_an_admission() {
+        assert_eq!(
+            daemon().opencode_backstop_wait().await,
+            std::time::Duration::from_secs(15),
+            "the wait a daemon starts with"
+        );
+        let silent = hurried().await;
+        let (uid, _registration) = register(&silent).await;
+        assert!(link_rows(&silent, &uid).is_empty());
+        until(|| async { !link_rows(&silent, &uid).is_empty() }).await;
+        assert_eq!(
+            link_rows(&silent, &uid),
+            [(
+                format!("link:{uid}:never"),
+                json!({"link": "detached", "reason": NEVER})
+            )]
+        );
+
+        let linked = hurried().await;
+        let (uid, _registration) = register(&linked).await;
+        let (_plugin, _) = admitted(&linked, hello_for(4242, 1_700_000_000, 1)).await;
+        tokio::time::sleep(SHORT * 2).await;
+        assert!(link_rows(&linked, &uid)
+            .iter()
+            .all(|(key, _)| !key.ends_with(":never")));
+    }
+
+    // ------------------------------------------------------- restarts
+
+    fn prompted(seq: u64, message: &str, model: &str) -> Value {
+        json!({"t": "ev", "seq": seq, "type": "message.updated", "properties": {
+            "sessionID": "ses_a", "info": {"id": message, "sessionID": "ses_a",
+            "role": "user", "agent": "build", "time": {"created": 1},
+            "model": {"providerID": "mock", "modelID": model}}}})
+    }
+
+    fn went_idle(seq: u64) -> Value {
+        json!({"t": "ev", "seq": seq, "type": "session.idle",
+            "properties": {"sessionID": "ses_a"}})
+    }
+
+    /// The keyboard's choice is compared with the one before it even when the
+    /// daemon restarted in between.
+    #[tokio::test]
+    async fn a_model_change_after_a_restart_is_said_against_the_choice_before_it() {
+        let db = fresh_database();
+        let before = daemon_on(&db);
+        let (uid, _registration) = register(&before).await;
+        let (mut plugin, _) = admitted(&before, hello_for(4242, 1_700_000_000, 1)).await;
+        for frame in [
+            prompted(1, "msg_01", "m1"),
+            went_idle(2),
+            prompted(3, "msg_02", "m2"),
+            went_idle(4),
+            prompted(5, "msg_03", "m3"),
+            went_idle(6),
+        ] {
+            plugin.send(&frame).await;
+        }
+        plugin.hang_up().await;
+
+        let daemon = daemon_on(&db);
+        try_register(&daemon, opencode_frame(&uid, Some(NONCE)))
+            .await
+            .unwrap();
+        let (mut plugin, _) = admitted(&daemon, hello_for(4242, 1_700_000_000, 2)).await;
+        plugin.send(&prompted(1, "msg_04", "m2")).await;
+        plugin.hang_up().await;
+        let notices: Vec<(String, Value)> = daemon
+            .store
+            .events_after(&uid, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == EventKind::Notification)
+            .map(|e| {
+                (
+                    e.source_event_id.unwrap_or_default(),
+                    e.payload["message"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                ("ses_a:model:msg_02".to_string(), json!("build · mock/m2")),
+                ("ses_a:model:msg_03".to_string(), json!("build · mock/m3")),
+                ("ses_a:model:msg_04".to_string(), json!("build · mock/m2")),
+            ]
+        );
+    }
+
+    /// A check that outlasts its budget is refused while the plugin still
+    /// waits for the answer, and the plugin dials again.
+    #[tokio::test]
+    async fn a_check_that_outlasts_its_budget_is_refused_and_dialled_again() {
+        let daemon = daemon();
+        let (uid, _registration) = register(&daemon).await;
+        let hello = hello_for(4242, 1_700_000_000, 1);
+        let slow = Fake {
+            wait: VERIFY_BUDGET + std::time::Duration::from_secs(1),
+            ..honest(&hello)
+        };
+        let asked = std::time::Instant::now();
+        let mut plugin = Plugin::dial(&daemon, slow, hello, Some(4242)).await;
+        match plugin.reply().await {
+            Some(DaemonFrame::OpencodeRefused { reason, r#final }) => {
+                assert_eq!(
+                    reason,
+                    "the OpenCode process could not be checked within 2s"
+                );
+                assert!(!r#final);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert!(asked.elapsed() < std::time::Duration::from_secs(3));
+        assert!(link_rows(&daemon, &uid).is_empty());
+    }
+
+    /// What the welcome and each resync acknowledge follows the facts as they
+    /// are recorded, and a restarted daemon reads the same turns from the log.
+    /// Not knowing the model each root last used, it acks their closed turns
+    /// inclusive.
+    #[tokio::test]
+    async fn every_resync_and_a_restart_ack_the_turns_recorded_so_far() {
+        let db = fresh_database();
+        let before = daemon_on(&db);
+        let (uid, _registration) = register(&before).await;
+        let (mut plugin, _) = admitted(&before, hello_for(4242, 1_700_000_000, 1)).await;
+        let prompt = |seq: u64, session: &str, message: &str| {
+            [
+                json!({"t": "ev", "seq": seq, "type": "message.updated", "properties": {
+                    "sessionID": session, "info": {"id": message, "sessionID": session,
+                    "role": "user", "time": {"created": 1}, "agent": "build",
+                    "model": {"providerID": "mock", "modelID": "m1"}}}}),
+                json!({"t": "ev", "seq": seq + 1, "type": "message.part.updated",
+                    "properties": {"sessionID": session, "part": {
+                    "id": format!("prt_{message}"), "sessionID": session,
+                    "messageID": message, "type": "text", "text": "go"}}}),
+            ]
+        };
+        let idle = |seq: u64, session: &str| {
+            json!({"t": "ev", "seq": seq, "type": "session.idle",
+                "properties": {"sessionID": session}})
+        };
+        let bad = json!({"t": "ev", "seq": "x", "type": "session.idle", "properties": {}});
+        let bound = |from: &str, inclusive: bool| json!({"from": from, "inclusive": inclusive});
+        let steps: [(Vec<Value>, Value); 3] = [
+            (
+                [
+                    &prompt(1, "ses_a", "msg_01")[..],
+                    &[idle(3, "ses_a")],
+                    &prompt(4, "ses_b", "msg_02"),
+                ]
+                .concat(),
+                json!({"ses_a": bound("msg_01", false), "ses_b": bound("msg_02", true)}),
+            ),
+            (
+                [&[idle(6, "ses_b")][..], &prompt(7, "ses_a", "msg_03")].concat(),
+                json!({"ses_a": bound("msg_01", false), "ses_b": bound("msg_02", false)}),
+            ),
+            (
+                vec![idle(9, "ses_a")],
+                json!({"ses_a": bound("msg_03", false), "ses_b": bound("msg_02", false)}),
+            ),
+        ];
+        let mut last = Value::Null;
+        for (sync, (frames, want)) in (1..).zip(steps) {
+            for frame in frames.iter().chain([&bad]) {
+                plugin.send(frame).await;
+            }
+            match plugin.reply().await {
+                Some(DaemonFrame::OpencodeResync { acked }) => {
+                    assert_eq!(serde_json::to_value(&acked).unwrap(), want, "step {sync}");
+                }
+                other => panic!("expected a resync, got {other:?}"),
+            }
+            plugin.send(&json!({"t": "settled", "sync": sync})).await;
+            last = want;
+        }
+        plugin.hang_up().await;
+
+        let daemon = daemon_on(&db);
+        try_register(&daemon, opencode_frame(&uid, Some(NONCE)))
+            .await
+            .unwrap();
+        let hello = hello_for(4242, 1_700_000_000, 2);
+        let mut plugin = Plugin::dial(&daemon, honest(&hello), hello, Some(4242)).await;
+        let (_, acked) = plugin.welcome().await;
+        for bound in last.as_object_mut().unwrap().values_mut() {
+            bound["inclusive"] = json!(true);
+        }
+        assert_eq!(serde_json::to_value(&acked).unwrap(), last);
+    }
+
+    /// A run that prompted root `ses_a` once, on `mock/m1`, and whose daemon
+    /// then restarted: the new daemon, the run, and its plugin past the welcome.
+    async fn restarted_after_one_turn_on_m1() -> (Arc<Daemon>, String, Plugin) {
+        let session = json!({"id": "ses_a", "directory": FOLDER, "time": {"created": 0}});
+        let user = prompted(0, "msg_01", "m1")["properties"]["info"].clone();
+        let part = json!({"id": "prt_01", "sessionID": "ses_a", "messageID": "msg_01",
+            "type": "text", "text": "go"});
+        let reply = json!({"id": "msg_02", "sessionID": "ses_a", "role": "assistant",
+            "parentID": "msg_01", "finish": "stop", "time": {"created": 2, "completed": 3}});
+        let db = fresh_database();
+        let before = daemon_on(&db);
+        let (uid, _registration) = register(&before).await;
+        let (mut plugin, _) = admitted(&before, hello_for(4242, 1_700_000_000, 1)).await;
+        for frame in [
+            json!({"t": "ev", "seq": 1, "type": "session.created",
+                "properties": {"info": session}}),
+            json!({"t": "ev", "seq": 2, "type": "message.updated",
+                "properties": {"sessionID": "ses_a", "info": user}}),
+            json!({"t": "ev", "seq": 3, "type": "message.part.updated",
+                "properties": {"sessionID": "ses_a", "part": part}}),
+            json!({"t": "ev", "seq": 4, "type": "message.updated",
+                "properties": {"sessionID": "ses_a", "info": reply}}),
+            went_idle(5),
+        ] {
+            plugin.send(&frame).await;
+        }
+        plugin.hang_up().await;
+        let facts = |daemon: &Daemon| -> Vec<Value> {
+            daemon
+                .store
+                .events_after(&uid, 0, 1000)
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.kind != EventKind::LinkState)
+                .map(|e| json!([e.kind.as_str(), e.source_event_id, e.turn_id, e.payload]))
+                .collect()
+        };
+        let logged = facts(&before);
+        assert!(
+            logged.iter().any(|f| f[1] == "ses_a:turn:msg_01"),
+            "{logged:?}"
+        );
+
+        let daemon = daemon_on(&db);
+        try_register(&daemon, opencode_frame(&uid, Some(NONCE)))
+            .await
+            .unwrap();
+        let hello = hello_for(4242, 1_700_000_000, 2);
+        let mut plugin = Plugin::dial(&daemon, honest(&hello), hello, Some(4242)).await;
+        let (_, acked) = plugin.welcome().await;
+        assert_eq!(
+            serde_json::to_value(&acked).unwrap(),
+            json!({"ses_a": {"from": "msg_01", "inclusive": true}}),
+            "the closed turn is read again: its model is not in the log"
+        );
+        // What the plugin sends for that bound: the root and its closed turn.
+        for frame in [
+            json!({"t": "sync_begin", "sync": 1, "reason": "connect", "scope": "full",
+                "as_of": 0, "status": {}, "status_ok": true}),
+            json!({"t": "sync_page", "sync": 1, "n": 0, "items": [
+                {"session": session},
+                {"sessionID": "ses_a", "info": user, "parts": [part]},
+                {"sessionID": "ses_a", "info": reply, "parts": []}]}),
+            json!({"t": "sync_end", "sync": 1, "done_at": 0, "list_ok": true,
+                "permissions_ok": true, "questions_ok": true, "requests_ok": true,
+                "lower": {}, "pages": 1, "items": 3, "bytes": 1, "activation": 2}),
+            json!({"t": "settled", "sync": 1}),
+            json!({"t": "ev", "seq": "x", "type": "session.idle", "properties": {}}),
+        ] {
+            plugin.send(&frame).await;
+        }
+        match plugin.reply().await {
+            Some(DaemonFrame::OpencodeResync { acked }) => assert_eq!(
+                serde_json::to_value(&acked).unwrap(),
+                json!({"ses_a": {"from": "msg_01", "inclusive": false}}),
+                "the model is known again"
+            ),
+            other => panic!("expected a resync, got {other:?}"),
+        }
+        plugin.send(&json!({"t": "settled", "sync": 2})).await;
+        assert_eq!(
+            facts(&daemon),
+            logged,
+            "the turn read again changes no fact"
+        );
+        (daemon, uid, plugin)
+    }
+
+    fn model_notices(daemon: &Daemon, uid: &str) -> Vec<(String, Value)> {
+        daemon
+            .store
+            .events_after(uid, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == EventKind::Notification)
+            .map(|e| {
+                (
+                    e.source_event_id.unwrap_or_default(),
+                    e.payload["message"].clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_first_model_change_after_a_restart_is_said() {
+        let (daemon, uid, mut plugin) = restarted_after_one_turn_on_m1().await;
+        plugin.send(&prompted(1, "msg_03", "m2")).await;
+        plugin.hang_up().await;
+        assert_eq!(
+            model_notices(&daemon, &uid),
+            [("ses_a:model:msg_03".to_string(), json!("build · mock/m2"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_model_after_a_restart_is_not_said() {
+        let (daemon, uid, mut plugin) = restarted_after_one_turn_on_m1().await;
+        plugin.send(&prompted(1, "msg_03", "m1")).await;
+        plugin.hang_up().await;
+        assert_eq!(model_notices(&daemon, &uid), []);
     }
 }
