@@ -171,8 +171,16 @@ impl ClientFeatures {
     /// can render it. Both sides of that comparison are values this build does
     /// not understand, and agreeing about a name is not the same as being able
     /// to act on it.
+    ///
+    /// **OpenCode grants nothing either.** This build can name it, but no daemon
+    /// hosts it, and a name the daemon knows is not one it can act on until it
+    /// hosts it: a client advertising `["opencode"]` is vouching for runs that do
+    /// not exist.
     pub fn supports(&self, agent: &crate::agent::AgentKind) -> bool {
-        if matches!(agent, crate::agent::AgentKind::Unsupported(_)) {
+        if matches!(
+            agent,
+            crate::agent::AgentKind::Unsupported(_) | crate::agent::AgentKind::Opencode
+        ) {
             return false;
         }
         if agent.is_claude() && self.agents.is_empty() {
@@ -1689,10 +1697,15 @@ mod tests {
              card's `question_hold`, and the `answers` and `decline` decisions — is \
              minor 21"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 22,
+            "OpenCode on the wire — `AgentKind::Opencode`, `Source::Opencode` and \
+             `SessionSummary.opencode_session_id` — is minor 22"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 21);
+        assert_eq!(crate::PROTOCOL_MINOR, 22);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2254,6 +2267,7 @@ mod tests {
         let empty = ClientFeatures::default();
         assert!(empty.supports(&crate::agent::AgentKind::Claude));
         assert!(!empty.supports(&crate::agent::AgentKind::Codex));
+        assert!(!empty.supports(&crate::agent::AgentKind::Opencode));
         // Named agents: Claude must still be listed to be a member of a
         // non-empty set, but the empty-set case is the only Claude-implicit one.
         let codex_only = ClientFeatures {
@@ -2261,6 +2275,13 @@ mod tests {
         };
         assert!(!codex_only.supports(&crate::agent::AgentKind::Claude));
         assert!(codex_only.supports(&crate::agent::AgentKind::Codex));
+        // OpenCode is a name this build knows but no daemon hosts, so even a
+        // client that advertised it is granted nothing for it.
+        let opencode_only = ClientFeatures {
+            agents: vec![crate::agent::AgentKind::Opencode],
+        };
+        assert!(!opencode_only.supports(&crate::agent::AgentKind::Opencode));
+        assert!(!opencode_only.supports(&crate::agent::AgentKind::Claude));
         // An unknown agent name is preserved through decode and grants nothing —
         // not even to itself. Round-tripping the name honestly is a storage
         // property; authorizing on it would be this build vouching that a phone

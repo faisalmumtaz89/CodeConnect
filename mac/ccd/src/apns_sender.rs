@@ -945,6 +945,9 @@ mod tests {
                     "gemini-phone",
                     vec![protocol::agent::AgentKind::Unsupported("gemini".into())],
                 ),
+                // A device that advertised OpenCode: a name this build knows, but
+                // not one any daemon hosts.
+                advertising("opencode-phone", vec![protocol::agent::AgentKind::Opencode]),
             ]
         };
         let ids = |targets: Vec<PushTarget>| -> Vec<String> {
@@ -983,6 +986,11 @@ mod tests {
             "an unknown agent reaches nobody — not even the phone that advertised \
              that very name. Agreeing about a name this build cannot act on is not \
              a capability, and it does not fall back to the floor either"
+        );
+        assert!(
+            recipients(fleet(), &[], &protocol::agent::AgentKind::Opencode).is_empty(),
+            "an OpenCode doorbell reaches nobody — not even the phone that advertised \
+             it. A name the daemon knows is not one it can act on until it hosts it"
         );
         assert!(
             !ids(recipients(fleet(), &[], &CLAUDE)).contains(&"gemini-phone".to_string()),

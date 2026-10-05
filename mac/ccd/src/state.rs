@@ -5400,10 +5400,12 @@ impl Daemon {
             protocol::agent::AgentKind::Claude => {
                 return refuse(crate::codex_refusals::interrupt_on_claude(&row.session_uid))
             }
-            protocol::agent::AgentKind::Unsupported(ref name) => {
+            // A name this build knows and does not host: refused as any agent it
+            // cannot drive is.
+            protocol::agent::AgentKind::Opencode | protocol::agent::AgentKind::Unsupported(_) => {
                 return refuse(crate::codex_refusals::interrupt_on_unsupported(
                     &row.session_uid,
-                    name,
+                    row.agent.as_str(),
                 ))
             }
         }
@@ -5660,10 +5662,12 @@ impl Daemon {
             protocol::agent::AgentKind::Claude => {
                 return refuse(crate::codex_refusals::compose_on_claude(&row.session_uid))
             }
-            protocol::agent::AgentKind::Unsupported(ref name) => {
+            // A name this build knows and does not host: refused as any agent it
+            // cannot drive is.
+            protocol::agent::AgentKind::Opencode | protocol::agent::AgentKind::Unsupported(_) => {
                 return refuse(crate::codex_refusals::compose_on_unsupported(
                     &row.session_uid,
-                    name,
+                    row.agent.as_str(),
                 ))
             }
         }
@@ -6361,13 +6365,15 @@ impl Daemon {
                      does not offer for it",
                     row.session_uid
                 )),
-                protocol::agent::AgentKind::Unsupported(ref name) => {
-                    ClaudeOnly::WrongAgent(format!(
-                        "{} is a {name} session, and {what} is something this daemon \
-                         can only do for Claude",
-                        row.session_uid
-                    ))
-                }
+                // A name this build knows and does not host: refused as any agent
+                // it cannot drive is.
+                protocol::agent::AgentKind::Opencode
+                | protocol::agent::AgentKind::Unsupported(_) => ClaudeOnly::WrongAgent(format!(
+                    "{} is a {} session, and {what} is something this daemon \
+                     can only do for Claude",
+                    row.session_uid,
+                    row.agent.as_str()
+                )),
             },
             // **A reference that names nothing is refused here too, and the caller
             // still chooses the words.** It used to be admitted, on the reasoning that
@@ -6427,11 +6433,15 @@ impl Daemon {
             Ok(Some(row)) => match row.agent {
                 protocol::agent::AgentKind::Claude => None,
                 protocol::agent::AgentKind::Codex => Some(row),
-                protocol::agent::AgentKind::Unsupported(ref name) => {
+                // A name this build knows and does not host: refused as any agent
+                // it cannot drive is.
+                protocol::agent::AgentKind::Opencode
+                | protocol::agent::AgentKind::Unsupported(_) => {
                     return AnswerResult::Rejected {
                         reason: format!(
-                            "{session_uid} is a {name} session, which this daemon does not \
-                             know how to answer; nothing was sent"
+                            "{session_uid} is a {} session, which this daemon does not \
+                             know how to answer; nothing was sent",
+                            row.agent.as_str()
                         ),
                     }
                 }
@@ -9575,6 +9585,8 @@ impl Daemon {
                 // `NoLink` and reports `none` on its own, so the two fields are
                 // independently true rather than one derived from the other.
                 codex_link: addressee.wire_link(),
+                // Nothing in this build learns which OpenCode session a run is showing.
+                opencode_session_id: None,
             });
         }
         out
@@ -15651,10 +15663,10 @@ mod tests {
 
     /// **A registration this daemon cannot host is refused, and WHICH fact
     /// refused it is asserted.** Nothing is persisted and nothing is
-    /// installed on any of the three arms. Absence still means Claude and works.
+    /// installed on any arm. Absence still means Claude and works.
     ///
-    /// The three arms no longer fail for one reason, and separating them is the
-    /// whole of what changed here. `gemini` and the present empty string are
+    /// The arms do not fail for one reason, and the test checks each against
+    /// the reason it fails for. `gemini`, the present empty string and `opencode` are
     /// refused by `supported_agents()`: this daemon does not host them. **Codex
     /// is not one of those any more** — it joined that list when its coordinator
     /// became able to send a registration — so its arm passes the agent gate and
@@ -15687,6 +15699,11 @@ mod tests {
             (
                 "01K1B3XQ8ZC0DE5FGH7JKMNP03",
                 AgentKind::Unsupported(String::new()),
+                "is not supported by this daemon",
+            ),
+            (
+                "01K1B3XQ8ZC0DE5FGH7JKMNP04",
+                AgentKind::Opencode,
                 "is not supported by this daemon",
             ),
         ] {
@@ -23281,6 +23298,127 @@ mod tests {
         }
         assert_no_ledger_rows(&db, uid);
         assert_no_insert_was_attempted(&db, uid);
+    }
+
+    /// **An OpenCode run is refused by every verb, before anything is claimed.**
+    ///
+    /// This daemon knows the name and hosts nothing under it, so the row is
+    /// staged rather than registered. Every verb a phone can aim at a run is
+    /// asked, the free text an older phone sends included, and each refusal
+    /// names the agent. Nothing reaches the four shared ledgers, not even as an
+    /// insert later cleaned up, and nothing is claimed in `mutation_ledger`.
+    ///
+    /// **Mutation:** move `Opencode` into the Codex arm of `answer` and the
+    /// answer half goes red; add it to `supported_agents` and the registration
+    /// arm of `a_registration_for_an_unsupported_agent_is_refused_with_no_trace`
+    /// goes red.
+    #[tokio::test]
+    async fn an_opencode_run_is_refused_by_every_verb_before_any_claim() {
+        use protocol::ws::{ComposeResult, InterruptResult};
+        let (store, db) = shared_store_on_disk();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNP0C";
+        let now = protocol::time::now_rfc3339();
+        store
+            .upsert_session(&SessionRow {
+                session_uid: uid.into(),
+                session_id: "oc-1".into(),
+                tmux_session: "oc-1".into(),
+                tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: now.clone(),
+                updated_at: now,
+                agent: protocol::agent::AgentKind::Opencode,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap()
+            .assert_present();
+        arm_ledger_tripwire(&db);
+
+        let text = "deploy";
+        let result = daemon
+            .send_text(
+                uid,
+                text.to_string(),
+                Some("st-1"),
+                Some(&protocol::hash::send_text_hash(uid, text, true)),
+                true,
+                false,
+            )
+            .await;
+        match &result {
+            SendTextResult::Refused { reason } => assert!(
+                reason.contains("opencode session") && reason.contains("nothing was typed"),
+                "{reason}"
+            ),
+            other => panic!("an OpenCode session must not be typed into: {other:?}"),
+        }
+
+        for decision in [
+            AnswerDecision::OptionId {
+                option_id: "once".into(),
+            },
+            AnswerDecision::Allow,
+        ] {
+            let result = daemon.answer("per_1", "h", decision, Some(uid)).await;
+            match &result {
+                AnswerResult::Rejected { reason } => assert!(
+                    reason.contains("opencode session") && reason.contains("nothing was sent"),
+                    "{reason}"
+                ),
+                other => panic!("an OpenCode answer must be refused: {other:?}"),
+            }
+        }
+
+        let refused = daemon
+            .interrupt(uid, "req-1", "turn-1", &interrupt_hash(uid, "turn-1"))
+            .await;
+        let InterruptResult::Rejected { reason } = &refused else {
+            panic!("an OpenCode interrupt must be refused: {refused:?}");
+        };
+        assert_eq!(
+            reason,
+            &crate::codex_refusals::interrupt_on_unsupported(uid, "opencode")
+        );
+
+        let refused = daemon
+            .compose(
+                uid,
+                "req-2",
+                text.to_string(),
+                &protocol::hash::compose_hash(uid, text),
+            )
+            .await;
+        let ComposeResult::Rejected { reason } = &refused else {
+            panic!("an OpenCode compose must be refused: {refused:?}");
+        };
+        assert_eq!(
+            reason,
+            &crate::codex_refusals::compose_on_unsupported(uid, "opencode")
+        );
+
+        match daemon.refuse_unless_claude(uid, "the terminal").await {
+            ClaudeOnly::WrongAgent(reason) => {
+                assert!(reason.contains("opencode session"), "{reason}")
+            }
+            other => panic!("the terminal must refuse an OpenCode run: {other:?}"),
+        }
+
+        assert_no_ledger_rows(&db, uid);
+        assert_no_insert_was_attempted(&db, uid);
+        let claimed: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM mutation_ledger WHERE session_uid = ?1",
+                [uid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(claimed, 0, "nothing was claimed for an OpenCode run");
     }
 
     /// **A Claude hook is not the road a Codex approval arrives on.**

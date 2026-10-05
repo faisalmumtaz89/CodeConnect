@@ -42,6 +42,14 @@
 #     that Codex state come through byte-for-byte, while the old daemon's Claude
 #     handling stays completely intact.
 #
+#   An OpenCode run is filed in `codex_sessions` too (`session_tables_for` sends
+#   every agent but Claude there), so one is seeded beside the Codex run and rides
+#   every bracket the Codex run does. Step 8 rolls a database holding a live
+#   OpenCode run back to the newest release tag reachable from HEAD's parent — a build that
+#   names `codex_sessions`, lists the run through `all_sessions` and reads its
+#   agent as one it does not know — and requires the row and its events to come
+#   through byte-for-byte, still live, while that build lists the run.
+#
 # HOW THE MUTATION CLAIM IS MEASURED. Each old-daemon run is bracketed on its
 # own: the Codex rows' exact bytes are captured immediately before that run
 # starts and compared immediately after it ends, so no window ever contains a
@@ -63,11 +71,22 @@
 # ccd/tests/ so it is tracked and conventionally located; cargo ignores non-.rs
 # files here, so it never runs as part of the unit suite.
 #
-# Usage: mac/ccd/tests/new-old-new-real.sh [old_commit]   (default: v0.6.0)
+# Usage: mac/ccd/tests/new-old-new-real.sh [old_commit] [prev_release]
+#        (defaults: v0.6.0, and the newest release tag reachable from HEAD's
+#        parent, so a tagged HEAD is never rolled back to itself)
 set -euo pipefail
 
 OLD_COMMIT="${1:-8e5b172}"
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+# Step 8's old build: the release a user of this build rolls back to. Resolved
+# before anything is built, so a clone without its release tags fails here with a
+# sentence rather than after the first seven steps.
+PREV_RELEASE="${2:-}"
+if [ -z "$PREV_RELEASE" ]; then
+  PREV_RELEASE="$(git -C "$REPO" describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^ 2>/dev/null)" \
+    || { echo "FAIL: no release tag is reachable from HEAD^, so step 8 has no previous release to"; \
+         echo "      roll back to. Fetch the tags (\`git fetch --tags\`) or name one as the second argument."; exit 1; }
+fi
 # Honour CARGO_TARGET_DIR: with it set, `cargo build` below puts the binary
 # there and not in the in-repo path, and a hardcoded `mac/target` would run
 # whatever stale binary happened to be sitting in it — or none at all.
@@ -99,6 +118,7 @@ NEW="$TARGET_DIR/debug/ccd"
 # hand-written frame down the socket exercises neither.
 NEWCC="$TARGET_DIR/debug/codeconnect"
 WT="$(mktemp -d)/cc-old"
+WT2="$(mktemp -d)/cc-prev"
 H="$(mktemp -d)"
 # The Codex run seeded below. A ULID ending CX so it is obvious in a log.
 CX=01K1B3XQ8ZC0DE5FGH7JKMNPCX
@@ -114,6 +134,9 @@ CX_THREAD=th_ABC123
 CX_ITEM=exec-cf7b67c7-3a19-4dd8-a9a6-6f243db33bd4
 CX_TURN=01a01282-c951-76c1-84d1-6e33d6fdb219
 CX_REQ=AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gACXRoX0FCQzEyMwEAKWV4ZWMtY2Y3YjY3YzctM2ExOS00ZGQ4LWE5YTYtNmYyNDNkYjMzYmQ0AAAAAAAAAAc
+# The OpenCode run seeded beside it. It ends `0C`, not `OC`: `O` is not a
+# Crockford digit, and a uid this build would refuse as malformed proves nothing.
+OC=01K1B3XQ8ZC0DE5FGH7JKMNP0C
 # The tools this harness cannot run without, checked BEFORE anything is built or
 # started so a missing one is named here rather than discovered a few hundred lines
 # in, after a worktree build, as an unexplained failure of whatever step happened to
@@ -155,10 +178,19 @@ cleanup() {
   # `NEWPID` included: a failure after step 7(g) spawns the sandbox
   # daemon and before its explicit kill would otherwise leak it, and it is the one
   # child here holding the home directory this script removes.
-  for pid in "${SUPPID:-}" "${SUPXPID:-}" "${OLDPID:-}" "${NEWPID:-}"; do
+  for pid in "${SUPPID:-}" "${SUPXPID:-}" "${OLDPID:-}" "${NEWPID:-}" "${PREVPID:-}"; do
     if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   done
+  # Step 8's private tmux server, which would otherwise outlive the run by the
+  # length of its `sleep`.
+  if [ -n "${H5:-}" ]; then
+    TMUX_TMPDIR="$H5/tmux" tmux -f /dev/null -L codeconnect kill-server 2>/dev/null || true
+  fi
   git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || true
+  git -C "$REPO" worktree remove --force "$WT2" 2>/dev/null || true
+  # The mktemp directories step 8 owns: `$WT2`'s parent and `$H5` itself.
+  rm -rf "$(dirname "$WT2")"
+  if [ -n "${H5:-}" ]; then rm -rf "$H5"; fi
 }
 trap cleanup EXIT
 
@@ -178,6 +210,12 @@ git -C "$REPO" worktree add --detach "$WT" "$OLD_COMMIT"
 ( cd "$WT/mac" && CARGO_TARGET_DIR="$WT/target" cargo build --bin ccd --bin codeconnect )
 OLD="$WT/target/debug/ccd"
 OLDCC="$WT/target/debug/codeconnect"
+
+echo "== building previous-release ccd + codeconnect ($PREV_RELEASE) in a worktree =="
+git -C "$REPO" worktree add --detach "$WT2" "$PREV_RELEASE"
+( cd "$WT2/mac" && CARGO_TARGET_DIR="$WT2/target" cargo build --bin ccd --bin codeconnect )
+PREV="$WT2/target/debug/ccd"
+PREVCC="$WT2/target/debug/codeconnect"
 
 # Loopback + a free port + push off, so both binaries do their real migrate and
 # recovery without fighting a live ccd, and a fast liveness sweep so the old
@@ -215,10 +253,11 @@ run() {
 }
 q() { sqlite3 "$H/events.db" "$1"; }
 
-# Every string that identifies the seeded Codex run: its tmux/session name, its
-# uid, and its thread id. One regex, built once, so a non-enumeration check
-# cannot quietly cover less than it claims to.
-codex_identifiers() { printf 'cx-1|%s|%s|%s|%s|%s' "$CX" "$CX_THREAD" "$CX_REQ" "$CX_ITEM" "$CX_TURN"; }
+# Every string that identifies the seeded Codex run — its tmux/session name, its
+# uid, its thread id and its card — and the OpenCode run's name and uid. One
+# regex, built once, so a non-enumeration check cannot quietly cover less than it
+# claims to.
+codex_identifiers() { printf 'cx-1|oc-1|%s|%s|%s|%s|%s|%s' "$CX" "$OC" "$CX_THREAD" "$CX_REQ" "$CX_ITEM" "$CX_TURN"; }
 
 # Run an OLD CLI command and assert BOTH halves of non-enumeration:
 #   (a) the command SUCCEEDED, and
@@ -367,6 +406,32 @@ q "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cw
    VALUES('$CX','cx-1','cx-1','codeconnect','/work/codex',NULL,NULL,'live','t','t','codex','$CX_THREAD','/tmp/cch.x/ccd.sock',7);
    INSERT INTO events(session_uid,session_id,seq,ts,kind,payload,source,source_event_id)
    VALUES('$CX','cx-1',1,'t','tool_call','{}','hook','x1'),('$CX','cx-1',2,'t','tool_call','{}','hook','x2');"
+# **And a LIVE OpenCode run beside it, with events.** The bytes the working tree
+# writes for one, pinned by `an_opencode_run_is_kept_out_of_the_swept_table_and_reads_back_as_itself`:
+# agent `opencode` in `codex_sessions`, events whose source is `opencode`, and
+# every Codex column NULL. It lives in the same table as the Codex run, so every
+# bracket below that hashes `codex_sessions` covers it too.
+seed_opencode_run() {
+  sqlite3 "$1" "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,claude_session_id,transcript_path,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket,codex_generation)
+   VALUES('$OC','oc-1','oc-1','codeconnect','/work/opencode',NULL,NULL,'live','t','t','opencode',NULL,NULL,NULL);
+   INSERT INTO events(session_uid,session_id,seq,ts,kind,payload,source,source_event_id)
+   VALUES('$OC','oc-1',1,'t','user_message','{}','opencode','o1'),('$OC','oc-1',2,'t','agent_message','{}','opencode','o2');"
+}
+seed_opencode_run "$H/events.db"
+[ "$(q "SELECT agent FROM codex_sessions WHERE session_uid='$OC';")" = "opencode" ] \
+  || { echo "FAIL: the OpenCode seed did not land"; exit 1; }
+# The OpenCode run as a build that knows it would find it: in `codex_sessions`
+# under its own agent, nowhere in `sessions`, and with both seeded events still
+# carrying their source. Asserted after every daemon that opens `$H`.
+assert_opencode_run_intact() {
+  [ "$(q "SELECT agent FROM codex_sessions WHERE session_uid='$OC';")" = "opencode" ] \
+    || { echo "FAIL: the OpenCode run is not in codex_sessions as itself $1"; exit 1; }
+  [ "$(q "SELECT COUNT(*) FROM sessions WHERE session_uid='$OC';")" = "0" ] \
+    || { echo "FAIL: the OpenCode run is in the swept sessions table $1"; exit 1; }
+  [ "$(q "SELECT COUNT(*) FROM events WHERE session_uid='$OC' AND source='opencode';")" = "2" ] \
+    || { echo "FAIL: the OpenCode run's events lost their source $1"; exit 1; }
+  echo "  the OpenCode run is in codex_sessions as itself, with its events, $1"
+}
 # **And an OPEN APPROVAL CARD for that run.** This is the row the
 # approval observer now produces, and it is the second half of the same
 # rollback question the `codex_sessions` seed asks. `pending_approvals` is one
@@ -428,7 +493,7 @@ q "INSERT INTO mutation_ledger(operation_kind,session_uid,client_request_id,clai
 
 # The complete durable Codex state, hashed. Anything the old daemon or the old
 # CLI touches changes this — the run, its events, AND its open cards.
-codex_state() { q "SELECT * FROM codex_sessions ORDER BY session_uid; SELECT * FROM events WHERE session_uid='$CX' ORDER BY seq; SELECT * FROM codex_pending_approvals ORDER BY request_id; SELECT * FROM mutation_ledger ORDER BY client_request_id;"; }
+codex_state() { q "SELECT * FROM codex_sessions ORDER BY session_uid; SELECT * FROM events WHERE session_uid IN ('$CX','$OC') ORDER BY session_uid, seq; SELECT * FROM codex_pending_approvals ORDER BY request_id; SELECT * FROM mutation_ledger ORDER BY client_request_id;"; }
 [ -n "$(codex_state)" ] || { echo "FAIL: the Codex seed did not land"; exit 1; }
 echo "  seeded: codex_sessions=$(q 'SELECT COUNT(*) FROM codex_sessions;') codex events=$(q "SELECT COUNT(*) FROM events WHERE session_uid='$CX';") lifecycle=$(q "SELECT lifecycle FROM codex_sessions WHERE session_uid='$CX';")"
 
@@ -479,7 +544,9 @@ echo "  seam columns intact through the old daemon: session=$(session_seam) devi
   echo "  BEFORE: $CODEX_BEFORE_OLD1"; echo "  AFTER : $(codex_state)"; exit 1; }
 [ "$(q "SELECT lifecycle FROM codex_sessions WHERE session_uid='$CX';")" = "live" ] \
   || { echo "FAIL: the old daemon's liveness sweep marked the LIVE Codex run exited"; exit 1; }
-echo "  (2) the LIVE Codex run is byte-for-byte untouched by the old daemon, and still live"
+[ "$(q "SELECT lifecycle FROM codex_sessions WHERE session_uid='$OC';")" = "live" ] \
+  || { echo "FAIL: the old daemon's liveness sweep marked the LIVE OpenCode run exited"; exit 1; }
+echo "  (2) the LIVE Codex and OpenCode runs are byte-for-byte untouched by the old daemon, and still live"
 
 echo "== 4) new ccd reopens =="
 run "$NEW" new2
@@ -497,6 +564,7 @@ assert_uv 5 "after new reopen"
 # foreign-epoch stamp is what makes the surviving set authorize nothing.
 [ "$(device_seam)" = "$DEVICE_SEAM_SEEDED" ] || { echo "FAIL: a device seam column did not survive the round-trip: $(device_seam)"; exit 1; }
 echo "  after new reopen: session seam intact=$(session_seam); device seam intact=$(device_seam) (foreign epoch ⇒ Unconfirmable ⇒ authorizes nothing)"
+assert_opencode_run_intact "after the new reopen"
 
 echo "== 5) AGENT-SCOPED ISOLATION: the old daemon and its real prune, live =="
 # A SECOND baseline, re-taken HERE rather than reused from the seed, because a
@@ -510,6 +578,7 @@ echo "== 5) AGENT-SCOPED ISOLATION: the old daemon and its real prune, live =="
 # already measured, in the first window, where the row was still live.
 CODEX_BEFORE_OLD2="$(codex_state)"
 CODEX_LIFECYCLE_BEFORE="$(q "SELECT lifecycle FROM codex_sessions WHERE session_uid='$CX';")"
+OC_LIFECYCLE_BEFORE="$(q "SELECT lifecycle FROM codex_sessions WHERE session_uid='$OC';")"
 CODEX_EVENTS_BEFORE="$(q "SELECT COUNT(*) FROM events WHERE session_uid='$CX';")"
 echo "  codex baseline: lifecycle=$CODEX_LIFECYCLE_BEFORE events=$CODEX_EVENTS_BEFORE"
 
@@ -523,10 +592,10 @@ echo "  the old daemon is up on a v5 database it does not understand"
 
 # (1) ENUMERATION. Nothing either old-daemon log says may name the Codex run —
 # not its session name, not its uid, not its thread id, and not the word codex.
-if grep -qiE "$(codex_identifiers)|codex" "$H/old-live.log" "$H/old.log"; then
-  echo "FAIL: the old daemon named Codex state:"; grep -inE "$(codex_identifiers)|codex" "$H/old-live.log" "$H/old.log"; kill $OLDPID; exit 1
+if grep -qiE "$(codex_identifiers)|codex|opencode" "$H/old-live.log" "$H/old.log"; then
+  echo "FAIL: the old daemon named Codex or OpenCode state:"; grep -inE "$(codex_identifiers)|codex|opencode" "$H/old-live.log" "$H/old.log"; kill $OLDPID; exit 1
 fi
-echo "  (1) neither old-daemon log names a Codex session, thread or uid"
+echo "  (1) neither old-daemon log names a Codex or OpenCode session, thread or uid"
 
 # Top-level `ls` FIRST, and it proves **command health, not non-enumeration**.
 # At 8e5b172 `list()` asks tmux and returns early — printing "no CodeConnect
@@ -582,8 +651,10 @@ kill $OLDPID 2>/dev/null; wait $OLDPID 2>/dev/null
 # above, which had to happen mid-window because the old prune only considers
 # ended runs. So undo exactly that nudge — back to whatever the baseline held,
 # not to a guess — leaving the comparison to measure the old daemon, its real
-# IPC and its real prune, and nothing else.
-q "UPDATE codex_sessions SET lifecycle='$CODEX_LIFECYCLE_BEFORE';"
+# IPC and its real prune, and nothing else. Per run, because the table holds two
+# and each baseline is its own.
+q "UPDATE codex_sessions SET lifecycle='$CODEX_LIFECYCLE_BEFORE' WHERE session_uid='$CX';
+   UPDATE codex_sessions SET lifecycle='$OC_LIFECYCLE_BEFORE' WHERE session_uid='$OC';"
 [ "$(codex_state)" = "$CODEX_BEFORE_OLD2" ] || {
   echo "FAIL: the old daemon mutated Codex state"
   echo "  BEFORE: $CODEX_BEFORE_OLD2"; echo "  AFTER : $(codex_state)"; exit 1; }
@@ -704,6 +775,7 @@ assert_uv 5 "after the final new reopen"
   || { echo "FAIL: a Codex outcome leaked into the shared answers table"; exit 1; }
 echo "  the Codex run, its open card and its terminal answer survived"
 echo "  new -> old -> new -> old + real prune -> new"
+assert_opencode_run_intact "after the final new reopen"
 
 echo "== 6b) a LIVE answer claim, recovered by the new binary the way a restart does =="
 # Step 6 proves a TERMINAL answer claim survives the round trip untouched. This
@@ -1553,6 +1625,108 @@ echo "      with the new daemon's OWN log showing exactly one negotiation — th
 echo "      answered supported=true, so the affirmative control is the launcher's round trip"
 echo "      rather than a second one the harness made on its own connection"
 
+echo "== 8) THE PREVIOUS RELEASE ($PREV_RELEASE) over a LIVE OpenCode run =="
+# v0.6.0 cannot name `codex_sessions`, so everything above says only that it never
+# reaches the OpenCode run. The release a user of this build actually rolls back to
+# can: it reads the row through `all_sessions`, decodes `opencode` as an agent it
+# does not know, and runs its own liveness sweep, listing and prune over it. This
+# step drives that build over the run.
+#
+# On a home of its own, built from scratch, for (5b)'s reason. The run's tmux pane
+# is real, on a private tmux root, so the old sweep's verdict is that the run is
+# present; a run whose pane is gone is one any build may truthfully mark exited.
+# A second OpenCode run is seeded with no pane as the control: the old sweep must
+# end that one, or its leaving the first one live says nothing about the pane.
+command -v tmux >/dev/null 2>&1 \
+  || { echo "FAIL: step 8 needs \`tmux\` for the OpenCode run's pane, and it is not on PATH."; exit 1; }
+H5="$H.prev"
+mkdir -p "$H5/tmux"
+sed "s/\"ws_port\": $PORT/\"ws_port\": $((PORT + 3))/" "$H/config.json" > "$H5/config.json"
+TMUX_TMPDIR="$H5/tmux" run_at "$NEW" new-prev "$H5"
+q5() { sqlite3 "$H5/events.db" "$1"; }
+[ "$(q5 'PRAGMA user_version;')" = "5" ] || { echo "FAIL: (8) staging home is not at v5"; exit 1; }
+seed_opencode_run "$H5/events.db"
+# The control: an OpenCode run like the first in every way but its pane.
+OC_GONE=01K1B3XQ8ZC0DE5FGH7JKMNP1C
+q5 "INSERT INTO codex_sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,claude_session_id,transcript_path,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket,codex_generation)
+   VALUES('$OC_GONE','oc-2','oc-2','codeconnect','/work/opencode',NULL,NULL,'live','t','t','opencode',NULL,NULL,NULL);"
+TMUX_TMPDIR="$H5/tmux" tmux -f /dev/null -L codeconnect new-session -d -s oc-1 'sleep 600'
+oc_state5() { q5 "SELECT * FROM codex_sessions WHERE session_uid='$OC'; SELECT * FROM events WHERE session_uid='$OC' ORDER BY seq;"; }
+OC_BEFORE="$(oc_state5)"
+[ -n "$OC_BEFORE" ] || { echo "FAIL: (8) the OpenCode seed did not land"; exit 1; }
+
+PREV_RC=0
+CODECONNECT_HOME="$H5" TMUX_TMPDIR="$H5/tmux" timeout "$DAEMON_WINDOW" "$PREV" > "$H5/prev.log" 2>&1 || PREV_RC=$?
+[ "$PREV_RC" = "124" ] \
+  || { echo "FAIL: (8) the $PREV_RELEASE daemon exited early (rc=$PREV_RC) — it did not stay up to do its work:"; cat "$H5/prev.log"; exit 1; }
+[ "$(oc_state5)" = "$OC_BEFORE" ] || {
+  echo "FAIL: (8) the $PREV_RELEASE daemon mutated the OpenCode run"
+  echo "  BEFORE: $OC_BEFORE"; echo "  AFTER : $(oc_state5)"; exit 1; }
+[ "$(q5 "SELECT lifecycle FROM codex_sessions WHERE session_uid='$OC';")" = "live" ] \
+  || { echo "FAIL: (8) the $PREV_RELEASE daemon's liveness sweep ended an OpenCode run whose pane is there"; exit 1; }
+[ "$(q5 "SELECT lifecycle FROM codex_sessions WHERE session_uid='$OC_GONE';")" = "exited" ] \
+  || { echo "FAIL: (8) the $PREV_RELEASE daemon's liveness sweep did not end the OpenCode run with no pane,"
+       echo "      so its leaving the other one live is not a verdict about the pane"; exit 1; }
+[ "$(q5 'PRAGMA user_version;')" = "5" ] \
+  || { echo "FAIL: (8) the $PREV_RELEASE daemon moved user_version off 5"; exit 1; }
+echo "  (8) the $PREV_RELEASE daemon left the LIVE OpenCode run byte-for-byte as seeded, and live,"
+echo "      and ended the control run whose pane does not exist"
+
+# Live, so its own CLI can ask it. `sessions list` must SUCCEED and name the run: a
+# build that failed its whole listing on an agent it cannot name would be an outage,
+# and one that hid the run would leave its operator unable to see it. Captured and
+# matched with `case`, for the `pipefail` reason given at step 5.
+CODECONNECT_HOME="$H5" TMUX_TMPDIR="$H5/tmux" "$PREV" > "$H5/prev-live.log" 2>&1 &
+PREVPID=$!
+daemon_accepting "$H5" || { echo "FAIL: (8) the $PREV_RELEASE daemon did not accept"; tail -20 "$H5/prev-live.log"; exit 1; }
+PREV_LIST_RC=0
+PREV_LIST="$(CODECONNECT_HOME="$H5" TMUX_TMPDIR="$H5/tmux" "$PREVCC" sessions list 2>&1)" || PREV_LIST_RC=$?
+[ "$PREV_LIST_RC" = "0" ] \
+  || { echo "FAIL: (8) the $PREV_RELEASE \`sessions list\` failed (rc=$PREV_LIST_RC):"; printf '%s\n' "$PREV_LIST"; kill $PREVPID; exit 1; }
+# The row's STATE column too: a listing that named the run as anything but live
+# would tell its operator the run had ended.
+PREV_LIST_STATE="$(printf '%s\n' "$PREV_LIST" | awk -v uid="$OC" '$2 == uid { print $3 }')"
+[ "$PREV_LIST_STATE" = "live" ] \
+  || { echo "FAIL: (8) the $PREV_RELEASE \`sessions list\` did not list the OpenCode run as live (state='$PREV_LIST_STATE'):";
+       printf '%s\n' "$PREV_LIST"; kill $PREVPID; exit 1; }
+PREV_PRUNE_RC=0
+PREV_PRUNE="$(CODECONNECT_HOME="$H5" TMUX_TMPDIR="$H5/tmux" "$PREVCC" sessions prune --dry-run 2>&1)" || PREV_PRUNE_RC=$?
+[ "$PREV_PRUNE_RC" = "0" ] \
+  || { echo "FAIL: (8) the $PREV_RELEASE \`sessions prune --dry-run\` failed (rc=$PREV_PRUNE_RC):"; printf '%s\n' "$PREV_PRUNE"; kill $PREVPID; exit 1; }
+case "$PREV_PRUNE" in
+  *"$OC"*) echo "FAIL: (8) the $PREV_RELEASE prune would delete a LIVE OpenCode run:";
+           printf '%s\n' "$PREV_PRUNE"; kill $PREVPID; exit 1;;
+esac
+# And it counted the run as running, rather than leaving it out for want of an
+# answer: absence from the removal list alone cannot tell those apart.
+case "$PREV_PRUNE" in
+  *"kept 1 still running, 0 whose state could not be established"*) ;;
+  *) echo "FAIL: (8) the $PREV_RELEASE prune did not count the OpenCode run as the one run still running:";
+     printf '%s\n' "$PREV_PRUNE"; kill $PREVPID; exit 1;;
+esac
+kill $PREVPID 2>/dev/null; wait $PREVPID 2>/dev/null || true; PREVPID=""
+[ "$(oc_state5)" = "$OC_BEFORE" ] || {
+  echo "FAIL: (8) the live $PREV_RELEASE daemon or its CLI mutated the OpenCode run"
+  echo "  BEFORE: $OC_BEFORE"; echo "  AFTER : $(oc_state5)"; exit 1; }
+echo "  (8) its \`sessions list\` listed the run as live and its \`prune --dry-run\` kept it as"
+echo "      the one run still running, both succeeding, and the run is still byte-for-byte as seeded"
+
+# And back up: the working tree reads the run as itself.
+TMUX_TMPDIR="$H5/tmux" run_at "$NEW" new-prev-back "$H5"
+[ "$(q5 "SELECT COUNT(*) FROM codex_sessions WHERE session_uid='$OC';")" = "1" ] \
+  && [ "$(q5 "SELECT COUNT(*) FROM sessions WHERE session_uid='$OC';")" = "0" ] \
+  || { echo "FAIL: (8) the OpenCode run is not exactly once in codex_sessions after the reopen"; exit 1; }
+[ "$(q5 "SELECT agent FROM codex_sessions WHERE session_uid='$OC';")" = "opencode" ] \
+  || { echo "FAIL: (8) the OpenCode run lost its agent on the way back up"; exit 1; }
+[ "$(q5 "SELECT COUNT(*) FROM events WHERE session_uid='$OC' AND source='opencode';")" = "2" ] \
+  || { echo "FAIL: (8) the OpenCode run's events lost their source on the way back up"; exit 1; }
+[ "$(q5 "SELECT lifecycle FROM codex_sessions WHERE session_uid='$OC';")" = "live" ] \
+  || { echo "FAIL: (8) the working tree ended the OpenCode run on the way back up, though its pane is there"; exit 1; }
+TMUX_TMPDIR="$H5/tmux" tmux -f /dev/null -L codeconnect kill-server 2>/dev/null || true
+rm -rf "$H5"
+H5=""
+echo "  (8) and the working tree reopened it as a live OpenCode run, with both events"
+
 # The verdict, in the numbers this run actually read out of the database. Refuse
 # to print it at all rather than print it with a blank where a version should be:
 # an unset variable here means a step that should have measured one did not run.
@@ -1603,3 +1777,9 @@ echo "      answer, mutating no Codex state and leaving no connection behind: th
 echo "      lands before a launch record exists. The identical command against the new"
 echo "      daemon got past that preflight and LAUNCHED for real, so the refusal is the"
 echo "      daemon's doing and not the launcher's mood."
+echo ""
+echo "      And an OpenCode run rode every bracket above beside the Codex run. Step 8 then"
+echo "      rolled a live one back to $PREV_RELEASE, which can name its table: that daemon"
+echo "      left the run byte-for-byte as seeded and still live while ending a control run"
+echo "      with no pane, its \`sessions list\` listed it as live and its \`prune --dry-run\`"
+echo "      kept it as running, and the working tree read it back as itself, still live."

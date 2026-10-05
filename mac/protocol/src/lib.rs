@@ -519,7 +519,25 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     on a question card are refused before anything is claimed or typed, and
 ///     `deny` on one is a decline. A minor-20 phone still shows the question as an
 ///     approval; nothing it can tap chooses an answer for the person.
-pub const PROTOCOL_MINOR: u32 = 21;
+///   * `22` — **OpenCode has a name on the wire.** A peer can say `opencode` without a
+///     peer at minor 21 having to understand it, as minor 15 let one say Codex.
+///     Additive, and a client written against minor 21 needs none of it:
+///       - [`agent::AgentKind::Opencode`] (`"opencode"`) wherever an `agent` is carried.
+///         A build below this minor decodes the word as
+///         [`agent::AgentKind::Unsupported`], which every actuation site refuses.
+///       - [`event::Source::Opencode`] (`"opencode"`), the provenance of a fact an
+///         OpenCode session reports. A daemon below this minor reads it back from
+///         storage as [`event::Source::Unknown`]; a phone below it keeps the word as an
+///         unknown source.
+///       - [`event::SessionSummary::opencode_session_id`] — the OpenCode session
+///         (`ses_…`) the run's keyboard is showing. Omitted when there is none, so a
+///         summary of a Claude or Codex run is byte-identical to minor 21.
+///
+///     At minor 22 no daemon hosts OpenCode: [`ws::Capabilities::supported_agents`]
+///     is unchanged, a registration naming the agent is refused, and an advertised
+///     `opencode` grants a client nothing, so no frame a minor-22 daemon sends carries
+///     the new words.
+pub const PROTOCOL_MINOR: u32 = 22;
 
 #[cfg(test)]
 mod ledger_tests {

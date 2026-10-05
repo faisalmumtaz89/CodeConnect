@@ -28,6 +28,13 @@ pub enum Source {
     /// `source_event_id`s are thread-namespaced so a thread switch inside one
     /// session cannot alias two threads' item ids.
     Codex,
+    /// Facts an OpenCode session reports about itself. Structured and first-hand,
+    /// and the only observation of an OpenCode session, so it ranks with
+    /// [`Source::Codex`]: the dedup key `(session_uid, source, source_event_id)`
+    /// already keeps it apart from every Claude and Codex fact, and the rank only
+    /// ever separates it from [`Source::Unknown`]. A build before protocol minor 22
+    /// reads a persisted `opencode` back as [`Source::Unknown`].
+    Opencode,
     /// tmux capture-pane snapshot. Presence checks only, never semantics.
     Pty,
     /// A persisted source string this build does not recognise — a fact written
@@ -57,6 +64,7 @@ impl Source {
             // only ever guards against a corrupt/unknown source (trust 0) losing
             // to the real one; it never competes with a Claude source.
             Source::Codex => 3,
+            Source::Opencode => 3,
             Source::Transcript => 2,
             Source::Pty => 1,
             Source::Unknown => 0,
@@ -69,6 +77,7 @@ impl Source {
             Source::Transcript => "transcript",
             Source::Daemon => "daemon",
             Source::Codex => "codex",
+            Source::Opencode => "opencode",
             Source::Pty => "pty",
             Source::Unknown => "unknown",
         }
@@ -461,6 +470,12 @@ pub struct SessionSummary {
     /// delivered, `lifecycle` whether there is still a run to deliver it to.
     #[serde(default)]
     pub codex_link: CodexLink,
+    /// The OpenCode session (`ses_…`) this run's keyboard is showing. Absent when no
+    /// OpenCode session is known for the run — every Claude and Codex run — and from
+    /// any daemon below protocol minor 22. Opaque: carried for correlation and
+    /// rendering, never parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_session_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -576,6 +591,7 @@ mod tests {
             agent: crate::agent::AgentKind::Claude,
             codex_thread_id: None,
             codex_link: CodexLink::None,
+            opencode_session_id: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);
@@ -601,6 +617,19 @@ mod tests {
         assert!(Source::Unknown.trust() < Source::Pty.trust());
         assert!(Source::Unknown.trust() < Source::Daemon.trust());
         assert_eq!(Source::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn an_opencode_source_is_named_and_ranked_with_codex() {
+        let encoded = serde_json::to_string(&Source::Opencode).unwrap();
+        assert_eq!(encoded, "\"opencode\"");
+        assert_eq!(
+            serde_json::from_str::<Source>(&encoded).unwrap(),
+            Source::Opencode
+        );
+        assert_eq!(Source::Opencode.as_str(), "opencode");
+        assert_eq!(Source::Opencode.trust(), Source::Codex.trust());
+        assert!(Source::Opencode.trust() > Source::Unknown.trust());
     }
 
     /// A daemon predating the agent seam sends no `agent`, and every run it
@@ -632,6 +661,40 @@ mod tests {
         let s = serde_json::to_string(&codex).unwrap();
         assert!(s.contains("\"agent\":\"codex\""), "{s}");
         assert_eq!(codex, serde_json::from_str::<SessionSummary>(&s).unwrap());
+    }
+
+    /// Every Claude and Codex summary is encoded without the field, which is what
+    /// keeps them byte-identical to a summary from a daemon that does not know it.
+    #[test]
+    fn a_summary_names_an_opencode_session_only_when_there_is_one() {
+        use crate::agent::AgentKind;
+        let older = serde_json::json!({
+            "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "session_id": "cc-1",
+            "tmux_session": "cc-1",
+            "cwd": "/Users/dev/Aion",
+            "lifecycle": "live",
+            "link": "detached",
+            "last_seq": 3,
+            "created_at": "t",
+            "updated_at": "t"
+        });
+        let decoded: SessionSummary = serde_json::from_value(older).expect("decodes");
+        assert_eq!(decoded.opencode_session_id, None);
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        assert!(!encoded.contains("opencode_session_id"), "{encoded}");
+
+        let opencode = SessionSummary {
+            agent: AgentKind::Opencode,
+            opencode_session_id: Some("ses_1".into()),
+            ..decoded
+        };
+        let s = serde_json::to_string(&opencode).unwrap();
+        assert!(s.contains("\"agent\":\"opencode\""), "{s}");
+        assert!(s.contains("\"opencode_session_id\":\"ses_1\""), "{s}");
+        let back = serde_json::from_str::<SessionSummary>(&s).unwrap();
+        assert_eq!(back.agent, AgentKind::Opencode);
+        assert_eq!(opencode, back);
     }
 
     /// **The five words the phone matches on, and the one an older daemon means.**

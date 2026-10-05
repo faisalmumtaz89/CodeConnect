@@ -634,6 +634,7 @@ impl Run {
             // over a Codex link, and the phone reads that off this field rather
             // than off the demo's silence.
             codex_link: protocol::event::CodexLink::None,
+            opencode_session_id: None,
         }
     }
 

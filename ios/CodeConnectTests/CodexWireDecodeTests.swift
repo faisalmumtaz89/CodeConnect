@@ -208,6 +208,24 @@ final class CodexWireDecodeTests: XCTestCase {
         XCTAssertEqual(EventSource.codex.rawValue, "codex")
     }
 
+    /// `source: "opencode"` is a provenance this build does not know. It is
+    /// retained as itself and never read as the trusted `.daemon`, and a summary
+    /// that names an OpenCode session still decodes.
+    func testAnOpenCodeSourceIsAnUnknownProvenance() throws {
+        let source = try decode(EventSource.self, #""opencode""#)
+        XCTAssertEqual(source, .unknown("opencode"))
+        XCTAssertNotEqual(source, .daemon)
+        let summary = try decode(
+            SessionSummary.self,
+            """
+            {"session_uid":"u-1","session_id":"oc-1","tmux_session":"oc-1","cwd":"/x",
+             "lifecycle":"live","link":"attached","last_seq":3,
+             "created_at":"t","updated_at":"t","agent":"opencode",
+             "opencode_session_id":"ses_1"}
+            """)
+        XCTAssertEqual(summary.agent, .unsupported("opencode"))
+    }
+
     /// An item type this build has never seen arrives as `codex_<type>`. It must
     /// round-trip as itself.
     func testUnknownCodexItemKindsSurvive() throws {
@@ -235,6 +253,9 @@ final class CodexWireDecodeTests: XCTestCase {
         XCTAssertEqual(
             try summary(#","agent":"gemini""#).agent, .unsupported("gemini"),
             "an unknown agent is retained, never read as Claude")
+        XCTAssertEqual(
+            try summary(#","agent":"opencode""#).agent, .unsupported("opencode"),
+            "an unknown agent is retained, never read as Claude")
     }
 
     /// **The unsupported arm, on `SessionSummary` itself.**
@@ -245,21 +266,23 @@ final class CodexWireDecodeTests: XCTestCase {
     /// stopped being about. Reading `"gemini"` as Claude would offer a Claude
     /// session's whole vocabulary to an agent that answers none of it.
     @MainActor func testAnUnknownAgentOnASummaryIsUnsupportedAndNotCodex() throws {
-        let summary = try decode(
-            SessionSummary.self,
-            """
-            {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1","cwd":"/x",
-             "lifecycle":"live","link":"attached","last_seq":3,
-             "created_at":"t","updated_at":"t","agent":"gemini","codex_link":"subscribed"}
-            """)
-        XCTAssertEqual(summary.agent, .unsupported("gemini"))
-        XCTAssertFalse(summary.isCodex, "an agent this build cannot drive is not Codex")
-        XCTAssertEqual(summary.agent.displayName, "gemini", "named in the daemon's own word")
-        // And it gets no answer surface at all — never Claude's by default.
-        guard case .noneAnswerable = DecisionCardView.answerSurface(
-            card: try XCTUnwrap(capturedCards().first?.card), agent: summary.agent,
-            paneSnapshot: nil)
-        else { return XCTFail("an unknown agent must not inherit a vocabulary") }
+        for name in ["gemini", "opencode"] {
+            let summary = try decode(
+                SessionSummary.self,
+                """
+                {"session_uid":"u-1","session_id":"cc-1","tmux_session":"cc-1","cwd":"/x",
+                 "lifecycle":"live","link":"attached","last_seq":3,
+                 "created_at":"t","updated_at":"t","agent":"\(name)","codex_link":"subscribed"}
+                """)
+            XCTAssertEqual(summary.agent, .unsupported(name))
+            XCTAssertFalse(summary.isCodex, "an agent this build cannot drive is not Codex")
+            XCTAssertEqual(summary.agent.displayName, name, "named in the daemon's own word")
+            // And it gets no answer surface at all — never Claude's by default.
+            guard case .noneAnswerable = DecisionCardView.answerSurface(
+                card: try XCTUnwrap(capturedCards().first?.card), agent: summary.agent,
+                paneSnapshot: nil)
+            else { return XCTFail("\(name) must not inherit a vocabulary") }
+        }
     }
 
     /// `codex_link` is the addressee state, defaulted so an older daemon

@@ -243,6 +243,7 @@ mod tests {
             agent: protocol::agent::AgentKind::Claude,
             codex_thread_id: None,
             codex_link: protocol::event::CodexLink::None,
+            opencode_session_id: None,
         }
     }
 

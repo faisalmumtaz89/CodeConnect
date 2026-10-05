@@ -550,8 +550,9 @@ pub enum DeleteOutcome {
 /// [`AgentKind::Unsupported`] run. That is deliberate and it is the same rule
 /// [`needs_codex_session_move`] uses: `sessions` is the table a rolled-back
 /// v0.6.0 daemon sweeps, and an agent this build understands even less than
-/// Codex is not the one to leave in it. The table is named for the agent it was
-/// built for, not for the only agent it can ever hold.
+/// Codex is not the one to leave in it. An OpenCode run is filed there too, for the
+/// same reason. The table is named for the agent it was built for, not for the
+/// only agent it can ever hold.
 fn session_tables_for(agent: &AgentKind) -> (&'static str, &'static str) {
     if agent.is_claude() {
         ("sessions", "codex_sessions")
@@ -5939,6 +5940,7 @@ fn parse_source(value: &str) -> Source {
         "transcript" => Source::Transcript,
         "daemon" => Source::Daemon,
         "codex" => Source::Codex,
+        "opencode" => Source::Opencode,
         "pty" => Source::Pty,
         // An unrecognised persisted source — a fact written by a newer daemon,
         // read back after a rollback — is the lowest trust there is, never the
@@ -7385,6 +7387,51 @@ mod tests {
             Some(codex.uid.clone()),
             "resolving by tmux name reaches the Codex half too"
         );
+    }
+
+    /// An OpenCode run is filed where a rolled-back v0.6.0 daemon cannot reach it,
+    /// and its agent and its events' source are stored as the words a build that
+    /// knows them reads back as themselves. The raw values are asserted too: they
+    /// are the bytes `new-old-new-real.sh` seeds for an older build to meet.
+    #[test]
+    fn an_opencode_run_is_kept_out_of_the_swept_table_and_reads_back_as_itself() {
+        let (store, _path) = temp_store();
+        let opencode = key("0C", "oc-1");
+        let mut row = session_row(&opencode);
+        row.agent = AgentKind::Opencode;
+        store.upsert_session(&row).unwrap().assert_present();
+        assert_eq!(
+            table_counts(&store),
+            (0, 1),
+            "not in the table an older daemon sweeps"
+        );
+        let found = store.get_session(&opencode.uid).unwrap().expect("by uid");
+        assert_eq!(found.agent, AgentKind::Opencode);
+
+        let mut event = pending(&opencode, EventKind::UserMessage, Some("o1"));
+        event.source = Source::Opencode;
+        store.append_event(&event).unwrap().expect("appended");
+        let events = store.events_after(&opencode.uid, 0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, Source::Opencode);
+
+        let conn = store.read();
+        let agent: String = conn
+            .query_row(
+                "SELECT agent FROM codex_sessions WHERE session_uid = ?1",
+                params![opencode.uid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent, "opencode");
+        let source: String = conn
+            .query_row(
+                "SELECT source FROM events WHERE session_uid = ?1",
+                params![opencode.uid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "opencode");
     }
 
     /// The isolation itself, stated as the old daemon's own SQL.

@@ -31,6 +31,9 @@ pub enum AgentKind {
     #[default]
     Claude,
     Codex,
+    /// OpenCode. A build before protocol minor 22 decodes `"opencode"` as
+    /// [`AgentKind::Unsupported`], which every actuation site refuses.
+    Opencode,
     /// An agent name this build does not know. Never treated as Claude: a use
     /// site that could actuate the session must refuse it. Carries the exact
     /// wire string so it survives a round-trip and can be shown to a human.
@@ -45,14 +48,15 @@ impl AgentKind {
         match self {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
+            AgentKind::Opencode => "opencode",
             AgentKind::Unsupported(name) => name.as_str(),
         }
     }
 
     /// Decode a **present** wire/storage string. Only true absence (an omitted
     /// field, decoded through `#[serde(default)]`, or a `NULL` column handled by
-    /// the caller) means Claude. A *present* value that is neither `claude` nor
-    /// `codex` — including the empty string — is preserved as
+    /// the caller) means Claude. A *present* value that is not a name this build
+    /// knows — including the empty string — is preserved as
     /// [`AgentKind::Unsupported`], never silently promoted to Claude: an empty or
     /// unrecognised agent that a peer deliberately sent is a fact this build does
     /// not understand, and it fails closed downstream rather than being read as
@@ -61,6 +65,7 @@ impl AgentKind {
         match value {
             "claude" => AgentKind::Claude,
             "codex" => AgentKind::Codex,
+            "opencode" => AgentKind::Opencode,
             other => AgentKind::Unsupported(other.to_string()),
         }
     }
@@ -115,6 +120,15 @@ mod tests {
             serde_json::from_str::<AgentKind>("\"codex\"").unwrap(),
             AgentKind::Codex
         );
+        assert_eq!(
+            serde_json::to_string(&AgentKind::Opencode).unwrap(),
+            "\"opencode\""
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentKind>("\"opencode\"").unwrap(),
+            AgentKind::Opencode
+        );
+        assert!(!AgentKind::Opencode.is_claude());
     }
 
     #[test]
@@ -137,6 +151,7 @@ mod tests {
         for kind in [
             AgentKind::Claude,
             AgentKind::Codex,
+            AgentKind::Opencode,
             AgentKind::Unsupported("gemini".into()),
         ] {
             assert_eq!(AgentKind::from_str_lossy(kind.as_str()), kind);
