@@ -16,10 +16,10 @@ afterEach(async () => {
 })
 
 /**
- * @param {{ agent?: boolean, onHello?: (h: any, c: any) => void, read?: boolean, api?: (f: ReturnType<typeof fakeApi>) => void }} [o]
+ * @param {{ agent?: boolean, consts?: Record<string, number>, onHello?: (h: any, c: any) => void, read?: boolean, api?: (f: ReturnType<typeof fakeApi>) => void }} [o]
  */
 async function setup(o = {}) {
-  const p = await loadPlugin({ agent: o.agent })
+  const p = await loadPlugin({ agent: o.agent, consts: o.consts })
   const ccd = fakeCcd(p.socket, { onHello: o.onHello, read: o.read })
   const f = fakeApi()
   o.api?.(f)
@@ -76,7 +76,8 @@ describe("hello", () => {
   })
 
   test("agent.json is read only as a regular file of at most 4 KiB; a FIFO there does not hold the read", async () => {
-    const { mod, dir } = await loadPlugin()
+    const { mod, dir, cleanup } = await loadPlugin()
+    cleanups.push(cleanup)
     const at = (/** @type {string} */ n) => join(dir, n)
     writeFileSync(at("ok.json"), JSON.stringify({ pid: 1, start: START }))
     expect(await mod.readStart(at("ok.json"))).toEqual(START)
@@ -124,7 +125,8 @@ describe("connection", () => {
   })
 
   test("backoff doubles from 0.5 s to 8 s with ±20% jitter", async () => {
-    const { mod } = await loadPlugin()
+    const { mod, cleanup } = await loadPlugin()
+    cleanups.push(cleanup)
     for (let a = 0; a < 10; a++) {
       const base = Math.min(8000, 500 * 2 ** a)
       expect(mod.backoffDelay(a, 0)).toBe(Math.round(base * 0.8))
@@ -167,6 +169,43 @@ describe("connection", () => {
     expect(gaps[0]).toBeLessThan(900)
     expect(gaps[2]).toBeGreaterThan(1500)
   }, 12000)
+
+  // Two non-final refusals leave the next retry at 2 s (±20%); a reset brings it back to 0.5 s.
+  test("the backoff starts over once a link settles", async () => {
+    let n = 0
+    const { ccd } = await setup({ onHello: (_h, c) => (++n <= 2 ? refuse(c, false) : n === 3 && welcome(c)) })
+    const c = await until(() => ccd.conns.length === 3 && settled(ccd.last(), 1) && ccd.last(), 6000)
+    const cut = Date.now()
+    c.socket.destroy()
+    const next = await until(() => ccd.conns.length === 4 && ccd.last(), 4000)
+    expect(next.at - cut).toBeLessThan(900)
+  }, 10000)
+
+  test("without a settle, the backoff starts over only once the link has stayed up STABLE_MS", async () => {
+    /** @type {Record<string, number>} */
+    const gap = {}
+    for (const up of [100, 600]) {
+      let n = 0
+      let welcomed = 0
+      const { ccd } = await setup({
+        consts: { STABLE_MS: 300 },
+        onHello: (_h, c) => {
+          if (++n <= 2) refuse(c, false)
+          else if (n === 3) (welcome(c), (welcomed = Date.now()))
+        },
+        api: (f) => (f.server.delay = 2000),
+      })
+      const c = await until(() => ccd.conns.length === 3 && welcomed && ccd.last(), 6000)
+      await sleep(up - (Date.now() - welcomed))
+      const cut = Date.now()
+      c.socket.destroy()
+      const next = await until(() => ccd.conns.length === 4 && ccd.last(), 4000)
+      expect(c.frames.some((/** @type {any} */ x) => x.t === "settled")).toBe(false)
+      gap[up] = next.at - cut
+    }
+    expect(gap[100]).toBeGreaterThan(1500)
+    expect(gap[600]).toBeLessThan(900)
+  }, 20000)
 
   test("dispose closes the link and stops reconnecting", async () => {
     const { ccd, f } = await setup()
@@ -263,6 +302,28 @@ describe("sync", () => {
     const stub = all.find((/** @type {any} */ i) => i.stub)
     expect(stub).toMatchObject({ stub: true, kind: "part", ids: { sessionID: "ses_p", messageID: "msg_ses_p_001", partID: "prt_huge", callID: "call_h" } })
     expect(stub.size).toBeGreaterThan(262144)
+  })
+
+  test("a snapshot yields to the event loop between messages", async () => {
+    /** @type {number[]} */
+    const reads = []
+    const count = (/** @type {ReturnType<typeof fakeApi>} */ f) => f.server.calls.filter((x) => x.method === "session.messages").length
+    const { ccd, f } = await setup({
+      api: (f) => {
+        f.server.sessions = [session("ses_y", Date.now() + 60000)]
+        f.server.messages.set("ses_y", Array.from({ length: 25 }, (_, i) => msg("ses_y", i + 1)))
+        f.server.status = { ses_y: { type: "busy" } }
+        let once = true
+        // Queued during the first history read, ahead of anything the snapshot queues afterwards.
+        f.server.before["session.messages"] = () => {
+          if (once) setImmediate(() => reads.push(count(f)))
+          once = false
+        }
+      },
+    })
+    await until(() => ccd.last() && settled(ccd.last(), 1))
+    expect(count(f)).toBe(3)
+    expect(reads).toEqual([1])
   })
 
   test("live frames are held during a sync and flushed after sync_end, then settled", async () => {

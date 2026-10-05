@@ -1,6 +1,6 @@
 // Shared test plumbing: a private copy of the plugin per test (the way CodeConnect deploys it, next to its
 // agent.json), a fake daemon on a unix socket, and small waits.
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -13,11 +13,21 @@ export const START = { sec: 1700000000, usec: 123456 }
 // Inside node_modules, so the copy resolves `solid-js` the way the host resolves it for a plugin.
 const SCRATCH = fileURLToPath(new URL("../node_modules/.cache/plugin-tests/", import.meta.url))
 
-/** @param {{ agent?: boolean }} [opts] */
+/**
+ * `consts` sets exported numeric constants of the copy (`{ STABLE_MS: 300 }`), so a timing rule is tested in
+ * milliseconds rather than seconds.
+ * @param {{ agent?: boolean, consts?: Record<string, number> }} [opts]
+ */
 export async function loadPlugin(opts = {}) {
   mkdirSync(SCRATCH, { recursive: true })
   const dir = mkdtempSync(join(SCRATCH, "cc-oc-"))
-  copyFileSync(PLUGIN, join(dir, "codeconnect-opencode.js"))
+  let source = readFileSync(PLUGIN, "utf8")
+  for (const [k, v] of Object.entries(opts.consts ?? {})) {
+    const re = new RegExp(`^export const ${k} = \\d+$`, "m")
+    if (!re.test(source)) throw new Error("no numeric constant " + k)
+    source = source.replace(re, `export const ${k} = ${v}`)
+  }
+  writeFileSync(join(dir, "codeconnect-opencode.js"), source)
   if (opts.agent !== false) writeAgent(dir)
   const mod = await import(pathToFileURL(join(dir, "codeconnect-opencode.js")).href)
   const socket = join(tmpdir(), `cc-oc-${process.pid}-${++sockets}.sock`)

@@ -8,13 +8,15 @@
 // launch), and when the disk fills its database writes fail and a turn stops mid-way. So every OpenCode here gets
 // TMPDIR inside the rig, cleared after each run and removed with the rig, also on a failed or interrupted run; a
 // rig left by a killed run is swept at the next start, and a rig refuses to start with less than 512 MiB free (a rig peaks near 200 MB).
+// Every process a rig starts outside tmux (the mock model, fake-ccd, `opencode serve`), and the pane's OpenCode, is
+// recorded in the rig directory with its start time, so the sweep can stop what a killed run left running.
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { ackedFrom } from "./fake-ccd.js"
-import { alive, birth } from "./proc.js"
+import { alive, birth, killIfSame } from "./proc.js"
 
 export const LIVE = process.env.CC_OPENCODE_LIVE === "1"
 if (!LIVE) console.error("SKIP live OpenCode tests: set CC_OPENCODE_LIVE=1 (and CC_OPENCODE_BIN) to run them")
@@ -28,6 +30,10 @@ export const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout
 export const OPENCODE_VERSION = "1.18.34"
 const FREE_MIN = 512 * 1048576
 const PREFIX = "cc-oc-live-"
+/** In each rig directory: one `{pid, start}` line per process the rig started. */
+const PIDS = "pids.jsonl"
+/** Where tmux keeps its server sockets; a killed server can leave its socket file behind. */
+const SOCKETS = join(process.env.TMUX_TMPDIR ?? "/tmp", `tmux-${process.getuid?.() ?? 0}`)
 
 /** The OpenCode binary, checked to answer `--version` with exactly OPENCODE_VERSION. */
 export function opencodeBin() {
@@ -58,17 +64,36 @@ for (const sig of /** @type {const} */ (["SIGINT", "SIGTERM", "SIGHUP"]))
     process.kill(process.pid, sig)
   })
 
-/** Removes what a killed run left: its tmux servers (and so its OpenCode) and its rig directories. */
+/**
+ * Removes what a killed run left: its tmux servers (and so its OpenCode) and their socket files, every recorded
+ * process still running with its recorded start time, and its rig directories.
+ */
 function sweep() {
   const dead = (/** @type {string} */ name) => {
     const pid = Number(name.slice(PREFIX.length).split("-")[0])
     return Number.isInteger(pid) && pid > 0 && pid !== process.pid && !alive(pid)
   }
-  const sockets = join(process.env.TMUX_TMPDIR ?? "/tmp", `tmux-${process.getuid?.() ?? 0}`)
   try {
-    for (const n of readdirSync(sockets)) if (n.startsWith(PREFIX) && dead(n)) spawnSync("tmux", ["-L", n, "kill-server"])
+    for (const n of readdirSync(SOCKETS))
+      if (n.startsWith(PREFIX) && dead(n)) {
+        spawnSync("tmux", ["-L", n, "kill-server"])
+        rmSync(join(SOCKETS, n), { force: true })
+      }
   } catch {}
-  for (const n of readdirSync(tmpdir())) if (n.startsWith(PREFIX) && dead(n)) rmSync(join(tmpdir(), n), { recursive: true, force: true })
+  for (const n of readdirSync(tmpdir())) {
+    if (!n.startsWith(PREFIX) || !dead(n)) continue
+    let recorded = ""
+    try {
+      recorded = readFileSync(join(tmpdir(), n, PIDS), "utf8")
+    } catch {}
+    for (const l of recorded.split("\n").filter(Boolean)) {
+      try {
+        const { pid, start } = JSON.parse(l)
+        killIfSame(pid, start)
+      } catch {}
+    }
+    rmSync(join(tmpdir(), n), { recursive: true, force: true })
+  }
 }
 
 const freeBytes = (/** @type {string} */ dir) => {
@@ -94,22 +119,29 @@ const LAG_SAMPLER = `const __lag = { samples: 0, totalMs: 0, maxMs: 0, hist: new
 let __last = performance.now()
 setInterval(() => { const n = performance.now(); const l = Math.max(0, n - __last - 20); __last = n; __lag.samples++; __lag.totalMs += l; __lag.maxMs = Math.max(__lag.maxMs, l); __lag.hist[Math.min(1000, Math.floor(l))]++ }, 20).unref?.()
 `
-const STATS_WRITER = `setInterval(() => { try { __w(fileURLToPath(new URL("./stats.json", import.meta.url)), JSON.stringify(__st)) } catch {} }, 200).unref?.()
+// Written to a temporary file and renamed over stats.json, so a reader never sees a partial file.
+const STATS_WRITER = `setInterval(() => { try { const f = fileURLToPath(new URL("./stats.json", import.meta.url)); __w(f + ".tmp", JSON.stringify(__st)); __r(f + ".tmp", f) } catch {} }, 200).unref?.()
 `
 
 /**
- * A build that records the queue and frame bounds it reached, its listeners' main-thread time and the main thread's
- * lag into `<session dir>/stats.json`.
+ * A build that records the queue and frame bounds it reached, its main-thread time and the main thread's lag into
+ * `<session dir>/stats.json`. Main-thread time is counted twice over: per listener call, and per synchronous slice of
+ * a snapshot. A slice runs from the start of runSync, or from the resumption after a server read, a socket drain or
+ * the yield between messages (the only waits in a snapshot that let the event loop run), to the next such wait or to
+ * the snapshot's end; it holds everything runSync, message(), prepare() and the page building do in between.
  */
 export const instrumented = (source = readFileSync(PLUGIN, "utf8")) =>
   variant(
     [
       [
         'import { fileURLToPath } from "node:url"\n',
-        `import { writeFileSync as __w } from "node:fs"
+        `import { renameSync as __r, writeFileSync as __w } from "node:fs"
 const __st = { maxQueue: 0, maxFrame: 0, maxPage: 0, drops: 0, frames: 0 }
 const __q = (/** @type {any} */ c, /** @type {number} */ extra) => { __st.maxQueue = Math.max(__st.maxQueue, (c?.writableLength ?? 0) + extra) }
-const __t = { listenerCalls: 0, listenerMs: 0, listenerMaxMs: 0 }
+const __t = { listenerCalls: 0, listenerMs: 0, listenerMaxMs: 0, syncSlices: 0, syncMs: 0, syncMaxMs: 0 }
+let __s0 = 0
+const __on = () => { __s0 = performance.now() }
+const __off = () => { if (!__s0) return; const d = performance.now() - __s0; __s0 = 0; __t.syncSlices++; __t.syncMs += d; __t.syncMaxMs = Math.max(__t.syncMaxMs, d) }
 ${LAG_SAMPLER}Object.assign(__st, { time: __t, lag: __lag })
 ${STATS_WRITER}`,
       ],
@@ -120,12 +152,19 @@ ${STATS_WRITER}`,
         "    const __t0 = performance.now()\n    try {\n      return __forward(type, event)\n    } finally {\n      const d = performance.now() - __t0\n      __t.listenerCalls++\n      __t.listenerMs += d\n      __t.listenerMaxMs = Math.max(__t.listenerMaxMs, d)\n    }\n  }\n  function __forward(type, event) {\n",
       ],
       ["      pages++\n", "      __st.maxPage = Math.max(__st.maxPage, utf8(line)); __q(c, utf8(line) + heldBytes)\n"],
+      ["const call = async (f) => {\n", "  const __p = __call(f)\n  __off()\n  try {\n    return await __p\n  } finally {\n    __on()\n  }\n}\nconst __call = async (/** @type {() => Promise<any>} */ f) => {\n"],
+      ["const yieldToLoop = () => ", "(__off(), __yield().finally(__on))\nconst __yield = () => "],
+      ["  const drained = (c) =>\n", "    (__off(), __drained(c).finally(__on))\n  const __drained = (/** @type {Socket} */ c) =>\n"],
+      [
+        "  async function runSync(c, t) {\n",
+        "    __on()\n    try {\n      return await __runSync(c, t)\n    } finally {\n      __off()\n    }\n  }\n  async function __runSync(/** @type {Socket} */ c, /** @type {Trigger} */ t) {\n",
+      ],
     ],
     source,
   )
 
 /** The control for `instrumented()`: the same lag sampler and stats file, and no listener, link or snapshot. */
-export const lagProbe = () => `import { writeFileSync as __w } from "node:fs"
+export const lagProbe = () => `import { renameSync as __r, writeFileSync as __w } from "node:fs"
 import { fileURLToPath } from "node:url"
 const __st = {}
 ${LAG_SAMPLER}Object.assign(__st, { lag: __lag })
@@ -137,14 +176,14 @@ ${STATS_WRITER}export default { id: "codeconnect", tui: async () => {} }
  * @param {any} a @param {any} b
  */
 export function lagBetween(a, b) {
-  const hist = b.hist.map((/** @type {number} */ n, /** @type {number} */ i) => n - (a?.hist[i] ?? 0))
-  const samples = b.samples - (a?.samples ?? 0)
+  const hist = b.hist.map((/** @type {number} */ n, /** @type {number} */ i) => n - a.hist[i])
+  const samples = b.samples - a.samples
   const at = (/** @type {number} */ q) => {
     let seen = 0
     for (let i = 0; i < hist.length; i++) if ((seen += hist[i]) >= q * samples) return i
     return hist.length - 1
   }
-  return { samples, totalMs: b.totalMs - (a?.totalMs ?? 0), p50: at(0.5), p99: at(0.99), p999: at(0.999) }
+  return { samples, totalMs: b.totalMs - a.totalMs, p50: at(0.5), p99: at(0.99), p999: at(0.999) }
 }
 
 let rigs = 0
@@ -163,13 +202,17 @@ export class Rig {
     this.socket = join(this.root, "ccd.sock")
     this.record = join(this.root, "record.jsonl")
     this.tmp = join(this.root, "tmp")
-    this.tmux = ["-L", `${PREFIX}${process.pid}-${++rigs}`, "-f", "/dev/null"]
+    this.server = `${PREFIX}${process.pid}-${++rigs}`
+    this.tmux = ["-L", this.server, "-f", "/dev/null"]
     /** @type {import("node:child_process").ChildProcess | null} */
     this.ccd = null
     /** @type {import("node:child_process").ChildProcess | null} */
     this.mock = null
+    /** @type {Map<number, { sec: number, usec: number }>} pid -> start time of every running process spawned here */
+    this.children = new Map()
     this.port = 0
     this.pid = 0
+    this.pidStart = { sec: 0, usec: 0 }
     this.launchedAt = 0
     for (const d of [this.home, this.proj, this.sess, this.tmp]) mkdirSync(d, { recursive: true })
     writeFileSync(join(this.proj, "a.txt"), "hello\n")
@@ -177,9 +220,32 @@ export class Rig {
     spawnSync("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init", "--allow-empty"], { cwd: this.proj })
   }
 
+  /**
+   * Starts a process outside tmux, recorded with its start time in the rig directory and stopped by closeSync, by the
+   * exit and signal cleanup, and by the next run's sweep.
+   * @param {string} file @param {string[]} args @param {import("node:child_process").SpawnOptions} opts
+   */
+  spawn(file, args, opts) {
+    const p = spawn(file, args, opts)
+    if (p.pid) this.children.set(p.pid, this.recordPid(p.pid))
+    p.once("exit", () => p.pid && this.children.delete(p.pid))
+    return p
+  }
+
+  /** Appends `pid` and its start time to the rig's record, and returns the start time. @param {number} pid */
+  recordPid(pid) {
+    try {
+      const start = birth(pid)
+      appendFileSync(join(this.root, PIDS), JSON.stringify({ pid, start }) + "\n")
+      return start
+    } catch {
+      return { sec: 0, usec: 0 }
+    }
+  }
+
   /** The mock model runs in its own process, so a busy test loop cannot slow its stream. */
   async start(permission = { "*": "allow", bash: "allow" }) {
-    const p = spawn(process.execPath, [MOCK], { stdio: ["ignore", "pipe", "inherit"] })
+    const p = this.spawn(process.execPath, [MOCK], { stdio: ["ignore", "pipe", "inherit"] })
     this.mock = p
     this.port = await new Promise((resolve, reject) => {
       p.stdout?.once("data", (d) => resolve(Number(/listening (\d+)/.exec(String(d))?.[1])))
@@ -223,7 +289,7 @@ export class Rig {
   /** @param {any} [acked] the first welcome's acked roots, used while nothing is recorded */
   async startCcd(acked) {
     const args = [FAKE_CCD, this.socket, this.sess, this.proj, this.record, ...(acked ? [JSON.stringify(acked)] : [])]
-    const p = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "inherit"] })
+    const p = this.spawn(process.execPath, args, { stdio: ["ignore", "pipe", "inherit"] })
     this.ccd = p
     await new Promise((resolve, reject) => {
       p.stdout?.once("data", resolve)
@@ -250,6 +316,7 @@ export class Rig {
     const plugin = o.plugin ?? "real"
     rmSync(join(this.sess, "agent.json"), { force: true })
     rmSync(join(this.sess, "stats.json"), { force: true })
+    rmSync(join(this.sess, "stats.json.tmp"), { force: true })
     if (plugin === "none") writeFileSync(join(this.sess, "tui.json"), JSON.stringify({ plugin: [] }))
     else {
       writeFileSync(join(this.sess, "codeconnect-opencode.js"), plugin === "real" ? readFileSync(PLUGIN) : plugin)
@@ -261,13 +328,14 @@ export class Rig {
     const r = this.t(["new-session", "-d", "-s", "oc", "-x", "160", "-y", "50", "-c", this.proj, "--", "env", "-i", ...env, this.bin, ...(o.args ?? [])])
     if (r.status !== 0) throw new Error("tmux: " + r.stderr)
     this.pid = Number(this.t(["display", "-p", "-t", "oc", "#{pane_pid}"]).stdout.trim())
+    this.pidStart = this.recordPid(this.pid)
     if (o.agent !== false) this.writeAgent()
     return this.pid
   }
 
   writeAgent() {
     const tmp = join(this.sess, "agent.json.tmp")
-    writeFileSync(tmp, JSON.stringify({ pid: this.pid, start: birth(this.pid) }), { flag: "wx", mode: 0o600 })
+    writeFileSync(tmp, JSON.stringify({ pid: this.pid, start: this.pidStart }), { flag: "wx", mode: 0o600 })
     renameSync(tmp, join(this.sess, "agent.json"))
   }
 
@@ -333,11 +401,13 @@ export class Rig {
       await sleep(50)
     }
   }
+  /** What the instrumented plugin last wrote; a missing or unreadable file is an error, never a zero. */
   stats() {
+    const f = join(this.sess, "stats.json")
     try {
-      return JSON.parse(readFileSync(join(this.sess, "stats.json"), "utf8"))
-    } catch {
-      return null
+      return JSON.parse(readFileSync(f, "utf8"))
+    } catch (e) {
+      throw new Error(`no readable ${f}: ${/** @type {Error} */ (e).message}`)
     }
   }
   acked() {
@@ -348,8 +418,8 @@ export class Rig {
   async reset() {
     this.t(["kill-server"])
     const pid = this.pid
-    for (let i = 0; pid && i < 100 && alive(pid); i++) await sleep(50)
-    if (pid && alive(pid)) process.kill(pid, "SIGKILL")
+    for (let i = 0; pid && i < 100 && this.running(pid); i++) await sleep(50)
+    if (pid) killIfSame(pid, this.pidStart)
     for (const d of [join(this.home, ".local", "share", "opencode"), join(this.home, ".local", "state", "opencode"), this.tmp]) rmSync(d, { recursive: true, force: true })
     mkdirSync(this.tmp)
     rmSync(this.record, { force: true })
@@ -358,20 +428,27 @@ export class Rig {
 
   async close() {
     this.t(["kill-server"])
-    for (let i = 0; this.pid && i < 100 && alive(this.pid); i++) await sleep(50)
+    for (let i = 0; this.pid && i < 100 && this.running(this.pid); i++) await sleep(50)
     this.closeSync()
+  }
+
+  /** True while `pid` is still the pane's OpenCode, not a process that reuses its pid. @param {number} pid */
+  running(pid) {
+    try {
+      return alive(pid) && birth(pid).sec === this.pidStart.sec
+    } catch {
+      return false
+    }
   }
 
   /** Everything this rig started is stopped and its directory removed. Safe to call twice. */
   closeSync() {
     this.t(["kill-server"])
-    if (this.pid && alive(this.pid)) {
-      try {
-        process.kill(this.pid, "SIGKILL")
-      } catch {}
-    }
-    this.stopCcd()
-    this.mock?.kill("SIGKILL")
+    rmSync(join(SOCKETS, this.server), { force: true })
+    if (this.pid) killIfSame(this.pid, this.pidStart)
+    for (const [pid, start] of this.children) killIfSame(pid, start)
+    this.children.clear()
+    this.ccd = null
     this.mock = null
     rmSync(this.root, { recursive: true, force: true })
     open.delete(this)

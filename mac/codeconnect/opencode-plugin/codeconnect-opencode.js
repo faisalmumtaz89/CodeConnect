@@ -41,7 +41,7 @@ export const BACKOFF_MAX_MS = 8000
 export const STABLE_MS = 8000
 /** Full snapshots start at least this far apart. */
 export const FULL_SYNC_GAP_MS = 1000
-/** Most epoch events kept; past it the oldest goes, and requests asked before it are no longer judged live. */
+/** Most epoch events kept; past it the oldest goes, and requests asked before it are judged dead ("epoch-evicted"). */
 export const EPOCH_EVENTS_CAP = 4096
 const ENDED_CAP = 1024
 const AGENT_FILE_CAP = 4096
@@ -398,7 +398,7 @@ export class EpochLog {
     this.events.push(e)
     while (this.events.length > EPOCH_EVENTS_CAP) {
       const dropped = /** @type {EpochEvent} */ (this.events.shift())
-      for (const [id, a] of this.asked) if (a.seq <= dropped.seq) this.end(id, a.sid, this.ended(id, a.sid, []) ?? "asked-before-activation")
+      for (const [id, a] of this.asked) if (a.seq <= dropped.seq) this.end(id, a.sid, this.ended(id, a.sid, []) ?? "epoch-evicted")
     }
     this.prune()
   }
@@ -434,7 +434,7 @@ export class EpochLog {
 
   /**
    * Why the request's epoch has ended, or null while it has not. "asked-before-activation" when this activation
-   * never saw it asked.
+   * never saw it asked; "epoch-evicted" when the events after its ask no longer fit EPOCH_EVENTS_CAP.
    * @param {string} id
    * @param {string} sid
    * @param {string[]} ancestors

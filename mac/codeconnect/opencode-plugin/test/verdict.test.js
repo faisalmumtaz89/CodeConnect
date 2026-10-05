@@ -192,7 +192,7 @@ describe("verdict rule", () => {
     for (let i = 0; i < EPOCH_EVENTS_CAP + 10; i++) log.note(100 + i, "session.idle", { sessionID: "ses_" + i })
     expect(log.events.length).toBeLessThanOrEqual(EPOCH_EVENTS_CAP)
     expect(log.asked.size).toBe(0)
-    expect(log.ended("que_1", "ses_other", [])).toBe("asked-before-activation")
+    expect(log.ended("que_1", "ses_other", [])).toBe("epoch-evicted")
     log.note(9000, "session.deleted", { info: { id: "ses_kid" } })
     expect(log.parent.has("ses_kid")).toBe(false)
   })

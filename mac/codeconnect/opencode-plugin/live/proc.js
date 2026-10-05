@@ -24,3 +24,15 @@ export function alive(pid) {
   const stat = ps(pid, "stat")
   return stat !== "" && !stat.startsWith("Z")
 }
+
+/**
+ * SIGKILL to `pid` only while it is still the process born at `start` (a recycled pid is left alone). SIGKILL also
+ * ends a stopped process.
+ * @param {number} pid
+ * @param {{ sec: number }} start
+ */
+export function killIfSame(pid, start) {
+  try {
+    if (alive(pid) && birth(pid).sec === start.sec) process.kill(pid, "SIGKILL")
+  } catch {}
+}

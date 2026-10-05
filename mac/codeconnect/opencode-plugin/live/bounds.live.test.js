@@ -2,13 +2,13 @@
 //   - A-many: one bash turn writes 150 files of 60 KB (its user message carries 150 patches): the link stays up,
 //     no frame is over 1 MiB, the queue stays under 4 MiB plus one page;
 //   - B-w64: a session of many 60 KB writes, made headless, then opened with `-s` while the daemon acks nothing:
-//     every page is at most 256 KiB, and the resync after a cut is incremental;
+//     every page is at most 256 KiB, no synchronous slice of the snapshot holds the main thread past its bound, and
+//     the resync after a cut is incremental;
 //   - flood: while a turn floods the bus, what the plugin costs OpenCode's main thread, measured inside OpenCode
-//     against a control build that only samples the lag: its listeners' time per call and per run, the main thread's
-//     lag beside the control's, and the keystroke echo pooled over every run; frames and queue stay inside the same
-//     bounds.
+//     against a control build that only samples the lag: its listeners' time per call and per run, its longest
+//     synchronous snapshot slice and the main thread's lag beside the control's; frames and queue stay inside the
+//     same bounds.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { spawn } from "node:child_process"
 import { LIVE, instrumented, lagBetween, lagProbe, pct, Rig, sleep } from "./harness.js"
 
 const MiB = 1048576
@@ -23,10 +23,17 @@ const LISTENER_TOTAL_MS = 400
 // - Main-thread lag, median over runs of each run's 99th percentile: 41 ms without the plugin, 48 ms with it; two
 //   groups of 5 runs from the same arm differ by up to 11 ms. The margin is that noise plus the measured cost.
 const LAG_P99_MARGIN_MS = 20
-// - Keystroke echo p50 pooled over every run: 31 ms without, 32 ms with; two groups of 5 runs from the same arm
-//   differ by at most 3 ms (5,000 random splits). Total lag is printed but not asserted: OpenCode's own freezes
-//   while it renders the long reply make it vary by over 4 s between runs of the same arm.
-const ECHO_P50_MARGIN_MS = 4
+// - One synchronous slice of a snapshot (see `instrumented()`), longest per launch over two full suites: 1.4-4.8 ms
+//   in the flood (10 runs), 1.7-11.4 ms in A-many, 21.7-28.9 ms in B-w64 (about 720 slices, 465-478 ms in all, the
+//   50-page snapshot). 50 ms is the same visible-hitch point as for a listener call.
+const SYNC_SLICE_MAX_MS = 50
+// The pass/fail gate is the plugin's own measured cost (listener time per call and per run, the longest snapshot
+// slice) and the lag p99 margin. Keystroke echo latency is printed only: one probe reading is a tmux capture-pane of
+// about 5-9 ms, as coarse as any difference the plugin could make to it. Total lag is printed only: OpenCode's own
+// freezes while it renders the long reply make it vary by over 4 s between runs of the same arm. Keystrokes not
+// echoed within 5 s are printed only: OpenCode itself, with no plugin loaded, at times freezes its main thread for
+// 7 s and more during this flood (the control's lag sampler and an unchanging pane show it), and a keystroke typed
+// then is lost in either arm.
 const TURNS = Number(process.env.CC_OPENCODE_LIVE_TURNS || 200)
 
 /** @param {any[]} recs */
@@ -70,10 +77,10 @@ describe.skipIf(!LIVE)("live bounds", () => {
   test(`B-w64: ${TURNS} turns of 60 KB writes, resynced from the start`, async () => {
     await rig.reset()
     rig.stopCcd()
-    const serve = spawn(rig.bin, ["serve", "--port", "0", "--hostname", "127.0.0.1"], { cwd: rig.proj, env: rig.env(), stdio: ["ignore", "pipe", "pipe"] })
+    const serve = rig.spawn(rig.bin, ["serve", "--port", "0", "--hostname", "127.0.0.1"], { cwd: rig.proj, env: rig.env(), stdio: ["ignore", "pipe", "pipe"] })
     let out = ""
-    serve.stdout.on("data", (d) => (out += d))
-    serve.stderr.on("data", (d) => (out += d))
+    serve.stdout?.on("data", (d) => (out += d))
+    serve.stderr?.on("data", (d) => (out += d))
     try {
       const t0 = Date.now()
       /** @type {RegExpExecArray | null} */
@@ -111,6 +118,7 @@ describe.skipIf(!LIVE)("live bounds", () => {
       expect(largest(recs)).toBeLessThanOrEqual(MiB)
       expect(st.drops).toBe(0)
       expect(st.maxQueue).toBeLessThanOrEqual(4 * MiB + PAGE)
+      expect(st.time.syncMaxMs).toBeLessThanOrEqual(SYNC_SLICE_MAX_MS)
       expect(second.bytes).toBeLessThan(first.bytes / 10)
     } finally {
       serve.kill("SIGKILL")
@@ -124,6 +132,8 @@ describe.skipIf(!LIVE)("live bounds", () => {
     const runs = { probe: [], instr: [] }
     /** @type {{ calls: number, ms: number, max: number }[]} */
     const listener = []
+    /** @type {{ slices: number, ms: number, max: number }[]} */
+    const slices = []
     /** @type {any[]} */
     const bounds = []
     const source = { probe: lagProbe(), instr: instrumented() }
@@ -135,9 +145,11 @@ describe.skipIf(!LIVE)("live bounds", () => {
         if (arm === "instr") await rig.until((r) => r.some((x) => x.frame?.t === "settled"))
         await sleep(500)
         const { lat, lost, before, after } = await probe(rig, "cc:flood", 20000)
-        runs[arm].push({ p50: pct(lat, 50), lat, lost, lag: lagBetween(before?.lag, after.lag) })
+        runs[arm].push({ p50: pct(lat, 50), lat, lost, lag: lagBetween(before.lag, after.lag) })
         if (arm === "instr") {
-          listener.push({ calls: after.time.listenerCalls - (before?.time.listenerCalls ?? 0), ms: after.time.listenerMs - (before?.time.listenerMs ?? 0), max: after.time.listenerMaxMs })
+          listener.push({ calls: after.time.listenerCalls - before.time.listenerCalls, ms: after.time.listenerMs - before.time.listenerMs, max: after.time.listenerMaxMs })
+          // Over the whole launch: the connect snapshot comes before the probe's first reading.
+          slices.push({ slices: after.time.syncSlices, ms: after.time.syncMs, max: after.time.syncMaxMs })
           bounds.push({ largest: largest(rig.records()), drops: after.drops, maxQueue: after.maxQueue })
         }
       }
@@ -158,6 +170,7 @@ describe.skipIf(!LIVE)("live bounds", () => {
         lag_total_ms_median: { without: lagTotal("probe"), with: lagTotal("instr") },
         lag_p99_ms_median: { without: lagP99("probe"), with: lagP99("instr") },
         listener,
+        slices,
         bounds,
       }),
     )
@@ -166,9 +179,8 @@ describe.skipIf(!LIVE)("live bounds", () => {
       expect(l.max).toBeLessThanOrEqual(LISTENER_MAX_MS)
       expect(l.ms).toBeLessThanOrEqual(LISTENER_TOTAL_MS)
     }
+    for (const x of slices) expect(x.max).toBeLessThanOrEqual(SYNC_SLICE_MAX_MS)
     expect(lagP99("instr")).toBeLessThanOrEqual(lagP99("probe") + LAG_P99_MARGIN_MS)
-    // Keystroke echo, pooled over every run: only a margin above the measured run-to-run noise is asserted.
-    expect(pct(pooled("instr"), 50)).toBeLessThanOrEqual(pct(pooled("probe"), 50) + ECHO_P50_MARGIN_MS)
     for (const b of bounds) {
       expect(b.largest).toBeLessThanOrEqual(MiB)
       expect(b.drops).toBe(0)
@@ -180,8 +192,9 @@ describe.skipIf(!LIVE)("live bounds", () => {
 /**
  * Fixed-clock keystroke probe, started once the turn is running: tick k is due at t0 + 250k ms whatever happened
  * before; it types one `Q` into the prompt and its latency is the first capture showing it, measured from the tick
- * (not from the send), so a stall of the TUI counts against every keystroke it delays. A Q not shown within 5 s is
- * counted as lost and the count is re-read.
+ * (not from the send), so a stall of the TUI counts against every keystroke it delays. A Q not shown within 5 s of
+ * being typed is counted as lost and the count is re-read. Every 20 ticks the prompt is cleared, and the probe waits
+ * until the pane shows no more Qs than before the first tick, so a slow delete is never read as a lost Q.
  * @param {Rig} rig
  * @param {string} prompt
  * @param {number} ms
@@ -192,7 +205,8 @@ async function probe(rig, prompt, ms) {
   await sleep(100)
   const before = rig.stats()
   const countQ = () => (rig.capture().match(/Q/g) ?? []).length
-  let seen = countQ()
+  const base = countQ()
+  let seen = base
   let lost = 0
   /** @type {number[]} */
   const lat = []
@@ -202,6 +216,7 @@ async function probe(rig, prompt, ms) {
     const wait = due - Date.now()
     if (wait > 0) await sleep(wait)
     rig.type("Q")
+    const sent = Date.now()
     for (;;) {
       const c = countQ()
       if (c > seen) {
@@ -209,7 +224,7 @@ async function probe(rig, prompt, ms) {
         seen = c
         break
       }
-      if (Date.now() - due > 5000) {
+      if (Date.now() - sent > 5000) {
         lost++
         seen = countQ()
         break
@@ -218,7 +233,7 @@ async function probe(rig, prompt, ms) {
     }
     if (k % 20 === 19) {
       for (let j = 0; j < 25; j++) rig.keys("BSpace")
-      await sleep(200)
+      for (const t = Date.now(); countQ() > base && Date.now() - t < 5000; ) await sleep(20)
       seen = countQ()
     }
   }

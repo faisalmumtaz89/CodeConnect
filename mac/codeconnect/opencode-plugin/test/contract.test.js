@@ -4,12 +4,13 @@
 // The hello's pid is the only value normalised (to 4242). CC_OPENCODE_CONTRACT_WRITE=1 rewrites the file.
 // Rows with a "case" key are hand-written examples of what this run does not reach (a failed list, a second
 // activation, split and stubbed history items, …); they are kept on a rewrite and must have the frame shapes the
-// run's own frames have.
+// run's own frames have, and the invariants below that tie a frame's fields to how the plugin builds it.
 import { afterEach, expect, test } from "bun:test"
 import { readFileSync, writeFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { fakeApi } from "./fake-api.js"
 import { fakeCcd, fixture, loadPlugin, settled, until, welcome } from "./helpers.js"
+import { encodedLength, PAGE_CAP } from "../codeconnect-opencode.js"
 
 const FILE = fixture("link-v1-frames.jsonl")
 /** @type {(() => Promise<void> | void)[]} */
@@ -149,7 +150,7 @@ const ITEM = [
   ["stub", "kind", "ids", "part_type", "status", "size", "sha256"],
   ["error", "sessionID"],
 ]
-const DEAD = /^(absent|session-missing|not-busy|anchor|asked-before-activation|epoch:(abort|stop|idle|retry|deleted|disposed)(:ancestor)?)$/
+const DEAD = /^(absent|session-missing|not-busy|anchor|asked-before-activation|epoch-evicted|epoch:(abort|stop|idle|retry|deleted|disposed)(:ancestor)?)$/
 
 /** @param {any} f */
 function shapeErrors(f) {
@@ -167,5 +168,13 @@ function shapeErrors(f) {
   }
   for (const b of Object.values(f.lower ?? f.acked ?? {}))
     if (!(b.from === null || typeof b.from === "string") || typeof b.inclusive !== "boolean") errs.push("bound " + JSON.stringify(b))
+  // No history without a session list: a requests-only snapshot, or a full one whose list failed, has no bounds or pages.
+  if (kind === "sync_end" && f.list_ok !== true && (Object.keys(f.lower).length || f.pages || f.items)) errs.push("history without a session list")
+  // A lone `part` item exists only for a part that does not fit a page as a one-part `parts` item.
+  if (kind === "sync_page") {
+    const envelope = encodedLength({ t: "sync_page", sync: f.sync, n: 999999, items: [] }) + 1
+    for (const it of f.items)
+      if ("part" in it && envelope + encodedLength({ sessionID: it.sessionID, info: it.info, parts: [it.part], split: true }) + 1 <= PAGE_CAP) errs.push("lone part that fits a page")
+  }
   return errs
 }
