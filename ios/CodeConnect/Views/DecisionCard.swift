@@ -176,6 +176,11 @@ struct DecisionCardView: View {
             let options = CodexCard.options(in: card.toolInput)
             return options.isEmpty ? .noneAnswerable : .codexOptions(options)
         case .claude:
+            // **Claude's question is never Allow and never an option.** Either
+            // types keys that pick answers nobody chose. A question this phone
+            // can read is answered on `QuestionCardView`; one it cannot is
+            // read-only here.
+            guard card.toolName != QuestionCard.toolName else { return .noneAnswerable }
             let pane = paneSnapshot.map(PaneOptions.parse) ?? []
             // The count test, unchanged. For Claude's ordinary two-item prompt
             // the rows *are* Allow and Deny drawn a second time in a second
@@ -239,6 +244,29 @@ struct DecisionCardView: View {
     }
 
     var body: some View {
+        if let questions = Self.questionCard(card: approval.card, agent: sessionAgent) {
+            QuestionCardView(
+                approval: approval, questions: questions, onSettled: onSettled,
+                comeBackToThis: comeBackToThis)
+        } else {
+            approvalBody
+        }
+    }
+
+    /// **The question this card asks, when the phone can show it as asked.**
+    ///
+    /// Claude's `AskUserQuestion`, on a card whose structured `tool_input`
+    /// reproduces the hashed text — the questions drawn are then provably the
+    /// ones the daemon sent. Anything less falls back to the approval layout,
+    /// read-only (`answerSurface`), showing the daemon's exact text.
+    static func questionCard(card: ApprovalCard, agent: AgentKind?) -> QuestionCard? {
+        guard agent == .claude, card.verification.hashMatchesDisplayText,
+            card.verification.renderMatchesDisplayText
+        else { return nil }
+        return QuestionCard(card: card)
+    }
+
+    private var approvalBody: some View {
         ScrollView {
             // Deliberately **not** a `LazyVStack`. The gate used to rely on one:
             // a 1pt marker with `onAppear` was nested inside a lazy child on the
@@ -1743,19 +1771,49 @@ struct DecisionCardView: View {
     private var denyBlockedReason: String? { sharedBlockedReason }
 
     private var sharedBlockedReason: String? {
+        Self.blockedReason(model: model, approval: approval, inFlight: inFlight != nil)
+    }
+
+    /// Why no control on `approval` can act now, in the order that matters —
+    /// the same for every surface that answers a card.
+    static func blockedReason(model: AppModel, approval: ApprovalItem, inFlight: Bool) -> String? {
         // A second tap while the first is in flight would be a silent no-op;
         // saying "waiting" is the honest version of the same refusal.
-        if inFlight != nil { return "Waiting for the daemon to confirm…" }
+        if inFlight { return "Waiting for the daemon to confirm…" }
         if let reason = model.actionsBlockedReason { return reason }
         if let summary = model.summary(for: approval.sessionKey) {
             let badge = FleetStatusRule.capability(
                 summary: summary, capabilities: model.connection.capabilities)
             if let reason = badge.reason { return reason }
         }
-        if !verification.hashMatchesDisplayText {
+        if !approval.card.verification.hashMatchesDisplayText {
             return "The text on this card does not match its hash. It cannot be answered safely."
         }
         return nil
+    }
+
+    /// What became of a send: refused at the face check, or answered.
+    enum Sent {
+        case faceRefused(String?)
+        case answered(AnswerAttempt)
+    }
+
+    /// Send `decision` as every surface that answers a card sends one: a face
+    /// first when `needsFace`, then the daemon, each outcome with its haptic.
+    static func send(
+        _ decision: AnswerDecision, for approval: ApprovalItem, model: AppModel, needsFace: Bool
+    ) async -> Sent {
+        if needsFace {
+            let outcome = await BiometricGate.confirm(
+                reason: BiometricGate.reason(for: approval.card.toolName))
+            guard outcome.isAuthenticated else {
+                CCHaptic.warning.fire()
+                return .faceRefused(outcome.message)
+            }
+        }
+        let result = await model.answer(item: approval, decision: decision)
+        report(result)
+        return .answered(result)
     }
 
     // MARK: Submission
@@ -1769,13 +1827,15 @@ struct DecisionCardView: View {
 
     /// What a decision would have been called on the wire, in the words the
     /// control the reader just pressed uses.
-    private static func sampleNotice(for decision: AnswerDecision) -> String {
+    static func sampleNotice(for decision: AnswerDecision) -> String {
         let sent: String
         switch decision {
         case .allow: sent = "Approve"
         case .deny: sent = "Deny"
         case .option(let index): sent = "option \(index)"
         case .optionId(let id): sent = "option \(id)"
+        case .answers: sent = "your answers"
+        case .decline: sent = "Decline"
         case .text, .unrecognised: sent = "this answer"
         }
         return "In a live session this would send \(sent) to your Mac."
@@ -1802,22 +1862,17 @@ struct DecisionCardView: View {
         spinningControl = key
         sentAt = Date()
         Task {
-            if requiresBiometrics(for: decision) {
-                let outcome = await BiometricGate.confirm(
-                    reason: BiometricGate.reason(for: approval.card.toolName))
-                guard outcome.isAuthenticated else {
-                    spinningControl = nil
-                    sentAt = nil
-                    withAnimation(CC.motion.small) { authNotice = outcome.message }
-                    CCHaptic.warning.fire()
-                    return
-                }
-            }
-            authNotice = nil
-            let result = await model.answer(item: approval, decision: decision)
+            let sent = await Self.send(
+                decision, for: approval, model: model, needsFace: requiresBiometrics(for: decision))
             spinningControl = nil
-            report(result)
-            if result.isTerminal { onSettled?() }
+            switch sent {
+            case .faceRefused(let message):
+                sentAt = nil
+                withAnimation(CC.motion.small) { authNotice = message }
+            case .answered(let result):
+                authNotice = nil
+                if result.isTerminal { onSettled?() }
+            }
         }
     }
 
@@ -1841,13 +1896,13 @@ struct DecisionCardView: View {
                 item: approval, reason: denyReason)
             spinningControl = nil
             composeResult = compose
-            report(denial)
+            Self.report(denial)
             if denial.isTerminal { onSettled?() }
         }
     }
 
     /// The app's global haptic table, and nothing outside it.
-    private func report(_ attempt: AnswerAttempt) {
+    private static func report(_ attempt: AnswerAttempt) {
         switch attempt {
         case .applied: CCHaptic.success.fire()
         case .indeterminate, .duplicate, .answeredAtKeyboard: CCHaptic.warning.fire()

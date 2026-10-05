@@ -555,6 +555,7 @@ pub async fn kill_storm(target: &Target, rounds: u32) -> Outcome {
                             "tool_use_id": format!("soak-kill-{round}-{i}"),
                         }),
                         wait: false,
+                        holds_questions: false,
                     });
                     if ok {
                         posted += 1;
@@ -680,6 +681,7 @@ pub async fn duplicate_hooks(target: &Target, replays: u32) -> Outcome {
         event: "PreToolUse".into(),
         payload,
         wait: false,
+        holds_questions: false,
     };
 
     // Concurrently, not in a loop: serial replays would be absorbed by any
@@ -780,6 +782,7 @@ pub async fn answer_storm(target: &Target, taps: u32) -> Outcome {
             "tool_input": tool_input,
         }),
         wait: false,
+        holds_questions: false,
     });
     if !posted {
         return Outcome::failed("could not post the approval");
@@ -993,6 +996,7 @@ pub async fn tail_torture(target: &Target) -> Outcome {
             "transcript_path": transcript.to_string_lossy(),
         }),
         wait: false,
+        holds_questions: false,
     };
 
     // Phase 1 — a normal tail.
@@ -1134,6 +1138,7 @@ pub async fn kill_during_ingest(target: &Target, rounds: u32) -> Outcome {
             "transcript_path": transcript.to_string_lossy(),
         }),
         wait: false,
+        holds_questions: false,
     };
     if let Err(err) = std::fs::write(&transcript, "") {
         return Outcome::failed(format!("creating the transcript: {err}"));
@@ -1281,6 +1286,7 @@ pub async fn concurrent_commits(target: &Target, writers: u32) -> Outcome {
                     "tool_use_id": format!("soak-order-{tag}-{i}"),
                 }),
                 wait: false,
+                holds_questions: false,
             })
         }));
     }

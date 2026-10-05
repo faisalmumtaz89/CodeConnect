@@ -75,10 +75,11 @@ impl PushHint {
     /// that has since answered everything.
     pub fn describing(&self, blocked: usize, blocked_label: Option<String>) -> PushHint {
         PushHint {
-            kind: if blocked > 0 {
-                PushKind::Approval
-            } else {
-                self.kind
+            // The question's own ring keeps its words while it is the one
+            // decision waiting.
+            kind: match (blocked, self.kind) {
+                (0, kind) | (1, kind @ PushKind::Question) => kind,
+                _ => PushKind::Approval,
             },
             blocked_sessions: blocked,
             project_label: match blocked {
@@ -130,6 +131,8 @@ impl PushHint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushKind {
     Approval,
+    /// Claude's `AskUserQuestion`: a decision too, answered on the same card list.
+    Question,
     NeedsInput,
     Completed,
     Idle,
@@ -151,7 +154,7 @@ impl PushKind {
     /// than a stale one.
     pub fn tag(self) -> &'static str {
         match self {
-            PushKind::Approval => "approval",
+            PushKind::Approval | PushKind::Question => "approval",
             PushKind::NeedsInput => "input",
             PushKind::Completed => "done",
             PushKind::Idle => "idle",
@@ -166,6 +169,7 @@ impl PushKind {
     #[cfg(test)]
     pub const ALL: &'static [PushKind] = &[
         PushKind::Approval,
+        PushKind::Question,
         PushKind::NeedsInput,
         PushKind::Completed,
         PushKind::Idle,
@@ -178,6 +182,7 @@ impl PushKind {
     pub fn sentence(self) -> &'static str {
         match self {
             PushKind::Approval => "Waiting on an approval",
+            PushKind::Question => "Asking you a question",
             PushKind::NeedsInput => "Waiting for your input",
             PushKind::Completed => "Finished a turn",
             PushKind::Idle => "Waiting for you",
@@ -349,7 +354,7 @@ pub enum PushMode {
     /// it composes may name the project, because nothing but Apple sees it.
     Direct,
     /// A CodeConnect-operated relay holds the key. This Mac supplies a token, a
-    /// credential and which of four kinds rang, and the relay composes a
+    /// credential and which of five kinds rang, and the relay composes a
     /// generic alert.
     Relay,
 }
@@ -572,6 +577,10 @@ mod tests {
 
             let mut ambient = hint(0);
             ambient.kind = rang;
+            assert_eq!(alert(&ambient.describing(3, None)).1, "3 agents need you");
+            if rang == PushKind::Question {
+                continue;
+            }
             assert_eq!(
                 ambient.describing(1, Some("Aion".into())).kind,
                 PushKind::Approval,
@@ -581,8 +590,19 @@ mod tests {
                 alert(&ambient.describing(1, Some("Aion".into()))).1,
                 "Waiting on an approval"
             );
-            assert_eq!(alert(&ambient.describing(3, None)).1, "3 agents need you");
         }
+    }
+
+    /// A question ringing as the one decision waiting says it is a question;
+    /// beside other decisions it is counted with them.
+    #[test]
+    fn a_question_rings_as_a_question() {
+        let mut asked = hint(0);
+        asked.kind = PushKind::Question;
+        let one = asked.describing(1, Some("Aion".into()));
+        assert_eq!(alert(&one).1, "Asking you a question");
+        assert_eq!(one.kind.tag(), "approval", "it opens the decision list");
+        assert_eq!(asked.describing(2, None).kind, PushKind::Approval);
     }
 
     /// **Whoever the doorbell speaks for is who it is delivered to.**
@@ -732,6 +752,7 @@ mod tests {
     #[test]
     fn the_routing_tags_are_pinned_literals() {
         assert_eq!(PushKind::Approval.tag(), "approval");
+        assert_eq!(PushKind::Question.tag(), "approval");
         assert_eq!(PushKind::NeedsInput.tag(), "input");
         assert_eq!(PushKind::Completed.tag(), "done");
         assert_eq!(PushKind::Idle.tag(), "idle");
@@ -746,6 +767,7 @@ mod tests {
             sentences,
             vec![
                 "Waiting on an approval",
+                "Asking you a question",
                 "Waiting for your input",
                 "Finished a turn",
                 "Waiting for you",

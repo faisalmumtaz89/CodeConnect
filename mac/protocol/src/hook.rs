@@ -129,6 +129,10 @@ pub struct HookInput {
     pub tool_use_id: Option<String>,
     #[serde(default)]
     pub prompt_id: Option<String>,
+    /// The background agent a hook comes from; absent for the main
+    /// conversation. Background agents share the main prompt's `prompt_id`.
+    #[serde(default)]
+    pub agent_id: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
     #[serde(default)]
@@ -168,13 +172,46 @@ pub struct HookDecision {
     pub decision: Decision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The tool input Claude runs the tool with, on a `PermissionRequest` allow.
+    ///
+    /// An `AskUserQuestion` is answered this way and no other: the input as shown
+    /// plus `answers` (and `annotations`). Claude ignores a bare allow for that
+    /// tool and leaves its dialog up (measured on 2.1.286), so an allow without
+    /// this field is never sent for a question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_input: Option<serde_json::Value>,
+    /// On a `PermissionRequest` deny: stop the turn, exactly as Escape at the
+    /// dialog does (measured on 2.1.286: same text, no model request, no Stop).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interrupt: bool,
 }
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The tool whose permission request is a question to the person, not a
+/// permission. Matched by name only: its options are never inspected to decide.
+pub const ASK_USER_QUESTION: &str = "AskUserQuestion";
+
+/// The largest hook `timeout` (seconds) to give Claude Code.
+///
+/// Claude arms the timeout with `setTimeout(seconds * 1000)`. 2,147,483 s (about
+/// 24.8 days) is the last whole second whose milliseconds fit the 32-bit timer
+/// JavaScript runtimes use; past it Node and standalone Bun 1.3 overflow to a
+/// 1 ms timer that fires at once. Claude 2.1.286's own runtime did not fire early
+/// for larger values (measured), but this is the largest value that is safe
+/// either way, and long enough that a held question lasts as long as the
+/// question itself.
+pub const CLAUDE_HOOK_TIMEOUT_MAX_SECS: u64 = 2_147_483;
 
 impl HookDecision {
     pub fn passthrough() -> Self {
         HookDecision {
             decision: Decision::Passthrough,
             reason: None,
+            updated_input: None,
+            interrupt: false,
         }
     }
 
@@ -182,6 +219,7 @@ impl HookDecision {
         HookDecision {
             decision: Decision::Ask,
             reason: Some(reason.into()),
+            ..HookDecision::passthrough()
         }
     }
 
@@ -244,6 +282,11 @@ impl HookDecision {
                                 .unwrap_or_else(|| "Denied via CodeConnect".to_string()),
                         ),
                     );
+                    if self.interrupt {
+                        nested.insert("interrupt".into(), true.into());
+                    }
+                } else if let Some(input) = &self.updated_input {
+                    nested.insert("updatedInput".into(), input.clone());
                 }
                 let mut inner = serde_json::Map::new();
                 inner.insert("hookEventName".into(), "PermissionRequest".into());
@@ -307,6 +350,7 @@ mod tests {
         let allow = HookDecision {
             decision: Decision::Allow,
             reason: None,
+            ..HookDecision::passthrough()
         }
         .render(&HookEventName::PermissionRequest)
         .expect("allow must render");
@@ -323,6 +367,7 @@ mod tests {
         let deny = HookDecision {
             decision: Decision::Deny,
             reason: Some("Denied from iPhone".into()),
+            ..HookDecision::passthrough()
         }
         .render(&HookEventName::PermissionRequest)
         .expect("deny must render");
@@ -332,6 +377,61 @@ mod tests {
         assert_eq!(inner["decision"]["behavior"], "deny");
         // The operator reads this string, so it has to be the caller's reason.
         assert_eq!(inner["decision"]["message"], "Denied from iPhone");
+    }
+
+    /// The two shapes a question is answered with, as measured on 2.1.286: allow
+    /// with the whole updated input, and deny with `interrupt`, which Claude treats
+    /// exactly as Escape.
+    #[test]
+    fn a_question_answer_and_an_interrupting_decline_render_as_measured() {
+        let input = serde_json::json!({"questions": [], "answers": {"Q?": "A"}, "annotations": {}});
+        let allow = HookDecision {
+            decision: Decision::Allow,
+            updated_input: Some(input.clone()),
+            ..HookDecision::passthrough()
+        }
+        .render(&HookEventName::PermissionRequest)
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&allow).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        assert_eq!(v["hookSpecificOutput"]["decision"]["updatedInput"], input);
+        assert!(v["hookSpecificOutput"]["decision"]
+            .get("interrupt")
+            .is_none());
+
+        let decline = HookDecision {
+            decision: Decision::Deny,
+            reason: Some("declined".into()),
+            interrupt: true,
+            ..HookDecision::passthrough()
+        }
+        .render(&HookEventName::PermissionRequest)
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&decline).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert_eq!(v["hookSpecificOutput"]["decision"]["interrupt"], true);
+        assert_eq!(v["hookSpecificOutput"]["decision"]["message"], "declined");
+        assert!(v["hookSpecificOutput"]["decision"]
+            .get("updatedInput")
+            .is_none());
+
+        // An ordinary deny keeps its old bytes: no interrupt field at all.
+        let deny = HookDecision {
+            decision: Decision::Deny,
+            reason: Some("no".into()),
+            ..HookDecision::passthrough()
+        }
+        .render(&HookEventName::PermissionRequest)
+        .unwrap();
+        assert!(!deny.contains("interrupt"), "{deny}");
+    }
+
+    /// The new fields are absent from the IPC frame when unused, so a decision an
+    /// older cc-hook reads is byte-identical to what it always read.
+    #[test]
+    fn unused_question_fields_stay_off_the_wire() {
+        let encoded = serde_json::to_string(&HookDecision::passthrough()).unwrap();
+        assert_eq!(encoded, r#"{"decision":"passthrough"}"#);
     }
 
     #[test]

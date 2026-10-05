@@ -203,6 +203,17 @@ mod tests {
             }
         );
 
+        let question =
+            parse(body(r#"{"type":"doorbell","kind":"question","blocked_count":1}"#).as_bytes())
+                .expect("a question's doorbell");
+        assert_eq!(
+            question.notification,
+            Notification::Doorbell {
+                kind: PushKind::Question,
+                blocked_count: 1
+            }
+        );
+
         let test = parse(body(r#"{"type":"test"}"#).as_bytes()).expect("the test request");
         assert_eq!(test.notification, Notification::Test {});
     }

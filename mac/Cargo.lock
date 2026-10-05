@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "cc-hook"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "protocol",
  "serde_json",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "ccd"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -206,11 +206,12 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "unicode-general-category",
 ]
 
 [[package]]
 name = "ccsoak"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -259,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "codeconnect"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "codex-broker",
@@ -274,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "codex-broker"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -335,7 +336,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
 name = "demo-daemon"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -951,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "base64",
  "libc",
@@ -962,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "push-core"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "http",
@@ -973,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "push-relay"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1684,6 +1685,12 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
 
 [[package]]
 name = "unicode-ident"

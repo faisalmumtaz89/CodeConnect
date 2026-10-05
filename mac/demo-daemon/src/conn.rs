@@ -494,6 +494,7 @@ fn capabilities() -> Capabilities {
         // demo does not make a phone render a diagnostic capability row that
         // means nothing yet. An empty list is skipped on the wire.
         supported_agents: Vec::new(),
+        question_card: false,
     }
 }
 

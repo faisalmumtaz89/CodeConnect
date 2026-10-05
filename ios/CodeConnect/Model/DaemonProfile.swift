@@ -116,6 +116,15 @@ struct DaemonProfile: Sendable, Hashable {
         protocolVersion > Wire.protocolVersion || protocolMinor >= 19
     }
 
+    /// **The daemon answers Claude's questions from the phone** — minor 21 *and*
+    /// the `question_card` capability. Below it the question is read-only here:
+    /// such a daemon files it as an ordinary approval, and nothing this phone
+    /// could send it chooses an answer.
+    var answersQuestions: Bool {
+        (protocolVersion > Wire.protocolVersion || protocolMinor >= 21)
+            && capabilities?.questionCard == true
+    }
+
     /// Why a Codex card cannot be answered from this phone, or nil when it can.
     ///
     /// **What is wrong, what to do now, what to do about it** — in that order,

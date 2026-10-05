@@ -807,6 +807,7 @@ impl Run {
             // `cards`, and resolving it takes it out. There is no screen here for
             // the prompt to leave without this server noticing.
             identity_bound: true,
+            question_hold: None,
         };
         // The same two halves `ccd` files: the card the phone renders and
         // answers, and the hook that raised it.

@@ -2900,6 +2900,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         // This is populated for the phone with the client work that can render what
         // naming an agent opens onto.
         supported_agents: Vec::new(),
+        question_card: true,
     }
 }
 
@@ -4156,6 +4157,15 @@ mod tests {
         let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
         assert_eq!(reply["type"], "hello_ack");
         assert_eq!(reply["protocol_version"], protocol::PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn the_ack_says_this_daemon_answers_claudes_questions() {
+        // A phone offers to answer a question only on this word, and a phone
+        // that does not see it shows the question read-only.
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(reply["capabilities"]["question_card"], true, "{reply}");
     }
 
     #[tokio::test]

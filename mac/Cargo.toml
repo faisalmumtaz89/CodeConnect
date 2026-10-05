@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.10.1"
+version = "0.11.0"
 edition = "2021"
 # CI pins this exact version so the floor is tested, not merely declared. 1.85 is
 # what the lockfile actually needs: `rustls` pulls `zeroize`, which is published
@@ -53,6 +53,9 @@ tokio = { version = "1", features = [
 ] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# The General_Category of a character, for one decision: whether Claude's question
+# dialog shows a label exactly as written. Tables only, no dependencies.
+unicode-general-category = "1.1"
 
 # TLS for `wss://`. rustls rather than native-tls: `tailscale cert` writes PEM,
 # which rustls loads directly, whereas Security.framework wants a PKCS#12

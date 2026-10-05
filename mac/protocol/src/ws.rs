@@ -893,6 +893,14 @@ pub struct Capabilities {
     /// populated once the daemon can actually drive a second agent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_agents: Vec<crate::agent::AgentKind>,
+    /// **This daemon answers Claude's `AskUserQuestion` from the phone** (minor
+    /// 21): its cards carry `question_hold`, it takes
+    /// [`AnswerDecision::Answers`] and [`AnswerDecision::Decline`], and it
+    /// refuses `allow` and `option` on a question card. Absent decodes `false`,
+    /// which is what an older daemon meant: it shows the question as an ordinary
+    /// approval.
+    #[serde(default)]
+    pub question_card: bool,
 }
 
 /// How the daemon applies an answer on the *installed* Claude Code build.
@@ -940,6 +948,65 @@ pub enum AnswerDecision {
     OptionId {
         option_id: String,
     },
+    /// Answers to a Claude `AskUserQuestion` card, one per question in the order
+    /// the card lists them (minor 21). The daemon builds Claude's answer from the
+    /// question it stored and these indices, and refuses anything incomplete or
+    /// out of range; nothing is typed.
+    Answers {
+        answers: Vec<QuestionAnswer>,
+    },
+    /// Decline a Claude `AskUserQuestion` card (minor 21), as Escape at its
+    /// dialog does: the main conversation's turn stops, and a background
+    /// agent's question is denied while the agent carries on.
+    Decline,
+}
+
+/// One question's answer on an `AskUserQuestion` card.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    /// 0-based indices into the question's `options`, in the order they were
+    /// chosen. At most one on a single-select question.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<u32>,
+    /// The "Other" text, when it was chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
+    /// Notes on the chosen preview. Only a single-select question whose options
+    /// carry previews takes notes, as at the terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// Whether the phone can answer an `AskUserQuestion` card (minor 21).
+///
+/// Present on such a card and on its `question_hold` events, absent on every
+/// other card. The latest `question_hold` event for a request wins over the
+/// value the card was created with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionHold {
+    /// Claude is waiting on the daemon for this question: the phone can answer
+    /// it. For the main conversation the Mac shows the same question at the same
+    /// time, and the first complete answer wins.
+    Held,
+    /// The question is on the Mac and only the Mac can answer it: a background
+    /// agent's question while someone is at the Mac, or one released to the Mac
+    /// when they came back.
+    AtMac,
+    /// The phone's hold on it ended (Claude's hook timed out, or the daemon
+    /// restarted). The question may still be open at the Mac.
+    Ended,
+}
+
+impl QuestionHold {
+    /// The hold as it is spelled on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuestionHold::Held => "held",
+            QuestionHold::AtMac => "at_mac",
+            QuestionHold::Ended => "ended",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1346,6 +1413,10 @@ pub struct ApprovalCard {
     /// from a daemon that had no such concept is never assumed to be bound.
     #[serde(default)]
     pub identity_bound: bool,
+    /// On an `AskUserQuestion` card only (minor 21): whether the phone can
+    /// answer it now. See [`QuestionHold`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_hold: Option<QuestionHold>,
 }
 
 #[cfg(test)]
@@ -1612,10 +1683,16 @@ mod tests {
              the ground that 19 had never shipped; build 72 (`66a03a3`, 2026-09-08) \
              shipped it, so the word costs a number of its own"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 21,
+            "Claude's `AskUserQuestion` answered from the phone — `question_card`, the \
+             card's `question_hold`, and the `answers` and `decline` decisions — is \
+             minor 21"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 20);
+        assert_eq!(crate::PROTOCOL_MINOR, 21);
     }
 
     /// **The tags, pinned on this side too.**
@@ -1988,6 +2065,83 @@ mod tests {
             .contains("indeterminate"));
     }
 
+    /// The two minor-21 decisions, byte for byte, since the phone encodes them
+    /// itself and the daemon decodes exactly these bytes.
+    #[test]
+    fn question_decisions_have_the_wire_shape_the_phone_sends() {
+        let answers = AnswerDecision::Answers {
+            answers: vec![
+                QuestionAnswer {
+                    selected: vec![0],
+                    ..Default::default()
+                },
+                QuestionAnswer {
+                    selected: vec![2, 0],
+                    other: Some("café ☕".into()),
+                    notes: None,
+                },
+                QuestionAnswer {
+                    selected: vec![1],
+                    other: None,
+                    notes: Some("wide".into()),
+                },
+            ],
+        };
+        let encoded = serde_json::to_string(&answers).unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"type":"answers","answers":[{"selected":[0]},{"selected":[2,0],"other":"café ☕"},{"selected":[1],"notes":"wide"}]}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<AnswerDecision>(&encoded).unwrap(),
+            answers
+        );
+        // An answer that is only "Other" omits `selected` and still decodes.
+        assert_eq!(
+            serde_json::from_str::<AnswerDecision>(
+                r#"{"type":"answers","answers":[{"other":"x"}]}"#
+            )
+            .unwrap(),
+            AnswerDecision::Answers {
+                answers: vec![QuestionAnswer {
+                    other: Some("x".into()),
+                    ..Default::default()
+                }]
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&AnswerDecision::Decline).unwrap(),
+            r#"{"type":"decline"}"#
+        );
+    }
+
+    #[test]
+    fn a_hold_is_spelled_as_it_serialises() {
+        for hold in [QuestionHold::Held, QuestionHold::AtMac, QuestionHold::Ended] {
+            assert_eq!(serde_json::json!(hold), hold.as_str());
+        }
+    }
+
+    /// A card that is not a question carries no `question_hold` at all, so every
+    /// other card is byte-identical to minor 20.
+    #[test]
+    fn only_a_question_card_names_its_hold() {
+        let card: ApprovalCard = serde_json::from_str(
+            r#"{"request_id":"toolu_1","payload_hash":"h","tool_name":"Bash",
+                "tool_input":{},"display_text":"Bash"}"#,
+        )
+        .unwrap();
+        assert_eq!(card.question_hold, None);
+        assert!(!serde_json::to_string(&card)
+            .unwrap()
+            .contains("question_hold"));
+        let mut question = card.clone();
+        question.question_hold = Some(QuestionHold::AtMac);
+        assert!(serde_json::to_string(&question)
+            .unwrap()
+            .contains(r#""question_hold":"at_mac""#));
+    }
+
     #[test]
     fn a_card_from_before_prompt_identity_never_claims_to_have_it() {
         // The safe direction for a missing field: an old card decodes as
@@ -2026,6 +2180,7 @@ mod tests {
             codex_interrupt: true,
             codex_compose: true,
             supported_agents: vec![crate::agent::AgentKind::Claude],
+            question_card: true,
         }
     }
 
@@ -2635,6 +2790,7 @@ mod tests {
             risk: None,
             generation: 1,
             identity_bound: true,
+            question_hold: None,
         };
         assert!(!serde_json::to_string(&card).unwrap().contains("risk"));
 

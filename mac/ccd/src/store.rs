@@ -1593,6 +1593,25 @@ impl Store {
         Ok(filed)
     }
 
+    /// The sequence number of the event a hook filed under `source_event_id`
+    /// in this run, read on the dedup index.
+    pub fn hook_event_seq(&self, session_uid: &str, source_event_id: &str) -> Result<Option<u64>> {
+        let conn = self.read();
+        let seq: Option<i64> = conn
+            .query_row(
+                "SELECT seq FROM events
+                  WHERE session_uid = ?1 AND source = ?2 AND source_event_id = ?3",
+                params![
+                    session_uid,
+                    protocol::event::Source::Hook.as_str(),
+                    source_event_id
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(seq.map(|seq| seq as u64))
+    }
+
     /// How many events this run actually has.
     ///
     /// Exists to be compared against [`Store::max_seq`]: the log's central

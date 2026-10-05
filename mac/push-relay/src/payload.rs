@@ -18,16 +18,19 @@
 
 use serde::Serialize;
 
-/// Why the doorbell rang: one of four words, and never the agent's own.
+/// Why the doorbell rang: one of five words, and never the agent's own.
 ///
 /// The same closed set the daemon composes from, restated here rather than
-/// shared because the relay must be able to refuse a fifth value that a future
-/// daemon invents — a relay that accepted whatever it was sent would be a relay
-/// with an open vocabulary.
+/// shared because the relay must be able to refuse a value outside it that a
+/// future daemon invents — a relay that accepted whatever it was sent would be
+/// a relay with an open vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 pub enum PushKind {
     #[serde(rename = "approval")]
     Approval,
+    /// Claude asking a question: a decision too, so a tap opens the same list.
+    #[serde(rename = "question")]
+    Question,
     #[serde(rename = "input")]
     NeedsInput,
     #[serde(rename = "done")]
@@ -41,7 +44,7 @@ impl PushKind {
     /// approval has a card in the decision list.
     pub fn tag(self) -> &'static str {
         match self {
-            PushKind::Approval => "approval",
+            PushKind::Approval | PushKind::Question => "approval",
             PushKind::NeedsInput => "input",
             PushKind::Completed => "done",
             PushKind::Idle => "idle",
@@ -52,6 +55,7 @@ impl PushKind {
     fn sentence(self) -> &'static str {
         match self {
             PushKind::Approval => "Waiting on an approval",
+            PushKind::Question => "Asking you a question",
             PushKind::NeedsInput => "Waiting for your input",
             PushKind::Completed => "Finished a turn",
             PushKind::Idle => "Waiting for you",
@@ -62,6 +66,7 @@ impl PushKind {
     #[cfg(test)]
     const ALL: &'static [PushKind] = &[
         PushKind::Approval,
+        PushKind::Question,
         PushKind::NeedsInput,
         PushKind::Completed,
         PushKind::Idle,
@@ -166,6 +171,10 @@ mod tests {
         assert_eq!(
             doorbell(PushKind::Approval, 0),
             r#"{"aps":{"alert":{"title":"CodeConnect","body":"Waiting on an approval"},"sound":"default","badge":0,"interruption-level":"time-sensitive"},"codeconnect":{"kind":"approval"}}"#
+        );
+        assert_eq!(
+            doorbell(PushKind::Question, 0),
+            r#"{"aps":{"alert":{"title":"CodeConnect","body":"Asking you a question"},"sound":"default","badge":0,"interruption-level":"time-sensitive"},"codeconnect":{"kind":"approval"}}"#
         );
         assert_eq!(
             doorbell(PushKind::NeedsInput, 0),
