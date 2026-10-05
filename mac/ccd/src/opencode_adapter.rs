@@ -30,6 +30,9 @@
 //!     usage are written, because nothing observed says how it ended. Only a
 //!     later snapshot of the persisted session that shows every assistant
 //!     message completed and no tool running closes it, with its real outcome.
+//!     A snapshot leaves a turn this adapter never saw outcome-unknown the
+//!     same way when a reply of it never completed and a later turn began
+//!     after it: the reply was abandoned when its process ended.
 //!
 //! A lost link closes nothing: the open turns wait for the snapshot the next
 //! connection brings.
@@ -73,7 +76,7 @@ use serde_json::{json, Map, Value};
 
 use crate::opencode_link::{
     CardIds, LinkFrame, RequestBody, RequestKind, SnapMessage, SnapPart, SnapRequest, SnapSession,
-    Snapshot, SyncScope,
+    Snapshot, StubIds, SyncScope,
 };
 
 /// The error a message ends with when the user stopped it.
@@ -172,7 +175,11 @@ impl Sum {
                 self.float += n.as_f64().unwrap_or(0.0);
                 self.fractional = true;
             }
-            Some(Value::Number(n)) => self.int += n.as_i64().unwrap_or(0),
+            Some(Value::Number(n)) => {
+                // A count past i64 is held at its ceiling, not wrapped.
+                let n = n.as_i64().unwrap_or(if n.is_u64() { i64::MAX } else { 0 });
+                self.int = self.int.saturating_add(n);
+            }
             _ => {}
         }
     }
@@ -312,14 +319,26 @@ impl OpencodeAdapter {
 
     // ------------------------------------------------------------ entry points
 
-    /// Normalize one link frame. Bus events and oversized cards map to facts;
-    /// every other frame is the link's business and maps to none. A malformed
-    /// event yields nothing and changes nothing it did not read.
+    /// Normalize one link frame. Bus events, oversized parts and oversized
+    /// cards map to facts; every other frame is the link's business and maps
+    /// to none. A malformed event yields nothing and changes nothing it did not
+    /// read.
     pub(crate) fn ingest(&mut self, frame: &LinkFrame) -> Vec<PendingEvent> {
         let out = match frame {
             LinkFrame::Ev {
                 event, properties, ..
             } => self.on_event(event, properties),
+            LinkFrame::Stub {
+                event,
+                ids,
+                part_type,
+                status,
+                size,
+                sha256,
+                ..
+            } if event == "message.part.updated" => {
+                self.on_part_stub(ids, part_type.as_deref(), status.as_deref(), *size, sha256)
+            }
             LinkFrame::CardStub {
                 event,
                 properties,
@@ -432,8 +451,8 @@ impl OpencodeAdapter {
         if !readable {
             return None;
         }
-        let mut plan = Resync::new(self.clone(), snap);
-        let mut out = plan.sessions(self);
+        let mut plan = Resync::new(self, snap);
+        let mut out = plan.sessions();
         for request in &snap.requests {
             let set_aside = request.session().is_some_and(|s| plan.set_aside(s));
             if !set_aside && request.id().is_some_and(|id| !plan.placed.contains(id)) {
@@ -461,7 +480,10 @@ impl OpencodeAdapter {
             staged.unassigned.retain(|root| skipped.contains(root));
             staged.resync_wanted = false;
         }
-        let facts = staged.route(out);
+        // One fact per key: the store keeps the first anyway.
+        let mut keys = HashSet::new();
+        let mut facts = staged.route(out);
+        facts.retain(|f| keys.insert(f.source_event_id.clone()));
         Some((facts, staged))
     }
 
@@ -1093,6 +1115,81 @@ impl OpencodeAdapter {
         out
     }
 
+    /// A part update over the plugin's frame cap: its ids, its type and its
+    /// tool status, without its content. It is read as the update it stands
+    /// for, with a note of its size and digest in place of what cannot be
+    /// shown:
+    ///
+    ///   * a tool that ended gets its result, so it is no longer running;
+    ///     a tool still running stays running;
+    ///   * a text or reasoning part is the part's final update (the plugin
+    ///     sends a text-less marker while one streams), so it is said, and
+    ///     the facts waiting behind it go on.
+    ///
+    /// Any other part over the cap is dropped.
+    fn on_part_stub(
+        &mut self,
+        ids: &StubIds,
+        part_type: Option<&str>,
+        status: Option<&str>,
+        size: u64,
+        sha256: &str,
+    ) -> Vec<Emit> {
+        let (Some(session), Some(message), Some(id), Some(kind)) = (
+            ids.session_id.as_deref(),
+            ids.message_id.as_deref(),
+            ids.part_id.as_deref(),
+            part_type,
+        ) else {
+            return Vec::new();
+        };
+        let note = |what: &str| {
+            format!("This {what} is too large to show ({size} bytes, sha256 {sha256})")
+        };
+        let mut part = Map::new();
+        part.insert("id".into(), json!(id));
+        part.insert("sessionID".into(), json!(session));
+        part.insert("messageID".into(), json!(message));
+        part.insert("type".into(), json!(kind));
+        match kind {
+            "tool" => {
+                let field = match status {
+                    Some("completed") => "output",
+                    Some("error") => "error",
+                    _ => return Vec::new(),
+                };
+                let known = self
+                    .running
+                    .iter()
+                    .find(|r| r.part_id == id)
+                    .map(|r| &r.part);
+                for key in ["tool", "callID"] {
+                    if let Some(value) = known.and_then(|p| p.get(key)) {
+                        part.insert(key.into(), value.clone());
+                    }
+                }
+                let mut state = Map::new();
+                state.insert("status".into(), json!(status));
+                if let Some(input) = known
+                    .and_then(|p| obj(p, "state"))
+                    .and_then(|s| s.get("input"))
+                {
+                    state.insert("input".into(), input.clone());
+                }
+                state.insert(field.into(), json!(note("output")));
+                part.insert("state".into(), Value::Object(state));
+            }
+            "text" | "reasoning" => {
+                part.insert("text".into(), json!(note("text")));
+                if self.msg_role.get(message).map(String::as_str) != Some("user") {
+                    part.insert("time".into(), json!({"start": 0, "end": 0}));
+                }
+            }
+            _ => return Vec::new(),
+        }
+        self.on_part_updated(&part)
+    }
+
     fn part_facts(
         &mut self,
         part: &Map<String, Value>,
@@ -1560,6 +1657,28 @@ fn bounded(text: &str) -> String {
     crate::codex_approval::bounded(text, crate::codex_approval::MAX_COMMAND_BYTES)
 }
 
+/// The most a card's encoded `tool_input` may take: one field cut to the
+/// 8 KiB bound, with its marker, and room for the rest of the card.
+const MAX_CARD_BYTES: usize = 2 * crate::codex_approval::MAX_COMMAND_BYTES;
+
+/// `tool_input` as the card, or, when it encodes over [`MAX_CARD_BYTES`], the
+/// card of a request too large to show, sized and hashed over the encoded
+/// request.
+fn bounded_card(
+    request_id: &str,
+    tool_name: &str,
+    tool_input: Value,
+    request: &Map<String, Value>,
+) -> ApprovalCard {
+    let size = serde_json::to_vec(&tool_input).map_or(usize::MAX, |b| b.len());
+    if size <= MAX_CARD_BYTES {
+        return card(request_id, tool_name, tool_input);
+    }
+    let encoded = serde_json::to_vec(request).unwrap_or_default();
+    let sha256 = protocol::hash::sha256_hex(&encoded);
+    stub_card(request_id, tool_name, encoded.len() as u64, &sha256)
+}
+
 /// A shell command is shown as the command OpenCode will run, never as its
 /// patterns, which are a prefix of it. Any other permission is shown by name
 /// with the patterns it asks for.
@@ -1578,16 +1697,17 @@ fn permission_card(request_id: &str, permission: &str, p: &Map<String, Value>) -
         })
         .unwrap_or_default();
     let name = permission.to_lowercase();
-    card(
+    bounded_card(
         request_id,
         &name,
         json!({"permission": permission, "patterns": patterns}),
+        p,
     )
 }
 
 fn question_card(request_id: &str, p: &Map<String, Value>) -> ApprovalCard {
     let questions = p.get("questions").cloned().unwrap_or(json!([]));
-    card(request_id, "question", json!({"questions": questions}))
+    bounded_card(request_id, "question", json!({"questions": questions}), p)
 }
 
 /// A request over the plugin's frame cap arrives without its text.
@@ -1607,6 +1727,8 @@ fn stub_card(request_id: &str, family: &str, size: u64, sha256: &str) -> Approva
 /// One snapshot being read into a copy of the adapter.
 struct Resync<'a> {
     m: OpencodeAdapter,
+    /// The adapter as it was before this snapshot.
+    live: &'a OpencodeAdapter,
     snap: &'a Snapshot,
     sessions: HashMap<&'a str, &'a SnapSession>,
     /// (message, call) → the pending request about that tool call.
@@ -1639,9 +1761,10 @@ fn session_id(session: &SnapSession) -> &str {
 }
 
 impl<'a> Resync<'a> {
-    fn new(m: OpencodeAdapter, snap: &'a Snapshot) -> Self {
+    fn new(live: &'a OpencodeAdapter, snap: &'a Snapshot) -> Self {
         Resync {
-            m,
+            m: live.clone(),
+            live,
             snap,
             sessions: snap.sessions.iter().map(|s| (session_id(s), s)).collect(),
             pending: snap
@@ -1662,13 +1785,16 @@ impl<'a> Resync<'a> {
     }
 
     /// Every root of the snapshot, oldest first, turn by turn.
-    fn sessions(&mut self, live: &OpencodeAdapter) -> Vec<Emit> {
+    fn sessions(&mut self) -> Vec<Emit> {
         for session in &self.snap.sessions {
             if let Some(parent) = str_of(&session.info, "parentID") {
                 self.m
                     .parent
                     .insert(session_id(session).to_string(), parent.to_string());
             }
+        }
+        for (child, parent) in &self.snap.stub_parents {
+            self.m.parent.insert(child.clone(), parent.clone());
         }
         let snap: &'a Snapshot = self.snap;
         let mut roots: Vec<&'a SnapSession> = snap
@@ -1685,12 +1811,13 @@ impl<'a> Resync<'a> {
         roots.retain(|r| !self.skipped.contains(session_id(r)));
         let mut out = Vec::new();
         for root in roots {
-            out.extend(self.read_root(live, root));
+            out.extend(self.read_root(root));
         }
         out
     }
 
-    fn read_root(&mut self, live: &OpencodeAdapter, session: &'a SnapSession) -> Vec<Emit> {
+    fn read_root(&mut self, session: &'a SnapSession) -> Vec<Emit> {
+        let live = self.live;
         let r = session_id(session).to_string();
         let mut out = self.m.on_session_created(&session.info);
         let msgs = &session.messages;
@@ -1699,25 +1826,43 @@ impl<'a> Resync<'a> {
             .filter(|x| str_of(&x.info, "role") == Some("user"))
             .filter_map(|x| str_of(&x.info, "id"))
             .collect();
-        // A prompt typed by a person while every earlier assistant message of
-        // the root had completed (or never would) began a busy period; one
+        // A prompt typed by a person began a busy period only if every
+        // earlier assistant message of the root had completed before it; one
         // typed while the agent worked joined the running turn. OpenCode's own
         // prompts (a subtask's follow-up, a compaction) never begin one.
-        let mut bounds: HashSet<String> = HashSet::new();
-        for (k, x) in msgs.iter().enumerate() {
-            let info = &x.info;
-            if str_of(info, "role") != Some("user") || !x.parts.iter().any(is_human) {
-                continue;
+        //
+        // OpenCode writes one assistant message of a session at a time, so one
+        // that never completed and has a later one after it was abandoned (the
+        // process ended or its stream was cut): it holds no later prompt back.
+        let assistant = |x: &SnapMessage| str_of(&x.info, "role") == Some("assistant");
+        let mut abandoned: HashSet<&str> = HashSet::new();
+        let mut later = false;
+        for x in msgs.iter().rev().filter(|x| assistant(x)) {
+            if later && !completed(&x.info) {
+                abandoned.extend(str_of(&x.info, "id"));
             }
-            let at = created(info);
-            let idle = msgs[..k]
-                .iter()
-                .filter(|y| str_of(&y.info, "role") == Some("assistant"))
-                .all(|y| {
-                    let done = obj(&y.info, "time").and_then(|t| t.get("completed"));
-                    !truthy(done) || done.and_then(Value::as_f64).unwrap_or(0.0) <= at
-                });
-            if idle {
+            later = true;
+        }
+        let mut bounds: HashSet<String> = HashSet::new();
+        let mut done_by = f64::NEG_INFINITY;
+        let mut working = false;
+        for x in msgs {
+            let info = &x.info;
+            if assistant(x) {
+                if completed(info) {
+                    let at = obj(info, "time")
+                        .and_then(|t| t.get("completed"))
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    done_by = done_by.max(at);
+                } else if !str_of(info, "id").is_some_and(|id| abandoned.contains(id)) {
+                    working = true;
+                }
+            } else if str_of(info, "role") == Some("user")
+                && x.parts.iter().any(is_human)
+                && !working
+                && done_by <= created(info)
+            {
                 bounds.extend(str_of(info, "id").map(str::to_string));
             }
         }
@@ -1788,9 +1933,15 @@ impl<'a> Resync<'a> {
             .filter_map(|x| str_of(&x.info, "id").map(|id| (id, created(&x.info))))
             .collect();
         for (k, t) in order.iter().enumerate() {
-            let finished = k + 1 < order.len() || !busy;
             let next = order.get(k + 1).map(|n| starts[n.as_str()]);
             let msgs = turn_msgs.remove(t).unwrap_or_default();
+            // OpenCode writes a prompt before it marks the root busy, so a
+            // prompt with no reply yet on an idle root has not been answered
+            // yet: its turn goes on.
+            let replied = msgs
+                .iter()
+                .any(|x| str_of(&x.info, "role") == Some("assistant"));
+            let finished = next.is_some() || (!busy && replied);
             out.extend(self.turn(&r, t, &msgs, &kids, finished, next));
         }
         out
@@ -1847,18 +1998,24 @@ impl<'a> Resync<'a> {
         if self.m.current.get(r).map(String::as_str) == Some(t) {
             self.m.current.remove(r);
         }
-        if !open.is_empty() {
-            if last {
-                // Idle, but its last message has not completed: as live, wait.
-                self.m.set_idle_pending(t, r);
-                self.m.open_msgs.insert(t.to_string(), open);
-                return out;
-            }
-            let forced = self.m.running_in(t).then_some("next_turn");
-            out.extend(self.m.terminal(r, t, forced));
+        if last && (!open.is_empty() || self.still_running) {
+            // Idle, but a message has not completed or the server still shows
+            // a tool running: as live, wait for it.
+            self.m.set_idle_pending(t, r);
+            self.m.open_msgs.insert(t.to_string(), open);
             return out;
         }
-        out.extend(self.m.terminal(r, t, None));
+        if !open.is_empty() && !self.live.turn_root.contains_key(t) {
+            // A message of it was abandoned and how the turn ended was never
+            // seen: its outcome is unknown, as for a turn open at an exit.
+            self.m.unknown.insert(t.to_string());
+            self.m.streaming.remove(t);
+            out.extend(self.m.release(t, true));
+            return out;
+        }
+        // A later turn began: what is still open was ended by it, as live.
+        let forced = (!open.is_empty() && self.m.running_in(t)).then_some("next_turn");
+        out.extend(self.m.terminal(r, t, forced));
         out
     }
 
@@ -2111,7 +2268,7 @@ mod tests {
     }
 
     /// The daemon's dedup: `(source, source_event_id)`, first wins.
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct Store {
         events: Vec<PendingEvent>,
         keys: HashSet<String>,
@@ -2162,6 +2319,7 @@ mod tests {
     /// One run as the daemon drives it: events, snapshots and settles in the
     /// order the capture holds them, a restarted daemon as a fresh adapter over
     /// the same store, and a new OpenCode process as a new run.
+    #[derive(Clone)]
     struct Run {
         adapter: OpencodeAdapter,
         store: Store,
@@ -2252,6 +2410,7 @@ mod tests {
                 }
             }
             let pages = u64::from(!items.is_empty());
+            let count = items.len();
             if !items.is_empty() {
                 frames.push(frame(
                     json!({"t": "sync_page", "sync": sync, "n": 0, "items": items}),
@@ -2260,7 +2419,7 @@ mod tests {
             let end = frame(json!({
                 "t": "sync_end", "sync": sync, "done_at": snap["done_at"], "list_ok": true,
                 "permissions_ok": true, "questions_ok": true, "requests_ok": true, "lower": {},
-                "pages": pages, "items": 0, "bytes": 0, "activation": 1,
+                "pages": pages, "items": count, "bytes": 0, "activation": 1,
             }));
             self.adapter.sync_begin();
             let mut assembly = SyncAssembly::begin(&frames[0]).unwrap();
@@ -2272,6 +2431,8 @@ mod tests {
                 .adapter
                 .plan_resync(&snapshot)
                 .expect("a whole snapshot");
+            let keys: HashSet<&str> = facts.iter().map(sid).collect();
+            assert_eq!(keys.len(), facts.len(), "one fact per key in a snapshot");
             self.store.record(facts);
             self.adapter.apply_resync(staged);
         }
@@ -2559,6 +2720,232 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The OpenCode server as the frames read so far describe it: what a
+    /// snapshot taken at that point would hold. Built from the frames'
+    /// content alone, never from what the adapter made of them.
+    #[derive(Default)]
+    struct Server {
+        sessions: BTreeMap<String, Value>,
+        /// Message → (session, info).
+        messages: BTreeMap<String, (String, Value)>,
+        /// Message → part → part.
+        parts: BTreeMap<String, BTreeMap<String, Value>>,
+        status: Map<String, Value>,
+        /// Request → (the list it is on, the request).
+        requests: BTreeMap<String, (&'static str, Value)>,
+        /// Messages written by the running OpenCode process: a new process's
+        /// snapshot pages back only to its own first prompt.
+        window: HashSet<String>,
+        /// The OpenCode process is running and its link could be read.
+        alive: bool,
+        /// A captured snapshot is being settled.
+        syncing: bool,
+    }
+
+    impl Server {
+        fn new() -> Self {
+            Server {
+                alive: true,
+                ..Server::default()
+            }
+        }
+
+        fn row(&mut self, row: &Value) {
+            let p = &row["properties"];
+            let id = |v: &Value| v.as_str().unwrap_or_default().to_string();
+            match row["type"].as_str().unwrap_or_default() {
+                "ccd.session.end" => self.alive = false,
+                "ccd.link.opened" if p["new_process"] == true => {
+                    self.alive = true;
+                    self.window.clear();
+                    self.status.clear();
+                }
+                "ccd.resync" => self.syncing = true,
+                "ccd.resync_settled" => self.syncing = false,
+                "session.created" | "session.updated" => {
+                    self.sessions
+                        .insert(id(&p["info"]["id"]), p["info"].clone());
+                }
+                "session.deleted" => {
+                    self.sessions.remove(&id(&p["info"]["id"]));
+                }
+                "session.status" if p["status"]["type"] == "idle" => {
+                    self.status.remove(&id(&p["sessionID"]));
+                }
+                "session.status" => {
+                    self.status.insert(id(&p["sessionID"]), p["status"].clone());
+                }
+                "session.idle" => {
+                    self.status.remove(&id(&p["sessionID"]));
+                }
+                "message.updated" => {
+                    let info = &p["info"];
+                    self.window.insert(id(&info["id"]));
+                    self.messages
+                        .insert(id(&info["id"]), (id(&info["sessionID"]), info.clone()));
+                }
+                "message.removed" => {
+                    self.messages.remove(&id(&p["messageID"]));
+                    self.parts.remove(&id(&p["messageID"]));
+                }
+                "message.part.updated" => {
+                    let part = &p["part"];
+                    self.parts
+                        .entry(id(&part["messageID"]))
+                        .or_default()
+                        .insert(id(&part["id"]), part.clone());
+                }
+                "message.part.removed" => {
+                    if let Some(parts) = self.parts.get_mut(&id(&p["messageID"])) {
+                        parts.remove(&id(&p["partID"]));
+                    }
+                }
+                "permission.asked" => {
+                    self.requests
+                        .insert(id(&p["id"]), ("permissions", p.clone()));
+                }
+                "question.asked" => {
+                    self.requests.insert(id(&p["id"]), ("questions", p.clone()));
+                }
+                "permission.replied" | "question.replied" | "question.rejected" => {
+                    self.requests.remove(&id(&p["requestID"]));
+                }
+                _ => {}
+            }
+        }
+
+        /// The snapshot, in the shape the captures hold one: every session
+        /// with its messages oldest first, and the pending requests.
+        fn snapshot(&self) -> Value {
+            let mut sessions: BTreeMap<&str, Value> = BTreeMap::new();
+            for (message, (session, info)) in &self.messages {
+                if !self.window.contains(message) {
+                    continue;
+                }
+                let entry = sessions.entry(session.as_str()).or_insert_with(|| {
+                    let info = self.sessions.get(session).cloned();
+                    json!({"info": info.unwrap_or(json!({"id": session, "time": {"created": 0}})),
+                        "messages": []})
+                });
+                let parts: Vec<&Value> = self
+                    .parts
+                    .get(message)
+                    .into_iter()
+                    .flat_map(|p| p.values())
+                    .collect();
+                entry["messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"info": info, "parts": parts}));
+            }
+            for (id, info) in &self.sessions {
+                sessions
+                    .entry(id.as_str())
+                    .or_insert_with(|| json!({"info": info, "messages": []}));
+            }
+            let list = |name: &str| -> Vec<&Value> {
+                self.requests
+                    .values()
+                    .filter(|(l, _)| *l == name)
+                    .map(|(_, r)| r)
+                    .collect()
+            };
+            json!({
+                "as_of": 0, "done_at": 0, "status": self.status, "status_ok": true,
+                "sessions": sessions.into_values().collect::<Vec<_>>(),
+                "permissions": list("permissions"), "questions": list("questions"),
+            })
+        }
+    }
+
+    /// A run cut at row `k`: `before` has read every row before it live; then
+    /// the snapshot the plugin would send at that point, settled, then the
+    /// rest live.
+    fn cut_at(before: &Run, rows: &[Value], k: usize, snapshot: &Value) -> Run {
+        let mut run = before.clone();
+        run.resync(snapshot);
+        let settled = run.adapter.settle();
+        run.store.record(settled);
+        for row in &rows[k..] {
+            run.row(row);
+        }
+        run
+    }
+
+    /// Every capture with a cut at every row where a snapshot can be read:
+    /// the facts are the uncut run's, and every turn ends once.
+    #[test]
+    fn a_snapshot_read_at_any_row_changes_no_fact() {
+        let mut captures: Vec<(&str, &str)> = FORWARDED.iter().map(|(n, f, _)| (*n, *f)).collect();
+        captures.extend([
+            ("linkcut", LINKCUT),
+            ("linkcut-overlap", LINKCUT_OVERLAP),
+            ("linkcut-uninterrupted", LINKCUT_UNCUT),
+            ("pending", PENDING),
+        ]);
+        let mut cuts = 0;
+        for (name, text) in captures {
+            let rows = rows(text);
+            let want = mine(&Run::replay(text).store);
+            let mut server = Server::new();
+            let mut before = Run::new();
+            for k in 0..rows.len() {
+                if k > 0 {
+                    server.row(&rows[k - 1]);
+                    before.row(&rows[k - 1]);
+                }
+                if !server.alive || server.syncing {
+                    continue;
+                }
+                cuts += 1;
+                let run = cut_at(&before, &rows, k, &server.snapshot());
+                let label = format!("{name} cut before row {k}");
+                // A snapshot names each root it reads; a capture that begins
+                // mid-session never saw that session start.
+                let got: Vec<(String, Value)> = mine(&run.store)
+                    .into_iter()
+                    .filter(|(k, _)| {
+                        !k.ends_with(":session_start") || want.iter().any(|(w, _)| w == k)
+                    })
+                    .collect();
+                let diffs = diff(&got, &want);
+                assert!(diffs.is_empty(), "{label}: {diffs:#?}");
+                run.assert_one_end_per_turn(&label);
+            }
+        }
+        assert_eq!(
+            cuts, 1285,
+            "a cut at every row where a snapshot can be read"
+        );
+    }
+
+    /// A prompt typed while the agent's reply still streams joins its turn:
+    /// a snapshot read right after it neither ends that turn early nor makes
+    /// the prompt a turn of its own.
+    #[test]
+    fn a_snapshot_after_a_joined_prompt_keeps_one_turn() {
+        let rows = rows(FORWARDED[0].1);
+        let joined = rows
+            .iter()
+            .position(|r| r["properties"]["part"]["text"] == "s8:basic joined")
+            .unwrap();
+        let mut server = Server::new();
+        let mut before = Run::new();
+        for row in &rows[..=joined] {
+            server.row(row);
+            before.row(row);
+        }
+        let snapshot = server.snapshot();
+        let session = snapshot["status"].as_object().unwrap();
+        assert_eq!(session.len(), 1, "the root is busy: {snapshot}");
+        let run = cut_at(&before, &rows, joined + 1, &snapshot);
+        let uncut = Run::replay(FORWARDED[0].1);
+        assert_eq!(run.store.turn_completes(), uncut.store.turn_completes());
+        let diffs = diff(&mine(&run.store), &mine(&uncut.store));
+        assert!(diffs.is_empty(), "{diffs:#?}");
+        run.assert_one_end_per_turn("joined");
     }
 
     // ------------------------------------------------------------ synthetic
@@ -3055,11 +3442,12 @@ mod tests {
             json!({"t": "sync_begin", "sync": 1, "reason": "connect", "scope": "full",
             "as_of": 9, "status": {}, "status_ok": true}),
         );
+        let count = items.len();
         let page = frame(json!({"t": "sync_page", "sync": 1, "n": 0, "items": items}));
         let end = frame(
             json!({"t": "sync_end", "sync": 1, "done_at": 9, "list_ok": true,
             "permissions_ok": true, "questions_ok": true, "requests_ok": true, "lower": {},
-            "pages": 1, "items": 0, "bytes": 0, "activation": 1}),
+            "pages": 1, "items": count, "bytes": 0, "activation": 1}),
         );
         let mut assembly = SyncAssembly::begin(&begin).unwrap();
         assembly.add(&page);
@@ -3115,5 +3503,264 @@ mod tests {
         items.push(message_items(OTHER, "msg_b1", "msg_b2").remove(1));
         let (a, facts) = two_roots_then(items);
         assert_only_the_healthy_tree_was_read(&a, &facts);
+    }
+
+    /// A snapshot of `items` read in one page, `status` its session status.
+    fn full_snapshot(status: Value, items: Vec<Value>) -> Snapshot {
+        let begin = frame(
+            json!({"t": "sync_begin", "sync": 1, "reason": "connect", "scope": "full",
+            "as_of": 9, "status": status, "status_ok": true}),
+        );
+        let count = items.len();
+        let page = frame(json!({"t": "sync_page", "sync": 1, "n": 0, "items": items}));
+        let end = frame(
+            json!({"t": "sync_end", "sync": 1, "done_at": 9, "list_ok": true,
+            "permissions_ok": true, "questions_ok": true, "requests_ok": true, "lower": {},
+            "pages": 1, "items": count, "bytes": 0, "activation": 1}),
+        );
+        let mut assembly = SyncAssembly::begin(&begin).unwrap();
+        assembly.add(&page);
+        assembly.finish(&end).unwrap()
+    }
+
+    fn part_stub(part: &str, kind: &str, status: Option<&str>) -> LinkFrame {
+        let mut stub = json!({"t": "stub", "seq": 9, "type": "message.part.updated",
+            "ids": {"sessionID": ROOT, "messageID": "msg_02", "partID": part, "callID": "call_1"},
+            "part_type": kind, "size": 2_000_000, "sha256": "ab".repeat(32)});
+        if let Some(status) = status {
+            stub["status"] = json!(status);
+        }
+        frame(stub)
+    }
+
+    fn too_large(what: &str) -> String {
+        format!(
+            "This {what} is too large to show (2000000 bytes, sha256 {})",
+            "ab".repeat(32)
+        )
+    }
+
+    #[test]
+    fn a_tool_update_over_the_frame_cap_ends_the_tool_only_when_it_ended() {
+        let mut a = OpencodeAdapter::new(key());
+        let model = json!({"providerID": "mock", "modelID": "m1"});
+        let mut events = feed(
+            &mut a,
+            &[
+                user("msg_01", "build", model),
+                assistant("msg_02", "msg_01", false),
+                bash("msg_02", "prt_02", "running"),
+                part_stub("prt_02", "tool", Some("running")),
+            ],
+        );
+        assert!(a.running_in("msg_01"), "still running");
+        events.extend(feed(
+            &mut a,
+            &[
+                part_stub("prt_02", "tool", Some("completed")),
+                assistant("msg_02", "msg_01", true),
+                idle(),
+            ],
+        ));
+        assert!(!a.running_in("msg_01"));
+        let results: Vec<&PendingEvent> = events
+            .iter()
+            .filter(|e| e.kind == EventKind::ToolResult)
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(sid(results[0]), format!("{ROOT}:post:prt_02"));
+        let payload = &results[0].payload;
+        assert_eq!(payload["tool_name"], "Bash");
+        assert_eq!(payload["tool_input"], json!({"command": "sleep 8"}));
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["aggregated_output"], too_large("output"));
+        let ends: Vec<&Value> = events
+            .iter()
+            .filter(|e| e.kind == EventKind::TurnComplete)
+            .map(|e| &e.payload["status"])
+            .collect();
+        assert_eq!(ends, [&json!("completed")]);
+    }
+
+    #[test]
+    fn a_text_over_the_frame_cap_is_said_by_its_size_and_lets_what_waits_behind_it_go() {
+        let mut a = OpencodeAdapter::new(key());
+        let start = ev(
+            "message.part.updated",
+            json!({"sessionID": ROOT, "part": {"id": "prt_02a", "sessionID": ROOT,
+            "messageID": "msg_02", "type": "text", "text": "", "time": {"start": 1}}}),
+        );
+        let model = json!({"providerID": "mock", "modelID": "m1"});
+        feed(
+            &mut a,
+            &[
+                user("msg_01", "build", model),
+                assistant("msg_02", "msg_01", false),
+                start,
+            ],
+        );
+        let held = feed(
+            &mut a,
+            &[
+                bash("msg_02", "prt_02b", "running"),
+                bash("msg_02", "prt_02b", "completed"),
+            ],
+        );
+        assert!(held.is_empty(), "behind the text still streaming");
+        let events = feed(&mut a, &[part_stub("prt_02a", "text", None)]);
+        let keys: Vec<&str> = events.iter().map(sid).collect();
+        let at = |s: &str| format!("{ROOT}:{s}");
+        assert_eq!(
+            keys,
+            [
+                at("text:prt_02a"),
+                at("pre:prt_02b"),
+                at("pre:prt_02b"),
+                at("post:prt_02b")
+            ]
+        );
+        assert_eq!(events[0].kind, EventKind::AgentMessage);
+        assert_eq!(events[0].payload["text"], too_large("text"));
+    }
+
+    #[test]
+    fn a_question_or_permission_too_large_for_a_card_is_shown_as_too_large() {
+        let mut a = OpencodeAdapter::new(key());
+        let question = json!({"id": "que_1", "sessionID": ROOT, "questions": [
+            {"question": "x".repeat(900_000), "header": "h", "options": []}]});
+        let patterns: Vec<String> = (0..120)
+            .map(|i| format!("{i}{}", "p".repeat(8000)))
+            .collect();
+        let many = json!({"id": "per_1", "sessionID": ROOT, "permission": "edit",
+            "patterns": patterns, "metadata": {}});
+        let odd = json!({"id": "per_2", "sessionID": ROOT, "permission": "edit",
+            "patterns": [{"glob": "q".repeat(20_000)}], "metadata": {}});
+        let events = feed(
+            &mut a,
+            &[
+                ev("question.asked", question.clone()),
+                ev("permission.asked", many.clone()),
+                ev("permission.asked", odd.clone()),
+            ],
+        );
+        let asked = [(question, "question"), (many, "edit"), (odd, "edit")];
+        assert_eq!(events.len(), asked.len());
+        for (event, (request, name)) in events.iter().zip(asked) {
+            let card = card_of(event);
+            let encoded = serde_json::to_vec(&request).unwrap();
+            let message = format!(
+                "This request is too large to show ({} bytes, sha256 {}); answer it at the Mac",
+                encoded.len(),
+                protocol::hash::sha256_hex(&encoded)
+            );
+            assert_eq!(card.tool_name, name);
+            assert_eq!(card.tool_input, json!({"message": message}));
+            assert!(card.display_text.len() <= MAX_CARD_BYTES);
+            assert_eq!(
+                protocol::hash::sha256_hex(card.display_text.as_bytes()),
+                card.payload_hash
+            );
+        }
+    }
+
+    #[test]
+    fn a_child_session_over_the_page_cap_sets_aside_its_root_tree() {
+        let mut items = vec![
+            json!({"session": {"id": OTHER, "directory": "/Users/ada/project",
+            "time": {"created": 1}}}),
+        ];
+        items.extend(message_items(OTHER, "msg_b1", "msg_b2"));
+        // The child's info is gone with the rest of it; its parent is kept.
+        items.push(json!({"stub": true, "kind": "session",
+            "ids": {"sessionID": "ses_0f00c000000cCCCCCCCCCCCCCC", "parentID": OTHER},
+            "size": 300_000, "sha256": "ab".repeat(32)}));
+        let (a, facts) = two_roots_then(items);
+        assert_only_the_healthy_tree_was_read(&a, &facts);
+    }
+
+    fn snapshot_message(id: &str, role: &str, parent: Option<&str>, time: Value) -> Value {
+        let mut info = json!({"id": id, "sessionID": ROOT, "role": role, "time": time});
+        if let Some(parent) = parent {
+            info["parentID"] = json!(parent);
+        }
+        let part = if role == "user" {
+            json!({"id": format!("prt_{id}"), "sessionID": ROOT, "messageID": id,
+                "type": "text", "text": "go"})
+        } else {
+            json!({"id": format!("prt_{id}"), "sessionID": ROOT, "messageID": id,
+                "type": "text", "text": "done", "time": {"start": 1, "end": 2}})
+        };
+        json!({"sessionID": ROOT, "info": info, "parts": [part]})
+    }
+
+    #[test]
+    fn a_reply_that_never_completed_leaves_its_turn_unknown_and_holds_no_later_prompt_back() {
+        let items = vec![
+            json!({"session": {"id": ROOT, "time": {"created": 0}}}),
+            snapshot_message("msg_01", "user", None, json!({"created": 1})),
+            // Abandoned: the process ended while it streamed.
+            snapshot_message("msg_02", "assistant", Some("msg_01"), json!({"created": 2})),
+            snapshot_message("msg_03", "user", None, json!({"created": 5})),
+            snapshot_message(
+                "msg_04",
+                "assistant",
+                Some("msg_03"),
+                json!({"created": 6, "completed": 7}),
+            ),
+        ];
+        let a = OpencodeAdapter::new(key());
+        let (facts, staged) = a.plan_resync(&full_snapshot(json!({}), items)).unwrap();
+        let ends: Vec<&str> = facts
+            .iter()
+            .filter(|e| e.kind == EventKind::TurnComplete)
+            .map(sid)
+            .collect();
+        assert_eq!(ends, [format!("{ROOT}:turn:msg_03")]);
+        assert!(staged.unknown.contains("msg_01"));
+        let prompt = facts
+            .iter()
+            .find(|e| sid(e) == format!("{ROOT}:user:prt_msg_03"))
+            .unwrap();
+        assert_eq!(prompt.turn_id.as_deref(), Some("msg_03"));
+    }
+
+    #[test]
+    fn a_finished_turn_whose_tool_over_the_page_cap_still_runs_is_not_closed_by_the_snapshot() {
+        let mut reply = snapshot_message(
+            "msg_02",
+            "assistant",
+            Some("msg_01"),
+            json!({"created": 2, "completed": 3}),
+        );
+        reply["parts"] = json!([]);
+        let items = vec![
+            json!({"session": {"id": ROOT, "time": {"created": 0}}}),
+            reply,
+            json!({"stub": true, "kind": "part", "ids": {"sessionID": ROOT, "messageID": "msg_02",
+                "partID": "prt_02", "callID": "call_1"}, "part_type": "tool", "status": "running",
+                "size": 300_000, "sha256": "ab".repeat(32)}),
+            snapshot_message("msg_01", "user", None, json!({"created": 1})),
+        ];
+        // The reply is split, so its part stub joins it.
+        let mut items = items;
+        items[1]["split"] = json!(true);
+        let mut a = OpencodeAdapter::new(key());
+        let (facts, staged) = a.plan_resync(&full_snapshot(json!({}), items)).unwrap();
+        assert!(
+            facts.iter().all(|e| e.kind != EventKind::TurnComplete),
+            "{:?}",
+            facts.iter().map(sid).collect::<Vec<_>>()
+        );
+        a.apply_resync(staged);
+        a.session_end();
+        assert!(a.unknown.contains("msg_01"));
+    }
+
+    #[test]
+    fn a_usage_sum_past_the_integer_range_is_held_at_its_ceiling() {
+        let mut sum = Sum::default();
+        sum.add(Some(&json!(u64::MAX)));
+        sum.add(Some(&json!(i64::MAX)));
+        assert_eq!(sum.value(), json!(i64::MAX));
     }
 }

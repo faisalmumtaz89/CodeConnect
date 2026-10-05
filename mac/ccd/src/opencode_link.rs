@@ -172,6 +172,9 @@ pub(crate) struct StubIds {
     pub(crate) part_id: Option<String>,
     #[serde(rename = "callID", default, skip_serializing_if = "Option::is_none")]
     pub(crate) call_id: Option<String>,
+    /// A session stub's parent session, so the daemon can find its root.
+    #[serde(rename = "parentID", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_id: Option<String>,
 }
 
 /// What a card over the frame cap keeps: whose request it is, and the tool call
@@ -438,6 +441,8 @@ pub(crate) struct Snapshot {
     /// the page cap, or a part of a message that was never sent. Nothing is
     /// read of the session tree they belong to; the rest of the snapshot is.
     pub(crate) damaged: BTreeSet<String>,
+    /// Child → parent for the sessions sent as a stub, whose info is gone.
+    pub(crate) stub_parents: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -503,11 +508,15 @@ pub(crate) struct SyncAssembly {
     status: Map<String, Value>,
     status_ok: bool,
     next_page: u64,
+    items: u64,
     sessions: Vec<SnapSession>,
     index: HashMap<String, usize>,
+    /// (session, message) → where that message is in its session.
+    message_index: HashMap<(String, String), usize>,
     requests: Vec<SnapRequest>,
     broken: Option<String>,
     damaged: BTreeSet<String>,
+    stub_parents: BTreeMap<String, String>,
 }
 
 impl SyncAssembly {
@@ -529,11 +538,14 @@ impl SyncAssembly {
             status: status.clone(),
             status_ok: *status_ok,
             next_page: 0,
+            items: 0,
             sessions: Vec::new(),
             index: HashMap::new(),
+            message_index: HashMap::new(),
             requests: Vec::new(),
             broken: None,
             damaged: BTreeSet::new(),
+            stub_parents: BTreeMap::new(),
         })
     }
 
@@ -565,6 +577,7 @@ impl SyncAssembly {
                     return self.fail(format!("page {n} of snapshot {sync} out of place"));
                 }
                 self.next_page += 1;
+                self.items = self.items.saturating_add(items.len() as u64);
                 for item in items {
                     self.item(item);
                 }
@@ -610,6 +623,9 @@ impl SyncAssembly {
             }
             PageItem::Stub { kind, ids, .. } => match &ids.session_id {
                 Some(session) => {
+                    if let (StubKind::Session, Some(parent)) = (kind, &ids.parent_id) {
+                        self.stub_parents.insert(session.clone(), parent.clone());
+                    }
                     self.damaged.insert(session.clone());
                 }
                 None => self.fail(format!("a {kind:?} stub without its session")),
@@ -652,31 +668,34 @@ impl SyncAssembly {
             return;
         };
         let messages = &mut self.sessions[at].messages;
-        match messages
-            .iter_mut()
-            .find(|m| m.info.get("id") == info.get("id"))
+        match self
+            .message_index
+            .get(&(session.to_string(), id.to_string()))
         {
-            Some(known) if split && known.split => known.parts.extend(parts),
+            Some(&known) if split && messages[known].split => messages[known].parts.extend(parts),
             Some(_) => self.fail(format!("message {id} sent twice")),
-            None => messages.push(SnapMessage {
-                info: info.clone(),
-                parts,
-                split,
-            }),
+            None => {
+                self.message_index
+                    .insert((session.to_string(), id.to_string()), messages.len());
+                messages.push(SnapMessage {
+                    info: info.clone(),
+                    parts,
+                    split,
+                });
+            }
         }
     }
 
     /// A part stub joins the split message it belongs to, which the plugin has
     /// always sent ahead of it.
     fn part_of(&mut self, session: &str, message: &str, stub: SnapPart) {
-        let known = self.index.get(session).and_then(|&at| {
-            self.sessions[at]
-                .messages
-                .iter_mut()
-                .find(|m| m.info.get("id").and_then(Value::as_str) == Some(message))
-        });
-        match known {
-            Some(known) => known.parts.push(stub),
+        let at = self.index.get(session).copied();
+        let known = self
+            .message_index
+            .get(&(session.to_string(), message.to_string()))
+            .copied();
+        match at.zip(known) {
+            Some((at, known)) => self.sessions[at].messages[known].parts.push(stub),
             None => {
                 self.damaged.insert(session.to_string());
             }
@@ -691,6 +710,8 @@ impl SyncAssembly {
             requests_ok,
             permissions_ok,
             questions_ok,
+            pages,
+            items,
             ..
         } = frame
         else {
@@ -698,6 +719,12 @@ impl SyncAssembly {
         };
         if *sync != self.sync {
             self.fail(format!("snapshot {} ended by {sync}", self.sync));
+        }
+        if (*pages, *items) != (self.next_page, self.items) {
+            self.fail(format!(
+                "snapshot {sync} sent {pages} pages of {items} items, {} of {} arrived",
+                self.next_page, self.items
+            ));
         }
         for session in &mut self.sessions {
             session
@@ -714,6 +741,7 @@ impl SyncAssembly {
             requests: self.requests,
             broken: self.broken,
             damaged: self.damaged,
+            stub_parents: self.stub_parents,
         })
     }
 }
@@ -909,6 +937,14 @@ mod tests {
             BTreeSet::from(["ses_0f00d000000dDDDDDDDDDDDDDD".to_string()]),
             "the session over the page cap is set aside, and only it"
         );
+        assert_eq!(
+            snapshot.stub_parents,
+            BTreeMap::from([(
+                "ses_0f00d000000dDDDDDDDDDDDDDD".to_string(),
+                "ses_0f00c000000cCCCCCCCCCCCCCC".to_string()
+            )]),
+            "its parent is kept, so its root tree can be set aside"
+        );
         let broken = snapshot.broken.expect("a session whose messages failed");
         assert!(broken.contains("could not be read"), "{broken}");
     }
@@ -947,6 +983,34 @@ mod tests {
         );
         let snapshot = SyncAssembly::begin(&begin).unwrap().finish(&end).unwrap();
         assert!(!snapshot.list_ok && !snapshot.requests_ok);
+    }
+
+    #[test]
+    fn a_snapshot_missing_a_page_or_an_item_it_announced_is_broken() {
+        let begin = link_frame(
+            &serde_json::json!({"t":"sync_begin","sync":6,"reason":"connect",
+            "scope":"full","as_of":0,"status":{},"status_ok":true}),
+        );
+        let page = link_frame(&serde_json::json!({"t":"sync_page","sync":6,"n":0,"items":[
+            {"session":{"id":"ses_0f00a000000aAAAAAAAAAAAAAA"}},
+            {"session":{"id":"ses_0f00b000000bBBBBBBBBBBBBBB"}}]}));
+        let end = |pages: u64, items: u64| {
+            link_frame(&serde_json::json!({"t":"sync_end","sync":6,"done_at":0,
+                "list_ok":true,"permissions_ok":true,"questions_ok":true,"requests_ok":true,
+                "lower":{},"pages":pages,"items":items,"bytes":1,"activation":1}))
+        };
+        let read = |pages: u64, items: u64| {
+            let mut assembly = SyncAssembly::begin(&begin).unwrap();
+            assembly.add(&page);
+            assembly.finish(&end(pages, items)).unwrap().broken
+        };
+        assert_eq!(read(1, 2), None);
+        let lost_page = read(2, 3).expect("a page never arrived");
+        assert!(
+            lost_page.contains("2 pages of 3 items, 1 of 2 arrived"),
+            "{lost_page}"
+        );
+        assert!(read(1, 3).is_some(), "an item never arrived");
     }
 
     fn hello(activation: u64) -> protocol::ipc::OpencodeHello {

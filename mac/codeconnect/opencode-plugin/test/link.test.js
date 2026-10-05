@@ -304,6 +304,23 @@ describe("sync", () => {
     expect(stub.size).toBeGreaterThan(262144)
   })
 
+  test("a session over the page cap is a stub that keeps its parent, so the daemon finds its root", async () => {
+    const T = Date.now() + 60000
+    const { ccd } = await setup({
+      api: (f) => {
+        const child = { ...session("ses_k", T + 1, "ses_r"), ...Object.fromEntries(Array.from({ length: 5 }, (_, i) => ["x" + i, "k".repeat(60000)])) }
+        f.server.sessions = [session("ses_r", T), child]
+        f.server.messages.set("ses_r", [msg("ses_r", 1, "user")])
+        f.server.messages.set("ses_k", [msg("ses_k", 2)])
+        f.server.status = { ses_r: { type: "busy" } }
+      },
+    })
+    const c = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())
+    const stub = items(c, 1).find((/** @type {any} */ i) => i.stub)
+    expect(stub).toMatchObject({ stub: true, kind: "session", ids: { sessionID: "ses_k", parentID: "ses_r" } })
+    expect(stub.size).toBeGreaterThan(262144)
+  })
+
   test("a snapshot yields to the event loop between messages", async () => {
     /** @type {number[]} */
     const reads = []
@@ -361,6 +378,19 @@ describe("sync", () => {
     c.socket.write(JSON.stringify({ type: "opencode_resync", acked: { ses_x: { from: "msg_1", inclusive: true } } }) + "\n")
     await until(() => settled(c, 3), 3000)
     expect(c.frames.filter((/** @type {any} */ x) => x.t === "sync_begin").at(-1)).toMatchObject({ sync: 3, scope: "full", reason: "requested" })
+  })
+
+  test("a session status that is not an object is sent as an empty one that failed", async () => {
+    const { ccd, f } = await setup({ api: (f) => (f.server.status = /** @type {any} */ ([{ type: "busy" }])) })
+    const c = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())
+    f.server.status = /** @type {any} */ ("busy")
+    f.emit("session.idle", { sessionID: "ses_x" })
+    await until(() => settled(c, 2), 3000)
+    const begins = c.frames.filter((/** @type {any} */ x) => x.t === "sync_begin")
+    expect(begins.map((/** @type {any} */ b) => [b.scope, b.status, b.status_ok])).toEqual([
+      ["full", {}, false],
+      ["requests", {}, false],
+    ])
   })
 
   test("full snapshots start at least a second apart", async () => {

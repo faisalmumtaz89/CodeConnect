@@ -82,6 +82,8 @@ const utf8 = (/** @type {string} */ s) => Buffer.byteLength(s, "utf8")
 /** @param {unknown} v */
 export const encodedLength = (v) => utf8(JSON.stringify(v))
 const sha256 = (/** @type {string} */ s) => createHash("sha256").update(s, "utf8").digest("hex")
+/** A JSON object that is not an array. */
+const isRecord = (/** @type {unknown} */ v) => !!v && typeof v === "object" && !Array.isArray(v)
 
 /**
  * A string whose encoded JSON form is over `cap` bytes keeps its longest prefix (never splitting a surrogate pair)
@@ -184,6 +186,7 @@ export function ids(p) {
   put("messageID", p?.info?.id ?? p?.part?.messageID ?? p?.messageID)
   put("partID", p?.part?.id ?? p?.partID)
   put("callID", p?.part?.callID ?? p?.tool?.callID)
+  put("parentID", p?.parentID)
   return o
 }
 
@@ -964,7 +967,7 @@ function activate(api, socketPath, nonce) {
   async function requestsSync(c, sync, reason, asOf, alive) {
     const reads = await readRequests()
     if (!alive()) return null
-    send(c, { t: "sync_begin", sync, reason, scope: "requests", as_of: asOf, status: reads.status.data ?? {}, status_ok: reads.status.ok })
+    send(c, { t: "sync_begin", sync, reason, scope: "requests", as_of: asOf, status: reads.status.ok ? reads.status.data : {}, status_ok: reads.status.ok })
     const n = await sendRequests(c, sync, reads, alive)
     if (n === null) return null
     const doneAt = seq
@@ -992,7 +995,7 @@ function activate(api, socketPath, nonce) {
       call(() => client.question.list({ directory: dir })),
     ])
     for (const r of [permissions, questions]) if (r.ok && !Array.isArray(r.data)) r.ok = false
-    if (status.ok && (!status.data || typeof status.data !== "object")) status.ok = false
+    if (status.ok && !isRecord(status.data)) status.ok = false
     return { status, permissions, questions }
   }
 
@@ -1061,7 +1064,7 @@ function activate(api, socketPath, nonce) {
   async function fullSync(c, sync, reason, asOf, alive) {
     const dir = directory()
     const status = await call(() => client.session.status({ directory: dir }))
-    if (status.ok && (!status.data || typeof status.data !== "object")) status.ok = false
+    if (status.ok && !isRecord(status.data)) status.ok = false
     if (!alive()) return null
     /** @type {Record<string, any>} */
     const statusData = status.ok ? status.data : {}
@@ -1129,7 +1132,7 @@ function activate(api, socketPath, nonce) {
       if (ENVELOPE + nb > PAGE_CAP) {
         const s = JSON.stringify(item)
         const kind = item.part ? "part" : item.session ? "session" : "message"
-        const keyed = item.part ? { sessionID: item.sessionID, part: item.part } : item.session ? { sessionID: item.session.id } : item
+        const keyed = item.part ? { sessionID: item.sessionID, part: item.part } : item.session ? { sessionID: item.session.id, parentID: item.session.parentID } : item
         item = { stub: true, kind, ids: ids(keyed), ...(item.part ? partShape(item.part) : {}), size: utf8(s), sha256: sha256(s) }
         nb = encodedLength(item) + 1
       }
