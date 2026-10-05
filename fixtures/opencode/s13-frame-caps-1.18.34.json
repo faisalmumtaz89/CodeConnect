@@ -1,6 +1,6 @@
 {
  "opencode": "1.18.34",
- "what": "plugin frame rules (wire v1): sizes are encoded JSON bytes; strings over 64 KiB are cut with codex_approval::bounded's marker; a frame over 1 MiB becomes {t:\"stub\",seq,type,ids,size,sha256} with size and sha256 over the same encoded line, newline included; patch bodies are never forwarded",
+ "what": "plugin frame rules (wire v1): sizes are encoded JSON bytes; strings over 64 KiB are cut with codex_approval::bounded's marker; a frame over 1 MiB becomes {t:\"stub\",seq,type,ids,size,sha256} with size and sha256 over the frame's encoded JSON without the newline, keeping the replaced part's part_type and status; patch bodies (including a message part's metadata.diff) are never forwarded",
  "caps": {
   "string_bytes": 65536,
   "frame_bytes": 1048576,
@@ -108,8 +108,8 @@
    },
    "expected": {
     "stub": true,
-    "line": "{\"t\":\"stub\",\"seq\":9,\"type\":\"message.part.updated\",\"ids\":{\"sessionID\":\"ses_y\",\"messageID\":\"msg_y\",\"partID\":\"prt_y\",\"callID\":\"call_y\"},\"size\":1310989,\"sha256\":\"d7a4c4921497332fba67a5b2d94cb15192ddae695c847a5989ae548d7ea9e40e\"}\n",
-    "line_bytes": 225
+    "line": "{\"t\":\"stub\",\"seq\":9,\"type\":\"message.part.updated\",\"ids\":{\"sessionID\":\"ses_y\",\"messageID\":\"msg_y\",\"partID\":\"prt_y\",\"callID\":\"call_y\"},\"part_type\":\"tool\",\"status\":\"completed\",\"size\":1310988,\"sha256\":\"616d100d482b390896aa7089b46cf6ef17cbceb8884c541d39824450042e7748\"}\n",
+    "line_bytes": 265
    }
   },
   {
@@ -164,7 +164,7 @@
    }
   },
   {
-   "what": "edit tool part: filediff dropped, the tool's own metadata.diff kept",
+   "what": "edit tool part: filediff and the tool's own metadata.diff dropped",
    "input": {
     "part": {
      "id": "prt_e",
@@ -191,9 +191,7 @@
      "tool": "edit",
      "state": {
       "status": "completed",
-      "metadata": {
-       "diff": "d"
-      }
+      "metadata": {}
      }
     }
    }

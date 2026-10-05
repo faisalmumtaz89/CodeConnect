@@ -1,6 +1,6 @@
 {
  "opencode": "1.18.34",
- "what": "approval cards (wire v1) are exempt from the string cap up to the frame cap, so the whole command reaches ccd's risk check; above the frame cap a card is a {t:\"card_stub\"} frame with no command text, sized and hashed over the whole encoded card line",
+ "what": "approval cards (wire v1) are exempt from the string cap up to the frame cap, so the whole command reaches ccd's risk check; above the frame cap a card is a {t:\"card_stub\"} frame with no command text, sized and hashed over the whole encoded card JSON without the newline",
  "recipe": "a recipe is a list of pieces concatenated in order: {text} literally, {repeat, count} as repeat x count",
  "cards": [
   {
@@ -98,7 +98,7 @@
    },
    "expected": {
     "stub": true,
-    "line": "{\"t\":\"card_stub\",\"seq\":1,\"type\":\"permission.asked\",\"properties\":{\"id\":\"per_x\",\"sessionID\":\"ses_x\",\"permission\":\"bash\",\"tool\":{\"messageID\":\"msg_x\",\"callID\":\"call_x\"}},\"size\":3600368,\"sha256\":\"a7fad36d194877ebe74960ee8a1aa0c422d97956d8ee4eaca8bb5605e2d693a5\"}\n",
+    "line": "{\"t\":\"card_stub\",\"seq\":1,\"type\":\"permission.asked\",\"properties\":{\"id\":\"per_x\",\"sessionID\":\"ses_x\",\"permission\":\"bash\",\"tool\":{\"messageID\":\"msg_x\",\"callID\":\"call_x\"}},\"size\":3600367,\"sha256\":\"fcfb744c87b843f0f54ea63ec8e4f9355c2e4f2c21e5f108822cd75165c3f820\"}\n",
     "line_bytes": 258
    },
    "live": {
@@ -147,7 +147,7 @@
    },
    "expected": {
     "stub": true,
-    "line": "{\"t\":\"card_stub\",\"seq\":1,\"type\":\"permission.asked\",\"properties\":{\"id\":\"per_x\",\"sessionID\":\"ses_x\",\"permission\":\"bash\",\"tool\":{\"messageID\":\"msg_x\",\"callID\":\"call_x\"}},\"size\":6000351,\"sha256\":\"2769ff91d94c161601acb4b0887c1c6faab74762c88fd388c03e7edc3adee955\"}\n",
+    "line": "{\"t\":\"card_stub\",\"seq\":1,\"type\":\"permission.asked\",\"properties\":{\"id\":\"per_x\",\"sessionID\":\"ses_x\",\"permission\":\"bash\",\"tool\":{\"messageID\":\"msg_x\",\"callID\":\"call_x\"}},\"size\":6000350,\"sha256\":\"ecf02bd4b44ac3ce552823c0671df53bb51656e66639152bbb9bda173e96b525\"}\n",
     "line_bytes": 258
    },
    "live": {

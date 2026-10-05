@@ -1,14 +1,20 @@
 // Live-test rig: a real OpenCode TUI in a private tmux server, the scripted mock model, and fake-ccd.js, all under
 // one temporary directory that is removed afterwards.
 //
-// Gate: nothing runs unless CC_OPENCODE_LIVE=1. With the flag set, a missing OpenCode binary is a failure, not a
-// skip. The binary is CC_OPENCODE_BIN, else `opencode` on PATH; the tests are written against OpenCode 1.18.34.
+// Gate: nothing runs unless CC_OPENCODE_LIVE=1. With the flag set, a missing OpenCode binary, or one whose
+// `--version` is not 1.18.34, is a failure, not a skip. The binary is CC_OPENCODE_BIN, else `opencode` on PATH.
+//
+// Disk: OpenCode unpacks its native libraries into TMPDIR at every start and leaves them there (about 19 MB a
+// launch), and when the disk fills its database writes fail and a turn stops mid-way. So every OpenCode here gets
+// TMPDIR inside the rig, cleared after each run and removed with the rig, also on a failed or interrupted run; a
+// rig left by a killed run is swept at the next start, and a rig refuses to start with less than 512 MiB free (a rig peaks near 200 MB).
 import { spawn, spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { ackedFrom, birth } from "./fake-ccd.js"
+import { ackedFrom } from "./fake-ccd.js"
+import { alive, birth } from "./proc.js"
 
 export const LIVE = process.env.CC_OPENCODE_LIVE === "1"
 if (!LIVE) console.error("SKIP live OpenCode tests: set CC_OPENCODE_LIVE=1 (and CC_OPENCODE_BIN) to run them")
@@ -19,14 +25,55 @@ const MOCK = fileURLToPath(new URL("./mock-model.js", import.meta.url))
 export const NONCE = "0123456789abcdef0123456789abcdef"
 export const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms))
 
+export const OPENCODE_VERSION = "1.18.34"
+const FREE_MIN = 512 * 1048576
+const PREFIX = "cc-oc-live-"
+
+/** The OpenCode binary, checked to answer `--version` with exactly OPENCODE_VERSION. */
 export function opencodeBin() {
-  const env = process.env.CC_OPENCODE_BIN
-  if (env) {
-    if (!existsSync(env)) throw new Error(`CC_OPENCODE_LIVE=1 but CC_OPENCODE_BIN=${env} does not exist`)
-    return env
+  let bin = process.env.CC_OPENCODE_BIN
+  if (bin && !existsSync(bin)) throw new Error(`CC_OPENCODE_LIVE=1 but CC_OPENCODE_BIN=${bin} does not exist`)
+  for (const d of bin ? [] : (process.env.PATH ?? "").split(delimiter)) if (d && existsSync(join(d, "opencode"))) (bin ??= join(d, "opencode"))
+  if (!bin) throw new Error("CC_OPENCODE_LIVE=1 but no OpenCode binary was found: set CC_OPENCODE_BIN rather than pass vacuously")
+  const scratch = mkdtempSync(join(tmpdir(), `${PREFIX}${process.pid}-version-`))
+  try {
+    const r = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 30000, env: { PATH: process.env.PATH ?? "", HOME: scratch, TMPDIR: scratch } })
+    const got = (r.stdout ?? "").trim()
+    if (got !== OPENCODE_VERSION) throw new Error(`CC_OPENCODE_LIVE=1 needs OpenCode ${OPENCODE_VERSION}, but ${bin} --version answered ${JSON.stringify(got || r.stderr || r.error?.message)}`)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
   }
-  for (const d of (process.env.PATH ?? "").split(delimiter)) if (d && existsSync(join(d, "opencode"))) return join(d, "opencode")
-  throw new Error("CC_OPENCODE_LIVE=1 but no OpenCode binary was found: set CC_OPENCODE_BIN rather than pass vacuously")
+  return bin
+}
+
+/** Rigs of this process, removed on exit even when a test failed or the run was interrupted. */
+const open = new Set()
+function cleanupAll() {
+  for (const rig of open) rig.closeSync()
+}
+process.on("exit", cleanupAll)
+for (const sig of /** @type {const} */ (["SIGINT", "SIGTERM", "SIGHUP"]))
+  process.once(sig, () => {
+    cleanupAll()
+    process.kill(process.pid, sig)
+  })
+
+/** Removes what a killed run left: its tmux servers (and so its OpenCode) and its rig directories. */
+function sweep() {
+  const dead = (/** @type {string} */ name) => {
+    const pid = Number(name.slice(PREFIX.length).split("-")[0])
+    return Number.isInteger(pid) && pid > 0 && pid !== process.pid && !alive(pid)
+  }
+  const sockets = join(process.env.TMUX_TMPDIR ?? "/tmp", `tmux-${process.getuid?.() ?? 0}`)
+  try {
+    for (const n of readdirSync(sockets)) if (n.startsWith(PREFIX) && dead(n)) spawnSync("tmux", ["-L", n, "kill-server"])
+  } catch {}
+  for (const n of readdirSync(tmpdir())) if (n.startsWith(PREFIX) && dead(n)) rmSync(join(tmpdir(), n), { recursive: true, force: true })
+}
+
+const freeBytes = (/** @type {string} */ dir) => {
+  const f = statfsSync(dir)
+  return f.bavail * f.bsize
 }
 
 /** The plugin source with `code` inserted after `anchor` (which must occur exactly once). */
@@ -39,48 +86,92 @@ export function variant(/** @type {[string, string][]} */ edits, source = readFi
   return source
 }
 
-/** A build that records the queue and frame bounds it reached, and its listeners' main-thread time, into `<session dir>/stats.json`. */
-export const instrumented = () =>
-  variant([
+/**
+ * Main-thread lag sampler: a 20 ms interval timer whose lateness is counted in a 1 ms histogram (`lag.hist`, last
+ * bucket 1000+ ms), with the total lateness and the sample count. Cumulative; the tests diff two readings.
+ */
+const LAG_SAMPLER = `const __lag = { samples: 0, totalMs: 0, maxMs: 0, hist: new Array(1001).fill(0) }
+let __last = performance.now()
+setInterval(() => { const n = performance.now(); const l = Math.max(0, n - __last - 20); __last = n; __lag.samples++; __lag.totalMs += l; __lag.maxMs = Math.max(__lag.maxMs, l); __lag.hist[Math.min(1000, Math.floor(l))]++ }, 20).unref?.()
+`
+const STATS_WRITER = `setInterval(() => { try { __w(fileURLToPath(new URL("./stats.json", import.meta.url)), JSON.stringify(__st)) } catch {} }, 200).unref?.()
+`
+
+/**
+ * A build that records the queue and frame bounds it reached, its listeners' main-thread time and the main thread's
+ * lag into `<session dir>/stats.json`.
+ */
+export const instrumented = (source = readFileSync(PLUGIN, "utf8")) =>
+  variant(
     [
-      'import { fileURLToPath } from "node:url"\n',
-      `import { writeFileSync as __w } from "node:fs"
+      [
+        'import { fileURLToPath } from "node:url"\n',
+        `import { writeFileSync as __w } from "node:fs"
 const __st = { maxQueue: 0, maxFrame: 0, maxPage: 0, drops: 0, frames: 0 }
 const __q = (/** @type {any} */ c, /** @type {number} */ extra) => { __st.maxQueue = Math.max(__st.maxQueue, (c?.writableLength ?? 0) + extra) }
-const __t = { listenerCalls: 0, listenerMs: 0, listenerMaxMs: 0, loopLagMaxMs: 0 }
-Object.assign(__st, { time: __t })
-let __last = performance.now()
-setInterval(() => { const n = performance.now(); __t.loopLagMaxMs = Math.max(__t.loopLagMaxMs, n - __last - 20); __last = n }, 20).unref?.()
-setInterval(() => { try { __w(fileURLToPath(new URL("./stats.json", import.meta.url)), JSON.stringify(__st)) } catch {} }, 200).unref?.()
-`,
+const __t = { listenerCalls: 0, listenerMs: 0, listenerMaxMs: 0 }
+${LAG_SAMPLER}Object.assign(__st, { time: __t, lag: __lag })
+${STATS_WRITER}`,
+      ],
+      ["  function enqueue(e, s, card = false) {\n    const c = sock\n", "    __st.frames++; __st.maxFrame = Math.max(__st.maxFrame, e.bytes); __q(c, heldBytes + e.bytes)\n"],
+      ["  function overflow(c) {\n", "    __st.drops++\n"],
+      [
+        "  function forward(type, event) {\n",
+        "    const __t0 = performance.now()\n    try {\n      return __forward(type, event)\n    } finally {\n      const d = performance.now() - __t0\n      __t.listenerCalls++\n      __t.listenerMs += d\n      __t.listenerMaxMs = Math.max(__t.listenerMaxMs, d)\n    }\n  }\n  function __forward(type, event) {\n",
+      ],
+      ["      pages++\n", "      __st.maxPage = Math.max(__st.maxPage, utf8(line)); __q(c, utf8(line) + heldBytes)\n"],
     ],
-    ["  function enqueue(e, s) {\n    const c = sock\n", "    __st.frames++; __st.maxFrame = Math.max(__st.maxFrame, e.bytes); __q(c, heldBytes + e.bytes)\n"],
-    ["  function overflow(c) {\n", "    __st.drops++\n"],
-    [
-      "  function forward(type, event) {\n",
-      "    const __t0 = performance.now()\n    try {\n      return __forward(type, event)\n    } finally {\n      const d = performance.now() - __t0\n      __t.listenerCalls++\n      __t.listenerMs += d\n      __t.listenerMaxMs = Math.max(__t.listenerMaxMs, d)\n    }\n  }\n  function __forward(type, event) {\n",
-    ],
-    ["      pages++\n", "      __st.maxPage = Math.max(__st.maxPage, utf8(line)); __q(c, utf8(line) + heldBytes)\n"],
-  ])
+    source,
+  )
+
+/** The control for `instrumented()`: the same lag sampler and stats file, and no listener, link or snapshot. */
+export const lagProbe = () => `import { writeFileSync as __w } from "node:fs"
+import { fileURLToPath } from "node:url"
+const __st = {}
+${LAG_SAMPLER}Object.assign(__st, { lag: __lag })
+${STATS_WRITER}export default { id: "codeconnect", tui: async () => {} }
+`
+
+/**
+ * Lag between two cumulative readings: samples, total and per-sample percentiles, in ms.
+ * @param {any} a @param {any} b
+ */
+export function lagBetween(a, b) {
+  const hist = b.hist.map((/** @type {number} */ n, /** @type {number} */ i) => n - (a?.hist[i] ?? 0))
+  const samples = b.samples - (a?.samples ?? 0)
+  const at = (/** @type {number} */ q) => {
+    let seen = 0
+    for (let i = 0; i < hist.length; i++) if ((seen += hist[i]) >= q * samples) return i
+    return hist.length - 1
+  }
+  return { samples, totalMs: b.totalMs - (a?.totalMs ?? 0), p50: at(0.5), p99: at(0.99), p999: at(0.999) }
+}
 
 let rigs = 0
 export class Rig {
   constructor() {
     this.bin = opencodeBin()
-    this.root = mkdtempSync(join(tmpdir(), "cc-oc-live-"))
+    sweep()
+    const free = freeBytes(tmpdir())
+    if (free < FREE_MIN)
+      throw new Error(`only ${Math.round(free / 1048576)} MiB free in ${tmpdir()}: the live tests need 512 MiB, because OpenCode stops a turn when its database writes fail`)
+    this.root = mkdtempSync(join(tmpdir(), `${PREFIX}${process.pid}-`))
+    open.add(this)
     this.home = join(this.root, "home")
     this.proj = join(this.root, "proj")
     this.sess = join(this.root, "sess")
     this.socket = join(this.root, "ccd.sock")
     this.record = join(this.root, "record.jsonl")
-    this.tmux = ["-L", `cc-oc-live-${process.pid}-${++rigs}`, "-f", "/dev/null"]
+    this.tmp = join(this.root, "tmp")
+    this.tmux = ["-L", `${PREFIX}${process.pid}-${++rigs}`, "-f", "/dev/null"]
     /** @type {import("node:child_process").ChildProcess | null} */
     this.ccd = null
     /** @type {import("node:child_process").ChildProcess | null} */
     this.mock = null
     this.port = 0
     this.pid = 0
-    for (const d of [this.home, this.proj, this.sess]) mkdirSync(d, { recursive: true })
+    this.launchedAt = 0
+    for (const d of [this.home, this.proj, this.sess, this.tmp]) mkdirSync(d, { recursive: true })
     writeFileSync(join(this.proj, "a.txt"), "hello\n")
     spawnSync("git", ["init", "-q"], { cwd: this.proj })
     spawnSync("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "init", "--allow-empty"], { cwd: this.proj })
@@ -125,7 +216,7 @@ export class Rig {
 
   env() {
     /** @type {Record<string, string>} */
-    const env = { HOME: this.home, PATH: process.env.PATH ?? "", TERM: "xterm-256color", OPENCODE_DISABLE_AUTOUPDATE: "1", OPENCODE_DISABLE_MODELS_FETCH: "1", NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" }
+    const env = { HOME: this.home, TMPDIR: this.tmp, PATH: process.env.PATH ?? "", TERM: "xterm-256color", OPENCODE_DISABLE_AUTOUPDATE: "1", OPENCODE_DISABLE_MODELS_FETCH: "1", NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" }
     return env
   }
 
@@ -166,6 +257,7 @@ export class Rig {
     }
     const env = Object.entries({ ...this.env(), OPENCODE_TUI_CONFIG: join(this.sess, "tui.json") }).map(([k, v]) => `${k}=${v}`)
     this.t(["kill-server"])
+    this.launchedAt = Date.now()
     const r = this.t(["new-session", "-d", "-s", "oc", "-x", "160", "-y", "50", "-c", this.proj, "--", "env", "-i", ...env, this.bin, ...(o.args ?? [])])
     if (r.status !== 0) throw new Error("tmux: " + r.stderr)
     this.pid = Number(this.t(["display", "-p", "-t", "oc", "#{pane_pid}"]).stdout.trim())
@@ -206,9 +298,18 @@ export class Rig {
     for (;;) {
       const s = this.capture()
       if (typeof what === "string" ? s.includes(what) : what.test(s)) return Date.now()
-      if (Date.now() - t0 > ms) throw new Error(`pane never showed ${what}:\n${s}`)
+      if (Date.now() - t0 > ms) throw new Error(`pane never showed ${what}:\n${s}\n${this.diagnosis()}`)
       await sleep(20)
     }
+  }
+  /** Free disk and OpenCode's own logged errors, for a failure message. */
+  diagnosis() {
+    const lines = [`free in ${tmpdir()}: ${Math.round(freeBytes(tmpdir()) / 1048576)} MiB`]
+    const dir = join(this.home, ".local", "share", "opencode", "log")
+    try {
+      for (const f of readdirSync(dir)) lines.push(...readFileSync(join(dir, f), "utf8").split("\n").filter((l) => l.includes("level=ERROR")).slice(-5).map((l) => l.slice(0, 300)))
+    } catch {}
+    return lines.join("\n")
   }
   ready(ms = 30000) {
     return this.waitFor("ctrl+p commands", ms)
@@ -249,26 +350,31 @@ export class Rig {
     const pid = this.pid
     for (let i = 0; pid && i < 100 && alive(pid); i++) await sleep(50)
     if (pid && alive(pid)) process.kill(pid, "SIGKILL")
-    for (const d of [join(this.home, ".local", "share", "opencode"), join(this.home, ".local", "state", "opencode")]) rmSync(d, { recursive: true, force: true })
+    for (const d of [join(this.home, ".local", "share", "opencode"), join(this.home, ".local", "state", "opencode"), this.tmp]) rmSync(d, { recursive: true, force: true })
+    mkdirSync(this.tmp)
     rmSync(this.record, { force: true })
     spawnSync("git", ["clean", "-qfdx"], { cwd: this.proj })
   }
 
   async close() {
     this.t(["kill-server"])
+    for (let i = 0; this.pid && i < 100 && alive(this.pid); i++) await sleep(50)
+    this.closeSync()
+  }
+
+  /** Everything this rig started is stopped and its directory removed. Safe to call twice. */
+  closeSync() {
+    this.t(["kill-server"])
+    if (this.pid && alive(this.pid)) {
+      try {
+        process.kill(this.pid, "SIGKILL")
+      } catch {}
+    }
     this.stopCcd()
     this.mock?.kill("SIGKILL")
+    this.mock = null
     rmSync(this.root, { recursive: true, force: true })
-  }
-}
-
-/** @param {number} pid */
-function alive(pid) {
-  try {
-    process.kill(pid, 0)
-    return !/^\S+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, "utf8"))
-  } catch {
-    return false
+    open.delete(this)
   }
 }
 

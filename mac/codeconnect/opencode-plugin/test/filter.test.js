@@ -46,6 +46,24 @@ describe("filter", () => {
     for (const e of bus) if (!e.type.startsWith("ccd.")) f.apply(e.type, e.properties)
     expect(f.toolSent.size).toBe(0)
     expect(f.started.size).toBe(0)
-    for (const sig of f.messageSent.values()) expect(JSON.parse(sig)[0]).toBe("user")
+    for (const m of f.messageSent.values()) expect(JSON.parse(m.sig)[0]).toBe("user")
+  })
+
+  test("maps lose entries when their part, message or session is removed", () => {
+    const f = new Filter()
+    const part = (/** @type {string} */ id, /** @type {string} */ mid, /** @type {string} */ sid, /** @type {any} */ x) => ({ sessionID: sid, part: { id, messageID: mid, sessionID: sid, ...x } })
+    const tool = { type: "tool", callID: "c", state: { status: "running", input: {} } }
+    const text = { type: "text", text: "a", time: { start: 1 } }
+    f.apply("message.part.updated", part("p1", "m1", "s1", tool))
+    f.apply("message.part.updated", part("p2", "m1", "s1", text))
+    f.apply("message.part.updated", part("p3", "m2", "s1", tool))
+    f.apply("message.part.updated", part("p4", "m3", "s2", text))
+    f.apply("message.updated", { sessionID: "s2", info: { id: "m3", sessionID: "s2", role: "assistant", time: { created: 1 } } })
+    f.apply("message.part.removed", { sessionID: "s1", messageID: "m2", partID: "p3" })
+    expect([...f.toolSent.keys()]).toEqual(["p1"])
+    f.apply("message.removed", { sessionID: "s1", messageID: "m1" })
+    expect(f.toolSent.size + f.started.size).toBe(1)
+    f.apply("session.deleted", { info: { id: "s2" } })
+    expect(f.toolSent.size + f.started.size + f.messageSent.size).toBe(0)
   })
 })

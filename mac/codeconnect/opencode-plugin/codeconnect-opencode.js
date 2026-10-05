@@ -12,7 +12,7 @@
 // OPENCODE_TUI_CONFIG at it. `solid-js` is the host's own copy, loaded on demand for the head effect.
 
 import { createConnection } from "node:net"
-import { readFileSync } from "node:fs"
+import { constants as fsc, promises as fsp } from "node:fs"
 import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
 
@@ -37,6 +37,14 @@ export const PAGE_CAP = 262144
 export const HELLO_TIMEOUT_MS = 3000
 export const BACKOFF_MIN_MS = 500
 export const BACKOFF_MAX_MS = 8000
+/** A link counts as stable, and the backoff starts over, after its first `settled` or after this long. */
+export const STABLE_MS = 8000
+/** Full snapshots start at least this far apart. */
+export const FULL_SYNC_GAP_MS = 1000
+/** Most epoch events kept; past it the oldest goes, and requests asked before it are no longer judged live. */
+export const EPOCH_EVENTS_CAP = 4096
+const ENDED_CAP = 1024
+const AGENT_FILE_CAP = 4096
 const API_PAGE_LIMIT = 10
 const READ_CAP = 1048576
 
@@ -106,8 +114,9 @@ export function cutString(s, cap = STRING_CAP) {
 const EVERYTHING = Symbol("exempt")
 
 /**
- * Copy-on-write walk: removes patch bodies (`summary.diffs`, `filediff`, `revert.diff`, any string `patch`) and
- * cuts strings, except inside the top-level keys named by `exempt`. OpenCode's objects are never mutated.
+ * Copy-on-write walk: removes patch bodies (`summary.diffs`, `filediff`, `revert.diff`, any string `patch`, and a
+ * string `diff` under a `metadata` outside the card fields) and cuts strings, except inside the top-level keys
+ * named by `exempt`. OpenCode's objects are never mutated.
  * @param {any} v
  * @param {Set<string>} [exempt]
  * @returns {any}
@@ -141,7 +150,11 @@ function walk(v, exempt, depth, key) {
     let o = null
     for (const k of Object.keys(v)) {
       const drop =
-        k === "filediff" || (k === "diffs" && key === "summary") || (k === "diff" && key === "revert") || (k === "patch" && typeof v[k] === "string")
+        k === "filediff" ||
+        (k === "diffs" && key === "summary") ||
+        (k === "diff" && key === "revert") ||
+        (k === "patch" && typeof v[k] === "string") ||
+        (k === "diff" && key === "metadata" && exempt !== EVERYTHING && typeof v[k] === "string")
       if (drop) {
         o ??= { ...v }
         delete o[k]
@@ -175,17 +188,30 @@ export function ids(p) {
 }
 
 /**
- * A live bus frame. Over the frame cap it becomes a stub whose size and sha256 are those of the full encoded line.
+ * What a stub keeps of the part it replaces, so the daemon can still close a turn: its type and its tool status.
+ * @param {any} part
+ */
+export function partShape(part) {
+  /** @type {{ part_type?: string, status?: string }} */
+  const o = {}
+  if (typeof part?.type === "string") o.part_type = part.type
+  if (typeof part?.state?.status === "string") o.status = part.state.status
+  return o
+}
+
+/**
+ * A live bus frame. Over the frame cap it becomes a stub; its size and sha256 are those of the full frame's encoded
+ * JSON, without the newline.
  * @param {number} seq
  * @param {string} type
  * @param {any} properties
  * @returns {Encoded}
  */
 export function eventLine(seq, type, properties) {
-  const line = JSON.stringify({ t: "ev", seq, type, properties: prepare(properties) }) + "\n"
-  const bytes = utf8(line)
-  if (bytes <= FRAME_CAP) return { line, bytes, stub: false }
-  const s = JSON.stringify({ t: "stub", seq, type, ids: ids(properties), size: bytes, sha256: sha256(line) }) + "\n"
+  const json = JSON.stringify({ t: "ev", seq, type, properties: prepare(properties) })
+  const bytes = utf8(json) + 1
+  if (bytes <= FRAME_CAP) return { line: json + "\n", bytes, stub: false }
+  const s = JSON.stringify({ t: "stub", seq, type, ids: ids(properties), ...partShape(properties?.part), size: bytes - 1, sha256: sha256(json) }) + "\n"
   return { line: s, bytes: utf8(s), stub: true }
 }
 
@@ -198,10 +224,10 @@ export function eventLine(seq, type, properties) {
  * @returns {Encoded}
  */
 export function cardLine(seq, type, card) {
-  const line = JSON.stringify({ t: "ev", seq, type, properties: prepare(card, CARD_FIELDS) }) + "\n"
-  const bytes = utf8(line)
-  if (bytes <= FRAME_CAP) return { line, bytes, stub: false }
-  const s = JSON.stringify({ t: "card_stub", seq, type, properties: cardIds(card), size: bytes, sha256: sha256(line) }) + "\n"
+  const json = JSON.stringify({ t: "ev", seq, type, properties: prepare(card, CARD_FIELDS) })
+  const bytes = utf8(json) + 1
+  if (bytes <= FRAME_CAP) return { line: json + "\n", bytes, stub: false }
+  const s = JSON.stringify({ t: "card_stub", seq, type, properties: cardIds(card), size: bytes - 1, sha256: sha256(json) }) + "\n"
   return { line: s, bytes: utf8(s), stub: true }
 }
 
@@ -215,15 +241,17 @@ const isUserText = (pt) => pt.type === "text" && !("time" in pt)
 
 /**
  * What is forwarded of each bus event: only state transitions. Its maps lose each entry at that entry's terminal
- * (user messages excepted: OpenCode re-emits their infos unchanged, so one entry per prompt is kept).
+ * (user messages excepted: OpenCode re-emits their infos unchanged, so one entry per prompt is kept), and at the
+ * removal of its part, its message or its session.
  */
 export class Filter {
   constructor() {
-    /** @type {Map<string, string>} */
+    /** @typedef {{ sid: string, mid: string }} Owner */
+    /** @type {Map<string, Owner>} part id -> owner, for a tool part whose `running` was sent */
     this.toolSent = new Map()
-    /** @type {Set<string>} */
-    this.started = new Set()
-    /** @type {Map<string, string>} */
+    /** @type {Map<string, Owner>} part id -> owner, for a text/reasoning part whose start marker was sent */
+    this.started = new Map()
+    /** @type {Map<string, { sig: string, sid: string }>} */
     this.messageSent = new Map()
   }
 
@@ -242,21 +270,22 @@ export class Filter {
       if (typeof i.summary === "boolean") keep.summary = i.summary
       const completed = Boolean(i.time?.completed)
       const sig = JSON.stringify([i.role, i.parentID ?? null, keep.summary ?? null, completed, i.error?.name ?? null])
-      if (this.messageSent.get(i.id) === sig) return null
+      if (this.messageSent.get(i.id)?.sig === sig) return null
       if (completed || i.role === "user") {
         this.messageSent.delete(i.id)
-        if (i.role === "user") this.messageSent.set(i.id, sig)
-      } else this.messageSent.set(i.id, sig)
+        if (i.role === "user") this.messageSent.set(i.id, { sig, sid: i.sessionID })
+      } else this.messageSent.set(i.id, { sig, sid: i.sessionID })
       return { sessionID: p.sessionID ?? null, info: keep }
     }
     if (type === "message.part.updated") {
       let pt = p.part
       const ty = pt.type
+      const owner = { sid: pt.sessionID, mid: pt.messageID }
       if (ty === "step-start") return null
       if (ty === "text" && (pt.synthetic || pt.ignored)) return null
       if ((ty === "text" || ty === "reasoning") && !isUserText(pt) && (pt.time ?? {}).end == null) {
         if (this.started.has(pt.id)) return null
-        this.started.add(pt.id)
+        this.started.set(pt.id, owner)
         return { sessionID: p.sessionID ?? null, part: { ...pt, text: "" } }
       }
       if (ty === "text" || ty === "reasoning") this.started.delete(pt.id)
@@ -264,15 +293,33 @@ export class Filter {
         const status = pt.state.status
         if (status === "pending") return null
         if (status === "running") {
-          if (this.toolSent.get(pt.id) === "running") return null
-          this.toolSent.set(pt.id, "running")
+          if (this.toolSent.has(pt.id)) return null
+          this.toolSent.set(pt.id, owner)
           const { metadata, ...state } = pt.state
           pt = { ...pt, state }
         } else this.toolSent.delete(pt.id)
       }
       return { sessionID: p.sessionID ?? null, part: pt }
     }
+    if (type === "message.part.removed") {
+      this.toolSent.delete(p.partID)
+      this.started.delete(p.partID)
+    } else if (type === "message.removed") this.forget((o) => o.mid === p.messageID, p.messageID)
+    else if (type === "session.deleted") {
+      const sid = p.info?.id ?? p.sessionID
+      this.forget((o) => o.sid === sid)
+    }
     return p
+  }
+
+  /**
+   * @param {(o: { sid: string, mid?: string }) => boolean} gone
+   * @param {string} [messageID]
+   */
+  forget(gone, messageID) {
+    for (const m of [this.toolSent, this.started]) for (const [k, o] of m) if (gone(o)) m.delete(k)
+    if (messageID !== undefined) this.messageSent.delete(messageID)
+    else for (const [k, o] of this.messageSent) if (gone(o)) this.messageSent.delete(k)
   }
 }
 
@@ -281,12 +328,16 @@ export class Filter {
 /**
  * Per-activation record of requests asked and of the events that end a request's epoch (abort, idle, retry,
  * delete of its session or an ancestor; instance disposal). Created inside `tui()`, so a re-activation starts
- * empty and judges every older request dead. Events older than the oldest open request are pruned.
+ * empty and judges every older request dead. A request whose epoch ended by what this log knows leaves `asked`
+ * with its reason; events older than the oldest open request are pruned, a repeat of an event no open request
+ * sits between is not kept, and the list never exceeds EPOCH_EVENTS_CAP.
  */
 export class EpochLog {
   constructor() {
     /** @type {Map<string, { seq: number, sid: string }>} */
     this.asked = new Map()
+    /** @type {Map<string, { why: string, sid: string }>} request id -> why its epoch ended, newest ENDED_CAP kept */
+    this.endedIds = new Map()
     /** @type {EpochEvent[]} */
     this.events = []
     /** @type {Map<string, string | undefined>} */
@@ -302,7 +353,10 @@ export class EpochLog {
     switch (type) {
       case "permission.asked":
       case "question.asked":
-        if (typeof p.id === "string") this.asked.set(p.id, { seq, sid: p.sessionID })
+        if (typeof p.id === "string") {
+          this.endedIds.delete(p.id)
+          this.asked.set(p.id, { seq, sid: p.sessionID })
+        }
         return
       case "permission.replied":
       case "question.replied":
@@ -313,23 +367,51 @@ export class EpochLog {
         if (p.info?.id) this.parent.set(p.info.id, p.info.parentID)
         return
       case "session.status":
-        if (p.status?.type === "idle" || p.status?.type === "retry") this.events.push({ seq, type: p.status.type, sid: p.sessionID })
-        return this.prune()
+        if (p.status?.type === "idle" || p.status?.type === "retry") this.push({ seq, type: p.status.type, sid: p.sessionID })
+        return
       case "session.idle":
-        this.events.push({ seq, type: "idle", sid: p.sessionID })
-        return this.prune()
+        return this.push({ seq, type: "idle", sid: p.sessionID })
       case "session.error":
-        if (p.error?.name === "MessageAbortedError") this.events.push({ seq, type: "abort", sid: p.sessionID })
-        return this.prune()
+        if (p.error?.name === "MessageAbortedError") this.push({ seq, type: "abort", sid: p.sessionID })
+        return
       case "session.deleted": {
         const sid = p.info?.id ?? p.sessionID
-        this.events.push({ seq, type: "deleted", sid })
-        return this.prune()
+        this.push({ seq, type: "deleted", sid })
+        this.parent.delete(sid)
+        return
       }
       case "server.instance.disposed":
-        this.events.push({ seq, type: "disposed" })
-        return this.prune()
+        return this.push({ seq, type: "disposed" })
     }
+  }
+
+  /** @param {EpochEvent} e */
+  push(e) {
+    for (const [id, a] of this.asked) {
+      const why = match(e, a.sid, this.ancestors(a.sid))
+      if (why) this.end(id, a.sid, why)
+    }
+    if (!this.asked.size) return void (this.events.length = 0)
+    let newest = 0
+    for (const a of this.asked.values()) newest = Math.max(newest, a.seq)
+    if (this.events.some((x) => x.type === e.type && x.sid === e.sid && x.seq >= newest)) return this.prune()
+    this.events.push(e)
+    while (this.events.length > EPOCH_EVENTS_CAP) {
+      const dropped = /** @type {EpochEvent} */ (this.events.shift())
+      for (const [id, a] of this.asked) if (a.seq <= dropped.seq) this.end(id, a.sid, this.ended(id, a.sid, []) ?? "asked-before-activation")
+    }
+    this.prune()
+  }
+
+  /**
+   * @param {string} id
+   * @param {string} sid
+   * @param {string} why
+   */
+  end(id, sid, why) {
+    this.asked.delete(id)
+    this.endedIds.set(id, { why, sid })
+    if (this.endedIds.size > ENDED_CAP) this.endedIds.delete(/** @type {string} */ (this.endedIds.keys().next().value))
   }
 
   prune() {
@@ -360,15 +442,26 @@ export class EpochLog {
    */
   ended(id, sid, ancestors) {
     const a = this.asked.get(id)
-    if (!a) return "asked-before-activation"
+    if (!a) return this.endedIds.get(id)?.why ?? "asked-before-activation"
     for (const e of this.events) {
       if (e.seq < a.seq) continue
-      if (e.type === "disposed") return "epoch:disposed"
-      if (e.sid === sid) return "epoch:" + e.type
-      if (e.sid && ancestors.includes(e.sid)) return "epoch:" + e.type + ":ancestor"
+      const why = match(e, sid, ancestors)
+      if (why) return why
     }
     return null
   }
+}
+
+/**
+ * @param {EpochEvent} e
+ * @param {string} sid
+ * @param {string[]} ancestors
+ */
+function match(e, sid, ancestors) {
+  if (e.type === "disposed") return "epoch:disposed"
+  if (e.sid === sid) return "epoch:" + e.type
+  if (e.sid && ancestors.includes(e.sid)) return "epoch:" + e.type + ":ancestor"
+  return null
 }
 
 /**
@@ -388,7 +481,8 @@ export function verdict(f) {
 // ------------------------------------------------------------------------------------------------------ backoff
 
 /**
- * Reconnect delay: 0.5 s doubling to 8 s, ±20% jitter.
+ * Reconnect delay: 0.5 s doubling to 8 s, ±20% jitter. The count starts over once a link has settled a snapshot
+ * or stayed up STABLE_MS, so a daemon that welcomes and drops at once is not redialed at the minimum rate.
  * @param {number} attempt 0 for the first retry
  * @param {number} [rand] in [0, 1)
  */
@@ -453,19 +547,119 @@ const isStart = (v) =>
 
 /**
  * `agent.json` next to this file: the agent's pid and birth time, written by CodeConnect after it started OpenCode.
- * @returns {Start | null}
+ * Read off the main thread, opened non-blocking (a FIFO planted there cannot hold the read), and only when it is a
+ * regular file of at most 4 KiB.
+ * @param {string} [path]
+ * @returns {Promise<Start | null>}
  */
-function readStart() {
+export async function readStart(path = fileURLToPath(new URL("./agent.json", import.meta.url))) {
+  /** @type {import("node:fs/promises").FileHandle | null} */
+  let fh = null
   try {
-    const v = JSON.parse(readFileSync(fileURLToPath(new URL("./agent.json", import.meta.url)), "utf8"))
+    fh = await fsp.open(path, fsc.O_RDONLY | fsc.O_NONBLOCK)
+    const st = await fh.stat()
+    if (!st.isFile() || st.size > AGENT_FILE_CAP) return null
+    const buf = Buffer.alloc(AGENT_FILE_CAP + 1)
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0)
+    if (bytesRead > AGENT_FILE_CAP) return null
+    const v = JSON.parse(buf.subarray(0, bytesRead).toString("utf8"))
     return isStart(v?.start) ? { sec: v.start.sec, usec: v.start.usec } : null
   } catch {
     return null
+  } finally {
+    await fh?.close().catch(() => {})
   }
+}
+
+/**
+ * The daemon's `acked` with every malformed entry dropped: a `ses_` key, `from` a string or null, `inclusive` a
+ * boolean.
+ * @param {unknown} v
+ * @returns {Acked}
+ */
+export function validAcked(v) {
+  /** @type {Acked} */
+  const o = {}
+  if (!v || typeof v !== "object" || Array.isArray(v)) return o
+  for (const [k, b] of Object.entries(v)) {
+    if (!k.startsWith("ses_") || !b || typeof b !== "object") continue
+    const from = /** @type {any} */ (b).from
+    const inclusive = /** @type {any} */ (b).inclusive
+    if ((from === null || typeof from === "string") && typeof inclusive === "boolean") o[k] = { from, inclusive }
+  }
+  return o
 }
 
 /** @param {any} r */
 const ok = (r) => !!r && !r.error && (r.response?.status ?? 200) < 400
+
+/** @param {() => Promise<any>} f */
+const call = async (f) => {
+  try {
+    const r = await f()
+    return { ok: ok(r), data: r?.data, response: r?.response }
+  } catch {
+    return { ok: false, data: undefined, response: undefined }
+  }
+}
+
+/**
+ * The liveness verdict of one pending request, from the server's facts (session, anchoring tool part, ancestor
+ * chain), the TUI store and the activation's epoch log.
+ * @param {{ client: any, state: any, epoch: EpochLog, directory: string | undefined }} env
+ * @param {"permission" | "question"} kind
+ * @param {any} r
+ * @param {boolean | "unknown"} listed
+ * @param {Record<string, any>} status
+ * @param {Map<string, string | null>} parents session -> parent, shared by the requests of one snapshot
+ * @returns {Promise<Verdict>}
+ */
+export async function judge(env, kind, r, listed, status, parents) {
+  const { client, directory: dir, epoch } = env
+  const sid = r.sessionID
+  let inStore = false
+  try {
+    inStore = (env.state.session[kind](sid) ?? []).some((/** @type {any} */ x) => x?.id === r.id)
+  } catch {}
+  const s = status[sid]
+  const busy = !!s && s.type !== "idle"
+  const got = await call(() => client.session.get({ sessionID: sid, directory: dir }))
+  let anchor = false
+  const tool = r.tool
+  if (tool?.messageID) {
+    const m = await call(() => client.session.message({ sessionID: sid, messageID: tool.messageID, directory: dir }))
+    const parts = Array.isArray(m.data?.parts) ? m.data.parts : []
+    const part = parts.find((/** @type {any} */ p) => p?.type === "tool" && p.callID === tool.callID)
+    anchor = m.ok && part?.state?.status === "running" && !m.data?.info?.error && !m.data?.info?.time?.completed
+  } else if (kind === "permission" && r.permission === "doom_loop") {
+    const meta = r.metadata ?? {}
+    const ms = await call(() => client.session.messages({ sessionID: sid, directory: dir, limit: 4 }))
+    const last = (Array.isArray(ms.data) ? ms.data : []).filter((/** @type {any} */ x) => x?.info?.role === "assistant").at(-1)
+    const want = JSON.stringify(meta.input)
+    const running = (Array.isArray(last?.parts) ? last.parts : []).some(
+      (/** @type {any} */ p) => p?.type === "tool" && p.tool === meta.tool && p.state?.status === "running" && JSON.stringify(p.state?.input) === want,
+    )
+    anchor = ms.ok && running && !last?.info?.error && !last?.info?.time?.completed
+  }
+  const chain = new Set(epoch.ancestors(sid))
+  let cur = sid
+  for (let i = 0; i < 8; i++) {
+    let p = parents.get(cur)
+    if (p === undefined) {
+      const g = cur === sid ? got : await call(() => client.session.get({ sessionID: cur, directory: dir }))
+      if (!g.ok) break
+      const parent = typeof g.data?.parentID === "string" ? g.data.parentID : null
+      parents.set(cur, parent)
+      p = parent
+    }
+    if (!p) break
+    chain.add(p)
+    cur = p
+  }
+  return verdict({ listed, inStore, sessionExists: got.ok, busy, anchor, epoch: epoch.ended(r.id, sid, [...chain]) })
+}
+
+const yieldToLoop = () => new Promise((r) => setImmediate(r))
 
 /**
  * @param {Api} api
@@ -499,7 +693,7 @@ function activate(api, socketPath, nonce) {
 
   const filter = new Filter()
   const epoch = new EpochLog()
-  /** @type {Map<string, any>} callID -> the running tool part's input */
+  /** @type {Map<string, { input: any, pid: string, mid: string, sid: string }>} callID -> the running tool part's input */
   const inputs = new Map()
   /** @type {Map<string, string>} root session -> first user message seen in this activation */
   const firstPrompt = new Map()
@@ -522,8 +716,12 @@ function activate(api, socketPath, nonce) {
   let attempt = 0
   let stopped = false
   let disposed = false
+  let dialing = false
+  let lastFull = -Infinity
   /** @type {ReturnType<typeof setTimeout> | null} */
   let retryTimer = null
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let stableTimer = null
   /** @type {Head | null} */
   let head = null
   let headSent = ""
@@ -546,9 +744,17 @@ function activate(api, socketPath, nonce) {
   function track(type, p) {
     epoch.note(seq, type, p)
     if (type === "message.part.updated" && p.part?.type === "tool" && p.part.callID) {
-      const s = p.part.state?.status
-      if (s === "pending" || s === "running") inputs.set(p.part.callID, p.part.state?.input)
-      else inputs.delete(p.part.callID)
+      const pt = p.part
+      const s = pt.state?.status
+      if (s === "pending" || s === "running") inputs.set(pt.callID, { input: pt.state?.input, pid: pt.id, mid: pt.messageID, sid: pt.sessionID })
+      else inputs.delete(pt.callID)
+    }
+    if (type === "message.part.removed") for (const [k, v] of inputs) v.pid === p.partID && inputs.delete(k)
+    if (type === "message.removed") for (const [k, v] of inputs) v.mid === p.messageID && inputs.delete(k)
+    if (type === "session.deleted") {
+      const sid = p.info?.id ?? p.sessionID
+      for (const [k, v] of inputs) v.sid === sid && inputs.delete(k)
+      firstPrompt.delete(sid)
     }
     if (type === "message.updated") {
       const i = p.info
@@ -568,31 +774,35 @@ function activate(api, socketPath, nonce) {
     if (REQUEST_TRIGGERS.has(type) || (type === "session.status" && p.status?.type === "retry")) trigger({ scope: "requests", reason: "trigger:" + type })
     const out = filter.apply(type, p)
     if (out === null || state !== "live") return
-    if (type === "permission.asked" || type === "question.asked") enqueue(cardLine(seq, type, withAnchor(out)), seq)
+    if (type === "permission.asked" || type === "question.asked") enqueue(cardLine(seq, type, withAnchor(out)), seq, true)
     else enqueue(eventLine(seq, type, out), seq)
   }
 
   /** @param {any} request */
   const withAnchor = (request) => {
     const callID = request?.tool?.callID
-    return callID && inputs.has(callID) ? { ...request, anchor_input: inputs.get(callID) } : request
+    const known = callID ? inputs.get(callID) : undefined
+    return known ? { ...request, anchor_input: known.input } : request
   }
 
   // ---- writes
   /**
+   * A frame is written at once, or held while a snapshot is being sent. A card is never held: the daemon keys it by
+   * request id, so it may arrive ahead of the snapshot.
    * @param {Encoded} e
    * @param {number} s
+   * @param {boolean} [card]
    */
-  function enqueue(e, s) {
+  function enqueue(e, s, card = false) {
     const c = sock
     if (!c || state !== "live") return
-    if (syncing) {
+    if (syncing && !card) {
       if (c.writableLength + heldBytes + e.bytes > QUEUE_CAP) return overflow(c)
       held.push({ line: e.line, bytes: e.bytes, seq: s })
       heldBytes += e.bytes
       return
     }
-    if (c.writableLength + e.bytes > QUEUE_CAP) return overflow(c)
+    if (c.writableLength + heldBytes + e.bytes > QUEUE_CAP) return overflow(c)
     c.write(e.line)
   }
 
@@ -692,14 +902,22 @@ function activate(api, socketPath, nonce) {
       return
     }
     pending = t
-    setTimeout(runPending, 0)
+    schedule()
+  }
+
+  /** Runs the pending snapshot on a later tick; a full one no sooner than FULL_SYNC_GAP_MS after the last full one. */
+  function schedule() {
+    const wait = pending?.scope === "full" ? Math.max(0, lastFull + FULL_SYNC_GAP_MS - Date.now()) : 0
+    setTimeout(runPending, wait)
   }
 
   function runPending() {
     const c = sock
     const t = pending
-    pending = null
     if (!t || !c || state !== "live" || syncing) return
+    if (t.scope === "full" && Date.now() < lastFull + FULL_SYNC_GAP_MS) return schedule()
+    pending = null
+    if (t.scope === "full") lastFull = Date.now()
     void runSync(c, t).catch(() => {
       if (sock === c) c.destroy()
     })
@@ -727,23 +945,15 @@ function activate(api, socketPath, nonce) {
       c.write(h.line)
     }
     if (!settled) send(c, { t: "settled", sync })
+    attempt = 0
     held = []
     heldBytes = 0
     syncing = false
-    if (pending) setTimeout(runPending, 0)
-  }
-
-  /** @param {() => Promise<any>} f */
-  const call = async (f) => {
-    try {
-      const r = await f()
-      return { ok: ok(r), data: r?.data, response: r?.response }
-    } catch {
-      return { ok: false, data: undefined, response: undefined }
-    }
+    if (pending) schedule()
   }
 
   /**
+   * A requests-only snapshot: the status, then every pending request with its verdict.
    * @param {Socket} c
    * @param {number} sync
    * @param {string} reason
@@ -764,6 +974,7 @@ function activate(api, socketPath, nonce) {
       done_at: doneAt,
       permissions_ok: reads.permissions.ok,
       questions_ok: reads.questions.ok,
+      requests_ok: reads.permissions.ok && reads.questions.ok,
       lower: {},
       pages: 0,
       items: 0,
@@ -780,6 +991,8 @@ function activate(api, socketPath, nonce) {
       call(() => client.permission.list({ directory: dir })),
       call(() => client.question.list({ directory: dir })),
     ])
+    for (const r of [permissions, questions]) if (r.ok && !Array.isArray(r.data)) r.ok = false
+    if (status.ok && (!status.data || typeof status.data !== "object")) status.ok = false
     return { status, permissions, questions }
   }
 
@@ -792,32 +1005,41 @@ function activate(api, socketPath, nonce) {
    */
   async function sendRequests(c, sync, reads, alive) {
     /** @type {Record<string, any>} */
-    const status = reads.status.ok ? reads.status.data ?? {} : {}
+    const status = reads.status.ok ? reads.status.data : {}
     /** @type {{ kind: "permission" | "question", request: any, listed: boolean | "unknown" }[]} */
     const requests = []
+    const valid = (/** @type {any} */ r) => !!r && typeof r === "object" && typeof r.id === "string" && typeof r.sessionID === "string"
     const fromStore = (/** @type {"permission" | "question"} */ kind) => {
       const seen = new Set()
-      const sids = new Set([...epoch.parent.keys(), ...[...epoch.asked.values()].map((a) => a.sid), ...(head?.session_id ? [head.session_id] : [])])
+      const sids = new Set([
+        ...epoch.parent.keys(),
+        ...[...epoch.asked.values(), ...epoch.endedIds.values()].map((a) => a.sid),
+        ...Object.keys(status),
+        ...(head?.session_id ? [head.session_id] : []),
+      ])
       for (const s of sids) {
         try {
-          for (const r of api.state.session[kind](s) ?? []) if (!seen.has(r.id)) (seen.add(r.id), requests.push({ kind, request: r, listed: "unknown" }))
+          for (const r of api.state.session[kind](s) ?? []) if (valid(r) && !seen.has(r.id)) (seen.add(r.id), requests.push({ kind, request: r, listed: "unknown" }))
         } catch {}
       }
     }
-    if (reads.permissions.ok) for (const r of reads.permissions.data ?? []) requests.push({ kind: "permission", request: r, listed: true })
+    if (reads.permissions.ok) for (const r of reads.permissions.data) valid(r) && requests.push({ kind: "permission", request: r, listed: true })
     else fromStore("permission")
-    if (reads.questions.ok) for (const r of reads.questions.data ?? []) requests.push({ kind: "question", request: r, listed: true })
+    if (reads.questions.ok) for (const r of reads.questions.data) valid(r) && requests.push({ kind: "question", request: r, listed: true })
     else fromStore("question")
     let bytes = 0
     const parents = new Map()
+    const env = { client, state: api.state, epoch, directory: directory() }
     for (const x of requests) {
-      const v = await judge(x.kind, x.request, x.listed, status, parents)
+      const v = await judge(env, x.kind, x.request, x.listed, status, parents)
       if (!alive()) return null
       const request = withAnchor(x.request)
-      const frame = { t: "sync_request", sync, kind: x.kind, request: prepare(request, CARD_FIELDS), verdict: v }
-      let line = JSON.stringify(frame) + "\n"
-      const nb = utf8(line)
-      if (nb > FRAME_CAP) line = JSON.stringify({ t: "sync_request", sync, kind: x.kind, stub: { properties: cardIds(request), size: nb, sha256: sha256(line) }, verdict: v }) + "\n"
+      const json = JSON.stringify({ t: "sync_request", sync, kind: x.kind, request: prepare(request, CARD_FIELDS), verdict: v })
+      const nb = utf8(json) + 1
+      const line =
+        nb > FRAME_CAP
+          ? JSON.stringify({ t: "sync_request", sync, kind: x.kind, stub: { properties: cardIds(request), size: nb - 1, sha256: sha256(json) }, verdict: v }) + "\n"
+          : json + "\n"
       bytes += utf8(line)
       c.write(line)
       if (c.writableLength > 0) await drained(c)
@@ -827,58 +1049,8 @@ function activate(api, socketPath, nonce) {
   }
 
   /**
-   * @param {"permission" | "question"} kind
-   * @param {any} r
-   * @param {boolean | "unknown"} listed
-   * @param {Record<string, any>} status
-   * @param {Map<string, string | null>} parents
-   * @returns {Promise<Verdict>}
-   */
-  async function judge(kind, r, listed, status, parents) {
-    const dir = directory()
-    const sid = r.sessionID
-    let inStore = false
-    try {
-      inStore = (api.state.session[kind](sid) ?? []).some((/** @type {any} */ x) => x.id === r.id)
-    } catch {}
-    const s = status[sid]
-    const busy = !!s && s.type !== "idle"
-    const got = await call(() => client.session.get({ sessionID: sid, directory: dir }))
-    let anchor = false
-    const tool = r.tool
-    if (tool?.messageID) {
-      const m = await call(() => client.session.message({ sessionID: sid, messageID: tool.messageID, directory: dir }))
-      const part = (m.data?.parts ?? []).find((/** @type {any} */ p) => p.type === "tool" && p.callID === tool.callID)
-      anchor = m.ok && part?.state?.status === "running" && !m.data?.info?.error && !m.data?.info?.time?.completed
-    } else if (kind === "permission" && r.permission === "doom_loop") {
-      const meta = r.metadata ?? {}
-      const ms = await call(() => client.session.messages({ sessionID: sid, directory: dir, limit: 4 }))
-      const last = (ms.data ?? []).filter((/** @type {any} */ x) => x.info.role === "assistant").at(-1)
-      const running = (last?.parts ?? []).some(
-        (/** @type {any} */ p) =>
-          p.type === "tool" && p.tool === meta.tool && p.state?.status === "running" && JSON.stringify(p.state?.input) === JSON.stringify(meta.input),
-      )
-      anchor = ms.ok && running && !last?.info?.error && !last?.info?.time?.completed
-    }
-    const chain = new Set(epoch.ancestors(sid))
-    let cur = sid
-    for (let i = 0; i < 8; i++) {
-      let p = parents.get(cur)
-      if (p === undefined) {
-        const g = cur === sid ? got : await call(() => client.session.get({ sessionID: cur, directory: dir }))
-        if (!g.ok) break
-        const parent = typeof g.data?.parentID === "string" ? g.data.parentID : null
-        parents.set(cur, parent)
-        p = parent
-      }
-      if (!p) break
-      chain.add(p)
-      cur = p
-    }
-    return verdict({ listed, inStore, sessionExists: got.ok, busy, anchor, epoch: epoch.ended(r.id, sid, [...chain]) })
-  }
-
-  /**
+   * A full snapshot: the status, the pending requests, then the history pages of every root in the window (each
+   * root's messages newest first, as the server pages them), then its children created inside the window.
    * @param {Socket} c
    * @param {number} sync
    * @param {string} reason
@@ -889,14 +1061,24 @@ function activate(api, socketPath, nonce) {
   async function fullSync(c, sync, reason, asOf, alive) {
     const dir = directory()
     const status = await call(() => client.session.status({ directory: dir }))
+    if (status.ok && (!status.data || typeof status.data !== "object")) status.ok = false
     if (!alive()) return null
-    send(c, { t: "sync_begin", sync, reason, scope: "full", as_of: asOf, status: status.data ?? {}, status_ok: status.ok })
+    /** @type {Record<string, any>} */
+    const statusData = status.ok ? status.data : {}
+    send(c, { t: "sync_begin", sync, reason, scope: "full", as_of: asOf, status: statusData, status_ok: status.ok })
     const list = await call(() => client.session.list({ directory: dir }))
     if (!alive()) return null
+    const listOk = list.ok && Array.isArray(list.data)
     /** @type {any[]} */
-    const infos = list.ok && Array.isArray(list.data) ? list.data : []
-    for (const x of infos) if (x?.parentID && !epoch.parent.has(x.id)) epoch.parent.set(x.id, x.parentID)
-    const busy = new Set(Object.entries(status.data ?? {}).filter(([, v]) => v?.type !== "idle").map(([k]) => k))
+    const infos = listOk ? list.data.filter((/** @type {any} */ x) => !!x && typeof x === "object" && typeof x.id === "string") : []
+    for (const x of infos) if (typeof x.parentID === "string" && !epoch.parent.has(x.id)) epoch.parent.set(x.id, x.parentID)
+
+    const reads = await readRequests()
+    if (!alive()) return null
+    const n = await sendRequests(c, sync, reads, alive)
+    if (n === null) return null
+
+    const busy = new Set(Object.entries(statusData).filter(([, v]) => v?.type !== "idle").map(([k]) => k))
     const roots = infos.filter((x) => !x.parentID && (x.id in acked || busy.has(x.id) || firstPrompt.has(x.id)))
 
     /** @type {Record<string, Bound>} */
@@ -905,7 +1087,7 @@ function activate(api, socketPath, nonce) {
     const mode = {}
     for (const r of roots) {
       if (r.id in acked) {
-        lower[r.id] = { from: acked[r.id].from, inclusive: !!acked[r.id].inclusive }
+        lower[r.id] = { from: acked[r.id].from, inclusive: acked[r.id].inclusive }
         mode[r.id] = acked[r.id].from === null ? "start" : "bound"
       } else if ((r.time?.created ?? 0) >= T0) {
         lower[r.id] = { from: null, inclusive: false }
@@ -936,14 +1118,19 @@ function activate(api, socketPath, nonce) {
       c.write(line)
       if (c.writableLength > 0) await drained(c)
     }
-    /** @param {any} item */
-    const add = async (item) => {
-      let nb = encodedLength(item) + 1
+    /**
+     * One page item; `size` is its encoded length when the caller already knows it. An item that cannot fit a page
+     * becomes a stub whose size and sha256 cover the item's encoded JSON.
+     * @param {any} item
+     * @param {number} [size]
+     */
+    const add = async (item, size = encodedLength(item)) => {
+      let nb = size + 1
       if (ENVELOPE + nb > PAGE_CAP) {
         const s = JSON.stringify(item)
         const kind = item.part ? "part" : item.session ? "session" : "message"
         const keyed = item.part ? { sessionID: item.sessionID, part: item.part } : item.session ? { sessionID: item.session.id } : item
-        item = { stub: true, kind, ids: ids(keyed), size: utf8(s), sha256: sha256(s) }
+        item = { stub: true, kind, ids: ids(keyed), ...(item.part ? partShape(item.part) : {}), size: utf8(s), sha256: sha256(s) }
         nb = encodedLength(item) + 1
       }
       if (ENVELOPE + pageBytes + nb > PAGE_CAP) await flush()
@@ -978,58 +1165,72 @@ function activate(api, socketPath, nonce) {
       for (let n = 0; n < 100000 && alive(); n++) {
         const r = await call(() => client.session.messages({ sessionID: sid, directory: dir, limit: API_PAGE_LIMIT, ...(before ? { before } : {}) }))
         if (!alive()) return oldest
-        if (!r.ok) {
+        if (!r.ok || !Array.isArray(r.data)) {
           await add({ error: true, sessionID: sid })
           return oldest
         }
         /** @type {any[]} */
-        const msgs = Array.isArray(r.data) ? r.data : []
+        const msgs = r.data
         let reached = false
         for (let i = msgs.length - 1; i >= 0 && !reached; i--) {
           const m = msgs[i]
-          const k = all ? "keep" : keep(root, m.info.id, m.info.role)
+          const id = m?.info?.id
+          if (typeof id !== "string") continue
+          const k = all ? "keep" : keep(root, id, m.info.role)
           if (k === "stop") {
             reached = true
             continue
           }
           if (k === "last") {
             reached = true
-            lower[root] = { from: m.info.id, inclusive: true }
+            lower[root] = { from: id, inclusive: true }
           }
-          oldest = Math.min(oldest, m.info.time?.created ?? Infinity)
+          const created = m.info.time?.created
+          if (typeof created === "number") oldest = Math.min(oldest, created)
           await message(sid, m)
+          if (!alive()) return oldest
+          await yieldToLoop()
           if (!alive()) return oldest
         }
         const cursor = r.response?.headers?.get?.("x-next-cursor")
-        if (reached || !cursor || !msgs.length) break
+        if (reached || typeof cursor !== "string" || !cursor || !msgs.length) break
         before = cursor
       }
       return oldest
     }
     /**
-     * A message as one item, or split across items in part order when it does not fit a page.
+     * A message as one item, or split across items in part order when it does not fit a page. Every part is
+     * encoded once; the item sizes are sums of those lengths.
      * @param {string} sid
      * @param {any} m
      */
     const message = async (sid, m) => {
       const info = prepare(m.info)
-      const parts = (m.parts ?? []).map((/** @type {any} */ p) => prepare(p))
-      const whole = { sessionID: sid, info, parts }
-      if (ENVELOPE + encodedLength(whole) + 1 <= PAGE_CAP) return add(whole)
-      /** @type {any[]} */
-      let chunk = []
-      for (const p of parts) {
-        if (chunk.length && ENVELOPE + encodedLength({ sessionID: sid, info, parts: [...chunk, p], split: true }) + 1 > PAGE_CAP) {
-          await add({ sessionID: sid, info, parts: chunk, split: true })
-          chunk = []
+      const parts = (Array.isArray(m.parts) ? m.parts : []).filter((/** @type {any} */ p) => !!p && typeof p === "object").map((/** @type {any} */ p) => prepare(p))
+      const sizes = parts.map((/** @type {any} */ p) => encodedLength(p))
+      // `[a,b]` encodes to the elements' lengths plus a comma between each pair.
+      const span = (/** @type {number} */ from, /** @type {number} */ to) => {
+        let n = Math.max(0, to - from - 1)
+        for (let i = from; i < to; i++) n += sizes[i]
+        return n
+      }
+      const wholeBase = encodedLength({ sessionID: sid, info, parts: [] })
+      if (ENVELOPE + wholeBase + span(0, parts.length) + 1 <= PAGE_CAP) return add({ sessionID: sid, info, parts }, wholeBase + span(0, parts.length))
+      const splitBase = encodedLength({ sessionID: sid, info, parts: [], split: true })
+      const oneBase = encodedLength({ sessionID: sid, info, part: 0, split: true }) - 1
+      const fits = (/** @type {number} */ size) => ENVELOPE + size + 1 <= PAGE_CAP
+      let from = 0
+      for (let i = 0; i < parts.length; i++) {
+        if (i > from && !fits(splitBase + span(from, i + 1))) {
+          await add({ sessionID: sid, info, parts: parts.slice(from, i), split: true }, splitBase + span(from, i))
+          from = i
         }
-        chunk.push(p)
-        if (chunk.length === 1 && ENVELOPE + encodedLength({ sessionID: sid, info, parts: chunk, split: true }) + 1 > PAGE_CAP) {
-          await add({ sessionID: sid, info, part: p, split: true })
-          chunk = []
+        if (i === from && !fits(splitBase + sizes[i])) {
+          await add({ sessionID: sid, info, part: parts[i], split: true }, oneBase + sizes[i])
+          from = i + 1
         }
       }
-      if (chunk.length) await add({ sessionID: sid, info, parts: chunk, split: true })
+      if (from < parts.length) await add({ sessionID: sid, info, parts: parts.slice(from), split: true }, splitBase + span(from, parts.length))
     }
 
     const want = new Set(roots.map((r) => r.id))
@@ -1041,7 +1242,7 @@ function activate(api, socketPath, nonce) {
       if (!alive()) return null
     }
     for (const k of infos) {
-      if (!k.parentID || !want.has(rootOf(k.id))) continue
+      if (typeof k.parentID !== "string" || !want.has(rootOf(k.id))) continue
       if ((k.time?.created ?? 0) < (start[rootOf(k.id)] ?? Infinity)) continue
       await add({ session: prepare(k) })
       await window(k.id, rootOf(k.id), true)
@@ -1049,17 +1250,15 @@ function activate(api, socketPath, nonce) {
     }
     await flush()
     if (!alive()) return null
-    const reads = await readRequests()
-    if (!alive()) return null
-    const n = await sendRequests(c, sync, reads, alive)
-    if (n === null) return null
     const doneAt = seq
     send(c, {
       t: "sync_end",
       sync,
       done_at: doneAt,
+      list_ok: listOk,
       permissions_ok: reads.permissions.ok,
       questions_ok: reads.questions.ok,
+      requests_ok: reads.permissions.ok && reads.questions.ok,
       lower,
       pages,
       items,
@@ -1070,10 +1269,13 @@ function activate(api, socketPath, nonce) {
   }
 
   // ---- connection
-  function connect() {
+  async function connect() {
     retryTimer = null
-    if (disposed || stopped) return
-    const start = readStart()
+    if (disposed || stopped || dialing) return
+    dialing = true
+    const start = await readStart()
+    dialing = false
+    if (disposed || stopped || sock) return
     if (!start) return retry()
     /** @type {Socket} */
     let c
@@ -1119,6 +1321,8 @@ function activate(api, socketPath, nonce) {
     c.on("end", () => c.destroy())
     c.on("close", () => {
       clearTimeout(timer)
+      if (stableTimer) clearTimeout(stableTimer)
+      stableTimer = null
       if (sock !== c) return
       sock = null
       state = "down"
@@ -1133,7 +1337,7 @@ function activate(api, socketPath, nonce) {
 
   function retry() {
     if (disposed || stopped || retryTimer) return
-    retryTimer = setTimeout(connect, backoffDelay(attempt++))
+    retryTimer = setTimeout(() => void connect(), backoffDelay(attempt++))
   }
 
   /**
@@ -1143,9 +1347,11 @@ function activate(api, socketPath, nonce) {
   function receive(c, m) {
     if (state === "hello") {
       if (m?.type === "opencode_welcome") {
-        attempt = 0
-        acked = m.acked && typeof m.acked === "object" ? m.acked : {}
+        acked = validAcked(m.acked)
         state = "live"
+        stableTimer = setTimeout(() => {
+          if (sock === c && state === "live") attempt = 0
+        }, STABLE_MS)
         sendHead()
         trigger({ scope: "full", reason: "connect" })
       } else if (m?.type === "opencode_refused") {
@@ -1155,7 +1361,7 @@ function activate(api, socketPath, nonce) {
       return
     }
     if (m?.type === "opencode_resync") {
-      if (m.acked && typeof m.acked === "object") acked = m.acked
+      if (m.acked !== undefined) acked = validAcked(m.acked)
       trigger({ scope: "full", reason: "requested" })
     }
   }
@@ -1175,7 +1381,8 @@ function activate(api, socketPath, nonce) {
     api.lifecycle.onDispose(() => {
       disposed = true
       if (retryTimer) clearTimeout(retryTimer)
-      retryTimer = null
+      if (stableTimer) clearTimeout(stableTimer)
+      retryTimer = stableTimer = null
       for (const off of unsubscribe.splice(0)) {
         try {
           off()
@@ -1201,7 +1408,7 @@ function activate(api, socketPath, nonce) {
         check.missing.push("solid-js")
       })
       .finally(() => {
-        if (!disposed && !sock && !retryTimer) connect()
+        if (!disposed && !sock && !retryTimer) void connect()
       })
   }, 0)
 }

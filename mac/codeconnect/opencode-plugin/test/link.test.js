@@ -2,6 +2,9 @@
 // report, backoff, the queue cap, the paged snapshot and its bounds, held frames and `settled`, coalesced
 // triggers, the head, and dispose.
 import { afterEach, describe, expect, test } from "bun:test"
+import { spawnSync } from "node:child_process"
+import { mkdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { fakeApi } from "./fake-api.js"
 import { fakeCcd, loadPlugin, refuse, settled, sleep, START, until, welcome, writeAgent } from "./helpers.js"
 
@@ -72,6 +75,22 @@ describe("hello", () => {
     await until(() => ccd.last()?.hello, 3000)
   })
 
+  test("agent.json is read only as a regular file of at most 4 KiB; a FIFO there does not hold the read", async () => {
+    const { mod, dir } = await loadPlugin()
+    const at = (/** @type {string} */ n) => join(dir, n)
+    writeFileSync(at("ok.json"), JSON.stringify({ pid: 1, start: START }))
+    expect(await mod.readStart(at("ok.json"))).toEqual(START)
+    writeFileSync(at("big.json"), JSON.stringify({ pid: 1, start: START, pad: "x".repeat(5000) }))
+    expect(await mod.readStart(at("big.json"))).toBeNull()
+    expect(spawnSync("mkfifo", [at("fifo.json")]).status).toBe(0)
+    const t0 = Date.now()
+    expect(await mod.readStart(at("fifo.json"))).toBeNull()
+    expect(Date.now() - t0).toBeLessThan(1000)
+    mkdirSync(at("dir.json"))
+    expect(await mod.readStart(at("dir.json"))).toBeNull()
+    expect(await mod.readStart(at("missing.json"))).toBeNull()
+  })
+
   test("a final refusal stops dialing; a non-final one backs off and dials again", async () => {
     let n = 0
     const a = await setup({ onHello: (_h, c) => refuse(c, true) })
@@ -114,7 +133,7 @@ describe("connection", () => {
     }
   })
 
-  test("a queue over 4 MiB closes the link instead of growing", async () => {
+  test("a queue over 4 MiB closes the link instead of growing, and the next link resyncs", async () => {
     const { ccd, f } = await setup({ read: false })
     const c = await until(() => ccd.last())
     welcome(c)
@@ -126,8 +145,28 @@ describe("connection", () => {
       await sleep(1)
     }
     await until(() => c.closed, 3000)
-    expect(ccd.conns.length).toBeGreaterThanOrEqual(1)
+    const next = await until(() => ccd.conns.length === 2 && ccd.last(), 3000)
+    next.socket.resume()
+    await until(() => next.hello)
+    welcome(next)
+    await until(() => next.frames.some((/** @type {any} */ x) => x.t === "settled"), 5000)
+    expect(next.frames.find((/** @type {any} */ x) => x.t === "sync_begin")).toMatchObject({ reason: "connect", scope: "full" })
   })
+
+  test("the backoff starts over only once a link settles, not at a welcome", async () => {
+    const { ccd } = await setup({
+      onHello: (_h, c) => {
+        welcome(c)
+        setTimeout(() => c.socket.destroy(), 5)
+      },
+      api: (f) => (f.server.delay = 100),
+    })
+    await until(() => ccd.conns.length === 4, 8000)
+    const t = ccd.conns.map((/** @type {any} */ c) => c.at)
+    const gaps = t.slice(1).map((/** @type {number} */ v, /** @type {number} */ i) => v - t[i])
+    expect(gaps[0]).toBeLessThan(900)
+    expect(gaps[2]).toBeGreaterThan(1500)
+  }, 12000)
 
   test("dispose closes the link and stops reconnecting", async () => {
     const { ccd, f } = await setup()
@@ -151,6 +190,7 @@ describe("sync", () => {
     })
     const c = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())
     expect(kinds(c)).toEqual(["opencode_hello", "head", "sync_begin", "sync_page", "sync_end", "settled"])
+    expect(c.frames.find((/** @type {any} */ x) => x.t === "sync_end")).toMatchObject({ list_ok: true, requests_ok: true })
     const [begin, , end] = c.frames.slice(2)
     expect(begin).toEqual({ t: "sync_begin", sync: 1, reason: "connect", scope: "full", as_of: 1, status: { ses_a: { type: "busy" } }, status_ok: true })
     expect(end).toMatchObject({ t: "sync_end", sync: 1, permissions_ok: true, questions_ok: true, lower: { ses_a: { from: null, inclusive: false } }, pages: 1, items: 3, activation: 1 })
@@ -261,6 +301,33 @@ describe("sync", () => {
     await until(() => settled(c, 3), 3000)
     expect(c.frames.filter((/** @type {any} */ x) => x.t === "sync_begin").at(-1)).toMatchObject({ sync: 3, scope: "full", reason: "requested" })
   })
+
+  test("full snapshots start at least a second apart", async () => {
+    const { ccd } = await setup()
+    const c = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())
+    for (let i = 0; i < 3; i++) c.socket.write(JSON.stringify({ type: "opencode_resync", acked: {} }) + "\n")
+    await until(() => settled(c, 2), 3000)
+    await sleep(1300)
+    const begins = c.wire.filter((/** @type {any} */ w) => w.line.startsWith('{"t":"sync_begin"'))
+    expect(begins.length).toBe(2)
+    expect(c.at2 - c.at1).toBeGreaterThanOrEqual(950)
+  })
+
+  test("a failed session list is reported, and a malformed acked entry is dropped", async () => {
+    const { ccd, f } = await setup({
+      onHello: (_h, c) => welcome(c, { ses_ok: { from: null, inclusive: false }, ses_bad: { from: 5, inclusive: false }, nope: { from: null, inclusive: true }, ses_x: null }),
+      api: (f) => f.server.failing.add("session.list"),
+    })
+    const c = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())
+    expect(c.frames.find((/** @type {any} */ x) => x.t === "sync_end")).toMatchObject({ list_ok: false, requests_ok: true, lower: {}, pages: 0 })
+    f.server.failing.delete("session.list")
+    f.server.sessions = [session("ses_ok", 1), session("ses_bad", 1)]
+    f.server.messages.set("ses_ok", [msg("ses_ok", 1, "user")])
+    f.server.messages.set("ses_bad", [msg("ses_bad", 1, "user")])
+    c.socket.write(JSON.stringify({ type: "opencode_resync", acked: { ses_ok: { from: null, inclusive: false }, ses_bad: { from: 5, inclusive: false } } }) + "\n")
+    await until(() => settled(c, 2), 3000)
+    expect(c.frames.filter((/** @type {any} */ x) => x.t === "sync_end").at(-1).lower).toEqual({ ses_ok: { from: null, inclusive: false } })
+  })
 })
 
 describe("requests", () => {
@@ -306,6 +373,66 @@ describe("requests", () => {
     const card = c.frames.find((/** @type {any} */ x) => x.type === "permission.asked")
     expect(card.properties.anchor_input).toEqual({ command: "echo" })
     expect(c.frames.find((/** @type {any} */ x) => x.t === "card_stub")).toMatchObject({ type: "question.asked", properties: { id: "que_1", sessionID: "ses_c", tool: { messageID: "m", callID: "call_x" } } })
+  })
+})
+
+describe("requests across links and activations", () => {
+  const T = Date.now() + 60000
+  const perm = { id: "per_e", sessionID: "ses_e", permission: "bash", patterns: ["ls"], metadata: { command: "ls" }, always: ["ls *"], tool: { messageID: "msg_ses_e_002", callID: "call_e" } }
+  /** @param {ReturnType<typeof fakeApi>} f */
+  const serve = (f) => {
+    f.server.sessions = [session("ses_e", T)]
+    const m = msg("ses_e", 2)
+    m.info.time.completed = undefined
+    m.parts = [{ id: "prt_e", sessionID: "ses_e", messageID: m.info.id, type: "tool", callID: "call_e", tool: "bash", state: { status: "running", input: { command: "ls" } } }]
+    f.server.messages.set("ses_e", [msg("ses_e", 1, "user"), m])
+    f.server.status = { ses_e: { type: "busy" } }
+    f.server.permissions = [perm]
+  }
+  /** @param {any} c @param {number} sync */
+  const verdictOf = (c, sync) => c.frames.find((/** @type {any} */ x) => x.t === "sync_request" && x.sync === sync)?.verdict
+
+  test("the pending list comes before any history page, and a card asked during a snapshot is not held", async () => {
+    const { ccd, f } = await setup({ api: serve })
+    f.emit("permission.asked", perm)
+    let once = true
+    f.server.before["session.messages"] = () => {
+      if (once) f.emit("question.asked", { id: "que_mid", sessionID: "ses_e", questions: [{ question: "?" }] })
+      once = false
+    }
+    const c = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())
+    const k = kinds(c)
+    expect(k.indexOf("sync_request")).toBeLessThan(k.indexOf("sync_page"))
+    const card = c.frames.findIndex((/** @type {any} */ x) => x.type === "question.asked")
+    expect(card).toBeGreaterThan(-1)
+    expect(card).toBeLessThan(k.indexOf("sync_end"))
+  })
+
+  test("the epoch log outlives a reconnect and starts over at a new activation", async () => {
+    const p = await loadPlugin()
+    const ccd = fakeCcd(p.socket)
+    const f1 = fakeApi()
+    serve(f1)
+    cleanups.push(p.cleanup, () => ccd.close(), () => f1.dispose())
+    await p.mod.default.tui(/** @type {any} */ (f1.api), { socket: p.socket, nonce: NONCE }, /** @type {any} */ ({}))
+    f1.emit("message.part.updated", { sessionID: "ses_e", part: f1.server.messages.get("ses_e")?.[1].parts[0] })
+    f1.emit("permission.asked", perm)
+    const a = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())
+    expect(a.hello.activation).toBe(1)
+    expect(verdictOf(a, 1)).toEqual({ live: true, dead: null, listed: true, in_store: false })
+    a.socket.end()
+    const b = await until(() => ccd.conns.length === 2 && settled(ccd.last(), 2) && ccd.last(), 4000)
+    expect(b.hello.activation).toBe(1)
+    expect(verdictOf(b, 2)).toEqual({ live: true, dead: null, listed: true, in_store: false })
+
+    f1.dispose()
+    const f2 = fakeApi()
+    serve(f2)
+    cleanups.push(() => f2.dispose())
+    await p.mod.default.tui(/** @type {any} */ (f2.api), { socket: p.socket, nonce: NONCE }, /** @type {any} */ ({}))
+    const c = await until(() => ccd.conns.length === 3 && settled(ccd.last(), 1) && ccd.last(), 4000)
+    expect(c.hello.activation).toBe(2)
+    expect(verdictOf(c, 1)).toEqual({ live: false, dead: "asked-before-activation", listed: true, in_store: false })
   })
 })
 

@@ -2,6 +2,9 @@
 // line either side wrote is recorded in order as {"dir":"plugin"|"ccd","frame":…}. The run must reproduce
 // fixtures/opencode/link-v1-frames.jsonl byte for byte; the daemon's tests decode and map the same file.
 // The hello's pid is the only value normalised (to 4242). CC_OPENCODE_CONTRACT_WRITE=1 rewrites the file.
+// Rows with a "case" key are hand-written examples of what this run does not reach (a failed list, a second
+// activation, split and stubbed history items, …); they are kept on a rewrite and must have the frame shapes the
+// run's own frames have.
 import { afterEach, expect, test } from "bun:test"
 import { readFileSync, writeFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
@@ -102,9 +105,67 @@ test("the scripted run reproduces link-v1-frames.jsonl", async () => {
     return JSON.stringify({ dir: w.dir, frame }) + "\n"
   })
   const text = rows.join("")
-  if (process.env.CC_OPENCODE_CONTRACT_WRITE === "1") writeFileSync(fileURLToPath(FILE), text)
-  const want = readFileSync(FILE, "utf8").split("\n").filter(Boolean)
+  const file = readFileSync(FILE, "utf8").split("\n").filter(Boolean)
+  const golden = file.filter((l) => "case" in JSON.parse(l))
+  if (process.env.CC_OPENCODE_CONTRACT_WRITE === "1") writeFileSync(fileURLToPath(FILE), text + golden.map((l) => l + "\n").join(""))
+  const want = readFileSync(FILE, "utf8").split("\n").filter(Boolean).filter((l) => !("case" in JSON.parse(l)))
   const got = text.split("\n").filter(Boolean)
   expect(got.length).toBe(want.length)
   for (let i = 0; i < want.length; i++) expect(got[i]).toBe(want[i])
+  for (const l of got) expect(shapeErrors(JSON.parse(l).frame)).toEqual([])
+  expect(golden.length).toBeGreaterThan(0)
+  for (const l of golden) {
+    const g = JSON.parse(l)
+    expect(Object.keys(g)).toEqual(["dir", "case", "frame"])
+    expect([g.case, shapeErrors(g.frame)]).toEqual([g.case, []])
+  }
 })
+
+/** The keys of every frame and page item, in the order the plugin writes them. */
+const FRAME = {
+  opencode_hello: [["type", "wire", "nonce", "pid", "start", "activation", "directory", "api"]],
+  opencode_welcome: [["type", "link", "acked"]],
+  opencode_resync: [["type", "acked"]],
+  head: [["t", "seq", "route"], ["t", "seq", "route", "session_id", "directory"]],
+  ev: [["t", "seq", "type", "properties"]],
+  stub: [["t", "seq", "type", "ids", "size", "sha256"], ["t", "seq", "type", "ids", "part_type", "size", "sha256"], ["t", "seq", "type", "ids", "part_type", "status", "size", "sha256"]],
+  card_stub: [["t", "seq", "type", "properties", "size", "sha256"]],
+  sync_begin: [["t", "sync", "reason", "scope", "as_of", "status", "status_ok"]],
+  sync_page: [["t", "sync", "n", "items"]],
+  sync_request: [["t", "sync", "kind", "request", "verdict"], ["t", "sync", "kind", "stub", "verdict"]],
+  sync_end: [
+    ["t", "sync", "done_at", "list_ok", "permissions_ok", "questions_ok", "requests_ok", "lower", "pages", "items", "bytes", "activation"],
+    ["t", "sync", "done_at", "permissions_ok", "questions_ok", "requests_ok", "lower", "pages", "items", "bytes", "activation"],
+  ],
+  settled: [["t", "sync"]],
+}
+const ITEM = [
+  ["session"],
+  ["sessionID", "info", "parts"],
+  ["sessionID", "info", "parts", "split"],
+  ["sessionID", "info", "part", "split"],
+  ["stub", "kind", "ids", "size", "sha256"],
+  ["stub", "kind", "ids", "part_type", "size", "sha256"],
+  ["stub", "kind", "ids", "part_type", "status", "size", "sha256"],
+  ["error", "sessionID"],
+]
+const DEAD = /^(absent|session-missing|not-busy|anchor|asked-before-activation|epoch:(abort|stop|idle|retry|deleted|disposed)(:ancestor)?)$/
+
+/** @param {any} f */
+function shapeErrors(f) {
+  const errs = []
+  const kind = f.t ?? f.type
+  const keys = JSON.stringify(Object.keys(f))
+  if (!(/** @type {Record<string, string[][]>} */ (FRAME))[kind]?.some((k) => JSON.stringify(k) === keys)) errs.push(`${kind}: keys ${keys}`)
+  if (kind === "sync_page")
+    for (const it of f.items) if (!ITEM.some((k) => JSON.stringify(k) === JSON.stringify(Object.keys(it)))) errs.push(`item keys ${JSON.stringify(Object.keys(it))}`)
+  if (kind === "sync_request") {
+    const v = f.verdict
+    if (JSON.stringify(Object.keys(v)) !== '["live","dead","listed","in_store"]') errs.push("verdict keys")
+    if (v.live !== (v.dead === null) || (v.dead !== null && !DEAD.test(v.dead))) errs.push("verdict " + JSON.stringify(v))
+    if (![true, false, "unknown"].includes(v.listed)) errs.push("listed")
+  }
+  for (const b of Object.values(f.lower ?? f.acked ?? {}))
+    if (!(b.from === null || typeof b.from === "string") || typeof b.inclusive !== "boolean") errs.push("bound " + JSON.stringify(b))
+  return errs
+}

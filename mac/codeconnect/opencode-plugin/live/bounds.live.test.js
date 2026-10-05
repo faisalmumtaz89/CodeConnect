@@ -3,15 +3,30 @@
 //     no frame is over 1 MiB, the queue stays under 4 MiB plus one page;
 //   - B-w64: a session of many 60 KB writes, made headless, then opened with `-s` while the daemon acks nothing:
 //     every page is at most 256 KiB, and the resync after a cut is incremental;
-//   - flood: keystroke echo p50 with the plugin is within 2 ms of the same OpenCode without it, over at least five
-//     runs each, while a turn floods the bus; frames and queue stay inside the same bounds.
+//   - flood: while a turn floods the bus, what the plugin costs OpenCode's main thread, measured inside OpenCode
+//     against a control build that only samples the lag: its listeners' time per call and per run, the main thread's
+//     lag beside the control's, and the keystroke echo pooled over every run; frames and queue stay inside the same
+//     bounds.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { LIVE, instrumented, pct, Rig, sleep } from "./harness.js"
+import { LIVE, instrumented, lagBetween, lagProbe, pct, Rig, sleep } from "./harness.js"
 
 const MiB = 1048576
 const PAGE = 262144
 const RUNS = Number(process.env.CC_OPENCODE_LIVE_RUNS || 5)
+// Flood thresholds. Basis: 12 runs per arm on Linux (4 cores), OpenCode 1.18.34, each run a 20 s flood.
+// - One listener call: measured 4.9-20.5 ms at most per run (garbage collection landing inside a call). 50 ms is
+//   the point where a single stall becomes a visible hitch at the keyboard.
+const LISTENER_MAX_MS = 50
+// - All listener calls of one run (about 395 calls): measured 47-117 ms. 400 ms is 2% of the flood.
+const LISTENER_TOTAL_MS = 400
+// - Main-thread lag, median over runs of each run's 99th percentile: 41 ms without the plugin, 48 ms with it; two
+//   groups of 5 runs from the same arm differ by up to 11 ms. The margin is that noise plus the measured cost.
+const LAG_P99_MARGIN_MS = 20
+// - Keystroke echo p50 pooled over every run: 31 ms without, 32 ms with; two groups of 5 runs from the same arm
+//   differ by at most 3 ms (5,000 random splits). Total lag is printed but not asserted: OpenCode's own freezes
+//   while it renders the long reply make it vary by over 4 s between runs of the same arm.
+const ECHO_P50_MARGIN_MS = 4
 const TURNS = Number(process.env.CC_OPENCODE_LIVE_TURNS || 200)
 
 /** @param {any[]} recs */
@@ -25,7 +40,8 @@ describe.skipIf(!LIVE)("live bounds", () => {
   /** @type {Rig} */
   let rig
   beforeAll(async () => {
-    rig = await new Rig().start()
+    rig = new Rig()
+    await rig.start()
     await rig.startCcd()
     await rig.launch()
     await rig.ready(60000)
@@ -33,7 +49,7 @@ describe.skipIf(!LIVE)("live bounds", () => {
     await rig.waitFor("fast reply done", 60000)
     await rig.reset()
   }, 90000)
-  afterAll(async () => rig && (await rig.close()))
+  afterAll(async () => rig && (await rig.close()), 30000)
 
   test("A-many: 150 x 60 KB files", async () => {
     await rig.launch({ plugin: instrumented() })
@@ -44,7 +60,7 @@ describe.skipIf(!LIVE)("live bounds", () => {
     await sleep(2000)
     const recs = rig.records()
     const st = rig.stats()
-    console.log("A-many:", JSON.stringify({ frames: linkFrames(recs).length, largestFrame: largest(recs), connections: conns(recs), plugin: st }))
+    console.log("A-many:", JSON.stringify({ frames: linkFrames(recs).length, largestFrame: largest(recs), connections: conns(recs), plugin: { ...st, lag: undefined } }))
     expect(conns(recs)).toBe(1)
     expect(largest(recs)).toBeLessThanOrEqual(MiB)
     expect(st.drops).toBe(0)
@@ -54,18 +70,19 @@ describe.skipIf(!LIVE)("live bounds", () => {
   test(`B-w64: ${TURNS} turns of 60 KB writes, resynced from the start`, async () => {
     await rig.reset()
     rig.stopCcd()
-    const port = 20000 + (process.pid % 20000)
-    const serve = spawn(rig.bin, ["serve", "--port", String(port), "--hostname", "127.0.0.1"], { cwd: rig.proj, env: rig.env(), stdio: ["ignore", "pipe", "pipe"] })
+    const serve = spawn(rig.bin, ["serve", "--port", "0", "--hostname", "127.0.0.1"], { cwd: rig.proj, env: rig.env(), stdio: ["ignore", "pipe", "pipe"] })
     let out = ""
     serve.stdout.on("data", (d) => (out += d))
     serve.stderr.on("data", (d) => (out += d))
     try {
       const t0 = Date.now()
-      while (!out.includes("listening")) {
+      /** @type {RegExpExecArray | null} */
+      let at
+      while (!(at = /listening on (http:\/\/127\.0\.0\.1:\d+)/.exec(out))) {
         if (Date.now() - t0 > 30000) throw new Error("opencode serve did not start: " + out)
         await sleep(100)
       }
-      const base = `http://127.0.0.1:${port}`
+      const base = at[1]
       const q = `?directory=${encodeURIComponent(rig.proj)}`
       const sid = (await (await fetch(`${base}/session${q}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()).id
       const g0 = Date.now()
@@ -88,7 +105,7 @@ describe.skipIf(!LIVE)("live bounds", () => {
       await sleep(500)
       const recs = rig.records()
       const st = rig.stats()
-      console.log("B-w64:", JSON.stringify({ first: { pages: first.pages, items: first.items, bytes: first.bytes, maxPage: Math.max(...pages) }, second: { pages: second.pages, items: second.items, bytes: second.bytes, lower: second.lower }, largestFrame: largest(recs), plugin: st }))
+      console.log("B-w64:", JSON.stringify({ first: { pages: first.pages, items: first.items, bytes: first.bytes, maxPage: Math.max(...pages) }, second: { pages: second.pages, items: second.items, bytes: second.bytes, lower: second.lower }, largestFrame: largest(recs), plugin: { ...st, lag: undefined } }))
       expect(first.pages).toBeGreaterThan(1)
       for (const b of pages) expect(b).toBeLessThanOrEqual(PAGE)
       expect(largest(recs)).toBeLessThanOrEqual(MiB)
@@ -102,51 +119,62 @@ describe.skipIf(!LIVE)("live bounds", () => {
     }
   }, 900000)
 
-  test(`flood: keystroke echo p50 within 2 ms of no plugin (${RUNS} runs each)`, async () => {
-    /** @type {Record<string, number[]>} */
-    const p50 = { none: [], real: [] }
-    /** @type {Record<string, number[]>} */
-    const all = { none: [], real: [] }
-    const frames = []
-    const lostBy = { none: 0, real: 0 }
+  test(`flood: the plugin's own main-thread cost while a turn floods the bus (${RUNS} runs with it, ${RUNS} without)`, async () => {
+    /** @type {Record<string, { p50: number, lat: number[], lost: number, lag: ReturnType<typeof lagBetween> }[]>} */
+    const runs = { probe: [], instr: [] }
+    /** @type {{ calls: number, ms: number, max: number }[]} */
+    const listener = []
+    /** @type {any[]} */
+    const bounds = []
+    const source = { probe: lagProbe(), instr: instrumented() }
     for (let i = 0; i < RUNS; i++)
-      for (const plugin of i % 2 ? ["real", "none"] : ["none", "real"]) {
+      for (const arm of /** @type {const} */ (i % 2 ? ["instr", "probe"] : ["probe", "instr"])) {
         await rig.reset()
-        await rig.launch({ plugin })
+        await rig.launch({ plugin: source[arm] })
         await rig.ready()
-        if (plugin === "real") await rig.until((r) => r.some((x) => x.frame?.t === "settled"))
-        const { lat, lost } = await probe(rig, "cc:flood", 20000)
-        p50[plugin].push(pct(lat, 50))
-        all[plugin].push(...lat)
-        lostBy[plugin] += lost
-        if (plugin === "real") frames.push(largest(rig.records()))
+        if (arm === "instr") await rig.until((r) => r.some((x) => x.frame?.t === "settled"))
+        await sleep(500)
+        const { lat, lost, before, after } = await probe(rig, "cc:flood", 20000)
+        runs[arm].push({ p50: pct(lat, 50), lat, lost, lag: lagBetween(before?.lag, after.lag) })
+        if (arm === "instr") {
+          listener.push({ calls: after.time.listenerCalls - (before?.time.listenerCalls ?? 0), ms: after.time.listenerMs - (before?.time.listenerMs ?? 0), max: after.time.listenerMaxMs })
+          bounds.push({ largest: largest(rig.records()), drops: after.drops, maxQueue: after.maxQueue })
+        }
       }
-    await rig.reset()
-    await rig.launch({ plugin: instrumented() })
-    await rig.ready()
-    await rig.until((r) => r.some((x) => x.frame?.t === "settled"))
-    await rig.prompt("cc:flood")
-    await rig.waitFor("Burst 3.", 30000)
-    await sleep(8000)
-    const st = rig.stats()
     const med = (/** @type {number[]} */ v) => pct(v, 50)
+    const pooled = (/** @type {string} */ arm) => runs[arm].flatMap((r) => r.lat)
+    const lagTotal = (/** @type {string} */ arm) => med(runs[arm].map((r) => r.lag.totalMs))
+    const lagP99 = (/** @type {string} */ arm) => med(runs[arm].map((r) => r.lag.p99))
     console.log(
-      "keystroke echo:",
+      "flood:",
       JSON.stringify({
         runs: RUNS,
-        p50_per_run: p50,
-        median_p50: { none: med(p50.none), real: med(p50.real) },
-        pooled: { none: { p50: pct(all.none, 50), p95: pct(all.none, 95), n: all.none.length }, real: { p50: pct(all.real, 50), p95: pct(all.real, 95), n: all.real.length } },
-        lost: lostBy,
-        largestFrame: Math.max(...frames),
-        instrumented: st,
+        echo_p50_per_run: { without: runs.probe.map((r) => r.p50), with: runs.instr.map((r) => r.p50) },
+        echo_pooled: {
+          without: { p50: pct(pooled("probe"), 50), p95: pct(pooled("probe"), 95), n: pooled("probe").length },
+          with: { p50: pct(pooled("instr"), 50), p95: pct(pooled("instr"), 95), n: pooled("instr").length },
+        },
+        lost: { without: runs.probe.reduce((n, r) => n + r.lost, 0), with: runs.instr.reduce((n, r) => n + r.lost, 0) },
+        lag_total_ms_median: { without: lagTotal("probe"), with: lagTotal("instr") },
+        lag_p99_ms_median: { without: lagP99("probe"), with: lagP99("instr") },
+        listener,
+        bounds,
       }),
     )
-    expect(med(p50.real)).toBeLessThanOrEqual(med(p50.none) + 2)
-    expect(Math.max(...frames)).toBeLessThanOrEqual(MiB)
-    expect(st.drops).toBe(0)
-    expect(st.maxQueue).toBeLessThanOrEqual(4 * MiB + PAGE)
-  }, 1200000)
+    // What the plugin itself spends on the main thread, measured inside OpenCode, not inferred from echo noise.
+    for (const l of listener) {
+      expect(l.max).toBeLessThanOrEqual(LISTENER_MAX_MS)
+      expect(l.ms).toBeLessThanOrEqual(LISTENER_TOTAL_MS)
+    }
+    expect(lagP99("instr")).toBeLessThanOrEqual(lagP99("probe") + LAG_P99_MARGIN_MS)
+    // Keystroke echo, pooled over every run: only a margin above the measured run-to-run noise is asserted.
+    expect(pct(pooled("instr"), 50)).toBeLessThanOrEqual(pct(pooled("probe"), 50) + ECHO_P50_MARGIN_MS)
+    for (const b of bounds) {
+      expect(b.largest).toBeLessThanOrEqual(MiB)
+      expect(b.drops).toBe(0)
+      expect(b.maxQueue).toBeLessThanOrEqual(4 * MiB + PAGE)
+    }
+  }, 2400000)
 })
 
 /**
@@ -162,6 +190,7 @@ async function probe(rig, prompt, ms) {
   await rig.prompt(prompt)
   await rig.waitFor("esc interrupt")
   await sleep(100)
+  const before = rig.stats()
   const countQ = () => (rig.capture().match(/Q/g) ?? []).length
   let seen = countQ()
   let lost = 0
@@ -193,5 +222,6 @@ async function probe(rig, prompt, ms) {
       seen = countQ()
     }
   }
-  return { lat, lost }
+  await sleep(300)
+  return { lat, lost, before, after: rig.stats() }
 }

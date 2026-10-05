@@ -1,6 +1,6 @@
 // A stand-in for the CodeConnect daemon's side of the OpenCode link, for the live tests. It listens on a unix
-// socket, admits a hello only from the process named in the session's agent.json (same pid, same birth time read
-// from /proc, the session's nonce, the expected folder), answers with `acked` derived from what it has recorded,
+// socket, admits a hello only from the process named in the session's agent.json (same pid, same start time as
+// `ps` reports it, the session's nonce, the expected folder), answers with `acked` derived from what it has recorded,
 // and appends every frame it reads to a JSONL record. A restart reads the record back, as the daemon reads its
 // store. SIGUSR1 cuts the current link; SIGUSR2 asks for a resync. Being its own process, it can be SIGSTOPped.
 //
@@ -8,17 +8,7 @@
 import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs"
 import { createServer } from "node:net"
 import { join } from "node:path"
-
-
-
-/** Birth time of a Linux process: boot time plus its start tick, in whole microseconds. @param {number} pid */
-export function birth(pid) {
-  const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
-  const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19])
-  const btime = Number(/btime (\d+)/.exec(readFileSync("/proc/stat", "utf8"))?.[1])
-  const us = btime * 1e6 + Math.round((ticks * 1e6) / 100)
-  return { sec: Math.floor(us / 1e6), usec: us % 1e6 }
-}
+import { birth } from "./proc.js"
 
 /**
  * The acked bound per root, from the recorded frames: the newest turn that ended, a turn being the user message

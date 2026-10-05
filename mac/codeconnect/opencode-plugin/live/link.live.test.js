@@ -1,19 +1,11 @@
 // Live: a real OpenCode TUI with the plugin, against fake-ccd.js and the mock model.
-//   - a plugin whose forward() throws still leaves the reply on the keyboard's screen;
-//   - with the daemon SIGSTOPped, the prompt is drawn within 5 s of the agent starting;
+//   - a plugin whose forward() throws still leaves the reply on the keyboard's screen (its link is admitted and
+//     settles a snapshot, so the throw is the only difference);
+//   - with the daemon SIGSTOPped, the prompt is drawn no more than 1 s slower than without the plugin (or within 5 s);
 //   - a request pending at a snapshot is listed with a live verdict, and is gone once answered at the keyboard;
 //   - a link cut, and a daemon kill and restart, mid-turn, end with the same messages and parts as an uncut run.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
 import { LIVE, Rig, sleep, variant } from "./harness.js"
-
-/** Milliseconds since the process started, to 10 ms (/proc ticks), measured against the monotonic uptime. */
-function agentAgeMs(/** @type {number} */ pid) {
-  const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
-  const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19])
-  const uptime = Number(readFileSync("/proc/uptime", "utf8").split(" ")[0])
-  return (uptime - ticks / 100) * 1000
-}
 
 /**
  * The terminal state of every message and part the daemon was told about, live or by snapshot, per session, in id
@@ -52,7 +44,8 @@ describe.skipIf(!LIVE)("live link", () => {
   /** @type {Rig} */
   let rig
   beforeAll(async () => {
-    rig = await new Rig().start()
+    rig = new Rig()
+    await rig.start()
     await rig.startCcd()
     await rig.launch()
     await rig.ready(60000)
@@ -60,7 +53,7 @@ describe.skipIf(!LIVE)("live link", () => {
     await rig.waitFor("fast reply done", 60000)
     await rig.reset()
   }, 90000)
-  afterAll(async () => rig && (await rig.close()))
+  afterAll(async () => rig && (await rig.close()), 30000)
 
   test("a plugin whose forward() throws leaves the reply visible", async () => {
     const out = /** @type {Record<string, number>} */ ({})
@@ -73,6 +66,10 @@ describe.skipIf(!LIVE)("live link", () => {
       await rig.reset()
       await rig.launch({ plugin })
       await rig.ready()
+      if (plugin !== "none") {
+        await rig.until((r) => r.some((x) => x.admitted === true))
+        await rig.until((r) => r.some((x) => x.frame?.t === "settled"))
+      }
       await rig.prompt("cc:fast")
       const t0 = Date.now()
       const seen = await rig.waitFor("fast reply done", 20000)
@@ -84,22 +81,20 @@ describe.skipIf(!LIVE)("live link", () => {
     expect(evs.real).toBeGreaterThan(0)
   }, 120000)
 
-  test("with the daemon stopped, the prompt is drawn within 5 s of the agent starting (or as fast as without the plugin)", async () => {
+  test("with the daemon stopped, the prompt is drawn no more than 1 s slower than without the plugin (or within 5 s of the agent starting)", async () => {
     const rows = []
     for (const plugin of ["none", "real", "none", "real", "none", "real"]) {
       await rig.reset()
       if (plugin === "real") rig.signalCcd("SIGSTOP")
       await rig.launch({ plugin })
-      const age0 = agentAgeMs(rig.pid)
-      const t0 = Date.now()
       const seen = await rig.ready(20000)
-      rows.push({ plugin, ms: Math.round(seen - t0 + age0) })
+      rows.push({ plugin, ms: seen - rig.launchedAt })
       if (plugin === "real") {
         rig.signalCcd("SIGCONT")
         await rig.until((r) => r.some((x) => x.frame?.t === "settled"), 20000)
       }
     }
-    console.log("agent start -> prompt drawn, ms:", JSON.stringify(rows))
+    console.log("pane started -> prompt drawn, ms:", JSON.stringify(rows))
     // OpenCode's own start-up is the floor: on a machine where it alone takes over 5 s, the stopped daemon may add
     // at most a second to it.
     const base = rows.filter((r) => r.plugin === "none").map((r) => r.ms).sort((a, b) => a - b)[1]
@@ -145,7 +140,10 @@ describe.skipIf(!LIVE)("live link", () => {
     await rig.ready()
     await rig.until((r) => r.some((x) => x.frame?.t === "settled"))
     await rig.prompt("cc:steps")
-    await sleep(1000)
+    await rig.waitFor("sleep 2; echo alpha", 30000)
+    const atCut = rig.capture()
+    expect(atCut).toContain("esc interrupt")
+    expect(atCut).not.toContain("All steps finished.")
     rig.signalCcd("SIGUSR1")
     await sleep(2000)
     rig.stopCcd()

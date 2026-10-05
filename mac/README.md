@@ -1185,6 +1185,7 @@ for](#what-the-phone-can-ask-for).
 ```sh
 cargo test                        # the workspace suite, including fixture replay
 soak/run.sh                       # the live gauntlet, against a real session
+cd codeconnect/opencode-plugin && bun install && bun test ./test   # the OpenCode plugin (CC_OPENCODE_LIVE=1 CC_OPENCODE_BIN=<opencode 1.18.34> bun test ./live: against a real OpenCode in tmux)
 ```
 
 The daemon's own tests drive a **fake supervisor** over a screen the test

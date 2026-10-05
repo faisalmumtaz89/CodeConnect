@@ -33,7 +33,7 @@ describe("caps", () => {
     })
   }
 
-  test("frame: over the frame cap becomes a stub sized and hashed over the same line", () => {
+  test("frame: over the frame cap becomes a stub sized and hashed over the frame's JSON, keeping the part's type and status", () => {
     const r = caps.frames[0].recipe
     const props = structuredClone(r.properties)
     props.part.state.input = Object.fromEntries(Array.from({ length: 20 }, (_, i) => ["f" + i, "x".repeat(70000)]))
@@ -41,8 +41,9 @@ describe("caps", () => {
     expect(e.stub).toBe(true)
     expect(e.line).toBe(caps.frames[0].expected.line)
     expect(e.bytes).toBe(caps.frames[0].expected.line_bytes)
-    const full = JSON.stringify({ t: "ev", seq: r.seq, type: r.type, properties: prepare(props) }) + "\n"
+    const full = JSON.stringify({ t: "ev", seq: r.seq, type: r.type, properties: prepare(props) })
     const stub = JSON.parse(e.line)
+    expect(stub).toMatchObject({ part_type: "tool", status: "completed" })
     expect(stub.size).toBe(Buffer.byteLength(full))
     expect(stub.sha256).toBe(sha(full))
   })
@@ -83,6 +84,13 @@ describe("caps", () => {
       expect(f.anchor_input.command).toBe(cmd)
     })
   }
+
+  test("a permission card keeps its metadata.diff; a tool part's is dropped", () => {
+    const card = cardLine(4, "permission.asked", { id: "per_1", sessionID: "ses_1", permission: "edit", metadata: { filepath: "a", diff: "@@ -1 +1 @@" } })
+    expect(JSON.parse(card.line).properties.metadata.diff).toBe("@@ -1 +1 @@")
+    const part = eventLine(5, "message.part.updated", { part: { type: "tool", state: { status: "completed", metadata: { diff: "@@ -1 +1 @@", exit: 0 } } } })
+    expect(JSON.parse(part.line).properties.part.state.metadata).toEqual({ exit: 0 })
+  })
 
   test("a question card keeps its questions whole", () => {
     const long = "q".repeat(100000)

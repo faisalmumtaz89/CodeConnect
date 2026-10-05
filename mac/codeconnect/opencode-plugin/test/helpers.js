@@ -61,6 +61,11 @@ export function fakeCcd(path, opts = {}) {
       wire: /** @type {{ dir: string, line: string }[]} */ ([]),
       closed: false,
       hello: null,
+      /** when the connection was accepted */
+      at: Date.now(),
+      /** when the first and second sync_begin arrived */
+      at1: 0,
+      at2: 0,
       send(/** @type {any} */ frame) {
         const line = JSON.stringify(frame) + "\n"
         conn.wire.push({ dir: "ccd", line })
@@ -79,6 +84,7 @@ export function fakeCcd(path, opts = {}) {
         conn.wire.push({ dir: "plugin", line: line + "\n" })
         const f = JSON.parse(line)
         conn.frames.push(f)
+        if (f.t === "sync_begin") conn.at1 ? (conn.at2 ||= Date.now()) : (conn.at1 = Date.now())
         if (f.type === "opencode_hello") {
           conn.hello = f
           if (opts.onHello) opts.onHello(f, conn)
