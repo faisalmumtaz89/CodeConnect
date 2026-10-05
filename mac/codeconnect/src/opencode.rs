@@ -145,9 +145,9 @@ impl std::fmt::Display for OpencodeRefusal {
                  refuses them in any spelling: drop it"
             ),
             OpencodeRefusal::HelpValue => f.write_str(
-                "`--help` or `--version` with a value or a `--no-` form is refused: OpenCode \
-                 prints for some of these spellings and starts the TUI for others. Write the \
-                 option alone, or drop it",
+                "`--help` or `--version` with a value, a `--no-` form, or `--version` after \
+                 `-c --` is refused: OpenCode prints for some of these spellings and starts the \
+                 TUI for others. Write the option alone, or drop it",
             ),
             OpencodeRefusal::NotADirectory { project } => write!(
                 f,
@@ -282,6 +282,10 @@ pub(crate) fn classify(args: &[String], env: Env, cwd: &Path) -> Result<Launch, 
         if token == "--" {
             break;
         }
+        // After `-c --` the TUI parses the rest as its own options, where version is
+        // not a print-and-exit flag: `-c -- --version` and `-c -- -v` start the TUI.
+        // Help still prints there.
+        let version_before = help.asked[1];
         let takes = if let Some(long) = token.strip_prefix("--") {
             long_option(token, long, &mut direct, &mut help)?
         } else if let Some(group) = token.strip_prefix('-').filter(|group| !group.is_empty()) {
@@ -312,6 +316,9 @@ pub(crate) fn classify(args: &[String], env: Env, cwd: &Path) -> Result<Launch, 
             }
             Takes::Nothing
         };
+        if project_closed && help.asked[1] && !version_before {
+            return Err(OpencodeRefusal::HelpValue);
+        }
         let boolean = |next: &&String| *next == "true" || *next == "false";
         match takes {
             Takes::Nothing => {}
@@ -760,7 +767,7 @@ mod tests {
         }
 
         let rows = fixture["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 192, "the measured table has 192 rows");
+        assert_eq!(rows.len(), 195, "the measured table has 195 rows");
         let mut mismatches = Vec::new();
         for row in rows {
             let case = row["case"].as_str().unwrap();
