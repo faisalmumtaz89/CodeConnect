@@ -191,7 +191,7 @@ pub fn request_within(frame: &ClientFrame, timeout: Duration) -> Result<DaemonFr
 ///
 /// **The one case this exists for is a rollback.** A machine whose `ccd` has
 /// been rolled back to a build that predates the agent seam still has this
-/// launcher on it, and a Codex session started against that daemon is a session
+/// launcher on it, and a session started against that daemon is a session
 /// it can never be told about: the supervisor asks the same question this asks,
 /// reads the same answer, and withholds its registration for the life of the run
 /// (`crate::supervisor::withhold_unless_hosted`). The run works — the TUI is

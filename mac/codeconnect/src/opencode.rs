@@ -12,7 +12,9 @@
 //! every other flag there takes the next word that is not flag-shaped as its value.
 //! The walk consumes at most what that root parse consumes, so every token that
 //! could dispatch a subcommand reaches the walk as a bare word and is judged.
-//! Nothing after `--` is examined: OpenCode ignores it.
+//! A short option takes a following `--` as its value, as yargs does, so the walk
+//! goes on judging the words after it; a `--` the walk reaches as its own word ends
+//! the walk, and nothing after it is examined: OpenCode ignores it.
 //!
 //! Precedence is refused, then direct, then hosted: `--port 5 --help` is refused,
 //! not answered with help.
@@ -86,23 +88,24 @@ pub(crate) enum Launch {
 /// where one exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OpencodeRefusal {
-    /// A subcommand name or alias, as a bare word anywhere before `--`. Only the
+    /// A subcommand name or alias, as a bare word anywhere the walk judges. Only the
     /// interactive TUI is hosted; `attach`, `serve`, `web` and `acp` are servers or
     /// transports, `run` is non-interactive, and `pr` starts a second `opencode`.
     Subcommand { name: String },
     /// `--port`, `--hostname`, `--mdns`, `--mdns-domain`, `--cors`, in any spelling.
     /// `--port`, `--hostname` and `--mdns` open a TCP server with no authentication
-    /// (measured: a foreign client created sessions, prompted and answered
-    /// permissions); the six-name group is refused by name, as OpenCode itself
-    /// treats it as one group.
+    /// (the fixture records each listener); the five-name group is refused by name,
+    /// as OpenCode itself treats it as one group.
     Transport { flag: String },
-    /// `--mini` and `--pure`, in any spelling: OpenCode loads no TUI plugin.
+    /// `--mini` and `--pure`, in any spelling: either one starts OpenCode without the
+    /// CodeConnect plugin.
     NoPlugin { flag: String },
-    /// `--help=…` or `--version=…`: `--help=true` prints help, `--help=false` and
-    /// `--version=1` launch the TUI, so neither direct nor hosted is honest.
+    /// `--help` or `--version` given a value (`--help=…`, `--help false`, `-h true`)
+    /// or negated alongside itself (`--help --no-help`): some of these print, others
+    /// launch the TUI, so neither direct nor hosted is honest.
     HelpValue,
     /// `[project]` names no directory. OpenCode prints an error and exits 0, which
-    /// reads as a clean run.
+    /// reads as a clean run. An empty `[project]` is no project, as OpenCode reads it.
     NotADirectory { project: String },
     /// A short group with a non-letter in it, other than one `=` right after `m` or
     /// `s`. yargs attaches the rest of such a group to a value letter, so the next
@@ -125,31 +128,39 @@ impl std::fmt::Display for OpencodeRefusal {
         match self {
             OpencodeRefusal::Subcommand { name } => write!(
                 f,
-                "`opencode {name}` is a subcommand; `codeconnect opencode` hosts only the \
-                 interactive TUI, so other subcommands and their aliases are refused"
+                "`{name}` is the name of an OpenCode subcommand, and `codeconnect opencode` \
+                 hosts only the interactive TUI, so it refuses that word: run \
+                 `opencode {name}` directly, or write a folder of that name as `./{name}`"
             ),
             OpencodeRefusal::Transport { flag } => write!(
                 f,
-                "`{flag}` opens an unauthenticated network server that any local process can \
-                 drive; refused like Codex `--remote`"
+                "`{flag}` is one of OpenCode's network-server options (`--port`, `--hostname`, \
+                 `--mdns`, `--mdns-domain`, `--cors`), which `codeconnect opencode` refuses in \
+                 any spelling: drop it"
             ),
             OpencodeRefusal::NoPlugin { flag } => write!(
                 f,
-                "`{flag}` runs OpenCode without plugins, so CodeConnect cannot attach"
+                "`{flag}` is a spelling of OpenCode's `--pure` or `--mini`, either of which \
+                 starts OpenCode without the CodeConnect plugin, so `codeconnect opencode` \
+                 refuses them in any spelling: drop it"
             ),
-            OpencodeRefusal::HelpValue => {
-                f.write_str("write `--help` or `--version` without a value")
-            }
-            OpencodeRefusal::NotADirectory { project } => {
-                write!(f, "`{project}` is not a directory")
-            }
+            OpencodeRefusal::HelpValue => f.write_str(
+                "`--help` or `--version` with a value or a `--no-` form is refused: OpenCode \
+                 prints for some of these spellings and starts the TUI for others. Write the \
+                 option alone, or drop it",
+            ),
+            OpencodeRefusal::NotADirectory { project } => write!(
+                f,
+                "`{project}` is not a directory; OpenCode opens `[project]` as a folder, \
+                 resolved from `$PWD`: pass a folder"
+            ),
             OpencodeRefusal::ShortShape => f.write_str(
                 "write `-m value` or `--model=value`: a short option followed by a non-letter \
                  is parsed differently by OpenCode",
             ),
             OpencodeRefusal::PureEnv => f.write_str(
-                "OPENCODE_PURE is set, so OpenCode runs without plugins and CodeConnect cannot \
-                 attach",
+                "OPENCODE_PURE is set to true, so OpenCode would start without the CodeConnect \
+                 plugin: unset OPENCODE_PURE and launch again",
             ),
             OpencodeRefusal::TuiConfigEnv => f.write_str(
                 "OPENCODE_TUI_CONFIG is set; CodeConnect needs that setting for its own plugin. \
@@ -235,6 +246,17 @@ enum Takes {
     Value,
     /// The next word, if it is literally `true` or `false`.
     Bool,
+    /// `--help`, `--version`, or a short group ending in `h` or `v`: a following
+    /// `true` or `false` is their value, which is refused.
+    HelpBool,
+}
+
+/// Help (`0`) and version (`1`): which were asked for by a flag, and which negated
+/// by `--no-help`/`--no-version`.
+#[derive(Default)]
+struct HelpFlags {
+    asked: [bool; 2],
+    negated: [bool; 2],
 }
 
 /// What `codeconnect opencode <args>` does: [`Launch`] or a refusal.
@@ -250,16 +272,32 @@ pub(crate) fn classify(args: &[String], env: Env, cwd: &Path) -> Result<Launch, 
     }
 
     let mut direct = false;
+    let mut help = HelpFlags::default();
     let mut project: Option<&String> = None;
-    let mut tokens = args
-        .iter()
-        .take_while(|token| token.as_str() != "--")
-        .peekable();
+    // Set once `-c` has taken a `--`: the TUI reads `-c` as a boolean and that `--`
+    // as the end of its options, so no later word is `[project]`.
+    let mut project_closed = false;
+    let mut tokens = args.iter().peekable();
     while let Some(token) = tokens.next() {
+        if token == "--" {
+            break;
+        }
         let takes = if let Some(long) = token.strip_prefix("--") {
-            long_option(token, long, &mut direct)?
+            long_option(token, long, &mut direct, &mut help)?
         } else if let Some(group) = token.strip_prefix('-').filter(|group| !group.is_empty()) {
-            short_group(group, &mut direct)?
+            let takes = short_group(group, &mut direct, &mut help)?;
+            // yargs takes a word as a short option's value unless it is `-x` or
+            // `--x`, so `--` itself is a value; only `h` and `v`, the root parse's
+            // booleans, decline it.
+            let last = group.chars().last();
+            if !group.contains('=')
+                && !matches!(last, Some('h' | 'v'))
+                && tokens.next_if(|next| *next == "--").is_some()
+            {
+                project_closed |= last == Some('c');
+                continue;
+            }
+            takes
         } else if SUBCOMMANDS.contains(&token.as_str()) {
             return Err(OpencodeRefusal::Subcommand {
                 name: token.clone(),
@@ -269,25 +307,37 @@ pub(crate) fn classify(args: &[String], env: Env, cwd: &Path) -> Result<Launch, 
             if token == "help" {
                 direct = true;
             }
-            project.get_or_insert(token);
+            if !project_closed {
+                project.get_or_insert(token);
+            }
             Takes::Nothing
         };
-        let consumed = match takes {
-            Takes::Nothing => false,
-            Takes::Value => tokens.peek().is_some_and(|next| !next.starts_with('-')),
-            Takes::Bool => tokens
-                .peek()
-                .is_some_and(|next| *next == "true" || *next == "false"),
-        };
-        if consumed {
-            tokens.next();
+        let boolean = |next: &&String| *next == "true" || *next == "false";
+        match takes {
+            Takes::Nothing => {}
+            Takes::Value => {
+                tokens.next_if(|next| !next.starts_with('-'));
+            }
+            Takes::Bool => {
+                tokens.next_if(boolean);
+            }
+            Takes::HelpBool => {
+                if tokens.peek().is_some_and(boolean) {
+                    return Err(OpencodeRefusal::HelpValue);
+                }
+            }
         }
+    }
+    // `--help --no-help` launches the TUI: the negation wins over the request.
+    if (0..2).any(|i| help.asked[i] && help.negated[i]) {
+        return Err(OpencodeRefusal::HelpValue);
     }
     if direct {
         return Ok(Launch::Direct);
     }
 
-    let Some(project) = project else {
+    // OpenCode tests `[project]` for truthiness: an empty one is no project.
+    let Some(project) = project.filter(|project| !project.is_empty()) else {
         return Ok(Launch::Hosted {
             folder: resolve(cwd),
         });
@@ -307,7 +357,16 @@ pub(crate) fn classify(args: &[String], env: Env, cwd: &Path) -> Result<Launch, 
 /// One `--name[=value]` option. The name is compared kebab-folded (`--mdnsDomain` is
 /// `--mdns-domain`); the refused groups also match the `--no-` form and a dotted
 /// name (`--no-mdns`, `--port.x=1`).
-fn long_option(token: &str, long: &str, direct: &mut bool) -> Result<Takes, OpencodeRefusal> {
+///
+/// A dotted help or version name (`--help.x`, `--no-help.x=1`) makes the option an
+/// object, which yargs reads as true: it prints. Shell completion runs for any
+/// spelling yargs sets the key with, `--no-get-yargs-completions` included.
+fn long_option(
+    token: &str,
+    long: &str,
+    direct: &mut bool,
+    help: &mut HelpFlags,
+) -> Result<Takes, OpencodeRefusal> {
     let (name, value) = match long.split_once('=') {
         Some((name, value)) => (name, Some(value)),
         None => (long, None),
@@ -328,12 +387,33 @@ fn long_option(token: &str, long: &str, direct: &mut bool) -> Result<Takes, Open
             flag: token.to_string(),
         });
     }
-    match name.as_str() {
-        "help" | "version" if value.is_some() => Err(OpencodeRefusal::HelpValue),
-        "help" | "version" | "get-yargs-completions" => {
-            *direct = true;
-            Ok(Takes::Nothing)
+    if root == "get-yargs-completions" {
+        *direct = true;
+        return Ok(Takes::Nothing);
+    }
+    if let Some(i) = ["help", "version"].iter().position(|flag| *flag == root) {
+        if name == format!("no-{root}") {
+            help.negated[i] = true;
+            return match value {
+                Some(_) => Err(OpencodeRefusal::HelpValue),
+                None => Ok(Takes::Nothing),
+            };
         }
+        help.asked[i] = true;
+        if name == root {
+            return match value {
+                Some(_) => Err(OpencodeRefusal::HelpValue),
+                None => {
+                    *direct = true;
+                    Ok(Takes::HelpBool)
+                }
+            };
+        }
+        // Dotted, so an object: printed whatever its value.
+        *direct = true;
+        return Ok(Takes::Nothing);
+    }
+    match name.as_str() {
         // A `--no-` form is yargs' negation: it sets `false` and takes no value.
         _ if value.is_some() || name.starts_with("no-") => Ok(Takes::Nothing),
         _ if VALUE_LONGS.contains(&root) => Ok(Takes::Value),
@@ -346,10 +426,14 @@ fn long_option(token: &str, long: &str, direct: &mut bool) -> Result<Takes, Open
 ///
 /// Letters only, or one `=` right after a final `m`/`s` (the value letters): any
 /// other shape is read by yargs differently from how it looks and is refused. `h`
-/// or `v` among the letters asks for help or version. Otherwise the final letter
-/// decides what the next word is: `m`/`s` take it as a value, `c` takes `true` or
-/// `false`.
-fn short_group(group: &str, direct: &mut bool) -> Result<Takes, OpencodeRefusal> {
+/// or `v` among the letters asks for help or version, and a final `h` or `v` takes
+/// `true` or `false` as its value. Otherwise the final letter decides what the next
+/// word is: `m`/`s` take it as a value, `c` takes `true` or `false`.
+fn short_group(
+    group: &str,
+    direct: &mut bool,
+    help: &mut HelpFlags,
+) -> Result<Takes, OpencodeRefusal> {
     let (letters, attached) = match group.split_once('=') {
         Some((letters, _)) => (letters, true),
         None => (group, false),
@@ -361,9 +445,14 @@ fn short_group(group: &str, direct: &mut bool) -> Result<Takes, OpencodeRefusal>
     if !shaped {
         return Err(OpencodeRefusal::ShortShape);
     }
+    help.asked[0] |= letters.contains('h');
+    help.asked[1] |= letters.contains('v');
     if letters.contains(['h', 'v']) {
         *direct = true;
-        return Ok(Takes::Nothing);
+        return Ok(match last {
+            Some('h' | 'v') => Takes::HelpBool,
+            _ => Takes::Nothing,
+        });
     }
     Ok(match (attached, last) {
         (false, Some('m' | 's')) => Takes::Value,
@@ -421,8 +510,9 @@ const PLUGIN_ID: &str = "codeconnect";
 /// OpenCode decides from `plugin_enabled[id]`: its TUI config files merged in its
 /// order — the global config directory, then `tui.json(c)` from the filesystem root
 /// down to `folder`, then each `.opencode` directory walking up from `folder`, then
-/// `~/.opencode` and `OPENCODE_CONFIG_DIR` — and then its saved state (`kv.json`),
-/// which wins. A file that cannot be read or parsed is skipped, as OpenCode skips
+/// `~/.opencode` and `OPENCODE_CONFIG_DIR` (read after OpenCode has changed into
+/// `folder`, so a relative one is relative to it) — and then its saved state
+/// (`kv.json`), which wins. A file that cannot be read or parsed is skipped, as OpenCode skips
 /// it. `{env:…}`/`{file:…}` substitution is not applied.
 fn plugin_disabled(folder: &Path, env: Env, home: &Path) -> Option<PathBuf> {
     let set = |key: &str| env(key).filter(|value| !value.is_empty());
@@ -430,7 +520,7 @@ fn plugin_disabled(folder: &Path, env: Env, home: &Path) -> Option<PathBuf> {
         .map_or_else(|| home.join(".config"), PathBuf::from)
         .join("opencode");
     let project_config = !env("OPENCODE_DISABLE_PROJECT_CONFIG").is_some_and(|v| truthy(&v));
-    let config_dir = set("OPENCODE_CONFIG_DIR").map(PathBuf::from);
+    let config_dir = set("OPENCODE_CONFIG_DIR").map(|dir| folder.join(dir));
 
     let mut files = tui_files(&global).to_vec();
     if project_config {
@@ -641,9 +731,10 @@ mod tests {
 
     /// **Every row of the measured launch table.** The fixture's launch folder, its
     /// directories, file and symlink are rebuilt under a temp directory, and each
-    /// row's argv and environment are classified there: an `H` row must be hosted in
-    /// the folder OpenCode opened, a `D` row direct, and an `R` row refused with the
-    /// row's own sentence. Every mismatch is reported, not only the first.
+    /// row's argv and environment are classified there: an `H` row must be hosted,
+    /// and in the folder OpenCode opened where the row records one (rows where
+    /// OpenCode exited record none); a `D` row direct; and an `R` row refused with
+    /// the row's own sentence. Every mismatch is reported, not only the first.
     #[test]
     fn every_measured_launch_row_gets_its_verdict() {
         let fixture: serde_json::Value = serde_json::from_str(LAUNCH_ARGV).unwrap();
@@ -669,7 +760,7 @@ mod tests {
         }
 
         let rows = fixture["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 144, "the measured table has 144 rows");
+        assert_eq!(rows.len(), 192, "the measured table has 192 rows");
         let mut mismatches = Vec::new();
         for row in rows {
             let case = row["case"].as_str().unwrap();
@@ -749,9 +840,10 @@ mod tests {
         );
     }
 
-    /// **A negated or dotted name never asks for help.** `--no-help` sets help to
-    /// `false` and launches the TUI, so running it directly would put an unhosted TUI
-    /// in this terminal; it is hosted. A refused group stays refused in every
+    /// **Help is direct only in the spellings that print.** `--no-help` alone sets
+    /// help to `false` and launches the TUI, so it is hosted; a dotted name makes
+    /// help an object, which prints, so it is direct; a negation beside a request
+    /// launches the TUI and is refused. A refused group stays refused in every
     /// spelling, capitalised and extra-dashed included.
     #[test]
     fn spellings_neither_widen_direct_nor_narrow_a_refusal() {
@@ -759,8 +851,30 @@ mod tests {
         let hosted = Ok(Launch::Hosted {
             folder: scratch.0.clone(),
         });
-        for parts in [&["--no-help"][..], &["--no-version"], &["--help.x"]] {
+        for parts in [&["--no-help"][..], &["--no-version"]] {
             assert_eq!(classify_in(parts, &scratch.0), hosted, "{parts:?}");
+        }
+        for parts in [
+            &["--help.x"][..],
+            &["--no-version.x=1"],
+            &["--noGetYargsCompletions"],
+        ] {
+            assert_eq!(
+                classify_in(parts, &scratch.0),
+                Ok(Launch::Direct),
+                "{parts:?}"
+            );
+        }
+        for parts in [
+            &["-vh", "true"][..],
+            &["--no-version", "-cv"],
+            &["--version=1"],
+        ] {
+            assert_eq!(
+                classify_in(parts, &scratch.0),
+                Err(OpencodeRefusal::HelpValue),
+                "{parts:?}"
+            );
         }
         for flag in [
             "--Port",
@@ -885,8 +999,13 @@ mod tests {
 
     /// **The plugin's enabled state is OpenCode's own merge.** Each later source
     /// overrides an earlier one: the global config, the project's `tui.json(c)`
-    /// root-first, `.opencode` directories, `OPENCODE_CONFIG_DIR`, and last the
-    /// saved state. The refusal names the file whose value won.
+    /// root-first, `.opencode` directories, `OPENCODE_CONFIG_DIR` (a relative one
+    /// from the session folder), and last the saved state. The refusal names the
+    /// file whose value won.
+    ///
+    /// The ancestor walk goes past the scratch directory to the filesystem root, so
+    /// a `tui.json(c)` or `.opencode` in a real ancestor of the temp directory takes
+    /// part in the merge too.
     #[test]
     fn the_plugin_is_disabled_by_the_source_that_wins_the_merge() {
         let scratch = Scratch::new();
@@ -940,6 +1059,12 @@ mod tests {
             )])),
             None,
             "OPENCODE_CONFIG_DIR comes after `.opencode`"
+        );
+        write(&folder.join("relative-dir/tui.json"), ENABLED);
+        assert_eq!(
+            disabled(&table(&[("OPENCODE_CONFIG_DIR", "relative-dir")])),
+            None,
+            "a relative OPENCODE_CONFIG_DIR is read from the session folder"
         );
 
         write(&kv, ENABLED);

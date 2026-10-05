@@ -1985,9 +1985,13 @@ mod tests {
 
     /// **The Codex wording is the descriptor's, byte for byte.** Every message the
     /// binary helpers print is formatted from [`CODEX`]; each expected string here is
-    /// the literal those helpers printed before they took a descriptor.
+    /// the literal those helpers printed before they took a descriptor. One message
+    /// is not pinned: the context of a failed `canonicalize` after `is_file` passed,
+    /// which takes a race or a permission fault to produce.
     #[test]
     fn the_codex_descriptor_renders_the_codex_messages_exactly() {
+        assert_eq!(CODEX.env, "CODECONNECT_CODEX_BIN");
+        assert_eq!(CODEX.config_key, "codex_bin");
         let root = tempdir();
         let absent = root.join("absent");
 
@@ -2055,10 +2059,11 @@ mod tests {
         cleanup(&root);
     }
 
-    /// OpenCode is found by its own config key, its own environment override and
-    /// `PATH`, and its messages name both.
+    /// OpenCode's candidates are the configured path, the environment override and
+    /// the `PATH` hit, with no well-known install between them; its not-found message
+    /// names its own config key.
     #[test]
-    fn opencode_is_found_by_its_own_key_environment_and_path() {
+    fn opencode_candidates_have_no_well_known_install() {
         let candidates = candidates(
             &OPENCODE,
             Some("/from/config/opencode"),
@@ -2074,7 +2079,6 @@ mod tests {
                 PathBuf::from("/from/path/opencode"),
             ]
         );
-        assert_eq!(OPENCODE.env, "CODECONNECT_OPENCODE_BIN");
         let none = first_native(&OPENCODE, Vec::new()).unwrap_err();
         assert_eq!(
             format!("{none:#}"),
