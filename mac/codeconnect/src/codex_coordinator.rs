@@ -1870,7 +1870,7 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
             // grammar — the same one the launcher writes it with and the host
             // reads it back with.
             "--codex-sha256" => {
-                let parsed = crate::codex::parse_codex_sha256(&value_of(&mut it, flag)?)
+                let parsed = crate::codex::parse_sha256("codex", &value_of(&mut it, flag)?)
                     .with_context(|| flag.to_string())?;
                 set_once(&mut codex_sha256, flag, parsed)?;
             }
@@ -1913,7 +1913,7 @@ fn parse_charter(args: &[String]) -> Result<Charter> {
     // and only then die in a pane the operator never sees. The refusal now lands before
     // anything exists.
     let codex = codex.context("--codex <path> is required (the coordinator resolves nothing)")?;
-    crate::codex::require_absolute_codex(std::path::Path::new(&codex))?;
+    crate::codex::require_absolute("--codex", std::path::Path::new(&codex))?;
 
     Ok(Charter {
         uid: uid.context("--uid <value> is required")?,
@@ -3314,7 +3314,7 @@ mod tests {
     /// The coordinator applies the host's `--codex` rule, at the charter, before it
     /// has built anything.
     ///
-    /// It is the same function the host calls (`codex::require_absolute_codex`), for
+    /// It is the same function the host calls (`codex::require_absolute`), for
     /// the same reason the two share the digest grammar: a coordinator that accepted
     /// a spelling the host refuses is not a lenient parser, it is a run directory, a
     /// tmux session and a launched host created for an invocation that was always

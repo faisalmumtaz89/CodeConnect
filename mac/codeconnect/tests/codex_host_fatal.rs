@@ -783,7 +783,7 @@ fn a_codex_replaced_after_the_pin_is_refused_before_anything_is_spawned() {
     std::fs::write(&fake, &sleeper).expect("write the pinned fake");
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).expect("chmod");
 
-    // Pin it — this is what `codex::resolve_codex_bin` would have handed the
+    // Pin it — this is what `codex::resolve_native_binary` would have handed the
     // coordinator, and what the coordinator puts on the host's argv.
     let pinned = codex_sha256(&fake);
 

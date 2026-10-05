@@ -378,10 +378,14 @@ pub struct Config {
 
     /// Explicit path to the real `codex` binary, resolved the same way
     /// `claude_bin` is. Flat beside `claude_bin` rather than nested under an
-    /// agent map: there are two agents, and one field each reads more plainly
-    /// than a structure that would invite a third the code cannot yet host.
+    /// agent map: one field per agent reads more plainly than a structure that
+    /// would invite an agent the code cannot host.
     #[serde(default)]
     pub codex_bin: Option<String>,
+
+    /// Explicit path to the real `opencode` binary, resolved as `codex_bin` is.
+    #[serde(default)]
+    pub opencode_bin: Option<String>,
 
     /// Cap on each of the daemon's own launchd logs. One previous generation is
     /// kept alongside, so the ceiling is twice this per stream.
@@ -525,6 +529,7 @@ impl Default for Config {
             fsevents: true,
             claude_bin: None,
             codex_bin: None,
+            opencode_bin: None,
             log_max_bytes: default_log_max_bytes(),
             log_rotate_secs: default_log_rotate_secs(),
             tmux_history_limit: default_tmux_history_limit(),

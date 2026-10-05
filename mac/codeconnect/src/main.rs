@@ -24,6 +24,7 @@ mod exec_gate;
 mod home_guard;
 mod job;
 mod launchd;
+mod opencode;
 mod pair;
 mod sessions;
 mod settings;
@@ -75,6 +76,7 @@ fn main() -> Result<()> {
     match command {
         "claude" => start_claude(rest),
         "codex" => codex::start(rest),
+        "opencode" => opencode::start(rest),
         "attach" => attach(rest),
         "ls" | "list" => list(),
         "sessions" => sessions::command(rest),
@@ -161,6 +163,7 @@ cc — CodeConnect shim
 
   codeconnect claude [args…]      run claude in the private tmux server, attached here
   codeconnect codex [args…]       run codex in the private tmux server, attached here
+  codeconnect opencode [args…]    run opencode in the private tmux server, attached here
   codeconnect attach <name>       re-attach a session (e.g. after closing the tab)
   codeconnect ls                  list what tmux is running (works with ccd down)
   codeconnect sessions            list what the event log knows, with lifecycle

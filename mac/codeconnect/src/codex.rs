@@ -8,8 +8,10 @@
 //! to be the **native standalone executable** and not a `#!`-script / `.js`
 //! wrapper (which could swap the real CLI out from under a pinned path), pins it
 //! by **byte identity** rather than by pathname so the bytes inspected here are
-//! provably the bytes every later `execve` runs (see [`ResolvedCodex`] and
-//! [`verify_codex_identity`]), and reads the user's argv the way codex does.
+//! provably the bytes every later `execve` runs (see [`ResolvedBinary`] and
+//! [`verify_binary_identity`]), and reads the user's argv the way codex does.
+//! The binary helpers take an [`AgentBinary`], so `codeconnect opencode` resolves,
+//! refuses and pins its executable by the same rules and in the same words.
 //!
 //! **The command is live.** [`start`] resolves, argv-validates and preflights the
 //! daemon — surfacing every one of those failures honestly and before anything
@@ -42,12 +44,64 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use protocol::config::Config;
 
-/// Environment override for the `codex` binary, mirroring
-/// `CODECONNECT_CLAUDE_BIN`.
-const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
+use crate::daemon::refuse_unless_hostable;
 
-/// A resolved `codex` executable: a pathname **and the identity of the bytes
-/// behind it**.
+/// What binary resolution and the identity pin need to know about one agent's
+/// executable.
+///
+/// Every message the helpers print is formatted from these fields, so each agent's
+/// wording comes from one descriptor and [`CODEX`] renders exactly the sentences the
+/// Codex launcher has always printed (pinned by
+/// `the_codex_descriptor_renders_the_codex_messages_exactly`).
+pub(crate) struct AgentBinary {
+    /// The executable's name: what `PATH` is searched for and what messages call it.
+    pub(crate) name: &'static str,
+    /// The environment override, mirroring `CODECONNECT_CLAUDE_BIN`.
+    pub(crate) env: &'static str,
+    /// The `~/.codeconnect/config.json` key that names the executable explicitly.
+    pub(crate) config_key: &'static str,
+    /// Install locations tried after the config key and the environment, before `PATH`.
+    pub(crate) well_known: fn(&Path) -> Vec<PathBuf>,
+    /// The install a refusal points at when every candidate found is unusable.
+    pub(crate) supported_install: &'static str,
+}
+
+pub(crate) const CODEX: AgentBinary = AgentBinary {
+    name: "codex",
+    env: "CODECONNECT_CODEX_BIN",
+    config_key: "codex_bin",
+    well_known: codex_well_known,
+    supported_install: "the standalone native codex \
+                        (e.g. ~/.local/bin/codex → …/standalone/releases/…/bin/codex)",
+};
+
+pub(crate) const OPENCODE: AgentBinary = AgentBinary {
+    name: "opencode",
+    env: "CODECONNECT_OPENCODE_BIN",
+    config_key: "opencode_bin",
+    well_known: no_well_known,
+    supported_install: "the native opencode executable",
+};
+
+/// The standalone installer's stable entry point (`~/.local/bin/codex` → a
+/// `standalone/current` symlink → the versioned release), then the two generic bin
+/// dirs a package manager would link a `codex` into.
+fn codex_well_known(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".local/bin/codex"),
+        PathBuf::from("/opt/homebrew/bin/codex"),
+        PathBuf::from("/usr/local/bin/codex"),
+    ]
+}
+
+/// No install location is assumed: the config key, the environment override or
+/// `PATH` names the executable.
+fn no_well_known(_home: &Path) -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// A resolved agent executable (`codex`, `opencode`): a pathname **and the identity
+/// of the bytes behind it**.
 ///
 /// [`path`](Self::path) is the fully-canonicalised versioned executable: the
 /// invocation candidate with every symlink resolved. On a standalone install the
@@ -75,7 +129,7 @@ const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
 /// **from the same single read whose first four bytes produced the Mach-O verdict**
 /// (see [`inspect_candidate`]). Every site that is about to run this binary
 /// re-derives the digest from the path and refuses on a mismatch
-/// ([`verify_codex_identity`]), so a replacement along inspect → version →
+/// ([`verify_binary_identity`]), so a replacement along inspect → version →
 /// coordinator → app-server → TUI is caught unless it lands between a site's check
 /// and its `execve`.
 ///
@@ -113,7 +167,7 @@ const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
 /// Nor can any verify-by-content scheme see a replacement that is *reverted* before
 /// the check runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedCodex {
+pub struct ResolvedBinary {
     pub path: PathBuf,
     /// Lowercase-hex SHA-256 of the whole file, as read during resolution.
     pub sha256: String,
@@ -150,9 +204,9 @@ pub struct ResolvedCodex {
 /// **What is defended, and must stay defended:** every cross-uid vector, and — for
 /// **the direct pinned executable** — the benign update race. A `codex` install or
 /// update landing mid-launch changes the file the resolved `--codex` pathname names,
-/// and that is refused at all three exec sites ([`verify_codex_identity`], which
+/// and that is refused at all three exec sites ([`verify_binary_identity`], which
 /// leaves only the interval between its check and each `execve`); `PATH`/`./`
-/// confusion is refused ([`require_absolute_codex`]); cross-boot pid reuse is refused
+/// confusion is refused ([`require_absolute`]); cross-boot pid reuse is refused
 /// by boot identity; a rolled-back daemon's storage is isolated; and the wire pins
 /// hold. Stated that narrowly on purpose: the claim is about the bytes behind one
 /// pathname, not about every race a launch can lose.
@@ -189,7 +243,7 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // nothing is launched. See `codex_itself`.
     if asks_help_or_version(passthrough) {
         use std::os::unix::process::CommandExt;
-        let codex = first_codex(codex_candidates_for(&config))?;
+        let codex = first_native(&CODEX, candidates_for(&CODEX, config.codex_bin.as_deref()))?;
         let err = codex_itself(&codex, passthrough).exec();
         return Err(err).with_context(|| format!("running {}", codex.display()));
     }
@@ -197,7 +251,7 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // Binary first, exactly as the Claude path resolves its binary first: a
     // missing or unusable executable must surface before anything else. The
     // canonicalised path is what we check and exec.
-    let resolved = resolve_codex_bin(&config)?;
+    let resolved = resolve_native_binary(&CODEX, config.codex_bin.as_deref())?;
     // Reserved grammar. A refused flag or subcommand surfaces here, naming what
     // was refused and why, before anything is created.
     let argv = scan_codex_argv(passthrough).map_err(|refusal| anyhow!("{refusal}"))?;
@@ -217,36 +271,6 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     ))?;
 
     launch(&resolved, &folder, &argv.normalized)
-}
-
-/// Refuse the launch when the daemon that is running cannot host Codex.
-///
-/// **The one case this exists for is a rollback.** A machine whose `ccd` has
-/// been rolled back to a build that predates the agent seam still has this
-/// launcher on it, and a Codex session started against that daemon is a session
-/// it can never be told about: the supervisor asks the same question this asks,
-/// reads the same answer, and withholds its registration for the life of the run
-/// (`crate::supervisor::withhold_unless_hosted`). The run works — the TUI is
-/// real, tmux is real — but nothing on the phone or in `codeconnect sessions`
-/// will ever show it. Refusing here says that before a session exists, rather
-/// than leaving somebody to discover it from an empty fleet.
-///
-/// **Only a decoded "no" refuses.** A daemon that is absent, or that we could not
-/// establish anything about, is not an obstacle: a session launched while `ccd`
-/// is down is a supported state, and it registers when the daemon comes back. The
-/// safety property lives with the supervisor, which fails closed on doubt; this
-/// only spends the operator's time well.
-fn refuse_unless_hostable(support: crate::daemon::AgentSupport) -> Result<()> {
-    match support {
-        crate::daemon::AgentSupport::Hosted
-        | crate::daemon::AgentSupport::Absent
-        | crate::daemon::AgentSupport::Indeterminate(_) => Ok(()),
-        crate::daemon::AgentSupport::Refused(why) => bail!(
-            "refusing to launch: {why}. The session would run, but this daemon could \
-             never be told about it — nothing would list it and the phone would not \
-             see it. Update or restart ccd, then try again."
-        ),
-    }
 }
 
 // ------------------------------------------------------------------- the launch
@@ -277,7 +301,7 @@ const RECORD_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// its session, and the host starts the TUI once that attach has reported the
 /// terminal's colors. The launcher keeps watching the durable outcome while it
 /// shows the session.
-fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Result<()> {
+fn launch(resolved: &ResolvedBinary, folder: &Path, passthrough: &[String]) -> Result<()> {
     // The folder is passed RAW, and that is not an oversight. The chain has exactly
     // one canonicalization, in the coordinator
     // (`codex_coordinator::canonical_launch_cwd`), and every later hop carries its
@@ -488,7 +512,7 @@ struct CharterInputs<'a> {
     custodian_nonce: &'a str,
     session_name: &'a str,
     cwd: &'a str,
-    codex: &'a ResolvedCodex,
+    codex: &'a ResolvedBinary,
     codex_home: &'a Path,
     tui_args: &'a [String],
     terminal_size: Option<(u16, u16)>,
@@ -501,7 +525,7 @@ struct CharterInputs<'a> {
 ///
 /// # The digest is CARRIED, never re-derived — and that is the whole point of the pin
 ///
-/// This function takes a [`ResolvedCodex`], not a path, and emits
+/// This function takes a [`ResolvedBinary`], not a path, and emits
 /// `--codex-sha256 {codex.sha256}`: the digest of the exact bytes
 /// [`inspect_candidate`] read, from the same single read that produced the Mach-O
 /// verdict, and that [`probe_codex`] then froze and re-verified across
@@ -593,7 +617,7 @@ fn spawn_coordinator(session_name: &str, session_uid: &str, charter: &[String]) 
 
 // ----------------------------------------------------------- binary resolution
 
-/// Find the real `codex`, never `codeconnect` itself.
+/// Find the agent's real executable, never `codeconnect` itself.
 ///
 /// launchd-safe and identical in shape to `resolve_claude_bin`: an explicit
 /// candidate list first, `PATH` only as a fallback, and the same self-resolution
@@ -610,11 +634,17 @@ fn spawn_coordinator(session_name: &str, session_uid: &str, charter: &[String]) 
 /// **Executable identity.** Canonicalisation pins a pathname; it does not pin a
 /// file. So each candidate is read exactly once ([`inspect_candidate`]) and that
 /// single read yields both the Mach-O verdict and the SHA-256 that every later
-/// exec site verifies against — see [`ResolvedCodex`] for why the name alone is not
+/// exec site verifies against — see [`ResolvedBinary`] for why the name alone is not
 /// enough and what the pin does and does not claim.
-fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
-    let candidates = codex_candidates_for(config);
+pub(crate) fn resolve_native_binary(
+    agent: &AgentBinary,
+    configured: Option<&str>,
+) -> Result<ResolvedBinary> {
+    resolve_among(agent, candidates_for(agent, configured))
+}
 
+/// [`resolve_native_binary`] over an explicit candidate list.
+fn resolve_among(agent: &AgentBinary, candidates: Vec<PathBuf>) -> Result<ResolvedBinary> {
     let current_canonical = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.canonicalize().ok());
@@ -635,7 +665,8 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
         // rather than exec an executable we cannot pin an identity to.
         let canonical = candidate.canonicalize().with_context(|| {
             format!(
-                "resolving the codex binary at {} to a versioned path",
+                "resolving the {} binary at {} to a versioned path",
+                agent.name,
                 candidate.display()
             )
         })?;
@@ -657,7 +688,7 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
         // the pin describe one file rather than two consecutive opens of one name.
         match inspect_candidate(&canonical) {
             CandidateIdentity::Native { sha256 } => {
-                return Ok(ResolvedCodex {
+                return Ok(ResolvedBinary {
                     path: canonical,
                     sha256,
                 })
@@ -679,15 +710,22 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
     }
     match rejected {
         Some((path, why)) => bail!(
-            "the codex at {} cannot be used: {why}; \
-             CodeConnect supports the standalone native codex \
-             (e.g. ~/.local/bin/codex → …/standalone/releases/…/bin/codex)",
-            path.display()
+            "the {} at {} cannot be used: {why}; CodeConnect supports {}",
+            agent.name,
+            path.display(),
+            agent.supported_install
         ),
-        None => {
-            bail!("could not find the codex binary; set codex_bin in ~/.codeconnect/config.json")
-        }
+        None => bail!("{}", not_found(agent)),
     }
+}
+
+/// What resolution says when no candidate exists at all, naming the config key that
+/// fixes it.
+fn not_found(agent: &AgentBinary) -> String {
+    format!(
+        "could not find the {} binary; set {} in ~/.codeconnect/config.json",
+        agent.name, agent.config_key
+    )
 }
 
 /// What one candidate turned out to be, decided from a **single** read of it.
@@ -734,7 +772,7 @@ enum CandidateIdentity {
 /// a handle the kernel pinned at `open`; the thing they get attributed to is a
 /// *pathname* that the rest of the launch carries around and eventually `execve`s.
 /// An installer landing an atomic replacement partway through the read leaves the
-/// read undisturbed — and would mint a `ResolvedCodex` whose digest is a perfectly
+/// read undisturbed — and would mint a `ResolvedBinary` whose digest is a perfectly
 /// truthful statement about a file that this pathname no longer reaches, which every
 /// later verify would then dutifully confirm was "unchanged" only because the
 /// replacement had settled before any of them looked.
@@ -792,9 +830,9 @@ fn inspect_candidate(path: &Path) -> CandidateIdentity {
 ///   3. the interactive TUI, `codex --remote …`, in the host.
 ///
 /// **Pinned:** the bytes of the file at the resolved path. All three execs open that
-/// one canonical pathname, and each is bracketed by [`verify_codex_identity`] — with
+/// one canonical pathname, and each is bracketed by [`verify_binary_identity`] — with
 /// the vnode arm, so the digest is attributable to the name and not merely to a vnode
-/// (see [`ResolvedCodex`]). If `--codex` is a dispatcher, that is the *dispatcher*
+/// (see [`ResolvedBinary`]). If `--codex` is a dispatcher, that is the *dispatcher*
 /// that is pinned, faithfully and completely: the same dispatcher bytes run all three
 /// times and a mid-launch swap of it is refused.
 ///
@@ -834,9 +872,10 @@ fn is_native_magic(magic: [u8; 4]) -> bool {
 // -------------------------------------------------------------- executable identity
 
 /// The wire width of a pinned digest: SHA-256 as lowercase hex.
-const CODEX_SHA256_HEX_LEN: usize = 64;
+const SHA256_HEX_LEN: usize = 64;
 
 /// Parse the `--codex-sha256` wire form: exactly 64 **lowercase** hex characters.
+/// `name` is the agent the digest pins, as the refusal calls it.
 ///
 /// One grammar, in the module that owns the concept, used by everything that reads
 /// the digest off an argv — the coordinator's charter and the host's charter alike
@@ -848,24 +887,25 @@ const CODEX_SHA256_HEX_LEN: usize = 64;
 /// one spelling, and a digest with two valid spellings is a digest whose equality
 /// test can answer "different" about identical bytes — the failure mode this whole
 /// mechanism exists to avoid, arriving through the front door.
-pub(crate) fn parse_codex_sha256(raw: &str) -> Result<String> {
-    let ok = raw.len() == CODEX_SHA256_HEX_LEN
+pub(crate) fn parse_sha256(name: &str, raw: &str) -> Result<String> {
+    let ok = raw.len() == SHA256_HEX_LEN
         && raw
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     if !ok {
         bail!(
-            "a codex digest must be exactly {CODEX_SHA256_HEX_LEN} lowercase hex characters \
+            "a {name} digest must be exactly {SHA256_HEX_LEN} lowercase hex characters \
              (a sha256), got {raw:?}"
         );
     }
     Ok(raw.to_string())
 }
 
-/// Refuse a `--codex` that is not an **absolute** path.
+/// Refuse a `--codex` that is not an **absolute** path. `flag` is the argument that
+/// carried the path, as the refusal names it.
 ///
 /// **Two different resolvers read that one string.** The executable-identity guard
-/// opens it ([`verify_codex_identity`] → `File::open`) and the spawns execute it
+/// opens it ([`verify_binary_identity`] → `File::open`) and the spawns execute it
 /// (`Command::new`), and those two disagree on exactly one class of input: a value
 /// containing no `/`. `File::open("codex")` opens `./codex`; `Command::new("codex")`
 /// searches `PATH`. A charter naming a bare `codex` would hash one file and execute
@@ -878,7 +918,7 @@ pub(crate) fn parse_codex_sha256(raw: &str) -> Result<String> {
 /// resolves to a canonical path, which is always absolute.
 ///
 /// **It lives here, in the module that owns the identity policy, for the same reason
-/// [`parse_codex_sha256`] does.** Two processes parse a charter carrying `--codex` —
+/// [`parse_sha256`] does.** Two processes parse a charter carrying `--codex` —
 /// the coordinator, which writes the host's charter and opens a pane, and the host,
 /// which reads it back — and the rule has to be the same rule in both. It was not:
 /// the host refused a relative path while the coordinator accepted one, so a bad
@@ -887,10 +927,10 @@ pub(crate) fn parse_codex_sha256(raw: &str) -> Result<String> {
 /// parsers now call this. Both, not one: the coordinator's call moves the refusal to
 /// the process a human is watching, and the host keeps its own because a host must
 /// never assume its parent checked anything.
-pub(crate) fn require_absolute_codex(path: &Path) -> Result<()> {
+pub(crate) fn require_absolute(flag: &str, path: &Path) -> Result<()> {
     if !path.is_absolute() {
         bail!(
-            "--codex must be an absolute path, got {}; a relative or bare name is \
+            "{flag} must be an absolute path, got {}; a relative or bare name is \
              resolved one way by the identity check (which opens it) and another by \
              the spawn (which searches PATH), so the bytes verified need not be the \
              bytes executed",
@@ -913,7 +953,7 @@ pub(crate) fn require_absolute_codex(path: &Path) -> Result<()> {
 /// descriptor open across a comparison of `(st_dev, st_ino)` between the handle and
 /// the name, so a rename landing inside the read is refused rather than hashed clean.
 /// What is left is the interval between that check and the kernel's own open inside
-/// `execve`; see [`ResolvedCodex`] for why macOS offers no way to close it.
+/// `execve`; see [`ResolvedBinary`] for why macOS offers no way to close it.
 ///
 /// `when` names the moment, so a refusal tells an operator *where* in the launch the
 /// file moved rather than only that it did.
@@ -921,25 +961,33 @@ pub(crate) fn require_absolute_codex(path: &Path) -> Result<()> {
 /// A failure to re-read is a refusal, not a pass: "I could not check" and "it is
 /// unchanged" are different answers, and only one of them licenses an `execve`.
 ///
+/// `agent` names the binary in both refusals.
+///
 /// **The caller owes one thing: a path that resolves the same way here as at the
 /// exec.** This opens `path` directly; `Command::new` PATH-searches a value with no
 /// `/` in it. Handing this a bare name would produce a truthful verification of a
 /// file that is not the one that runs, which is the whole gate lost to a spelling.
-/// The host enforces it (`codex_host::require_absolute_codex`) and resolution
+/// The host enforces it ([`require_absolute`]) and resolution
 /// produces only canonical absolute paths.
-pub(crate) fn verify_codex_identity(path: &Path, expected: &str, when: &str) -> Result<()> {
+pub(crate) fn verify_binary_identity(
+    agent: &AgentBinary,
+    path: &Path,
+    expected: &str,
+    when: &str,
+) -> Result<()> {
+    let name = agent.name;
     let actual = protocol::hash::sha256_file(path).with_context(|| {
         format!(
-            "re-reading the codex binary at {} to verify its identity {when}",
+            "re-reading the {name} binary at {} to verify its identity {when}",
             path.display()
         )
     })?;
     if actual != expected {
         bail!(
-            "the codex binary at {} is not the one this launch pinned: it hashed {expected} \
+            "the {name} binary at {} is not the one this launch pinned: it hashed {expected} \
              when it was resolved and inspected, and hashes {actual} {when}. Refusing to run \
              it — the bytes that were checked are not the bytes that would execute. \
-             (A codex install or update running alongside a launch produces exactly this; \
+             (A {name} install or update running alongside a launch produces exactly this; \
              let it finish, then launch again.)",
             path.display()
         );
@@ -948,28 +996,24 @@ pub(crate) fn verify_codex_identity(path: &Path, expected: &str, when: &str) -> 
 }
 
 /// The ordered candidate list, factored out so the precedence is unit-tested
-/// without touching the process environment: config `codex_bin`, then the
-/// `CODECONNECT_CODEX_BIN` env override, then the well-known install locations,
-/// then a `PATH` hit last.
-fn codex_candidates(
-    config: &Config,
+/// without touching the process environment: the config key (`codex_bin`), then the
+/// env override (`CODECONNECT_CODEX_BIN`), then the agent's well-known install
+/// locations, then a `PATH` hit last.
+fn candidates(
+    agent: &AgentBinary,
+    configured: Option<&str>,
     env_override: Option<PathBuf>,
     home: &Path,
     path_hit: Option<PathBuf>,
 ) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(configured) = &config.codex_bin {
+    if let Some(configured) = configured {
         candidates.push(PathBuf::from(configured));
     }
     if let Some(env) = env_override {
         candidates.push(env);
     }
-    // The standalone installer's stable entry point (`~/.local/bin/codex` → a
-    // `standalone/current` symlink → the versioned release), then the two
-    // generic bin dirs a package manager would link a `codex` into.
-    candidates.push(home.join(".local/bin/codex"));
-    candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
-    candidates.push(PathBuf::from("/usr/local/bin/codex"));
+    candidates.extend((agent.well_known)(home));
     if let Some(found) = path_hit {
         candidates.push(found);
     }
@@ -1198,11 +1242,11 @@ fn run_bounded(bin: &Path, args: &[&str], budget: Duration) -> Result<Vec<u8>> {
 /// Ask the installed codex its version and refuse a binary that does not state one. The
 /// value itself decides nothing.
 ///
-/// [`verify_codex_identity`] runs first, so a binary that is not the one resolution
+/// [`verify_binary_identity`] runs first, so a binary that is not the one resolution
 /// inspected is refused before it is ever exec'd.
-fn probe_codex(resolved: &ResolvedCodex) -> Result<()> {
+fn probe_codex(resolved: &ResolvedBinary) -> Result<()> {
     let bin = resolved.path.as_path();
-    verify_codex_identity(bin, &resolved.sha256, "before `codex --version`")?;
+    verify_binary_identity(&CODEX, bin, &resolved.sha256, "before `codex --version`")?;
     let version_out = run_bounded(bin, &["--version"], PROBE_BUDGET)?;
     let text = String::from_utf8_lossy(&version_out).into_owned();
     parse_codex_version(&text)
@@ -1705,7 +1749,7 @@ fn looks_like_flag(token: &str) -> bool {
 /// What `codeconnect codex --help` (or `--version`, `-h`, `-V`, in any cluster) becomes:
 /// the answer is codex's, so it is codex that is run, exactly as the caller would have
 /// run it, inheriting stdio and handing back its exit status. The path is the codex a
-/// launch would choose ([`first_codex`]); the launch's hash protects a session this
+/// launch would choose ([`first_native`]); the launch's hash protects a session this
 /// process hosts, and nothing is hosted here, so it is not paid.
 fn codex_itself(codex: &Path, args: &[String]) -> Command {
     let mut command = Command::new(codex);
@@ -1713,12 +1757,12 @@ fn codex_itself(codex: &Path, args: &[String]) -> Command {
     command
 }
 
-/// The codex a launch would choose, for help and version: the first candidate that
+/// The binary a launch would choose, for help and version: the first candidate that
 /// is a native executable and not this binary, in the launch's own order
-/// ([`codex_candidates`], as [`resolve_codex_bin`] walks it), judged by its magic number
+/// ([`candidates`], as [`resolve_native_binary`] walks it), judged by its magic number
 /// alone — no hash. When no candidate is native, the first existing one, so
-/// a machine with only a script shim still gets codex's help.
-fn first_codex(candidates: Vec<PathBuf>) -> Result<PathBuf> {
+/// a machine with only a script shim still gets the agent's help.
+pub(crate) fn first_native(agent: &AgentBinary, candidates: Vec<PathBuf>) -> Result<PathBuf> {
     let current = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.canonicalize().ok());
@@ -1729,9 +1773,10 @@ fn first_codex(candidates: Vec<PathBuf>) -> Result<PathBuf> {
         .filter(|canonical| Some(canonical) != current.as_ref())
         .collect();
     let native = existing.iter().find(|path| starts_with_native_magic(path));
-    native.or(existing.first()).cloned().ok_or_else(|| {
-        anyhow!("could not find the codex binary; set codex_bin in ~/.codeconnect/config.json")
-    })
+    native
+        .or(existing.first())
+        .cloned()
+        .ok_or_else(|| anyhow!("{}", not_found(agent)))
 }
 
 /// Whether the file's first four bytes are a Mach-O magic number ([`is_native_magic`]).
@@ -1742,14 +1787,15 @@ fn starts_with_native_magic(path: &Path) -> bool {
         .is_ok_and(|()| is_native_magic(magic))
 }
 
-/// [`codex_candidates`] for this process: config, `CODECONNECT_CODEX_BIN`, the
-/// well-known paths and `PATH`.
-fn codex_candidates_for(config: &Config) -> Vec<PathBuf> {
-    codex_candidates(
-        config,
-        std::env::var_os(CODEX_BIN_ENV).map(PathBuf::from),
+/// [`candidates`] for this process: the configured path, the agent's environment
+/// override, its well-known paths and `PATH`.
+pub(crate) fn candidates_for(agent: &AgentBinary, configured: Option<&str>) -> Vec<PathBuf> {
+    candidates(
+        agent,
+        configured,
+        std::env::var_os(agent.env).map(PathBuf::from),
         &protocol::home_dir(),
-        protocol::tmux::search_path("codex"),
+        protocol::tmux::search_path(agent.name),
     )
 }
 
@@ -1917,8 +1963,9 @@ mod tests {
             codex_bin: Some("/from/config/codex".into()),
             ..Config::default()
         };
-        let candidates = codex_candidates(
-            &config,
+        let candidates = candidates(
+            &CODEX,
+            config.codex_bin.as_deref(),
             Some(PathBuf::from("/from/env/codex")),
             Path::new("/home/u"),
             Some(PathBuf::from("/from/path/codex")),
@@ -1933,6 +1980,105 @@ mod tests {
                 PathBuf::from("/usr/local/bin/codex"),
                 PathBuf::from("/from/path/codex"),
             ]
+        );
+    }
+
+    /// **The Codex wording is the descriptor's, byte for byte.** Every message the
+    /// binary helpers print is formatted from [`CODEX`]; each expected string here is
+    /// the literal those helpers printed before they took a descriptor.
+    #[test]
+    fn the_codex_descriptor_renders_the_codex_messages_exactly() {
+        let root = tempdir();
+        let absent = root.join("absent");
+
+        let none = first_native(&CODEX, vec![absent.clone()]).unwrap_err();
+        assert_eq!(
+            format!("{none:#}"),
+            "could not find the codex binary; set codex_bin in ~/.codeconnect/config.json"
+        );
+        let none = resolve_among(&CODEX, vec![absent.clone()]).unwrap_err();
+        assert_eq!(
+            format!("{none:#}"),
+            "could not find the codex binary; set codex_bin in ~/.codeconnect/config.json"
+        );
+
+        let wrapper = root.join("codex");
+        std::fs::write(&wrapper, b"#!/bin/sh\n").unwrap();
+        let err = resolve_among(&CODEX, vec![wrapper.clone()]).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "the codex at {} cannot be used: it is a wrapper, not a native executable; \
+                 CodeConnect supports the standalone native codex \
+                 (e.g. ~/.local/bin/codex → …/standalone/releases/…/bin/codex)",
+                wrapper.canonicalize().unwrap().display()
+            )
+        );
+
+        let native = root.join("codex-native");
+        std::fs::write(&native, [0xCFu8, 0xFA, 0xED, 0xFE, b'n', b'o', b'w']).unwrap();
+        let actual = protocol::hash::sha256_file(&native).unwrap();
+        let pinned = protocol::hash::sha256_hex(b"pinned");
+        let err = verify_binary_identity(&CODEX, &native, &pinned, "before the spawn").unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "the codex binary at {} is not the one this launch pinned: it hashed {pinned} \
+                 when it was resolved and inspected, and hashes {actual} before the spawn. \
+                 Refusing to run it — the bytes that were checked are not the bytes that \
+                 would execute. (A codex install or update running alongside a launch \
+                 produces exactly this; let it finish, then launch again.)",
+                native.display()
+            )
+        );
+        let err = verify_binary_identity(&CODEX, &absent, &pinned, "after deletion").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "re-reading the codex binary at {} to verify its identity after deletion",
+                absent.display()
+            )
+        );
+
+        assert_eq!(
+            require_absolute("--codex", Path::new("codex"))
+                .unwrap_err()
+                .to_string(),
+            "--codex must be an absolute path, got codex; a relative or bare name is resolved \
+             one way by the identity check (which opens it) and another by the spawn (which \
+             searches PATH), so the bytes verified need not be the bytes executed"
+        );
+        assert_eq!(
+            parse_sha256("codex", "nope").unwrap_err().to_string(),
+            "a codex digest must be exactly 64 lowercase hex characters (a sha256), got \"nope\""
+        );
+        cleanup(&root);
+    }
+
+    /// OpenCode is found by its own config key, its own environment override and
+    /// `PATH`, and its messages name both.
+    #[test]
+    fn opencode_is_found_by_its_own_key_environment_and_path() {
+        let candidates = candidates(
+            &OPENCODE,
+            Some("/from/config/opencode"),
+            Some(PathBuf::from("/from/env/opencode")),
+            Path::new("/home/u"),
+            Some(PathBuf::from("/from/path/opencode")),
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/from/config/opencode"),
+                PathBuf::from("/from/env/opencode"),
+                PathBuf::from("/from/path/opencode"),
+            ]
+        );
+        assert_eq!(OPENCODE.env, "CODECONNECT_OPENCODE_BIN");
+        let none = first_native(&OPENCODE, Vec::new()).unwrap_err();
+        assert_eq!(
+            format!("{none:#}"),
+            "could not find the opencode binary; set opencode_bin in ~/.codeconnect/config.json"
         );
     }
 
@@ -1992,7 +2138,7 @@ mod tests {
         // `std::env::current_exe()` is a real, readable, absolute file — and one
         // whose actual sha256 is emphatically not the sentinel below.
         let real = std::env::current_exe().expect("this test binary is a real file");
-        let resolved = ResolvedCodex {
+        let resolved = ResolvedBinary {
             path: real.clone(),
             sha256: sha256.to_string(),
         };
@@ -2013,9 +2159,9 @@ mod tests {
     /// The charter [`launch`] builds for this session folder and TUI argv.
     fn charter_for(folder: &Path, tui_args: &[String]) -> (Vec<String>, PathBuf) {
         let real = std::env::current_exe().expect("this test binary is a real file");
-        let resolved = ResolvedCodex {
+        let resolved = ResolvedBinary {
             path: real.clone(),
-            sha256: "d".repeat(CODEX_SHA256_HEX_LEN),
+            sha256: "d".repeat(SHA256_HEX_LEN),
         };
         let argv = coordinator_charter(&CharterInputs {
             uid: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -2034,11 +2180,8 @@ mod tests {
     #[test]
     fn the_launcher_carries_terminal_size_before_tui_arguments() {
         let prompt = vec!["a prompt".to_string()];
-        let (argv, _) = charter_over_a_real_file_with(
-            &"b".repeat(CODEX_SHA256_HEX_LEN),
-            &prompt,
-            Some((131, 43)),
-        );
+        let (argv, _) =
+            charter_over_a_real_file_with(&"b".repeat(SHA256_HEX_LEN), &prompt, Some((131, 43)));
         assert_eq!(flag(&argv, "--terminal-size"), Some("131x43"));
         let wait_index = argv
             .iter()
@@ -2052,7 +2195,7 @@ mod tests {
         assert!(size_index < boundary);
         assert!(wait_index < boundary);
         assert_eq!(&argv[boundary + 1..], &prompt);
-        let (argv, _) = charter_over_a_real_file_with(&"b".repeat(CODEX_SHA256_HEX_LEN), &[], None);
+        let (argv, _) = charter_over_a_real_file_with(&"b".repeat(SHA256_HEX_LEN), &[], None);
         assert!(!argv.iter().any(|arg| arg == "--terminal-size"));
         assert!(!argv.iter().any(|arg| arg == "--wait-for-terminal"));
     }
@@ -2067,7 +2210,7 @@ mod tests {
     /// makes the two answers differ and only the carried one still describes the
     /// bytes that were magic-checked and hashed.
     ///
-    /// So the test makes them differ on purpose: the `ResolvedCodex` names a real
+    /// So the test makes them differ on purpose: the `ResolvedBinary` names a real
     /// file and records a digest that is *not* that file's. A carrying
     /// implementation emits the recorded value; a re-deriving one emits the file's.
     /// MUTATION-VERIFIED — replacing `inputs.codex.sha256.clone()` in
@@ -2075,7 +2218,7 @@ mod tests {
     /// fails this assertion.
     #[test]
     fn the_charter_carries_the_resolve_time_digest_and_never_re_derives_it() {
-        let pinned = "a".repeat(CODEX_SHA256_HEX_LEN);
+        let pinned = "a".repeat(SHA256_HEX_LEN);
         let (argv, real) = charter_over_a_real_file_with(&pinned, &[], None);
 
         // The premise: these two really are different answers about one path.
@@ -2093,7 +2236,7 @@ mod tests {
              from the path: {argv:?}"
         );
         // And the well-formedness the coordinator will re-check on the way in.
-        assert!(parse_codex_sha256(&pinned).is_ok());
+        assert!(parse_sha256("codex", &pinned).is_ok());
     }
 
     /// The charter fills every dimension the coordinator and the host refuse to
@@ -2101,7 +2244,7 @@ mod tests {
     /// the coordinator's own default (the one shared server).
     #[test]
     fn the_charter_names_every_undefaulted_dimension_and_no_tmux_socket() {
-        let (argv, _) = charter_over_a_real_file_with(&"b".repeat(CODEX_SHA256_HEX_LEN), &[], None);
+        let (argv, _) = charter_over_a_real_file_with(&"b".repeat(SHA256_HEX_LEN), &[], None);
 
         for required in [
             "--uid",
@@ -2157,7 +2300,7 @@ mod tests {
     /// coordinator flag into a TUI argument.
     #[test]
     fn the_charter_forwards_a_passthrough_only_behind_the_boundary() {
-        let (bare, _) = charter_over_a_real_file_with(&"c".repeat(CODEX_SHA256_HEX_LEN), &[], None);
+        let (bare, _) = charter_over_a_real_file_with(&"c".repeat(SHA256_HEX_LEN), &[], None);
         assert!(
             !bare.iter().any(|a| a == "--"),
             "an empty passthrough must add no boundary: {bare:?}"
@@ -2165,7 +2308,7 @@ mod tests {
 
         let passthrough = vec!["--model".to_string(), "gpt-5".to_string(), "hi".to_string()];
         let (with, _) =
-            charter_over_a_real_file_with(&"c".repeat(CODEX_SHA256_HEX_LEN), &passthrough, None);
+            charter_over_a_real_file_with(&"c".repeat(SHA256_HEX_LEN), &passthrough, None);
         let at = with
             .iter()
             .position(|a| a == "--")
@@ -2221,7 +2364,7 @@ mod tests {
         // And the other half: the minters really are in `launch`, so the assertion
         // above is about where they are rather than about a spelling that vanished.
         let launch_body =
-            body("fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String])");
+            body("fn launch(resolved: &ResolvedBinary, folder: &Path, passthrough: &[String])");
         for minter in ["uid::new(", "next_session_name("] {
             assert!(
                 launch_body.contains(minter),
@@ -2246,7 +2389,7 @@ mod tests {
 
     #[test]
     fn candidate_list_omits_absent_config_env_and_path_and_the_unevidenced_dir() {
-        let candidates = codex_candidates(&Config::default(), None, Path::new("/home/u"), None);
+        let candidates = candidates(&CODEX, None, None, Path::new("/home/u"), None);
         assert_eq!(
             candidates,
             vec![
@@ -2288,7 +2431,8 @@ mod tests {
             codex_bin: Some(invocation.to_string_lossy().into_owned()),
             ..Config::default()
         };
-        let resolved = resolve_codex_bin(&config).expect("must resolve the configured codex");
+        let resolved = resolve_native_binary(&CODEX, config.codex_bin.as_deref())
+            .expect("must resolve the configured codex");
         assert_eq!(resolved.path, real.canonicalize().unwrap());
         assert!(resolved
             .path
@@ -2308,15 +2452,7 @@ mod tests {
         std::fs::write(&real, b"#!/bin/sh\n").unwrap();
         make_executable(&real);
 
-        let candidates = codex_candidates(
-            &Config {
-                codex_bin: Some("/nonexistent/codex".into()),
-                ..Config::default()
-            },
-            None,
-            &home,
-            None,
-        );
+        let candidates = candidates(&CODEX, Some("/nonexistent/codex"), None, &home, None);
         let first_real = candidates.into_iter().find(|c| c.is_file()).unwrap();
         assert_eq!(first_real, real);
 
@@ -2332,7 +2468,7 @@ mod tests {
         };
         // Resolution finds a real codex further down the list or fails, but never
         // returns the shim itself.
-        if let Ok(resolved) = resolve_codex_bin(&config) {
+        if let Ok(resolved) = resolve_native_binary(&CODEX, config.codex_bin.as_deref()) {
             assert_ne!(
                 resolved.path.canonicalize().ok(),
                 me.canonicalize().ok(),
@@ -2348,7 +2484,7 @@ mod tests {
             return;
         }
         let resolved =
-            resolve_codex_bin(&Config::default()).expect("codex must be installed on PATH");
+            resolve_native_binary(&CODEX, None).expect("codex must be installed on PATH");
         // A single canonicalised path, which is a real file and not the shim.
         assert!(resolved.path.is_file());
         assert_eq!(resolved.path, resolved.path.canonicalize().unwrap());
@@ -2388,7 +2524,7 @@ mod tests {
             codex_bin: Some(wrapper.to_string_lossy().into_owned()),
             ..Config::default()
         };
-        match resolve_codex_bin(&cfg_wrapper) {
+        match resolve_native_binary(&CODEX, cfg_wrapper.codex_bin.as_deref()) {
             Ok(resolved) => {
                 assert_ne!(resolved.path, wrapper.canonicalize().unwrap());
                 assert!(is_native(&resolved.path));
@@ -2404,7 +2540,8 @@ mod tests {
             codex_bin: Some(native.to_string_lossy().into_owned()),
             ..Config::default()
         };
-        let resolved = resolve_codex_bin(&cfg_native).expect("native binary must be accepted");
+        let resolved = resolve_native_binary(&CODEX, cfg_native.codex_bin.as_deref())
+            .expect("native binary must be accepted");
         assert_eq!(resolved.path, native.canonicalize().unwrap());
 
         cleanup(&root);
@@ -2424,12 +2561,13 @@ mod tests {
             codex_bin: Some(bin.to_string_lossy().into_owned()),
             ..Config::default()
         };
-        let resolved = resolve_codex_bin(&config).expect("a native candidate resolves");
+        let resolved = resolve_native_binary(&CODEX, config.codex_bin.as_deref())
+            .expect("a native candidate resolves");
         // The digest is of the file, computed independently of the code under test.
         assert_eq!(resolved.sha256, protocol::hash::sha256_hex(&bytes));
         // And it is the wire form the two charters will accept.
         assert_eq!(
-            parse_codex_sha256(&resolved.sha256).unwrap(),
+            parse_sha256("codex", &resolved.sha256).unwrap(),
             resolved.sha256
         );
 
@@ -2451,17 +2589,24 @@ mod tests {
             codex_bin: Some(bin.to_string_lossy().into_owned()),
             ..Config::default()
         };
-        let resolved = resolve_codex_bin(&config).expect("a native candidate resolves");
+        let resolved = resolve_native_binary(&CODEX, config.codex_bin.as_deref())
+            .expect("a native candidate resolves");
 
         // Unchanged: every exec site is free to proceed.
-        verify_codex_identity(&resolved.path, &resolved.sha256, "in the unchanged case")
-            .expect("an untouched binary must verify");
+        verify_binary_identity(
+            &CODEX,
+            &resolved.path,
+            &resolved.sha256,
+            "in the unchanged case",
+        )
+        .expect("an untouched binary must verify");
 
         // The swap. Same path, same canonical name, different bytes — and still a
         // perfectly valid native Mach-O, so the magic check alone would wave it
         // through. Only the digest sees it.
         std::fs::write(&bin, [0xCFu8, 0xFA, 0xED, 0xFE, b'n', b'e', b'w']).unwrap();
-        let err = verify_codex_identity(
+        let err = verify_binary_identity(
+            &CODEX,
             &resolved.path,
             &resolved.sha256,
             "immediately before the app-server spawn",
@@ -2490,15 +2635,20 @@ mod tests {
         // A truncation is a swap too — the digest covers the whole file, not a
         // prefix, so a binary that keeps its magic and loses its tail is refused.
         std::fs::write(&bin, [0xCFu8, 0xFA, 0xED, 0xFE]).unwrap();
-        assert!(
-            verify_codex_identity(&resolved.path, &resolved.sha256, "after truncation",).is_err()
-        );
+        assert!(verify_binary_identity(
+            &CODEX,
+            &resolved.path,
+            &resolved.sha256,
+            "after truncation",
+        )
+        .is_err());
 
         // And a file that is gone is a refusal, never a pass: "I could not check"
         // and "it is unchanged" must not share an answer.
         std::fs::remove_file(&bin).unwrap();
-        let err = verify_codex_identity(&resolved.path, &resolved.sha256, "after deletion")
-            .expect_err("an unreadable binary must be refused");
+        let err =
+            verify_binary_identity(&CODEX, &resolved.path, &resolved.sha256, "after deletion")
+                .expect_err("an unreadable binary must be refused");
         assert!(
             format!("{err:#}").contains("re-reading"),
             "the refusal must say the check itself failed: {err:#}"
@@ -2557,7 +2707,7 @@ mod tests {
     /// **The rename window at the resolution site.** The verification sites are not
     /// the only place a 220 MB read happens: resolution takes one too, and the digest
     /// it mints is the pin everything downstream compares against. A rename landing
-    /// inside *that* read produces a `ResolvedCodex` whose digest describes bytes the
+    /// inside *that* read produces a `ResolvedBinary` whose digest describes bytes the
     /// pathname no longer reaches — and because the replacement has settled by the
     /// time any verify runs, every later check confirms it as "unchanged". The whole
     /// chain would be internally consistent and about the wrong file.
@@ -2659,18 +2809,18 @@ mod tests {
     #[test]
     fn a_digest_on_the_wire_has_exactly_one_valid_spelling() {
         let good = protocol::hash::sha256_hex(b"codex");
-        assert_eq!(parse_codex_sha256(&good).unwrap(), good);
+        assert_eq!(parse_sha256("codex", &good).unwrap(), good);
 
         // Uppercase is refused rather than folded: one digest, one spelling, so a
         // string comparison can never call identical bytes different.
-        assert!(parse_codex_sha256(&good.to_uppercase()).is_err());
+        assert!(parse_sha256("codex", &good.to_uppercase()).is_err());
         // Wrong width in both directions, and non-hex characters.
-        assert!(parse_codex_sha256(&good[..63]).is_err());
-        assert!(parse_codex_sha256(&format!("{good}0")).is_err());
-        assert!(parse_codex_sha256(&"g".repeat(64)).is_err());
-        assert!(parse_codex_sha256("").is_err());
+        assert!(parse_sha256("codex", &good[..63]).is_err());
+        assert!(parse_sha256("codex", &format!("{good}0")).is_err());
+        assert!(parse_sha256("codex", &"g".repeat(64)).is_err());
+        assert!(parse_sha256("codex", "").is_err());
         // The refusal says what was expected, so a caller can fix it.
-        let err = parse_codex_sha256("nope").unwrap_err().to_string();
+        let err = parse_sha256("codex", "nope").unwrap_err().to_string();
         assert!(err.contains("64"), "names the width: {err}");
         assert!(err.contains("lowercase"), "names the case: {err}");
     }
@@ -2694,10 +2844,10 @@ mod tests {
             eprintln!("skipped: no `codex` on PATH — nothing to version-check");
             return;
         }
-        let real = resolve_codex_bin(&Config::default()).unwrap();
+        let real = resolve_native_binary(&CODEX, None).unwrap();
         // Only the mismatch arm is staged, so the suite pays for one hash of a 220 MB
         // binary rather than two; the matching arm is the ordinary launch.
-        let swapped = ResolvedCodex {
+        let swapped = ResolvedBinary {
             path: real.path.clone(),
             sha256: protocol::hash::sha256_hex(b"some other codex"),
         };
@@ -2731,7 +2881,7 @@ mod tests {
         std::fs::write(&script, b"#!/bin/sh\necho 'not a version at all'\n").unwrap();
         make_executable(&script);
 
-        let swapped = ResolvedCodex {
+        let swapped = ResolvedBinary {
             path: script.clone(),
             sha256: protocol::hash::sha256_hex(b"what was actually pinned"),
         };
@@ -2748,7 +2898,7 @@ mod tests {
 
         // With the right digest, the same script reaches the parse and fails there —
         // proving the identity check is not simply swallowing every error.
-        let honest = ResolvedCodex {
+        let honest = ResolvedBinary {
             path: script.clone(),
             sha256: protocol::hash::sha256_file(&script).unwrap(),
         };
@@ -2810,7 +2960,7 @@ mod tests {
             "the version must still be READ — a binary that cannot say what it is is not \
              launched"
         );
-        let probe = production_fn("fn probe_codex(resolved: &ResolvedCodex) -> Result<()> {");
+        let probe = production_fn("fn probe_codex(resolved: &ResolvedBinary) -> Result<()> {");
         assert!(
             probe.contains("parse_codex_version("),
             "the probe must parse what it read"
@@ -3472,7 +3622,7 @@ mod tests {
             .find("codex_itself(")
             .expect("start runs codex itself");
         for later in [
-            "resolve_codex_bin(",
+            "resolve_native_binary(",
             "scan_codex_argv(",
             "probe_codex(",
             "launch(&resolved",
@@ -3598,7 +3748,7 @@ mod tests {
     }
 
     /// **Help runs the codex a launch would choose**: the first native executable in the
-    /// launch's own candidate order ([`codex_candidates`]), with none of the launch's
+    /// launch's own candidate order ([`candidates`]), with none of the launch's
     /// hashing. A script shim earlier in the list is skipped exactly as a launch
     /// skips it; only when no native binary exists at all does help fall back to the
     /// first candidate, so a shim-only machine still gets codex's help. Nothing at all is
@@ -3622,17 +3772,23 @@ mod tests {
             codex_bin: Some(shim.to_string_lossy().into_owned()),
             ..Config::default()
         };
-        let candidates = codex_candidates(&config, Some(native.clone()), &root, None);
+        let candidates = candidates(
+            &CODEX,
+            config.codex_bin.as_deref(),
+            Some(native.clone()),
+            &root,
+            None,
+        );
         assert_eq!(
-            first_codex(candidates).expect("a codex"),
+            first_native(&CODEX, candidates).expect("a codex"),
             native.canonicalize().unwrap(),
             "help must run the native binary a launch would run, not the shim"
         );
 
         // Shim-only: help still runs it.
-        let found = first_codex(vec![root.join("absent"), shim.clone()]).expect("a codex");
+        let found = first_native(&CODEX, vec![root.join("absent"), shim.clone()]).expect("a codex");
         assert_eq!(found, shim.canonicalize().unwrap());
-        let none = first_codex(vec![root.join("absent")]).expect_err("nothing to run");
+        let none = first_native(&CODEX, vec![root.join("absent")]).expect_err("nothing to run");
         assert!(format!("{none:#}").contains("could not find the codex binary"));
         cleanup(&root);
     }

@@ -314,7 +314,7 @@ pub(crate) struct HostArgs {
     /// The codex binary to exec for BOTH the app-server and the TUI.
     ///
     /// The host does **not** re-resolve or native-check this path —
-    /// `codex::resolve_codex_bin` runs upstream in the launcher. Stated plainly
+    /// `codex::resolve_native_binary` runs upstream in the launcher. Stated plainly
     /// because it is a real premise:
     /// `internal-codex-host --codex /any/path` will exec that path twice. Same-uid,
     /// so not a privilege boundary — but not a guarantee this file makes.
@@ -338,7 +338,7 @@ pub(crate) struct HostArgs {
     /// **Why a missing one is a refusal.** An absent digest would mean falling back
     /// to trusting a pathname, silently, on the one dimension that decides which
     /// code runs — the same reason no dimension has a default here.
-    /// [`crate::codex::verify_codex_identity`] is then re-run immediately before
+    /// [`crate::codex::verify_binary_identity`] is then re-run immediately before
     /// **each** of the two spawns, not once at parse time: the app-server and the
     /// TUI start at different moments, separated by the app-server's bring-up and
     /// the broker's bind, and a single early check would leave the second exec
@@ -624,7 +624,7 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
             // The executable-identity pin: the identity of the bytes `--codex` must
             // still be, checked against the same grammar the launcher writes it with.
             "--codex-sha256" => {
-                let parsed = crate::codex::parse_codex_sha256(&value_of(&mut it, flag)?)
+                let parsed = crate::codex::parse_sha256("codex", &value_of(&mut it, flag)?)
                     .with_context(|| flag.to_string())?;
                 set_once(&mut codex_sha256, flag, parsed)?;
             }
@@ -657,7 +657,7 @@ pub(crate) fn parse_host_args(args: &[String]) -> Result<HostArgs> {
     // applies to the same string. The host repeats it rather than trusting its
     // parent: the process whose spawns this decides is the one that has to be sure.
     let codex = codex.context("--codex <path> is required")?;
-    crate::codex::require_absolute_codex(&codex)?;
+    crate::codex::require_absolute("--codex", &codex)?;
 
     Ok(HostArgs {
         codex,
@@ -1349,10 +1349,11 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
     // holds the descriptor across a `(dev, ino)` comparison with the name). What is
     // left is the interval from that comparison to the child's `execve`, which macOS
     // gives no way to close — there is no exec-by-descriptor — see
-    // `codex::ResolvedCodex`. A hostile process running as this uid is out of scope
+    // `codex::ResolvedBinary`. A hostile process running as this uid is out of scope
     // by construction: invariant 1 in this module's doc, which defers to
     // `codex::start` for what it covers.
-    if let Err(err) = crate::codex::verify_codex_identity(
+    if let Err(err) = crate::codex::verify_binary_identity(
+        &crate::codex::CODEX,
         &args.codex,
         &args.codex_sha256,
         "immediately before the app-server spawn",
@@ -2559,7 +2560,8 @@ async fn drive(
     // The app-server verify above records what this closes and what it does not.
     let (codex, codex_sha256) = (args.codex.clone(), args.codex_sha256.clone());
     let verify = tokio::task::spawn_blocking(move || {
-        crate::codex::verify_codex_identity(
+        crate::codex::verify_binary_identity(
+            &crate::codex::CODEX,
             &codex,
             &codex_sha256,
             "immediately before the TUI spawn",
@@ -3360,7 +3362,7 @@ mod tests {
         assert!(err.contains("--codex-sha256"), "names the flag: {err}");
 
         // Malformed: too short, too long, non-hex, uppercase. Each is refused
-        // rather than normalised — see `codex::parse_codex_sha256`.
+        // rather than normalised — see `codex::parse_sha256`.
         //
         // The case probe is built from a real digest and checked to CONTAIN a
         // letter first. The obvious spelling — uppercasing the all-digit fixture

@@ -187,6 +187,37 @@ pub fn request_within(frame: &ClientFrame, timeout: Duration) -> Result<DaemonFr
     }
 }
 
+/// Refuse a launch when the daemon that is running cannot host its agent.
+///
+/// **The one case this exists for is a rollback.** A machine whose `ccd` has
+/// been rolled back to a build that predates the agent seam still has this
+/// launcher on it, and a Codex session started against that daemon is a session
+/// it can never be told about: the supervisor asks the same question this asks,
+/// reads the same answer, and withholds its registration for the life of the run
+/// (`crate::supervisor::withhold_unless_hosted`). The run works — the TUI is
+/// real, tmux is real — but nothing on the phone or in `codeconnect sessions`
+/// will ever show it. Refusing here says that before a session exists, rather
+/// than leaving somebody to discover it from an empty fleet.
+///
+/// **Only a decoded "no" refuses.** A daemon that is absent, or that we could not
+/// establish anything about, is not an obstacle: a session launched while `ccd`
+/// is down is a supported state, and it registers when the daemon comes back. The
+/// safety property lives with the supervisor, which fails closed on doubt; this
+/// only spends the operator's time well.
+///
+/// One function for every non-Claude launcher (`codeconnect codex`,
+/// `codeconnect opencode`), so the refusal reads the same whichever agent it stops.
+pub(crate) fn refuse_unless_hostable(support: AgentSupport) -> Result<()> {
+    match support {
+        AgentSupport::Hosted | AgentSupport::Absent | AgentSupport::Indeterminate(_) => Ok(()),
+        AgentSupport::Refused(why) => bail!(
+            "refusing to launch: {why}. The session would run, but this daemon could \
+             never be told about it — nothing would list it and the phone would not \
+             see it. Update or restart ccd, then try again."
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
