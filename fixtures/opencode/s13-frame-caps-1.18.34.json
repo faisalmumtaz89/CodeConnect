@@ -1,0 +1,249 @@
+{
+ "opencode": "1.18.34",
+ "what": "plugin frame rules (wire v1): sizes are encoded JSON bytes; strings over 64 KiB are cut with codex_approval::bounded's marker; a frame over 1 MiB becomes {t:\"stub\",seq,type,ids,size,sha256} with size and sha256 over the same encoded line, newline included; patch bodies are never forwarded",
+ "caps": {
+  "string_bytes": 65536,
+  "frame_bytes": 1048576,
+  "queue_bytes": 4194304,
+  "resync_page_bytes": 262144,
+  "ccd_ipc_frame_bytes": 8388608
+ },
+ "recipe": "a recipe is a list of pieces concatenated in order: {text} literally, {repeat, count} as repeat x count",
+ "strings": [
+  {
+   "what": "70 KB ASCII command (the non-card tool part's input)",
+   "recipe": [
+    {
+     "text": "echo "
+    },
+    {
+     "repeat": "a",
+     "count": 70000
+    },
+    {
+     "text": " ; rm -rf ~/work"
+    }
+   ],
+   "input_encoded_bytes": 70023,
+   "expected": {
+    "cut": true,
+    "kept_utf16_units": 65417,
+    "kept_utf8_bytes": 65417,
+    "marker": "… (4604 bytes elided; sha256 of the whole text 8f0cd2f766b97a9cf798d4d4b35bb53753282f12485feb06427f5f0dd39a5072)",
+    "output_encoded_bytes": 65533
+   }
+  },
+  {
+   "what": "60,000 control bytes: 60 KB raw, 360 KB encoded",
+   "recipe": [
+    {
+     "repeat": "\u0001",
+     "count": 60000
+    }
+   ],
+   "input_encoded_bytes": 360002,
+   "expected": {
+    "cut": true,
+    "kept_utf16_units": 10902,
+    "kept_utf8_bytes": 10902,
+    "marker": "… (49098 bytes elided; sha256 of the whole text ffb240dcc910eace6c9f7fafe782880385b9c26c64aa90f8568243d5395347ab)",
+    "output_encoded_bytes": 65529
+   }
+  },
+  {
+   "what": "astral characters: never split a surrogate pair",
+   "recipe": [
+    {
+     "repeat": "😀",
+     "count": 20000
+    }
+   ],
+   "input_encoded_bytes": 80002,
+   "expected": {
+    "cut": true,
+    "kept_utf16_units": 32706,
+    "kept_utf8_bytes": 65412,
+    "marker": "… (14588 bytes elided; sha256 of the whole text 05d172b0647e80ebde625c5558dfefdc5d7dfba78f2b73ebde9bce880da49ddc)",
+    "output_encoded_bytes": 65529
+   }
+  },
+  {
+   "what": "exactly at the cap stays whole",
+   "recipe": [
+    {
+     "repeat": "a",
+     "count": 65534
+    }
+   ],
+   "input_encoded_bytes": 65536,
+   "expected": {
+    "cut": false
+   }
+  }
+ ],
+ "frames": [
+  {
+   "what": "20 strings of 70,000 bytes: each is cut to 64 KiB, the frame is still over 1 MiB",
+   "recipe": {
+    "seq": 9,
+    "type": "message.part.updated",
+    "properties": {
+     "sessionID": "ses_y",
+     "part": {
+      "id": "prt_y",
+      "messageID": "msg_y",
+      "callID": "call_y",
+      "type": "tool",
+      "state": {
+       "status": "completed",
+       "input": {
+        "f0..f19": {
+         "repeat": "x",
+         "count": 70000
+        }
+       }
+      }
+     }
+    }
+   },
+   "expected": {
+    "stub": true,
+    "line": "{\"t\":\"stub\",\"seq\":9,\"type\":\"message.part.updated\",\"ids\":{\"sessionID\":\"ses_y\",\"messageID\":\"msg_y\",\"partID\":\"prt_y\",\"callID\":\"call_y\"},\"size\":1310989,\"sha256\":\"d7a4c4921497332fba67a5b2d94cb15192ddae695c847a5989ae548d7ea9e40e\"}\n",
+    "line_bytes": 225
+   }
+  },
+  {
+   "what": "a small frame passes unchanged",
+   "input": {
+    "seq": 10,
+    "type": "session.status",
+    "properties": {
+     "sessionID": "ses_y",
+     "status": {
+      "type": "busy"
+     }
+    }
+   },
+   "expected": {
+    "stub": false,
+    "line": "{\"t\":\"ev\",\"seq\":10,\"type\":\"session.status\",\"properties\":{\"sessionID\":\"ses_y\",\"status\":{\"type\":\"busy\"}}}\n",
+    "line_bytes": 104
+   }
+  }
+ ],
+ "patch_bodies": [
+  {
+   "what": "user message summary.diffs",
+   "input": {
+    "info": {
+     "id": "msg_u",
+     "sessionID": "ses_z",
+     "role": "user",
+     "summary": {
+      "title": "t",
+      "diffs": [
+       {
+        "file": "a",
+        "patch": "@@ big patch @@",
+        "additions": 1,
+        "deletions": 0
+       }
+      ]
+     }
+    }
+   },
+   "expected": {
+    "info": {
+     "id": "msg_u",
+     "sessionID": "ses_z",
+     "role": "user",
+     "summary": {
+      "title": "t"
+     }
+    }
+   }
+  },
+  {
+   "what": "edit tool part: filediff dropped, the tool's own metadata.diff kept",
+   "input": {
+    "part": {
+     "id": "prt_e",
+     "type": "tool",
+     "tool": "edit",
+     "state": {
+      "status": "completed",
+      "metadata": {
+       "diff": "d",
+       "filediff": {
+        "file": "a",
+        "before": "x",
+        "after": "y",
+        "patch": "p"
+       }
+      }
+     }
+    }
+   },
+   "expected": {
+    "part": {
+     "id": "prt_e",
+     "type": "tool",
+     "tool": "edit",
+     "state": {
+      "status": "completed",
+      "metadata": {
+       "diff": "d"
+      }
+     }
+    }
+   }
+  },
+  {
+   "what": "session summary.diffs, revert.diff and files[].patch",
+   "input": {
+    "info": {
+     "id": "ses_z",
+     "summary": {
+      "additions": 1,
+      "deletions": 0,
+      "files": 1,
+      "diffs": [
+       {
+        "file": "a",
+        "patch": "pp"
+       }
+      ]
+     },
+     "revert": {
+      "messageID": "m",
+      "diff": "big",
+      "files": [
+       {
+        "path": "a",
+        "patch": "pp"
+       }
+      ]
+     }
+    }
+   },
+   "expected": {
+    "info": {
+     "id": "ses_z",
+     "summary": {
+      "additions": 1,
+      "deletions": 0,
+      "files": 1
+     },
+     "revert": {
+      "messageID": "m",
+      "files": [
+       {
+        "path": "a"
+       }
+      ]
+     }
+    }
+   }
+  }
+ ]
+}

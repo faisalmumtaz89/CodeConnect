@@ -1,0 +1,160 @@
+{
+ "opencode": "1.18.34",
+ "what": "approval cards (wire v1) are exempt from the string cap up to the frame cap, so the whole command reaches ccd's risk check; above the frame cap a card is a {t:\"card_stub\"} frame with no command text, sized and hashed over the whole encoded card line",
+ "recipe": "a recipe is a list of pieces concatenated in order: {text} literally, {repeat, count} as repeat x count",
+ "cards": [
+  {
+   "name": "cut70",
+   "what": "70 KB command ending in the destructive part: forwarded whole and answerable",
+   "command_recipe": [
+    {
+     "text": "echo "
+    },
+    {
+     "repeat": "a",
+     "count": 70000
+    },
+    {
+     "text": " ; rm -rf ~/work"
+    }
+   ],
+   "card_template": {
+    "id": "per_x",
+    "sessionID": "ses_x",
+    "permission": "bash",
+    "patterns": [
+     "<command>"
+    ],
+    "always": [
+     "echo *"
+    ],
+    "metadata": {
+     "command": "<command>",
+     "description": "d"
+    },
+    "tool": {
+     "messageID": "msg_x",
+     "callID": "call_x"
+    },
+    "anchor_input": {
+     "command": "<command>",
+     "description": "d"
+    }
+   },
+   "expected": {
+    "stub": false,
+    "line_bytes": 210351,
+    "line_sha256": "41a8893cca074a87fd098320f27052c543fee7512961c77eb2999fcb90e680f2",
+    "whole_command_in": [
+     "metadata.command",
+     "patterns[0]",
+     "anchor_input.command"
+    ],
+    "command_kept_whole": true
+   },
+   "live": {
+    "frame_bytes": 210421,
+    "stub": false,
+    "note": "measured on the live link before wire v1 framing; the byte count differs from line_bytes by the id lengths and the frame keys"
+   }
+  },
+  {
+   "name": "cutctl",
+   "what": "200,000 control bytes: fits raw, ~3.6 MB encoded: stub",
+   "command_recipe": [
+    {
+     "text": "printf %s "
+    },
+    {
+     "repeat": "\u0001",
+     "count": 200000
+    },
+    {
+     "text": " ; rm -rf ~/work"
+    }
+   ],
+   "card_template": {
+    "id": "per_x",
+    "sessionID": "ses_x",
+    "permission": "bash",
+    "patterns": [
+     "<command>"
+    ],
+    "always": [
+     "printf *"
+    ],
+    "metadata": {
+     "command": "<command>",
+     "description": "d"
+    },
+    "tool": {
+     "messageID": "msg_x",
+     "callID": "call_x"
+    },
+    "anchor_input": {
+     "command": "<command>",
+     "description": "d"
+    }
+   },
+   "expected": {
+    "stub": true,
+    "line": "{\"t\":\"card_stub\",\"seq\":1,\"type\":\"permission.asked\",\"properties\":{\"id\":\"per_x\",\"sessionID\":\"ses_x\",\"permission\":\"bash\",\"tool\":{\"messageID\":\"msg_x\",\"callID\":\"call_x\"}},\"size\":3600368,\"sha256\":\"a7fad36d194877ebe74960ee8a1aa0c422d97956d8ee4eaca8bb5605e2d693a5\"}\n",
+    "line_bytes": 258
+   },
+   "live": {
+    "frame_bytes": 379,
+    "stub": true,
+    "note": "measured on the live link before wire v1 framing; the byte count differs from line_bytes by the id lengths and the frame keys"
+   }
+  },
+  {
+   "name": "cut2m",
+   "what": "2 MB command: stub",
+   "command_recipe": [
+    {
+     "text": "echo "
+    },
+    {
+     "repeat": "a",
+     "count": 2000000
+    },
+    {
+     "text": " ; rm -rf ~/work"
+    }
+   ],
+   "card_template": {
+    "id": "per_x",
+    "sessionID": "ses_x",
+    "permission": "bash",
+    "patterns": [
+     "<command>"
+    ],
+    "always": [
+     "echo *"
+    ],
+    "metadata": {
+     "command": "<command>",
+     "description": "d"
+    },
+    "tool": {
+     "messageID": "msg_x",
+     "callID": "call_x"
+    },
+    "anchor_input": {
+     "command": "<command>",
+     "description": "d"
+    }
+   },
+   "expected": {
+    "stub": true,
+    "line": "{\"t\":\"card_stub\",\"seq\":1,\"type\":\"permission.asked\",\"properties\":{\"id\":\"per_x\",\"sessionID\":\"ses_x\",\"permission\":\"bash\",\"tool\":{\"messageID\":\"msg_x\",\"callID\":\"call_x\"}},\"size\":6000351,\"sha256\":\"2769ff91d94c161601acb4b0887c1c6faab74762c88fd388c03e7edc3adee955\"}\n",
+    "line_bytes": 258
+   },
+   "live": {
+    "frame_bytes": 379,
+    "stub": true,
+    "note": "measured on the live link before wire v1 framing; the byte count differs from line_bytes by the id lengths and the frame keys"
+   }
+  }
+ ]
+}

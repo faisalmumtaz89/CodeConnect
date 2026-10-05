@@ -1,0 +1,20 @@
+{
+  "name": "codeconnect-opencode-plugin",
+  "private": true,
+  "type": "module",
+  "description": "The CodeConnect OpenCode TUI plugin. The plugin itself is codeconnect-opencode.js and has no dependencies; these packages only type-check it.",
+  "scripts": {
+    "check": "tsc -p jsconfig.json",
+    "test": "bun test ./test",
+    "test:live": "CC_OPENCODE_LIVE=1 bun test ./live"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.34",
+    "@opentui/core": "0.4.5",
+    "@opentui/keymap": "0.4.5",
+    "@opentui/solid": "0.4.5",
+    "@types/node": "24.12.2",
+    "solid-js": "1.9.10",
+    "typescript": "5.8.2"
+  }
+}
