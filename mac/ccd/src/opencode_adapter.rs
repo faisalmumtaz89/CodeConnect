@@ -32,10 +32,16 @@
 //!     message completed and no tool running closes it, with its real outcome.
 //!     A snapshot leaves a turn this adapter never saw outcome-unknown the
 //!     same way when a reply of it never completed and a later turn began
-//!     after it: the reply was abandoned when its process ended.
+//!     after it: the reply was abandoned when its process ended. It does the
+//!     same when what is persisted cannot say how a turn ended: its prompt got
+//!     no reply, or a prompt was written in the millisecond its run may have
+//!     ended.
 //!
 //! A lost link closes nothing: the open turns wait for the snapshot the next
-//! connection brings.
+//! connection brings. A snapshot reads a busy period where OpenCode's own run
+//! loop draws one: a user message, typed or written by OpenCode, begins a turn
+//! when the run before it had ended — on the loop's exit test, an error, an
+//! abort, a rejected permission, or a `!command`'s end.
 //!
 //! ## Order
 //!
@@ -280,6 +286,31 @@ pub(crate) struct OpencodeAdapter {
     /// last full snapshot.
     unassigned: HashSet<String>,
     resync_wanted: bool,
+    /// Turns a snapshot left open whose end will prove nothing: they end
+    /// outcome-unknown.
+    unproven: HashMap<String, Unproven>,
+}
+
+/// Why a turn a snapshot left open cannot be closed with an outcome.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Unproven {
+    /// Whether a prompt joined it or began a turn of its own could not be
+    /// told.
+    Start,
+    /// It has no reply yet, and how a run that never replied ended is not
+    /// persisted. A reply clears it.
+    Reply,
+    /// The same, on a root idle at the snapshot and not busy since. OpenCode
+    /// writes a prompt before it marks the root busy, so the run may still
+    /// start; if the next prompt comes first, that run never started and the
+    /// prompt begins a turn of its own.
+    Idle,
+    /// Its run had ended on a root still busy: that busy period is the run's
+    /// last moment or the next one's first, which a `!command` begins before
+    /// it writes its prompt (`effect/runner.ts` startShell). An idle next
+    /// ends the turn as seen; a prompt next could have joined it or begun a
+    /// turn of its own, so it joins and the turn becomes `Start`.
+    Over,
 }
 
 impl OpencodeAdapter {
@@ -314,6 +345,7 @@ impl OpencodeAdapter {
             selection_seen: HashSet::new(),
             unassigned: HashSet::new(),
             resync_wanted: false,
+            unproven: HashMap::new(),
         }
     }
 
@@ -715,6 +747,10 @@ impl OpencodeAdapter {
                 return Vec::new();
             }
         };
+        match self.unproven.remove(&turn) {
+            None | Some(Unproven::Over) => {}
+            Some(_) => return self.unknown_end(&turn),
+        }
         if self.open_msgs.get(&turn).is_some_and(|m| !m.is_empty()) {
             self.set_idle_pending(&turn, session);
             return Vec::new();
@@ -734,14 +770,21 @@ impl OpencodeAdapter {
             if !seen.insert(turn.clone()) || self.closed.contains(&turn) {
                 continue;
             }
-            self.unknown.insert(turn.clone());
-            self.streaming.remove(&turn);
-            out.extend(self.release(&turn, true));
+            out.extend(self.unknown_end(&turn));
         }
         self.current.clear();
         self.idle_pending.clear();
         self.open_msgs.clear();
         out
+    }
+
+    /// `turn` ends outcome-unknown: what it holds back is released, and no
+    /// TurnComplete, tool result or usage is made for it.
+    fn unknown_end(&mut self, turn: &str) -> Vec<Emit> {
+        self.unknown.insert(turn.to_string());
+        self.unproven.remove(turn);
+        self.streaming.remove(turn);
+        self.release(turn, true)
     }
 
     // ------------------------------------------------------------- bus events
@@ -825,6 +868,14 @@ impl OpencodeAdapter {
                 )]
             }
             Some("idle") => self.close_turn(session),
+            Some("busy") => {
+                if let Some(turn) = self.current.get(session) {
+                    if let Some(u @ Unproven::Idle) = self.unproven.get_mut(turn) {
+                        *u = Unproven::Reply;
+                    }
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -915,6 +966,20 @@ impl OpencodeAdapter {
                 return out;
             }
             let root = self.root(session).to_string();
+            let never_ran = self
+                .current
+                .get(&root)
+                .filter(|t| root == session && self.unproven.get(*t) == Some(&Unproven::Idle))
+                .cloned();
+            if let Some(turn) = never_ran {
+                self.current.remove(&root);
+                out.extend(self.unknown_end(&turn));
+            }
+            if let Some(turn) = self.current.get(&root).filter(|_| root == session) {
+                if let Some(u @ Unproven::Over) = self.unproven.get_mut(turn) {
+                    *u = Unproven::Start;
+                }
+            }
             if root == session && !self.current.contains_key(&root) {
                 // A new busy period ends any close deferred on this root.
                 let deferred: Vec<String> = self
@@ -964,12 +1029,30 @@ impl OpencodeAdapter {
             self.msg_turn.insert(id.to_string(), turn);
         }
         let turn = self.msg_turn.get(id).cloned().flatten();
+        if let Some(turn) = &turn {
+            if matches!(
+                self.unproven.get(turn),
+                Some(Unproven::Reply | Unproven::Idle)
+            ) {
+                self.unproven.remove(turn);
+            }
+        }
         if completed(info) {
             self.done_msgs.insert(id.to_string());
             if let Some(turn) = &turn {
                 if session == self.root(session) && error_name(info) == Some(ABORT) {
                     // The root's own abort, even when no session.error came.
                     self.root_abort.insert(turn.clone());
+                }
+                // The error it ended on, even when its session.error was lost.
+                if let Some(name) = error_name(info).filter(|n| *n != ABORT && *n != OVERFLOW) {
+                    if !self
+                        .error_seen
+                        .contains(&(session.to_string(), turn.clone()))
+                    {
+                        let data = obj(info, "error").and_then(|e| obj(e, "data"));
+                        out.extend(self.error_fact(session, turn, name, data));
+                    }
                 }
                 if let Some(open) = self.open_msgs.get_mut(turn) {
                     open.remove(id);
@@ -1743,6 +1826,9 @@ struct Resync<'a> {
     still_running: bool,
     /// Roots whose session tree the snapshot holds incomplete.
     skipped: HashSet<String>,
+    /// Why the turn being read cannot be closed with an outcome, if it
+    /// cannot.
+    proof: Option<Unproven>,
 }
 
 fn request_tool(request: &SnapRequest) -> Option<(String, String)> {
@@ -1777,6 +1863,7 @@ impl<'a> Resync<'a> {
             open: BTreeSet::new(),
             still_running: false,
             skipped: HashSet::new(),
+            proof: None,
         }
     }
 
@@ -1821,19 +1908,13 @@ impl<'a> Resync<'a> {
         let r = session_id(session).to_string();
         let mut out = self.m.on_session_created(&session.info);
         let msgs = &session.messages;
-        let users: HashSet<&str> = msgs
-            .iter()
-            .filter(|x| str_of(&x.info, "role") == Some("user"))
-            .filter_map(|x| str_of(&x.info, "id"))
-            .collect();
-        // A prompt typed by a person began a busy period only if every
-        // earlier assistant message of the root had completed before it; one
-        // typed while the agent worked joined the running turn. OpenCode's own
-        // prompts (a subtask's follow-up, a compaction) never begin one.
+        // A user message, typed or written by OpenCode, begins a turn when
+        // the root's busy period before it had ended. A message this adapter
+        // saw keeps the turn it was given.
         //
         // OpenCode writes one assistant message of a session at a time, so one
-        // that never completed and has a later one after it was abandoned (the
-        // process ended or its stream was cut): it holds no later prompt back.
+        // that never completed and has a later one after it was abandoned: its
+        // process ended, and its run with it.
         let assistant = |x: &SnapMessage| str_of(&x.info, "role") == Some("assistant");
         let mut abandoned: HashSet<&str> = HashSet::new();
         let mut later = false;
@@ -1844,35 +1925,70 @@ impl<'a> Resync<'a> {
             later = true;
         }
         let mut bounds: HashSet<String> = HashSet::new();
-        let mut done_by = f64::NEG_INFINITY;
-        let mut working = false;
+        let mut unsure: Vec<&str> = Vec::new();
+        let mut last_user: Option<&SnapMessage> = None;
+        let mut last_reply: Option<&SnapMessage> = None;
+        let mut answered = false;
+        let mut user_began = false;
         for x in msgs {
-            let info = &x.info;
             if assistant(x) {
-                if completed(info) {
-                    let at = obj(info, "time")
-                        .and_then(|t| t.get("completed"))
-                        .and_then(Value::as_f64)
-                        .unwrap_or(0.0);
-                    done_by = done_by.max(at);
-                } else if !str_of(info, "id").is_some_and(|id| abandoned.contains(id)) {
-                    working = true;
-                }
-            } else if str_of(info, "role") == Some("user")
-                && x.parts.iter().any(is_human)
-                && !working
-                && done_by <= created(info)
-            {
-                bounds.extend(str_of(info, "id").map(str::to_string));
+                last_reply = Some(x);
+                answered = true;
+                continue;
             }
+            let Some(id) =
+                str_of(&x.info, "id").filter(|_| str_of(&x.info, "role") == Some("user"))
+            else {
+                continue;
+            };
+            let begins = match (live.msg_turn.get(id).cloned().flatten(), last_reply) {
+                (Some(t), _) => Some(t == id),
+                // Nothing replied in the root yet.
+                (None, None) => Some(true),
+                // The latest prompt began a turn and got no reply: its run
+                // ended without one.
+                (None, Some(_)) if !answered && user_began => Some(true),
+                (None, Some(a)) => {
+                    let ends = if answered {
+                        ends_run(a, last_user, Some(x))
+                    } else {
+                        // The latest prompt joined the run of `a`, which then
+                        // goes on to answer it unless `a` ended it outright.
+                        ends_outright(a)
+                    };
+                    let a_id = str_of(&a.info, "id").unwrap_or_default();
+                    if abandoned.contains(a_id) {
+                        Some(true)
+                    } else if !ends {
+                        Some(false)
+                    } else {
+                        // It ended at `a`'s completion: before this message
+                        // was written, or in the same millisecond, which
+                        // cannot be told apart from just after.
+                        let done = obj(&a.info, "time").and_then(|t| t.get("completed"));
+                        match done
+                            .and_then(Value::as_f64)
+                            .map(|at| at.total_cmp(&created(&x.info)))
+                        {
+                            Some(std::cmp::Ordering::Less) => Some(true),
+                            Some(std::cmp::Ordering::Equal) => None,
+                            _ => Some(false),
+                        }
+                    }
+                }
+            };
+            match begins {
+                Some(true) => {
+                    bounds.insert(id.to_string());
+                }
+                None => unsure.push(id),
+                Some(false) => {}
+            }
+            user_began = begins == Some(true);
+            last_user = Some(x);
+            answered = false;
         }
-        // Turns this adapter saw begin stand.
-        bounds.extend(
-            live.turn_root
-                .iter()
-                .filter(|(t, root)| **root == r && users.contains(t.as_str()))
-                .map(|(t, _)| t.clone()),
-        );
+        let over = answered && last_reply.is_some_and(|a| ends_run(a, last_user, None));
         let busy = matches!(
             self.snap
                 .status
@@ -1932,6 +2048,10 @@ impl<'a> Resync<'a> {
             .iter()
             .filter_map(|x| str_of(&x.info, "id").map(|id| (id, created(&x.info))))
             .collect();
+        let doubted: HashSet<String> = unsure
+            .iter()
+            .filter_map(|u| self.m.msg_turn.get(*u).cloned().flatten())
+            .collect();
         for (k, t) in order.iter().enumerate() {
             let next = order.get(k + 1).map(|n| starts[n.as_str()]);
             let msgs = turn_msgs.remove(t).unwrap_or_default();
@@ -1942,6 +2062,17 @@ impl<'a> Resync<'a> {
                 .iter()
                 .any(|x| str_of(&x.info, "role") == Some("assistant"));
             let finished = next.is_some() || (!busy && replied);
+            self.proof = if doubted.contains(t) {
+                Some(Unproven::Start)
+            } else if replied && busy && over && next.is_none() {
+                Some(Unproven::Over)
+            } else if replied {
+                None
+            } else if busy {
+                Some(Unproven::Reply)
+            } else {
+                Some(Unproven::Idle)
+            };
             out.extend(self.turn(&r, t, &msgs, &kids, finished, next));
         }
         out
@@ -1957,6 +2088,7 @@ impl<'a> Resync<'a> {
         next: Option<f64>,
     ) -> Vec<Emit> {
         let last = next.is_none();
+        let proof = self.proof.take();
         self.open.clear();
         self.still_running = false;
         let finished = finished || self.m.closed.contains(t);
@@ -1980,7 +2112,12 @@ impl<'a> Resync<'a> {
         if self.m.unknown.contains(t) {
             // The process ended with this turn open: only a persisted session
             // showing it whole closes it.
-            if finished && open.is_empty() && !self.still_running && !self.m.running_in(t) {
+            if finished
+                && proof.is_none()
+                && open.is_empty()
+                && !self.still_running
+                && !self.m.running_in(t)
+            {
                 out.extend(self.m.terminal(r, t, None));
             }
             return out;
@@ -1993,10 +2130,20 @@ impl<'a> Resync<'a> {
                 .entry(t.to_string())
                 .or_default()
                 .extend(open);
+            match proof {
+                Some(why) => self.m.unproven.insert(t.to_string(), why),
+                None => self.m.unproven.remove(t),
+            };
             return out;
         }
         if self.m.current.get(r).map(String::as_str) == Some(t) {
             self.m.current.remove(r);
+        }
+        if proof.is_some() {
+            // It got no reply, or where it began could not be told: how it
+            // ended is not persisted.
+            out.extend(self.m.unknown_end(t));
+            return out;
         }
         if last && (!open.is_empty() || self.still_running) {
             // Idle, but a message has not completed or the server still shows
@@ -2008,9 +2155,7 @@ impl<'a> Resync<'a> {
         if !open.is_empty() && !self.live.turn_root.contains_key(t) {
             // A message of it was abandoned and how the turn ended was never
             // seen: its outcome is unknown, as for a turn open at an exit.
-            self.m.unknown.insert(t.to_string());
-            self.m.streaming.remove(t);
-            out.extend(self.m.release(t, true));
+            out.extend(self.m.unknown_end(t));
             return out;
         }
         // A later turn began: what is still open was ended by it, as live.
@@ -2176,17 +2321,106 @@ impl<'a> Resync<'a> {
     }
 }
 
-fn is_human(part: &SnapPart) -> bool {
-    match part {
-        SnapPart::Whole(pt) => match str_of(pt, "type") {
-            Some("text") => !truthy(pt.get("synthetic")),
-            Some("subtask" | "file") => true,
-            _ => false,
-        },
-        SnapPart::Stub { part_type, .. } => {
-            matches!(part_type.as_deref(), Some("text" | "subtask" | "file"))
-        }
+/// What a rejected permission and a dismissed question leave on their tool
+/// part (`core/src/v1/permission.ts`, `opencode/src/question/index.ts`).
+/// OpenCode's run stops on either (`session/processor.ts` 199-201, 693-695).
+const REJECTED: [&str; 2] = [
+    "The user rejected permission to use this specific tool call.",
+    "The user dismissed this question",
+];
+
+fn whole(x: &SnapMessage) -> impl Iterator<Item = &Map<String, Value>> {
+    x.parts.iter().filter_map(|p| match p {
+        SnapPart::Whole(pt) => Some(pt),
+        SnapPart::Stub { .. } => None,
+    })
+}
+
+/// Whether OpenCode's run stopped at the root's assistant message `a`
+/// whatever was written after it (paths under `packages/opencode/src`): on an
+/// error — an abort, and every error the run stops on; a context overflow it
+/// compacts past sets none (`session/processor.ts` 615-631) — on structured
+/// output (`session/prompt.ts` 1288-1291), or on a rejected permission or a
+/// dismissed question.
+fn ends_outright(a: &SnapMessage) -> bool {
+    truthy(a.info.get("error"))
+        || a.info.contains_key("structured")
+        || whole(a).any(|pt| {
+            let state = obj(pt, "state");
+            str_of(pt, "type") == Some("tool")
+                && state.and_then(|s| str_of(s, "status")) == Some("error")
+                && state
+                    .and_then(|s| str_of(s, "error"))
+                    .is_some_and(|e| REJECTED.contains(&e))
+        })
+}
+
+/// Whether OpenCode's busy period ended with the root's assistant message
+/// `a`, given the latest user message before it and the user message `next`
+/// written after it, if one was:
+///
+///   * it stopped outright ([`ends_outright`]);
+///   * a `!command`'s message ends the busy period it ran in: it has no
+///     `finish` and no step-start, which every step of the loop opens with
+///     (`session/prompt.ts` 451-590, `effect/runner.ts` startShell);
+///   * otherwise the loop's own exit test (`session/prompt.ts` 1105-1131): a
+///     finish other than `tool-calls` and `unknown`, no tool call, and a reply
+///     to the latest prompt. A compaction summary passes that test, but one
+///     the loop ran by itself goes on to the prompt it wrote after it
+///     ([`written_after_summary`]).
+fn ends_run(a: &SnapMessage, last_user: Option<&SnapMessage>, next: Option<&SnapMessage>) -> bool {
+    if ends_outright(a) {
+        return true;
     }
+    let info = &a.info;
+    if !completed(info) {
+        return false;
+    }
+    let Some(finish) = str_of(info, "finish") else {
+        return !whole(a).any(|pt| str_of(pt, "type") == Some("step-start"));
+    };
+    // A tool call the loop answers: not one the provider ran, nor one cut by
+    // an abort or a retry (`session/prompt.ts` 96-100).
+    let tool_call = a.parts.iter().any(|p| match p {
+        SnapPart::Whole(pt) => {
+            let state = obj(pt, "state");
+            str_of(pt, "type") == Some("tool")
+                && !obj(pt, "metadata").is_some_and(|m| truthy(m.get("providerExecuted")))
+                && !(state.and_then(|s| str_of(s, "status")) == Some("error")
+                    && state
+                        .and_then(|s| obj(s, "metadata"))
+                        .is_some_and(|m| m.get("interrupted") == Some(&Value::Bool(true))))
+        }
+        SnapPart::Stub { part_type, .. } => part_type.as_deref() == Some("tool"),
+    });
+    let user = last_user.and_then(|u| str_of(&u.info, "id"));
+    if matches!(finish, "tool-calls" | "unknown")
+        || tool_call
+        || user.is_none()
+        || str_of(info, "parentID") != user
+    {
+        return false;
+    }
+    let summary = info.get("summary") == Some(&Value::Bool(true));
+    !(summary && last_user.is_some_and(|c| written_after_summary(c, next)))
+}
+
+/// Whether the compaction prompt `c` is one the loop wrote itself, and `next`
+/// the prompt it wrote after the summary, or one it is yet to write
+/// (`session/compaction.ts` 468-546): the overflowing prompt replayed, or,
+/// with no overflow, a synthetic prompt to continue. A `/compact` writes
+/// neither (`server/routes/instance/httpapi/handlers/session.ts` 273-292).
+fn written_after_summary(c: &SnapMessage, next: Option<&SnapMessage>) -> bool {
+    let Some(part) = whole(c).find(|pt| str_of(pt, "type") == Some("compaction")) else {
+        return false;
+    };
+    truthy(part.get("auto"))
+        && (truthy(part.get("overflow"))
+            || next.is_none_or(|next| {
+                next.parts
+                    .iter()
+                    .all(|p| matches!(p, SnapPart::Whole(pt) if is_filler(pt)))
+            }))
 }
 
 #[cfg(test)]
@@ -2762,7 +2996,30 @@ mod tests {
                     self.window.clear();
                     self.status.clear();
                 }
-                "ccd.resync" => self.syncing = true,
+                "ccd.resync" => {
+                    // What the server held when the captured snapshot was read.
+                    self.syncing = true;
+                    self.status = p["status"].as_object().cloned().unwrap_or_default();
+                    for session in p["sessions"].as_array().into_iter().flatten() {
+                        self.sessions
+                            .insert(id(&session["info"]["id"]), session["info"].clone());
+                        for message in session["messages"].as_array().into_iter().flatten() {
+                            let (info, parts) = (&message["info"], &message["parts"]);
+                            self.window.insert(id(&info["id"]));
+                            self.messages
+                                .insert(id(&info["id"]), (id(&info["sessionID"]), info.clone()));
+                            self.parts.insert(
+                                id(&info["id"]),
+                                parts
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .map(|pt| (id(&pt["id"]), pt.clone()))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
                 "ccd.resync_settled" => self.syncing = false,
                 "session.created" | "session.updated" => {
                     self.sessions
@@ -3754,6 +4011,504 @@ mod tests {
         a.apply_resync(staged);
         a.session_end();
         assert!(a.unknown.contains("msg_01"));
+    }
+
+    // ------------------------------------------------- turns from the loop
+
+    /// A root session as OpenCode 1.18.34 writes it, row by row, in the
+    /// captures' bus shape: ids ascending, the clock one millisecond on per
+    /// write. Paths are under `packages/opencode/src`.
+    struct Script {
+        rows: Vec<Value>,
+        n: u64,
+        at: u64,
+    }
+
+    impl Script {
+        fn new() -> Self {
+            let mut s = Script {
+                rows: Vec::new(),
+                n: 0,
+                at: 1_700_000_000_000,
+            };
+            s.push(
+                "session.created",
+                json!({"info": {"id": ROOT, "time": {"created": s.at}}}),
+            );
+            s
+        }
+
+        fn push(&mut self, event: &str, properties: Value) {
+            self.rows
+                .push(json!({"type": event, "properties": properties}));
+        }
+
+        fn id(&mut self, prefix: &str) -> String {
+            self.n += 1;
+            format!("{prefix}_0f00{:08x}AAAAAAAAAAAAAA", self.n)
+        }
+
+        fn tick(&mut self) -> u64 {
+            self.at += 1;
+            self.at
+        }
+
+        /// The next write lands in the same millisecond as the last one.
+        fn same_ms(&mut self) {
+            self.at -= 1;
+        }
+
+        fn busy(&mut self) {
+            self.push(
+                "session.status",
+                json!({"sessionID": ROOT, "status": {"type": "busy"}}),
+            );
+        }
+
+        fn idle(&mut self) {
+            self.push(
+                "session.status",
+                json!({"sessionID": ROOT, "status": {"type": "idle"}}),
+            );
+            self.push("session.idle", json!({"sessionID": ROOT}));
+        }
+
+        fn error(&mut self, name: &str, message: &str) {
+            self.push(
+                "session.error",
+                json!({"sessionID": ROOT, "error": {"name": name, "data": {"message": message}}}),
+            );
+        }
+
+        fn message(&mut self, info: &Value) {
+            self.push("message.updated", json!({"sessionID": ROOT, "info": info}));
+        }
+
+        fn part(&mut self, message: &str, mut part: Value) -> Value {
+            let id = self.id("prt");
+            part["id"] = json!(id);
+            part["sessionID"] = json!(ROOT);
+            part["messageID"] = json!(message);
+            self.push(
+                "message.part.updated",
+                json!({"sessionID": ROOT, "part": part}),
+            );
+            part
+        }
+
+        /// A user message with its parts (`prompt.ts` createUserMessage).
+        fn user(&mut self, parts: &[Value]) -> String {
+            let id = self.id("msg");
+            let info = json!({"id": id, "sessionID": ROOT, "role": "user",
+                "time": {"created": self.tick()}, "agent": "build",
+                "model": {"providerID": "mock", "modelID": "m"}});
+            self.message(&info);
+            for part in parts {
+                self.part(&id, part.clone());
+            }
+            id
+        }
+
+        fn prompt(&mut self, text: &str) -> String {
+            self.user(&[json!({"type": "text", "text": text})])
+        }
+
+        fn assistant(&mut self, parent: &str, extra: Value) -> (String, Value) {
+            let id = self.id("msg");
+            let mut info = json!({"id": id, "sessionID": ROOT, "role": "assistant",
+                "parentID": parent, "mode": "build", "agent": "build", "modelID": "m",
+                "providerID": "mock", "time": {"created": self.tick()}});
+            for (k, v) in extra.as_object().into_iter().flatten() {
+                info[k] = v.clone();
+            }
+            self.message(&info);
+            (id, info)
+        }
+
+        fn complete(&mut self, info: &mut Value, finish: Option<&str>) {
+            info["time"]["completed"] = json!(self.tick());
+            if let Some(finish) = finish {
+                info["finish"] = json!(finish);
+            }
+            self.message(info);
+        }
+
+        /// One step of the loop (`processor.ts`): step-start, the model's
+        /// output, step-finish with its reason, the message completed.
+        fn step(&mut self, parent: &str, extra: Value, finish: &str, tool: bool) -> String {
+            let (id, mut info) = self.assistant(parent, extra);
+            self.part(&id, json!({"type": "step-start"}));
+            if tool {
+                let at = self.tick();
+                let running = self.part(&id, json!({"type": "tool", "tool": "read",
+                    "callID": format!("call_{}", self.n),
+                    "state": {"status": "running", "input": {"filePath": "a"}, "time": {"start": at}}}));
+                let mut done = running.clone();
+                done["state"] = json!({"status": "completed", "input": {"filePath": "a"},
+                    "output": "x", "title": "a", "metadata": {}, "time": {"start": at, "end": self.tick()}});
+                self.push(
+                    "message.part.updated",
+                    json!({"sessionID": ROOT, "part": done}),
+                );
+            } else {
+                let at = self.tick();
+                self.part(
+                    &id,
+                    json!({"type": "text", "text": "done",
+                    "time": {"start": at, "end": at}}),
+                );
+            }
+            self.part(&id, json!({"type": "step-finish", "reason": finish, "cost": 0,
+                "tokens": {"input": 1, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}}));
+            self.complete(&mut info, Some(finish));
+            id
+        }
+
+        /// A prompt on an idle root answered in one step.
+        fn turn(&mut self, text: &str) {
+            let p = self.prompt(text);
+            self.busy();
+            self.step(&p, json!({}), "stop", false);
+            self.idle();
+        }
+    }
+
+    /// The longest lost window the captures are cut with.
+    const LONGEST: usize = 89;
+
+    /// Every lost window of `rows` that `keep` takes, by its length and the
+    /// row it ends before (all of them when `keep` is `None`), checked against
+    /// the uninterrupted run. Returns how many were checked.
+    fn windows_of(
+        name: &str,
+        rows: &[Value],
+        keep: Option<&dyn Fn(usize, usize) -> bool>,
+    ) -> usize {
+        let uncut = {
+            let mut run = Run::new();
+            for row in rows {
+                run.row(row);
+            }
+            run
+        };
+        let want: HashMap<String, (Option<String>, Value)> = uncut
+            .store
+            .events
+            .iter()
+            .map(|e| (sid(e).to_string(), (e.turn_id.clone(), e.payload.clone())))
+            .collect();
+        let turns: HashSet<&str> = uncut
+            .store
+            .events
+            .iter()
+            .filter_map(|e| e.turn_id.as_deref())
+            .collect();
+        let longest = if keep.is_some() { LONGEST } else { rows.len() };
+        let daemon = |row: &Value| {
+            let t = row["type"].as_str().unwrap_or_default();
+            t.starts_with("ccd.") || t.starts_with("collector.")
+        };
+        // The adapter as it stood after each of the last `longest` rows.
+        let mut before: std::collections::VecDeque<Run> = std::collections::VecDeque::new();
+        let mut server = Server::new();
+        let mut live = Run::new();
+        let mut windows = 0;
+        for j in 0..=rows.len() {
+            before.push_back(live.clone());
+            if before.len() > longest + 1 {
+                before.pop_front();
+            }
+            if j > 0 {
+                server.row(&rows[j - 1]);
+            }
+            if j < rows.len() {
+                live.row(&rows[j]);
+            }
+            if !server.alive || server.syncing {
+                continue;
+            }
+            let snapshot = server.snapshot();
+            for k in (0..j).rev() {
+                let len = j - k;
+                if len > longest || daemon(&rows[k]) {
+                    break;
+                }
+                if keep.is_some_and(|keep| !keep(len, j)) {
+                    continue;
+                }
+                windows += 1;
+                let label = format!("{name}: rows {k}..{j} lost");
+                let run = cut_at(&before[before.len() - 1 - len], rows, j, &snapshot);
+                run.assert_one_end_per_turn(&label);
+                let unknown = run.unknown();
+                for e in &run.store.events {
+                    let turn = e.turn_id.as_deref();
+                    assert!(
+                        turn.is_none_or(|t| turns.contains(t)),
+                        "{label}: a turn the run never had: {}",
+                        sid(e)
+                    );
+                    let Some((was, payload)) = want.get(sid(e)) else {
+                        assert!(e.kind != EventKind::TurnComplete, "{label}: {}", sid(e));
+                        continue;
+                    };
+                    if e.kind == EventKind::TurnComplete {
+                        assert_eq!(payload, &e.payload, "{label}: {}", sid(e));
+                    }
+                    assert!(
+                        was.as_deref() == turn || turn.is_some_and(|t| unknown.contains(t)),
+                        "{label}: {} moved from {was:?} to {turn:?}",
+                        sid(e)
+                    );
+                }
+                let ended: HashSet<&str> = run
+                    .store
+                    .events
+                    .iter()
+                    .filter(|e| e.kind == EventKind::TurnComplete)
+                    .filter_map(|e| e.turn_id.as_deref())
+                    .collect();
+                let held: HashSet<&str> = run
+                    .store
+                    .events
+                    .iter()
+                    .filter_map(|e| e.turn_id.as_deref())
+                    .collect();
+                for e in &uncut.store.events {
+                    if e.kind == EventKind::TurnComplete {
+                        // A turn whose facts all joined an outcome-unknown
+                        // turn is outcome-unknown with it.
+                        let t = e.turn_id.as_deref().unwrap();
+                        assert!(
+                            ended.contains(t) || unknown.contains(t) || !held.contains(t),
+                            "{label}: {t} neither ended as it did nor outcome-unknown"
+                        );
+                    }
+                }
+            }
+        }
+        windows
+    }
+
+    /// The link lost for a window of rows: OpenCode wrote every row, the
+    /// adapter read the rows before the window, then the snapshot taken after
+    /// it, then the rest. What only the lost frames said may be lost with
+    /// them, but every TurnComplete is one the uninterrupted run made, no turn
+    /// is invented or split, and every turn of the uninterrupted run ends as
+    /// it did there or is outcome-unknown.
+    #[test]
+    fn a_snapshot_after_lost_frames_invents_and_splits_no_turn() {
+        let mut captures: Vec<(&str, &str)> = FORWARDED.iter().map(|(n, f, _)| (*n, *f)).collect();
+        captures.extend([
+            ("linkcut", LINKCUT),
+            ("linkcut-overlap", LINKCUT_OVERLAP),
+            ("linkcut-uninterrupted", LINKCUT_UNCUT),
+            ("pending", PENDING),
+        ]);
+        // Windows of one and two rows at every row; longer ones at every
+        // fifth, staggered by length.
+        let keep = |len: usize, j: usize| {
+            len <= 2 || ([3, 5, 8, 13, 21, 34, 55, LONGEST].contains(&len) && j % 5 == len % 5)
+        };
+        let windows: usize = captures
+            .iter()
+            .map(|(name, text)| windows_of(name, &rows(text), Some(&keep)))
+            .sum();
+        assert_eq!(windows, 3963, "lost windows checked");
+    }
+
+    /// The script read live from its first row, and again with nothing read
+    /// live and one snapshot after its last row; then every lost window.
+    /// Returns how the snapshot-only run's facts differ from the live run's.
+    fn snapshot_only(name: &str, script: &Script) -> Vec<String> {
+        let rows = &script.rows;
+        let uncut = {
+            let mut run = Run::new();
+            for row in rows {
+                run.row(row);
+            }
+            run
+        };
+        uncut.assert_one_end_per_turn(name);
+        windows_of(name, rows, None);
+        let mut server = Server::new();
+        for row in rows {
+            server.row(row);
+        }
+        let run = cut_at(&Run::new(), rows, rows.len(), &server.snapshot());
+        diff(&mine(&run.store), &mine(&uncut.store))
+            .into_iter()
+            .filter(|d| !d.ends_with(":session_start"))
+            .collect()
+    }
+
+    /// An overflow mid-step makes OpenCode compact and write the overflowing
+    /// prompt again after the summary, inside the same busy period
+    /// (`prompt.ts` 1320-1327, `compaction.ts` 468-496): one turn.
+    #[test]
+    fn a_prompt_replayed_after_an_overflow_compaction_stays_in_its_turn() {
+        let mut s = Script::new();
+        s.turn("first");
+        let p = s.prompt("long");
+        s.busy();
+        // `processor.ts` 621-631: no error and no finish on the message.
+        let (a, mut info) = s.assistant(&p, json!({}));
+        s.part(&a, json!({"type": "step-start"}));
+        s.error("ContextOverflowError", "prompt is too long");
+        s.complete(&mut info, None);
+        let c = s.user(&[json!({"type": "compaction", "auto": true, "overflow": true})]);
+        s.step(
+            &c,
+            json!({"mode": "compaction", "agent": "compaction", "summary": true}),
+            "stop",
+            false,
+        );
+        let replay = s.prompt("long");
+        s.step(&replay, json!({}), "stop", false);
+        s.idle();
+        assert_eq!(snapshot_only("overflow", &s), Vec::<String>::new());
+    }
+
+    /// A prompt that lands between two steps of one run joins it: the loop
+    /// answers it in its next step (`prompt.ts` 1088-1131).
+    #[test]
+    fn a_prompt_between_two_steps_joins_the_running_turn() {
+        let mut s = Script::new();
+        s.turn("first");
+        let p = s.prompt("go");
+        s.busy();
+        s.step(&p, json!({}), "tool-calls", true);
+        let joined = s.prompt("and this");
+        s.step(&joined, json!({}), "stop", false);
+        s.idle();
+        assert_eq!(snapshot_only("between steps", &s), Vec::<String>::new());
+    }
+
+    /// The same, written in the millisecond the step completed.
+    #[test]
+    fn a_prompt_in_the_millisecond_a_step_completed_joins_the_running_turn() {
+        let mut s = Script::new();
+        s.turn("first");
+        let p = s.prompt("go");
+        s.busy();
+        s.step(&p, json!({}), "tool-calls", true);
+        s.same_ms();
+        let joined = s.prompt("and this");
+        s.step(&joined, json!({}), "stop", false);
+        s.idle();
+        assert_eq!(
+            snapshot_only("same ms, tool-calls", &s),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A prompt in the millisecond a final step completed: whether the run had
+    /// ended (`prompt.ts` 1105-1131) cannot be told from what is persisted, so
+    /// the prompt joins and the turn is outcome-unknown.
+    #[test]
+    fn a_prompt_in_the_millisecond_a_run_may_have_ended_leaves_its_turn_unknown() {
+        let mut s = Script::new();
+        s.turn("first");
+        let p = s.prompt("go");
+        s.busy();
+        s.step(&p, json!({}), "stop", false);
+        s.same_ms();
+        let joined = s.prompt("and this");
+        s.step(&joined, json!({}), "stop", false);
+        s.idle();
+        assert_eq!(
+            snapshot_only("same ms, stop", &s),
+            [
+                format!("missing {ROOT}:usage:{p}"),
+                format!("missing {ROOT}:turn:{p}")
+            ]
+        );
+    }
+
+    /// A `!command` runs on an idle root only, and is a busy period of its
+    /// own: a synthetic prompt, then an assistant message with no finish and
+    /// one shell tool (`prompt.ts` 451-590, `effect/runner.ts` startShell).
+    #[test]
+    fn a_shell_command_is_a_turn_of_its_own() {
+        let mut s = Script::new();
+        s.turn("first");
+        s.busy();
+        let u = s.user(&[json!({"type": "text", "synthetic": true,
+            "text": "The following tool was executed by the user"})]);
+        let (a, mut info) = s.assistant(&u, json!({}));
+        let at = s.tick();
+        let running = s.part(
+            &a,
+            json!({"type": "tool", "tool": "bash", "callID": "call_sh",
+            "state": {"status": "running", "time": {"start": at}, "input": {"command": "ls"}}}),
+        );
+        s.complete(&mut info, None);
+        let mut done = running;
+        done["state"] = json!({"status": "completed", "time": {"start": at, "end": s.at},
+            "input": {"command": "ls"}, "title": "", "metadata": {"output": "a\n"}, "output": "a\n"});
+        s.push(
+            "message.part.updated",
+            json!({"sessionID": ROOT, "part": done}),
+        );
+        s.idle();
+        s.turn("next");
+        assert_eq!(snapshot_only("shell", &s), Vec::<String>::new());
+    }
+
+    /// `/compact` on an idle root: a prompt holding only a compaction part,
+    /// then the summary, then idle (`handlers/session.ts` 273-292,
+    /// `compaction.ts` 390-420).
+    #[test]
+    fn a_manual_compaction_is_a_turn_of_its_own() {
+        let mut s = Script::new();
+        s.turn("first");
+        let c = s.user(&[json!({"type": "compaction", "auto": false})]);
+        s.busy();
+        s.step(
+            &c,
+            json!({"mode": "compaction", "agent": "compaction", "summary": true}),
+            "stop",
+            false,
+        );
+        s.idle();
+        s.turn("next");
+        assert_eq!(snapshot_only("compact", &s), Vec::<String>::new());
+    }
+
+    /// A background task's result is prompted into its idle parent as
+    /// synthetic text, which starts a busy period (`tool/task.ts` 227-252).
+    #[test]
+    fn a_task_result_prompted_into_an_idle_root_is_a_turn_of_its_own() {
+        let mut s = Script::new();
+        s.turn("first");
+        let u = s.user(&[json!({"type": "text", "synthetic": true,
+            "text": "<task_result>Background task completed: scan</task_result>"})]);
+        s.busy();
+        s.step(&u, json!({}), "stop", false);
+        s.idle();
+        s.turn("next");
+        assert_eq!(snapshot_only("task result", &s), Vec::<String>::new());
+    }
+
+    /// A prompt whose run failed before it wrote a reply (`prompt.ts`
+    /// 594-612): the next prompt is a turn of its own, and how the failed one
+    /// ended is not persisted, so a snapshot leaves it outcome-unknown.
+    #[test]
+    fn a_prompt_that_got_no_reply_ends_unknown_and_holds_no_later_prompt() {
+        let mut s = Script::new();
+        s.turn("first");
+        let p = s.prompt("go");
+        s.busy();
+        s.error("UnknownError", "Model not found: mock/gone.");
+        s.idle();
+        s.turn("next");
+        assert_eq!(
+            snapshot_only("no reply", &s),
+            [
+                format!("missing {ROOT}:error:{p}"),
+                format!("missing {ROOT}:turn:{p}")
+            ]
+        );
     }
 
     #[test]
