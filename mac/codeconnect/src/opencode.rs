@@ -388,7 +388,7 @@ struct HelpFlags {
 /// What `codeconnect opencode <args>` does: [`Launch`] or a refusal.
 ///
 /// `env` supplies `OPENCODE_PURE`, `OPENCODE_TUI_CONFIG` and `PWD`; `cwd` is the
-/// launcher's working directory.
+/// launcher's working directory, where the pane starts.
 pub(crate) fn classify(args: &[String], env: Env, cwd: &Path) -> Result<Launch, OpencodeRefusal> {
     if env("OPENCODE_PURE").is_some_and(|value| truthy(&value)) {
         return Err(OpencodeRefusal::PureEnv);
@@ -475,9 +475,9 @@ pub(crate) fn classify(args: &[String], env: Env, cwd: &Path) -> Result<Launch, 
             folder: resolve(cwd),
         });
     };
-    // OpenCode: `[project]` joined onto `$PWD` (else the working directory), both
-    // resolved — lexically, then through symlinks.
-    let base = resolve(&cwd.join(env("PWD").unwrap_or_default()));
+    // OpenCode: `[project]` joined onto `$PWD`, both resolved — lexically, then
+    // through symlinks.
+    let base = resolve(&pane_pwd(env, cwd));
     let folder = resolve(&base.join(project));
     if !folder.is_dir() {
         return Err(OpencodeRefusal::NotADirectory {
@@ -485,6 +485,21 @@ pub(crate) fn classify(args: &[String], env: Env, cwd: &Path) -> Result<Launch, 
         });
     }
     Ok(Launch::Hosted { folder })
+}
+
+/// The `$PWD` OpenCode sees in the pane, whose `/bin/sh` keeps the caller's only
+/// when it is absolute and names the same directory as `cwd`, and otherwise sets it
+/// to `cwd`.
+fn pane_pwd(env: Env, cwd: &Path) -> PathBuf {
+    use std::os::unix::fs::MetadataExt;
+    let same_directory = |pwd: &Path| match (std::fs::metadata(pwd), std::fs::metadata(cwd)) {
+        (Ok(pwd), Ok(cwd)) => pwd.dev() == cwd.dev() && pwd.ino() == cwd.ino(),
+        _ => false,
+    };
+    env("PWD")
+        .map(PathBuf::from)
+        .filter(|pwd| pwd.is_absolute() && same_directory(pwd))
+        .unwrap_or_else(|| cwd.to_path_buf())
 }
 
 /// One `--name[=value]` option. The name is compared kebab-folded (`--mdnsDomain` is
@@ -1078,12 +1093,13 @@ mod tests {
     fn the_project_is_joined_onto_the_resolved_pwd() {
         let scratch = Scratch::new();
         let project = scratch.0.join("project");
-        std::fs::create_dir_all(project.join("sub")).unwrap();
-        std::os::unix::fs::symlink(project.join("sub"), scratch.0.join("link")).unwrap();
+        let sub = project.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::os::unix::fs::symlink(&sub, scratch.0.join("link")).unwrap();
         let link = scratch.0.join("link");
         let env = table(&[("PWD", link.to_str().unwrap())]);
         assert_eq!(
-            classify_with(&argv(&[".."]), &env, &scratch.0),
+            classify_with(&argv(&[".."]), &env, &sub),
             Ok(Launch::Hosted {
                 folder: project.clone()
             })
@@ -1092,6 +1108,56 @@ mod tests {
         assert_eq!(
             classify_with(&[], &env, &project),
             Ok(Launch::Hosted { folder: project })
+        );
+    }
+
+    /// **The pane's `$PWD` is the one `/bin/sh` hands OpenCode**: the caller's when it
+    /// is absolute and names the working directory, a symlink alias included; the
+    /// working directory otherwise.
+    #[test]
+    fn the_pane_keeps_pwd_only_when_it_names_the_working_directory() {
+        let scratch = Scratch::new();
+        let sub = scratch.0.join("project/sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(scratch.0.join("elsewhere")).unwrap();
+        let link = scratch.0.join("link");
+        std::os::unix::fs::symlink(&sub, &link).unwrap();
+        let with_pwd = |pwd: &Path| {
+            let pwd = pwd.as_os_str().to_owned();
+            move |key: &str| (key == "PWD").then(|| pwd.clone())
+        };
+        assert_eq!(pane_pwd(&with_pwd(&link), &sub), link);
+        for pwd in [
+            scratch.0.join("elsewhere"),
+            scratch.0.join("missing"),
+            PathBuf::from("project/sub"),
+            PathBuf::new(),
+        ] {
+            assert_eq!(pane_pwd(&with_pwd(&pwd), &sub), sub, "PWD={pwd:?}");
+        }
+        assert_eq!(pane_pwd(&no_env, &sub), sub);
+    }
+
+    /// **A stale `$PWD` does not move `[project]`**: the pane's shell replaces it with
+    /// the working directory, so `.` and a relative project resolve from there.
+    #[test]
+    fn a_stale_pwd_resolves_the_project_from_the_working_directory() {
+        let scratch = Scratch::new();
+        let project = scratch.0.join("project");
+        std::fs::create_dir_all(project.join("sub")).unwrap();
+        std::fs::create_dir_all(scratch.0.join("elsewhere/sub")).unwrap();
+        let env = table(&[("PWD", scratch.0.join("elsewhere").to_str().unwrap())]);
+        assert_eq!(
+            classify_with(&argv(&["."]), &env, &project),
+            Ok(Launch::Hosted {
+                folder: project.clone()
+            })
+        );
+        assert_eq!(
+            classify_with(&argv(&["sub"]), &env, &project),
+            Ok(Launch::Hosted {
+                folder: project.join("sub")
+            })
         );
     }
 

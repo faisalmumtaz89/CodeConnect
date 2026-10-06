@@ -15,12 +15,14 @@
 //! Claude's and OpenCode's panes run [`run`] (`codeconnect internal-job`); the Codex
 //! host is its TUI's parent already and calls [`watch`] itself.
 
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -48,6 +50,11 @@ extern "C" fn resume_requested(_: libc::c_int) {
     }
 }
 
+/// The OpenCode session's files, as paths a signal handler can unlink.
+static SESSION_FILES: OnceLock<Vec<CString>> = OnceLock::new();
+
+/// Pass a terminal signal to the agent's group. Before the agent runs, the job ends
+/// by the signal instead, removing the session's files first.
 extern "C" fn forward(signal: libc::c_int) {
     let agent = AGENT.load(Ordering::SeqCst);
     if agent > 0 {
@@ -55,6 +62,21 @@ extern "C" fn forward(signal: libc::c_int) {
             libc::killpg(agent, signal);
             libc::killpg(agent, libc::SIGCONT);
         }
+        return;
+    }
+    for path in SESSION_FILES.get().into_iter().flatten() {
+        unsafe { libc::unlink(path.as_ptr()) };
+    }
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+}
+
+/// Hand SIGHUP, SIGINT and SIGTERM to [`forward`].
+fn forward_terminal_signals() {
+    for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
+        unsafe { libc::signal(signal, forward as *const () as libc::sighandler_t) };
     }
 }
 
@@ -146,12 +168,25 @@ fn parse(mut args: &[OsString]) -> Result<(Options, &[OsString])> {
 /// With `--verify`, the executable at `PATH` must still hash to `SHA256` the moment
 /// before `PROGRAM` starts. With `--opencode-dir`, the agent's pid and start time
 /// are published in `DIR` once it runs, and the OpenCode session's files there are
-/// removed however the job ends.
+/// removed however the job ends; when the agent cannot be started, the pane shows
+/// why until Return.
 pub fn run(args: &[OsString]) -> Result<()> {
     let (options, args) = parse(args)?;
+    if let Some(dir) = &options.opencode_dir {
+        let files = crate::opencode::SESSION_FILES
+            .iter()
+            .filter_map(|name| CString::new(dir.join(name).into_os_string().into_vec()).ok())
+            .collect();
+        let _ = SESSION_FILES.set(files);
+        forward_terminal_signals();
+    }
     let ended = start(&options, args);
     if let Some(dir) = &options.opencode_dir {
         remove_session_files(dir);
+        if let Err(error) = &ended {
+            show_until_return(error);
+            std::process::exit(1);
+        }
     }
     match ended? {
         Ended::Signalled(signal) => {
@@ -187,9 +222,7 @@ fn start(options: &Options, args: &[OsString]) -> Result<Ended> {
         .with_context(|| format!("starting {}", program.to_string_lossy()))?
         .id() as libc::pid_t;
     AGENT.store(agent, Ordering::SeqCst);
-    for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
-        unsafe { libc::signal(signal, forward as *const () as libc::sighandler_t) };
-    }
+    forward_terminal_signals();
     unsafe { libc::tcsetpgrp(libc::STDIN_FILENO, agent) };
     if let Some(dir) = &options.opencode_dir {
         publish_agent(dir, agent);
@@ -252,6 +285,18 @@ fn remove_session_files(dir: &Path) {
     for name in crate::opencode::SESSION_FILES {
         let _ = std::fs::remove_file(dir.join(name));
     }
+}
+
+/// Print `error` in the pane and keep the pane until Return or the end of its input,
+/// so the reason is read before the session closes.
+/// A child that failed to exec may have taken the terminal first, so it is taken back.
+fn show_until_return(error: &anyhow::Error) {
+    unsafe { libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpgrp()) };
+    let _ = writeln!(
+        std::io::stderr(),
+        "codeconnect: {error:#}\nPress Return to close this session."
+    );
+    let _ = std::io::stdin().read_line(&mut String::new());
 }
 
 /// Hold each stop of `agent`, a child of this process leading its own group, until

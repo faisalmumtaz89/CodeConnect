@@ -38,9 +38,20 @@ struct Rig {
     opencode: PathBuf,
     codeconnect: PathBuf,
     proj: PathBuf,
-    mock: Child,
+    _mock: Mock,
     ccd: Option<Child>,
     launchers: Vec<Child>,
+}
+
+/// The mock model, ended when dropped, so a rig that fails while it is being built
+/// leaves nothing running.
+struct Mock(Child);
+
+impl Drop for Mock {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 impl Rig {
@@ -58,17 +69,25 @@ impl Rig {
             .unwrap();
         let mock_model = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../codeconnect/opencode-plugin/live/mock-model.js");
-        let mut mock = Command::new(&opencode)
-            .env("BUN_BE_BUN", "1")
-            .arg(mock_model)
-            .arg("0")
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("start the mock model");
-        let mut line = String::new();
-        BufReader::new(mock.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
+        let mut mock = Mock(
+            Command::new(&opencode)
+                .env("BUN_BE_BUN", "1")
+                .arg(mock_model)
+                .arg("0")
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("start the mock model"),
+        );
+        let stdout = mock.0.stdout.take().unwrap();
+        let (said, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = BufReader::new(stdout).read_line(&mut line);
+            let _ = said.send(line);
+        });
+        let line = heard
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the mock model never said it was listening");
         let port: u16 = line
             .trim()
             .strip_prefix("listening ")
@@ -103,7 +122,7 @@ impl Rig {
             root,
             opencode,
             proj,
-            mock,
+            _mock: mock,
             ccd: None,
             launchers: Vec::new(),
         }
@@ -260,7 +279,7 @@ impl Drop for Rig {
             let _ = ccd.kill();
             let _ = ccd.wait();
         }
-        for child in self.launchers.iter_mut().chain([&mut self.mock]) {
+        for child in &mut self.launchers {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -273,16 +292,34 @@ impl Drop for Rig {
     }
 }
 
-/// Builds the launcher beside this test's `ccd` and returns its path.
+/// Builds the launcher from this tree, in the profile this test's `ccd` was built
+/// with, and returns the executable cargo reports for it.
 fn build_codeconnect() -> PathBuf {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["build", "-p", "codeconnect"])
+    // `target/<profile dir>/ccd`, where the `dev` profile's directory is `debug`.
+    let profile = match Path::new(env!("CARGO_BIN_EXE_ccd"))
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+    {
+        Some("debug") => "dev",
+        Some(name) => name,
+        None => panic!("no profile directory above {}", env!("CARGO_BIN_EXE_ccd")),
+    };
+    let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["build", "-p", "codeconnect", "--bin", "codeconnect"])
+        .args(["--profile", profile, "--message-format=json"])
         .current_dir(workspace)
-        .status()
+        .stderr(Stdio::inherit())
+        .output()
         .unwrap();
-    assert!(status.success(), "cargo build -p codeconnect");
-    let bin = Path::new(env!("CARGO_BIN_EXE_ccd")).with_file_name("codeconnect");
+    assert!(out.status.success(), "cargo build -p codeconnect");
+    let bin = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|message| message["target"]["name"] == "codeconnect")
+        .find_map(|message| message["executable"].as_str().map(PathBuf::from))
+        .expect("cargo reported no codeconnect executable");
     assert!(bin.is_file(), "no codeconnect at {}", bin.display());
     bin
 }

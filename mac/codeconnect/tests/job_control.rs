@@ -18,6 +18,12 @@ struct Pane {
 
 impl Pane {
     fn start(script: &str) -> Pane {
+        Pane::start_with(&[], script)
+    }
+
+    /// [`Pane::start`], with `options` ahead of the job's program; `DIR` in either
+    /// is the pane's directory.
+    fn start_with(options: &[&str], script: &str) -> Pane {
         let tmux = protocol::tmux::tmux_bin().expect("job control tests require tmux");
         // Short: a unix socket path is capped near 104 bytes.
         let dir = Path::new("/tmp").join(format!("ccj-{}", protocol::uid::new().unwrap()));
@@ -27,12 +33,15 @@ impl Pane {
             dir,
             tmux,
         };
-        let script = script.replace("DIR", &pane.dir.display().to_string());
+        let dir = pane.dir.display().to_string();
+        let script = script.replace("DIR", &dir);
         let started = pane
             .command()
             .args(["new-session", "-d", "-s", "j", "-x", "80", "-y", "24", "--"])
             .arg(env!("CARGO_BIN_EXE_codeconnect"))
-            .args(["internal-job", "/bin/sh", "-c", &script])
+            .arg("internal-job")
+            .args(options.iter().map(|option| option.replace("DIR", &dir)))
+            .args(["/bin/sh", "-c", &script])
             .status()
             .unwrap();
         assert!(started.success(), "new-session");
@@ -429,4 +438,92 @@ fn an_opencode_job_publishes_its_agent_and_takes_its_files_with_it() {
     assert_eq!(left(), ["environment", "pid", "seen"]);
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// **An OpenCode agent that cannot start leaves its reason on screen**: a binary
+/// that changed, or a program that cannot be run. The pane stays, saying why, until
+/// Return closes it.
+#[test]
+fn an_opencode_job_that_cannot_start_shows_why_until_return() {
+    let other = "0".repeat(64);
+    for (options, reason) in [
+        (
+            &["--opencode-dir", "DIR", "--verify", "/bin/sh", &other][..],
+            "is not the one this launch pinned",
+        ),
+        (
+            &["--opencode-dir", "DIR", "DIR/missing"][..],
+            "starting /tmp/",
+        ),
+    ] {
+        let pane = Pane::start_with(options, "touch DIR/ran");
+        let screen = || {
+            let out = pane
+                .command()
+                .args(["capture-pane", "-p", "-J", "-t", "j:"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        wait_for("the reason on screen", || screen().contains(reason));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(pane.alive(), "the pane stays while its reason is shown");
+        assert!(!pane.dir.join("ran").exists());
+        pane.command()
+            .args(["send-keys", "-t", "j:", "Enter"])
+            .status()
+            .unwrap();
+        wait_for("Return to close the session", || !pane.alive());
+    }
+}
+
+/// **A signal while the pinned binary is being hashed takes the session's files**,
+/// as it does once the agent runs. The binary is a FIFO, so the hash waits on it.
+#[test]
+fn a_signal_during_the_hash_removes_the_session_files() {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::process::ExitStatusExt;
+    for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
+        let dir = std::env::temp_dir().join(format!("ccj-sig-{}", protocol::uid::new().unwrap()));
+        protocol::fsperm::private_dir(&dir).unwrap();
+        for name in ["codeconnect-opencode.js", "tui.json", "environment"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let binary = dir.join("opencode");
+        let path = std::ffi::CString::new(binary.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let mut job = Command::new(env!("CARGO_BIN_EXE_codeconnect"))
+            .arg("internal-job")
+            .arg("--opencode-dir")
+            .arg(&dir)
+            .arg("--verify")
+            .arg(&binary)
+            .arg("0".repeat(64))
+            .args(["/bin/sh", "-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        // A writer opens only once the job is reading the FIFO.
+        let mut writer = None;
+        wait_for("the job to open the binary", || {
+            writer = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&binary)
+                .ok();
+            writer.is_some()
+        });
+        unsafe { libc::kill(job.id() as i32, signal) };
+        let ended = job.wait().unwrap();
+        drop(writer);
+        assert_eq!(ended.signal(), Some(signal), "signal {signal}");
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["environment", "opencode"], "signal {signal}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
