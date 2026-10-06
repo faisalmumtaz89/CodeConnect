@@ -25,6 +25,8 @@ struct TimelineRow: View {
     /// whether an absent `risk_class` means "medium" or "this daemon never
     /// said".
     let profile: DaemonProfile
+    /// The run's agent, which decides whether a card is Claude's question.
+    let agent: AgentKind?
     /// Fired after a long message collapses, with this row's own id, so the
     /// screen can bring the row back under the viewport — see `AgentMessageRow`.
     var onCollapse: ((String) -> Void)? = nil
@@ -44,9 +46,17 @@ struct TimelineRow: View {
         case .tool(let tool):
             ToolRow(tool: tool)
         case .approval(let approval):
-            ApprovalRow(
-                approval: approval, risk: approval.assessment(profile: profile).effective
-            ) { onOpenApproval(approval) }
+            if let questions = DecisionCardView.questionCard(card: approval.card, agent: agent) {
+                QuestionRow(
+                    approval: approval, questions: questions,
+                    risk: approval.assessment(profile: profile).effective,
+                    answersQuestions: profile.answersQuestions
+                ) { onOpenApproval(approval) }
+            } else {
+                ApprovalRow(
+                    approval: approval, risk: approval.assessment(profile: profile).effective
+                ) { onOpenApproval(approval) }
+            }
         case .notice(let notice):
             NoticeRow(notice: notice, date: item.date)
         }
@@ -60,20 +70,40 @@ struct TimelineRow: View {
 /// started at 44 while the fleet's started at 52 and the Deck's at 16: four left
 /// edges where the app allows two — 32 for marks and glyphs, 52 for language.
 /// The gutter is 24 now, so text lands on 52 exactly as it does on a fleet row,
-/// and its contents are **trailing**-aligned so a glyph ends on 40 — the same
-/// edge the fleet's dots end on.
+/// and its marks are centred on the app's one mark axis, 36 from the screen's
+/// edge, by `ccGutterMark()` (measured at L: a tool glyph spans 26.7–44.7,
+/// centre 35.7).
 ///
 /// Named rather than repeated so a tool row, a notice row and a user message
 /// cannot drift apart, which is exactly what happened when each of them owned
 /// its own padding.
 enum TimelineSpine {
     /// Holds the tool glyph, the notice glyph and the user-message bar: 16 → 40
-    /// from the screen's edge, with its contents against the right of it.
+    /// from the screen's edge, each centred on the mark axis (`ccGutterMark()`).
     static let gutter: CGFloat = CC.space.xl
     static let gap: CGFloat = CC.space.sm
     /// 24 (gutter) + 12 (gap) = 36 from the list's leading edge; **52** from the
     /// screen's.
     static let content: CGFloat = gutter + gap
+}
+
+extension View {
+    /// Places a mark in the timeline's gutter column, **centred on the app's
+    /// one mark axis** (`CCColumn.markCentre`, 36 on screen) rather than pushed
+    /// against the column's edge, where a 10pt dot and an 18pt glyph ended on
+    /// one line and centred on two.
+    ///
+    /// **Never against the text.** At accessibility sizes a glyph outgrows the
+    /// gutter, and centred it would touch the words beside it; a mark that wide
+    /// moves left until `CCColumn.markClearance` separates them.
+    func ccGutterMark() -> some View {
+        alignmentGuide(.leading) { mark in
+            max(
+                mark.width / 2 - CCColumn.markCentre,
+                mark.width - (TimelineSpine.content - CCColumn.markClearance))
+        }
+        .frame(width: TimelineSpine.gutter, alignment: .leading)
+    }
 }
 
 // MARK: - Messages
@@ -111,14 +141,18 @@ struct UserMessageRow: View {
             // different rule and is correct.
             .padding(.leading, TimelineSpine.content)
 
-            HStack(alignment: .top, spacing: TimelineSpine.gap) {
+            // The bubble **hangs back by its own padding**, so its text — not
+            // its border — starts on 52 under `YOU`: border 40, text 52, the
+            // kit's rule for a nested surface (`CCColumn.hang`). Set at the
+            // gap, the label sat on the border and the words 12pt right of it.
+            HStack(alignment: .top, spacing: TimelineSpine.gap - CC.space.sm) {
                 // The marker. 2pt of `borderStrong` says "this one is yours"
                 // without spending a hue on it — and it sits in the same gutter
                 // as every glyph on this screen.
                 Rectangle()
                     .fill(CC.color.borderStrong)
                     .frame(width: 2)
-                    .frame(width: TimelineSpine.gutter, alignment: .trailing)
+                    .ccGutterMark()
                     .accessibilityHidden(true)
                 Text(text)
                     .ccType(isCommand ? CC.type.monoSmall : CC.type.callout)
@@ -425,27 +459,31 @@ struct ToolRow: View {
     private var summaryLine: some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
             HStack(spacing: TimelineSpine.gap) {
-                CCIcon(ToolSummary.symbol(tool: tool.name), size: CC.size.icon, weight: .medium)
+                CCIcon(
+                    ToolSummary.symbol(tool: tool.name), size: CC.size.icon, weight: .medium,
+                    maxSize: CCColumn.markMaxSize)
                     .foregroundStyle(CC.text.tertiary)
                     // Fixed to the gutter column, because `CCIcon` sizes its own
                     // frame from the glyph and a column of tool rows has to line
                     // up whatever symbols it happens to hold.
-                    .frame(width: TimelineSpine.gutter, alignment: .trailing)
-                Text(tool.name)
-                    .ccType(CC.type.callout)
-                    .foregroundStyle(CC.text.primary)
-                    .lineLimit(1)
-                    // The glyph above is already pinned to the gutter so a
-                    // column of tool rows lines up; this is the same argument
-                    // applied to the name, so the commands beside them line up
-                    // too. See `CCToolColumn`.
-                    .ccToolLabelColumn(toolColumn, disabled: typeSize.isAccessibilitySize)
-                if let argument = tool.argument {
-                    Text(argument.firstLine)
-                        .ccType(CC.type.monoSmall)
-                        .foregroundStyle(CC.text.secondary)
-                        .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
-                        .truncationMode(.middle)
+                    .ccGutterMark()
+                HStack(spacing: CCToolColumn.argumentGap) {
+                    Text(tool.name)
+                        .ccType(CC.type.callout)
+                        .foregroundStyle(CC.text.primary)
+                        .lineLimit(1)
+                        // The glyph above is already pinned to the gutter so a
+                        // column of tool rows lines up; this is the same argument
+                        // applied to the name, so the commands beside them line up
+                        // too. See `CCToolColumn`.
+                        .ccToolLabelColumn(toolColumn, disabled: typeSize.isAccessibilitySize)
+                    if let argument = tool.argument {
+                        Text(argument.firstLine)
+                            .ccType(CC.type.monoSmall)
+                            .foregroundStyle(CC.text.secondary)
+                            .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+                            .truncationMode(.middle)
+                    }
                 }
                 Spacer(minLength: CC.space.xxs)
             }
@@ -617,19 +655,19 @@ struct ApprovalRow: View {
                         color: approval.isPending ? CC.color.warning : CC.text.tertiary,
                         size: CCStatusDot.Size.cardHeader.rawValue,
                         pulses: approval.isPending)
-                    .offset(x: -dotGutter)
+                    .offset(x: dotOffset)
                     .accessibilityHidden(true)
                 }
             CCRiskTag(risk)
         }
     }
 
-    /// The offset scales with the dot, for the reason `CCSectionHeader` states
-    /// in the same words: fixed at 20 while the disc grew to 14 at AX5, the two
-    /// closed to a 6pt gap and the dot read as a bullet glued to the N of
-    /// NEEDS YOU.
-    private var dotGutter: CGFloat {
-        min(scaledDot, CCStatusDot.Size.cardHeader.rawValue * CC.size.dotMaxScale) + CC.space.xs
+    /// Back from the text to the mark axis, less half the dot, so the dot is
+    /// centred on `CCColumn.markCentre` at every size: it grows about the axis
+    /// rather than toward the text, as `CCSectionHeader`'s does.
+    private var dotOffset: CGFloat {
+        let width = min(scaledDot, CCStatusDot.Size.cardHeader.rawValue * CC.size.dotMaxScale)
+        return -(CCColumn.content - CCColumn.markCentre + width / 2)
     }
 
     private var summaryLine: some View {
@@ -637,7 +675,7 @@ struct ApprovalRow: View {
         // name and a command cannot share 340pt, and side by side the command
         // wrapped into a column half the card wide.
         CCAdaptiveStack(
-            horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs,
+            horizontalSpacing: CCToolColumn.argumentGap, verticalSpacing: CC.space.xxs,
             verticalAlignment: .firstTextBaseline
         ) {
             Text(approval.card.toolName)
@@ -655,7 +693,7 @@ struct ApprovalRow: View {
                 // fact — on the row whose whole job is to say what is waiting.
                 CCMonoBlock(inline: argument.firstLine)
             }
-            Spacer(minLength: 0)
+            CCAdaptiveSpacer(minLength: 0)
         }
     }
 
@@ -668,7 +706,7 @@ struct ApprovalRow: View {
         } else {
             CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
                 CCWaitClock(since: approval.requestedAt, now: now, prefix: "waiting")
-                Spacer(minLength: CC.space.xs)
+                CCAdaptiveSpacer(minLength: CC.space.xs)
                 CCButton("Review", variant: .primary, size: .sm, action: onOpen)
             }
         }
@@ -681,7 +719,7 @@ struct ApprovalRow: View {
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: CC.space.xs)
+            CCAdaptiveSpacer(minLength: CC.space.xs)
             Text(Format.age(since: outcome.resolvedDate, now: now))
                 .ccType(CC.type.monoSmall)
                 .foregroundStyle(CC.text.tertiary)
@@ -707,7 +745,7 @@ struct ApprovalRow: View {
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: CC.space.xs)
+            CCAdaptiveSpacer(minLength: CC.space.xs)
             CCButton("View", variant: .ghost, size: .sm, action: onOpen)
         }
     }
@@ -749,16 +787,8 @@ struct ApprovalRow: View {
         if outcome.indeterminate { return "Answer not confirmed" }
         // An inferred decision is the daemon noticing the prompt is gone, not
         // watching an answer happen. Rendering it as "Allowed" would put a fact
-        // on screen that nobody observed.
-        if outcome.inferred { return "Answered at the keyboard" }
-        let who: String
-        switch outcome.resolvedBy {
-        case .phone: who = "from this app"
-        case .local: who = "at the keyboard"
-        case .timeout: who = "by timeout - nobody answered"
-        case .superseded: who = "superseded"
-        }
-        return "\(outcome.decision.label) \(who)"
+        // on screen that nobody observed (`decisionLabel` says "Closed").
+        return "\(outcome.decisionLabel) \(outcome.provenance)"
     }
 
     /// The spoken label for a row carrying a recorded outcome. An unconfirmed
@@ -782,6 +812,136 @@ struct ApprovalRow: View {
     }
 }
 
+// MARK: - Questions
+
+/// Claude's question, previewed: what it asks, in its own words, and where it
+/// stands — the question card's own status (`QuestionCardStatus.recorded`), so
+/// the row and the card it opens cannot disagree.
+///
+/// Its own row rather than an `ApprovalRow`, because a question is not a
+/// command waiting on a verdict: it has no tool name to put in the command
+/// column, no execution risk worth a badge unless it would take Face ID, and an
+/// ending that is an answer rather than Allowed or Denied. One status treatment
+/// while it waits — its glyph, amber — where the approval row also tints its
+/// border, pulses a dot and prints NEEDS YOU.
+struct QuestionRow: View {
+    let approval: ApprovalItem
+    let questions: QuestionCard
+    let risk: RiskClass
+    let answersQuestions: Bool
+    let onOpen: () -> Void
+
+    /// See `ApprovalRow.lastTick`: the same clock, for the same two ages.
+    @State private var lastTick = Date()
+
+    private var now: Date { AgeTick.renderTime(lastTick: lastTick) }
+
+    private var clock: AgeClock {
+        if let outcome = approval.outcome {
+            return AgeClock(since: outcome.resolvedDate, scale: .age)
+        }
+        return AgeClock(since: approval.requestedAt, scale: .clock)
+    }
+
+    private var status: QuestionCardStatus {
+        .recorded(approval, answersQuestions: answersQuestions)
+    }
+
+    private var title: String {
+        questions.questions.count == 1 ? "Question" : "\(questions.questions.count) questions"
+    }
+
+    var body: some View {
+        CCCard(border: CC.color.border) {
+            VStack(alignment: .leading, spacing: CC.space.sm) {
+                titleLine
+                // Prose, set as prose, and cut at its end when it is long: the
+                // whole of it is on the card one tap away.
+                Text(questions.questions[0].text)
+                    .ccType(CC.type.callout)
+                    .foregroundStyle(CC.text.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
+                footer
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityAddTraits(.isButton)
+        // The row's one action opens the card, in every state — the same
+        // thing its Answer or View button does.
+        .accessibilityAction { onOpen() }
+        .task(id: clock) { await AgeTick.follow(clock) { lastTick = $0 } }
+    }
+
+    /// The glyph **hangs in the gutter**, centred on the mark axis as
+    /// `ApprovalRow`'s dot is, so the title starts on the card's one text edge
+    /// with the question under it. It is the row's status mark too: amber while
+    /// the question waits on someone.
+    private var titleLine: some View {
+        CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
+            Text(title)
+                .ccType(CC.type.callout)
+                .foregroundStyle(CC.text.primary)
+                .overlay(alignment: .leading) {
+                    CCIcon(
+                        "questionmark.bubble", size: CC.size.icon, weight: .medium,
+                        maxSize: CCColumn.markMaxSize)
+                        .foregroundStyle(approval.isPending ? CC.color.warning : CC.text.tertiary)
+                        .fixedSize()
+                        // Centred on the mark axis, 16 back from the text edge,
+                        // and never closer to the title than the clearance.
+                        .alignmentGuide(.leading) {
+                            max(
+                                $0.width / 2 + CCColumn.content - CCColumn.markCentre,
+                                $0.width + CCColumn.markClearance)
+                        }
+                        .accessibilityHidden(true)
+                }
+            CCAdaptiveSpacer(minLength: 0)
+            // Face ID is asked of a HIGH question's answer, so the row says so;
+            // any lower class gates nothing a question does.
+            if risk == .high { CCRiskTag(risk) }
+        }
+    }
+
+    @ViewBuilder
+    private var footer: some View {
+        CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
+            if let summary = status.summary(of: questions) {
+                Text(summary)
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                CCAdaptiveSpacer(minLength: CC.space.xs)
+                if let outcome = approval.outcome {
+                    HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs) {
+                        Text(Format.age(since: outcome.resolvedDate, now: now))
+                            .ccType(CC.type.monoSmall)
+                        Text("ago").ccType(CC.type.footnote)
+                    }
+                    .foregroundStyle(CC.text.tertiary)
+                    .lineLimit(1)
+                }
+                CCButton("View", variant: .ghost, size: .sm, action: onOpen)
+            } else {
+                CCWaitClock(since: approval.requestedAt, now: now, prefix: "waiting")
+                CCAdaptiveSpacer(minLength: CC.space.xs)
+                CCButton("Answer", variant: .primary, size: .sm, action: onOpen)
+            }
+        }
+    }
+
+    private var accessibilityLabel: String {
+        let state =
+            status.summary(of: questions)
+            ?? "waiting \(Format.spokenAge(now.timeIntervalSince(approval.requestedAt)))"
+        return "\(title) from Claude. \(questions.questions[0].text). \(state)."
+    }
+}
+
 // MARK: - Notices
 
 struct NoticeRow: View {
@@ -790,9 +950,10 @@ struct NoticeRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: TimelineSpine.gap) {
-            CCIcon(notice.symbol, size: CC.size.icon, weight: .medium)
+            CCIcon(
+                notice.symbol, size: CC.size.icon, weight: .medium, maxSize: CCColumn.markMaxSize)
                 .foregroundStyle(tone == .neutral ? CC.text.tertiary : tone.color)
-                .frame(width: TimelineSpine.gutter, alignment: .trailing)
+                .ccGutterMark()
                 .padding(.top, 1)
 
             VStack(alignment: .leading, spacing: CC.space.xxs) {

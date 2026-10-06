@@ -671,8 +671,7 @@ import SwiftUI
                             ) {
                                 CCRiskTag(.high)
                                 CCWaitClock(
-                                    since: Self.waitingSince, now: Date(), prefix: nil,
-                                    style: CC.type.monoSmall)
+                                    since: Self.waitingSince, now: Date(), prefix: nil)
                             }
                         } meta: {
                             VStack(alignment: .leading, spacing: CC.space.xxs) {
@@ -687,7 +686,7 @@ import SwiftUI
                                         .lineLimit(1)
                                         .layoutPriority(1)
                                     CCMonoBlock(inline: "git push --force origin main")
-                                    Spacer(minLength: 0)
+                                    CCAdaptiveSpacer(minLength: 0)
                                 }
                                 CCAdaptiveStack(
                                     horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs
@@ -695,7 +694,7 @@ import SwiftUI
                                     Text(verbatim: "started 09:05")
                                         .ccType(CC.type.micro)
                                         .foregroundStyle(CC.text.tertiary)
-                                    Spacer(minLength: CC.space.xs)
+                                    CCAdaptiveSpacer(minLength: CC.space.xs)
                                 }
                             }
                         }
@@ -1010,6 +1009,8 @@ import SwiftUI
 
         private var freshnessSection: some View {
             section("CCFreshnessPill") {
+                // Three to a row: six labelled pills are wider than a phone, and a
+                // row wider than the page scrolled the whole page sideways.
                 CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
                     CCFreshnessPill(
                         health: LinkHealth(level: .live, age: 1.2, detail: "Live."),
@@ -1017,9 +1018,11 @@ import SwiftUI
                     CCFreshnessPill(
                         health: LinkHealth(level: .lagging, age: 18, detail: "Link lagging."))
                     CCFreshnessPill(
-                        health: LinkHealth(level: .connecting, age: nil, detail: "Opening."))
-                    CCFreshnessPill(
                         health: LinkHealth(level: .stale, age: 61, detail: "Gone quiet."))
+                }
+                CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
+                    CCFreshnessPill(
+                        health: LinkHealth(level: .connecting, age: nil, detail: "Opening."))
                     CCFreshnessPill(
                         health: LinkHealth(level: .offline, age: nil, detail: "Not paired."))
                     CCFreshnessPill(

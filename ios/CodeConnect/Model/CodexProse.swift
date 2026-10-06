@@ -143,7 +143,7 @@ enum CodexProse {
         switch by {
         case .phone:
             return Banner(
-                title: "Answered from this phone",
+                title: "Answered from a phone",
                 message: "Codex has the answer.",
                 icon: "checkmark.seal", tone: .success)
         // **The honesty this arm exists for.** `decision` is absent for a

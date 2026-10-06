@@ -110,6 +110,18 @@ enum DiffState: Sendable {
         return false
     }
 
+    /// How many files have changed, where the app has counted them: a clean
+    /// tree — a diff with no text at all — is a counted 0. Nil until a diff has
+    /// loaded, and for one with no file sections that is not a clean tree: the
+    /// daemon's note says it is not a git repository, the capture was cut off,
+    /// or the text is something this app does not count, such as `ccd`'s
+    /// listing of untracked files.
+    var changedFileCount: Int? {
+        guard case .loaded(let diff, let parsed, _) = self else { return nil }
+        if !parsed.files.isEmpty { return parsed.files.count }
+        return parsed.isEmpty && diff.note == nil && !diff.truncated ? 0 : nil
+    }
+
     /// A request that ended in the app's own account of the link, rather than
     /// in anything the daemon said. The screen has a state of its own for this
     /// and must not fall through to the failure state.

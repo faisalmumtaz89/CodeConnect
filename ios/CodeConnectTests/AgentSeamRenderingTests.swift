@@ -344,8 +344,8 @@ final class PersistedApprovalRowTests: XCTestCase {
         XCTAssertFalse(outcome.indeterminate)
 
         XCTAssertEqual(ApprovalRow.headerTitle(for: approval), "RESOLVED")
-        // resolved_by "local" in the fixture → "at the keyboard".
-        XCTAssertEqual(ApprovalRow.resolutionText(for: outcome), "Allowed at the keyboard")
+        // resolved_by "local" in the fixture → "at the Mac".
+        XCTAssertEqual(ApprovalRow.resolutionText(for: outcome), "Allowed at the Mac")
         XCTAssertTrue(
             ApprovalRow.resolvedAccessibilityLabel(for: outcome, toolName: approval.card.toolName)
                 .hasPrefix("Resolved approval"))

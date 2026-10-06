@@ -30,6 +30,20 @@ enum CCColumn {
     static let gutter: CGFloat = CC.space.md
     /// Where text sits inside a card: 36, which is 52 on screen.
     static let content: CGFloat = CC.space.md + gap
+    /// **The one axis every mark in the gutter is centred on**: the middle of
+    /// the dot's slot, 20, which is 36 on screen. A fleet dot, a session dot, a
+    /// card's status dot, a timeline glyph and the YOU bar all centre here, so
+    /// marks of different widths share a line instead of each ending, or
+    /// starting, wherever its own frame put it.
+    static let markCentre: CGFloat = gutter + CC.size.dot / 2
+    /// The least room between a mark and the text it leads. Only a mark grown
+    /// at accessibility sizes comes this close; it moves off the axis rather
+    /// than touch the words.
+    static let markClearance: CGFloat = CC.space.xxs
+    /// The largest glyph the gutter holds. A mark kept `markClearance` from
+    /// text on 52 starts at 52 − 4 − its frame, so a frame past 44 would leave
+    /// the screen's own 4pt margin; `CCIcon`'s frame is 1.35 × its size, so 32.
+    static let markMaxSize: CGFloat = 32
 
     /// What a component must **add** to land its own text on the content column,
     /// given how far its container has already inset it.
@@ -350,6 +364,9 @@ struct CCIcon: View {
     var size: CGFloat = CC.size.icon
     var weight: Font.Weight = .medium
     var relativeTo: Font.TextStyle = .body
+    /// Where it stops growing with Dynamic Type, for a glyph in a column with
+    /// a fixed amount of room (`CCColumn.markMaxSize`).
+    var maxSize: CGFloat = .infinity
 
     @ScaledMetric private var scaled: CGFloat
 
@@ -357,22 +374,25 @@ struct CCIcon: View {
         _ name: String,
         size: CGFloat = CC.size.icon,
         weight: Font.Weight = .medium,
-        relativeTo: Font.TextStyle = .body
+        relativeTo: Font.TextStyle = .body,
+        maxSize: CGFloat = .infinity
     ) {
         self.name = name
         self.size = size
         self.weight = weight
         self.relativeTo = relativeTo
+        self.maxSize = maxSize
         _scaled = ScaledMetric(wrappedValue: size, relativeTo: relativeTo)
     }
 
     var body: some View {
+        let size = min(scaled, maxSize)
         Image(systemName: name)
-            .font(.system(size: scaled, weight: weight))
+            .font(.system(size: size, weight: weight))
             .symbolRenderingMode(.monochrome)
             // Symbols vary in optical width; a fixed frame keeps a column of
             // rows aligned no matter which glyph each one uses.
-            .frame(width: scaled * 1.35, alignment: .center)
+            .frame(width: size * 1.35, alignment: .center)
             .accessibilityHidden(true)
     }
 }
@@ -796,5 +816,19 @@ struct CCAdaptiveStack<Content: View>: View {
         } else {
             HStack(alignment: verticalAlignment, spacing: horizontalSpacing, content: content)
         }
+    }
+}
+
+/// The `Spacer` a `CCAdaptiveStack` takes: it separates the two ends of the
+/// horizontal form and is absent from the vertical one, where a `Spacer` turns
+/// into height — a gap under a footer's text, or an action pushed down the
+/// screen. `CCSectionHeader` writes the same rule out by hand.
+struct CCAdaptiveSpacer: View {
+    var minLength: CGFloat? = nil
+
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        if !typeSize.isAccessibilitySize { Spacer(minLength: minLength) }
     }
 }

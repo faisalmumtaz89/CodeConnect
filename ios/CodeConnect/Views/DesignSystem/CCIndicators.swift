@@ -447,6 +447,9 @@ struct CCFreshnessPill: View {
     /// Already formatted — `0.4s`, `18s`, `offline`. Monospace, so a ticking
     /// number does not shuffle the layout on every tick.
     let age: String
+    /// What `age` is the age of — `link` — set as prose before it. Nil where
+    /// `age` is already a word (`offline`).
+    var prefix: String?
     var dotColor: Color = CC.color.success
     var labelColor: Color = CC.text.tertiary
     var isHollow: Bool = false
@@ -483,6 +486,12 @@ struct CCFreshnessPill: View {
         HStack(spacing: CC.space.xxs + 1) {
             CCStatusDot(
                 color: dotColor, size: CC.size.dotSm, isHollow: isHollow, pulses: pulses)
+            if let prefix {
+                Text(prefix)
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(labelColor)
+                    .fixedSize()
+            }
             Text(age)
                 .ccType(CC.type.monoSmall)
                 .foregroundStyle(labelColor)

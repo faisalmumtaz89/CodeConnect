@@ -35,6 +35,11 @@ struct CCField: View {
     var disableAutocorrection: Bool = false
     /// Monospace input — endpoints, tokens, paths.
     var isMono: Bool = false
+    /// Where the label sits: on the content column (the default, for a field
+    /// among rows that keep a gutter), or on the field's own leading edge, for a
+    /// document with no gutter — a question sheet, where every line starts at
+    /// the margin and a label stepped out to the column was a third edge.
+    var labelOnContentColumn: Bool = true
     var onSubmit: (() -> Void)?
 
     @FocusState private var focused: Bool
@@ -64,7 +69,10 @@ struct CCField: View {
                     // 52.67 against `YOUR COMMENT` 16.67, Δ −36.00 — and the
                     // `CCSectionHeader` fix could never reach it, because this
                     // label is not a section header.
-                    .padding(.leading, CCColumn.step(from: columnInset, scaledDot: scaledDot))
+                    .padding(
+                        .leading,
+                        labelOnContentColumn
+                            ? CCColumn.step(from: columnInset, scaledDot: scaledDot) : 0)
             }
 
             input

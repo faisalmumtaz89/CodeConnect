@@ -769,9 +769,7 @@ struct DeckAccessoryBar: View {
                     Text("·")
                         .ccType(CC.type.footnote)
                         .foregroundStyle(CC.text.disabled)
-                    CCWaitClock(
-                        since: waitingSince, now: now, prefix: "waiting",
-                        style: CC.type.monoSmall)
+                    CCWaitClock(since: waitingSince, now: now, prefix: "waiting")
                 }
             }
             if let topCommand {

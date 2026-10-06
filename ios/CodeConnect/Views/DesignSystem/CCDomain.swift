@@ -190,8 +190,14 @@ extension CCFreshnessPill {
             label = CC.color.danger
         }
 
+        let isAge: Bool
+        switch health.level {
+        case .live, .lagging, .stale: isAge = true
+        case .connecting, .offline, .rejected: isAge = false
+        }
         self.init(
             age: health.shortText,
+            prefix: isAge ? "link" : nil,
             dotColor: dot,
             labelColor: label,
             isHollow: hollow,

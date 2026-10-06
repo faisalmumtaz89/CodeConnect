@@ -210,12 +210,19 @@ extension CCSheetChrome where Trailing == EmptyView {
 /// material is the system's and lightens under a light-mode trait that this app
 /// forces off but cannot rely on inside every UIKit-hosted subview.
 ///
-/// **`surfaceRaised`, with 16 / 20 / 12 padding.** It shipped `surface`
+/// **`surfaceRaised`, with 16 / 16 / 12 padding.** It shipped `surface`
 /// #0A0A0A with 12 / 16 / 8 — the same fill as the scroll content it is pinned
 /// over, so the bar carrying the irreversible action separated from the document
-/// by a hairline and nothing else, and every one of its three paddings was 4pt
-/// short. The luminance ladder is the whole separation mechanism here: a bar is a
-/// block *nested over* a screen, which is exactly what `surfaceRaised` means.
+/// by a hairline and nothing else. The luminance ladder is the whole separation
+/// mechanism here: a bar is a block *nested over* a screen, which is exactly what
+/// `surfaceRaised` means. Its sides are the page's 16, the same inset as the
+/// document above it: at 20, every button's edges missed the content's by 4pt.
+///
+/// **Its fill runs to the screen's bottom edge.** A pinned bar sits in a
+/// `ccScrollCap`, whose scroll view clips, so the bar's own background stops at
+/// the safe area: measured, a 44pt darker band under the bar, with the document
+/// scrolling visibly through it at AX5. The footer that holds the bar paints the
+/// band with `.ccActionBarSafeAreaFill(_:)`, outside the cap.
 struct CCActionBar<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
@@ -225,11 +232,21 @@ struct CCActionBar<Content: View>: View {
             VStack(spacing: CC.space.sm) {
                 content()
             }
-            .padding(.horizontal, CC.space.lg)
+            .padding(.horizontal, CC.space.md)
             .padding(.top, CC.space.md)
             .padding(.bottom, CC.space.sm)
         }
         .background(CC.color.surfaceRaised)
+    }
+}
+
+extension View {
+    /// Paints the bottom safe area under a pinned `CCActionBar` in the bar's
+    /// own fill. `present` is whether this footer is drawing a bar now: a
+    /// footer without one leaves the edge to the document.
+    func ccActionBarSafeAreaFill(_ present: Bool) -> some View {
+        background(
+            present ? CC.color.surfaceRaised : Color.clear, ignoresSafeAreaEdges: .bottom)
     }
 }
 

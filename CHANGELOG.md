@@ -3,6 +3,67 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A cleaner session timeline
+
+- A reply no longer sits under two empty lines, and the empty fragments Claude writes
+  between a tool call and its reply no longer take up space on the timeline.
+- "Claude is waiting for your input" is a quiet note rather than an amber warning, and it
+  disappears once you send your next message; a finished session no longer turns back to
+  running when it appears. The rows saying the session started and the
+  link attached are gone from the top of the timeline; a session that starts again later,
+  and a link that drops and comes back, are still shown. A later start says what it was:
+  "Session started", "Session resumed" or "Conversation compacted" (a cleared conversation
+  already says "Conversation cleared.", also after `/clear` with a name, `/new` or `/reset`).
+- The "waiting 4s" clock on an approval or question is the same small size as every other
+  age, with only the number in fixed-width type.
+- At the largest text sizes, rows that stack their parts no longer carry an empty gap where
+  a horizontal spacer used to be.
+- A question Claude asks is one entry on the timeline: the tool row that repeated it above its
+  card, with a meaningless "0ms", is gone.
+- That entry reads as a question: "Question" and its words in ordinary type, no MEDIUM badge,
+  **Answer** while you can answer it from the phone and **View** when only the Mac can. Once
+  answered it says what was chosen ("Answered: Blue") and how long ago, in the same words the
+  question itself uses ("Answered at the Mac", "Closed").
+- The session's two clocks say what they count: "last event 53s ago" beside the title ("53s
+  ago" at the largest text sizes), and "link 0s" in the toolbar pill.
+- The session's folder is written in readable grey instead of dimmed. It is still the Mac's
+  full path, cut at its start so the end that names the project shows.
+- The message box on a Claude session says "Ask Claude to do anything", as a Codex session's
+  names Codex.
+- The diff button reads "± 0" when the session's folder has no changes at all, instead of
+  the same bare "±" it shows before it has looked. New files that are not yet tracked are
+  changes, so they never read as 0.
+- The bar holding Submit, Allow or Deny now fills the sheet to its bottom edge: there is no
+  darker band under it, and at the largest text sizes the question no longer shows through
+  beneath it.
+- A project's name on a decision or question is set in ordinary type, as it is everywhere else;
+  only its folder path stays in fixed-width type.
+- A question's sheet has one heading, "Question" (or "4 questions"), instead of "Decision"
+  above "Claude has a question"; it names the run as the session does, says up front when an
+  answer will take Face ID, and once answered states it once rather than three times. No empty
+  band sits above a question that has no topic chip.
+- A question you can only read (asked at the Mac, closed) shows its options without empty
+  radio buttons, and no rule is drawn under the last option.
+- Before you choose, the question says "Choose an answer to submit." quietly under its buttons,
+  not as an amber warning between Submit and Decline, and the bar no longer jumps when you
+  choose. A reason that stops both buttons is said once.
+- While an answer is being sent, its choices can no longer be changed, so what the question shows
+  is what was sent.
+- Every dot and glyph in the left margin (the session's status dot, a card's dot, tool and notice
+  icons, the bar beside your messages) is centred on one line, the one the fleet's dots use.
+- A tool's command starts the same distance after its name on a timeline row as on an approval
+  card or a fleet row.
+- Your own messages line up: the words start under "YOU", with the bubble around them.
+- On a question, the label over the Other and Notes fields starts at the same edge as the question
+  and the field, not indented.
+- The buttons pinned at the bottom of a decision, question or command sheet line up with the content
+  above them.
+- An approval's ending says only what is known: "Allowed from a phone" (any of your paired phones,
+  not necessarily this one), "Allowed at the Mac", and "Closed at the Mac" when the prompt left the
+  Mac without anyone being seen to answer it. It used to say "from this app", "at the keyboard",
+  and once "at the keyboard at the keyboard". A Codex question answered from the phone says
+  "Answered from a phone" for the same reason.
+
 ## Answer Claude's questions from the phone
 
 When Claude asks you to choose (its `AskUserQuestion`), the phone now shows the question

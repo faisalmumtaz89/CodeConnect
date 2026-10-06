@@ -165,31 +165,27 @@ struct CCStatStrip: View {
 ///
 /// **Always `textTertiary`, whatever the wait.** A long wait is not a different
 /// kind of fact from a short one, and the number already says how long it is;
-/// a hue on top of it restated the band the row sat in. Monospaced digits, and
-/// it never rounds up: `4m12s` is a fact, not an estimate, and a clock that
-/// jumps a whole minute at a time reads as a stalled render rather than as
-/// elapsed time.
+/// a hue on top of it restated the band the row sat in. `monoSmall`, like every
+/// other age, and it never rounds up: `4m12s` is a fact, not an estimate, and a
+/// clock that jumps a whole minute at a time reads as a stalled render rather
+/// than as elapsed time. The prefix is a word, so it is set as prose.
 struct CCWaitClock: View {
     let since: Date
     let now: Date
     /// `"waiting"` on the card and the timeline row; nothing on a Fleet row,
     /// where the band header has already said what the number means.
     var prefix: String?
-    var style: CCTextStyle = CC.type.mono
 
     var body: some View {
-        Text(text)
-            .ccType(style)
-            .foregroundStyle(CC.text.tertiary)
-            .lineLimit(1)
-            .accessibilityLabel(
-                "\(prefix ?? "waiting") \(Format.spokenAge(now.timeIntervalSince(since)))")
-    }
-
-    private var text: String {
-        let clock = Self.clock(since: since, now: now)
-        guard let prefix else { return clock }
-        return "\(prefix) \(clock)"
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs) {
+            if let prefix { Text(prefix).ccType(CC.type.footnote) }
+            Text(Self.clock(since: since, now: now)).ccType(CC.type.monoSmall)
+        }
+        .foregroundStyle(CC.text.tertiary)
+        .lineLimit(1)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "\(prefix ?? "waiting") \(Format.spokenAge(now.timeIntervalSince(since)))")
     }
 
     /// `12s` · `4m12s` · `2h04m` · `3d02h`. Two units, never three: the third is

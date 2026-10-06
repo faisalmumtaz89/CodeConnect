@@ -24,6 +24,15 @@ import SwiftUI
 /// column frame widens it, so the maximum cannot chase itself. Tool names do not
 /// change with scroll, so this converges on the first pass and then stops — the
 /// hazard that a scroll-varying measurement would create does not arise here.
+enum CCToolColumn {
+    /// The one gap between a tool label and the argument beside it, on every
+    /// row that draws the pair — a timeline tool row, an approval preview, a
+    /// fleet row's activity line. The tool row used its glyph spacing, 12, and
+    /// the other two 8, so one screen's commands started 4pt apart after the
+    /// same measured column.
+    static let argumentGap: CGFloat = CC.space.xs
+}
+
 struct CCToolLabelWidthKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -52,16 +61,23 @@ extension View {
     /// then draw it into the column once one exists.
     ///
     /// `disabled` is how a caller opts out at accessibility sizes, where these
-    /// rows stack and a width would only be dead space.
+    /// rows stack and a width would only be dead space. Opted out, the label is
+    /// left alone entirely: held at its intrinsic width it could not truncate,
+    /// and a long name at AX5 ran off the row.
+    @ViewBuilder
     func ccToolLabelColumn(_ width: CGFloat, disabled: Bool = false) -> some View {
-        fixedSize()
-            .background {
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: CCToolLabelWidthKey.self, value: proxy.size.width)
+        if disabled {
+            self
+        } else {
+            fixedSize()
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: CCToolLabelWidthKey.self, value: proxy.size.width)
+                    }
                 }
-            }
-            .frame(width: disabled || width <= 0 ? nil : width, alignment: .leading)
+                .frame(width: width <= 0 ? nil : width, alignment: .leading)
+        }
     }
 
     /// Collect the widest tool label beneath this view and publish it back down.

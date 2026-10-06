@@ -154,6 +154,7 @@ release build:
 | `-CC_FIXTURE longOutput` | the `deck` fleet plus `fx-5`'s turn ending in a finished command with **60 lines of output** and one more call after it. The only fixture with a tool output past its 40-line "Show all", which at the tail is the geometry where the timeline once carried the reader to the last line |
 | `-CC_QUESTION <state>` | one Claude session holding a four-question `AskUserQuestion` card from a minor-21 daemon — `held`, `at-mac`, `ended`, `answered`, or `old-mac` (minor 20, no `question_card`). See *Claude's questions* |
 | `-CC_FIXTURE_LATE_EVENT_MS <n>` | delivers the fixture's last frame `n` ms after the rest: an event that arrives while the reader is on screen, so a test can act first and then see whether it is followed or counted as "N new" |
+| `-CC_FIXTURE_ANSWER_MS <n>` | holds a fixture's answer `n` ms before it lands, so a test can see a card while its answer is on its way |
 | `-CC_FIXTURE_LINK stale` | withholds the fixture's keep-alive `pong`, so `LinkHealth` crosses its 45-second `staleAfter` on its own and every action disables itself **with its reason**. Pairs with either fixture; without it, `stale` is unreachable under a fixture and therefore never rendered or tested |
 | `-CC_FIXTURE_CACHED <seconds>` | restages the fixture's fleet as one read off **disk** that many seconds ago, so the cached banner draws its age. Without it the cached fleet — the state where every wait clock ticks off data that arrived before launch, and a reader cannot tell a `5m40s` read off disk from a live one — could not be rendered or tested at all. Compose with `-CC_FIXTURE_LINK stale` for the **compound** banner the ladder was rebuilt for: the link's classification carrying the cache's age, one banner, both facts |
 | `-CC_RENDER_PROBE YES` | adds a 1pt invisible element carrying the content-size category this process actually resolved to (`cc-render-probe`). The render harness reads it before it photographs anything — see *The render harness* below. Off by default so it cannot appear in a tree a product test is counting |
@@ -256,8 +257,10 @@ is enforced.
   `display_text` against `payload_hash`.
 * **An inferred outcome is never stated as fact.** `ResolvedBy::Local` carries
   `inferred: true` — the daemon saw the prompt leave, it did not see the answer —
-  so the UI says "answered at the keyboard", never "Allowed"
-  (`AnswerOutcome.decisionLabel`).
+  so the UI says "Closed at the Mac", never "Allowed" or "answered"
+  (`AnswerOutcome.decisionLabel`). Where an answer came from is said as far as the
+  record proves it (`AnswerOutcome.provenance`): `phone` is "from a phone", any
+  paired one, never "this app"; `local` is "at the Mac".
 * **A disconnected terminal says so.** The last bytes stay on screen under an
   explicit not-live banner, because a frozen terminal is indistinguishable from
   a live one and clearing it would lie about what you just read.
@@ -439,6 +442,31 @@ each Stop state (offered, aborted, link down, refused late, indeterminate), each
 outcome (started, steered, duplicate, rejected, indeterminate), the replayed turn
 stream, and two older-daemon states that prove the controls hide rather than fail.
 
+## The session timeline
+
+`TimelineBuilder` (`Model/Timeline.swift`) turns the event log into rows, a pure
+function of the events:
+
+* an agent reply is drawn without the blank lines Claude puts around a text block
+  (`Event.agentText`); a block that is only blank lines draws no row;
+* Claude Code's routine `idle_prompt` is a neutral row in its own words, retired by
+  the next message, and never counts as activity for the session's status; a real
+  request for input (`agent_needs_input`, a permission prompt with no card) stays a
+  warning;
+* a session's own start (its first start, in a history that begins at seq 1, with
+  only link, error and notification events before it; the daemon numbers each run
+  from 1 with no gaps), and the link attaching before it was ever down, draw no row;
+  a later start, one after any other event, a start at the top of a window
+  whose older events are not loaded, a link going down, and its coming back after
+  that, do. None of them counts as activity. A start says what Claude
+  Code reports started it, with its model: "Session started", "Session resumed" or
+  "Conversation compacted"; one from `/clear` draws no row, as "Conversation
+  cleared." already says it (for `/clear` with or without a name, and for `/new` and
+  `/reset`, which Claude Code records as `/clear`);
+* Claude's `AskUserQuestion` is one entry, its card: the call's own tool row is not
+  drawn, as the card states the question and how it ended. Every other tool keeps its
+  row beside its card.
+
 ## Claude's questions
 
 Claude Code asks every `AskUserQuestion` through a `PermissionRequest`, so the
@@ -453,6 +481,8 @@ advertises `question_card` (`DaemonProfile.answersQuestions`) gets
 `AskUserQuestion` card whose questions reproduce the hashed text (anything less
 falls back to the approval layout, read-only):
 
+* the sheet is titled "Question" (or "4 questions") and the card names the run
+  (`RunLabel.inline`), with a HIGH card's Face ID requirement and its reason;
 * one step per question — header chip, question, options — then a **Review** step
   listing every answer; with one question, Submit sits on the question itself;
 * single choice: radio rows plus **Other**, which opens a text field; several
@@ -460,7 +490,8 @@ falls back to the approval layout, read-only):
   whose options carry a `preview` draws the chosen option's preview in a
   monospace block under it and offers **Notes** — no other question does — and,
   as the Mac's preview layout has no "Type something", no Other;
-* **Submit** (live only when every question has an answer) and **Decline** (as
+* **Submit** (live only when every question has an answer, which a neutral line under
+  the buttons says; it keeps its place once met, so the bar does not move) and **Decline** (as
   Escape at the Mac: the main conversation's turn stops; a background agent's
   question is denied and the agent carries on). A HIGH card's Submit takes Face ID,
   as Allow does.
@@ -484,7 +515,15 @@ records), *Unconfirmed* (a current Mac's decline among them), and
 *Closed* when the question left the Mac (Escape, the session or turn ending)
 without anyone being seen to answer it. Neither age nor a newer prompt closes a
 question card: one still open at the Mac stays *Asking at the Mac*. A refusal saying the question was "answered at the Mac"
-is the Mac winning the race, and reads as answered at the keyboard.
+is the Mac winning the race, and reads as *Answered at the Mac*.
+
+On the timeline a question is a `QuestionRow` (`Views/TimelineRows.swift`), not an
+approval row: "Question" (or "4 questions") and the first question's words in prose,
+two lines at most, and the same status as the card (`QuestionCardStatus.recorded`):
+**Answer** while the phone can answer it, otherwise the status's own words — *Asking at
+the Mac*, *Answer at the Mac*, *Closed*, an answer from the phone as what was chosen —
+with **View**, and once it has ended how long ago. It carries no risk tag unless the class
+is HIGH, where Submit takes Face ID.
 
 | Fixture | Where it runs | What it pins |
 |---|---|---|
@@ -633,8 +672,8 @@ haptic is not motion, and removing it removes information.
 | `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH. <rationale>` |
 | `CCCountChip` | `CCCountChip(3)` — the same construction with a number in it. Used by `CCSectionHeader`; never hand-rolled |
 | `CCStatusDot` | `CCStatusDot(color:size:isHollow:pulses:)` · `CCStatusDot(tone:…)` · `CCStatusDot(status:size:isCached:)` — scales with Dynamic Type to `CC.size.dotMaxScale` (8 → 14 at AX5) |
-| `CCFreshnessPill` | `CCFreshnessPill(health:action:)` — the only written copy of the freshness table: each `LinkHealth.level` maps to one dot, one mono label, whether actions are enabled, and which banner (if any) shows |
-| `CCField` | `CCField(label:text:placeholder:hint:error:axis:lineLimit:isSecure:keyboardType:…:isMono:onSubmit:)` — 52pt. `label` is **optional**: an empty string still reserves ~22pt of its line, `nil` draws no row |
+| `CCFreshnessPill` | `CCFreshnessPill(health:action:)` — the only written copy of the freshness table: each `LinkHealth.level` maps to one dot, one mono label (an age, after the word `link`, while there is a link to age), whether actions are enabled, and which banner (if any) shows |
+| `CCField` | `CCField(label:text:placeholder:hint:error:axis:lineLimit:isSecure:keyboardType:…:isMono:labelOnContentColumn:onSubmit:)` — 52pt. `label` is **optional**: an empty string still reserves ~22pt of its line, `nil` draws no row. The label steps out to the content column unless `labelOnContentColumn: false`, for a document with no gutter (the question sheet), where it sits on the field's edge |
 | `CCSectionHeader` | `CCSectionHeader("Blocked", count:, dotColor:, dotPulses:, note:, noteAction:, actionTitle:, action:)` — **place it flush**: it puts its own label on the 52pt column and takes no column parameter. The dot hangs itself into the 32pt gutter, takes no layout width, and stays centred on that axis as it scales |
 | `CCEmptyState` | `CCEmptyState(glyph:title:message:tone:actionTitle:action:actionDisabledReason:secondaryActionTitle:secondaryAction:)` — the primary action is `.primary`, because an empty state has exactly one action worth taking, and `actionDisabledReason:` *draws* why the only way out is shut |
 | `CCScreenMark` | `CCScreenMark(glyph:tone:)` — a 32pt glyph in a 64pt bordered circle. **A component, not a modifier, because the Dynamic Type ramp is welded to the token**: `ccGlyphContainer`'s free `relativeTo:` let two marks meaning "here is the thing this screen is about" ride `.title2` and `.largeTitle`, which measured 150.33 against 108.67 at AX5 and 0.00 apart at the default `L`. Use it for any such mark |
@@ -645,7 +684,7 @@ haptic is not motion, and removing it removes information.
 | `CCGapMarker` | `CCGapMarker(label:actionLabel:action:)` — inline, at its position in time |
 | `CCBanner` / `CCBannerSlot` | `CCBannerSlot([CCBannerItem(.rejected, title:…), …])` renders **exactly one**, by the ladder `rejected > offline > stale > cached > gap > truncated` |
 | `CCHunkHeader` | `CCHunkHeader(header:fontSize:actions: CCHunkActions(comment:copyHunk:copyPath:))` — the kit draws the glyph, owns the menu and **is** the 44pt target. Pass actions as values, not a built control; the `menu:` closure form is legacy and cannot carry the gesture |
-| Primitives | `CCHairline`, `CCIcon`, `CCProse`, `CCProgressRing` (the only spinner), `CCAdaptiveStack`, `CCPasteboard`, `CCMeasured`, `CCInlineCode`, `.ccSurface`, `.ccHitTarget`, `.ccDisabled`, `.ccFocusRing`, `.ccGlyphContainer`, `.ccColumnInset` |
+| Primitives | `CCHairline`, `CCIcon`, `CCProse`, `CCProgressRing` (the only spinner), `CCAdaptiveStack`, `CCAdaptiveSpacer`, `CCPasteboard`, `CCMeasured`, `CCInlineCode`, `.ccSurface`, `.ccHitTarget`, `.ccDisabled`, `.ccFocusRing`, `.ccGlyphContainer`, `.ccColumnInset` |
 
 ### Global chrome
 
@@ -700,7 +739,9 @@ could drop them in their own commit, and every call site now has.
 **card's own** leading edge: `gutter` 16 (32 on screen — dots, glyphs and index
 badges, and **nothing written**) and `content` 36 (52 on screen — every text run
 there is). `gap` is the 20 between them, which is what a component adds to step
-from one to the other.
+from one to the other. `markCentre` 20 (36 on screen) is the one axis every mark
+is centred on — fleet and session dots, a card's status dot, the timeline's glyphs
+(`ccGutterMark()`) and the YOU bar — so marks of different widths share a line.
 
 **One row leaves the gutter empty on purpose:** a Fleet row with no dot — every
 row in the Blocked and Failed bands — drops the column and starts its title at
@@ -917,7 +958,8 @@ does the same with its toolbar circles, which are ~60pt each at AX5 and left
 horizontally so it wraps instead of starving the row; `CCMonoBlock` moves its
 copy button out of the text's line and into a labelled row underneath, giving
 the command the block's full width; `CCStatStrip` becomes a vertical stack; and
-`CCAdaptiveStack` does the same for button groups, banners and section headers.
+`CCAdaptiveStack` does the same for button groups, banners and section headers, with
+`CCAdaptiveSpacer` as its spacer, which is absent once the stack is vertical.
 
 **Chrome is not content, and at AX5 the diff sheet is the proof.** Measured on an
 874pt screen, the code started ~700pt down: the reader opened a diff and could

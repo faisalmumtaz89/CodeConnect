@@ -19,9 +19,19 @@ struct DecisionCardSheet: View {
 
     private var attempt: AnswerAttempt? { model.lastAttempt(for: approval) }
 
+    /// What the sheet holds. A question is not a decision to approve, and its
+    /// card carries no title of its own, so this is its one heading.
+    private var title: String {
+        guard
+            let questions = DecisionCardView.questionCard(
+                card: approval.card, agent: model.summary(for: approval.sessionKey)?.agent)
+        else { return "Decision" }
+        return questions.questions.count == 1 ? "Question" : "\(questions.questions.count) questions"
+    }
+
     var body: some View {
         CCSheetChrome(
-            "Decision",
+            title,
             onClose: { dismiss() },
             closeLabel: attempt?.isTerminal == true ? "Done" : "Close"
         ) {
@@ -161,7 +171,7 @@ struct ResolutionBanner: View {
         case .indeterminate(let outcome):
             return "\(outcome.decisionLabel), but the daemon couldn’t confirm it landed"
         case .duplicate: return "Already answered"
-        case .answeredAtKeyboard: return "Answered at the keyboard"
+        case .answeredAtKeyboard: return "Answered at the Mac"
         case .staleCard: return "This card is out of date"
         case .rejected: return "The daemon refused this answer"
         case .failed: return "The answer did not reach the daemon"
@@ -199,7 +209,7 @@ struct ResolutionBanner: View {
             ].compactMap { $0 }.joined(separator: " · ")
         case .duplicate(let outcome, let stale):
             let original =
-                "Original outcome: \(outcome.decisionLabel) \(outcome.resolvedBy == .phone ? "from a phone" : "at the Mac"), \(outcome.resolvedAt)."
+                "Original outcome: \(outcome.decisionLabel) \(outcome.provenance), \(outcome.resolvedAt)."
                 + (outcome.inferred
                     ? " The daemon inferred that from the prompt disappearing rather than observing the answer."
                     : "")

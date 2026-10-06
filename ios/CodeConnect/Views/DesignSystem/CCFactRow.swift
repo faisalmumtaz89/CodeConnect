@@ -86,7 +86,7 @@ struct CCFactRow<Value: View, Detail: View>: View {
             VStack(alignment: .leading, spacing: CC.space.xs) {
                 CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
                     labelText
-                    Spacer(minLength: CC.space.xs)
+                    CCAdaptiveSpacer(minLength: CC.space.xs)
                     value()
                     ageText
                 }

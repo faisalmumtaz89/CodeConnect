@@ -418,9 +418,11 @@ struct DecisionCardView: View {
             // two — and it was a fourth encoding of "pending" beside the
             // risk badge above it and the amber wait clock below. The dot went;
             // the column came back.
+            // Prose: a project is a name someone gave a folder, set as names
+            // are everywhere else in the app. The path below it is the code.
             HStack(spacing: CC.space.xs) {
                 Text(verbatim: label.project)
-                    .ccType(CC.type.monoSmall)
+                    .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
                     // **Bounded, because the decision comes first.** A project
                     // may be forty characters, and at the largest accessibility
@@ -432,10 +434,10 @@ struct DecisionCardView: View {
                     .truncationMode(.tail)
                 if let qualifier = label.qualifier {
                     Text("·")
-                        .ccType(CC.type.monoSmall)
+                        .ccType(CC.type.footnote)
                         .foregroundStyle(CC.text.disabled)
                     Text(verbatim: qualifier)
-                        .ccType(CC.type.monoSmall)
+                        .ccType(CC.type.footnote)
                         .foregroundStyle(CC.text.disabled)
                 }
                 Spacer(minLength: 0)
@@ -1308,13 +1310,12 @@ struct DecisionCardView: View {
     }
 
     static func alreadyResolvedMessage(for outcome: AnswerOutcome, now: Date) -> String {
-        let who = outcome.resolvedBy == .phone ? "from this app" : "at the keyboard"
         let age = "\(Format.age(since: outcome.resolvedDate, now: now)) ago"
+        let ending = "\(outcome.decisionLabel) \(outcome.provenance)"
         if outcome.indeterminate {
-            return
-                "\(outcome.decisionLabel) \(who) · \(age), but the daemon couldn’t confirm it reached the agent"
+            return "\(ending) · \(age), but the daemon couldn’t confirm it reached the agent"
         }
-        return "\(outcome.decisionLabel) \(who) · \(age)"
+        return "\(ending) · \(age)"
     }
 
     /// Never a checkmark for an unconfirmed outcome — the seal *is* the visual
@@ -1369,6 +1370,7 @@ struct DecisionCardView: View {
         // on purpose: what the read gate has to clear is the height the footer
         // actually draws at, not the height its content wanted.
         .ccScrollCap()
+        .ccActionBarSafeAreaFill(drawsActionBar)
         .background {
             GeometryReader { proxy in
                 // How much of the document the pinned footer is covering, and so
@@ -1451,6 +1453,15 @@ struct DecisionCardView: View {
             .foregroundStyle(CC.text.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Whether `actionBar` draws a bar: the read-only note's, or an
+    /// answerable card's. Every other branch draws nothing.
+    private var drawsActionBar: Bool {
+        Self.readOnlyNoteInPinnedBar(
+            isAccessibilitySize: typeSize.isAccessibilitySize,
+            isActionable: isActionable, isAnswerable: isAnswerable)
+            || (isActionable && isAnswerable)
     }
 
     @ViewBuilder
@@ -1582,7 +1593,7 @@ struct DecisionCardView: View {
                     model.connection.retryNow()
                 }
             }
-            Spacer(minLength: 0)
+            CCAdaptiveSpacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1733,7 +1744,7 @@ struct DecisionCardView: View {
                 CCButton("Cancel", variant: .ghost, size: .sm) {
                     withAnimation(CC.motion.small) { showDenyField = false }
                 }
-                Spacer(minLength: CC.space.xs)
+                CCAdaptiveSpacer(minLength: CC.space.xs)
                 CCButton(
                     "Deny and send",
                     // Denying is the safe direction. It was drawn `destructive`,

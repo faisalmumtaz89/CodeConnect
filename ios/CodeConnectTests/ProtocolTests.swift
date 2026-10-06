@@ -196,7 +196,7 @@ final class ProtocolTests: XCTestCase {
             return XCTFail("wrong result")
         }
         XCTAssertTrue(outcome.inferred)
-        XCTAssertEqual(outcome.decisionLabel, "Answered at the keyboard")
+        XCTAssertEqual(outcome.decisionLabel, "Closed")
         XCTAssertEqual(outcome.decision.label, "Allowed", "the raw decision is still available")
     }
 

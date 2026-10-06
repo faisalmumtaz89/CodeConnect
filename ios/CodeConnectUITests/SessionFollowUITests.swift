@@ -334,7 +334,7 @@ final class SessionFollowUITests: XCTestCase {
         XCTAssertTrue(
             waitUntil(timeout: 8) {
                 let shown = (field.value as? String) ?? ""
-                return shown.isEmpty || shown == "Say something to this agent"
+                return shown.isEmpty || shown == "Ask Claude to do anything"
             },
             "the composer still shows what it sent: \((field.value as? String) ?? "nil")")
     }

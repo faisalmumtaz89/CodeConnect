@@ -30,7 +30,7 @@ That's the whole setup. The agent itself behaves exactly as it did before, and t
 - **Diff review that works on a phone.** Unified, monospace, word-level highlighting, comment-to-agent on any hunk.
 - **Talk to it — out loud if you like.** The compose bar stages text into the agent's prompt; template chips insert, never send. Dictation is Apple's own speech recognition — on-device wherever your language supports it; where it doesn't, Apple's speech service does the transcription. A transcript is always staged for review, never auto-sent.
 - **A real terminal.** Attach to the live tmux session over the connection the app is already paired on, and take over completely.
-- **It never lies about state.** Every fact shows its age. A stale link disables actions and says why. "Answered at the keyboard" is a state the phone renders, not a guess.
+- **It never lies about state.** Every fact shows its age. A stale link disables actions and says why. An answer is said to come "from a phone" or "at the Mac", as far as the record proves, and a prompt that only left the Mac is "Closed", never a guessed answer.
 
 ## Why you might not want this (yet)
 

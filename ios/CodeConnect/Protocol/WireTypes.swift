@@ -1085,9 +1085,21 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
     var resolvedDate: Date { ISO8601.parse(resolvedAt) ?? .distantPast }
 
     /// How to describe this outcome without overclaiming. An inferred decision
-    /// is reported as "the prompt went away", never as "Allowed".
+    /// is the daemon seeing the prompt leave the Mac, not an answer, so it is
+    /// "Closed" — never "Allowed", and never "Answered".
     var decisionLabel: String {
-        inferred ? "Answered at the keyboard" : decision.label
+        inferred ? "Closed" : decision.label
+    }
+
+    /// Where the answer came from, as far as the record proves it: `phone`
+    /// names a paired phone, not this one, so "a phone"; `local` is the Mac.
+    var provenance: String {
+        switch resolvedBy {
+        case .phone: return "from a phone"
+        case .local: return "at the Mac"
+        case .timeout: return "by timeout - nobody answered"
+        case .superseded: return "superseded"
+        }
     }
 }
 
