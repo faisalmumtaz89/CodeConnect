@@ -1312,8 +1312,7 @@ struct FleetRowView: View {
                 if let blocked { CCRiskTag(blocked.risk) }
                 // `monoSmall`, like every other age on the screen: the wait
                 // is set apart by where it sits, not by its size or a hue.
-                CCWaitClock(
-                    since: waitingSince, now: now, prefix: nil, style: CC.type.monoSmall)
+                CCWaitClock(since: waitingSince, now: now, prefix: nil)
             }
         } else {
             Text(freshness)
@@ -1351,7 +1350,7 @@ struct FleetRowView: View {
                         .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 0)
+                CCAdaptiveSpacer(minLength: 0)
                 stopControl
             }
             if showsIdentity || showsCapability || row.blockedCount > 1 { exceptionLine }
@@ -1384,7 +1383,7 @@ struct FleetRowView: View {
         // `…re.swift`, which is a path nobody can read. Stacked, it gets the
         // whole measure.
         CCAdaptiveStack(
-            horizontalSpacing: CC.space.xs, verticalSpacing: 2,
+            horizontalSpacing: CCToolColumn.argumentGap, verticalSpacing: 2,
             verticalAlignment: .firstTextBaseline
         ) {
             Text(card.tool)
@@ -1398,7 +1397,7 @@ struct FleetRowView: View {
             if let argument = card.argument {
                 CCMonoBlock(inline: argument, truncation: truncation)
             }
-            Spacer(minLength: 0)
+            CCAdaptiveSpacer(minLength: 0)
         }
     }
 
@@ -1455,7 +1454,7 @@ struct FleetRowView: View {
                     .lineLimit(1)
                     .accessibilityHidden(true)
             }
-            Spacer(minLength: CC.space.xs)
+            CCAdaptiveSpacer(minLength: CC.space.xs)
         }
     }
 

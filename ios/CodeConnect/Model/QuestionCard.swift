@@ -210,6 +210,34 @@ enum QuestionCardStatus: Sendable, Hashable {
         }
     }
 
+    /// Where a question the timeline holds stands, by the same rule as the card.
+    ///
+    /// The timeline's item is the live one, so it is backed; no answer attempt
+    /// is consulted, because the row states what was recorded and the card owns
+    /// what this phone is in the middle of sending.
+    static func recorded(_ approval: ApprovalItem, answersQuestions: Bool) -> QuestionCardStatus {
+        resolve(
+            outcome: approval.outcome, attempt: nil, isBacked: true,
+            hold: approval.questionHold, answersQuestions: answersQuestions)
+    }
+
+    /// The one line a timeline row says about where the question stands, in the
+    /// card's own words, or nil while the phone can answer it. An answer from
+    /// the phone is the answer itself: what was chosen, question by question.
+    func summary(of card: QuestionCard) -> String? {
+        switch self {
+        case .answerable:
+            return nil
+        case .answeredOnPhone(let answers):
+            let chosen = zip(card.questions.indices, answers).map { index, answer in
+                card.choices(of: answer, for: index).joined(separator: ", ")
+            }
+            return "Answered: " + chosen.joined(separator: " · ")
+        default:
+            return banner?.title
+        }
+    }
+
     /// Only what the daemon observed is stated: an inferred ending, and a
     /// decision a question cannot carry, is closed.
     private static func ended(by outcome: AnswerOutcome) -> QuestionCardStatus {

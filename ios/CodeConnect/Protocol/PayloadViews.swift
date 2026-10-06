@@ -264,15 +264,35 @@ extension Event {
     /// Prose from an assistant turn. `tool_use` blocks are deliberately skipped:
     /// the PreToolUse hook already reported those as `tool_call` events with a
     /// daemon-assigned seq, and rendering both would double every tool call.
+    ///
+    /// **Without its outer blank lines.** Claude starts a text block that
+    /// follows a tool call or a thinking block with `"\n\n"` (measured, 2.1.289),
+    /// and some blocks are nothing else: drawn verbatim, each reply sat under two
+    /// empty lines of reading type and a whitespace-only block drew an empty row.
+    /// Only the blank lines around the text go; indentation on its first line,
+    /// paragraph breaks and code blocks inside it are the agent's.
     var agentText: String? {
         guard kind == .agentMessage else { return nil }
-        guard let blocks = payload["message"]?["content"]?.arrayValue else { return flatText }
+        guard let blocks = payload["message"]?["content"]?.arrayValue else {
+            return flatText.flatMap(Self.withoutOuterBlankLines)
+        }
         let joined =
             blocks
             .filter { $0["type"]?.stringValue == "text" }
             .compactMap { $0["text"]?.stringValue }
             .joined(separator: "\n")
-        return joined.isEmpty ? nil : joined
+        return Self.withoutOuterBlankLines(joined)
+    }
+
+    /// `text` from the start of its first non-blank line to its last visible
+    /// character, or nil when every line is blank.
+    static func withoutOuterBlankLines(_ text: String) -> String? {
+        guard let first = text.firstIndex(where: { !$0.isWhitespace }),
+            let last = text.lastIndex(where: { !$0.isWhitespace })
+        else { return nil }
+        let lineStart = text[..<first].lastIndex(where: \.isNewline).map(text.index(after:))
+            ?? text.startIndex
+        return String(text[lineStart...last])
     }
 
     /// Tool-use blocks announced by the assistant turn, used only as a fallback

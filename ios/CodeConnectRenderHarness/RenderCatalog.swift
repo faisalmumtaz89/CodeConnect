@@ -1221,21 +1221,21 @@ enum RenderCatalog {
             }),
         // ---- R-series: how a card ends ---------------------------------
         codexScenario(
-            "resolved-accepted", purpose: "answered from this phone, on the Codex link",
+            "resolved-accepted", purpose: "answered from a phone, on the Codex link",
             route: "session",
             reach: { app, driver in
                 try openResolvedCard(app, driver)
                 try driver.require(
-                    driver.element(containing: "Answered from this phone", in: app),
+                    driver.element(containing: "Answered from a phone", in: app),
                     "the ending's own sentence, on the card")
             }),
         codexScenario(
-            "resolved-declined", purpose: "declined from this phone — Codex was told no",
+            "resolved-declined", purpose: "declined from a phone — Codex was told no",
             route: "session",
             reach: { app, driver in
                 try openResolvedCard(app, driver)
                 try driver.require(
-                    driver.element(containing: "Answered from this phone", in: app),
+                    driver.element(containing: "Answered from a phone", in: app),
                     "the ending's own sentence, on the card")
             }),
         codexScenario(
@@ -1509,7 +1509,7 @@ enum RenderCatalog {
     /// One question-card scenario: the session opened by deep link, the card
     /// opened from its own timeline row.
     private static func questionScenario(
-        _ name: String, state: String, purpose: String, opensWith button: String = "Review",
+        _ name: String, state: String, purpose: String, opensWith button: String = "Answer",
         reach: @escaping (XCUIApplication, RenderDriver) throws -> Void
     ) -> RenderScenario {
         RenderScenario(
@@ -1520,8 +1520,7 @@ enum RenderCatalog {
                 try driver.requireExists(open, "the question's \(button) button")
                 try tapPastTheTailPill(app, driver, open, "the \(button) button on screen")
                 try driver.requireExists(
-                    driver.element(containing: "Claude has 4 questions", in: app),
-                    "the question card")
+                    app.staticTexts["4 questions"].firstMatch, "the question card's sheet")
                 try reach(app, driver)
             })
     }
@@ -1554,7 +1553,7 @@ enum RenderCatalog {
                 format: "identifier IN %@", ["question-next", "question-submit", "question-back"])
         ).allElementsBoundByIndex.map(\.frame.minY).min() ?? app.frame.maxY
         // The sheet's own chrome ends where its title does.
-        let top = app.staticTexts["Decision"].firstMatch.frame.maxY
+        let top = app.staticTexts["4 questions"].firstMatch.frame.maxY
         let reach: CGFloat = 44
         let margin = app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: 12, dy: app.frame.height * 0.45))
@@ -1661,6 +1660,7 @@ enum RenderCatalog {
         questionScenario(
             "at-mac", state: "at-mac",
             purpose: "read-only: Claude is asking at the Mac, the questions shown whole",
+            opensWith: "View",
             reach: { app, driver in
                 try driver.require(
                     driver.element(containing: "Asking at the Mac", in: app), "the card's status")
@@ -1668,6 +1668,7 @@ enum RenderCatalog {
         questionScenario(
             "ended", state: "ended",
             purpose: "read-only: the phone's hold ended — answer at the Mac",
+            opensWith: "View",
             reach: { app, driver in
                 try driver.require(
                     driver.element(containing: "no longer be answered from the phone", in: app),
@@ -1676,6 +1677,7 @@ enum RenderCatalog {
         questionScenario(
             "old-mac", state: "old-mac",
             purpose: "read-only on a minor-20 Mac: no Allow, and why",
+            opensWith: "View",
             reach: { app, driver in
                 try driver.require(
                     driver.element(containing: "too old to answer", in: app), "the card's status")

@@ -107,12 +107,18 @@ enum NoticeSeverity: Sendable, Hashable {
 /// from this, never from the display copy — rewording a string must not be able
 /// to change which band a session sorts into.
 enum NoticeKind: Sendable, Hashable {
-    case sessionStart
     /// A `Stop` hook: the turn finished, the session is still alive.
     case turnComplete
     case sessionEnded
     case agentWaiting
+    /// Claude Code's routine `idle_prompt`: a minute after a finished turn, it
+    /// is still waiting for the next message. Not a request — the turn already
+    /// ended — so it says nothing about whether the agent is working.
+    case agentIdle
     case agentFinished
+    /// The run starting again after its first start: a restart or resume under
+    /// the reader. Not work, so not activity.
+    case sessionStart
     /// Observation-about-our-observation; never evidence about the agent.
     case link
     case failure
@@ -171,10 +177,18 @@ enum TimelineBuilder {
         var panesByPrompt: [String: String] = [:]
         var hookToolCallIDs: Set<String> = []
         var approvalPromptIDs: Set<String> = []
+        /// Claude's questions, by tool-use id. A question is one thing to the
+        /// reader: its card says everything its tool call does — the question,
+        /// and how it ended — and the call's own duration is Claude's, not the
+        /// minute the reader took to answer.
+        var questionToolUseIDs: Set<String> = []
         var lastTurnEndSeq: UInt64 = 0
+        var lastUserMessageSeq: UInt64 = 0
 
         for event in events {
             switch event.kind {
+            case .userMessage:
+                lastUserMessageSeq = max(lastUserMessageSeq, event.seq)
             case .toolCall:
                 if let id = event.toolUseID { hookToolCallIDs.insert(id) }
             case .toolResult:
@@ -195,6 +209,9 @@ enum TimelineBuilder {
                 }
             case .approvalRequest:
                 if let promptID = event.approvalCard?.promptID { approvalPromptIDs.insert(promptID) }
+                if let card = event.approvalCard, card.toolName == QuestionCard.toolName {
+                    questionToolUseIDs.insert(card.requestID)
+                }
             case .questionHold:
                 if let change = event.questionHoldChange {
                     holdsByRequest[change.requestID] = (event.seq, change.hold)
@@ -216,6 +233,21 @@ enum TimelineBuilder {
 
         var items: [TimelineItem] = []
         items.reserveCapacity(events.count)
+        /// Whether the link has been anything but attached. Until then an
+        /// `attached` is the supervisor registering at spawn, which says
+        /// nothing to the reader; after it, `attached` is the recovery.
+        var linkWasDown = false
+        /// Events that observe the session and say nothing about its turns.
+        let observations: [EventKind] = [.linkState, .error, .notification]
+        /// The session's own start is the top of the timeline and draws no
+        /// row: the first start in a history that begins at seq 1, with only
+        /// observations before it. The daemon numbers a run's events from 1
+        /// with no gaps, so such a history is the whole run and everything
+        /// before the start is in hand. A cold open loads only the newest
+        /// events, so a start first in view can be a restart under history not
+        /// yet loaded, and one after any of the conversation is a restart under
+        /// it; either says something.
+        var atSessionTop = events.first?.seq == 1
 
         for event in events {
             switch event.kind {
@@ -231,7 +263,7 @@ enum TimelineBuilder {
                     switch local {
                     case .caveat:
                         break
-                    case .invocation:
+                    case .invocation(let command, _):
                         if let text = local.invocationText {
                             // `/clear` rotates the transcript: Claude Code
                             // opens a NEW file whose first user entry is this
@@ -239,7 +271,10 @@ enum TimelineBuilder {
                             // the observable completion — the daemon is
                             // following the fresh conversation. Rendered as
                             // the fact it proves rather than as typed input.
-                            if text == "/clear" {
+                            // By name: it takes an optional one (`/clear
+                            // next-task`), and `/new` and `/reset` are recorded
+                            // as `/clear` (2.1.289).
+                            if command == "/clear" {
                                 items.append(
                                     event.item(
                                         .notice(
@@ -291,7 +326,8 @@ enum TimelineBuilder {
                         event.item(.agentMessage(text, isInterrupted: event.isInterruptedItem)))
                 }
                 // Only when the PreToolUse hook missed the call entirely.
-                for use in event.agentToolUses where !hookToolCallIDs.contains(use.id) {
+                for use in event.agentToolUses
+                where !hookToolCallIDs.contains(use.id) && !questionToolUseIDs.contains(use.id) {
                     let outcome = resultsByToolUse[use.id]
                     let tool = ToolItem(
                         toolUseID: use.id,
@@ -311,6 +347,7 @@ enum TimelineBuilder {
 
             case .toolCall:
                 let id = event.toolUseID
+                if let id, questionToolUseIDs.contains(id) { break }
                 let outcome = id.flatMap { resultsByToolUse[$0] }
                 let name = event.toolName ?? "tool"
                 items.append(
@@ -331,7 +368,9 @@ enum TimelineBuilder {
 
             case .toolResult:
                 // Folded into its call above, unless the call was never seen.
-                guard let id = event.toolUseID, !hookToolCallIDs.contains(id) else { break }
+                guard let id = event.toolUseID, !hookToolCallIDs.contains(id),
+                    !questionToolUseIDs.contains(id)
+                else { break }
                 let outcome = resultsByToolUse[id]
                 let name = event.toolName ?? "tool"
                 items.append(
@@ -383,24 +422,29 @@ enum TimelineBuilder {
                 guard let notice = notice(for: event, approvalPromptIDs: approvalPromptIDs) else {
                     break
                 }
+                // Retired by the next message: once you have answered it, "Claude
+                // is waiting for your input" is no longer true of anything.
+                if notice.kind == .agentIdle, event.seq < lastUserMessageSeq { break }
                 items.append(event.item(.notice(notice)))
 
+            case .sessionEnd, .turnComplete:
+                items.append(event.item(.notice(endNotice(for: event))))
+
             case .sessionStart:
+                if atSessionTop { break }
+                guard let title = startTitle(source: event.payload["source"]?.stringValue)
+                else { break }
                 items.append(
                     event.item(
                         .notice(
                             NoticeItem(
                                 kind: .sessionStart,
                                 symbol: "play.circle",
-                                title: "Session started",
+                                title: title,
                                 // Through the same mapper the Model sheet
-                                // uses. The hook hands over an API id —
-                                // `claude-opus-5[1m]` — and one screen
-                                // resolving that to "Opus 5 · 1M context"
-                                // while another prints the id is the app
-                                // disagreeing with itself about the same
-                                // fact. An id this build does not recognise
-                                // still passes through verbatim.
+                                // uses, so the two never disagree about the
+                                // same id; one this build does not recognise
+                                // passes through verbatim.
                                 detail: event.modelName.map {
                                     let display = ModelDisplay.from($0)
                                     return [display.name, display.meta]
@@ -409,11 +453,11 @@ enum TimelineBuilder {
                                 },
                                 severity: .info))))
 
-            case .sessionEnd, .turnComplete:
-                items.append(event.item(.notice(endNotice(for: event))))
-
             case .linkState:
                 guard let fact = event.linkStateFact else { break }
+                let wasDown = linkWasDown
+                linkWasDown = fact.link != "attached"
+                if fact.link == "attached", !wasDown { break }
                 items.append(
                     event.item(
                         .notice(
@@ -441,9 +485,24 @@ enum TimelineBuilder {
                 // question hold is shown on the card it is about
                 break
             }
+
+            if !observations.contains(event.kind) { atSessionTop = false }
         }
 
         return items
+    }
+
+    /// What a start that draws a row says, by what Claude Code reports started
+    /// it (2.1.289: `startup`, `resume`, `clear`, `compact`, `fork`). A resume
+    /// or a compaction is the same session going on; `/clear` already has its
+    /// row, "Conversation cleared.", so its start draws none.
+    private static func startTitle(source: String?) -> String? {
+        switch source {
+        case "resume": return "Session resumed"
+        case "compact": return "Conversation compacted"
+        case "clear": return nil
+        default: return "Session started"
+        }
     }
 
     // MARK: Tool results
@@ -544,7 +603,17 @@ enum TimelineBuilder {
                     .filter { !$0.isEmpty }
                     .joined(separator: " "),
                 severity: .warning)
-        case "agent_needs_input", "idle_prompt":
+        case "idle_prompt":
+            // The turn has already ended and said so; this is a reminder, not
+            // a request. Neutral, and its own words once — the title used to
+            // say "Waiting for you" over a detail saying the same.
+            return NoticeItem(
+                kind: .agentIdle,
+                symbol: "ellipsis.bubble",
+                title: event.notificationMessage ?? "Waiting for your next message",
+                detail: nil,
+                severity: .info)
+        case "agent_needs_input":
             return NoticeItem(
                 kind: .agentWaiting,
                 symbol: "questionmark.bubble",

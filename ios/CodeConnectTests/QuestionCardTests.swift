@@ -376,4 +376,104 @@ final class QuestionCardTests: XCTestCase {
             ToolSummary.principalArgument(tool: card.toolName, input: card.toolInput),
             "How should snapshots be stored?")
     }
+
+    // MARK: What the timeline says about a question
+
+    /// The question card the timeline holds after `names`, through the builder.
+    private func recorded(_ names: [String], capable: Bool = true) throws
+        -> (QuestionCardStatus, String?)
+    {
+        let items = TimelineBuilder.build(try names.map(event))
+        let item = try XCTUnwrap(
+            items.compactMap { item -> ApprovalItem? in
+                if case .approval(let approval) = item.content { return approval }
+                return nil
+            }.last)
+        let card = try XCTUnwrap(QuestionCard(card: item.card))
+        let status = QuestionCardStatus.recorded(item, answersQuestions: capable)
+        return (status, status.summary(of: card))
+    }
+
+    /// The row and the card read one status: the row says what the card's
+    /// banner says, and an answer from the phone is what was chosen.
+    func testTheTimelineStatesWhatTheCardStates() throws {
+        XCTAssertNil(try recorded(["held_request"]).1, "answerable: the row offers Answer instead")
+        XCTAssertEqual(try recorded(["at_mac_request"]).1, "Asking at the Mac")
+        XCTAssertEqual(try recorded(["held_request", "hold_ended"]).1, "Answer at the Mac")
+        XCTAssertEqual(try recorded(["held_request"], capable: false).1, "Answer at the Mac")
+        XCTAssertEqual(try recorded(["at_mac_request", "answered_at_mac"]).1, "Answered at the Mac")
+        XCTAssertEqual(
+            try recorded(["held_request", "answered_from_phone"]).1,
+            "Answered: Dedupe with hardlinks (Recommended) · Unit tests, Soak test · "
+                + "Archive it under docs/plans, café ☕ · Side by side")
+    }
+
+    /// A question that left the Mac with nobody seen to answer it is closed —
+    /// never "answered at the keyboard", which states an answer nobody saw.
+    func testAnInferredEndingIsClosedOnTheTimelineToo() throws {
+        var resolved = try XCTUnwrap(try wire()["answered_at_mac"]?.objectValue)
+        var payload = try XCTUnwrap(resolved["payload"]?.objectValue)
+        payload["inferred"] = .bool(true)
+        payload["decision"] = .object(["type": .string("decline")])
+        resolved["payload"] = .object(payload)
+        let ended = try XCTUnwrap(JSONValue.object(resolved).decoded(Event.self))
+        let items = TimelineBuilder.build([try event("at_mac_request"), ended])
+        let item = try XCTUnwrap(
+            items.compactMap { item -> ApprovalItem? in
+                if case .approval(let approval) = item.content { return approval }
+                return nil
+            }.first)
+        let status = QuestionCardStatus.recorded(item, answersQuestions: true)
+        XCTAssertEqual(status, .closed)
+        XCTAssertEqual(status.summary(of: try XCTUnwrap(QuestionCard(card: item.card))), "Closed")
+    }
+
+    // MARK: One question, one entry
+
+    /// A PreToolUse or PostToolUse hook event for one call, with the fields the
+    /// builder reads from it.
+    private func toolEvent(_ kind: String, seq: Int, id: String, tool: String) throws -> Event {
+        try XCTUnwrap(
+            JSONValue.object([
+                "seq": .int(Int64(seq)), "session_uid": .string("01K1B3XQ8ZC0DE5FGH7JKMNPQR"),
+                "session_id": .string("cc-1"), "ts": .string("2026-10-03T00:00:0\(seq).000Z"),
+                "kind": .string(kind), "source": .string("hook"),
+                "payload": .object([
+                    "tool_name": .string(tool), "tool_use_id": .string(id),
+                    "tool_input": .object([:]), "duration_ms": .int(0),
+                ]),
+            ]).decoded(Event.self))
+    }
+
+    func testAQuestionIsOneEntryNotAToolRowAndACard() throws {
+        let id = try heldCard().requestID
+        let items = TimelineBuilder.build([
+            try toolEvent("tool_call", seq: 1, id: id, tool: "AskUserQuestion"),
+            try event("held_request"),
+            try event("answered_from_phone"),
+            try toolEvent("tool_result", seq: 6, id: id, tool: "AskUserQuestion"),
+        ])
+        let tools = items.filter {
+            if case .tool = $0.content { return true }
+            return false
+        }
+        XCTAssertEqual(tools.count, 0, "no tool row for the question's own call")
+        XCTAssertEqual(items.count, 1, "the card alone")
+    }
+
+    /// Only a question folds: an ordinary approved call keeps its own row.
+    func testAnOrdinaryToolKeepsItsRowBesideItsCard() throws {
+        var request = try XCTUnwrap(try wire()["held_request"]?.objectValue)
+        var payload = try XCTUnwrap(request["payload"]?.objectValue)
+        var card = try XCTUnwrap(payload["card"]?.objectValue)
+        card["tool_name"] = .string("Bash")
+        payload["card"] = .object(card)
+        request["payload"] = .object(payload)
+        let bashCard = try XCTUnwrap(JSONValue.object(request).decoded(Event.self))
+        let id = try heldCard().requestID
+        let items = TimelineBuilder.build([
+            try toolEvent("tool_call", seq: 1, id: id, tool: "Bash"), bashCard,
+        ])
+        XCTAssertEqual(items.count, 2)
+    }
 }

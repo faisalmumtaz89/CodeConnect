@@ -24,11 +24,11 @@ final class QuestionCardUITests: XCTestCase {
         ]
         app.launch()
 
-        let review = app.buttons["Review"].firstMatch
-        XCTAssertTrue(review.waitForExistence(timeout: 30), "the question's row on the timeline")
-        review.tap()
+        let answer = app.buttons["Answer"].firstMatch
+        XCTAssertTrue(answer.waitForExistence(timeout: 30), "the question's row on the timeline")
+        answer.tap()
         XCTAssertTrue(
-            app.staticTexts["Claude has 4 questions"].waitForExistence(timeout: 15),
+            app.staticTexts["4 questions"].waitForExistence(timeout: 15),
             "the question card, not the approval layout")
         XCTAssertFalse(app.buttons["Allow"].exists, "a question card never offers Allow")
 
@@ -89,9 +89,106 @@ final class QuestionCardUITests: XCTestCase {
         XCTAssertTrue(
             app.staticTexts["Claude has the answers sent from the phone."].waitForExistence(timeout: 10),
             "the confirmed answer")
-        XCTAssertTrue(app.staticTexts["Answers sent"].exists || app.staticTexts["ANSWERS SENT"].exists)
+        XCTAssertFalse(
+            app.staticTexts["Answers sent"].exists || app.staticTexts["ANSWERS SENT"].exists,
+            "the banner says it once")
+        XCTAssertTrue(app.staticTexts["Side by side"].exists, "with what was sent")
         XCTAssertFalse(submit.exists, "an answered card offers nothing more")
         XCTAssertFalse(app.buttons["Allow"].exists)
+    }
+
+    /// The card sends what it held when the answer was given, so nothing on
+    /// it can change while that answer is on its way: the step's choices are
+    /// disabled until it lands.
+    func testTheChoicesAreLockedWhileAnAnswerIsSent() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-CC_QUESTION", "held",
+            "-CC_DEEPLINK", "codeconnect://session/01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "-CC_FIXTURE_ANSWER_MS", "20000",
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
+        ]
+        app.launch()
+        let answer = app.buttons["Answer"].firstMatch
+        XCTAssertTrue(answer.waitForExistence(timeout: 30), "the question's row on the timeline")
+        answer.tap()
+        let option = app.buttons["question-0-option-0"]
+        XCTAssertTrue(option.waitForExistence(timeout: 15))
+        XCTAssertTrue(option.isEnabled, "a choice is live before anything is sent")
+
+        app.buttons["question-decline"].tap()
+        let locked = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == false"), object: option)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [locked], timeout: 5), .completed,
+            "the choices are locked while the answer is sent")
+        XCTAssertFalse(app.buttons["question-next"].isEnabled, "and so is the step's navigation")
+    }
+
+    /// Choosing the answer that completes the card does not move the bar at
+    /// AX5, where every line is tallest: Submit's note is cleared, not removed
+    /// (removed, Submit moved 22.7pt at L and 105pt here).
+    func testTheBarStaysPutWhenTheLastAnswerIsChosenAtAX5() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-CC_QUESTION", "held",
+            "-CC_DEEPLINK", "codeconnect://session/01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityXXXL",
+        ]
+        app.launch()
+        let answer = app.buttons["Answer"].firstMatch
+        XCTAssertTrue(answer.waitForExistence(timeout: 30))
+        answer.tap()
+        let next = app.buttons["question-next"].firstMatch
+        for index in 0..<3 {
+            let option = app.buttons["question-\(index)-option-0"]
+            XCTAssertTrue(option.waitForExistence(timeout: 10))
+            tapAboveTheBar(option, in: app)
+            next.tap()
+        }
+        next.tap()  // the fourth left unanswered
+        let submit = app.buttons["question-submit"].firstMatch
+        XCTAssertTrue(submit.waitForExistence(timeout: 5))
+        XCTAssertFalse(submit.isEnabled, "one question unanswered")
+        let before = submit.frame
+
+        app.buttons["question-3-change"].tap()
+        let last = app.buttons["question-3-option-0"]
+        XCTAssertTrue(last.waitForExistence(timeout: 5))
+        tapAboveTheBar(last, in: app)
+        next.tap()
+        XCTAssertTrue(submit.waitForExistence(timeout: 5))
+        XCTAssertTrue(submit.isEnabled, "every question answered")
+        XCTAssertEqual(submit.frame.minY, before.minY, accuracy: 0.5, "the bar did not move")
+        XCTAssertEqual(submit.frame.height, before.height, accuracy: 0.5)
+    }
+
+    /// At AX5 the pinned bar covers the lower part of the sheet, and a plain
+    /// `tap()` on an option behind it presses the bar's Next instead. Taps the
+    /// option's top, after dragging the sheet up while the bar hides it.
+    private func tapAboveTheBar(_ element: XCUIElement, in app: XCUIApplication) {
+        let window = app.windows.firstMatch
+        // The bar's highest control: Back stacks above Next at AX5.
+        func barTop() -> CGFloat {
+            ["question-back", "question-next", "question-submit"]
+                .map { app.buttons[$0].firstMatch }
+                .filter(\.exists)
+                .map(\.frame.minY)
+                .min() ?? window.frame.maxY
+        }
+        for _ in 0..<6 where element.frame.minY + 24 > barTop() - 16 {
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.6)).press(
+                forDuration: 0.05,
+                thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.35)),
+                withVelocity: .slow, thenHoldForDuration: 0.25)
+        }
+        XCTAssertLessThan(element.frame.minY + 24, barTop() - 16, "the option is above the bar")
+        window.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: element.frame.midX, dy: element.frame.minY + 12)).tap()
+        let chosen = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isSelected == true"), object: element)
+        XCTAssertEqual(XCTWaiter.wait(for: [chosen], timeout: 3), .completed, "the option was chosen")
     }
 
     /// A question only the Mac can answer is still shown whole, its previews
@@ -104,9 +201,12 @@ final class QuestionCardUITests: XCTestCase {
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]
         app.launch()
-        let review = app.buttons["Review"].firstMatch
-        XCTAssertTrue(review.waitForExistence(timeout: 30))
-        review.tap()
+        // Only the Mac can answer it, so its row offers View, not Answer.
+        XCTAssertTrue(
+            app.staticTexts["Asking at the Mac"].waitForExistence(timeout: 30),
+            "the row says where the question is")
+        XCTAssertFalse(app.buttons["Answer"].exists)
+        app.buttons["View"].firstMatch.tap()
         for option in 0..<2 {
             XCTAssertTrue(
                 app.descendants(matching: .any)["question-3-option-\(option)-preview"]
@@ -126,9 +226,9 @@ final class QuestionCardUITests: XCTestCase {
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL",
         ]
         app.launch()
-        let review = app.buttons["Review"].firstMatch
-        XCTAssertTrue(review.waitForExistence(timeout: 30))
-        review.tap()
+        let answer = app.buttons["Answer"].firstMatch
+        XCTAssertTrue(answer.waitForExistence(timeout: 30))
+        answer.tap()
         XCTAssertTrue(app.buttons["question-next"].firstMatch.waitForExistence(timeout: 15))
 
         let decline = app.buttons["question-decline"].firstMatch
@@ -164,9 +264,9 @@ final class QuestionCardUITests: XCTestCase {
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]
         app.launch()
-        let review = app.buttons["Review"].firstMatch
-        XCTAssertTrue(review.waitForExistence(timeout: 30))
-        review.tap()
+        let answer = app.buttons["Answer"].firstMatch
+        XCTAssertTrue(answer.waitForExistence(timeout: 30))
+        answer.tap()
         let next = app.buttons["question-next"].firstMatch
         XCTAssertTrue(next.waitForExistence(timeout: 15))
         for _ in 0..<4 { next.tap() }

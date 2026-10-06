@@ -346,7 +346,11 @@ enum FleetStatusRule {
             // it is the daemon reporting that it could not read a transcript line,
             // which is a fact about our observation, not about the agent. Counted
             // as activity it made a finished session look busy for ever.
-            case .link, .sessionStart, .other, .failure: return false
+            //
+            // A routine idle reminder sits with them too: it follows a turn
+            // that has already ended, and counted as activity it turned every
+            // finished session back to Running a minute later.
+            case .link, .sessionStart, .other, .failure, .agentIdle: return false
             case .turnComplete, .sessionEnded, .agentWaiting, .agentFinished: return true
             }
         }

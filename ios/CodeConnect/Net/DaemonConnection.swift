@@ -836,6 +836,10 @@ final class DaemonConnection {
     ) async throws -> AnswerResult {
         #if DEBUG
             if fixtureAnswers {
+                // `-CC_FIXTURE_ANSWER_MS <n>` holds the answer `n` ms, so a UI
+                // test can see the card while one is on its way.
+                let holdMS = UserDefaults.standard.integer(forKey: "CC_FIXTURE_ANSWER_MS")
+                if holdMS > 0 { try? await Task.sleep(for: .milliseconds(holdMS)) }
                 return .applied(
                     outcome: AnswerOutcome(
                         requestID: requestID, sessionID: session ?? "fixture", decision: decision,

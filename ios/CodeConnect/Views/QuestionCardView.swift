@@ -65,6 +65,13 @@ struct QuestionCardView: View {
 
     private var inFlight: Bool { spinningControl != nil || model.isAnswering(approval) }
 
+    /// Whether the answers on screen may still be changed. Not while an answer
+    /// is being sent: Submit captured the draft when it was tapped, so an edit
+    /// made during the send would show an answer that was never sent.
+    static func acceptsEdits(status: QuestionCardStatus, inFlight: Bool) -> Bool {
+        status.isAnswerable && !inFlight
+    }
+
     private var risk: RiskClass { approval.assessment(profile: model.daemonProfile).effective }
 
     /// Everything that stops every control on this card — the decision card's
@@ -73,9 +80,15 @@ struct QuestionCardView: View {
         DecisionCardView.blockedReason(model: model, approval: approval, inFlight: inFlight)
     }
 
-    private var submitBlockedReason: String? {
-        if let blockedReason { return blockedReason }
-        return draft.answers(in: questions) == nil ? "Answer every question to submit." : nil
+    /// Whether this step's forward control is Submit.
+    private var submitsHere: Bool { count == 1 || isReview }
+
+    private var isComplete: Bool { draft.answers(in: questions) != nil }
+
+    /// What Submit is waiting for while the answers are incomplete. Not a
+    /// warning: an untouched form is not a fault.
+    private var incompleteNote: String {
+        count == 1 ? "Choose an answer to submit." : "Answer every question to submit."
     }
 
     // MARK: Body
@@ -95,7 +108,19 @@ struct QuestionCardView: View {
                     }
                     switch status {
                     case .answerable:
-                        if isReview { reviewList } else { questionStep(step) }
+                        Group {
+                            if isReview { reviewList } else { questionStep(step) }
+                        }
+                        .disabled(!Self.acceptsEdits(status: status, inFlight: inFlight))
+                        // After the question, beside the bar it is about: above
+                        // it, at AX5 this took the screen and the question
+                        // started below the fold.
+                        if risk == .high {
+                            Text("Submitting takes Face ID. \(risk.rationale)")
+                                .ccType(CC.type.footnote)
+                                .foregroundStyle(CC.text.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         // At accessibility sizes the subordinate controls leave the
                         // pinned bar, as on the decision card: stacked there they
                         // own the screen and leave the question unreadable.
@@ -124,16 +149,18 @@ struct QuestionCardView: View {
 
     // MARK: Header
 
+    /// Which run is asking — the whole run label, so two runs of one project
+    /// stay apart — and, on a HIGH card, its tag. Why the answer takes Face ID
+    /// is said after the question, not here. No title: the sheet's own says
+    /// "Question", and the question itself is the heading that matters.
     private var header: some View {
-        VStack(alignment: .leading, spacing: CC.space.xs) {
-            Text(count == 1 ? "Claude has a question" : "Claude has \(count) questions")
-                .ccType(CC.type.title)
-                .foregroundStyle(CC.text.primary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(verbatim: model.runLabel(for: approval.sessionKey).project)
-                .ccType(CC.type.monoSmall)
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
+            Text(verbatim: model.runLabel(for: approval.sessionKey).inline)
+                .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if risk == .high { CCRiskTag(risk) }
         }
     }
 
@@ -160,7 +187,9 @@ struct QuestionCardView: View {
                                 .padding(.bottom, CC.space.sm)
                                 .accessibilityIdentifier("question-\(index)-preview")
                         }
-                        CCHairline()
+                        if option < question.options.count - 1 || question.takesOther {
+                            CCHairline()
+                        }
                     }
                     if question.takesOther {
                         otherRow(index)
@@ -169,14 +198,15 @@ struct QuestionCardView: View {
             }
             if entry.otherChosen {
                 CCField(
-                    label: "Other", text: otherBinding(index), placeholder: "Type your answer")
+                    label: "Other", text: otherBinding(index), placeholder: "Type your answer",
+                    labelOnContentColumn: false)
                 .accessibilityIdentifier("question-\(index)-other-text")
             }
             if question.takesNotes {
                 CCField(
                     label: "Notes", text: notesBinding(index),
                     placeholder: "Optional notes for Claude on this choice", axis: .vertical,
-                    lineLimit: 1...4)
+                    lineLimit: 1...4, labelOnContentColumn: false)
                 .accessibilityIdentifier("question-\(index)-notes")
             }
         }
@@ -185,14 +215,18 @@ struct QuestionCardView: View {
     private func questionHeading(_ index: Int) -> some View {
         let question = questions.questions[index]
         return VStack(alignment: .leading, spacing: CC.rhythm.text) {
-            CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
-                if count > 1 {
-                    Text("Question \(index + 1) of \(count)")
-                        .ccType(CC.type.fieldLabel)
-                        .foregroundStyle(CC.text.secondary)
+            // Only when it has something to show: empty, it was still a row,
+            // and the stack's spacing above the question with it.
+            if count > 1 || question.header != nil {
+                CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
+                    if count > 1 {
+                        Text("Question \(index + 1) of \(count)")
+                            .ccType(CC.type.fieldLabel)
+                            .foregroundStyle(CC.text.secondary)
+                    }
+                    if let header = question.header { CCBadge(header) }
+                    CCAdaptiveSpacer(minLength: 0)
                 }
-                if let header = question.header { CCBadge(header) }
-                Spacer(minLength: 0)
             }
             Text(question.text)
                 .ccType(CC.type.headline)
@@ -285,10 +319,10 @@ struct QuestionCardView: View {
         }
     }
 
-    /// What was sent from the phone, once the Mac has confirmed it.
+    /// What was sent from the phone, once the Mac has confirmed it. Under the
+    /// banner that already says so, with no heading saying it a third time.
     private func answeredList(_ answers: [QuestionAnswer]) -> some View {
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
-            CCSectionHeader("Answers sent")
             CCCard(padding: 0) {
                 VStack(spacing: 0) {
                     ForEach(questions.questions.indices, id: \.self) { index in
@@ -307,7 +341,7 @@ struct QuestionCardView: View {
         return VStack(alignment: .leading, spacing: CC.space.xxs) {
             CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
                 if let header = question.header { CCBadge(header) }
-                Spacer(minLength: 0)
+                CCAdaptiveSpacer(minLength: 0)
                 if canChange {
                     CCButton("Change", variant: .ghost, size: .sm) { step = index }
                         .accessibilityIdentifier("question-\(index)-change")
@@ -355,9 +389,10 @@ struct QuestionCardView: View {
             CCCard(padding: 0) {
                 VStack(spacing: 0) {
                     ForEach(question.options.indices, id: \.self) { option in
+                        // No radio or checkbox: nothing here can be chosen, and
+                        // an empty control reads as a form still to fill in.
                         ChoiceRowLabel(
-                            symbol: Self.symbol(chosen: false, multiSelect: question.multiSelect),
-                            isChosen: false, label: question.options[option].label,
+                            symbol: nil, isChosen: false, label: question.options[option].label,
                             detail: question.options[option].description, order: nil)
                         .background(CC.color.surface)
                         if let preview = question.options[option].preview {
@@ -389,12 +424,14 @@ struct QuestionCardView: View {
                 CCActionBar {
                     navigation
                     if !typeSize.isAccessibilitySize { subordinateControls }
+                    barNote
                 }
             } else if let comeBackToThis {
                 CCActionBar { comeBackButton(comeBackToThis) }
             }
         }
         .ccScrollCap()
+        .ccActionBarSafeAreaFill(status.isAnswerable || comeBackToThis != nil)
     }
 
     /// What an answerable card says above its controls: why the last answer
@@ -410,11 +447,43 @@ struct QuestionCardView: View {
         return nil
     }
 
+    /// Why a control on the bar cannot be pressed, said **once**, under all of
+    /// them: a reason that stops Submit and Decline alike was printed under
+    /// each. Submit's own prerequisite keeps its slot when it is met — drawn
+    /// clear rather than removed — so choosing the last answer does not move the
+    /// bar (it jumped 22.7pt when the line went).
+    @ViewBuilder
+    private var barNote: some View {
+        if let blockedReason {
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
+                CCIcon(
+                    "exclamationmark.circle.fill", size: 11, weight: .semibold,
+                    relativeTo: .caption
+                )
+                .foregroundStyle(CC.color.warning)
+                CCProse(blockedReason, style: CC.type.footnote, color: CC.color.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(CCInlineCode.plain(blockedReason))
+        } else if submitsHere {
+            Text(incompleteNote)
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(isComplete ? 0 : 1)
+                .accessibilityHidden(isComplete)
+        }
+    }
+
     @ViewBuilder
     private var navigation: some View {
         if step > 0 {
             CCActionPair {
                 CCButton("Back", variant: .secondary, size: .lg, fullWidth: true) { step -= 1 }
+                    .disabled(inFlight)
                     .accessibilityIdentifier("question-back")
             } allow: {
                 forward
@@ -429,18 +498,22 @@ struct QuestionCardView: View {
         if count == 1 || isReview {
             CCButton(
                 "Submit", variant: .primary, size: .lg, fullWidth: true,
-                isLoading: spinningControl == "submit",
-                disabledReason: CCDisabledReason(submitBlockedReason)
+                isLoading: spinningControl == "submit"
             ) {
                 if let answers = draft.answers(in: questions) {
                     submit(.answers(answers), key: "submit")
                 }
             }
+            // The reason is on the bar, once (`barNote`); the control carries
+            // it as its hint.
+            .disabled(blockedReason != nil || !isComplete)
+            .accessibilityHint(blockedReason ?? (isComplete ? "" : incompleteNote))
             .accessibilityIdentifier("question-submit")
         } else {
             CCButton(step == count - 1 ? "Review" : "Next", variant: .primary, size: .lg, fullWidth: true) {
                 step += 1
             }
+            .disabled(inFlight)
             .accessibilityIdentifier("question-next")
         }
     }
@@ -451,13 +524,13 @@ struct QuestionCardView: View {
         VStack(spacing: CC.rhythm.controls) {
             CCButton(
                 "Decline", icon: "xmark", variant: .secondary, size: .md, fullWidth: true,
-                isLoading: spinningControl == "decline",
-                disabledReason: CCDisabledReason(blockedReason)
+                isLoading: spinningControl == "decline"
             ) {
                 submit(.decline, key: "decline")
             }
+            .disabled(blockedReason != nil)
             .accessibilityIdentifier("question-decline")
-            .accessibilityHint("Declines the question, as Escape does at the Mac.")
+            .accessibilityHint(blockedReason ?? "Declines the question, as Escape does at the Mac.")
             if let comeBackToThis { comeBackButton(comeBackToThis) }
         }
     }
@@ -504,8 +577,9 @@ struct QuestionCardView: View {
 
 /// One choice: its mark, its label and description, and — on a question that
 /// takes several — the order it was picked in, which is the order it is sent.
+/// No mark on a choice that cannot be made.
 private struct ChoiceRowLabel: View {
-    let symbol: String
+    let symbol: String?
     let isChosen: Bool
     let label: String
     let detail: String?
@@ -515,8 +589,10 @@ private struct ChoiceRowLabel: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
-            CCIcon(symbol, size: 18, weight: .regular, relativeTo: .callout)
-                .foregroundStyle(isChosen && isEnabled ? CC.text.primary : CC.text.tertiary)
+            if let symbol {
+                CCIcon(symbol, size: 18, weight: .regular, relativeTo: .callout)
+                    .foregroundStyle(isChosen && isEnabled ? CC.text.primary : CC.text.tertiary)
+            }
             VStack(alignment: .leading, spacing: CC.space.xxs) {
                 Text(label)
                     .ccType(CC.type.callout)

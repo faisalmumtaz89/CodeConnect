@@ -21,6 +21,20 @@ enum ComposerTemplates {
         "Continue", "Fix it", "Run the tests", "Commit & push", "Explain this",
         "Use a simpler approach",
     ]
+
+    /// The composer's reading-size placeholder. **Named, where the app knows the
+    /// name**: "Say something to this agent" is the honest phrasing only when
+    /// the app cannot say which agent. The two paths behind the field are
+    /// genuinely different messages (`send_text` into a TTY, `compose` over a
+    /// control link), and a reader who knows which one they are talking to is a
+    /// reader who can read the outcome sentence that comes back.
+    static func placeholder(for agent: AgentKind?) -> String {
+        switch agent {
+        case .claude: return "Ask Claude to do anything"
+        case .codex: return "Ask Codex to do anything"
+        case .unsupported, nil: return "Say something to this agent"
+        }
+    }
 }
 
 /// The tail-following verdict, deliberately outside the screen's own state.
@@ -677,8 +691,9 @@ struct SessionDetailView: View {
                     pulses: (state?.pendingApprovals.isEmpty == false))
                 // The same gutter the timeline's glyphs sit in, so the block's
                 // three lines start on the screen's one content column — 52,
-                // the number the fleet's rows use.
-                .frame(width: TimelineSpine.gutter, alignment: .trailing)
+                // the number the fleet's rows use — and the dot on its one
+                // mark axis.
+                .ccGutterMark()
                 .padding(.top, CC.space.xs)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -691,17 +706,19 @@ struct SessionDetailView: View {
                         Spacer(minLength: CC.space.xs)
                         SessionFreshness(lastEventAt: state?.lastEventAt)
                     }
+                    // A phrase about this run — `started 1:51 PM` — so small
+                    // prose, not `micro`, which is the uppercase section label.
                     if let qualifier = label.qualifier {
                         Text(verbatim: qualifier)
-                            .ccType(CC.type.micro)
+                            .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.tertiary)
                             .lineLimit(1)
                     }
-                    // `textDisabled` is permitted here — one of its few allowed
-                    // positions — because the project name above it carries the
-                    // same fact at full contrast, so nothing is only readable in
-                    // the dimmed run. Head truncation so the tail survives:
-                    // `…/GitHub/CodeConnect` is the part that identifies. The
+                    // `textTertiary`: it is information with an action on it,
+                    // not chrome. The path is the Mac's, as it is: the phone
+                    // does not know whose home folder it is under, so it does
+                    // not shorten one. Head truncation keeps the tail, the
+                    // part that identifies the run. The
                     // agent tag leads it, as it leads the fleet row's activity
                     // line, and keeps its width while the path gives way. At
                     // accessibility sizes the two stack, as the fleet row's
@@ -713,7 +730,7 @@ struct SessionDetailView: View {
                             CCTag(agent: summary.agent)
                             Text(summary.cwd)
                                 .ccType(CC.type.monoSmall)
-                                .foregroundStyle(CC.text.disabled)
+                                .foregroundStyle(CC.text.tertiary)
                                 .lineLimit(1)
                                 .truncationMode(.head)
                                 .onLongPressGesture { CCPasteboard.copy(summary.cwd) }
@@ -880,10 +897,7 @@ struct SessionDetailView: View {
         .accessibilityIdentifier("open-diff")
     }
 
-    private var changedFileCount: Int? {
-        guard case .loaded(_, let parsed, _) = model.diffs[key] else { return nil }
-        return parsed.files.isEmpty ? nil : parsed.files.count
-    }
+    private var changedFileCount: Int? { model.diffs[key]?.changedFileCount }
 
     /// A deep link aimed at *this* session opens what it asked for.
     private func consumeDeepLink() {
@@ -1220,6 +1234,7 @@ private struct SessionTimeline: View {
                         VStack(alignment: .leading, spacing: 0) {
                             TimelineRow(
                                 item: item, profile: model.daemonProfile,
+                                agent: model.summary(for: key)?.agent,
                                 // Fired *before* the collapse — see
                                 // `AgentMessageRow` — so the target is the row in
                                 // its expanded geometry, which is always reachable.
@@ -1323,9 +1338,9 @@ private struct SessionTimeline: View {
             // The follow trigger is the tail *item*, not the count: the
             // builder merges some events into the row they belong to, so the
             // last row can grow with no append — count would sit still while
-            // the anchor is pushed out of view, and following would silently
-            // end. Any change to the last item — new row or grown row — is
-            // exactly "the tail moved".
+            // the anchor is pushed out of view, until `TailObserver`'s re-pin
+            // a debounce later. Any change to the last item — new row or
+            // grown row — is exactly "the tail moved".
             .onChange(of: state.timeline.last) { _, _ in
                 // `isAway`, not `following`: the settled flag lags a real
                 // departure by the debounce, and an event landing in that
@@ -1455,14 +1470,36 @@ private struct SessionFreshness: View {
         lastEventAt.map { AgeClock(since: $0, scale: .age) }
     }
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    /// Said with what it measures. Bare, `53s` sat a row below the link pill's
+    /// own bare `0s` and above a card's `waiting 4s`: three numbers of seconds
+    /// on one screen, two of them unexplained. At accessibility sizes it is
+    /// `1m ago`: the whole phrase beside an AX5 title read `last… 1… ago`, and
+    /// moving it to a line of its own pushed the screen down a line.
     var body: some View {
-        Text(lastEventAt.map { Format.age(since: $0, now: now) } ?? "no events")
-            .ccType(CC.type.monoSmall)
-            .foregroundStyle(CC.text.tertiary)
-            .task(id: clock) {
-                guard let clock else { return }
-                await AgeTick.follow(clock) { lastTick = $0 }
+        Group {
+            if let lastEventAt {
+                HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs) {
+                    if !dynamicTypeSize.isAccessibilitySize {
+                        Text("last event").ccType(CC.type.footnote)
+                    }
+                    Text(Format.age(since: lastEventAt, now: now)).ccType(CC.type.monoSmall)
+                    Text("ago").ccType(CC.type.footnote)
+                }
+                .lineLimit(1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    "Last event \(Format.spokenAge(now.timeIntervalSince(lastEventAt)))")
+            } else {
+                Text("no events").ccType(CC.type.footnote)
             }
+        }
+        .foregroundStyle(CC.text.tertiary)
+        .task(id: clock) {
+            guard let clock else { return }
+            await AgeTick.follow(clock) { lastTick = $0 }
+        }
     }
 }
 
@@ -1901,14 +1938,8 @@ private struct SessionComposeBar: View {
     /// enough that the sentence would own the screen. The field is already
     /// labelled `MESSAGE`, so the short form loses nothing.
     private var placeholder: String {
-        // **Named, where the app knows the name.** "Say something to this agent"
-        // is the honest phrasing when the app cannot say which agent — and on a
-        // Codex session it can, so it does. The two paths behind this field are
-        // genuinely different messages (`send_text` into a TTY, `compose` over a
-        // control link), and a reader who knows which one they are talking to is
-        // a reader who can read the outcome sentence that comes back.
-        let named = summary?.isCodex == true ? "Ask Codex to do anything" : "Say something to this agent"
-        return typeSize.isAccessibilitySize ? "Say something" : named
+        typeSize.isAccessibilitySize
+            ? "Say something" : ComposerTemplates.placeholder(for: summary?.agent)
     }
 
     /// What a developer most often tells an agent from a phone, most-used
@@ -2041,7 +2072,7 @@ private struct ComposeNote: View {
             if let action {
                 CCButton(action.title, variant: .ghost, size: .sm, action: action.perform)
             }
-            Spacer(minLength: 0)
+            CCAdaptiveSpacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .transition(.opacity)
