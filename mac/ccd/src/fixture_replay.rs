@@ -316,6 +316,68 @@ fn real_transcript_maps_to_known_kinds_and_dedups() {
         .is_none());
 }
 
+/// Every way a 2.1.290 turn ends, recorded: each turn gets one end, a turn a
+/// tool ended (no `stop_hook_summary`) at its `turn_duration`, an API error
+/// none, read in one scan as a resumed transcript is or one line per scan, so
+/// no answer depends on what an earlier scan saw.
+#[test]
+fn every_recorded_turn_ends_once_however_the_file_is_read() {
+    const ENDS: [&str; 12] = [
+        "6963bfa6-64dc-40e4-8e35-28f553e293f1", // plain reply: summary
+        "c94ee365-8b09-46b7-9a4e-50aa631de65c", // after a tool: summary
+        "2c2657a0-896e-4824-8de3-ca5471002aa4", // question answered from the phone: summary
+        "b4f9a1eb-f02c-4dbe-9fb3-562cb2caeef5", // MCP `claude/endTurn`: turn_duration
+        "1adf2598-1c7b-44cc-9e8c-d2a7e0e74a7e", // Stop hook blocks: summary
+        "5fb42419-8093-484f-b41b-b692682c241d", // then ends: summary
+        "26b2bce5-9ea0-474c-a76d-bc96cf21468c", // Stop hook blocks: summary
+        "c57a2687-0042-4283-a6c2-7b7e1a6864ac", // then an MCP end: turn_duration
+        // The API error (c07e9856…) and its turn_duration (b96e7edb…): no end.
+        // `/rename` typed during the turn: its row is held until the turn ends,
+        // between the summary and the turn_duration (3ad3e3a1…), which is no end.
+        "481929df-54cc-49f6-ab25-6d76d78ce8fa",
+        "0cb45a75-ed80-46f8-9b22-7a5b12e6d65c", // a background agent launched: summary
+        "4a66ee3c-601f-4081-8d9b-114778762092", // its result: summary
+        "92b952f2-e7f5-4391-b68f-d13753143860", // plain reply: summary
+    ];
+    let recorded = std::fs::read_to_string(fixture("transcript/turn-ends-2.1.290.jsonl")).unwrap();
+    for per_line in [false, true] {
+        let store = temp_store();
+        let run = run();
+        seed_session(&store, &run);
+        let path = std::env::temp_dir().join(format!(
+            "ccd-turn-ends-{}-{}-{per_line}.jsonl",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let lines: Vec<&str> = if per_line {
+            recorded.lines().collect()
+        } else {
+            vec![recorded.as_str().trim_end()]
+        };
+        let mut written = String::new();
+        for chunk in lines {
+            written.push_str(chunk);
+            written.push('\n');
+            std::fs::write(&path, &written).unwrap();
+            let scan = crate::tailer::scan_file(&store, &run, path.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            store
+                .append_batch_with_cursor(&run.uid, &scan.events, &scan.cursor)
+                .unwrap();
+        }
+        std::fs::remove_file(&path).unwrap();
+        let ends: Vec<String> = store
+            .events_after(&run.uid, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == EventKind::TurnComplete)
+            .filter_map(|event| event.source_event_id)
+            .collect();
+        assert_eq!(ends, ENDS, "one line per scan: {per_line}");
+    }
+}
+
 #[test]
 fn transcript_and_hooks_coexist_without_collapsing_each_other() {
     // The same tool call is reported by both planes. They must both survive:

@@ -9,7 +9,7 @@ An agent's terminal output tells you what it *has done*. It does not reliably te
 That single fact determines the design. Anything that detects approvals by reading terminal text is inferring a signal from its absence, and it breaks the first time the rendering changes. So the system is split in two:
 
 - **The control plane** — where an agent asks a question and *blocks*. Claude Code's hooks; for Codex, which has none, its own JSON-RPC app server, read through a broker. It is the only place an approval is created or answered.
-- **The observation plane** — where an agent narrates what already happened. Session transcripts and pane snapshots. Useful for showing a timeline and a diff. Never used to decide anything.
+- **The observation plane** — where an agent narrates what already happened. Session transcripts and pane snapshots. Useful for showing a timeline and a diff. Never used to decide anything: the daemon acts on hooks alone. For Claude, the end of a turn shown on the phone is placed from the transcript, so it lands after the turn's last reply, and the phone's running or done status follows it; that is display, not a decision.
 
 Terminal bytes are read for exactly one purpose: confirming that the prompt we are about to answer is the prompt currently on screen.
 

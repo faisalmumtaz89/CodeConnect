@@ -88,8 +88,10 @@ pub enum EventKind {
     /// [`EventKind::TurnComplete`]. Conflating them is what made the phone
     /// render "session ended" after every single reply.
     SessionEnd,
-    /// The agent finished a turn and handed the keyboard back (Stop hook). The
-    /// session is still alive and can be typed into.
+    /// The agent finished a turn and handed the keyboard back. For Claude it is
+    /// filed from the transcript, after the turn's last reply, or from the Stop
+    /// hook when the run has no transcript. The session is still alive and can
+    /// be typed into.
     TurnComplete,
     /// A tool is about to run (PreToolUse). Observability, never the gate.
     ToolCall,

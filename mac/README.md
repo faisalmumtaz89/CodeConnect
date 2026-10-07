@@ -937,8 +937,43 @@ means an incompatible peer cannot use the handshake to probe credentials.
   the phone, so without them, asking for a diff of a working tree somebody else
   prepared would run their program as the daemon's user. Observing a working tree
   must not be a way to execute anything.
-* **`EventKind::TurnComplete`** is emitted on the Stop hook. `SessionEnd` now
-  means only what it says: the supervisor exited or the tmux session is gone.
+* **`EventKind::TurnComplete`** marks the end of a turn. For Claude it is filed
+  from the transcript alone, after the turn's last reply. The Stop hook arrives
+  before that reply is on disk (up to 100 ms), so filing the end from the hook put
+  it above the reply. When the Stop hooks end a turn, Claude writes a
+  `stop_hook_summary` line after the reply, and that line is the end. Every user
+  turn that finishes also gets a `turn_duration` line. It is the end when a tool
+  ended the turn (an MCP result's `claude/endTurn`, a `/loop` wakeup), which runs
+  the Stop hook but writes no summary. Walking Claude's `parentUuid` chain back
+  from it tells the cases apart: a summary before the turn's last assistant entry
+  means the turn already has its end, and a last assistant entry that is an API
+  error means the turn ran no Stop hook and gets none. Only a main-conversation
+  assistant entry proves an end; a chain that cannot be followed (an unknown or
+  missing parent, a loop, more than 64 entries) proves none. So a resumed transcript's
+  history gets its ends too. A run whose transcript has never existed (Claude's
+  session persistence turned off) has its ends filed from the Stop hook instead;
+  a transcript the tailer has read and that is missing for a moment does not
+  count. The Stop hook still closes a question held when the main
+  conversation's turn ends. When `/clear` moves a run to a new transcript, the
+  old one is still read for one second: `/clear` typed while Claude answers runs
+  at the end of the turn, and Claude writes that turn's reply and end to the old
+  file from its 100 ms write buffer after the move (measured 20 to 125 ms). The
+  old file is then read to its end, as long as each read is filed, and the new
+  one is followed, so the new transcript's lines reach the phone about a second
+  late. Phones judge whether a Claude tool call is still running by where the
+  transcript puts it, so a prompt queued during a turn, whose tool starts before
+  the last turn's end is read, does not show its running call as left without a
+  result. Known gaps:
+  Escape while the Stop hooks run leaves the turn without an end; a resumed run
+  whose transcript exists but is no longer written gets none; and when Claude
+  holds back the `turn_duration` while in-process teammates run, two turns that
+  tools ended in that time share one end. Within the second after a `/clear`:
+  another transcript move skips the transcript in between; a move back to the
+  old transcript leaves the run following the abandoned one until it moves
+  again; restarting ccd, or the session ending with more than 4 MiB of the old
+  transcript unread, loses that turn's last reply and end; and anything Claude
+  writes to the old transcript later than that second is not read. `SessionEnd` now means only what it
+  says: the supervisor exited or the tmux session is gone.
 * **`risk_class`** rides on every `approval_request` card as
   `risk{class, matched_pattern}`. `high` for destructive shell patterns, `low`
   for pure read tools, `medium` for everything else — including anything

@@ -176,6 +176,11 @@ enum TimelineBuilder {
         var holdsByRequest: [String: (seq: UInt64, hold: QuestionHold)] = [:]
         var panesByPrompt: [String: String] = [:]
         var hookToolCallIDs: Set<String> = []
+        // Where Claude's transcript puts each call. The hook files a call when
+        // Claude runs it, which for a prompt queued during a turn can be before
+        // the daemon has read the last turn's end; the transcript has the call
+        // after that end, in the turn it belongs to.
+        var transcriptToolUseSeqs: [String: UInt64] = [:]
         var approvalPromptIDs: Set<String> = []
         /// Claude's questions, by tool-use id. A question is one thing to the
         /// reader: its card says everything its tool call does — the question,
@@ -191,6 +196,8 @@ enum TimelineBuilder {
                 lastUserMessageSeq = max(lastUserMessageSeq, event.seq)
             case .toolCall:
                 if let id = event.toolUseID { hookToolCallIDs.insert(id) }
+            case .agentMessage:
+                for use in event.agentToolUses { transcriptToolUseSeqs[use.id] = event.seq }
             case .toolResult:
                 absorbResult(event, into: &resultsByToolUse)
             case .approvalResolved:
@@ -359,7 +366,8 @@ enum TimelineBuilder {
                                 argument: ToolSummary.principalArgument(
                                     tool: name, input: event.toolInput),
                                 status: status(
-                                    for: id, outcome: outcome, eventSeq: event.seq,
+                                    for: id, outcome: outcome,
+                                    eventSeq: id.flatMap { transcriptToolUseSeqs[$0] } ?? event.seq,
                                     approvals: outcomesByRequest, turnEnd: lastTurnEndSeq),
                                 durationMS: outcome?.durationMS,
                                 input: event.toolInput,

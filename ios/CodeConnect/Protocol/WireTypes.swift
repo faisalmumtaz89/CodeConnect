@@ -408,7 +408,7 @@ extension AnswerPath: Codable {
 /// to survive a round-trip rather than being dropped.
 enum EventKind: Sendable, Hashable {
     case sessionStart, sessionEnd
-    /// A feature-level-1 daemon's Stop-hook fact: the *turn* finished, the
+    /// A feature-level-1 daemon's end of a turn: the *turn* finished, the
     /// session lives on. Older daemons sent the same fact as `session_end`
     /// carrying `hook_event_name: "Stop"`, which is why `Event.isTurnComplete`
     /// still recognises that shape.

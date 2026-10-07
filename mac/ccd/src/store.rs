@@ -1612,6 +1612,28 @@ impl Store {
         Ok(seq.map(|seq| seq as u64))
     }
 
+    /// A transcript entry this run filed under Claude's `uuid` for it.
+    pub fn transcript_entry(
+        &self,
+        session_uid: &str,
+        uuid: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let conn = self.read();
+        let payload: Option<String> = conn
+            .query_row(
+                "SELECT payload FROM events
+                  WHERE session_uid = ?1 AND source = ?2 AND source_event_id = ?3",
+                params![
+                    session_uid,
+                    protocol::event::Source::Transcript.as_str(),
+                    uuid
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload.and_then(|payload| serde_json::from_str(&payload).ok()))
+    }
+
     /// How many events this run actually has.
     ///
     /// Exists to be compared against [`Store::max_seq`]: the log's central

@@ -175,6 +175,43 @@ final class AgentSeamRenderingTests: XCTestCase {
             .denied,
             "a confirmed denial still reads as denied")
     }
+
+    private func toolStatus(_ lines: [String]) throws -> ToolStatus? {
+        let events = try lines.enumerated().map { index, line in
+            try JSONDecoder().decode(
+                Event.self,
+                from: Data(
+                    """
+                    {"seq":\(index + 1),"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_id":"cc-1",
+                     "ts":"2026-10-07T09:00:00.000Z",\(line)}
+                    """.utf8))
+        }
+        return TimelineBuilder.build(events).compactMap { item -> ToolStatus? in
+            if case .tool(let tool) = item.content, tool.toolUseID == "toolu_2" { return tool.status }
+            return nil
+        }.first
+    }
+
+    private static let call =
+        #""kind":"tool_call","source":"hook","payload":{"tool_use_id":"toolu_2","tool_name":"Bash"}"#
+    private static let use =
+        #""kind":"agent_message","source":"transcript","payload":{"uuid":"a2","message":{"content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{}}]}}"#
+    private static let end =
+        #""kind":"turn_complete","source":"transcript","payload":{"uuid":"s1","type":"system","subtype":"stop_hook_summary"}"#
+
+    /// A prompt queued during a turn can start its tool before ccd has read the
+    /// last turn's end from the transcript, so the hook's call is filed above
+    /// that end. Where Claude's transcript puts the call, after the end, is what
+    /// says which turn it belongs to: it is running, not left without a result.
+    func testACallTheTranscriptPlacesAfterTheLastTurnEndIsRunning() throws {
+        XCTAssertEqual(try toolStatus([Self.call, Self.end, Self.use]), .running)
+    }
+
+    /// A call whose turn ended without a result still reads as unresolved.
+    func testACallItsTurnEndedWithoutAResultIsUnresolved() throws {
+        XCTAssertEqual(try toolStatus([Self.call, Self.use, Self.end]), .unresolved)
+        XCTAssertEqual(try toolStatus([Self.call, Self.end]), .unresolved)
+    }
 }
 
 

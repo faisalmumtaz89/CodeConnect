@@ -109,6 +109,7 @@ db_ops! {
     fn append_event(pending: PendingEvent) -> Option<Event>;
     fn max_seq(session_uid: String) -> u64;
     fn hook_event_seq(session_uid: String, source_event_id: String) -> Option<u64>;
+    fn load_cursor(session_uid: String) -> Option<crate::store::TailCursor>;
     fn count_events_of_kind(session_uid: String, kind: EventKind) -> u64;
     fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;
