@@ -38,7 +38,7 @@ struct DaemonProfile: Sendable, Hashable {
     /// and `ResolvedBy::Local` arrived. A newer major implies all of them.
     var speaksMinor1OrLater: Bool { protocolVersion > Wire.protocolVersion || protocolMinor >= 1 }
 
-    /// The daemon files the Stop hook as `EventKind::TurnComplete`, so the
+    /// The daemon files the end of a turn as `EventKind::TurnComplete`, so the
     /// `session_end` + `hook_event_name: "Stop"` workaround is no longer needed.
     ///
     /// There is no separate capability flag for this — `protocol_minor` is the

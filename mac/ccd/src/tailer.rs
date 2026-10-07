@@ -70,11 +70,21 @@ const MAX_PARSE_ERRORS_PER_SCAN: usize = 32;
 /// Transcripts being tailed, keyed by `session_uid`.
 type Tails = HashMap<String, Tail>;
 
+/// How long a run's old transcript is still read after `/clear` names a new one.
+///
+/// `/clear` typed while Claude answers is queued and runs at the end of the
+/// turn, and Claude writes that turn's reply and end to the old file from a
+/// write buffer it flushes every 100 ms: measured 20 to 125 ms after the
+/// switch. Ten flushes.
+const OLD_TRANSCRIPT_LINGER: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// One session's transcript. The display name rides along so every ingested
 /// line carries it without a lookup per line.
 struct Tail {
     session: SessionKey,
     path: String,
+    /// The transcript `/clear` moved the run to, and when to start reading it.
+    next: Option<(String, std::time::Instant)>,
 }
 
 /// What the daemon asks the tailer to do.
@@ -171,11 +181,17 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
                                 continue;
                             }
                         };
-                        crate::log_info!("tailing {path} for {} ({session_uid})", session.name);
                         if let Some(watcher) = watcher.as_mut() {
                             watcher.watch_parent_of(&path);
                         }
-                        tails.insert(session_uid, Tail { session, path });
+                        // A run moving to a new transcript (`/clear`) keeps
+                        // its old one until Claude has finished writing to it.
+                        if let Some(tail) = tails.get_mut(&session_uid) {
+                            tail.next = Some((path, std::time::Instant::now() + OLD_TRANSCRIPT_LINGER));
+                            continue;
+                        }
+                        crate::log_info!("tailing {path} for {} ({session_uid})", session.name);
+                        tails.insert(session_uid, Tail { session, path, next: None });
                     }
                     Some(TailCommand::Stop { session_uid }) => {
                         let Some(tail) = tails.remove(&session_uid) else {
@@ -189,10 +205,12 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
                         // that ending costs nothing. A transcript whose file is
                         // already gone scans to nothing, silently, so this is
                         // free for a run that ended days ago.
-                        if let Err(err) = poll_once(&daemon, &tail.session, &tail.path).await {
-                            crate::log_debug!(
-                                "tail {}: final read failed: {err:#}", tail.session.name
-                            );
+                        for path in std::iter::once(&tail.path).chain(tail.next.as_ref().map(|(next, _)| next)) {
+                            if let Err(err) = poll_once(&daemon, &tail.session, path).await {
+                                crate::log_debug!(
+                                    "tail {}: final read failed: {err:#}", tail.session.name
+                                );
+                            }
                         }
                         if let Some(watcher) = watcher.as_mut() {
                             watcher.release_parent_of(&tail.path);
@@ -210,10 +228,10 @@ pub async fn run(daemon: Arc<Daemon>, mut rx: mpsc::UnboundedReceiver<TailComman
                 // Drain the burst: several writes to one line must cost one scan.
                 tokio::time::sleep(FSEVENT_DEBOUNCE).await;
                 while nudge_rx.try_recv().is_ok() {}
-                poll_all(&daemon, &tails).await;
+                poll_all(&daemon, &mut tails).await;
             }
             _ = ticker.tick() => {
-                poll_all(&daemon, &tails).await;
+                poll_all(&daemon, &mut tails).await;
             }
         }
     }
@@ -250,6 +268,7 @@ fn tails_to_resume(rows: Vec<crate::store::SessionRow>) -> (Tails, Vec<Tail>) {
         let tail = Tail {
             session: row.key(),
             path,
+            next: None,
         };
         if row.lifecycle == protocol::event::Lifecycle::Exited {
             final_reads.push(tail);
@@ -260,11 +279,46 @@ fn tails_to_resume(rows: Vec<crate::store::SessionRow>) -> (Tails, Vec<Tail>) {
     (tails, final_reads)
 }
 
-async fn poll_all(daemon: &Arc<Daemon>, tails: &Tails) {
-    for tail in tails.values() {
+async fn poll_all(daemon: &Arc<Daemon>, tails: &mut Tails) {
+    for tail in tails.values_mut() {
+        if let Some((next, _)) = tail
+            .next
+            .take_if(|(_, at)| *at <= std::time::Instant::now())
+        {
+            read_to_end(daemon, tail).await;
+            crate::log_info!(
+                "tailing {next} for {} ({})",
+                tail.session.name,
+                tail.session.uid
+            );
+            tail.path = next;
+        }
         if let Err(err) = poll_once(daemon, &tail.session, &tail.path).await {
             crate::log_warn!("tail {}: {err:#}", tail.session.name);
         }
+    }
+}
+
+/// Read a transcript the run is leaving to the end it has now, however many
+/// polls that takes, while each one moves the run's saved cursor on. A poll
+/// whose lines were not filed (the run was deleted) saves no cursor, and
+/// the read stops there rather than repeat it.
+async fn read_to_end(daemon: &Arc<Daemon>, tail: &Tail) {
+    let end = std::fs::metadata(&tail.path).map_or(0, |m| m.len());
+    let mut reached = 0;
+    loop {
+        if let Err(err) = poll_once(daemon, &tail.session, &tail.path).await {
+            crate::log_debug!("tail {}: final read failed: {err:#}", tail.session.name);
+            return;
+        }
+        let saved = match daemon.db.load_cursor(tail.session.uid.clone()).await {
+            Ok(Some(cursor)) => cursor.offset,
+            _ => return,
+        };
+        if saved >= end || saved <= reached {
+            return;
+        }
+        reached = saved;
     }
 }
 
@@ -460,7 +514,12 @@ pub(crate) fn scan_file(
             // build does not know about, and the second is an ordinary skip —
             // the transcript format grows, and an unknown entry is not damage.
             Ok(value) => {
-                if let Some(event) = transcript_event(session, &value, &last_line_sha) {
+                if let Some(mut event) = transcript_event(session, &value, &last_line_sha) {
+                    if is_main(&value, "turn_duration")
+                        && ends_its_turn(store, session, &events, &value)?
+                    {
+                        event.kind = EventKind::TurnComplete;
+                    }
                     events.push(event);
                 }
             }
@@ -616,6 +675,64 @@ fn parse_error_event(
     .with_source_event_id(format!("transcript_unreadable:{line_sha}"))
 }
 
+/// A main-conversation `system` entry of this subtype.
+fn is_main(entry: &serde_json::Value, subtype: &str) -> bool {
+    entry.get("type").and_then(|v| v.as_str()) == Some("system")
+        && entry.get("subtype").and_then(|v| v.as_str()) == Some(subtype)
+        && entry.get("isSidechain").and_then(|v| v.as_bool()) != Some(true)
+}
+
+/// Whether a main-conversation `turn_duration` is the end of its turn.
+///
+/// Claude writes one when a user turn finishes. A turn its Stop hooks ended
+/// already has its end, the `stop_hook_summary`. A turn a tool ended (an MCP
+/// result's `claude/endTurn`, a `/loop` wakeup) runs the Stop hook but writes
+/// no summary, so this is its end. A turn that failed on an API error ran no
+/// Stop hook and has none. Claude's own chain (`parentUuid`) is walked back
+/// from the `turn_duration` to the turn's last assistant entry: a summary on
+/// the way means the turn is already over, and only a main-conversation
+/// assistant entry proves a turn this ends. Ancestry that cannot be followed
+/// proves nothing. The entries are read from this
+/// batch or, filed by an earlier scan, from the log, so the answer does not
+/// depend on how the file was split into reads.
+fn ends_its_turn(
+    store: &crate::store::Store,
+    session: &SessionKey,
+    earlier: &[PendingEvent],
+    duration: &serde_json::Value,
+) -> Result<bool> {
+    let mut parent = duration.get("parentUuid").cloned();
+    // Bounded: a turn ends a few entries after its last assistant entry, and
+    // a broken chain must not hold up the scan.
+    for _ in 0..64 {
+        let Some(uuid) = parent.as_ref().and_then(|v| v.as_str()) else {
+            break;
+        };
+        let entry = match earlier
+            .iter()
+            .rev()
+            .find(|event| event.source_event_id.as_deref() == Some(uuid))
+        {
+            Some(event) => event.payload.clone(),
+            None => match store.transcript_entry(&session.uid, uuid)? {
+                Some(entry) => entry,
+                None => break,
+            },
+        };
+        if is_main(&entry, "stop_hook_summary") {
+            return Ok(false);
+        }
+        if entry.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+            return Ok(
+                entry.get("isSidechain").and_then(|v| v.as_bool()) != Some(true)
+                    && entry.get("isApiErrorMessage").and_then(|v| v.as_bool()) != Some(true),
+            );
+        }
+        parent = entry.get("parentUuid").cloned();
+    }
+    Ok(false)
+}
+
 /// Re-read the last line we claimed to consume and compare its hash.
 fn verify_last_line(file: &mut std::fs::File, cursor: &TailCursor) -> Result<bool> {
     if cursor.offset == 0 {
@@ -663,6 +780,11 @@ fn transcript_event(
             }
         }
         "assistant" => EventKind::AgentMessage,
+        // Written once the turn's Stop hooks have run, after the turn's last
+        // reply, so the end of the turn is filed after everything it said.
+        "system" if is_main(value, "stop_hook_summary") && !object.contains_key("hookLabel") => {
+            EventKind::TurnComplete
+        }
         "" => EventKind::Other("transcript_entry".to_string()),
         other => EventKind::Other(format!("transcript_{other}")),
     };
@@ -893,6 +1015,7 @@ mod tests {
         let ended = Tail {
             session: run.clone(),
             path: transcript.to_string_lossy().into_owned(),
+            next: None,
         };
         // Exactly what the startup path does with a `final_reads` entry.
         let scan = scan_file(&store, &ended.session, &ended.path)
@@ -990,6 +1113,30 @@ mod tests {
         let assistant = map_line(br#"{"type":"assistant","uuid":"a1"}"#, "x").unwrap();
         assert_eq!(assistant.kind, EventKind::AgentMessage);
 
+        // The main conversation's Stop hooks have run: its turn is over. A
+        // background agent's, an older Claude's summary of other hooks (it
+        // carries a `hookLabel`), or any other system entry, is not.
+        for (line, kind) in [
+            (
+                &br#"{"type":"system","subtype":"stop_hook_summary","isSidechain":false}"#[..],
+                EventKind::TurnComplete,
+            ),
+            (
+                br#"{"type":"system","subtype":"stop_hook_summary","isSidechain":true}"#,
+                EventKind::Other("transcript_system".into()),
+            ),
+            (
+                br#"{"type":"system","subtype":"turn_duration","isSidechain":false}"#,
+                EventKind::Other("transcript_system".into()),
+            ),
+            (
+                br#"{"type":"system","subtype":"stop_hook_summary","hookLabel":"PreToolUse"}"#,
+                EventKind::Other("transcript_system".into()),
+            ),
+        ] {
+            assert_eq!(map_line(line, "x").unwrap().kind, kind);
+        }
+
         let unknown = map_line(br#"{"type":"bridge-session"}"#, "abc").unwrap();
         assert_eq!(
             unknown.kind,
@@ -1015,6 +1162,109 @@ mod tests {
         assert!(map_line(b"42", "x").is_none());
         // And an undecodable line never reaches the mapper at all.
         assert!(serde_json::from_slice::<serde_json::Value>(b"not json at all").is_err());
+    }
+
+    /// A `turn_duration` ends a turn only when Claude's chain leads back to a
+    /// main-conversation assistant entry that is not an API error, with no
+    /// summary on the way. Ancestry that cannot be followed proves nothing.
+    #[test]
+    fn a_turn_duration_ends_a_turn_only_when_its_chain_proves_it() {
+        let duration = |parent: Option<&str>| {
+            let mut line =
+                serde_json::json!({"type": "system", "subtype": "turn_duration", "uuid": "d"});
+            if let Some(parent) = parent {
+                line["parentUuid"] = parent.into();
+            }
+            line.to_string()
+        };
+        let hops: Vec<String> = (0..70)
+            .map(|i| {
+                let parent = if i == 0 {
+                    "a".to_string()
+                } else {
+                    format!("h{}", i - 1)
+                };
+                format!(r#"{{"type":"attachment","uuid":"h{i}","parentUuid":"{parent}"}}"#)
+            })
+            .collect();
+        let main = r#"{"type":"assistant","uuid":"a","isSidechain":false}"#;
+        let cases: Vec<(&str, Vec<String>, bool)> = vec![
+            (
+                "main assistant",
+                vec![main.into(), duration(Some("a"))],
+                true,
+            ),
+            (
+                "API error",
+                vec![
+                    r#"{"type":"assistant","uuid":"a","isApiErrorMessage":true}"#.into(),
+                    duration(Some("a")),
+                ],
+                false,
+            ),
+            (
+                "summary",
+                vec![
+                    main.into(),
+                    r#"{"type":"system","subtype":"stop_hook_summary","uuid":"s","parentUuid":"a"}"#
+                        .into(),
+                    duration(Some("s")),
+                ],
+                false,
+            ),
+            (
+                "unknown parent",
+                vec![main.into(), duration(Some("nowhere"))],
+                false,
+            ),
+            ("no parent", vec![main.into(), duration(None)], false),
+            (
+                "cycle",
+                vec![
+                    r#"{"type":"attachment","uuid":"x","parentUuid":"y"}"#.into(),
+                    r#"{"type":"attachment","uuid":"y","parentUuid":"x"}"#.into(),
+                    duration(Some("x")),
+                ],
+                false,
+            ),
+            (
+                "more than 64 hops",
+                std::iter::once(main.to_string())
+                    .chain(hops.iter().cloned())
+                    .chain([duration(Some("h69"))])
+                    .collect(),
+                false,
+            ),
+            (
+                "sidechain assistant",
+                vec![
+                    r#"{"type":"assistant","uuid":"a","isSidechain":true}"#.into(),
+                    duration(Some("a")),
+                ],
+                false,
+            ),
+        ];
+        for (name, lines, ends) in cases {
+            let (db, jsonl) = temp_paths();
+            let run = session();
+            let store = store_for(&db, &run);
+            append(
+                &jsonl,
+                &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+            let scan = scan_file(&store, &run, jsonl.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            let kind = &scan
+                .events
+                .iter()
+                .find(|event| event.source_event_id.as_deref() == Some("d"))
+                .unwrap()
+                .kind;
+            assert_eq!(*kind == EventKind::TurnComplete, ends, "{name}: {kind:?}");
+            let _ = std::fs::remove_file(&db);
+            let _ = std::fs::remove_file(&jsonl);
+        }
     }
 
     #[test]

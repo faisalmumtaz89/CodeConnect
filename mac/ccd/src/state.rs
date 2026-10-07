@@ -577,12 +577,16 @@ struct Inner {
     /// share a single child process, not race two — the lock is taken across
     /// the re-check-then-probe, so the loser finds the winner's cache entry.
     catalog_probes: HashMap<String, Arc<Mutex<()>>>,
-    /// `(session_uid, prompt_id, tool_name, input_hash)` -> `tool_use_id`.
+    /// `(session_uid, prompt_id, tool_name, input_hash)` -> `tool_use_id`, and
+    /// the run's [`Inner::main_turn_ends`] when its `PreToolUse` arrived.
     ///
     /// PermissionRequest carries no `tool_use_id` on claude 2.1.220, but the
     /// PreToolUse that fires microseconds earlier does. Correlating gives every
     /// approval a stable, agent-side identity for idempotency.
-    tool_use_ids: HashMap<String, String>,
+    tool_use_ids: HashMap<String, (String, u64)>,
+    /// Per run: how many main-conversation Stop hooks have arrived. A question
+    /// whose `PreToolUse` saw fewer was asked in a turn that has since ended.
+    main_turn_ends: HashMap<String, u64>,
     last_seen_ms: HashMap<String, i64>,
     /// When pairing attempts failed, inside the current window.
     ///
@@ -2922,6 +2926,13 @@ impl Daemon {
         };
 
         if event_name == HookEventName::Stop && main_thread(&post.payload) {
+            *self
+                .inner
+                .lock()
+                .await
+                .main_turn_ends
+                .entry(session.uid.clone())
+                .or_default() += 1;
             self.main_thread_moved(&session).await;
         }
 
@@ -2940,7 +2951,12 @@ impl Daemon {
                     if inner.tool_use_ids.len() > 512 {
                         inner.tool_use_ids.clear();
                     }
-                    inner.tool_use_ids.insert(key, tool_use_id);
+                    let turn_ends = inner
+                        .main_turn_ends
+                        .get(&session.uid)
+                        .copied()
+                        .unwrap_or_default();
+                    inner.tool_use_ids.insert(key, (tool_use_id, turn_ends));
                 }
                 self.ingest(hook_event(&session, &event_name, &post.payload, &input))
                     .await?;
@@ -2965,20 +2981,31 @@ impl Daemon {
                     self.maybe_push(&session, &input, event).await;
                 }
             }
-            _ => {
+            HookEventName::Stop => {
                 // A finished turn is progress too — the next wait is news.
-                if matches!(event_name, HookEventName::Stop) {
-                    self.push_gate.note_progress(&session.uid);
+                self.push_gate.note_progress(&session.uid);
+                // The turn's end is filed by the tailer from the transcript,
+                // which Claude writes after the turn's last reply; this hook
+                // arrives before that reply is on disk. Filed here only for a
+                // run whose transcript has never existed (Claude's session
+                // persistence off), so the end of its turns is not lost. A file
+                // the tailer has read is only ever missing in passing.
+                let absent = input
+                    .transcript_path
+                    .as_deref()
+                    .is_none_or(|path| !std::path::Path::new(path).exists());
+                if absent && self.db.load_cursor(session.uid.clone()).await?.is_none() {
+                    self.ingest(hook_event(&session, &event_name, &post.payload, &input))
+                        .await?;
                 }
+            }
+            _ => {
                 self.ingest(hook_event(&session, &event_name, &post.payload, &input))
                     .await?;
                 // Checked again after the write: a question registered while
                 // this hook waited on it is found now.
                 if question_ran {
                     self.note_question_ran(&session.uid, &input).await;
-                }
-                if matches!(event_name, HookEventName::Stop) && main_thread(&post.payload) {
-                    self.main_thread_moved(&session).await;
                 }
             }
         }
@@ -3046,10 +3073,11 @@ impl Daemon {
         let display_text = approval_payload_text(&tool_name, &tool_input);
         let payload_hash = approval_payload_hash(&tool_name, &tool_input);
 
-        let request_id = {
+        let (request_id, turn_ends) = {
             let inner = self.inner.lock().await;
             correlation_key(&session.uid, input)
                 .and_then(|key| inner.tool_use_ids.get(&key).cloned())
+                .unzip()
         };
         // Joined to its `tool_use_id`, the id a question's `PostToolUse` names —
         // the only way to learn whose answer Claude ran with.
@@ -3213,12 +3241,11 @@ impl Daemon {
                 "CodeConnect: mirrored to your phone; answer here or there",
             ));
         };
-        // A result or the end of the turn filed before this request was
-        // registered went by without finding it; each is read back from the
-        // log, from the call's own `PreToolUse` on. One filed later finds the
-        // entry when its hook checks again after its own write.
-        // A read that fails finds nothing, and the request is handled as if
-        // nothing had been filed.
+        // A result filed before this request was registered went by without
+        // finding it, and is read back from the log, from the call's own
+        // `PreToolUse` on. One filed later finds the entry when its hook checks
+        // again after its own write. A read that fails finds nothing, and the
+        // request is handled as if nothing had been filed.
         if let Ok(Some(asked)) = self
             .db
             .hook_event_seq(session.uid.clone(), format!("pre:{request_id}"))
@@ -3230,21 +3257,31 @@ impl Daemon {
                 .await
                 .unwrap_or_default()
             {
-                match event.kind {
-                    EventKind::ToolResult if event.item_id.as_deref() == Some(&request_id) => {
-                        note_tool_result(&mut *self.inner.lock().await, &event);
-                        if question.is_some() {
-                            let ran = serde_json::from_value(event.payload).unwrap_or_default();
-                            self.note_question_ran(&session.uid, &ran).await;
-                        }
+                if event.kind == EventKind::ToolResult
+                    && event.item_id.as_deref() == Some(&request_id)
+                {
+                    note_tool_result(&mut *self.inner.lock().await, &event);
+                    if question.is_some() {
+                        let ran = serde_json::from_value(event.payload).unwrap_or_default();
+                        self.note_question_ran(&session.uid, &ran).await;
                     }
-                    EventKind::TurnComplete
-                        if question == Some(false) && main_thread(&event.payload) =>
-                    {
-                        self.main_thread_moved(session).await;
-                    }
-                    _ => {}
                 }
+            }
+        }
+        // Likewise the end of the turn: a main-conversation Stop hook that
+        // arrived after this question's `PreToolUse` and before its
+        // registration found nothing to close.
+        if question == Some(false) {
+            let ended = self
+                .inner
+                .lock()
+                .await
+                .main_turn_ends
+                .get(&session.uid)
+                .copied()
+                .unwrap_or_default();
+            if turn_ends.is_some_and(|asked| ended > asked) {
+                self.main_thread_moved(session).await;
             }
         }
         // Resolved while its card was being written — the turn ended over a
@@ -14072,26 +14109,535 @@ mod tests {
 
     // ------------------------------------------------------- hook mapping
 
+    /// A run with no transcript (Claude's persistence turned off) has its turns
+    /// ended by the Stop hook, since no `stop_hook_summary` will ever be read.
     #[tokio::test]
     async fn the_stop_hook_records_a_turn_not_a_session_end() {
+        for transcript in [None, Some("/nonexistent/ccd-no-transcript.jsonl")] {
+            let daemon = test_daemon();
+            let mut payload =
+                json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"});
+            if let Some(path) = transcript {
+                payload["transcript_path"] = json!(path);
+            }
+            daemon
+                .handle_hook(HookPost {
+                    session_id: "cc-1".into(),
+                    session_uid: Some(TEST_UID.to_string()),
+                    event: "Stop".into(),
+                    payload,
+                    wait: false,
+                    holds_questions: false,
+                })
+                .await;
+            let events = daemon.store.events_after(TEST_UID, 0, 10).unwrap();
+            let kinds: Vec<&EventKind> = events.iter().map(|e| &e.kind).collect();
+            assert!(kinds.contains(&&EventKind::TurnComplete), "{kinds:?}");
+            assert!(
+                !kinds.contains(&&EventKind::SessionEnd),
+                "a finished turn is not a finished session: {kinds:?}"
+            );
+        }
+    }
+
+    /// Claude runs the Stop hook before its final reply reaches the transcript
+    /// (up to 100 ms later), then writes the hooks' summary after the reply. The
+    /// turn is filed as over only after its reply, once.
+    #[tokio::test]
+    async fn a_turn_is_filed_as_over_after_its_reply() {
+        let lines: Vec<&str> = include_str!("../../../fixtures/transcript/session-sample.jsonl")
+            .lines()
+            .collect();
+        let path = std::env::temp_dir().join(format!(
+            "ccd-turn-end-{}-{}.jsonl",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::write(&path, format!("{}\n", lines[0])).unwrap();
         let daemon = test_daemon();
         daemon
             .handle_hook(HookPost {
                 session_id: "cc-1".into(),
                 session_uid: Some(TEST_UID.to_string()),
                 event: "Stop".into(),
-                payload: json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"}),
+                payload: json!({
+                    "hook_event_name": "Stop",
+                    "session_id": "uuid",
+                    "cwd": "/tmp",
+                    "transcript_path": path,
+                }),
                 wait: false,
                 holds_questions: false,
             })
             .await;
-        let events = daemon.store.events_after(TEST_UID, 0, 10).unwrap();
-        let kinds: Vec<&EventKind> = events.iter().map(|e| &e.kind).collect();
-        assert!(kinds.contains(&&EventKind::TurnComplete), "{kinds:?}");
-        assert!(
-            !kinds.contains(&&EventKind::SessionEnd),
-            "a finished turn is not a finished session: {kinds:?}"
+        // Then the reply, the hooks' summary and the turn's duration.
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                lines[0], lines[10], lines[11], lines[12]
+            ),
+        )
+        .unwrap();
+        let run = SessionKey::new(TEST_UID, "cc-1");
+        let scan = crate::tailer::scan_file(&daemon.store, &run, path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        daemon
+            .ingest_scan(TEST_UID, scan.events, scan.cursor)
+            .await
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let order: Vec<EventKind> = daemon
+            .store
+            .events_after(TEST_UID, 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.kind)
+            .filter(|kind| matches!(kind, EventKind::AgentMessage | EventKind::TurnComplete))
+            .collect();
+        assert_eq!(order, [EventKind::AgentMessage, EventKind::TurnComplete]);
+    }
+
+    /// `/clear` moves the run to a new transcript, and the last turn's reply and
+    /// end can still be unread in the old one when it does, more than one read
+    /// away. They are read before the tailer follows the new file.
+    #[tokio::test]
+    async fn a_new_transcript_is_followed_only_after_the_old_one_is_read() {
+        let lines: Vec<&str> = include_str!("../../../fixtures/transcript/session-sample.jsonl")
+            .lines()
+            .collect();
+        let stem = std::env::temp_dir().join(format!(
+            "ccd-clear-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let (old, new) = (
+            stem.with_extension("old.jsonl"),
+            stem.with_extension("new.jsonl"),
         );
+        let (daemon, tails) = daemon_watching_tails(
+            shared_store(),
+            Config {
+                fsevents: false,
+                // Longer than the old transcript is kept after `/clear`, so
+                // it is read only at the move, as the first tick after it.
+                tail_poll_ms: 1_500,
+                ..Config::default()
+            },
+        );
+        tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
+        let start = |path: &std::path::Path| HookPost {
+            session_id: "cc-1".into(),
+            session_uid: Some(TEST_UID.to_string()),
+            event: "SessionStart".into(),
+            payload: json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "uuid",
+                "cwd": "/tmp",
+                "transcript_path": path,
+            }),
+            wait: false,
+            holds_questions: false,
+        };
+        daemon.handle_hook(start(&old)).await;
+        // Past the tailer's 4 MiB read: 45 lines of 100 kB, then the reply and
+        // the hooks' summary.
+        let filler: String = (0..45)
+            .map(|i| {
+                format!(
+                    "{}\n",
+                    json!({"type": "user", "uuid": format!("f{i}"), "text": "x".repeat(100_000)})
+                )
+            })
+            .collect();
+        std::fs::write(
+            &old,
+            format!("{}\n{filler}{}\n{}\n", lines[0], lines[10], lines[11]),
+        )
+        .unwrap();
+        std::fs::write(&new, "").unwrap();
+        daemon.handle_hook(start(&new)).await;
+        let filed = || {
+            daemon
+                .store
+                .events_after(TEST_UID, 0, 100)
+                .unwrap()
+                .into_iter()
+                .map(|event| event.kind)
+                .filter(|kind| matches!(kind, EventKind::AgentMessage | EventKind::TurnComplete))
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..400 {
+            if filed().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::remove_file(&old).unwrap();
+        std::fs::remove_file(&new).unwrap();
+        assert_eq!(filed(), [EventKind::AgentMessage, EventKind::TurnComplete]);
+    }
+
+    /// `/clear` typed while Claude answers is queued and runs at the end of
+    /// the turn, and Claude writes that turn's reply and end to the old
+    /// transcript up to a write flush after the run has moved to the new one.
+    /// They are still filed, and so is what follows in the new transcript.
+    #[tokio::test]
+    async fn a_turn_that_ends_after_its_clear_still_gets_its_reply_and_end() {
+        let lines: Vec<&str> = include_str!("../../../fixtures/transcript/session-sample.jsonl")
+            .lines()
+            .collect();
+        let stem = std::env::temp_dir().join(format!(
+            "ccd-clear-late-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let (old, new) = (
+            stem.with_extension("old.jsonl"),
+            stem.with_extension("new.jsonl"),
+        );
+        let daemon = tailed(&old).await;
+        written(&daemon, &old, &[serde_json::from_str(lines[9]).unwrap()]).await;
+        std::fs::write(&new, "").unwrap();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "SessionStart".into(),
+                payload: json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": "uuid",
+                    "cwd": "/tmp",
+                    "transcript_path": new,
+                }),
+                wait: false,
+                holds_questions: false,
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::fs::write(
+            &old,
+            format!("{}\n{}\n{}\n", lines[9], lines[10], lines[11]),
+        )
+        .unwrap();
+        std::fs::write(&new, format!("{}\n", lines[14])).unwrap();
+        let filed = || {
+            daemon
+                .store
+                .events_after(TEST_UID, 0, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.source == Source::Transcript)
+                .filter_map(|event| event.source_event_id)
+                .collect::<Vec<_>>()
+        };
+        let want = [lines[9], lines[10], lines[11], lines[14]].map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["uuid"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        });
+        for _ in 0..300 {
+            if filed().len() == want.len() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::remove_file(&old).unwrap();
+        std::fs::remove_file(&new).unwrap();
+        assert_eq!(filed(), want);
+    }
+
+    /// A run that ends within moments of `/clear` still has the start of its
+    /// new transcript read.
+    #[tokio::test]
+    async fn a_run_that_ends_just_after_its_clear_has_its_new_transcript_read() {
+        let stem = std::env::temp_dir().join(format!(
+            "ccd-clear-ended-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let (old, new) = (
+            stem.with_extension("old.jsonl"),
+            stem.with_extension("new.jsonl"),
+        );
+        let daemon = tailed(&old).await;
+        std::fs::write(&new, format!("{}\n", json!({"type": "user", "uuid": "n1"}))).unwrap();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "SessionStart".into(),
+                payload: json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": "uuid",
+                    "cwd": "/tmp",
+                    "transcript_path": new,
+                }),
+                wait: false,
+                holds_questions: false,
+            })
+            .await;
+        daemon
+            .transcript_tx
+            .send(crate::tailer::TailCommand::Stop {
+                session_uid: TEST_UID.to_string(),
+            })
+            .unwrap();
+        let filed = || {
+            daemon
+                .store
+                .events_after(TEST_UID, 0, 100)
+                .unwrap()
+                .iter()
+                .any(|event| event.source_event_id.as_deref() == Some("n1"))
+        };
+        for _ in 0..100 {
+            if filed() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::remove_file(&old).unwrap();
+        std::fs::remove_file(&new).unwrap();
+        assert!(filed());
+    }
+
+    /// An old transcript left with a half-written last line when the run moves
+    /// on is read as far as it can be, and the run moves on.
+    #[tokio::test]
+    async fn a_half_written_last_line_does_not_hold_up_the_move() {
+        let stem = std::env::temp_dir().join(format!(
+            "ccd-clear-partial-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let (old, new) = (
+            stem.with_extension("old.jsonl"),
+            stem.with_extension("new.jsonl"),
+        );
+        let daemon = tailed(&old).await;
+        written(&daemon, &old, &[json!({"type": "user", "uuid": "o1"})]).await;
+        let mut text = std::fs::read_to_string(&old).unwrap();
+        text.push_str(r#"{"type":"assistant","uuid":"o2""#);
+        std::fs::write(&old, text).unwrap();
+        std::fs::write(&new, format!("{}\n", json!({"type": "user", "uuid": "n1"}))).unwrap();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "SessionStart".into(),
+                payload: json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": "uuid",
+                    "cwd": "/tmp",
+                    "transcript_path": new,
+                }),
+                wait: false,
+                holds_questions: false,
+            })
+            .await;
+        let filed = || {
+            daemon
+                .store
+                .events_after(TEST_UID, 0, 100)
+                .unwrap()
+                .iter()
+                .any(|event| event.source_event_id.as_deref() == Some("n1"))
+        };
+        for _ in 0..300 {
+            if filed() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::remove_file(&old).unwrap();
+        std::fs::remove_file(&new).unwrap();
+        assert!(filed(), "the new transcript was never followed");
+    }
+
+    /// A run deleted while its old transcript waits to be read after `/clear`
+    /// files nothing more, and the read of that file ends: the tailer goes on
+    /// filing every other run's transcript.
+    #[tokio::test]
+    async fn a_run_deleted_after_its_clear_holds_up_no_other_run() {
+        let stem = std::env::temp_dir().join(format!(
+            "ccd-clear-deleted-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let (old, new, other) = (
+            stem.with_extension("old.jsonl"),
+            stem.with_extension("new.jsonl"),
+            stem.with_extension("other.jsonl"),
+        );
+        let daemon = tailed(&old).await;
+        let start = |uid: &str, name: &str, path: &std::path::Path| HookPost {
+            session_id: name.into(),
+            session_uid: Some(uid.to_string()),
+            event: "SessionStart".into(),
+            payload: json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "uuid",
+                "cwd": "/tmp",
+                "transcript_path": path,
+            }),
+            wait: false,
+            holds_questions: false,
+        };
+        const OTHER: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+        std::fs::write(&other, "").unwrap();
+        daemon.handle_hook(start(OTHER, "cc-2", &other)).await;
+        // Three of the tailer's 4 MiB reads, unread when the run moves.
+        let filler: String = (0..120)
+            .map(|i| {
+                format!(
+                    "{}\n",
+                    json!({"type": "user", "uuid": format!("f{i}"), "text": "x".repeat(100_000)})
+                )
+            })
+            .collect();
+        std::fs::write(&new, "").unwrap();
+        daemon.handle_hook(start(TEST_UID, "cc-1", &new)).await;
+        std::fs::write(&old, filler).unwrap();
+        daemon
+            .db
+            .set_lifecycle(TEST_UID.to_string(), Lifecycle::Exited)
+            .await
+            .unwrap();
+        daemon
+            .db
+            .delete_exited_session(TEST_UID.to_string())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        std::fs::write(
+            &other,
+            format!("{}\n", json!({"type": "user", "uuid": "o1"})),
+        )
+        .unwrap();
+        let mut filed = false;
+        for _ in 0..300 {
+            filed = !daemon
+                .store
+                .events_after(OTHER, 0, 100)
+                .unwrap()
+                .iter()
+                .all(|event| event.source_event_id.as_deref() != Some("o1"));
+            if filed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        for path in [&old, &new, &other] {
+            std::fs::remove_file(path).unwrap();
+        }
+        assert!(filed, "the other run's line was not filed within 3 s");
+    }
+
+    /// A tailing daemon, and a writer for the run's transcript at `path`.
+    async fn tailed(path: &std::path::Path) -> Arc<Daemon> {
+        let (daemon, tails) = daemon_watching_tails(
+            shared_store(),
+            Config {
+                fsevents: false,
+                tail_poll_ms: 20,
+                ..Config::default()
+            },
+        );
+        tokio::spawn(crate::tailer::run(Arc::clone(&daemon), tails));
+        std::fs::write(path, "").unwrap();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "SessionStart".into(),
+                payload: json!({
+                    "hook_event_name": "SessionStart",
+                    "session_id": "uuid",
+                    "cwd": "/tmp",
+                    "transcript_path": path,
+                }),
+                wait: false,
+                holds_questions: false,
+            })
+            .await;
+        daemon
+    }
+
+    async fn stop_hook(daemon: &Arc<Daemon>, path: &std::path::Path) {
+        daemon
+            .handle_hook(HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "Stop".into(),
+                payload: json!({
+                    "hook_event_name": "Stop",
+                    "session_id": "uuid",
+                    "cwd": "/tmp",
+                    "transcript_path": path,
+                }),
+                wait: false,
+                holds_questions: false,
+            })
+            .await;
+    }
+
+    /// Appends transcript lines to `path` and waits until the tailer has filed
+    /// them, returning the run's kinds of transcript fact so far.
+    async fn written(
+        daemon: &Arc<Daemon>,
+        path: &std::path::Path,
+        lines: &[serde_json::Value],
+    ) -> Vec<EventKind> {
+        let read = || {
+            daemon
+                .store
+                .events_after(TEST_UID, 0, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.source == Source::Transcript)
+                .map(|event| event.kind)
+                .collect::<Vec<_>>()
+        };
+        let want = read().len() + lines.len();
+        let mut text = std::fs::read_to_string(path).unwrap();
+        for line in lines {
+            text.push_str(&format!("{line}\n"));
+        }
+        std::fs::write(path, text).unwrap();
+        for _ in 0..300 {
+            if read().len() == want {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        read()
+    }
+
+    /// A transcript the tailer has read and that is missing for a moment when
+    /// the Stop hook arrives (Claude moving it) is not a run without one: the
+    /// turn's end still comes from the transcript alone.
+    #[tokio::test]
+    async fn a_transcript_missing_in_passing_leaves_the_end_to_the_tailer() {
+        let path = std::env::temp_dir().join(format!(
+            "ccd-missing-{}-{}.jsonl",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let daemon = tailed(&path).await;
+        written(&daemon, &path, &[json!({"type": "user", "uuid": "u1"})]).await;
+        std::fs::remove_file(&path).unwrap();
+        stop_hook(&daemon, &path).await;
+        let kinds: Vec<EventKind> = daemon
+            .store
+            .events_after(TEST_UID, 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect();
+        assert!(!kinds.contains(&EventKind::TurnComplete), "{kinds:?}");
     }
 
     #[tokio::test]
@@ -29806,6 +30352,40 @@ mod tests {
         let rings = capture.0.lock().unwrap();
         assert_eq!(rings.len(), 1, "{rings:?}");
         assert_eq!(rings[0].0.kind, crate::apns::PushKind::Question);
+    }
+
+    /// A prompt queued during a turn starts the next turn as soon as the last
+    /// one ends, and can ask its question before the tailer files the last
+    /// turn's end, even between the question's `PreToolUse` and its
+    /// `PermissionRequest`. Neither that end nor the Stop hook before it closes
+    /// the question.
+    #[tokio::test]
+    async fn the_previous_turn_ending_leaves_the_next_question_held() {
+        let daemon = test_daemon();
+        let uid = TEST_UID;
+        let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+        daemon
+            .handle_hook(post(uid, question_hook("Stop"), false))
+            .await;
+        daemon
+            .handle_hook(post(uid, question_hook("PreToolUse"), false))
+            .await;
+        let summary = json!({"type": "system", "subtype": "stop_hook_summary", "uuid": "s1"});
+        daemon
+            .ingest(
+                PendingEvent::new(
+                    &SessionKey::new(uid, "cc-1"),
+                    EventKind::TurnComplete,
+                    summary,
+                    Source::Transcript,
+                )
+                .with_source_event_id("s1".to_string()),
+            )
+            .await
+            .unwrap();
+        let raised = raise_question(&daemon, uid, None, true).await;
+        assert_eq!(card_hold(&daemon, uid), Some(QuestionHold::Held));
+        assert!(!raised.hook.is_finished());
     }
 
     /// A background agent's question is not the main conversation's: the main
