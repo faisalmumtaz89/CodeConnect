@@ -45,8 +45,12 @@ enum AnswerAttempt: Sendable {
     /// `indeterminate: true`. Rendering that as "Already answered" with a
     /// checkmark is the same false-confirmation the app forbids, so an
     /// indeterminate duplicate is reported as `.indeterminate`, never `.duplicate`.
+    ///
+    /// Except an answer sent to Claude: that outcome is an earlier tap's, maybe
+    /// another phone's, and nothing from this tap was sent, so it stays a
+    /// duplicate.
     static func classify(duplicate outcome: AnswerOutcome, staleHash: Bool) -> AnswerAttempt {
-        outcome.indeterminate
+        outcome.indeterminate && !outcome.wasSentToClaude
             ? .indeterminate(outcome) : .duplicate(outcome: outcome, staleHash: staleHash)
     }
 }
@@ -2120,7 +2124,8 @@ final class AppModel {
             decision: decision, agent: agent,
             resolvesCodexCards: daemonProfile.resolvesCodexCards,
             isQuestion: item.card.toolName == QuestionCard.toolName,
-            answersQuestions: daemonProfile.answersQuestions)
+            answersQuestions: daemonProfile.answersQuestions,
+            answersApprovalsByHook: daemonProfile.answersApprovalsByHook)
         {
             return .rejected(mismatch)
         }
@@ -2137,17 +2142,21 @@ final class AppModel {
     /// Why this decision cannot be sent to this agent, or nil when it can.
     ///
     /// Deliberately silent about `.unrecognised`: it is only ever *received*.
-    /// `.text` is **not** silent any more — it is Claude's deny-with-a-reason
-    /// path, which types free text into a composer a Codex session does not
-    /// have, and "the control is not drawn" is a view fact, not a guarantee.
+    /// `.text` is Claude's denial with a reason, which a Codex card does not
+    /// take, and "the control is not drawn" is a view fact, not a guarantee.
     ///
     /// **A Claude question takes only `answers` and `decline`, and only from a
     /// daemon that understands them.** `allow` or an option on Claude's
-    /// `AskUserQuestion` types keys that pick answers nobody chose; this refuses
-    /// them on the send path whatever the daemon advertises.
+    /// `AskUserQuestion` would pick answers nobody chose; this refuses them on
+    /// the send path whatever the daemon advertises.
+    ///
+    /// **A Claude approval is answered only by a daemon that returns it through
+    /// the card's own hook.** An older one types the answer into whatever prompt
+    /// is on screen, which can be another agent's.
     static func decisionMismatch(
         decision: AnswerDecision, agent: AgentKind, resolvesCodexCards: Bool = true,
-        isQuestion: Bool = false, answersQuestions: Bool = false
+        isQuestion: Bool = false, answersQuestions: Bool = false,
+        answersApprovalsByHook: Bool = false
     ) -> String? {
         switch (agent, decision) {
         case (.claude, .answers), (.claude, .decline):
@@ -2163,14 +2172,17 @@ final class AppModel {
         case (.claude, _) where isQuestion:
             return "Claude is asking a question, which is answered by choosing its answers, "
                 + "so nothing was sent."
+        case (.claude, _) where !answersApprovalsByHook:
+            return "This Mac's CodeConnect is too old to answer Claude's approvals from the "
+                + "phone, so nothing was sent. Update it, or answer at the Mac."
         case (.codex, _) where !resolvesCodexCards:
             // **Old daemons.** Below minor 19 the resolution carries no `request_id`, so
             // an answered card can never be retired. A card that cannot be
             // retired must not be answered from here, by any vocabulary.
             return "This Mac's CodeConnect is too old to answer a Codex card from the phone, "
                 + "so nothing was sent. Update it, or answer at the Mac."
-        case (.codex, .allow), (.codex, .deny), (.codex, .option), (.codex, .text),
-            (.codex, .answers), (.codex, .decline):
+        case (.codex, .allow), (.codex, .deny), (.codex, .option),
+            (.codex, .text), (.codex, .answers), (.codex, .decline):
             return "A Codex card is answered by naming one of the options it offered, "
                 + "so nothing was sent."
         case (.claude, .optionId):
@@ -2207,28 +2219,6 @@ final class AppModel {
         } catch {
             return .failed(error.localizedDescription)
         }
-    }
-
-    /// Deny, then type the reason. Two steps because `Deny` is Escape — it
-    /// dismisses the prompt and returns Claude to its composer, which is the
-    /// only place free text can land.
-    func denyWithReason(item: ApprovalItem, reason: String) async -> (
-        AnswerAttempt, ComposeAttempt?
-    ) {
-        let denial = await answer(item: item, decision: .deny)
-        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard case .applied = denial, !trimmed.isEmpty else { return (denial, nil) }
-
-        // The composer needs a beat to come back after Escape; a refusal here
-        // means "not ready yet", so it is worth a few short retries.
-        var last: ComposeAttempt = .failed("The composer never came back after the denial.")
-        for attempt in 0..<4 {
-            if attempt > 0 { try? await Task.sleep(for: .milliseconds(500)) }
-            last = await send(text: trimmed, to: item.sessionKey, submit: true)
-            if case .refused = last { continue }
-            return (denial, last)
-        }
-        return (denial, last)
     }
 
     /// `key` is a run, not a name. It reaches the daemon as the `session_uid`

@@ -377,6 +377,11 @@ pub struct HookPost {
     /// question is then not held.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub holds_questions: bool,
+    /// The same, for every other `PermissionRequest`: this cc-hook waits for an
+    /// approval's answer without a bound of its own. Absent from an older
+    /// cc-hook, whose approvals are then not held and are answered at the Mac.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds_approvals: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1274,6 +1279,7 @@ mod tests {
             payload: serde_json::json!({"tool_name": "Bash"}),
             wait: true,
             holds_questions: false,
+            holds_approvals: false,
         });
         let line = serde_json::to_string(&frame).unwrap();
         assert!(line.contains("\"type\":\"hook\""));

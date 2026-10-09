@@ -285,8 +285,10 @@ impl HookDecision {
                     if self.interrupt {
                         nested.insert("interrupt".into(), true.into());
                     }
-                } else if let Some(input) = &self.updated_input {
-                    nested.insert("updatedInput".into(), input.clone());
+                } else {
+                    if let Some(input) = &self.updated_input {
+                        nested.insert("updatedInput".into(), input.clone());
+                    }
                 }
                 let mut inner = serde_json::Map::new();
                 inner.insert("hookEventName".into(), "PermissionRequest".into());

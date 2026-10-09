@@ -179,7 +179,7 @@ final class CodexProseTests: XCTestCase {
             toolInput: #"{"command":"touch x","options":[{"id":"accept","label":"Yes, proceed"},"#
                 + #"{"id":"cancel","label":"No, and tell Codex what to do differently"}]}"#)
         guard case .codexOptions(let options) =
-            DecisionCardView.answerSurface(card: two, agent: .codex, paneSnapshot: nil)
+            DecisionCardView.answerSurface(card: two, agent: .codex, hold: nil, hookOnlyApprovals: true)
         else { return XCTFail("a two-option Codex card must still offer its options") }
         XCTAssertEqual(options.map(\.id), ["accept", "cancel"])
     }
@@ -192,28 +192,28 @@ final class CodexProseTests: XCTestCase {
                 .joined(separator: ",")
             let subject = card(toolInput: #"{"command":"x","options":[\#(rows)]}"#)
             guard case .codexOptions(let options) =
-                DecisionCardView.answerSurface(card: subject, agent: .codex, paneSnapshot: nil)
+                DecisionCardView.answerSurface(card: subject, agent: .codex, hold: nil, hookOnlyApprovals: true)
             else { return XCTFail("\(count) options must still be a Codex surface") }
             XCTAssertEqual(options.count, count)
         }
     }
 
-    /// **Claude is unchanged.** Same function, same rule, including the `> 2`
-    /// suppression that keeps a two-item prompt from drawing Allow and Deny twice.
-    func testAClaudeCardKeepsItsExistingSurface() {
+    /// **A Claude approval is answerable only through its own held hook**: from
+    /// a daemon that says it answers that way, while the card is held.
+    func testAClaudeCardIsAnswerableOnlyWhileHeldByAHookOnlyDaemon() {
         let claude = card(toolInput: #"{"command":"ls"}"#, toolName: "Bash")
-        let twoItemPane = "  1. Yes\n  2. No, and tell Claude what to do differently\n"
-        guard case .allowDeny(let suppressed) =
-            DecisionCardView.answerSurface(card: claude, agent: .claude, paneSnapshot: twoItemPane)
-        else { return XCTFail("a Claude card keeps Allow/Deny") }
-        XCTAssertTrue(suppressed.isEmpty, "the two-item prompt is Allow and Deny, drawn once")
-
-        let threeItemPane =
-            "  1. Yes\n  2. Yes, and don't ask again\n  3. No, and tell Claude what to do\n"
-        guard case .allowDeny(let shown) =
-            DecisionCardView.answerSurface(card: claude, agent: .claude, paneSnapshot: threeItemPane)
-        else { return XCTFail("a Claude card keeps Allow/Deny") }
-        XCTAssertEqual(shown.count, 3, "a third outcome Allow cannot express still renders")
+        XCTAssertEqual(
+            DecisionCardView.answerSurface(
+                card: claude, agent: .claude, hold: .held, hookOnlyApprovals: true),
+            .allowDeny)
+        for (hold, hookOnly) in [
+            (QuestionHold.held, false), (.atMac, true), (.ended, true), (nil, true),
+        ] {
+            XCTAssertEqual(
+                DecisionCardView.answerSurface(
+                    card: claude, agent: .claude, hold: hold, hookOnlyApprovals: hookOnly),
+                .noneAnswerable, "\(String(describing: hold)), hook-only \(hookOnly)")
+        }
     }
 
     /// **The surface follows the SESSION, not the card.**
@@ -226,7 +226,8 @@ final class CodexProseTests: XCTestCase {
             toolInput: #"{"command":"x","options":[{"id":"accept","label":"Yes"}]}"#,
             toolName: "Bash")
         guard case .allowDeny =
-            DecisionCardView.answerSurface(card: looksCodex, agent: .claude, paneSnapshot: nil)
+            DecisionCardView.answerSurface(
+                card: looksCodex, agent: .claude, hold: .held, hookOnlyApprovals: true)
         else { return XCTFail("a Claude session keeps Claude's vocabulary") }
     }
 
@@ -238,7 +239,7 @@ final class CodexProseTests: XCTestCase {
             guard case .noneAnswerable =
                 DecisionCardView.answerSurface(
                     card: card(toolInput: input), agent: .codex,
-                    paneSnapshot: "  1. Yes\n  2. No\n  3. Later\n")
+                    hold: nil, hookOnlyApprovals: true)
             else { return XCTFail("malformed Codex options must not become Allow/Deny: \(input)") }
         }
     }
@@ -250,7 +251,7 @@ final class CodexProseTests: XCTestCase {
         guard case .noneAnswerable =
             DecisionCardView.answerSurface(
                 card: card(toolInput: #"{"command":"x"}"#), agent: nil,
-                paneSnapshot: "  1. Yes\n  2. No\n  3. Later\n")
+                hold: nil, hookOnlyApprovals: true)
         else { return XCTFail("an unknown agent must not inherit Claude's answer surface") }
     }
 
@@ -271,7 +272,7 @@ final class CodexProseTests: XCTestCase {
 
         guard case .noneAnswerable =
             DecisionCardView.answerSurface(
-                card: unverifiable, agent: .codex, paneSnapshot: nil)
+                card: unverifiable, agent: .codex, hold: nil, hookOnlyApprovals: true)
         else { return XCTFail("a card the phone cannot vouch for must not be answerable") }
 
         let shown = unverifiable.primaryText(verification: unverifiable.verification, agent: .codex)
@@ -290,7 +291,7 @@ final class CodexProseTests: XCTestCase {
         guard case .noneAnswerable =
             DecisionCardView.answerSurface(
                 card: card(toolInput: #"{"command":"x"}"#), agent: .unsupported("gemini"),
-                paneSnapshot: nil)
+                hold: nil, hookOnlyApprovals: true)
         else { return XCTFail("guessing a vocabulary for an unknown agent is guessing on the wire") }
     }
 

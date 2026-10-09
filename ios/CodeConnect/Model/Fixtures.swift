@@ -281,11 +281,12 @@ enum Fixtures {
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
         "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
-        "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":true,\
+        "answer_path":"hook_return","hold_secs":0,"send_text":true,"capture":true,\
         "delete_session":true,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,"slash_composer_recovery":true,\
-        "prompt_identity":true,"command_catalog":true,"terminal_pty":true},\
+        "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
+        "hook_only_approvals":true},\
         "device_name":"iPhone"}
         """
 
@@ -301,11 +302,12 @@ enum Fixtures {
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
         "capabilities":{"can_approve_reliably":true,"fail_mode":"fail_open",\
-        "answer_path":"send_keys","hold_secs":0,"send_text":true,"capture":false,\
+        "answer_path":"hook_return","hold_secs":0,"send_text":true,"capture":false,\
         "delete_session":false,"test_push":false,"push":false,"tls":false,\
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,"slash_composer_recovery":true,\
-        "prompt_identity":true,"command_catalog":false,"terminal_pty":false},\
+        "prompt_identity":true,"command_catalog":false,"terminal_pty":false,\
+        "hook_only_approvals":true},\
         "device_name":"iPhone"}
         """
 
@@ -460,7 +462,7 @@ enum Fixtures {
             "ts":"\(stamp)","kind":"approval_request","source":"hook",\
             "payload":{"card":{"request_id":"\(card.requestID)","payload_hash":"\(hash)",\
             "tool_name":"\(card.tool)","tool_input":\(inputJSON),\
-            "display_text":\(quoted(displayText))\(risk)}}}}
+            "display_text":\(quoted(displayText))\(risk),"question_hold":"held"}}}}
             """
     }
 

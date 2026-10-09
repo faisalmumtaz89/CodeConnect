@@ -9,8 +9,11 @@
 //! 2. **Never block longer than promised.** Reaching the daemon is bounded by
 //!    `--connect-timeout-ms` (default 200ms) and waiting for a decision by
 //!    `--gate-timeout-ms`. Observability events do not wait at all. The one
-//!    exception is Claude's own question (`AskUserQuestion`): it is held for as
-//!    long as Claude waits on this hook, and Claude's hook timeout is the bound.
+//!    exception is `PermissionRequest`: its answer comes from the phone through
+//!    this hook, so it is held for as long as Claude waits on it: Claude's
+//!    hook timeout is the bound. It ends sooner when its parent changes (Claude,
+//!    or a shell prefix Claude ran it under, has exited), or when the daemon
+//!    closes the card because the session ended.
 //!
 //! Diagnostics go to a log file, never to stderr: hook stderr is surfaced in the
 //! transcript and would pollute the session the user is trying to work in.
@@ -95,6 +98,10 @@ fn main() {
 }
 
 fn run() {
+    // Read first: the later a held hook reads its parent, the longer the window
+    // in which Claude can die unnoticed.
+    let parent = std::os::unix::process::parent_id();
+
     // Answered before touching stdin: a hook binary blocks until EOF, so
     // `cc-hook --version` from an install script or a terminal would otherwise
     // hang forever waiting for input that is never coming.
@@ -133,9 +140,7 @@ fn run() {
     let input: HookInput = serde_json::from_value(payload.clone()).unwrap_or_default();
     let event_name = resolve_event(&args, &input);
     let session_id = resolve_session(&args, &input);
-    let question = args.gate
-        && event_name == HookEventName::PermissionRequest
-        && input.tool_name.as_deref() == Some(protocol::hook::ASK_USER_QUESTION);
+    let held = args.gate && event_name == HookEventName::PermissionRequest;
 
     let post = HookPost {
         session_id,
@@ -144,9 +149,10 @@ fn run() {
         payload,
         wait: args.gate,
         holds_questions: args.gate,
+        holds_approvals: args.gate,
     };
 
-    let decision = match post_to_daemon(&args, &post, question) {
+    let decision = match post_to_daemon(&args, &post, held, parent) {
         Ok(decision) => decision,
         Err(reason) => {
             debug_log(&format!("daemon path failed: {reason}"));
@@ -237,10 +243,15 @@ fn fallback_decision(args: &Args, event: &HookEventName, reason: &str) -> HookDe
 /// Post the frame and, for gate events, wait for the daemon's decision.
 /// `Err(reason)` means "no decision from the daemon" — never a hard failure.
 ///
-/// A question waits with no deadline of its own. The daemon reads this
-/// connection closing as Claude ending the hook, so a gate connection is
+/// A `PermissionRequest` waits with no deadline of its own. The daemon reads
+/// this connection closing as Claude ending the hook, so a gate connection is
 /// never half-closed: it stays open until this process exits.
-fn post_to_daemon(args: &Args, post: &HookPost, question: bool) -> Result<HookDecision, String> {
+fn post_to_daemon(
+    args: &Args,
+    post: &HookPost,
+    held: bool,
+    parent: u32,
+) -> Result<HookDecision, String> {
     let mut stream = connect_with_timeout(&args.socket, args.connect_timeout)
         .ok_or_else(|| "connect".to_string())?;
 
@@ -264,7 +275,10 @@ fn post_to_daemon(args: &Args, post: &HookPost, question: bool) -> Result<HookDe
         return Ok(HookDecision::passthrough());
     }
 
-    let _ = stream.set_read_timeout((!question).then_some(args.gate_timeout));
+    let _ = stream.set_read_timeout((!held).then_some(args.gate_timeout));
+    if held {
+        exit_when_orphaned(parent);
+    }
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
     match reader.read_line(&mut response) {
@@ -283,6 +297,24 @@ fn post_to_daemon(args: &Args, post: &HookPost, question: bool) -> Result<HookDe
         }
         Err(err) => Err(format!("read: {err}")),
     }
+}
+
+/// A held hook has no deadline of its own: Claude's wait on it is the bound.
+/// If its parent dies first, this process is orphaned and would wait for ever,
+/// holding the card for the phone. It exits instead, which closes the
+/// connection, and the daemon reads that as Claude ending the hook. `parent` is
+/// the one this process started under. A parent that is not Claude, or one gone
+/// before this process started, is not noticed here; the daemon lets the hook go
+/// when the session ends.
+fn exit_when_orphaned(parent: u32) {
+    let _ = thread::Builder::new()
+        .name("cc-hook-parent".to_string())
+        .spawn(move || loop {
+            thread::sleep(Duration::from_millis(200));
+            if std::os::unix::process::parent_id() != parent {
+                std::process::exit(0);
+            }
+        });
 }
 
 /// `UnixStream::connect` has no timeout in std. A connect to an AF_UNIX path is

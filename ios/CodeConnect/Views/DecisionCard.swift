@@ -73,7 +73,6 @@ struct DecisionCardView: View {
     /// actually in flight lives on the model, keyed by request id, so dismissing
     /// and re-presenting this card cannot start a second one.
     @State private var spinningControl: String?
-    @State private var composeResult: ComposeAttempt?
     /// Why the biometric check did not pass. Shown, never swallowed.
     @State private var authNotice: String?
     /// What a tap in the sample fleet would have done. See `submit`.
@@ -102,9 +101,6 @@ struct DecisionCardView: View {
     }
     private var attempt: AnswerAttempt? { model.lastAttempt(for: approval) }
     private var verification: ApprovalCard.Verification { approval.card.verification }
-    private var options: [PaneOptions.Option] {
-        approval.paneSnapshot.map(PaneOptions.parse) ?? []
-    }
 
     /// **How this card may be answered at all** — one decision, read by the
     /// action bar, the option rows and `submit`, so no answer surface can be
@@ -117,9 +113,10 @@ struct DecisionCardView: View {
     /// an `option_id` aimed at a Claude session is refused just as plainly. So
     /// this is a fork, not an addition.
     enum AnswerSurface: Sendable, Hashable {
-        /// Claude's card: Allow, Deny, and the pane's numbered options when they
-        /// offer something the bar cannot already say.
-        case allowDeny(options: [PaneOptions.Option])
+        /// Claude's card, held for the phone: Allow, Deny, and a denial with a
+        /// reason. "Always" is chosen at the Mac, where Claude's own dialog says
+        /// what it saves.
+        case allowDeny
         /// A Codex card: **the option table and nothing else.** Every count,
         /// including two — the `> 2` rule that suppresses Claude's redundant
         /// yes/no pair would leave a two-option Codex card with Allow and Deny,
@@ -156,8 +153,8 @@ struct DecisionCardView: View {
     /// to default to `.claude`, which is the one answer that can transmit: an
     /// `allow` for a run whose agent nobody knows. Unknown fails closed.
     static func answerSurface(
-        card: ApprovalCard, agent: AgentKind?, paneSnapshot: String?,
-        resolvesCodexCards: Bool = true
+        card: ApprovalCard, agent: AgentKind?, hold: QuestionHold?,
+        hookOnlyApprovals: Bool, resolvesCodexCards: Bool = true
     ) -> AnswerSurface {
         guard let agent else { return .noneAnswerable }
         switch agent {
@@ -181,12 +178,12 @@ struct DecisionCardView: View {
             // can read is answered on `QuestionCardView`; one it cannot is
             // read-only here.
             guard card.toolName != QuestionCard.toolName else { return .noneAnswerable }
-            let pane = paneSnapshot.map(PaneOptions.parse) ?? []
-            // The count test, unchanged. For Claude's ordinary two-item prompt
-            // the rows *are* Allow and Deny drawn a second time in a second
-            // style, and four buttons for two outcomes makes the reader work out
-            // which pair is which before deciding anything.
-            return .allowDeny(options: pane.count > 2 ? pane : [])
+            // **Only through the hook Claude holds for this card's own call.** A
+            // daemon that does not say so types the answer into whatever prompt
+            // is on screen, which can be another agent's; and a card no hook is
+            // held for is answered at the Mac.
+            guard hookOnlyApprovals, hold == .held else { return .noneAnswerable }
+            return .allowDeny
         case .unsupported:
             // An agent this build cannot drive gets no answer surface at all.
             // Guessing a vocabulary for it would be guessing on the wire.
@@ -212,34 +209,18 @@ struct DecisionCardView: View {
         Self.answerSurface(
             card: approval.card,
             agent: sessionAgent,
-            paneSnapshot: approval.paneSnapshot,
+            hold: hold,
+            hookOnlyApprovals: model.daemonProfile.answersApprovalsByHook,
             resolvesCodexCards: model.daemonProfile.resolvesCodexCards)
     }
+
+    /// Whether the phone can answer this card now, from the live lookup when
+    /// there is one: the hold moves while the card is open.
+    private var hold: QuestionHold? { (live ?? approval).questionHold }
 
     /// The Codex option table, or empty for a Claude card.
     private var codexOptions: [CodexCard.Option] {
         if case .codexOptions(let options) = answerSurface { return options }
-        return []
-    }
-
-    /// The numbered options, but only when they offer something the action bar
-    /// cannot already say.
-    ///
-    /// The rows are real controls — each sends `.option(index:)` — so this is not a
-    /// caption being tidied away. It is that for Claude's ordinary two-item prompt
-    /// the rows *are* Allow and Deny, drawn a second time in a second style, and a
-    /// card that offers four buttons for two outcomes makes the reader work out
-    /// which pair is which before deciding anything.
-    ///
-    /// A longer menu is the opposite case. `Yes, and don't ask again` is a third
-    /// outcome with consequences beyond this card, and Allow cannot express it, so
-    /// there the list is the only way to choose it and it stays.
-    ///
-    /// The test is the count, not the wording. Matching on the words `yes` and `no`
-    /// would make this depend on Claude's phrasing in a language this app does not
-    /// control, and getting that wrong hides a real choice.
-    private var distinctOptions: [PaneOptions.Option] {
-        if case .allowDeny(let options) = answerSurface { return options }
         return []
     }
 
@@ -290,11 +271,6 @@ struct DecisionCardView: View {
                 // they render at any count.
                 if !codexOptions.isEmpty, isActionable { codexOptionsBlock }
                 whatWasChosenBlock
-                // Gated on `isActionable`: the option rows call `submit`, so on a
-                // resolved/unbacked card they would be a second answer surface
-                // the action-bar gate does not cover. Hidden when the card cannot
-                // be acted on, exactly like the bar.
-                if !distinctOptions.isEmpty, isActionable { exactOptions }
                 disclosures
                 verificationLine
                 // **The read-only note leaves the pinned bar at accessibility
@@ -339,8 +315,8 @@ struct DecisionCardView: View {
                 // `.unavailable` card would still expose a working deny path at
                 // AX sizes — the same answer surface the bar withholds.
                 // Not on a Codex card: at accessibility sizes this is the only
-                // home of `Deny with a reason`, which types a denial into
-                // Claude's composer — machinery a Codex session does not have.
+                // home of `Deny with a reason`, Claude's denial with a reason —
+                // a decision a Codex card does not take.
                 // Its own `Come back to this` rides in the bar above instead, at
                 // every size, because that one is a queue control and not an
                 // answer.
@@ -690,53 +666,6 @@ struct DecisionCardView: View {
         }
     }
 
-    // MARK: Options
-
-    /// Claude's own numbered options are the *primary* answer path when a pane
-    /// offers them, and they obey the same risk gate as Allow.
-    private var exactOptions: some View {
-        VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
-            CCSectionHeader("Claude's exact options")
-            CCCard(padding: 0) {
-                VStack(spacing: 0) {
-                    ForEach(Array(distinctOptions.enumerated()), id: \.element.id) { index, option in
-                        optionRow(option, separator: index < distinctOptions.count - 1)
-                    }
-                }
-            }
-            // The reason once, for the group, rather than under each of three
-            // rows — `ccDisabled` on the card disables every option inside it
-            // and draws the single visible explanation a dead control owes.
-            .ccDisabled(CCDisabledReason(blockedReason))
-
-            Text("Accepting one of Claude's suggestions means picking its numbered option.")
-                .ccType(CC.type.footnote)
-                .foregroundStyle(CC.text.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private func optionRow(_ option: PaneOptions.Option, separator: Bool) -> some View {
-        Button {
-            submit(.option(index: option.index), key: "option-\(option.index)")
-        } label: {
-            OptionRowLabel(
-                index: option.index, label: option.label,
-                isBusy: inFlight == "option-\(option.index)")
-        }
-        .buttonStyle(
-            CCPressReporter { label, pressed in
-                label
-                    .background(pressed ? CCSurfaceLevel.surface.pressed : CC.color.surface)
-                    .overlay(alignment: .bottom) {
-                        if separator { CCHairline() }
-                    }
-                    .ccAnimation(CC.motion.micro, value: pressed)
-            }
-        )
-        .accessibilityLabel("Option \(option.index): \(option.label)")
-    }
-
     // MARK: The patch (Codex file-change cards)
 
     private var changes: [CodexCard.Change] { CodexCard.changes(in: approval.card.toolInput) }
@@ -936,13 +865,11 @@ struct DecisionCardView: View {
 
     /// **The only way a Codex card can be answered.**
     ///
-    /// Not "Claude's exact options" drawn again: those rows send
-    /// `.option(index:)`, which a Codex session refuses by name, and they are
-    /// suppressed below three because for Claude the first two *are* Allow and
-    /// Deny. Neither applies here. A Codex card offers two options whenever its
-    /// amendment argv contains a line break — the daemon withholds the label
-    /// rather than shorten it — and those two are still the only answers the
-    /// Mac will take.
+    /// Not Claude's Allow and Deny drawn again: those send `allow` and `deny`,
+    /// which a Codex session refuses by name. A Codex card offers two options
+    /// whenever its amendment argv contains a line break — the daemon withholds
+    /// the label rather than shorten it — and those two are still the only
+    /// answers the Mac will take.
     private var codexOptionsBlock: some View {
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             CCSectionHeader("Choose one")
@@ -973,9 +900,8 @@ struct DecisionCardView: View {
                 isBusy: inFlight == "option-\(option.id)",
                 // **No two-line clamp on a Codex option.**
                 //
-                // Claude's numbered options are short restatements of Allow and
-                // Deny, so two lines is generous. A Codex amendment label is the
-                // whole consequence of the choice — *"don't ask again for
+                // A Codex amendment label is the whole consequence of the
+                // choice — *"don't ask again for
                 // commands that start with `touch '/tmp/cc-label-d.… spaced.txt'`"*
                 // — and the daemon builds it from the exact argv it would
                 // whitelist. Clamped at two it read `…'/tmp/cc-label-d.…`, which
@@ -1267,7 +1193,7 @@ struct DecisionCardView: View {
                     "The text on this card does not match its hash. It cannot be answered safely.",
                 tone: .danger, icon: "exclamationmark.shield.fill")
         case .resolution(let attempt):
-            ResolutionBanner(attempt: attempt, compose: composeResult)
+            ResolutionBanner(attempt: attempt)
         case .alreadyResolved(let outcome):
             CCBanner(
                 Self.alreadyResolvedTitle(for: outcome),
@@ -1306,11 +1232,15 @@ struct DecisionCardView: View {
     /// locally-resolved, never-confirmed answer — is "Unconfirmed", never
     /// "Already resolved", and never wears the confirming seal.
     static func alreadyResolvedTitle(for outcome: AnswerOutcome) -> String {
-        outcome.indeterminate ? "Unconfirmed" : "Already resolved"
+        if outcome.wasSentToClaude { return "Sent" }
+        return outcome.indeterminate ? "Unconfirmed" : "Already resolved"
     }
 
     static func alreadyResolvedMessage(for outcome: AnswerOutcome, now: Date) -> String {
         let age = "\(Format.age(since: outcome.resolvedDate, now: now)) ago"
+        if outcome.wasSentToClaude {
+            return "\(outcome.decisionLabel) · \(AnswerOutcome.sentToClaude) · \(age)"
+        }
         let ending = "\(outcome.decisionLabel) \(outcome.provenance)"
         if outcome.indeterminate {
             return "\(ending) · \(age), but the daemon couldn’t confirm it reached the agent"
@@ -1495,10 +1425,10 @@ struct DecisionCardView: View {
                 // the Deck's queue control — so it belongs on a Codex card
                 // exactly as much as on a Claude one, and losing it would leave
                 // the Deck with no way past a card the reader is not ready for.
-                // `Deny with a reason` does not survive, and must not: denying
-                // is `send_text` into Claude's composer, which a Codex session
-                // has none of, and the card's own third option is the daemon's
-                // way of saying no with a reason.
+                // `Deny with a reason` does not survive, and must not: it is
+                // Claude's decision, which a Codex card refuses, and the card's
+                // own third option is the daemon's way of saying no with a
+                // reason.
                 if let comeBackToThis {
                     CCButton(
                         "Come back to this", icon: "arrow.uturn.down", variant: .ghost,
@@ -1564,8 +1494,25 @@ struct DecisionCardView: View {
         case .unsupported(let raw):
             return "This app does not know how to answer a \(raw) session. Answer it at the Mac."
         case .claude:
-            return "This card cannot be answered from here."
+            return Self.claudeUnanswerableReason(
+                isQuestion: approval.card.toolName == QuestionCard.toolName,
+                hookOnlyApprovals: model.daemonProfile.answersApprovalsByHook, hold: hold)
         }
+    }
+
+    /// Why a Claude card offers nothing to tap: the Mac's CodeConnect would type
+    /// the answer, or the card is not held for the phone. Static so the words can
+    /// be asserted without a `View`.
+    static func claudeUnanswerableReason(
+        isQuestion: Bool, hookOnlyApprovals: Bool, hold: QuestionHold?
+    ) -> String {
+        if isQuestion { return "This card cannot be answered from here." }
+        guard hookOnlyApprovals else {
+            return "This Mac's CodeConnect is too old to answer Claude's approvals from the "
+                + "phone. Update it, or answer at the Mac."
+        }
+        if hold == .atMac { return "Claude is asking this at the Mac, so answer it there." }
+        return "The phone can no longer answer this. Answer it at the Mac."
     }
 
     private var codexBarNote: String {
@@ -1763,7 +1710,7 @@ struct DecisionCardView: View {
                 .disabled(denyReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
 
-            Text("Denies with Escape, then types your reason into the session.")
+            Text("Denies the call, and Claude gets your reason with the denial.")
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1832,8 +1779,10 @@ struct DecisionCardView: View {
     /// HIGH-risk *approvals* need a second factor. Denials never do.
     private func requiresBiometrics(for decision: AnswerDecision) -> Bool {
         guard risk == .high else { return false }
-        if case .deny = decision { return false }
-        return true
+        switch decision {
+        case .deny, .text: return false
+        default: return true
+        }
     }
 
     /// What a decision would have been called on the wire, in the words the
@@ -1847,7 +1796,8 @@ struct DecisionCardView: View {
         case .optionId(let id): sent = "option \(id)"
         case .answers: sent = "your answers"
         case .decline: sent = "Decline"
-        case .text, .unrecognised: sent = "this answer"
+        case .text: sent = "Deny with your reason"
+        case .unrecognised: sent = "this answer"
         }
         return "In a live session this would send \(sent) to your Mac."
     }
@@ -1887,29 +1837,11 @@ struct DecisionCardView: View {
         }
     }
 
+    /// A denial with a reason is one answer: the reason goes to the agent that
+    /// asked, through its call's hook. With no reason it is a plain deny.
     private func submitDenyWithReason() {
-        // Same answer-path safety net as `submit`: a deny-with-reason is still an
-        // answer, so it must never act on an outcome-carrying, terminally
-        // resolved, or unbacked card.
-        guard isActionable else { return }
-        guard inFlight == nil else { return }
-        // A denial with a reason is two sends, and in the sample fleet neither
-        // has anywhere to go.
-        if model.sampleFleetActive {
-            withAnimation(CC.motion.small) { sampleNotice = Self.sampleNotice(for: .deny) }
-            CCHaptic.warning.fire()
-            return
-        }
-        spinningControl = "deny-reason"
-        sentAt = Date()
-        Task {
-            let (denial, compose) = await model.denyWithReason(
-                item: approval, reason: denyReason)
-            spinningControl = nil
-            composeResult = compose
-            Self.report(denial)
-            if denial.isTerminal { onSettled?() }
-        }
+        let reason = denyReason.trimmingCharacters(in: .whitespacesAndNewlines)
+        submit(reason.isEmpty ? .deny : .text(reason), key: "deny-reason")
     }
 
     /// The app's global haptic table, and nothing outside it.
@@ -2131,7 +2063,7 @@ private struct ActionBarHeightKey: PreferenceKey {
     }
 }
 
-/// One of Claude's own numbered options.
+/// One option of a Codex card, numbered.
 ///
 /// Split into its own view for one reason: it has to read `isEnabled` from the
 /// environment. `ccDisabled` on the card above disables every row inside it, and

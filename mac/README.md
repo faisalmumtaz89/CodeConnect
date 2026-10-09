@@ -162,50 +162,32 @@ store by it.
 
 `codeconnect ls` shows both.
 
-## Prompt identity
+## Card identity
 
-An approval card is bound to **one prompt**, and the daemon refuses to type an
-answer it cannot prove is going to that prompt.
+A Claude approval card is answered only through the `PermissionRequest` hook
+Claude holds for its own call, never by typing into the prompt on screen — see
+[docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#approving-something-safely).
+The card is joined to its call's `tool_use_id` by that call's `PreToolUse`,
+keyed by run, prompt, tool, input and background agent; a request with two open
+calls under one key joins neither, and its card is read-only. A call whose
+result (its `PostToolUse`, or its `tool_result` in the transcript) was read
+before its request is not held: its card closes from that result.
+`ApprovalCard.question_hold` says whether the phone can answer it now, and
+`identity_bound` is true exactly on a held approval, for phones that predate the
+hold on approvals. A card no hook holds — from an older `cc-hook`, joined to no
+single call, whose hold has ended, or recovered after a daemon restart — is
+answered at the Mac, and nothing is typed for it. A held card is not retired by
+the 15-minute expiry: it lasts as long as Claude waits on it.
 
-Three mechanisms, in decreasing order of certainty:
+Known gap: Claude keeps a main-thread call's hook held until the call's result,
+even after the Mac answers, so a phone No after the Mac's Yes on the same
+main-thread request stops that command, as Esc would.
 
-* **Generation.** Every structured `PermissionRequest` gives the run a new
-  prompt generation — derived from the number of `approval_request` events it
-  has logged, so a replayed hook cannot advance it and a restart cannot lose it.
-  A card raised at generation *N* is refused once the run is on *N+1*, and the
-  older card is **superseded**: it stops asking, and the ledger records
-  `resolved_by: "superseded"` with nothing typed. Superseded is reported as a
-  *rejection* rather than a duplicate, because a duplicate means "your answer
-  already applied" and this one never did. A question card is never superseded,
-  nor retired by the 15-minute expiry: a background agent's question can be on
-  screen beside the next prompt, so only its own ending (answered, the dialog
-  gone and the composer back, its hook or the turn ended) closes its card.
-* **Visible pane only.** Every presence and identity check captures
-  `capture-pane -p -J` with no `-S`, which is tmux's visible-pane default. With
-  scrollback, "a permission prompt is on screen" stayed true for as long as one
-  had *ever* been on screen — so a prompt answered half an hour ago could
-  authorise typing into the composer.
-* **Prompt fingerprint.** A sha256 of the prompt *block* on the visible pane:
-  the line the presence needle matched, twelve lines of context above it (the
-  command being asked about) and everything below it (the options and their
-  footer). Not the whole pane — a pane carries a cursor and elapsed counters, so
-  a whole-pane hash would refuse every answer. It rides with the injection
-  request and is re-checked by the supervisor **in the same breath as the
-  presence check**, immediately before the keys go out.
-
-The fingerprint is taken a few hundred milliseconds after the card is created,
-because the hook fires microseconds *before* Claude renders the prompt. Until it
-is taken the card is shown but not remotely actuatable, and the binding is
-announced as its own event (`approval_prompt_bound`, an `Other` kind so an older
-client passes it through untouched). `ApprovalCard.identity_bound` on the
-`approval_request` event is what was true when the card was logged — false, by
-construction.
-
-**Refusing is the answer when identity cannot be established.** No fingerprint,
-a prompt that has changed, or a supervisor too old to check one, and the answer
-is refused with a reason rather than typed on a guess. A free-text takeover is
-exempt: it is not an answer to a prompt at all, and its interlock is the
-composer being ready — which a permission prompt on screen already fails.
+**Visible pane only.** Every presence check captures
+`capture-pane -p -J` with no `-S`, which is tmux's visible-pane default. With
+scrollback, "a permission prompt is on screen" stayed true for as long as one
+had *ever* been on screen — so a prompt answered half an hour ago could
+authorise typing into the composer.
 
 **The composer is recognised by its box, not by its footer.** Claude draws it as
 a rule of box-drawing horizontals, a `❯` prompt row, a closing rule and a
@@ -299,14 +281,6 @@ further keys. One Escape is the ceiling on purpose: `/keybindings` spawns an
 editor where Escape is a mode key, so no key sequence can rescue it, and typing
 into an unknown screen is how a rescue becomes damage.
 
-A supervisor from before `protocol_minor` 3 accepts the fingerprint field and
-silently drops it (serde ignores what it does not know), so it would look
-checked and be unchecked. Such a supervisor reports its level at registration
-and the daemon refuses to actuate approvals through it: sessions started before
-this upgrade can be *watched* from the phone but must be answered at the Mac
-until they are restarted. It is logged once, at registration, rather than only
-as a refusal somebody cannot explain.
-
 ## Durability of mutations
 
 Anything that types into a TTY is claimed durably **before** it types, and the
@@ -334,10 +308,9 @@ do not know".
 
 Open approval cards are persisted too. They used to be memory-only, so a restart
 answered "unknown or already-resolved request" to a tap on a card that was still
-on the screen. A recovered card comes back with **no** fingerprint — this
-process never saw the screen it was created against — and the local-resolution
-sweep either re-establishes identity against the pane that is actually visible
-or resolves the card because the prompt has gone.
+on the screen. A recovered card comes back unheld and read-only: no hook is
+held across a restart, so it is answered at the Mac, and the call's result or
+the local-resolution sweep closes it.
 
 ## Never claiming what it does not know
 
@@ -830,7 +803,7 @@ gate then refuses.
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
 `send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`,
-`codex_compose`, `question_card` and `supported_agents` so the app disables
+`codex_compose`, `question_card`, `hook_only_approvals` and `supported_agents` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -873,6 +846,12 @@ well. `>= 21` answers Claude's `AskUserQuestion` from the phone: the
 `question_card` capability, `ApprovalCard.question_hold` (`held`, `at_mac`,
 `ended`, updated by `question_hold` events), and the `answers` and `decline`
 decisions; `allow` and `option` on a question card are refused for every client.
+`>= 22` answers every Claude card only through its own call's hook, and nothing
+is typed: the `hook_only_approvals` capability, `question_hold` on every Claude
+card, and `text` on a Claude approval as a denial with that reason. For every
+client, any `option` but `1` on an approval is refused, and so is any decision
+on a card that is not held. A phone answers Claude approvals only from a daemon that
+advertises `hook_only_approvals`.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run
@@ -985,15 +964,23 @@ means an incompatible peer cannot use the handshake to probe credentials.
   phone shows "answered at the keyboard" instead of a rejection. If a tool result
   arrives the decision is observed; if the prompt merely left the screen the
   decision is a guess and is flagged `inferred: true`.
-* **`ResolvedBy::Superseded`** — a newer prompt replaced this one before it was
-  answered. Nothing was typed, so a tap on it comes back `rejected` with that
-  reason, not `duplicate`.
+* **`ResolvedBy::Timeout`** — closed with nobody's answer: an approval not held
+  for the phone that waited 15 minutes, or any open card of a run that ended
+  (detail "the session ended before anyone answered"; a held hook is let go).
+  The decision is `inferred`.
+* **`ResolvedBy::Superseded`** — recorded by daemons before minor 22, when a
+  newer prompt replaced a card before it was answered. Nothing was typed, so a
+  tap on it comes back `rejected` with that reason, not `duplicate`.
 * **`AnswerOutcome.indeterminate`** — the decision is known and whether it
-  reached the agent is not, because the daemon stopped between claiming it and
-  recording what became of it. Distinct from `inferred`, which is uncertainty about the
-  *decision*. Never retried.
-* **`ApprovalCard.generation` / `identity_bound`** and the
-  `approval_prompt_bound` event — see [Prompt identity](#prompt-identity).
+  reached the agent is not: the daemon stopped between claiming it and
+  recording what became of it, or (from minor 22) it is a phone answer to a
+  Claude approval, sent to the call's hook (detail "Sent to Claude from a
+  phone"), which Claude may not use. Distinct from `inferred`, which is
+  uncertainty about the *decision*. Never retried.
+* **`ApprovalCard.question_hold` / `identity_bound`** — see
+  [Card identity](#card-identity). Before minor 22, `identity_bound` meant the
+  prompt on screen had been fingerprinted for typing, announced by an
+  `approval_prompt_bound` event this daemon no longer sends.
 
 ### The live terminal (minor 13)
 
@@ -1075,7 +1062,6 @@ Every field is optional. The defaults are what the daemon is validated against.
 | `ws_bind` | tailnet IP | Explicit bind address; otherwise `tailscale ip -4`, else loopback. The QR host is never one known to point somewhere else: bound to loopback the daemon advertises loopback and `codeconnect pair` refuses to print a code, and bound off the tailnet it drops a name this Mac's resolver puts at another address — see [Pairing](#pairing) and [TLS](#tls). |
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
 | `gate_hook` | `"PermissionRequest"` | Which hook waits for the daemon. `"PreToolUse"` or `"none"` also valid. |
-| `hold_ms` | `0` | How long to hold the gate hook for a phone answer. `0` = never hold. Claude's own questions (`AskUserQuestion`) are held for as long as Claude asks them whatever this says, when the phone can answer them: a background agent's only while nobody is at the Mac — see [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md#claudes-own-questions). |
 | `unreachable_ask` | `false` | When the daemon is unreachable, make PreToolUse return `ask` with our reason. Renders the reason to the operator, at the cost of prompting on every tool call. |
 | `input_box_needles` | the composer's box | Whitespace-insensitive needles proving the composer is ready, replacing the shape check. By default the composer is recognised by the box Claude draws it in — its `❯` prompt row directly under a rule of box-drawing horizontals — because the footer hints are dropped as soon as the mode hint or a subagent count needs the room. |
 | `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |
@@ -1223,8 +1209,8 @@ soak/run.sh                       # the live gauntlet, against a real session
 ```
 
 The daemon's own tests drive a **fake supervisor** over a screen the test
-controls: it makes its decisions with the same `protocol::ipc` functions the real
-supervisor calls (prompt presence, then prompt fingerprint), so the interlock is
+controls: before typing it checks for the prompt with the same `protocol::ipc`
+prompt-presence function the real supervisor calls, so the interlock is
 exercised rather than re-implemented. Its one addition is a split screen —
 scrollback is returned only for a capture that did not ask for the visible pane,
 which is how a test can tell "read the screen" from "read the history".
@@ -1295,23 +1281,6 @@ fails the suite instead of failing silently in production.
   protocol minor 1 cannot say which run it means; the daemon matches the live
   approvals, then the ledger's most recent entry. Two runs holding the same
   `request_id` open at once is refused with an instruction rather than guessed.
-* **Sessions started before this build cannot be answered from the phone.**
-  Their supervisors report `protocol_minor` 0 and cannot check a prompt
-  fingerprint, so approvals are shown but not actuated. `codeconnect claude` again (or
-  re-attaching a restarted session) clears it; it is logged once at
-  registration.
-* **A card is briefly not remotely actuatable after it appears.** The prompt is
-  fingerprinted a few hundred milliseconds after the hook fires, because that is
-  when Claude draws it. An answer arriving inside that window is refused with a
-  reason rather than typed against an unverified screen.
-* **A prompt the operator is interacting with reads as a different prompt.**
-  Moving the selection with the arrow keys changes the block the fingerprint
-  covers, so a phone answer is refused. That is the intended direction: whoever
-  is at the keyboard owns that prompt.
 * **A `send_text` from a client below minor 3 is not idempotent.** There is
   nothing to recognise a retry by, so a retried takeover types twice. The daemon
   logs it rather than pretending otherwise.
-* **The prompt fingerprint assumes the pane is static while a prompt is up.**
-  The agent is blocked at that point, so nothing streams — but a future TUI that
-  animates inside the prompt block would produce refusals rather than wrong
-  keystrokes. Failing that way round is the deliberate choice.

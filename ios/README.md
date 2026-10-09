@@ -293,8 +293,6 @@ is enforced.
   the decision card, which gets fresh `@State` when re-presented.
 * **Subscriptions are generation-stamped** (`AppModel.subscribeIfNeeded`).
 * **Sockets are closed by identity** (`DaemonConnection.close(socket:session:)`).
-* **`PaneOptions.parse` takes the last list, never the longest**, within 25 lines
-  of the bottom of the snapshot.
 * **A pairing code is never persisted.** It is single-use with a five-minute
   life; storing one would produce a pairing that looks valid and can never
   connect. The device token from `hello_ack` is what reaches the Keychain — and
@@ -466,6 +464,31 @@ function of the events:
 * Claude's `AskUserQuestion` is one entry, its card: the call's own tool row is not
   drawn, as the card states the question and how it ended. Every other tool keeps its
   row beside its card.
+
+## Claude's approvals
+
+A Claude approval is answered only through the hook Claude holds for that card's
+own call, never by typing into the prompt on screen, which can be another agent's.
+The card is answerable only from a daemon that advertises `hook_only_approvals`
+(protocol minor 22, `DaemonProfile.answersApprovalsByHook`) and only while its
+`question_hold` is `held` (`DecisionCardView.answerSurface`); the send path refuses
+the same cases (`AppModel.decisionMismatch`). Otherwise the card is read-only and
+says why (`DecisionCardView.claudeUnanswerableReason`): the Mac's CodeConnect is too
+old, Claude is asking at the Mac, or the phone can no longer answer it.
+
+A held card offers **Allow**, **Deny** and **Deny with a reason**. Deny with a
+reason is one answer, `{"type":"text","text":…}`, which the daemon returns to the
+agent that asked as its denial. "Always" is chosen at the Mac, where Claude's own
+dialog says exactly what it saves; the phone never offers rows read off the Mac's
+screen.
+
+A sent answer is recorded as sent to Claude, not confirmed (`indeterminate`, detail
+"Sent to Claude from a phone"; `AnswerOutcome.wasSentToClaude`), because Claude
+takes the first answer and may not use the phone's. The banner, the resolved card
+and the timeline say "Sent", never "Confirmed" or "Unconfirmed".
+
+`CodeConnectTests/HookOnlyApprovalTests.swift` reads `minor-22-wire.json`, which
+ccd's own test emits.
 
 ## Claude's questions
 

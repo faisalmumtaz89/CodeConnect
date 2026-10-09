@@ -437,7 +437,7 @@ struct QuestionCardView: View {
     /// What an answerable card says above its controls: why the last answer
     /// did not land, a refused Face ID, or the sample fleet.
     private var notice: AnyView? {
-        if let attempt { return AnyView(ResolutionBanner(attempt: attempt, compose: nil)) }
+        if let attempt { return AnyView(ResolutionBanner(attempt: attempt)) }
         if let authNotice {
             return AnyView(CCBanner("Face ID", message: authNotice, tone: .warning, icon: "faceid"))
         }

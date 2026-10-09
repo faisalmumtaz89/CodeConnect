@@ -2820,9 +2820,8 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
     // and two flags derived independently could tell it to do both or neither.
     let mode = daemon.push.mode();
     Capabilities {
-        // True: an answer reaches the agent either as a hook return or as
-        // keystrokes into the live prompt, and a refused injection is reported
-        // rather than silently dropped.
+        // True: an answer reaches the agent through its call's own held hook,
+        // and one that cannot be handed over is refused rather than dropped.
         can_approve_reliably: true,
         // Minor 7. A phone talking to an older daemon finds no such key in the
         // ack and reads that as false, so the swipe is absent rather than
@@ -2838,12 +2837,9 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         // The hook emits nothing when we are unreachable, so a dead daemon is
         // indistinguishable from no daemon.
         fail_mode: "fail_open".into(),
-        answer_path: if daemon.config.hold_ms > 0 {
-            AnswerPath::HookReturn
-        } else {
-            AnswerPath::SendKeys
-        },
-        hold_secs: daemon.config.hold_ms / 1000,
+        answer_path: AnswerPath::HookReturn,
+        // No fixed hold: a card is held for as long as Claude waits on it.
+        hold_secs: 0,
         send_text: true,
         capture: true,
         // **Direct only, and false in relay mode on purpose.** A client that
@@ -2901,6 +2897,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         // naming an agent opens onto.
         supported_agents: Vec::new(),
         question_card: true,
+        hook_only_approvals: true,
     }
 }
 
@@ -4166,6 +4163,19 @@ mod tests {
         let (server, _) = live_server(protocol::config::Config::default()).await;
         let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
         assert_eq!(reply["capabilities"]["question_card"], true, "{reply}");
+    }
+
+    #[tokio::test]
+    async fn the_ack_says_this_daemon_answers_claude_cards_only_through_their_hooks() {
+        // A phone offers to answer a Claude approval only on this word, and a
+        // phone that does not see it shows the approval read-only: an older
+        // daemon types answers into whatever prompt is on screen.
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(
+            reply["capabilities"]["hook_only_approvals"], true,
+            "{reply}"
+        );
     }
 
     #[tokio::test]

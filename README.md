@@ -58,10 +58,7 @@ iPhone (SwiftUI)  ──wss:// tailnet (ws:// fallback)──▶  ccd (Rust daem
 
 Approval **requests** ride structured channels only — Claude Code's hooks, and Codex's app server through the broker; ACP later. Terminal bytes are never parsed to *derive* a fact — three independent projects tried and abandoned it, and Claude Code's transcript contains no approval events at all. The event log is the only source of truth.
 
-Your **answer** travels one of two ways, and the daemon tells the app which one is live:
-
-- **`hook_return`** — the decision goes back through the hook that asked, bound to Claude's own tool-call id. Nothing is typed anywhere. Enable it by setting `hold_ms` in `~/.codeconnect/config.json`; the trade is that the Mac's own prompt is held while your phone is asked.
-- **`send_keys`** (default) — the answer is typed into the live prompt, because with `hold_ms: 0` the hook has already returned and the local prompt is what is waiting. Here the visible pane *is* read, to prove the prompt on screen is still the one the card was made for, and a keystroke is refused outright if it cannot be. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the four identity checks.
+Your **answer** to a Claude card goes back through the hook Claude holds for that card's own call, bound to its tool-call id, and nothing is typed into a permission prompt: the prompt on screen can be another agent's. For the main conversation the Mac's dialog stays answerable at the same time, and whichever answers first wins; a background agent's card waits for the phone only while you are away from the Mac. A card no hook is held for is answered at the Mac. See [ARCHITECTURE.md](docs/ARCHITECTURE.md#approving-something-safely).
 
 ## Getting started
 
@@ -115,7 +112,7 @@ Two things are worth knowing before the daemon comes back up.
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the pieces fit together, and why each is shaped the way it is
 - [`docs/codex.md`](docs/codex.md) — Codex sessions: launching one, what the phone can and cannot do with it, the security boundary, and what happens when Codex updates
-- [`mac/README.md`](mac/README.md) — the daemon in depth: session and prompt identity, durability, pairing, TLS, configuration, and the chaos soak
+- [`mac/README.md`](mac/README.md) — the daemon in depth: session and card identity, durability, pairing, TLS, configuration, and the chaos soak
 - [`ios/README.md`](ios/README.md) — the app: honesty rules, test seams, the render harness, and the design system
 - [`SECURITY.md`](SECURITY.md) — trust boundaries, including exactly what a stolen phone token can do
 - [`docs/push-gateway.md`](docs/push-gateway.md) — the push relay: architecture, the privacy contract, and the operational runbook (§7)

@@ -155,20 +155,13 @@ pub struct Config {
     /// re-measured against 2.1.220, the return value decides the permission in
     /// both directions and no local prompt appears at all.
     ///
-    /// So answers no longer *have* to be typed into the pane. Moving them onto
-    /// the hook's return value is what would make "approvals ride structured
-    /// channels, never parsed terminal bytes" true of the approval path as well
-    /// — but it is a behavioural change (the local prompt is delayed while the
-    /// gate is held), so it is gated on `hold_ms` rather than switched on here.
+    /// So answers are never typed into the pane: every phone answer to a Claude
+    /// card is that call's held hook's return value.
     #[serde(default = "default_gate_hook")]
     pub gate_hook: String,
 
-    /// How long the daemon holds a gate hook open waiting for a phone answer.
-    /// Default 0: holding delays the *local* prompt, and in mirror mode the
-    /// local prompt is what the phone's answer is typed into.
-    pub hold_ms: u64,
-
-    /// cc-hook's own wait budget. Must exceed `hold_ms`.
+    /// cc-hook's own wait budget on a gate event other than `PermissionRequest`,
+    /// which waits as long as Claude does.
     #[serde(default = "default_gate_timeout_ms")]
     pub gate_timeout_ms: u64,
     #[serde(default = "default_connect_timeout_ms")]
@@ -492,7 +485,6 @@ impl Default for Config {
             ws_bind: None,
             ws_loopback: true,
             gate_hook: default_gate_hook(),
-            hold_ms: 0,
             push_enabled: true,
             apns_key_path: None,
             apns_key_id: None,
@@ -593,13 +585,6 @@ impl Config {
             );
             self.tmux_history_limit = clamped;
         }
-        if self.gate_timeout_ms <= self.hold_ms {
-            eprintln!(
-                "codeconnect: gate_timeout_ms ({}) must exceed hold_ms ({}); raising it",
-                self.gate_timeout_ms, self.hold_ms
-            );
-            self.gate_timeout_ms = self.hold_ms.saturating_add(5_000);
-        }
         self.tail_poll_ms = self.tail_poll_ms.clamp(50, 10_000);
         self.connect_timeout_ms = self.connect_timeout_ms.clamp(10, 5_000);
         self.max_payload_bytes = self.max_payload_bytes.clamp(4 * 1024, 8 * 1024 * 1024);
@@ -662,8 +647,6 @@ mod tests {
     #[test]
     fn defaults_are_coherent() {
         let config = Config::default();
-        assert_eq!(config.hold_ms, 0);
-        assert!(config.gate_timeout_ms > config.hold_ms);
         assert!(!config.unreachable_ask);
         assert_eq!(
             config.gate_event(),
@@ -759,14 +742,6 @@ mod tests {
         let config: Config = serde_json::from_str(r#"{"ws_port": 9999}"#).unwrap();
         assert_eq!(config.ws_port, 9999);
         assert_eq!(config.gate_timeout_ms, default_gate_timeout_ms());
-    }
-
-    #[test]
-    fn gate_timeout_is_raised_above_hold() {
-        let config: Config =
-            serde_json::from_str(r#"{"hold_ms": 60000, "gate_timeout_ms": 1000}"#).unwrap();
-        let config = config.sanitised();
-        assert!(config.gate_timeout_ms > 60_000);
     }
 
     #[test]

@@ -1039,7 +1039,7 @@ import SwiftUI
                     CCField(
                         label: "Reason", text: $fieldText,
                         placeholder: "Tell Claude what to do instead",
-                        hint: "Denies with Escape, then types this into the session.")
+                        hint: "Denies the call, and Claude gets this with the denial.")
                     CCField(
                         label: "Daemon address", text: $monoField,
                         placeholder: "100.x.y.z:8765",

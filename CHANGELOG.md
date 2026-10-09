@@ -3,6 +3,34 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A phone answer goes only to the call it was for
+
+An approval's Allow, Deny or "always allow" from the phone could reach a different Claude
+prompt than the card's. Claude queues background agents' prompts at the Mac, and CodeConnect
+typed the answer into whichever one was on screen, so a tap could run, deny or answer
+another agent's command. Now every answer goes back only through the hook Claude holds for
+that card's own call, and nothing is ever typed into a permission prompt.
+
+- A main-conversation approval waits for the phone and the Mac together; whichever answers
+  first wins. A background agent's waits for the phone only while you are away from the Mac,
+  as its questions do, and appears at the Mac once you are back.
+- Deny stops the main conversation's turn, as Escape does; a background agent's call is denied
+  and the agent carries on. Deny with a reason sends your reason to the agent that asked,
+  instead of typing it into the main conversation.
+- "Allow always" is chosen at the Mac, where Claude's own dialog says exactly what it saves.
+  The phone allows once; it no longer offers a standing permission, because the one it could
+  send can differ from what the Mac's row would save.
+- A card the phone cannot answer that way is shown read-only and says to answer at the Mac:
+  one from a session started before this update, one Claude is showing at the Mac, or one whose
+  wait has ended. An approval answered at the Mac closes on the phone once Claude has run or
+  rejected it, and every open card closes when its session ends.
+- A phone answer is recorded as sent to Claude, not as confirmed: Claude takes the first
+  answer, the Mac's or the phone's, and may not use the phone's. Every phone shows "Sent to
+  Claude from a phone", and the card closes at once.
+- The phone (1.1.5) answers Claude approvals only from a Mac with this update (CodeConnect
+  0.12.0); with an older Mac they are read-only. A phone that has not been updated can still
+  allow and deny; anything else it sends is refused rather than typed.
+
 ## A cleaner session timeline
 
 - A reply no longer sits under two empty lines, and the empty fragments Claude writes
