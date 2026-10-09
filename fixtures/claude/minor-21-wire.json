@@ -67,7 +67,7 @@
     "payload": {
       "card": {
         "display_text": "AskUserQuestion\n{\"questions\":[{\"header\":\"Snapshots\",\"multiSelect\":false,\"options\":[{\"description\":\"Saves space\",\"label\":\"Dedupe with hardlinks (Recommended)\"},{\"description\":\"Frees everything\",\"label\":\"Delete all snapshots\"}],\"question\":\"How should snapshots be stored?\"},{\"header\":\"Checks\",\"multiSelect\":true,\"options\":[{\"description\":\"fast\",\"label\":\"Unit tests\"},{\"description\":\"style\",\"label\":\"Lint\"},{\"description\":\"slow\",\"label\":\"Soak test\"}],\"question\":\"Which checks should run before release?\"},{\"header\":\"Archive\",\"multiSelect\":false,\"options\":[{\"description\":\"untracked\",\"label\":\"Keep on disk (Recommended)\"},{\"description\":\"tracked\",\"label\":\"Commit it\"}],\"question\":\"Where should the plan archive go?\"},{\"header\":\"Layout\",\"multiSelect\":false,\"options\":[{\"description\":\"one column\",\"label\":\"Stacked\",\"preview\":\"+------+\\n| A    |\\n+------+\\n| B    |\\n+------+\"},{\"description\":\"two columns\",\"label\":\"Side by side\",\"preview\":\"+---+---+\\n| A | B |\\n+---+---+\"}],\"question\":\"Which layout do you prefer?\"}]}",
-        "generation": 1,
+        "generation": 0,
         "identity_bound": false,
         "payload_hash": "40ec0770a725f3e8108c36a146835286253b6dbccc1c9588d9c86b6692b2a012",
         "permission_mode": "acceptEdits",
@@ -244,7 +244,7 @@
     "payload": {
       "card": {
         "display_text": "AskUserQuestion\n{\"questions\":[{\"header\":\"Snapshots\",\"multiSelect\":false,\"options\":[{\"description\":\"Saves space\",\"label\":\"Dedupe with hardlinks (Recommended)\"},{\"description\":\"Frees everything\",\"label\":\"Delete all snapshots\"}],\"question\":\"How should snapshots be stored?\"},{\"header\":\"Checks\",\"multiSelect\":true,\"options\":[{\"description\":\"fast\",\"label\":\"Unit tests\"},{\"description\":\"style\",\"label\":\"Lint\"},{\"description\":\"slow\",\"label\":\"Soak test\"}],\"question\":\"Which checks should run before release?\"},{\"header\":\"Archive\",\"multiSelect\":false,\"options\":[{\"description\":\"untracked\",\"label\":\"Keep on disk (Recommended)\"},{\"description\":\"tracked\",\"label\":\"Commit it\"}],\"question\":\"Where should the plan archive go?\"},{\"header\":\"Layout\",\"multiSelect\":false,\"options\":[{\"description\":\"one column\",\"label\":\"Stacked\",\"preview\":\"+------+\\n| A    |\\n+------+\\n| B    |\\n+------+\"},{\"description\":\"two columns\",\"label\":\"Side by side\",\"preview\":\"+---+---+\\n| A | B |\\n+---+---+\"}],\"question\":\"Which layout do you prefer?\"}]}",
-        "generation": 1,
+        "generation": 0,
         "identity_bound": false,
         "payload_hash": "40ec0770a725f3e8108c36a146835286253b6dbccc1c9588d9c86b6692b2a012",
         "permission_mode": "acceptEdits",

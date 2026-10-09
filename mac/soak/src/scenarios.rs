@@ -556,6 +556,7 @@ pub async fn kill_storm(target: &Target, rounds: u32) -> Outcome {
                         }),
                         wait: false,
                         holds_questions: false,
+                        holds_approvals: false,
                     });
                     if ok {
                         posted += 1;
@@ -682,6 +683,7 @@ pub async fn duplicate_hooks(target: &Target, replays: u32) -> Outcome {
         payload,
         wait: false,
         holds_questions: false,
+        holds_approvals: false,
     };
 
     // Concurrently, not in a loop: serial replays would be absorbed by any
@@ -783,6 +785,7 @@ pub async fn answer_storm(target: &Target, taps: u32) -> Outcome {
         }),
         wait: false,
         holds_questions: false,
+        holds_approvals: false,
     });
     if !posted {
         return Outcome::failed("could not post the approval");
@@ -997,6 +1000,7 @@ pub async fn tail_torture(target: &Target) -> Outcome {
         }),
         wait: false,
         holds_questions: false,
+        holds_approvals: false,
     };
 
     // Phase 1 — a normal tail.
@@ -1139,6 +1143,7 @@ pub async fn kill_during_ingest(target: &Target, rounds: u32) -> Outcome {
         }),
         wait: false,
         holds_questions: false,
+        holds_approvals: false,
     };
     if let Err(err) = std::fs::write(&transcript, "") {
         return Outcome::failed(format!("creating the transcript: {err}"));
@@ -1287,6 +1292,7 @@ pub async fn concurrent_commits(target: &Target, writers: u32) -> Outcome {
                 }),
                 wait: false,
                 holds_questions: false,
+                holds_approvals: false,
             })
         }));
     }

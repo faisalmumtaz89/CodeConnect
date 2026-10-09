@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
     }
 
     crate::log_info!(
-        "ccd {} (protocol {}.{}) starting; root={} bind={} host={} tls={} gate={} hold_ms={} managed={}",
+        "ccd {} (protocol {}.{}) starting; root={} bind={} host={} tls={} gate={} managed={}",
         env!("CARGO_PKG_VERSION"),
         protocol::PROTOCOL_VERSION,
         protocol::PROTOCOL_MINOR,
@@ -120,7 +120,6 @@ async fn main() -> Result<()> {
         daemon.endpoint.host,
         daemon.endpoint.tls,
         daemon.config.gate_hook,
-        daemon.config.hold_ms,
         state::launchd_label().unwrap_or_else(|| "no (started by hand)".into()),
     );
     // Straight after the banner that names the bind, and before anything is

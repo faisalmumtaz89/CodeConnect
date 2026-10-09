@@ -54,12 +54,8 @@ struct DecisionCardSheet: View {
 /// uppercased and never abbreviated. The **provenance** underneath carries the
 /// original outcome, the transport and the daemon's own reason, because a
 /// duplicate that does not show you what the first answer was is just a refusal.
-/// The compose result rides last: "denied" and "your sentence reached the
-/// session" succeed and fail independently, and collapsing them would let one
-/// claim the other's success.
 struct ResolutionBanner: View {
     let attempt: AnswerAttempt
-    let compose: ComposeAttempt?
 
     var body: some View {
         VStack(alignment: .leading, spacing: CC.space.xs) {
@@ -71,54 +67,7 @@ struct ResolutionBanner: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let compose {
-                composeLine(compose)
-            }
         }
-    }
-
-    @ViewBuilder
-    private func composeLine(_ compose: ComposeAttempt) -> some View {
-        switch compose {
-        case .sent:
-            line("Reason typed into the session.", tone: .success, glyph: "checkmark")
-        case .refused(let reason):
-            line(
-                "Reason not typed: \(reason)", tone: .warning,
-                glyph: "exclamationmark.triangle.fill")
-        case .failed(let reason):
-            line(
-                "Reason could not be sent: \(reason)", tone: .warning,
-                glyph: "xmark.octagon.fill")
-        case .alreadyApplied:
-            line(
-                "Reason was already typed — not repeated.", tone: .success,
-                glyph: "checkmark")
-        case .indeterminate(let reason):
-            line(
-                "Couldn’t confirm whether the reason was typed: \(reason)", tone: .warning,
-                glyph: "questionmark.circle.fill")
-        case .composerRecovered:
-            // Unreachable from a denial reason (never a slash command), but
-            // the compiler is right to ask and silence would be a lie.
-            line("Reason typed into the session.", tone: .success, glyph: "checkmark")
-        case .composerLost:
-            line(
-                "The Mac's composer did not come back. Open Terminal to recover.",
-                tone: .warning, glyph: "exclamationmark.triangle.fill")
-        }
-    }
-
-    private func line(_ text: String, tone: CCTone, glyph: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
-            CCIcon(glyph, size: 11, weight: .semibold, relativeTo: .caption)
-                .foregroundStyle(tone.color)
-            Text(text)
-                .ccType(CC.type.footnote)
-                .foregroundStyle(tone.color)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var tone: CCTone {
@@ -150,7 +99,7 @@ struct ResolutionBanner: View {
         switch attempt {
         case .applied: return "Confirmed"
         // Never "Confirmed": the daemon did not confirm this one landed.
-        case .indeterminate: return "Unconfirmed"
+        case .indeterminate(let outcome): return outcome.wasSentToClaude ? "Sent" : "Unconfirmed"
         case .duplicate: return "Duplicate"
         case .answeredAtKeyboard: return "Not answered here"
         case .staleCard: return "Out of date"
@@ -169,6 +118,9 @@ struct ResolutionBanner: View {
         // answer but could not confirm it reached the agent, so this must never
         // read as confirmed/applied.
         case .indeterminate(let outcome):
+            if outcome.wasSentToClaude {
+                return "\(outcome.decisionLabel) · \(AnswerOutcome.sentToClaude)"
+            }
             return "\(outcome.decisionLabel), but the daemon couldn’t confirm it landed"
         case .duplicate: return "Already answered"
         case .answeredAtKeyboard: return "Answered at the Mac"
@@ -202,6 +154,8 @@ struct ResolutionBanner: View {
         // Never the `actuationPhrase` — that would claim the answer was "typed at
         // the TTY" or "returned to the hook", the exact positive actuation the
         // daemon could not confirm. The provenance states the uncertainty instead.
+        case .indeterminate(let outcome) where outcome.wasSentToClaude:
+            return "Claude takes the first answer, the Mac’s or this one, so whether it used this one is not known."
         case .indeterminate(let outcome):
             return [
                 "The daemon accepted this but never confirmed it reached the agent.",

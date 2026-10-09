@@ -751,7 +751,8 @@ pub struct Capabilities {
     pub fail_mode: String,
     /// How an answer reaches the agent on this build.
     pub answer_path: AnswerPath,
-    /// Seconds the daemon will hold a gate hook open. 0 = never hold.
+    /// Seconds the daemon will hold a gate hook open, from when holding had a
+    /// fixed bound. 0: a held card is held for as long as Claude waits on it.
     pub hold_secs: u64,
     pub send_text: bool,
     pub capture: bool,
@@ -901,17 +902,26 @@ pub struct Capabilities {
     /// approval.
     #[serde(default)]
     pub question_card: bool,
+    /// **Every Claude card decision this daemon takes reaches the card's own
+    /// call through the hook Claude holds for it, and nothing is ever typed**
+    /// (minor 22). Its Claude cards carry `question_hold`. Absent decodes
+    /// `false`: an older daemon
+    /// types an approval's answer into whatever prompt is on screen, so a phone
+    /// shows its Claude approval cards read-only.
+    #[serde(default)]
+    pub hook_only_approvals: bool,
 }
 
 /// How the daemon applies an answer on the *installed* Claude Code build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnswerPath {
-    /// Structured hook return — the agent never renders a prompt.
+    /// Structured hook return: the answer goes back through the hook Claude
+    /// holds for the call.
     HookReturn,
-    /// Keystrokes into the live prompt, after positive presence confirmation.
-    /// Physically identical to answering at the Mac's keyboard, which is what
-    /// makes first-answer-wins a property of the TTY rather than of a protocol.
+    /// Keystrokes into the live prompt. Older daemons answered approvals this
+    /// way; from minor 22 it describes only an answer made at the Mac's own
+    /// keyboard, or one an older daemon typed.
     SendKeys,
     /// The JSON-RPC response to the app-server's own `requestApproval`, written
     /// on the Codex link's socket.
@@ -932,10 +942,13 @@ pub enum AnswerDecision {
     Allow,
     Deny,
     /// Pick the nth option exactly as rendered (1-based, as Claude numbers them).
+    /// On a Claude approval from minor 22 only `1`, the dialog's plain yes, is
+    /// taken; any other is refused before anything is claimed.
     Option {
         index: u32,
     },
-    /// Free-text takeover.
+    /// Free text. On a Claude approval from minor 22: a denial with this reason,
+    /// returned to the agent that asked through its call's hook.
     Text {
         text: String,
     },
@@ -977,11 +990,12 @@ pub struct QuestionAnswer {
     pub notes: Option<String>,
 }
 
-/// Whether the phone can answer an `AskUserQuestion` card (minor 21).
+/// Whether the phone can answer a Claude card: an `AskUserQuestion` card from
+/// minor 21, every Claude card from minor 22.
 ///
-/// Present on such a card and on its `question_hold` events, absent on every
-/// other card. The latest `question_hold` event for a request wins over the
-/// value the card was created with.
+/// Present on such a card and on its `question_hold` events, absent on a Codex
+/// card. The latest `question_hold` event for a request wins over the value the
+/// card was created with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionHold {
@@ -1042,12 +1056,14 @@ pub struct AnswerOutcome {
     #[serde(default, skip_serializing_if = "is_false")]
     pub inferred: bool,
     /// True when the daemon knows *what* was decided but not whether it landed:
-    /// it was killed between claiming the answer and recording its outcome.
+    /// it was killed between claiming the answer and recording its outcome, or
+    /// (from minor 22) it is a phone answer to a Claude approval, sent to the
+    /// call's own hook, which Claude may not use because it takes the first
+    /// answer (detail "Sent to Claude from a phone").
     ///
     /// Distinct from `inferred`, which is uncertainty about the decision. This
     /// is uncertainty about the *actuation*, and it is the reason such a request
-    /// is never retried: a second injection into a live TTY cannot be taken
-    /// back, while an unanswered prompt is still sitting in front of a human.
+    /// is never retried: an answer sent twice cannot be taken back.
     #[serde(default, skip_serializing_if = "is_false")]
     pub indeterminate: bool,
 }
@@ -1398,23 +1414,25 @@ pub struct ApprovalCard {
     /// never a gate — CodeConnect has no permission model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk: Option<crate::risk::RiskAssessment>,
-    /// The prompt generation this card belongs to (minor 3).
-    ///
-    /// Per run, monotonic, one per structured permission request. A card whose
-    /// generation is behind the session's current one is answering a prompt
-    /// that is no longer on screen, and the daemon refuses it.
+    /// The card's place in its run's sequence of permission requests (minor 3):
+    /// per run, monotonic, one per structured permission request. From minor
+    /// 22 a Claude card carries 0: it is answered through its own call's hook
+    /// whatever else is on screen, so its place in the run decides nothing.
     #[serde(default)]
     pub generation: u64,
-    /// True once the daemon has fingerprinted the prompt this card is for and
-    /// can prove, at the moment of typing, that the same prompt is still up.
+    /// True when the phone can answer this card with an allow or a deny. From
+    /// minor 22, for a Claude card: a held approval, answered through its own
+    /// call's hook (a question takes no allow, so it is never true there).
+    /// Before, it meant the prompt on screen had been fingerprinted for typing.
     ///
     /// False means the card is worth *showing* — a human should know an agent
     /// is waiting — but must be answered at the Mac. Defaulted false so a card
     /// from a daemon that had no such concept is never assumed to be bound.
     #[serde(default)]
     pub identity_bound: bool,
-    /// On an `AskUserQuestion` card only (minor 21): whether the phone can
-    /// answer it now. See [`QuestionHold`].
+    /// Whether the phone can answer this card now: on an `AskUserQuestion` card
+    /// from minor 21, and on every Claude card from minor 22. See
+    /// [`QuestionHold`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_hold: Option<QuestionHold>,
 }
@@ -1689,10 +1707,16 @@ mod tests {
              card's `question_hold`, and the `answers` and `decline` decisions — is \
              minor 21"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 22,
+            "every Claude card answered only through its own call's hook — \
+             `hook_only_approvals`, `question_hold` on every Claude card, and \
+             `text` as a denial with that reason — is minor 22"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 21);
+        assert_eq!(crate::PROTOCOL_MINOR, 22);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2122,8 +2146,8 @@ mod tests {
         }
     }
 
-    /// A card that is not a question carries no `question_hold` at all, so every
-    /// other card is byte-identical to minor 20.
+    /// A card with no `question_hold` decodes as none: a card from before minor
+    /// 22 that is not a question, or a Codex card.
     #[test]
     fn only_a_question_card_names_its_hold() {
         let card: ApprovalCard = serde_json::from_str(
@@ -2181,6 +2205,7 @@ mod tests {
             codex_compose: true,
             supported_agents: vec![crate::agent::AgentKind::Claude],
             question_card: true,
+            hook_only_approvals: true,
         }
     }
 

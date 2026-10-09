@@ -1524,23 +1524,6 @@ impl Store {
         Ok(seq as u64)
     }
 
-    /// How many events of one kind this run has logged.
-    ///
-    /// Used to derive the prompt generation. Counting logged facts rather than
-    /// keeping a counter is what makes the generation idempotent for free: a
-    /// replayed hook produces no new event, so it produces no new generation,
-    /// and there is no in-memory number to roll back when a duplicate is
-    /// discovered — or to lose across a restart.
-    pub fn count_events_of_kind(&self, session_uid: &str, kind: &EventKind) -> Result<u64> {
-        let conn = self.read();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM events WHERE session_uid = ?1 AND kind = ?2",
-            params![session_uid, kind.as_str()],
-            |row| row.get(0),
-        )?;
-        Ok(count as u64)
-    }
-
     /// **Has this run already filed the terminal named by
     /// `terminal_source_event_id`?**
     ///

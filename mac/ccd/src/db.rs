@@ -32,7 +32,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use protocol::event::{Event, EventKind, Lifecycle, PendingEvent};
+use protocol::event::{Event, Lifecycle, PendingEvent};
 use protocol::pairing::DeviceSummary;
 use protocol::ws::AnswerOutcome;
 
@@ -110,7 +110,6 @@ db_ops! {
     fn max_seq(session_uid: String) -> u64;
     fn hook_event_seq(session_uid: String, source_event_id: String) -> Option<u64>;
     fn load_cursor(session_uid: String) -> Option<crate::store::TailCursor>;
-    fn count_events_of_kind(session_uid: String, kind: EventKind) -> u64;
     fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;
     /// The durable Codex generation high-water for one uid, or
@@ -642,7 +641,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::event::{SessionKey, Source};
+    use protocol::event::{EventKind, SessionKey, Source};
 
     fn temp_db() -> Db {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

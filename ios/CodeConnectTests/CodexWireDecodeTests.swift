@@ -258,7 +258,7 @@ final class CodexWireDecodeTests: XCTestCase {
         // And it gets no answer surface at all — never Claude's by default.
         guard case .noneAnswerable = DecisionCardView.answerSurface(
             card: try XCTUnwrap(capturedCards().first?.card), agent: summary.agent,
-            paneSnapshot: nil)
+            hold: nil, hookOnlyApprovals: true)
         else { return XCTFail("an unknown agent must not inherit a vocabulary") }
     }
 

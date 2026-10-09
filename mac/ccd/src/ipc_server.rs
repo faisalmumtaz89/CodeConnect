@@ -994,6 +994,129 @@ mod tests {
         );
     }
 
+    /// **A held approval's hook is let go when its run ends.** cc-hook watches
+    /// its parent, but its parent need not be Claude (a shell prefix that does
+    /// not `exec`), so once the run is marked exited the daemon answers the
+    /// hook with no decision and closes its connection, and closes the card:
+    /// a phone answer afterwards sends nothing.
+    #[tokio::test]
+    async fn a_held_approvals_hook_is_let_go_when_its_run_ends() {
+        let (daemon, socket) = served_daemon().await;
+        let uid = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
+        assert!(matches!(
+            exchange(
+                &socket,
+                &register_frame(uid, "cc-1", protocol::agent::AgentKind::Claude)
+            )
+            .await,
+            DaemonFrame::Ack
+        ));
+        let hook = |event: &str, extra: serde_json::Value, wait: bool| {
+            let mut payload = serde_json::json!({
+                "hook_event_name": event,
+                "prompt_id": "p1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "touch b.txt"},
+            });
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::to_string(&ClientFrame::Hook(protocol::ipc::HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.into()),
+                event: event.into(),
+                payload,
+                wait,
+                holds_questions: wait,
+                holds_approvals: wait,
+            }))
+            .unwrap()
+        };
+        let send = |line: String| {
+            let socket = socket.clone();
+            async move {
+                let mut stream = UnixStream::connect(&socket).await.unwrap();
+                stream.write_all(line.as_bytes()).await.unwrap();
+                stream.write_all(b"\n").await.unwrap();
+                stream
+            }
+        };
+        drop(
+            send(hook(
+                "PreToolUse",
+                serde_json::json!({"tool_use_id": "toolu_b"}),
+                false,
+            ))
+            .await,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let held = send(hook("PermissionRequest", serde_json::json!({}), true)).await;
+
+        let events = |kind: &str| {
+            daemon
+                .store
+                .events_after(uid, 0, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind.as_str() == kind)
+                .map(|event| event.payload)
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..200 {
+            if !events("approval_request").is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let card = events("approval_request")[0]["card"].clone();
+        assert_eq!(card["question_hold"], "held");
+
+        daemon
+            .session_exited("cc-1", Some(uid), Some(0), None, None)
+            .await;
+
+        let mut held = BufReader::new(held);
+        let mut reply = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            held.read_line(&mut reply),
+        )
+        .await
+        .expect("the held hook was never answered")
+        .unwrap();
+        match serde_json::from_str(&reply).unwrap() {
+            DaemonFrame::HookReply { decision } => {
+                assert_eq!(decision, protocol::hook::HookDecision::passthrough())
+            }
+            other => panic!("{other:?}"),
+        }
+        reply.clear();
+        assert_eq!(held.read_line(&mut reply).await.unwrap(), 0, "closed");
+
+        let resolved = events("approval_resolved");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0]["resolved_by"], "timeout");
+        assert_eq!(
+            resolved[0]["detail"],
+            "the session ended before anyone answered"
+        );
+        match daemon
+            .answer(
+                "toolu_b",
+                card["payload_hash"].as_str().unwrap(),
+                protocol::ws::AnswerDecision::Allow,
+                Some(uid),
+            )
+            .await
+        {
+            protocol::ws::AnswerResult::Duplicate { outcome, .. } => {
+                assert_eq!(outcome.resolved_by, protocol::ws::ResolvedBy::Timeout)
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// **A held question learns that Claude ended its hook from the connection
     /// alone.** cc-hook keeps a waiting connection open until it exits (Claude
     /// SIGTERMs it on Escape, an interrupt or the session ending), so the daemon
@@ -1022,6 +1145,7 @@ mod tests {
                 payload,
                 wait,
                 holds_questions: wait,
+                holds_approvals: wait,
             }))
             .unwrap()
         };

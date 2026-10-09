@@ -506,6 +506,10 @@ final class DecisionCardLiveBackingTests: XCTestCase {
     /// even though a stale dead-socket `.failed` is still stored.
     func testRecoveredIndeterminateOutcomeWinsAndDisablesBar() async throws {
         let model = AppModel(cache: EventCache())  // NOT connected
+        // What the daemon said before the socket died: it answers Claude's
+        // approvals through their hooks, so the answer reaches the dead socket.
+        model.connection.simulateCapabilitiesForTesting(
+            Capabilities(extra: ["hook_only_approvals": .bool(true)]), minor: 22)
         try ingest(requestEvent, into: model)
         describeSessionAsClaude(model)
         await settle(model)

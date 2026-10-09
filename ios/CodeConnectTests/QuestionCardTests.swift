@@ -293,13 +293,13 @@ final class QuestionCardTests: XCTestCase {
 
     // MARK: No Allow, ever
 
-    /// Allow and an option type keys that pick answers nobody chose. Under no
-    /// capability, hold or pane is either offered or sent for Claude's question.
+    /// Allow and an option would pick answers nobody chose. Under no capability
+    /// or hold is either offered or sent for Claude's question.
     func testAQuestionCardNeverOffersOrSendsAllowOrAnOption() throws {
         let card = try heldCard()
-        let pane = "Do you want to proceed?\n❯ 1. Yes\n  2. Yes, and don't ask again\n  3. No"
         XCTAssertEqual(
-            DecisionCardView.answerSurface(card: card, agent: .claude, paneSnapshot: pane),
+            DecisionCardView.answerSurface(
+                card: card, agent: .claude, hold: .held, hookOnlyApprovals: true),
             .noneAnswerable, "the fallback layout is read-only for a question")
         XCTAssertNotNil(DecisionCardView.questionCard(card: card, agent: .claude))
         XCTAssertNil(DecisionCardView.questionCard(card: card, agent: nil), "unknown agent")
@@ -333,8 +333,9 @@ final class QuestionCardTests: XCTestCase {
             }
         }
         XCTAssertNil(
-            AppModel.decisionMismatch(decision: .allow, agent: .claude),
-            "an ordinary approval still takes Allow")
+            AppModel.decisionMismatch(
+                decision: .allow, agent: .claude, answersApprovalsByHook: true),
+            "an ordinary approval still takes Allow from a daemon that answers it by its hook")
     }
 
     func testTheMacAnsweringFirstReadsAsAnsweredAtTheMac() {

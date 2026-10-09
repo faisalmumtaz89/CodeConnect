@@ -464,7 +464,7 @@ fn capabilities() -> Capabilities {
         // it in between.
         can_approve_reliably: true,
         fail_mode: "fail_open".into(),
-        answer_path: AnswerPath::SendKeys,
+        answer_path: AnswerPath::HookReturn,
         hold_secs: 0,
         send_text: true,
         // No pane, no shell, no Claude Code binary, no APNs key, and nothing
@@ -495,6 +495,9 @@ fn capabilities() -> Capabilities {
         // means nothing yet. An empty list is skipped on the wire.
         supported_agents: Vec::new(),
         question_card: false,
+        // Its cards are answered by this server and nothing else: there is no
+        // screen to type into.
+        hook_only_approvals: true,
     }
 }
 

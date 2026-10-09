@@ -519,7 +519,28 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     on a question card are refused before anything is claimed or typed, and
 ///     `deny` on one is a decline. A minor-20 phone still shows the question as an
 ///     approval; nothing it can tap chooses an answer for the person.
-pub const PROTOCOL_MINOR: u32 = 21;
+///   * `22` — **Every Claude card is answered only through the hook Claude holds
+///     for its own call. Nothing is typed into a permission prompt.**
+///
+///     A phone's answer used to be typed into whichever prompt was on screen,
+///     and Claude queues background agents' prompts there, so it could answer
+///     another agent's call. Additive, and a client written against minor 21
+///     needs all of it:
+///       - [`ws::Capabilities::hook_only_approvals`] — this daemon answers
+///         Claude cards only that way. A client shows a daemon's Claude
+///         approvals as answerable only when it is advertised.
+///       - [`ws::ApprovalCard::question_hold`] — on every Claude card now, not
+///         only a question: whether the phone can answer it now, with its
+///         `question_hold` events as in minor 21.
+///       - [`ws::AnswerDecision::Text`] on a Claude approval — a denial with
+///         that reason, sent to the agent that asked.
+///
+///     What changed for every client, including older ones: nothing is typed.
+///     `allow`, `deny` and `option` 1 on a held approval go back through its
+///     hook; any other `option` is refused before anything is claimed, and so
+///     is any decision on a card that is not held. `identity_bound` is true
+///     exactly on a held approval.
+pub const PROTOCOL_MINOR: u32 = 22;
 
 #[cfg(test)]
 mod ledger_tests {

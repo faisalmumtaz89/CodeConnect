@@ -829,6 +829,12 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// `answers` and `decline` decisions. Absent is false — an older daemon
     /// shows the question as an ordinary approval.
     var questionCard: Bool { advertises(["question_card"]) }
+    /// This daemon answers every Claude card only through the hook Claude holds
+    /// for that card's own call, and never types (minor 22). Absent is false:
+    /// an older daemon types an approval's answer into whatever prompt is on
+    /// screen, which can be another agent's, so its Claude approvals are shown
+    /// read-only.
+    var hookOnlyApprovals: Bool { advertises(["hook_only_approvals"]) }
     /// Which agents this daemon hosts. **Omitted entirely while it would only
     /// name Claude** (`ws.rs`), so empty and absent both read as `["claude"]`.
     var supportedAgents: [String] {
@@ -934,7 +940,7 @@ extension AnswerDecision: Codable {
         case .deny: return "Denied"
         case .option(let index): return "Chose option \(index)"
         case .optionId(let id): return "Chose option \(id)"
-        case .text: return "Replied with text"
+        case .text: return "Denied with a reason"
         case .answers: return "Answered"
         case .decline: return "Declined"
         case .unrecognised(let raw): return "Answered (\(raw))"
@@ -1091,12 +1097,27 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         inferred ? "Closed" : decision.label
     }
 
+    /// A phone's answer to a Claude approval, as a minor-22 daemon records it:
+    /// handed to the call's own hook, which is all that is known. Claude takes
+    /// the first answer and may not use this one, so it is shown as sent, never
+    /// as confirmed and never as an answer that went missing.
+    var wasSentToClaude: Bool { indeterminate && detail?.hasPrefix(Self.sentToClaude) == true }
+
+    /// The daemon's own words for that record (`SENT_TO_CLAUDE` in ccd), which
+    /// it follows with a note when the record could not be written.
+    static let sentToClaude = "Sent to Claude from a phone"
+
+    /// The daemon's words (`RUN_ENDED` in ccd) for a card closed because the
+    /// session that asked it ended, which it records as a `timeout`.
+    static let sessionEnded = "the session ended before anyone answered"
+
     /// Where the answer came from, as far as the record proves it: `phone`
     /// names a paired phone, not this one, so "a phone"; `local` is the Mac.
     var provenance: String {
         switch resolvedBy {
         case .phone: return "from a phone"
         case .local: return "at the Mac"
+        case .timeout where detail == Self.sessionEnded: return "when the session ended"
         case .timeout: return "by timeout - nobody answered"
         case .superseded: return "superseded"
         }
@@ -1541,9 +1562,10 @@ struct ApprovalCard: Codable, Sendable, Hashable {
     /// feature level 1; absent on older daemons. Interpreting it is
     /// `RiskAssessment`'s job, not this type's.
     let risk: WireRisk?
-    /// On an `AskUserQuestion` card from a minor-21 daemon only: whether the
-    /// phone can answer it as the card was raised. A later `question_hold`
-    /// event overrides it — see `ApprovalItem.questionHold`.
+    /// Whether the phone can answer it as the card was raised: on an
+    /// `AskUserQuestion` card from a minor-21 daemon, and on every Claude card
+    /// from minor 22. A later `question_hold` event overrides it — see
+    /// `ApprovalItem.questionHold`.
     var questionHold: QuestionHold? = nil
 
     enum CodingKeys: String, CodingKey {

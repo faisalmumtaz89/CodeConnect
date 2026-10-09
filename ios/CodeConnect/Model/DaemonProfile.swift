@@ -125,6 +125,13 @@ struct DaemonProfile: Sendable, Hashable {
             && capabilities?.questionCard == true
     }
 
+    /// **The daemon answers a Claude approval only through the hook Claude holds
+    /// for that card's own call** — the `hook_only_approvals` capability (minor
+    /// 22). Without it a Claude approval is read-only here: an older daemon
+    /// types the answer into whatever prompt is on screen, which can be another
+    /// agent's.
+    var answersApprovalsByHook: Bool { capabilities?.hookOnlyApprovals == true }
+
     /// Why a Codex card cannot be answered from this phone, or nil when it can.
     ///
     /// **What is wrong, what to do now, what to do about it** — in that order,

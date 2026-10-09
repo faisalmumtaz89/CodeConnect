@@ -64,10 +64,10 @@ const RESPAWN_AFTER: Duration = Duration::from_secs(55);
 /// faster one.
 const BROADCAST_CAPACITY: usize = 1024;
 
-/// What a run's answer is applied *as*. `ccd` reports `send_keys` whenever it
-/// holds no hook open, which is this server's shape too: nothing is held, and an
-/// answer settles the moment it arrives.
-const APPLIED_VIA: AnswerPath = AnswerPath::SendKeys;
+/// What a run's answer is applied *as*: `ccd` returns every Claude card's answer
+/// through the hook held for it, and this server's cards are answered by the
+/// server itself, so nothing is ever typed here either.
+const APPLIED_VIA: AnswerPath = AnswerPath::HookReturn;
 
 /// The needle a real send matched at the Mac's prompt. There is no prompt here,
 /// and this is the string the daemon reports for the ordinary case.
@@ -336,11 +336,10 @@ impl Fleet {
         );
         let _ = self.events_tx.send(resolved);
 
-        // A deny runs nothing, so there is no tool call to show. Anything else is
-        // treated as permission to proceed — the demo's cards offer allow and
-        // deny, and an option or a free-text takeover both mean the human chose
-        // to let the turn continue.
-        if matches!(decision, AnswerDecision::Deny) {
+        // A deny runs nothing, so there is no tool call to show, and a denial
+        // with a reason is a deny. Anything else is treated as permission to
+        // proceed.
+        if matches!(decision, AnswerDecision::Deny | AnswerDecision::Text { .. }) {
             let scripted = &self.script.runs[run.slot];
             run.stage = Stage::Aftermath {
                 allowed: false,
@@ -807,7 +806,8 @@ impl Run {
             // `cards`, and resolving it takes it out. There is no screen here for
             // the prompt to leave without this server noticing.
             identity_bound: true,
-            question_hold: None,
+            // Held for the phone for the same reason.
+            question_hold: Some(protocol::ws::QuestionHold::Held),
         };
         // The same two halves `ccd` files: the card the phone renders and
         // answers, and the hook that raised it.
@@ -990,7 +990,7 @@ mod tests {
             other => panic!("the first answer must apply; got {other:?}"),
         };
         assert_eq!(applied.resolved_by, ResolvedBy::Phone);
-        assert_eq!(applied.applied_via, AnswerPath::SendKeys);
+        assert_eq!(applied.applied_via, AnswerPath::HookReturn);
         assert!(!applied.inferred && !applied.indeterminate);
         // Named by the run's tmux name, as `ccd` records it.
         assert_eq!(applied.session_id, "cc-1");
