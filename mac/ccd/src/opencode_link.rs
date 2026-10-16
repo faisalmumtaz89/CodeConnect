@@ -129,7 +129,11 @@ pub(crate) enum LinkFrame {
         /// The newest stage of every reply this activation of the plugin was
         /// told to send, so a daemon that was not there for the stage frames
         /// still learns how each reply ended.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(
+            default,
+            deserialize_with = "readable_commands",
+            skip_serializing_if = "Vec::is_empty"
+        )]
         commands: Vec<AnswerCommand>,
     },
     SyncRequest {
@@ -226,6 +230,63 @@ pub(crate) struct AnswerCommand {
     pub(crate) reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) http: Option<u16>,
+}
+
+/// `sync_begin.commands`, one entry at a time. The entries are the plugin's
+/// memory of its activation and come back on every snapshot, so an entry this
+/// build cannot read (a stage it does not know, an `http` that is no status)
+/// is skipped and logged rather than failing the frame: failing it would fail
+/// every snapshot after it, each asking for the next.
+fn readable_commands<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<AnswerCommand>, D::Error> {
+    let entries = Vec::<Value>::deserialize(deserializer)?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| {
+            let request_id = entry
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map_or_else(|| "?".to_string(), |id| bounded(id, LOG_TEXT_BYTES));
+            match serde_json::from_value::<AnswerCommand>(entry) {
+                Ok(command) => Some(command),
+                Err(err) => {
+                    crate::log_info!(
+                        "opencode link: skipped an answer command for {request_id}: {err}"
+                    );
+                    None
+                }
+            }
+        })
+        .collect())
+}
+
+/// The most of the plugin's free text one log line carries.
+const LOG_TEXT_BYTES: usize = 256;
+
+fn bounded(text: &str, max: usize) -> String {
+    crate::codex_approval::bounded(text, max)
+}
+
+/// The log line for an answer stage the daemon has no attempt to settle.
+fn answer_note(
+    request_id: &str,
+    stage: AnswerStage,
+    reason: Option<&str>,
+    detail: Option<&str>,
+    http: Option<u16>,
+) -> String {
+    let request_id = bounded(request_id, LOG_TEXT_BYTES);
+    let reason = reason.map_or_else(|| "-".to_string(), |reason| bounded(reason, LOG_TEXT_BYTES));
+    let http = http.map_or_else(|| "-".to_string(), |http| http.to_string());
+    let detail = detail
+        .filter(|detail| !detail.is_empty())
+        .map(|detail| format!(" {}", bounded(detail, LOG_TEXT_BYTES)))
+        .unwrap_or_default();
+    format!(
+        "answer stage `{}` for {request_id} with no attempt to settle (reason {reason}, http {http}){detail}",
+        stage.as_str()
+    )
 }
 
 /// The identifiers a `stub` keeps, each present only when the event had it.
@@ -1358,13 +1419,15 @@ async fn step(
             // The daemon sends no reply over this link, so a stage the plugin
             // reports belongs to no attempt of its own: it is noted and
             // settles nothing.
-            let reason = reason.as_deref().unwrap_or("-");
-            let detail = detail.as_deref().unwrap_or("");
-            let http = http.map_or_else(|| "-".to_string(), |http| http.to_string());
             crate::log_info!(
-                "opencode link {link}: answer stage `{}` for {request_id} with no attempt to settle \
-                 (reason {reason}, http {http}) {detail}",
-                stage.as_str()
+                "opencode link {link}: {}",
+                answer_note(
+                    request_id,
+                    *stage,
+                    reason.as_deref(),
+                    detail.as_deref(),
+                    *http
+                )
             );
         }
         LinkFrame::SyncBegin { sync, commands, .. } => {
@@ -1726,6 +1789,68 @@ mod tests {
             panic!("not a sync_begin");
         };
         assert!(commands.is_empty());
+    }
+
+    /// The plugin sends its commands memory on every snapshot of the
+    /// activation: an entry the daemon could not read would otherwise fail
+    /// each `sync_begin`, and each failure asks for the next snapshot.
+    #[test]
+    fn an_answer_command_this_build_cannot_read_is_skipped_and_the_rest_are_kept() {
+        let frame = link_frame(&serde_json::json!({
+        "t":"sync_begin","sync":7,"reason":"requested","scope":"full","as_of":50,
+        "status":{},"status_ok":true,
+        "commands":[
+            {"request_id":"per_a","stage":"retrying"},
+            {"request_id":"per_b","stage":"result","http":200},
+            {"request_id":"per_c","stage":"result","http":70000},
+            {"stage":"sent"}
+        ]}));
+        let LinkFrame::SyncBegin { commands, .. } = &frame else {
+            panic!("not a sync_begin");
+        };
+        assert_eq!(
+            commands,
+            &[AnswerCommand {
+                request_id: "per_b".into(),
+                stage: AnswerStage::Result,
+                reason: None,
+                http: Some(200),
+            }]
+        );
+        assert!(
+            SyncAssembly::begin(&frame).is_some(),
+            "the snapshot proceeds"
+        );
+        assert!(decode(
+            br#"{"t":"sync_begin","sync":1,"reason":"connect","scope":"full","as_of":0,
+                "status":{},"status_ok":true,"commands":null}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_answer_stage_is_logged_with_its_free_text_bounded() {
+        let detail = "d".repeat(LOG_TEXT_BYTES * 8);
+        let note = answer_note(
+            "per_1",
+            AnswerStage::Refused,
+            Some("error"),
+            Some(&detail),
+            None,
+        );
+        assert!(note.starts_with(
+            "answer stage `refused` for per_1 with no attempt to settle (reason error, http -) dddd"
+        ));
+        assert!(note.contains(" bytes elided;"), "{note}");
+        assert!(note.len() < LOG_TEXT_BYTES * 2, "{}", note.len());
+        assert_eq!(
+            answer_note("per_1", AnswerStage::Result, None, None, Some(200)),
+            "answer stage `result` for per_1 with no attempt to settle (reason -, http 200)"
+        );
+        assert_eq!(
+            answer_note("per_1", AnswerStage::Sent, None, Some(""), None),
+            "answer stage `sent` for per_1 with no attempt to settle (reason -, http -)"
+        );
     }
 
     #[test]
