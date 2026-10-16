@@ -131,7 +131,8 @@ const FRAME = {
   ev: [["t", "seq", "type", "properties"]],
   stub: [["t", "seq", "type", "ids", "size", "sha256"], ["t", "seq", "type", "ids", "part_type", "size", "sha256"], ["t", "seq", "type", "ids", "part_type", "status", "size", "sha256"]],
   card_stub: [["t", "seq", "type", "properties", "size", "sha256"]],
-  sync_begin: [["t", "sync", "reason", "scope", "as_of", "status", "status_ok"]],
+  answer: [["t", "seq", "request_id", "stage"], ["t", "seq", "request_id", "stage", "reason", "detail"], ["t", "seq", "request_id", "stage", "http"]],
+  sync_begin: [["t", "sync", "reason", "scope", "as_of", "status", "status_ok"], ["t", "sync", "reason", "scope", "as_of", "status", "status_ok", "commands"]],
   sync_page: [["t", "sync", "n", "items"]],
   sync_request: [["t", "sync", "kind", "request", "verdict"], ["t", "sync", "kind", "stub", "verdict"]],
   sync_end: [
@@ -151,6 +152,17 @@ const ITEM = [
   ["error", "sessionID"],
 ]
 const DEAD = /^(absent|session-missing|not-busy|anchor|asked-before-activation|epoch-evicted|epoch:(abort|stop|idle|retry|deleted|disposed)(:ancestor)?)$/
+/** An answer stage, and the fields only that stage carries; a `commands` entry is the same without `detail`. */
+const STAGE = { received: [], refused: ["reason"], sent: [], result: ["http"] }
+/** @param {any} a @param {boolean} entry */
+function stageErrors(a, entry) {
+  const only = (/** @type {Record<string, string[]>} */ (STAGE))[a.stage]
+  if (!only) return [`stage ${JSON.stringify(a.stage)}`]
+  const extra = Object.keys(a).filter((k) => !["request_id", "stage"].includes(k) && !(k === "detail" && !entry && a.stage === "refused"))
+  if (JSON.stringify(extra) !== JSON.stringify(only)) return [`${a.stage} with ${JSON.stringify(extra)}`]
+  if (a.stage === "result" && !Number.isInteger(a.http)) return ["http not a status"]
+  return []
+}
 
 /** @param {any} f */
 function shapeErrors(f) {
@@ -166,6 +178,11 @@ function shapeErrors(f) {
     if (v.live !== (v.dead === null) || (v.dead !== null && !DEAD.test(v.dead))) errs.push("verdict " + JSON.stringify(v))
     if (![true, false, "unknown"].includes(v.listed)) errs.push("listed")
   }
+  if (kind === "answer") {
+    const { t, seq, ...stage } = f
+    errs.push(...stageErrors(stage, false))
+  }
+  if (kind === "sync_begin") for (const c of f.commands ?? []) errs.push(...stageErrors(c, true))
   for (const b of Object.values(f.lower ?? f.acked ?? {}))
     if (!(b.from === null || typeof b.from === "string") || typeof b.inclusive !== "boolean") errs.push("bound " + JSON.stringify(b))
   // No history without a session list: a requests-only snapshot, or a full one whose list failed, has no bounds or pages.

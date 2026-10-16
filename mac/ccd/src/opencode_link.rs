@@ -12,6 +12,8 @@
 //!     same over the frame cap, ids and digest only; `card_stub` — a permission or
 //!     question card over the frame cap;
 //!   * `head` — the session the keyboard is showing;
+//!   * `answer` — one stage of a reply the plugin was told to send to the
+//!     server, by request id;
 //!   * `sync_begin`, `sync_request`, `sync_page`, `sync_end`, `settled` — one
 //!     snapshot read from the OpenCode server, which [`SyncAssembly`] turns into a
 //!     [`Snapshot`].
@@ -101,6 +103,20 @@ pub(crate) enum LinkFrame {
         #[serde(flatten)]
         route: HeadRoute,
     },
+    /// How far the plugin got with a reply it was told to send: `received`,
+    /// then `refused` (with the plugin's reason code and its free text) or
+    /// `sent`, then `result` with the server's HTTP status.
+    Answer {
+        seq: u64,
+        request_id: String,
+        stage: AnswerStage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        http: Option<u16>,
+    },
     SyncBegin {
         sync: u64,
         /// `connect`, `requested`, or `trigger:<event type>`.
@@ -110,6 +126,11 @@ pub(crate) enum LinkFrame {
         as_of: u64,
         status: Map<String, Value>,
         status_ok: bool,
+        /// The newest stage of every reply this activation of the plugin was
+        /// told to send, so a daemon that was not there for the stage frames
+        /// still learns how each reply ended.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        commands: Vec<AnswerCommand>,
     },
     SyncRequest {
         sync: u64,
@@ -151,18 +172,20 @@ impl LinkFrame {
             LinkFrame::Ev { seq, .. }
             | LinkFrame::Stub { seq, .. }
             | LinkFrame::CardStub { seq, .. }
-            | LinkFrame::Head { seq, .. } => Some(*seq),
+            | LinkFrame::Head { seq, .. }
+            | LinkFrame::Answer { seq, .. } => Some(*seq),
             _ => None,
         }
     }
 
-    /// A permission or question card. Cards are keyed by request id, so the
-    /// plugin sends them at once even while it holds other frames for a
-    /// snapshot, and a card is never refused for its `seq`.
-    fn is_card(&self) -> bool {
+    /// A frame the plugin writes at once even while it holds the others for a
+    /// snapshot: a permission or question card, a permission's reply, and a
+    /// stage of an answer. Each is keyed by its request id, so it is never
+    /// refused for its `seq`, and the held frames that follow it keep theirs.
+    fn is_unheld(&self) -> bool {
         match self {
-            LinkFrame::Ev { event, .. } => is_card_event(event),
-            LinkFrame::CardStub { .. } => true,
+            LinkFrame::Ev { event, .. } => is_card_event(event) || event == "permission.replied",
+            LinkFrame::CardStub { .. } | LinkFrame::Answer { .. } => true,
             _ => false,
         }
     }
@@ -170,6 +193,39 @@ impl LinkFrame {
 
 pub(crate) fn is_card_event(event: &str) -> bool {
     event == "permission.asked" || event == "question.asked"
+}
+
+/// Where a reply the plugin was told to send stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AnswerStage {
+    Received,
+    Refused,
+    Sent,
+    Result,
+}
+
+impl AnswerStage {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            AnswerStage::Received => "received",
+            AnswerStage::Refused => "refused",
+            AnswerStage::Sent => "sent",
+            AnswerStage::Result => "result",
+        }
+    }
+}
+
+/// One entry of `sync_begin.commands`: the newest stage of the reply for
+/// `request_id`, with the fields its stage frame carried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AnswerCommand {
+    pub(crate) request_id: String,
+    pub(crate) stage: AnswerStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) http: Option<u16>,
 }
 
 /// The identifiers a `stub` keeps, each present only when the event had it.
@@ -366,11 +422,12 @@ pub(crate) fn decode(line: &[u8]) -> Result<Option<LinkFrame>, String> {
     let Some(tag) = value.get("t").and_then(Value::as_str).map(str::to_string) else {
         return Err("a link frame without a string `t`".into());
     };
-    const KNOWN: [&str; 9] = [
+    const KNOWN: [&str; 10] = [
         "ev",
         "stub",
         "card_stub",
         "head",
+        "answer",
         "sync_begin",
         "sync_request",
         "sync_page",
@@ -396,9 +453,11 @@ pub(crate) fn decode(line: &[u8]) -> Result<Option<LinkFrame>, String> {
 /// Drops a frame the link has already passed.
 ///
 /// `seq` is per plugin activation, so the high-water mark belongs to one
-/// `(pid, start, activation)` and starts over with another. Cards pass
-/// regardless: they are idempotent by request id, and the plugin sends one
-/// immediately even while a snapshot holds the frames around it.
+/// `(pid, start, activation)` and starts over with another. An unheld frame
+/// ([`LinkFrame::is_unheld`]) passes regardless and moves the mark nowhere:
+/// it is idempotent by request id, and the plugin sends it immediately even
+/// while a snapshot holds the frames around it, whose lower `seq`s must still
+/// pass when they are flushed.
 #[derive(Debug, Default)]
 pub(crate) struct SeqFilter {
     activation: Option<(i32, protocol::ipc::OpencodeStart, u64)>,
@@ -420,7 +479,7 @@ impl SeqFilter {
         let Some(seq) = frame.seq() else {
             return true;
         };
-        if frame.is_card() {
+        if frame.is_unheld() {
             return true;
         }
         if self.last.is_some_and(|last| seq <= last) {
@@ -1288,7 +1347,33 @@ async fn step(
             }
             daemon.opencode_head(&run.session.uid, link, head).await;
         }
-        LinkFrame::SyncBegin { .. } => {
+        LinkFrame::Answer {
+            request_id,
+            stage,
+            reason,
+            detail,
+            http,
+            ..
+        } => {
+            // The daemon sends no reply over this link, so a stage the plugin
+            // reports belongs to no attempt of its own: it is noted and
+            // settles nothing.
+            let reason = reason.as_deref().unwrap_or("-");
+            let detail = detail.as_deref().unwrap_or("");
+            let http = http.map_or_else(|| "-".to_string(), |http| http.to_string());
+            crate::log_info!(
+                "opencode link {link}: answer stage `{}` for {request_id} with no attempt to settle \
+                 (reason {reason}, http {http}) {detail}",
+                stage.as_str()
+            );
+        }
+        LinkFrame::SyncBegin { sync, commands, .. } => {
+            if !commands.is_empty() {
+                crate::log_info!(
+                    "opencode link {link}: snapshot {sync} carries {} answer commands",
+                    commands.len()
+                );
+            }
             observer.adapter.sync_begin();
             observer.sync = SyncAssembly::begin(&frame);
         }
@@ -1569,7 +1654,78 @@ mod tests {
                 "the frame must survive a decode and an encode"
             );
         }
-        assert_eq!(link, 32, "every link frame the contract holds");
+        assert_eq!(link, 37, "every link frame the contract holds");
+    }
+
+    #[test]
+    fn an_answer_stage_frame_carries_its_stage_and_what_that_stage_knows() {
+        let stages = [
+            (
+                "an answer command the plugin received",
+                AnswerStage::Received,
+                None,
+                None,
+            ),
+            (
+                "an answer the plugin refused",
+                AnswerStage::Refused,
+                Some("not-listed"),
+                None,
+            ),
+            ("an answer the plugin sent", AnswerStage::Sent, None, None),
+            ("an answer's result", AnswerStage::Result, None, Some(200)),
+        ];
+        for (starts, want_stage, want_reason, want_http) in stages {
+            let LinkFrame::Answer {
+                request_id,
+                stage,
+                reason,
+                detail,
+                http,
+                ..
+            } = link_frame(&case(starts))
+            else {
+                panic!("not an answer stage: {starts}");
+            };
+            assert!(request_id.starts_with("per_"), "{starts}");
+            assert_eq!(stage, want_stage, "{starts}");
+            assert_eq!(reason.as_deref(), want_reason, "{starts}");
+            assert_eq!(detail.is_some(), want_reason.is_some(), "{starts}");
+            assert_eq!(http, want_http, "{starts}");
+        }
+    }
+
+    #[test]
+    fn a_snapshots_commands_are_read_whole_and_are_empty_when_absent() {
+        let LinkFrame::SyncBegin { commands, .. } = link_frame(&case(
+            "a snapshot carrying the activation's answer commands",
+        )) else {
+            panic!("not a sync_begin");
+        };
+        assert_eq!(
+            commands,
+            [
+                AnswerCommand {
+                    request_id: "per_0f00a00000001xxxxxxxxxxxxx".into(),
+                    stage: AnswerStage::Refused,
+                    reason: Some("link".into()),
+                    http: None,
+                },
+                AnswerCommand {
+                    request_id: "per_0f00c00000002xxxxxxxxxxxxx".into(),
+                    stage: AnswerStage::Result,
+                    reason: None,
+                    http: Some(404),
+                },
+            ]
+        );
+        let LinkFrame::SyncBegin { commands, .. } = link_frame(&serde_json::json!({
+            "t":"sync_begin","sync":1,"reason":"connect","scope":"full","as_of":0,
+            "status":{},"status_ok":true}))
+        else {
+            panic!("not a sync_begin");
+        };
+        assert!(commands.is_empty());
     }
 
     #[test]
@@ -1817,6 +1973,49 @@ mod tests {
             filter.pass(&ev(1, "session.idle")),
             "a new activation counts from 1"
         );
+    }
+
+    /// While a snapshot is being sent the plugin holds ordinary frames and
+    /// writes cards, replies and answer stages at once, so those arrive with
+    /// higher `seq`s than the held frames flushed after them. None of them may
+    /// move the mark, or every held frame would be dropped at `settled`.
+    #[test]
+    fn is_unheld() {
+        let mut filter = SeqFilter::default();
+        filter.admitted(&hello(1));
+        assert!(filter.pass(&ev(45, "session.status")));
+        assert_eq!(filter.last, Some(45));
+
+        // During the snapshot: written at once, passed at once, mark unmoved.
+        assert!(filter.pass(&ev(50, "permission.replied")));
+        assert!(filter.pass(&ev(51, "permission.asked")));
+        assert!(filter.pass(&LinkFrame::Answer {
+            seq: 52,
+            request_id: "per_1".into(),
+            stage: AnswerStage::Sent,
+            reason: None,
+            detail: None,
+            http: None,
+        }));
+        assert_eq!(filter.last, Some(45));
+
+        // The held frames, flushed before `settled`, are all new.
+        for seq in 46..=49 {
+            assert!(filter.pass(&ev(seq, "message.part.updated")), "held {seq}");
+        }
+        assert_eq!(filter.last, Some(49));
+
+        // An ordinary frame is still held to its place.
+        assert!(!filter.pass(&ev(47, "message.part.updated")));
+        assert!(!filter.pass(&ev(49, "session.idle")));
+        assert!(filter.pass(&ev(53, "session.idle")));
+
+        // An unheld frame after a mark far ahead of it passes, and leaves it.
+        filter.last = Some(60);
+        assert!(filter.pass(&ev(47, "permission.replied")));
+        assert!(filter.pass(&ev(47, "permission.asked")));
+        assert!(!filter.pass(&ev(47, "session.idle")));
+        assert_eq!(filter.last, Some(60));
     }
 
     // ------------------------------------------------------------ the live link
