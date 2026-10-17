@@ -1,0 +1,92 @@
+{
+  "anchor": {
+    "id": "per_0f93a30ad001gr837gzOH9EQ0S",
+    "parentID": null,
+    "partInput": {
+      "query": "s7 test query"
+    },
+    "partStatus": "running",
+    "partTool": "websearch",
+    "perm": "websearch"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f93a30ad001gr837gzOH9EQ0S",
+    "metadata": {
+      "provider": "exa",
+      "query": "s7 test query"
+    },
+    "patterns": [
+      "s7 test query"
+    ],
+    "permission": "websearch",
+    "sessionID": "ses_f06c5d7c3ffetORvGZc4CEA2GG",
+    "tool": {
+      "callID": "call_75_0",
+      "messageID": "msg_0f93a2894001cM2nOW3mxhtVOa"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "all searches, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "websearch\n{\"always\":[\"*\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"all searches, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"provider\":\"exa\",\"query\":\"s7 test query\"}",
+      "payload_hash": "0e4c58a394d020cba847dcf00d3f30de18558d6200e08b4cb398d634257275d5",
+      "risk": {
+        "class": "low"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "all searches, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "provider": "exa",
+        "query": "s7 test query"
+      },
+      "tool_name": "websearch"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "websearch",
+  "opencode": "1.18.34"
+}

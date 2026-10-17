@@ -1,0 +1,60 @@
+{
+  "what": "The config files OpenCode 1.18.34's TUI merges, read for their `permission` key only, and the deny patterns an Always scope names when its grant would cover them. Hand-written: the daemon reads these files as the TUI does (later files win, no {env:} or {file:} substitution) and says when one cannot be read instead of naming an incomplete list.",
+  "home": "/Users/ada",
+  "worktree": "/Users/ada/project",
+  "env": {
+    "OPENCODE_CONFIG": "/Users/ada/extra.jsonc"
+  },
+  "files": {
+    "/Users/ada/.config/opencode/opencode.json": "{\"permission\": {\"*\": \"ask\", \"edit\": {\"*\": \"ask\", \"secrets/*\": \"deny\"}, \"bash\": {\"rm *\": \"deny\", \"git push *\": \"deny\"}}}",
+    "/Users/ada/extra.jsonc": "{\n  // the TUI reads JSON with comments\n  \"permission\": {\"bash\": {\"git push *\": \"ask\"},},\n}",
+    "/Users/ada/project/.opencode/opencode.json": "{\"permission\": {\"edit\": {\"notes/*\": \"deny\"}, \"webfetch\": \"deny\"}}"
+  },
+  "files_read": [
+    "/Users/ada/.config/opencode/opencode.json",
+    "/Users/ada/.config/opencode/opencode.jsonc",
+    "/Users/ada/extra.jsonc",
+    "/Users/ada/opencode.json",
+    "/Users/ada/opencode.jsonc",
+    "/Users/ada/.opencode/opencode.json",
+    "/Users/ada/.opencode/opencode.jsonc",
+    "/Users/ada/project/opencode.json",
+    "/Users/ada/project/opencode.jsonc",
+    "/Users/ada/project/.opencode/opencode.json",
+    "/Users/ada/project/.opencode/opencode.jsonc"
+  ],
+  "cases": [
+    {
+      "permission": "edit",
+      "always": ["*"],
+      "denies": ["notes/*", "secrets/*"],
+      "scope": "the grant, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Your config denies notes/*, secrets/*; this would allow it"
+    },
+    {
+      "permission": "bash",
+      "always": ["ls *"],
+      "denies": ["rm *"],
+      "scope": "the grant, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+    },
+    {
+      "permission": "bash",
+      "always": ["rm *"],
+      "denies": ["rm *"],
+      "scope": "the grant, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Your config denies rm *; this would allow it"
+    },
+    {
+      "permission": "webfetch",
+      "always": ["*"],
+      "denies": ["*"],
+      "scope": "the grant, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Your config denies *; this would allow it"
+    },
+    {
+      "permission": "glob",
+      "always": ["*"],
+      "denies": [],
+      "scope": "the grant, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+    }
+  ],
+  "unreadable": "/Users/ada/project/opencode.json",
+  "scope_unreadable": "the grant, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Could not read your config, so what it denies is not listed"
+}

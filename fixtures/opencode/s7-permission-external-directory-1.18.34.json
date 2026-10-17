@@ -1,0 +1,95 @@
+{
+  "anchor": {
+    "id": "per_0f94e6cd8001ATj5SKUQsMRX8Y",
+    "parentID": null,
+    "partInput": {
+      "filePath": "/Users/ada/outside/target.txt"
+    },
+    "partStatus": "running",
+    "partTool": "read",
+    "perm": "external_directory"
+  },
+  "asked": {
+    "always": [
+      "/Users/ada/outside/*"
+    ],
+    "id": "per_0f94e6cd8001ATj5SKUQsMRX8Y",
+    "metadata": {
+      "filepath": "/Users/ada/outside/target.txt",
+      "parentDir": "/Users/ada/outside"
+    },
+    "patterns": [
+      "/Users/ada/outside/*"
+    ],
+    "permission": "external_directory",
+    "sessionID": "ses_f06b19c43ffeeTJoawsZDGuole",
+    "tool": {
+      "callID": "call_42_0",
+      "messageID": "msg_0f94e640e001Sn7NCx4sVDZbVG"
+    }
+  },
+  "context": {
+    "home": "/Users/ada",
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ],
+    "worktree": "/Users/ada/project"
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "/Users/ada/outside and everything below it, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "external directory\n{\"always\":[\"/Users/ada/outside/*\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"filepath\":\"/Users/ada/outside/target.txt\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"/Users/ada/outside and everything below it, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"path\":\"/Users/ada/outside\",\"via\":\"read\"}",
+      "payload_hash": "1c4aba3e145ae26b815209d5def7342ad91835580009f6f2bd65e3da1c47debf",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "/Users/ada/outside/*"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "filepath": "/Users/ada/outside/target.txt",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "/Users/ada/outside and everything below it, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "path": "/Users/ada/outside",
+        "via": "read"
+      },
+      "tool_name": "external directory"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "external_directory",
+  "opencode": "1.18.34"
+}

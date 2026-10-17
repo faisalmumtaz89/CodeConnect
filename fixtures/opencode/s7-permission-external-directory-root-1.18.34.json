@@ -1,0 +1,100 @@
+{
+  "anchor": {
+    "id": "per_0f94e854e0012O2xhe4SAVObVc",
+    "parentID": null,
+    "partInput": {
+      "command": "cd / && ls",
+      "description": "s7b bash"
+    },
+    "partStatus": "running",
+    "partTool": "bash",
+    "perm": "external_directory"
+  },
+  "asked": {
+    "always": [
+      "/*"
+    ],
+    "id": "per_0f94e854e0012O2xhe4SAVObVc",
+    "metadata": {
+      "command": "cd / && ls",
+      "directories": [
+        "/"
+      ],
+      "patterns": [
+        "/*"
+      ]
+    },
+    "patterns": [
+      "/*"
+    ],
+    "permission": "external_directory",
+    "sessionID": "ses_f06b19c43ffeeTJoawsZDGuole",
+    "tool": {
+      "callID": "call_46_0",
+      "messageID": "msg_0f94e84ab001J6cOZYT6K6jdUu"
+    }
+  },
+  "context": {
+    "home": "/Users/ada",
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ],
+    "worktree": "/Users/ada/project"
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": false,
+    "always_text": null,
+    "card": {
+      "display_text": "external directory\n{\"always\":[\"/*\"],\"command\":\"cd / && ls\",\"computed_at\":\"2023-11-14T22:13:20Z\",\"dirs\":[\"/\"],\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"path\":\"/\",\"via\":\"bash\"}",
+      "payload_hash": "ae657a3e1a0bc95849d4bd4e08449fa3fa151cff57a4d8cdc9159dbf05b31c3b",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "/*"
+        ],
+        "command": "cd / && ls",
+        "computed_at": "2023-11-14T22:13:20Z",
+        "dirs": [
+          "/"
+        ],
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "path": "/",
+        "via": "bash"
+      },
+      "tool_name": "external directory"
+    },
+    "hidden": false,
+    "note": "Always is not offered: an always[] entry with '/*' stripped is '/' (R5)",
+    "reject_with_words": false
+  },
+  "family": "external_directory",
+  "opencode": "1.18.34"
+}

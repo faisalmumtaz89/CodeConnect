@@ -1,0 +1,89 @@
+{
+  "anchor": {
+    "id": "per_0f94e6e6f001XCeOJf8uymvayF",
+    "parentID": null,
+    "partInput": {
+      "filePath": "/Users/ada/outside/target.txt"
+    },
+    "partStatus": "running",
+    "partTool": "read",
+    "perm": "read"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f94e6e6f001XCeOJf8uymvayF",
+    "metadata": {},
+    "patterns": [
+      "../outside/target.txt"
+    ],
+    "permission": "read",
+    "sessionID": "ses_f06b19c43ffeeTJoawsZDGuole",
+    "tool": {
+      "callID": "call_42_0",
+      "messageID": "msg_0f94e640e001Sn7NCx4sVDZbVG"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "all reads, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "read\n{\"always\":[\"*\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"all reads, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"path\":\"/Users/ada/outside/target.txt\",\"relative\":\"../outside/target.txt\"}",
+      "payload_hash": "6101be87d0ae21515c153cbcd3a4b2dcdbec9442db38a75750e3434a6ebdd669",
+      "risk": {
+        "class": "low"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "all reads, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "path": "/Users/ada/outside/target.txt",
+        "relative": "../outside/target.txt"
+      },
+      "tool_name": "read"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "read",
+  "opencode": "1.18.34"
+}

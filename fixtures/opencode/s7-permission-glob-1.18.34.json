@@ -1,0 +1,93 @@
+{
+  "anchor": {
+    "id": "per_0f94bf544001ZJKlQ4nT9pysTb",
+    "parentID": null,
+    "partInput": {
+      "path": "/Users/ada/outside",
+      "pattern": "*.txt"
+    },
+    "partStatus": "running",
+    "partTool": "glob",
+    "perm": "glob"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f94bf544001ZJKlQ4nT9pysTb",
+    "metadata": {
+      "path": "/Users/ada/outside",
+      "pattern": "*.txt"
+    },
+    "patterns": [
+      "*.txt"
+    ],
+    "permission": "glob",
+    "sessionID": "ses_f06b49d9fffexM4aBXc40dPk4J",
+    "tool": {
+      "callID": "call_10_0",
+      "messageID": "msg_0f94bf4f6001IV0bDfkN6J5Eac"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "all glob calls, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "glob\n{\"always\":[\"*\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"all glob calls, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"path\":\"/Users/ada/outside\",\"pattern\":\"*.txt\"}",
+      "payload_hash": "2902bdeaf4964a2a21a95072694a2195dde2eff5c35ea261ba3efa790e17fe23",
+      "risk": {
+        "class": "low"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "all glob calls, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "path": "/Users/ada/outside",
+        "pattern": "*.txt"
+      },
+      "tool_name": "glob"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "glob",
+  "opencode": "1.18.34"
+}

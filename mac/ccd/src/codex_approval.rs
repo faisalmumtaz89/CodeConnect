@@ -1150,7 +1150,7 @@ impl Approval {
 }
 
 /// One `changes[]` entry with its diff cut to this card's per-file share.
-fn bounded_change(change: &Value, max_diff: usize) -> Value {
+pub(crate) fn bounded_change(change: &Value, max_diff: usize) -> Value {
     let Some(map) = change.as_object() else {
         return change.clone();
     };

@@ -1,0 +1,88 @@
+{
+  "anchor": {
+    "id": "per_0f939470f0017Nc7vRbRq4VY31",
+    "parentID": null,
+    "partInput": {
+      "name": "s7skill"
+    },
+    "partStatus": "running",
+    "partTool": "skill",
+    "perm": "skill"
+  },
+  "asked": {
+    "always": [
+      "s7skill"
+    ],
+    "id": "per_0f939470f0017Nc7vRbRq4VY31",
+    "metadata": {},
+    "patterns": [
+      "s7skill"
+    ],
+    "permission": "skill",
+    "sessionID": "ses_f06c8794bffepxkzxF836S0V86",
+    "tool": {
+      "callID": "call_58_0",
+      "messageID": "msg_0f93946bc0016PyYSozvEd0QzY"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "the skill s7skill, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "skill\n{\"always\":[\"s7skill\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"name\":\"s7skill\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"the skill s7skill, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}]}",
+      "payload_hash": "72a1cc74675708b03b449449db4da5550bf07277136bb1ff1bf9c50091ae3351",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "s7skill"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "name": "s7skill",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "the skill s7skill, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ]
+      },
+      "tool_name": "skill"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "skill",
+  "opencode": "1.18.34"
+}

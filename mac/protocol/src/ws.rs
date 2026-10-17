@@ -1124,6 +1124,15 @@ pub enum ClearCause {
     /// be a false statement about the run, made to reuse a word; the item
     /// finishing is what actually happened and is what this says.
     ItemCompleted,
+    /// **The request ended by a stop or a reload before anyone answered it.**
+    ///
+    /// An OpenCode request stays listed after the turn it belongs to was
+    /// aborted, retried past, deleted or reloaded away, and a reply sent to it
+    /// then is accepted by the server and reaches nothing. The plugin judges
+    /// that from the server's own state at every snapshot, and OpenCode's exit
+    /// ends every request the same way. Which of those ended it, and who did,
+    /// is not on the wire and is not said here.
+    Ended,
 }
 
 /// How far a phone claim got before delivery became uncertain. Present only on
@@ -2380,6 +2389,9 @@ mod tests {
             CodexResolution::Cleared {
                 cause: ClearCause::ItemCompleted,
             },
+            CodexResolution::Cleared {
+                cause: ClearCause::Ended,
+            },
             CodexResolution::Timeout,
             CodexResolution::Unknown {
                 attempted_by: ResolutionActor::Phone,
@@ -2417,6 +2429,14 @@ mod tests {
             })
             .unwrap(),
             r#"{"status":"cleared","cause":"item_completed"}"#
+        );
+        // The OpenCode request ended by a stop or a reload, pinned the same way.
+        assert_eq!(
+            serde_json::to_string(&CodexResolution::Cleared {
+                cause: ClearCause::Ended
+            })
+            .unwrap(),
+            r#"{"status":"cleared","cause":"ended"}"#
         );
         // And it is a DIFFERENT string from the turn terminal it must never be
         // confused with — the distinction the variant exists to make.
@@ -2477,6 +2497,9 @@ mod tests {
             },
             CodexResolution::Cleared {
                 cause: ClearCause::ItemCompleted,
+            },
+            CodexResolution::Cleared {
+                cause: ClearCause::Ended,
             },
             CodexResolution::Timeout,
             CodexResolution::Unknown {

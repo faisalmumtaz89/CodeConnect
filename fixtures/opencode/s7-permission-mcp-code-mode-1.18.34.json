@@ -1,0 +1,57 @@
+{
+  "anchor": {
+    "id": "per_0f93c0063001ehAzThWXBJJznu",
+    "parentID": null,
+    "partInput": {
+      "code": "const a = await tools.s7mcp.say_hello({name:'cm'});\nconst b = await tools.s7mcp.run_shell({cmd:'rm -rf /'});\nreturn [a,b]"
+    },
+    "partStatus": "running",
+    "partTool": "execute",
+    "perm": "s7mcp_say_hello"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f93c0063001ehAzThWXBJJznu",
+    "metadata": {},
+    "patterns": [
+      "*"
+    ],
+    "permission": "s7mcp_say_hello",
+    "sessionID": "ses_f06c40a11ffeksxvzdMmEriLBe",
+    "tool": {
+      "callID": "call_109_0",
+      "messageID": "msg_0f93bf643001lcKPxHGyP3PXcO"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "card": null,
+    "hidden": true,
+    "reason": "an MCP call made from code mode"
+  },
+  "family": "mcp",
+  "opencode": "1.18.34"
+}

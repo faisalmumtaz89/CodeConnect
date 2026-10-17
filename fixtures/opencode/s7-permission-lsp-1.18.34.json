@@ -1,0 +1,101 @@
+{
+  "anchor": {
+    "id": "per_0f93a7f6b0015pEqideiR3TuOw",
+    "parentID": null,
+    "partInput": {
+      "character": 1,
+      "filePath": "a.txt",
+      "line": 1,
+      "operation": "hover"
+    },
+    "partStatus": "running",
+    "partTool": "lsp",
+    "perm": "lsp"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f93a7f6b0015pEqideiR3TuOw",
+    "metadata": {
+      "character": 1,
+      "filePath": "/Users/ada/project/a.txt",
+      "line": 1,
+      "operation": "hover"
+    },
+    "patterns": [
+      "*"
+    ],
+    "permission": "lsp",
+    "sessionID": "ses_f06c5d7c3ffetORvGZc4CEA2GG",
+    "tool": {
+      "callID": "call_76_0",
+      "messageID": "msg_0f93a7ed9001jydJte6CKQYgX0"
+    }
+  },
+  "context": {
+    "flag": "lsp is an experimental tool; it is in tool.ids only when enabled",
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch",
+      "lsp"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "all LSP queries, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "lsp\n{\"always\":[\"*\"],\"character\":1,\"computed_at\":\"2023-11-14T22:13:20Z\",\"filePath\":\"/Users/ada/project/a.txt\",\"line\":1,\"operation\":\"hover\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"all LSP queries, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}]}",
+      "payload_hash": "214dc4532bdecc75a2b8b2d6fb7dc9b409a76cfb6c905c0720bfe495a32bf93e",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "character": 1,
+        "computed_at": "2023-11-14T22:13:20Z",
+        "filePath": "/Users/ada/project/a.txt",
+        "line": 1,
+        "operation": "hover",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "all LSP queries, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ]
+      },
+      "tool_name": "lsp"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "lsp",
+  "opencode": "1.18.34"
+}

@@ -1,0 +1,59 @@
+{
+  "anchor": {
+    "id": "per_0f9398c40001z9tlvWSaou5Nwq",
+    "parentID": null,
+    "partInput": {},
+    "partStatus": "running",
+    "partTool": "s7custom",
+    "perm": "s7custom"
+  },
+  "asked": {
+    "always": [
+      "deploy:*"
+    ],
+    "id": "per_0f9398c40001z9tlvWSaou5Nwq",
+    "metadata": {
+      "note": "arbitrary metadata",
+      "target": "prod"
+    },
+    "patterns": [
+      "deploy:prod"
+    ],
+    "permission": "s7custom",
+    "sessionID": "ses_f06c8794bffepxkzxF836S0V86",
+    "tool": {
+      "callID": "call_70_0",
+      "messageID": "msg_0f9398bbc001IRiGdHCNg48Ovq"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch",
+      "s7custom"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "card": null,
+    "hidden": true,
+    "reason": "`s7custom` is not a permission this build has a card for"
+  },
+  "family": "plugin/custom",
+  "opencode": "1.18.34"
+}

@@ -1,0 +1,94 @@
+{
+  "anchor": {
+    "id": "per_0f94c02cd001YkYlnEVvZKgvF1",
+    "parentID": null,
+    "partInput": {
+      "format": "text",
+      "url": "http://mock.invalid/redir"
+    },
+    "partStatus": "running",
+    "partTool": "webfetch",
+    "perm": "webfetch"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f94c02cd001YkYlnEVvZKgvF1",
+    "metadata": {
+      "format": "text",
+      "url": "http://mock.invalid/redir"
+    },
+    "patterns": [
+      "http://mock.invalid/redir"
+    ],
+    "permission": "webfetch",
+    "sessionID": "ses_f06b49d9fffexM4aBXc40dPk4J",
+    "tool": {
+      "callID": "call_12_0",
+      "messageID": "msg_0f94c026d001YzALlyUzkIV51K"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "all web fetches, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "webfetch\n{\"always\":[\"*\"],\"caveat\":\"follows redirects to any host\",\"computed_at\":\"2023-11-14T22:13:20Z\",\"format\":\"text\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"all web fetches, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"url\":\"http://mock.invalid/redir\"}",
+      "payload_hash": "65c8618618555085506e8dfe4067ee9d38ef45cd4d7e3a5c47ee73f847bcb46d",
+      "risk": {
+        "class": "low"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "caveat": "follows redirects to any host",
+        "computed_at": "2023-11-14T22:13:20Z",
+        "format": "text",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "all web fetches, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "url": "http://mock.invalid/redir"
+      },
+      "tool_name": "webfetch"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "webfetch",
+  "opencode": "1.18.34"
+}

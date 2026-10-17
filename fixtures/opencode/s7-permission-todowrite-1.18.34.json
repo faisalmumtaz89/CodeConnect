@@ -1,0 +1,100 @@
+{
+  "anchor": {
+    "id": "per_0f9393bc9001PwB3CV2oUXBLby",
+    "parentID": null,
+    "partInput": {
+      "todos": [
+        {
+          "content": "s7 todo",
+          "priority": "high",
+          "status": "pending"
+        }
+      ]
+    },
+    "partStatus": "running",
+    "partTool": "todowrite",
+    "perm": "todowrite"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f9393bc9001PwB3CV2oUXBLby",
+    "metadata": {},
+    "patterns": [
+      "*"
+    ],
+    "permission": "todowrite",
+    "sessionID": "ses_f06c8794bffepxkzxF836S0V86",
+    "tool": {
+      "callID": "call_56_0",
+      "messageID": "msg_0f9393b440019hLylZbrIABwzJ"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "all todo-list updates, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "todowrite\n{\"always\":[\"*\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"all todo-list updates, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"todos\":[{\"content\":\"s7 todo\",\"priority\":\"high\",\"status\":\"pending\"}]}",
+      "payload_hash": "4746770bd85538e93822ad5220bcdcf9eef0ac60024fa5ab138c66284cd8659d",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "all todo-list updates, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "todos": [
+          {
+            "content": "s7 todo",
+            "priority": "high",
+            "status": "pending"
+          }
+        ]
+      },
+      "tool_name": "todowrite"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "todowrite",
+  "opencode": "1.18.34"
+}

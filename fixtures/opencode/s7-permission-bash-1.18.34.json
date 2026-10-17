@@ -1,0 +1,93 @@
+{
+  "anchor": {
+    "id": "per_0f94b6bf9001hEH1bEkdlwaa2U",
+    "parentID": null,
+    "partInput": {
+      "command": "ls -la",
+      "description": "s7b bash"
+    },
+    "partStatus": "running",
+    "partTool": "bash",
+    "perm": "bash"
+  },
+  "asked": {
+    "always": [
+      "ls *"
+    ],
+    "id": "per_0f94b6bf9001hEH1bEkdlwaa2U",
+    "metadata": {
+      "command": "ls -la"
+    },
+    "patterns": [
+      "ls -la"
+    ],
+    "permission": "bash",
+    "sessionID": "ses_f06b49d9fffexM4aBXc40dPk4J",
+    "tool": {
+      "callID": "call_4_0",
+      "messageID": "msg_0f94b62a4001YgcpB74jTgjE2A"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "Allow commands starting ls *, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Matching ignores redirects, $VARS and later arguments",
+    "card": {
+      "display_text": "command\n{\"always\":[\"ls *\"],\"command\":\"ls -la\",\"computed_at\":\"2023-11-14T22:13:20Z\",\"description\":\"s7b bash\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"Allow commands starting ls *, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Matching ignores redirects, $VARS and later arguments\"},{\"id\":\"reject\",\"label\":\"Reject\"}]}",
+      "payload_hash": "e59c6a6cdde3d8703a546abc96b449465da40458e1223a5d28f2c4055f7c05dd",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "ls *"
+        ],
+        "command": "ls -la",
+        "computed_at": "2023-11-14T22:13:20Z",
+        "description": "s7b bash",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "Allow commands starting ls *, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Matching ignores redirects, $VARS and later arguments"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ]
+      },
+      "tool_name": "command"
+    },
+    "hidden": false,
+    "note": "description is the model's words, labelled as such",
+    "reject_with_words": false
+  },
+  "family": "bash",
+  "opencode": "1.18.34"
+}

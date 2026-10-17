@@ -1,0 +1,62 @@
+{
+  "anchor": {
+    "id": "per_0f94f026b0017TKtmd6gkEagsA",
+    "parentID": null,
+    "partInput": {
+      "command": "ls -la",
+      "description": "s7b bash"
+    },
+    "partStatus": "running",
+    "partTool": "bash",
+    "perm": "bash"
+  },
+  "asked": {
+    "always": [
+      "ls *"
+    ],
+    "id": "per_0f94f026b0017TKtmd6gkEagsA",
+    "metadata": {
+      "command": "ls -la"
+    },
+    "patterns": [
+      "ls -la"
+    ],
+    "permission": "bash",
+    "sessionID": "ses_f06b10733ffeCTicJlCr6Ei2i4",
+    "tool": {
+      "callID": "call_53_0",
+      "messageID": "msg_0f94ef91c001vXoQzsxoRu4Cgh"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp",
+      "apply"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch",
+      "bash"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "card": null,
+    "hidden": true,
+    "reason": "the tool id `bash` is shadowed"
+  },
+  "family": "bash",
+  "opencode": "1.18.34"
+}

@@ -1,0 +1,59 @@
+{
+  "anchor": {
+    "id": "per_0f94f0ed5001YKr0BGefNjSf21",
+    "parentID": null,
+    "partInput": {
+      "patchText": "*** Begin Patch\n*** Add File: c.txt\n+overwritten by Add File\n*** End Patch"
+    },
+    "partStatus": "running",
+    "partTool": "apply_patch",
+    "perm": "apply_patch"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f94f0ed5001YKr0BGefNjSf21",
+    "metadata": {},
+    "patterns": [
+      "*"
+    ],
+    "permission": "apply_patch",
+    "sessionID": "ses_f06b10733ffeCTicJlCr6Ei2i4",
+    "tool": {
+      "callID": "call_55_0",
+      "messageID": "msg_0f94f0e540019zmZ3naycCftrX"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp",
+      "apply"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch",
+      "bash"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "card": null,
+    "hidden": true,
+    "reason": "the tool id `apply_patch` is shadowed"
+  },
+  "family": "edit",
+  "opencode": "1.18.34"
+}

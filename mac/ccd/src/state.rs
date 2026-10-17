@@ -152,6 +152,10 @@ pub(crate) enum Retirement {
     Failed,
 }
 
+/// A card that was not filed: nothing landed, nothing rings, and the request
+/// stands at the keyboard. The raise logged why.
+struct NotRaised;
+
 impl Retirement {
     /// Whether this card is settled — by this terminal or by an earlier one.
     ///
@@ -2214,11 +2218,82 @@ impl Daemon {
                     }
                 }
 
+                // An OpenCode row whose resolution is already in the log: the
+                // card was retired by a daemon that filed the terminal without
+                // deleting the row. The row goes, under the same key, and no
+                // second terminal is written.
+                let mut resolved: Vec<(String, String, String)> = Vec::new();
+                for (uid, agent) in &agents {
+                    if *agent != protocol::agent::AgentKind::Opencode {
+                        continue;
+                    }
+                    let open: std::collections::HashSet<String> = self
+                        .db
+                        .opencode_open_cards(uid.clone())
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(request_id, _, _)| request_id)
+                        .collect();
+                    for card in self
+                        .db
+                        .codex_pending_approvals(uid.clone())
+                        .await
+                        .unwrap_or_default()
+                    {
+                        if !open.contains(&card.request_id) {
+                            resolved.push((uid.clone(), card.request_id, card.thread_id));
+                        }
+                    }
+                }
+                for (uid, request_id, thread_id) in &resolved {
+                    let name = rows
+                        .iter()
+                        .find(|row| row.session_uid == *uid)
+                        .map(|row| row.session_id.clone())
+                        .unwrap_or_default();
+                    let session = SessionKey::new(uid, name);
+                    let cleared = protocol::ws::CodexResolutionPayload {
+                        request_id: request_id.clone(),
+                        resolution: protocol::ws::CodexResolution::Cleared {
+                            cause: protocol::ws::ClearCause::Ended,
+                        },
+                    };
+                    let pending = PendingEvent::new(
+                        &session,
+                        EventKind::ApprovalResolved,
+                        serde_json::to_value(&cleared).unwrap_or_default(),
+                        Source::Opencode,
+                    )
+                    .with_source_event_id(format!("{thread_id}:perm_resolved:{request_id}"))
+                    .with_item_id(Some(request_id.clone()));
+                    if let Err(err) = self
+                        .db
+                        .retire_codex_pending_approval(
+                            uid.clone(),
+                            request_id.clone(),
+                            pending,
+                            None,
+                        )
+                        .await
+                    {
+                        crate::log_error!(
+                            "recovery: could not drop the resolved OpenCode card {request_id}: {err:#}"
+                        );
+                    }
+                }
+
                 let mut inner = self.inner.lock().await;
                 let mut restored = 0usize;
                 // Held questions whose hooks died with the previous process.
                 let mut unheld = Vec::new();
                 for row in rows {
+                    if resolved
+                        .iter()
+                        .any(|(uid, id, _)| *uid == row.session_uid && *id == row.request_id)
+                    {
+                        continue;
+                    }
                     let Ok(card) = serde_json::from_str::<ApprovalCard>(&row.card) else {
                         crate::log_error!(
                             "recovery: dropping an undecodable pending card for {}",
@@ -4326,6 +4401,69 @@ impl Daemon {
             item_id: item_id.to_string(),
             family: family.to_string(),
         };
+        self.raise_card(
+            session,
+            card,
+            pending,
+            row,
+            protocol::agent::AgentKind::Codex,
+        )
+        .await
+        .is_ok()
+    }
+
+    /// **File one card and the request fact it stands behind, then hold it
+    /// open and ring.**
+    ///
+    /// The Codex and OpenCode raises share this: one commit boundary for the
+    /// row and the fact, the in-memory entry only once it holds, and the
+    /// doorbell only on the first sighting. `pending` is the `ApprovalRequest`
+    /// fact as the caller spelled it — its source and key are the caller's,
+    /// because a re-delivery is told apart by the key the first sighting filed
+    /// under.
+    async fn raise_card(
+        &self,
+        session: &SessionKey,
+        card: ApprovalCard,
+        pending: PendingEvent,
+        row: crate::store::CodexPendingApprovalRow,
+        agent: protocol::agent::AgentKind,
+    ) -> Result<Option<Event>, NotRaised> {
+        let request_id = card.request_id.clone();
+        let generation = card.generation;
+        let created_ms = row.created_ms;
+        let item_id = row.item_id.clone();
+        let who = agent.as_str();
+
+        // **The aggregate bound, checked on the serialised fact against the
+        // limit that would destroy it.**
+        //
+        // [`Daemon::truncate_payload`] does not *trim* an oversized payload, it
+        // REPLACES it with a preview object — and a phone handed that decodes no
+        // card at all. The per-field bounds keep this rare, and they cannot
+        // make it impossible: nothing on the wire bounds a path, an execpolicy
+        // amendment, or a field a later release adds, and every field rides
+        // the payload twice because `display_text` is `tool_input`
+        // stringified. So the *total* is asked here, where the real limit
+        // lives, and an approval that cannot be carded honestly is not carded
+        // at all.
+        //
+        // Refusing loudly is the right failure: the question is being asked at
+        // the keyboard and is still answerable there, as it would be with no
+        // card at all. A silently dead card is not.
+        let encoded_payload = pending.payload.to_string();
+        if encoded_payload.len() > self.config.max_payload_bytes {
+            crate::log_error!(
+                "refusing to card the {who} approval {request_id} for {}: the event would be \
+                 {} bytes against a {}-byte payload limit, and a payload the daemon replaces \
+                 is a card the phone cannot decode. The request stands and is answerable at \
+                 the keyboard.",
+                session.name,
+                encoded_payload.len(),
+                self.config.max_payload_bytes
+            );
+            return Err(NotRaised);
+        }
 
         // **One commit boundary, and nothing is exposed before it holds.**
         //
@@ -4371,32 +4509,32 @@ impl Daemon {
                 ..
             }) => {
                 crate::log_error!(
-                    "refusing a re-delivery of the Codex approval {request_id} for {}: item \
+                    "refusing a re-delivery of the {who} approval {request_id} for {}: item \
                      {item_id} already holds a card for a DIFFERENT question. The card the \
                      phone is holding stands, because changing it under a filed request \
                      event would leave the two disagreeing. This shape is unmeasured.",
                     session.name
                 );
-                return false;
+                return Err(NotRaised);
             }
             // The run was deleted between the frame arriving and the card being
             // filed. Neither half landed, so there is nothing to undo.
             Ok(_) => {
                 crate::log_info!(
-                    "dropping Codex approval {request_id} for {}: the session was deleted \
+                    "dropping {who} approval {request_id} for {}: the session was deleted \
                      while it was in flight",
                     session.name
                 );
-                return false;
+                return Err(NotRaised);
             }
             Err(err) => {
                 crate::log_error!(
-                    "refusing the Codex approval {request_id} for {}: neither the card nor \
+                    "refusing the {who} approval {request_id} for {}: neither the card nor \
                      the request event could be committed, so nothing is raised and nothing \
                      rings. The request stands and is answerable at the keyboard: {err:#}",
                     session.name
                 );
-                return false;
+                return Err(NotRaised);
             }
         };
 
@@ -4412,11 +4550,11 @@ impl Daemon {
                     card,
                     session: session.clone(),
                     project_label: label.clone(),
-                    agent: protocol::agent::AgentKind::Codex,
+                    agent: agent.clone(),
                     created_ms,
-                    // No hook is held open on a Codex approval: the app-server
-                    // asked the TUI, not this daemon, and nothing here is
-                    // blocking on an answer to hand back.
+                    // No hook is held open on a Codex or OpenCode approval:
+                    // the agent asked its own TUI, not this daemon, and
+                    // nothing here is blocking on an answer to hand back.
                     responder: None,
                     claimed: false,
                     local_misses: 0,
@@ -4433,7 +4571,7 @@ impl Daemon {
 
         // The doorbell hangs off the FILED event, and only a first sighting
         // files one. A re-delivery after a reconnect is not a second question.
-        if let Some(event) = approval_event {
+        if let Some(event) = &approval_event {
             if let Some(ticket) = self.push_gate.admit_decision(&session.uid, &request_id) {
                 self.dispatch_push(
                     session.uid.clone(),
@@ -4445,9 +4583,9 @@ impl Daemon {
                         session_uid: session.uid.clone(),
                         // The ringing run's own agent, which is what
                         // `describing` keeps and `recipients` authorizes
-                        // against. A Codex decision offered to a phone that
-                        // cannot render one is the failure this narrows away.
-                        agent: protocol::agent::AgentKind::Codex,
+                        // against. A decision offered to a phone that cannot
+                        // render one is the failure this narrows away.
+                        agent,
                     },
                     ticket,
                     false,
@@ -4455,7 +4593,126 @@ impl Daemon {
                 );
             }
         }
-        true
+        Ok(approval_event)
+    }
+
+    /// **File one OpenCode card the phone may answer**, from the fact the
+    /// adapter built for it. The row is derived from the fact: the OpenCode
+    /// session is the key's prefix, the turn and the request are on the
+    /// envelope, the family is in the payload, and the generation on the card
+    /// is the plugin activation that asked it.
+    async fn raise_opencode_approval(
+        &self,
+        session: &SessionKey,
+        fact: PendingEvent,
+    ) -> Result<Option<Event>> {
+        let card: ApprovalCard = serde_json::from_value(fact.payload["card"].clone())
+            .map_err(|err| anyhow!("an OpenCode card that does not decode: {err}"))?;
+        let key = fact.source_event_id.clone().unwrap_or_default();
+        let thread_id = key.split_once(':').map_or("", |(ses, _)| ses).to_string();
+        let encoded = serde_json::to_string(&card)?;
+        let row = crate::store::CodexPendingApprovalRow {
+            session_uid: session.uid.clone(),
+            session_id: session.name.clone(),
+            request_id: card.request_id.clone(),
+            card: encoded,
+            generation: card.generation,
+            created_ms: protocol::time::now_unix_ms(),
+            thread_id,
+            turn_id: fact.turn_id.clone().unwrap_or_default(),
+            item_id: card.request_id.clone(),
+            family: fact.payload["family"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        };
+        match self
+            .raise_card(
+                session,
+                card,
+                fact,
+                row,
+                protocol::agent::AgentKind::Opencode,
+            )
+            .await
+        {
+            Ok(event) => Ok(event),
+            Err(NotRaised) => Ok(None),
+        }
+    }
+
+    /// **One OpenCode fact into the log, by what it is.** A card the phone may
+    /// answer is raised ([`Daemon::raise_opencode_approval`]); a card's terminal
+    /// retires it ([`Daemon::retire_opencode_card`]), and when the card was
+    /// already gone the terminal is still appended so the timeline shows it;
+    /// everything else is appended as it is.
+    pub(crate) async fn file_opencode_fact(
+        &self,
+        session: &SessionKey,
+        fact: PendingEvent,
+    ) -> Result<Option<Event>> {
+        match fact.kind {
+            EventKind::ApprovalRequest if fact.payload["answerable"] == serde_json::json!(true) => {
+                self.raise_opencode_approval(session, fact).await
+            }
+            EventKind::ApprovalResolved => {
+                let Some(request_id) = fact.item_id.clone() else {
+                    return self.ingest(fact).await;
+                };
+                let resolution: protocol::ws::CodexResolution =
+                    serde_json::from_value(fact.payload.clone()).map_err(|err| {
+                        anyhow!("an OpenCode resolution that does not decode: {err}")
+                    })?;
+                let key = fact.source_event_id.clone().unwrap_or_default();
+                match self
+                    .retire_opencode_card(
+                        session,
+                        &request_id,
+                        resolution,
+                        &key,
+                        fact.turn_id.clone(),
+                    )
+                    .await
+                {
+                    Retirement::Retired => Ok(None),
+                    Retirement::AlreadyGone => self.ingest(fact).await,
+                    Retirement::Failed => Err(anyhow!(
+                        "the OpenCode card {request_id} could not be retired; it stays open"
+                    )),
+                }
+            }
+            _ => self.ingest(fact).await,
+        }
+    }
+
+    /// **Retire one OpenCode card, first terminal wins.** Every terminal of
+    /// an OpenCode card — a reply at the Mac, a snapshot's verdict, the exit
+    /// sweep — comes through here under the adapter's own key for the
+    /// request's resolution, so one request has one `approval_resolved` and
+    /// the log's dedup holds for every terminal. The row and the pending entry
+    /// go together; the adapter's mirror is dropped by the caller.
+    pub(crate) async fn retire_opencode_card(
+        &self,
+        session: &SessionKey,
+        request_id: &str,
+        resolution: protocol::ws::CodexResolution,
+        key: &str,
+        turn: Option<String>,
+    ) -> Retirement {
+        let resolved = protocol::ws::CodexResolutionPayload {
+            request_id: request_id.to_string(),
+            resolution,
+        };
+        let pending = PendingEvent::new(
+            session,
+            EventKind::ApprovalResolved,
+            serde_json::to_value(&resolved).unwrap_or(serde_json::Value::Null),
+            Source::Opencode,
+        )
+        .with_source_event_id(key.to_string())
+        .with_turn_id(turn)
+        .with_item_id(Some(request_id.to_string()));
+        self.retire_card(session, request_id, pending, None).await
     }
 
     /// **Retire one Codex card, first terminal wins.**
@@ -4591,10 +4848,6 @@ impl Daemon {
         resolution: protocol::ws::CodexResolution,
         answer: Option<crate::store::AnswerTerminal>,
     ) -> Retirement {
-        let id: ApprovalId = (session.uid.clone(), request_id.to_string());
-        let Some(claimed) = self.inner.lock().await.pending.remove(&id) else {
-            return Retirement::AlreadyGone;
-        };
         // **The payload names the card it retires.**
         //
         // The resolution on its own is a terminal with no subject: `{"status":
@@ -4620,6 +4873,24 @@ impl Daemon {
             Source::Daemon,
         )
         .with_source_event_id(format!("resolved:{request_id}"));
+        self.retire_card(session, request_id, pending, answer).await
+    }
+
+    /// **Delete the row, file the terminal, settle the claim: one commit, by
+    /// the first terminal to claim the card.** The Codex and OpenCode retires
+    /// share this; `pending` is the resolution fact as the caller spelled it.
+    async fn retire_card(
+        &self,
+        session: &SessionKey,
+        request_id: &str,
+        pending: PendingEvent,
+        answer: Option<crate::store::AnswerTerminal>,
+    ) -> Retirement {
+        let id: ApprovalId = (session.uid.clone(), request_id.to_string());
+        let Some(claimed) = self.inner.lock().await.pending.remove(&id) else {
+            return Retirement::AlreadyGone;
+        };
+        let resolution = pending.payload.clone();
 
         // Published inside the gate for `ingest`'s reason: no later seq may
         // overtake this one on the way to a socket.
@@ -4645,7 +4916,7 @@ impl Daemon {
             // nor consumed the right to: a later one still can.
             self.inner.lock().await.pending.insert(id, claimed);
             crate::log_error!(
-                "could not retire the Codex approval {request_id} in {}: neither the card \
+                "could not retire the approval {request_id} in {}: neither the card \
                  nor its resolution was committed, so the card stays open and the next \
                  terminal will try again: {err:#}",
                 session.name
@@ -4658,9 +4929,8 @@ impl Daemon {
             .last_seen_ms
             .insert(session.uid.clone(), protocol::time::now_unix_ms());
         crate::log_info!(
-            "codex approval {request_id} in {} retired: {:?}",
-            session.name,
-            resolved.resolution
+            "approval {request_id} in {} retired: {resolution}",
+            session.name
         );
         Retirement::Retired
     }
@@ -8841,7 +9111,8 @@ impl Daemon {
             }
         }
         let logged = crate::opencode_link::Logged::read(self, session).await;
-        let observer = crate::opencode_link::Observer::new(session.clone(), logged);
+        let host = Arc::new(crate::opencode_link::Host::new(info.cwd.clone()));
+        let observer = crate::opencode_link::Observer::new(session.clone(), logged, host);
         {
             let mut inner = self.inner.lock().await;
             // The registration's check, again where it counts: a run of
@@ -9046,20 +9317,63 @@ impl Daemon {
     /// The OpenCode run has ended: it leaves the daemon, its link stops, and
     /// what its observer was holding back only for order is written. Every turn
     /// it had open stays outcome-unknown.
+    ///
+    /// Every card of the run still open is retired as ended, its row and its
+    /// pending entry with it, so the fleet stops saying an exited run is
+    /// blocked: through the observer's own facts when the daemon holds the
+    /// run, and from the pending entries alone when it does not — an exit
+    /// reported with no registration before it, for a run whose cards
+    /// recovery restored.
     async fn end_opencode_run(&self, session: &SessionKey) {
-        let Some(run) = self.inner.lock().await.forget_opencode_run(&session.uid) else {
+        let run = self.inner.lock().await.forget_opencode_run(&session.uid);
+        if let Some(run) = run {
+            let observer = Arc::clone(&run.observer);
+            drop(run);
+            let facts = observer.lock().await.adapter.session_end();
+            for fact in facts {
+                if let Err(err) = self.file_opencode_fact(session, fact).await {
+                    crate::log_error!(
+                        "failed to record what {} held at its end: {err:#}",
+                        session.name
+                    );
+                }
+            }
+        }
+        let open: Vec<String> = self
+            .inner
+            .lock()
+            .await
+            .pending
+            .iter()
+            .filter(|((uid, _), p)| {
+                *uid == session.uid && p.agent == protocol::agent::AgentKind::Opencode
+            })
+            .map(|((_, request_id), _)| request_id.clone())
+            .collect();
+        if open.is_empty() {
             return;
-        };
-        let observer = Arc::clone(&run.observer);
-        drop(run);
-        let facts = observer.lock().await.adapter.session_end();
-        for fact in facts {
-            if let Err(err) = self.ingest(fact).await {
+        }
+        let rows = match self.db.codex_pending_approvals(session.uid.clone()).await {
+            Ok(rows) => rows,
+            Err(err) => {
                 crate::log_error!(
-                    "failed to record what {} held at its end: {err:#}",
+                    "could not read the open OpenCode cards of {} at its end: {err:#}",
                     session.name
                 );
+                return;
             }
+        };
+        for request_id in open {
+            let Some(row) = rows.iter().find(|row| row.request_id == request_id) else {
+                continue;
+            };
+            let key = format!("{}:perm_resolved:{request_id}", row.thread_id);
+            let turn = (!row.turn_id.is_empty()).then(|| row.turn_id.clone());
+            let cleared = protocol::ws::CodexResolution::Cleared {
+                cause: protocol::ws::ClearCause::Ended,
+            };
+            self.retire_opencode_card(session, &request_id, cleared, &key, turn)
+                .await;
         }
     }
 

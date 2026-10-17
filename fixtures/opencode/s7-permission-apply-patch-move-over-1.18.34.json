@@ -1,0 +1,119 @@
+{
+  "anchor": {
+    "id": "per_0f94ddcb5001HQwakf6gJZvAOE",
+    "parentID": null,
+    "partInput": {
+      "patchText": "*** Begin Patch\n*** Update File: b.txt\n*** Move to: c2.txt\n@@\n-bee\n+bee moved\n*** End Patch"
+    },
+    "partStatus": "running",
+    "partTool": "apply_patch",
+    "perm": "edit"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f94ddcb5001HQwakf6gJZvAOE",
+    "metadata": {
+      "diff": "Index: /Users/ada/project/b.txt\n===================================================================\n--- /Users/ada/project/b.txt\n+++ /Users/ada/project/b.txt\n@@ -1,1 +1,1 @@\n-bee\n+bee moved\n\n",
+      "filepath": "b.txt",
+      "files": [
+        {
+          "additions": 1,
+          "deletions": 1,
+          "filePath": "/Users/ada/project/b.txt",
+          "movePath": "/Users/ada/project/c2.txt",
+          "patch": "Index: /Users/ada/project/b.txt\n===================================================================\n--- /Users/ada/project/b.txt\n+++ /Users/ada/project/b.txt\n@@ -1,1 +1,1 @@\n-bee\n+bee moved\n",
+          "relativePath": "c2.txt",
+          "type": "move"
+        }
+      ]
+    },
+    "patterns": [
+      "b.txt"
+    ],
+    "permission": "edit",
+    "sessionID": "ses_f06b24118ffeY4fRw8BHj7dBZR",
+    "tool": {
+      "callID": "call_33_0",
+      "messageID": "msg_0f94ddc09001K1itR8armzYRg3"
+    }
+  },
+  "context": {
+    "existing_files": [
+      "/Users/ada/project/c2.txt"
+    ],
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "Allow ALL edits, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "file change\n{\"always\":[\"*\"],\"caveat\":\"destination not checked against your edit rules\",\"changes\":[{\"diff\":\"Index: /Users/ada/project/b.txt\\n===================================================================\\n--- /Users/ada/project/b.txt\\n+++ /Users/ada/project/b.txt\\n@@ -1,1 +1,1 @@\\n-bee\\n+bee moved\\n\\n\",\"move_path\":\"/Users/ada/project/c2.txt\",\"overwrites\":\"overwrites existing /Users/ada/project/c2.txt (current content not shown)\",\"path\":\"/Users/ada/project/b.txt\",\"type\":\"move\"}],\"computed_at\":\"2023-11-14T22:13:20Z\",\"note\":\"writes the version computed at computed_at; changes made to the file since then are overwritten\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"Allow ALL edits, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"unchecked_dest\":[\"/Users/ada/project/c2.txt\"]}",
+      "payload_hash": "270211f1c6a079c19ca6db8154183620cb992aeba20fc9716bfa3033ab62afd1",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "caveat": "destination not checked against your edit rules",
+        "changes": [
+          {
+            "diff": "Index: /Users/ada/project/b.txt\n===================================================================\n--- /Users/ada/project/b.txt\n+++ /Users/ada/project/b.txt\n@@ -1,1 +1,1 @@\n-bee\n+bee moved\n\n",
+            "move_path": "/Users/ada/project/c2.txt",
+            "overwrites": "overwrites existing /Users/ada/project/c2.txt (current content not shown)",
+            "path": "/Users/ada/project/b.txt",
+            "type": "move"
+          }
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "note": "writes the version computed at computed_at; changes made to the file since then are overwritten",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "Allow ALL edits, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "unchecked_dest": [
+          "/Users/ada/project/c2.txt"
+        ]
+      },
+      "tool_name": "file change"
+    },
+    "hidden": false,
+    "note": "move onto an existing file: 'overwrites existing' (R3a) and 'destination not checked against your edit rules' (R3b); files[].patch is never forwarded, metadata.diff is",
+    "reject_with_words": false
+  },
+  "family": "edit",
+  "opencode": "1.18.34"
+}

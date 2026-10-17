@@ -72,17 +72,20 @@
 //! `<OpenCode session>:<suffix>`, and the daemon's dedup is first-wins on it, so
 //! a fact re-read from a snapshot or after a daemon restart costs nothing.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use protocol::event::{EventKind, PendingEvent, SessionKey, Source};
 use protocol::ws::{
-    ApprovalCard, ClearCause, CodexResolution, CodexResolutionPayload, ResolutionActor,
+    AnswerDecision, ApprovalCard, ClearCause, CodexResolution, CodexResolutionPayload,
+    ResolutionActor,
 };
 use serde_json::{json, Map, Value};
 
 use crate::opencode_link::{
-    CardIds, LinkFrame, RequestBody, RequestKind, SnapMessage, SnapPart, SnapRequest, SnapSession,
-    Snapshot, StubIds, SyncScope,
+    CardEnv, CardIds, LinkFrame, RequestBody, RequestKind, SnapMessage, SnapPart, SnapRequest,
+    SnapSession, Snapshot, StubIds, SyncScope,
 };
 
 /// The error a message ends with when the user stopped it.
@@ -227,6 +230,12 @@ struct OpenCard {
     request_id: String,
     session: String,
     kind: RequestKind,
+    /// The tool call the request named, shared by the cards of one call.
+    call_id: Option<String>,
+    /// When the card's content was computed, for a rebuild of the same open
+    /// request to reuse. `None` for a card restored from the log or shown
+    /// without being offered.
+    computed_at: Option<String>,
 }
 
 /// Normalizes one OpenCode run's link into the neutral event model. Construct
@@ -290,6 +299,12 @@ pub(crate) struct OpencodeAdapter {
     /// Turns a snapshot left open whose end will prove nothing: they end
     /// outcome-unknown.
     unproven: HashMap<String, Unproven>,
+    /// The Mac a card is built on.
+    env: Arc<dyn CardEnv>,
+    /// The plugin activation cards are stamped with.
+    activation: u64,
+    /// Requests resolved before any card of them was raised, oldest first.
+    retired: VecDeque<String>,
 }
 
 /// Why a turn a snapshot left open cannot be closed with an outcome.
@@ -315,7 +330,7 @@ enum Unproven {
 }
 
 impl OpencodeAdapter {
-    pub(crate) fn new(session: SessionKey) -> Self {
+    pub(crate) fn new(session: SessionKey, env: Arc<dyn CardEnv>) -> Self {
         OpencodeAdapter {
             session,
             parent: HashMap::new(),
@@ -347,6 +362,9 @@ impl OpencodeAdapter {
             unassigned: HashSet::new(),
             resync_wanted: false,
             unproven: HashMap::new(),
+            env,
+            activation: 0,
+            retired: VecDeque::new(),
         }
     }
 
@@ -410,6 +428,8 @@ impl OpencodeAdapter {
                 request_id: request_id.to_string(),
                 session: session.to_string(),
                 kind,
+                call_id: None,
+                computed_at: None,
             });
         }
     }
@@ -467,9 +487,18 @@ impl OpencodeAdapter {
 
     /// The OpenCode process has ended. Facts held only for their order are
     /// real and are released; every open turn becomes outcome-unknown, and no
-    /// TurnComplete, tool result or usage is made for it.
+    /// TurnComplete, tool result or usage is made for it. Every open card is
+    /// retired as ended: the request it was about ended with the process.
     pub(crate) fn session_end(&mut self) -> Vec<PendingEvent> {
-        let out = self.close_all();
+        let mut out = self.close_all();
+        let open: Vec<String> = self
+            .open_cards
+            .iter()
+            .map(|c| c.request_id.clone())
+            .collect();
+        for request_id in open {
+            out.extend(self.ended(&request_id));
+        }
         self.route(out)
     }
 
@@ -513,8 +542,8 @@ impl OpencodeAdapter {
         let mut out = plan.sessions();
         for request in &snap.requests {
             let set_aside = request.session().is_some_and(|s| plan.set_aside(s));
-            if !set_aside && request.id().is_some_and(|id| !plan.placed.contains(id)) {
-                out.extend(plan.m.asked(request));
+            if !set_aside {
+                out.extend(plan.ask(request));
             }
         }
         let listed: HashSet<&str> = snap.requests.iter().filter_map(SnapRequest::id).collect();
@@ -837,6 +866,7 @@ impl OpencodeAdapter {
             "message.part.removed" => self.on_part_removed(p),
             "permission.asked" => self.on_asked(RequestKind::Permission, p),
             "question.asked" => self.on_asked(RequestKind::Question, p),
+            "permission.v2.asked" | "question.v2.asked" => self.on_hidden_asked(p),
             "permission.replied" => self.on_replied(RequestKind::Permission, p),
             "question.replied" | "question.rejected" => self.on_replied(RequestKind::Question, p),
             _ => Vec::new(),
@@ -1593,6 +1623,8 @@ impl OpencodeAdapter {
         session: &str,
         kind: RequestKind,
         turn: Option<String>,
+        call_id: Option<&str>,
+        computed_at: Option<String>,
     ) {
         self.request_turn.insert(request_id.to_string(), turn);
         match self
@@ -1600,32 +1632,59 @@ impl OpencodeAdapter {
             .iter_mut()
             .find(|c| c.request_id == request_id)
         {
-            Some(card) => card.session = session.to_string(),
+            Some(card) => {
+                card.session = session.to_string();
+                if computed_at.is_some() {
+                    card.computed_at = computed_at;
+                }
+            }
             None => self.open_cards.push(OpenCard {
                 request_id: request_id.to_string(),
                 session: session.to_string(),
                 kind,
+                call_id: call_id.map(str::to_string),
+                computed_at,
             }),
         }
     }
 
-    fn card_fact(
-        &self,
-        kind: RequestKind,
-        session: &str,
-        family: &str,
-        call_id: Option<&str>,
-        card: ApprovalCard,
-        turn: Option<&str>,
-    ) -> Emit {
+    /// The plugin activation every card raised from now on is stamped with,
+    /// and an answer is checked against.
+    pub(crate) fn set_activation(&mut self, activation: u64) {
+        self.activation = activation;
+    }
+
+    /// The card is no longer open: its terminal was filed. The row and the
+    /// daemon's pending entry are the store of an open card; this list only
+    /// mirrors them, and every terminal ends here.
+    pub(crate) fn forget(&mut self, request_id: &str) {
+        self.open_cards.retain(|c| c.request_id != request_id);
+    }
+
+    /// A request resolved before any card of it could be raised. Its card
+    /// frame, should it still arrive, is hidden: it lost the race to its own
+    /// resolution.
+    fn remember_retired(&mut self, request_id: &str) {
+        if self.retired.iter().any(|id| id == request_id) {
+            return;
+        }
+        if self.retired.len() == RETIRED_MEMORY {
+            self.retired.pop_front();
+        }
+        self.retired.push_back(request_id.to_string());
+    }
+
+    fn card_fact(&self, session: &str, filed: Filed<'_>, card: ApprovalCard) -> Emit {
         let request_id = card.request_id.clone();
-        let prefix = match kind {
+        let prefix = match filed.kind {
             RequestKind::Permission => "perm",
             RequestKind::Question => "question",
         };
         let payload = json!({
-            "request_id": request_id, "family": family, "tool_call_id": call_id, "card": card,
+            "request_id": request_id, "family": filed.family, "tool_call_id": filed.call_id,
+            "card": card, "answerable": filed.answerable,
         });
+        let turn = filed.turn;
         self.fact(
             EventKind::ApprovalRequest,
             session,
@@ -1636,22 +1695,133 @@ impl OpencodeAdapter {
         )
     }
 
+    /// The tool part a request is about, as the plugin last showed it
+    /// running: its tool and its input. A doom-loop request names no part, so
+    /// its anchor is the newest running part whose tool and input are the
+    /// ones it says were repeated.
+    fn anchor(&self, session: &str, p: &Map<String, Value>) -> Option<Anchor> {
+        let tool = obj(p, "tool");
+        let metadata = obj(p, "metadata");
+        let running = self.running.iter().rev().find(|r| {
+            r.session == session
+                && match tool {
+                    Some(tool) => {
+                        str_of(&r.part, "callID") == str_of(tool, "callID")
+                            && str_of(&r.part, "messageID") == str_of(tool, "messageID")
+                    }
+                    None => {
+                        str_of(&r.part, "tool") == metadata.and_then(|m| str_of(m, "tool"))
+                            && obj(&r.part, "state").and_then(|s| s.get("input"))
+                                == metadata.and_then(|m| m.get("input"))
+                    }
+                }
+        })?;
+        let input = obj(&running.part, "state")
+            .and_then(|s| obj(s, "input"))
+            .cloned()
+            .or_else(|| obj(p, "anchor_input").cloned())
+            .unwrap_or_default();
+        Some(Anchor {
+            tool: str_of(&running.part, "tool")
+                .unwrap_or_default()
+                .to_string(),
+            input,
+        })
+    }
+
     fn on_asked(&mut self, kind: RequestKind, p: &Map<String, Value>) -> Vec<Emit> {
         let (Some(id), Some(session)) = (str_of(p, "id"), str_of(p, "sessionID")) else {
             return Vec::new();
         };
         let tool = obj(p, "tool");
         let turn = self.card_turn(session, tool);
-        self.open_card(id, session, kind, turn.clone());
-        let (family, card) = match kind {
-            RequestKind::Permission => {
-                let permission = str_of(p, "permission").unwrap_or_default();
-                (permission.to_string(), permission_card(id, permission, p))
-            }
-            RequestKind::Question => ("question".to_string(), question_card(id, p)),
-        };
         let call_id = tool.and_then(|t| str_of(t, "callID"));
-        vec![self.card_fact(kind, session, &family, call_id, card, turn.as_deref())]
+        let permission = str_of(p, "permission").unwrap_or_default();
+        let Some(ctx) = obj(p, "ctx").filter(|_| kind == RequestKind::Permission) else {
+            // A question, or a permission the plugin judged against nothing:
+            // shown, and answered at the Mac.
+            self.open_card(id, session, kind, turn.clone(), call_id, None);
+            let (family, card) = match kind {
+                RequestKind::Permission => {
+                    (permission.to_string(), permission_card(id, permission, p))
+                }
+                RequestKind::Question => ("question".to_string(), question_card(id, p)),
+            };
+            let filed = Filed {
+                kind,
+                family: &family,
+                call_id,
+                turn: turn.as_deref(),
+                answerable: false,
+            };
+            return vec![self.card_fact(session, filed, card)];
+        };
+        if self.retired.iter().any(|r| r == id) {
+            crate::log_info!("opencode: request {id} resolved before its card arrived; not shown");
+            return Vec::new();
+        }
+        let (built, computed_at) = self.build_ask(p, ctx);
+        match built {
+            Built::Hidden(why) => {
+                crate::log_info!("opencode: permission {id} ({permission}) not shown: {why}");
+                Vec::new()
+            }
+            Built::Stub { family, card } => {
+                self.open_card(id, session, kind, turn.clone(), call_id, None);
+                let filed = Filed {
+                    kind,
+                    family: &family,
+                    call_id,
+                    turn: turn.as_deref(),
+                    answerable: false,
+                };
+                vec![self.card_fact(session, filed, card)]
+            }
+            Built::Card { family, card } => {
+                self.open_card(id, session, kind, turn.clone(), call_id, Some(computed_at));
+                let filed = Filed {
+                    kind,
+                    family: &family,
+                    call_id,
+                    turn: turn.as_deref(),
+                    answerable: true,
+                };
+                vec![self.card_fact(session, filed, card)]
+            }
+        }
+    }
+
+    /// The card of one permission request the plugin judged, and when its
+    /// content was computed: the time a card of the same open request was
+    /// built, so its bytes stay the same, else now.
+    fn build_ask(&self, p: &Map<String, Value>, ctx: &Map<String, Value>) -> (Built, String) {
+        let id = str_of(p, "id").unwrap_or_default();
+        let session = str_of(p, "sessionID").unwrap_or_default();
+        let call_id = obj(p, "tool").and_then(|t| str_of(t, "callID"));
+        let computed_at = self
+            .open_cards
+            .iter()
+            .find(|c| c.request_id == id)
+            .and_then(|c| c.computed_at.clone())
+            .unwrap_or_else(|| self.env.now());
+        let paired = call_id.is_some()
+            && self
+                .open_cards
+                .iter()
+                .any(|c| c.request_id != id && c.call_id.as_deref() == call_id);
+        let ask = Ask {
+            id,
+            session,
+            permission: str_of(p, "permission").unwrap_or_default(),
+            patterns: strings(p.get("patterns")),
+            always: strings(p.get("always")),
+            metadata: obj(p, "metadata").cloned().unwrap_or_default(),
+            anchor: self.anchor(session, p),
+            ctx: Ctx::read(ctx),
+            computed_at: computed_at.clone(),
+            paired,
+        };
+        (build(&ask, self.env.as_ref(), self.activation), computed_at)
     }
 
     fn on_card_stub(
@@ -1663,20 +1833,41 @@ impl OpencodeAdapter {
     ) -> Vec<Emit> {
         let tool = ids.tool.as_ref().and_then(Value::as_object);
         let turn = self.card_turn(&ids.session_id, tool);
-        self.open_card(&ids.id, &ids.session_id, kind, turn.clone());
+        let call_id = tool.and_then(|t| str_of(t, "callID"));
+        self.open_card(&ids.id, &ids.session_id, kind, turn.clone(), call_id, None);
         let family = match kind {
             RequestKind::Permission => ids.permission.clone().unwrap_or_default(),
             RequestKind::Question => "question".to_string(),
         };
         let card = stub_card(&ids.id, &family, size, sha256);
-        let call_id = tool.and_then(|t| str_of(t, "callID"));
-        vec![self.card_fact(
+        let filed = Filed {
             kind,
-            &ids.session_id,
-            &family,
+            family: &family,
             call_id,
-            card,
+            turn: turn.as_deref(),
+            answerable: false,
+        };
+        vec![self.card_fact(&ids.session_id, filed, card)]
+    }
+
+    /// A request another client made in OpenCode's process, which the TUI
+    /// never shows and this daemon never cards: one line says it is there.
+    fn on_hidden_asked(&self, p: &Map<String, Value>) -> Vec<Emit> {
+        let (Some(id), Some(session)) = (str_of(p, "id"), str_of(p, "sessionID")) else {
+            return Vec::new();
+        };
+        let turn = self.current.get(self.root(session)).cloned();
+        let payload = json!({
+            "notification_type": "opencode_request_hidden", "request_id": id,
+            "message": HIDDEN_REQUEST,
+        });
+        vec![self.fact(
+            EventKind::Notification,
+            session,
+            &format!("perm_hidden:{id}"),
+            payload,
             turn.as_deref(),
+            Some(id),
         )]
     }
 
@@ -1706,22 +1897,35 @@ impl OpencodeAdapter {
         )
     }
 
-    /// Answered at the Mac. Which way is not said: the reply words are not
-    /// part of this card's vocabulary.
+    /// Answered at the Mac, by the keyboard, another client, or OpenCode's own
+    /// cascade after an Always or a Reject in the same session: the reply word
+    /// is on the wire and nothing says which. A reply for a request with no
+    /// open card is nothing to the timeline, and its id is remembered so a
+    /// card frame still on its way is not shown.
     fn on_replied(&mut self, kind: RequestKind, p: &Map<String, Value>) -> Vec<Emit> {
         let (Some(id), Some(session)) = (str_of(p, "requestID"), str_of(p, "sessionID")) else {
             return Vec::new();
         };
-        self.open_cards.retain(|c| c.request_id != id);
+        if !self.open_cards.iter().any(|c| c.request_id == id) {
+            self.remember_retired(id);
+            return Vec::new();
+        }
+        self.forget(id);
         let turn = self
             .request_turn
             .get(id)
             .cloned()
             .flatten()
             .or_else(|| self.current.get(self.root(session)).cloned());
+        let decision = match kind {
+            RequestKind::Permission => str_of(p, "reply").map(|reply| AnswerDecision::OptionId {
+                option_id: reply.to_string(),
+            }),
+            RequestKind::Question => None,
+        };
         let answered = CodexResolution::Answered {
             by: ResolutionActor::Local,
-            decision: None,
+            decision,
         };
         vec![self.resolution(session, kind, id, answered, turn)]
     }
@@ -1734,7 +1938,34 @@ impl OpencodeAdapter {
             }
         }
     }
+
+    /// A snapshot judged an open card's request dead: the card is retired as
+    /// ended, in the turn it was asked in.
+    fn ended(&mut self, request_id: &str) -> Vec<Emit> {
+        let Some(at) = self
+            .open_cards
+            .iter()
+            .position(|c| c.request_id == request_id)
+        else {
+            return Vec::new();
+        };
+        let card = self.open_cards.remove(at);
+        let turn = self.request_turn.get(request_id).cloned().flatten();
+        let cleared = CodexResolution::Cleared {
+            cause: ClearCause::Ended,
+        };
+        vec![self.resolution(&card.session, card.kind, request_id, cleared, turn)]
+    }
 }
+
+/// How many resolved-before-carded ids a run remembers, evicted oldest first.
+/// Permission and question ids ascend only within their own prefix, so the
+/// order is the order seen, never the ids'.
+const RETIRED_MEMORY: usize = 64;
+
+/// The line a request from another client gets.
+const HIDDEN_REQUEST: &str =
+    "OpenCode has a request from another client that this app does not answer";
 
 // ---------------------------------------------------------------- the card
 
@@ -1788,9 +2019,9 @@ fn bounded_card(
     stub_card(request_id, tool_name, encoded.len() as u64, &sha256)
 }
 
-/// A shell command is shown as the command OpenCode will run, never as its
-/// patterns, which are a prefix of it. Any other permission is shown by name
-/// with the patterns it asks for.
+/// A permission the plugin judged against nothing: a shell command is shown
+/// as the command OpenCode will run, never as its patterns, which are a prefix
+/// of it; any other permission is shown by name with the patterns it asks for.
 fn permission_card(request_id: &str, permission: &str, p: &Map<String, Value>) -> ApprovalCard {
     let command = obj(p, "metadata").and_then(|m| str_of(m, "command"));
     if let (Some(command), "bash") = (command, permission) {
@@ -1829,6 +2060,1060 @@ fn stub_card(request_id: &str, family: &str, size: u64, sha256: &str) -> Approva
         &family.to_lowercase(),
         json!({"message": message}),
     )
+}
+
+// ------------------------------------------------------- the answerable card
+//
+// A permission the phone may answer, built from what the plugin read at the
+// ask: the request, the tool part it is about, and the TUI's tool ids,
+// connected MCP servers, permission mode and the session's parent. Every
+// family below was measured on OpenCode 1.18.34 (`fixtures/opencode/
+// s7-permission-*`); a request of any other shape is not shown, because a
+// card that says less than the screen beside it, or more, is a card that lies.
+
+/// How a card's request fact is filed: its kind, the family word, the tool
+/// call it is about, the turn, and whether the phone may answer it.
+struct Filed<'a> {
+    kind: RequestKind,
+    family: &'a str,
+    call_id: Option<&'a str>,
+    turn: Option<&'a str>,
+    answerable: bool,
+}
+
+/// The tool part a request is about.
+struct Anchor {
+    tool: String,
+    input: Map<String, Value>,
+}
+
+/// What the plugin read at the ask.
+struct Ctx {
+    ok: bool,
+    tool_ids: Vec<String>,
+    mcp: Vec<String>,
+    parent: Option<String>,
+}
+
+impl Ctx {
+    fn read(ctx: &Map<String, Value>) -> Ctx {
+        Ctx {
+            ok: truthy(ctx.get("ok")),
+            tool_ids: strings(ctx.get("tool_ids")),
+            mcp: strings(ctx.get("mcp")),
+            parent: str_of(ctx, "parent").map(str::to_string),
+        }
+    }
+}
+
+/// One permission request and everything a card of it is built from.
+struct Ask<'a> {
+    id: &'a str,
+    session: &'a str,
+    permission: &'a str,
+    patterns: Vec<String>,
+    always: Vec<String>,
+    metadata: Map<String, Value>,
+    anchor: Option<Anchor>,
+    ctx: Ctx,
+    /// When this card's content was computed. Inside the hash, and reused by
+    /// a rebuild of the same open request so the bytes stay the same.
+    computed_at: String,
+    /// Another card about the same tool call is open.
+    paired: bool,
+}
+
+/// What building a card decided.
+enum Built {
+    /// Not shown, and why. Nothing is filed for it.
+    Hidden(String),
+    /// Shown and not answerable: too large to show.
+    Stub {
+        family: String,
+        card: ApprovalCard,
+    },
+    Card {
+        family: String,
+        card: ApprovalCard,
+    },
+}
+
+/// The families a phone is offered, by the request's `permission`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Bash,
+    ExternalDirectory,
+    Edit,
+    Read,
+    Glob,
+    Grep,
+    Webfetch,
+    Websearch,
+    Task,
+    Todowrite,
+    Skill,
+    Lsp,
+    DoomLoop,
+    Mcp,
+}
+
+impl Family {
+    fn of_permission(permission: &str) -> Option<Family> {
+        Some(match permission {
+            "bash" => Family::Bash,
+            "external_directory" => Family::ExternalDirectory,
+            "edit" => Family::Edit,
+            "read" => Family::Read,
+            "glob" => Family::Glob,
+            "grep" => Family::Grep,
+            "webfetch" => Family::Webfetch,
+            "websearch" => Family::Websearch,
+            "task" => Family::Task,
+            "todowrite" => Family::Todowrite,
+            "skill" => Family::Skill,
+            "lsp" => Family::Lsp,
+            "doom_loop" => Family::DoomLoop,
+            _ => return None,
+        })
+    }
+
+    /// The word the card's row and fact carry.
+    fn as_str(self) -> &'static str {
+        match self {
+            Family::Bash => "bash",
+            Family::ExternalDirectory => "external_directory",
+            Family::Edit => "edit",
+            Family::Read => "read",
+            Family::Glob => "glob",
+            Family::Grep => "grep",
+            Family::Webfetch => "webfetch",
+            Family::Websearch => "websearch",
+            Family::Task => "task",
+            Family::Todowrite => "todowrite",
+            Family::Skill => "skill",
+            Family::Lsp => "lsp",
+            Family::DoomLoop => "doom_loop",
+            Family::Mcp => "mcp",
+        }
+    }
+
+    /// The tools whose part a request of this family is anchored to.
+    fn tools(self) -> &'static [&'static str] {
+        match self {
+            Family::Bash => &["bash"],
+            Family::ExternalDirectory => &[
+                "read",
+                "edit",
+                "write",
+                "lsp",
+                "bash",
+                "grep",
+                "glob",
+                "apply_patch",
+            ],
+            Family::Edit => &["edit", "write", "apply_patch"],
+            Family::Read => &[
+                "read",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+            ],
+            Family::Glob => &["glob"],
+            Family::Grep => &["grep"],
+            Family::Webfetch => &["webfetch"],
+            Family::Websearch => &["websearch"],
+            Family::Task => &["task"],
+            Family::Todowrite => &["todowrite"],
+            Family::Skill => &["skill"],
+            Family::Lsp => &["lsp"],
+            Family::DoomLoop | Family::Mcp => &[],
+        }
+    }
+}
+
+/// The scope every Always grants, measured: an Always is appended after the
+/// config's rules and the last match wins, so it also allows what the config
+/// denies, for every session of this OpenCode until it reloads or exits.
+const SCOPE: &str = "in this folder's OpenCode until it reloads or exits, for every session \
+                     there, including what your config denies";
+
+/// What OpenCode's tool-name sanitiser does to an MCP server's name.
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn strings(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `path` against `base`, lexically: `.` dropped and `..` folded, no link
+/// followed. What OpenCode's own path checks do.
+fn resolve(base: &Path, path: &str) -> PathBuf {
+    let joined = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        base.join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn shown(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// Every string in a value cut to the display bound, with a digest of the
+/// whole where it was cut.
+fn bound_strings(value: &Value) -> Value {
+    match value {
+        Value::String(s) => Value::String(bounded(s)),
+        Value::Array(items) => Value::Array(items.iter().map(bound_strings).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), bound_strings(v)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Whether an OpenCode wildcard pattern covers `text`: `*` is any run of
+/// characters, directory separators included, `?` one character.
+fn wildcard_covers(pattern: &str, text: &str) -> bool {
+    fn go(p: &[char], t: &[char]) -> bool {
+        match p.split_first() {
+            None => t.is_empty(),
+            Some(('*', rest)) => (0..=t.len()).any(|k| go(rest, &t[k..])),
+            Some(('?', rest)) => !t.is_empty() && go(rest, &t[1..]),
+            Some((c, rest)) => t.first() == Some(c) && go(rest, &t[1..]),
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    go(&p, &t)
+}
+
+/// The files OpenCode's TUI reads its config from, in the order it merges
+/// them: the global config, `OPENCODE_CONFIG`, each folder from the home
+/// folder down to the run's folder (`opencode.json(c)` and `.opencode/`),
+/// then `OPENCODE_CONFIG_DIR`. Later files win.
+fn config_files(env: &dyn CardEnv) -> Vec<PathBuf> {
+    let both = |dir: &Path| vec![dir.join("opencode.json"), dir.join("opencode.jsonc")];
+    let mut out = Vec::new();
+    let global = env
+        .env_var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env.home().map(|home| home.join(".config")))
+        .map(|config| config.join("opencode"));
+    if let Some(global) = global {
+        out.extend(both(&global));
+    }
+    if let Some(path) = env.env_var("OPENCODE_CONFIG") {
+        out.push(PathBuf::from(path));
+    }
+    let worktree = env.worktree();
+    let top = env
+        .home()
+        .filter(|home| worktree.starts_with(home))
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let mut dirs: Vec<&Path> = worktree
+        .ancestors()
+        .take_while(|dir| dir.starts_with(&top))
+        .collect();
+    dirs.reverse();
+    for dir in dirs {
+        out.extend(both(dir));
+        out.extend(both(&dir.join(".opencode")));
+    }
+    if let Some(dir) = env.env_var("OPENCODE_CONFIG_DIR") {
+        out.extend(both(Path::new(&dir)));
+    }
+    out
+}
+
+/// JSON with comments, as OpenCode's config files allow it, as JSON: `//` and
+/// `/* */` comments outside strings dropped, a comma before `}` or `]` dropped.
+fn jsonc_to_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    let mut in_string = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < chars.len() {
+                out.push(chars[i + 1]);
+                i += 1;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+                i += 1;
+            }
+            '/' if chars.get(i + 1) == Some(&'/') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if chars.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            ',' => {
+                let mut k = i + 1;
+                while k < chars.len() && chars[k].is_whitespace() {
+                    k += 1;
+                }
+                if !matches!(chars.get(k), Some('}') | Some(']')) {
+                    out.push(c);
+                }
+                i += 1;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The patterns the operator's merged config denies under `permission`,
+/// read as OpenCode merges its config: later files override earlier ones key
+/// by key. A file that cannot be read or parsed fails the whole read, and the
+/// card says so rather than naming an incomplete list; `{env:}` and `{file:}`
+/// substitutions are not performed, so a config using them reads as written.
+fn config_denies(env: &dyn CardEnv, permission: &str) -> Result<Vec<String>, String> {
+    fn merge(into: &mut Value, from: Value) {
+        match (into, from) {
+            (Value::Object(a), Value::Object(b)) => {
+                for (k, v) in b {
+                    match a.get_mut(&k) {
+                        Some(slot) => merge(slot, v),
+                        None => {
+                            a.insert(k, v);
+                        }
+                    }
+                }
+            }
+            (slot, v) => *slot = v,
+        }
+    }
+    let mut merged = Value::Null;
+    for file in config_files(env) {
+        let text = env
+            .read_text(&file)
+            .map_err(|err| format!("{}: {err}", shown(&file)))?;
+        let Some(text) = text else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let parsed: Value = serde_json::from_str(&jsonc_to_json(&text))
+            .map_err(|err| format!("{}: {err}", shown(&file)))?;
+        if let Some(rules) = parsed.get("permission") {
+            merge(&mut merged, rules.clone());
+        }
+    }
+    let rule = merged.get(permission).or_else(|| merged.get("*"));
+    Ok(match rule {
+        Some(Value::String(word)) if word == "deny" => vec!["*".to_string()],
+        Some(Value::Object(rules)) => rules
+            .iter()
+            .filter(|(_, v)| v.as_str() == Some("deny"))
+            .map(|(k, _)| k.clone())
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// The Always option's scope: what it grants, where, for how long, and what
+/// the operator's config says against it.
+fn scope(
+    text: &str,
+    caveat: Option<&str>,
+    always: &[String],
+    denies: &Result<Vec<String>, String>,
+) -> String {
+    let mut out = format!("{text}, {SCOPE}");
+    if let Some(caveat) = caveat {
+        out.push_str(". ");
+        out.push_str(caveat);
+    }
+    match denies {
+        Err(_) => out.push_str(". Could not read your config, so what it denies is not listed"),
+        Ok(denied) => {
+            let covered: Vec<&str> = denied
+                .iter()
+                .filter(|deny| always.iter().any(|a| a == "*" || wildcard_covers(a, deny)))
+                .map(String::as_str)
+                .collect();
+            if !covered.is_empty() {
+                out.push_str(". Your config denies ");
+                out.push_str(&covered.join(", "));
+                out.push_str("; this would allow it");
+            }
+        }
+    }
+    out
+}
+
+fn options(always: Option<String>, with_words: bool) -> Value {
+    let mut out = vec![json!({"id": "once", "label": "Allow once"})];
+    if let Some(scope) = always {
+        out.push(json!({"id": "always", "label": "Allow always", "scope": scope}));
+    }
+    out.push(json!({"id": "reject", "label": "Reject"}));
+    if with_words {
+        out.push(json!({"id": "reject_with_words", "label": "Reject with words"}));
+    }
+    Value::Array(out)
+}
+
+/// Whether an external-directory Always may be offered for `entry`, an
+/// `always[]` pattern: one tap on it removes the check for everything below
+/// the folder it names until OpenCode reloads, so a folder that is the disk,
+/// the home folder, the run's folder or an ancestor of any of them is not
+/// offered, nor a pattern this daemon cannot resolve to one folder.
+fn external_always_offered(env: &dyn CardEnv, entry: &str) -> bool {
+    let dir = entry.strip_suffix("/*").unwrap_or(entry);
+    if dir.contains(['*', '?']) {
+        return false;
+    }
+    let Some(target) = env.identity(Path::new(dir)) else {
+        return false;
+    };
+    let mut forbidden: Vec<PathBuf> =
+        vec![PathBuf::from("/"), PathBuf::from("/System/Volumes/Data")];
+    for root in [env.home(), Some(env.worktree())].into_iter().flatten() {
+        forbidden.extend(root.ancestors().map(Path::to_path_buf));
+    }
+    !forbidden
+        .iter()
+        .any(|path| env.identity(path) == Some(target))
+}
+
+/// The one family the request belongs to, or why it belongs to none.
+fn family_of(ask: &Ask) -> Result<Family, String> {
+    if let Some(family) = Family::of_permission(ask.permission) {
+        return Ok(family);
+    }
+    let star = |list: &[String]| list == ["*"];
+    let anchored = ask
+        .anchor
+        .as_ref()
+        .is_some_and(|a| a.tool == ask.permission);
+    let servers: Vec<&String> = ask
+        .ctx
+        .mcp
+        .iter()
+        .filter(|s| ask.permission.starts_with(&format!("{}_", sanitize(s))))
+        .collect();
+    if anchored
+        && !ask.ctx.tool_ids.iter().any(|id| id == ask.permission)
+        && star(&ask.patterns)
+        && star(&ask.always)
+        && ask.metadata.is_empty()
+        && servers.len() == 1
+    {
+        return Ok(Family::Mcp);
+    }
+    Err(format!(
+        "`{}` is not a permission this build has a card for",
+        ask.permission
+    ))
+}
+
+/// Whether a tool id is shadowed: registered twice, or a built-in id that a
+/// connected MCP server's tools would replace. Measured: the later entry
+/// wins, and nothing in the request says which ran.
+fn shadowed(ctx: &Ctx, id: &str) -> bool {
+    let times = ctx.tool_ids.iter().filter(|t| *t == id).count();
+    times > 1
+        || (times == 1
+            && ctx
+                .mcp
+                .iter()
+                .any(|s| id.starts_with(&format!("{}_", sanitize(s)))))
+}
+
+/// The anchored input against what the request says, per family: a card is
+/// built from both and must not describe two different calls.
+fn consistent(family: Family, ask: &Ask, anchor: &Anchor, worktree: &Path) -> bool {
+    let input = &anchor.input;
+    let meta = &ask.metadata;
+    let same = |key: &str| input.get(key) == meta.get(key);
+    let same_path = |input_key: &str, meta_key: &str| match (
+        str_of(input, input_key),
+        str_of(meta, meta_key),
+    ) {
+        (Some(a), Some(b)) => resolve(worktree, a) == resolve(worktree, b),
+        _ => false,
+    };
+    match family {
+        Family::Bash => same("command"),
+        Family::ExternalDirectory => match anchor.tool.as_str() {
+            "bash" => same("command"),
+            "grep" | "glob" => same_path("path", "filepath"),
+            "apply_patch" => true,
+            _ => same_path("filePath", "filepath"),
+        },
+        Family::Edit => anchor.tool == "apply_patch" || same_path("filePath", "filepath"),
+        Family::Read => match anchor.tool.as_str() {
+            "read" => ask
+                .patterns
+                .first()
+                .zip(str_of(input, "filePath"))
+                .is_some_and(|(pattern, path)| {
+                    resolve(worktree, path) == resolve(worktree, pattern)
+                }),
+            _ => same("server"),
+        },
+        Family::Glob | Family::Grep => same("pattern"),
+        Family::Webfetch => same("url"),
+        Family::Websearch => same("query"),
+        Family::Task => same("subagent_type") && same("description"),
+        Family::Skill => ask.patterns.first().map(String::as_str) == str_of(input, "name"),
+        Family::Todowrite | Family::Lsp => true,
+        Family::DoomLoop | Family::Mcp => true,
+    }
+}
+
+/// Build the card, or say why there is none.
+fn build(ask: &Ask, env: &dyn CardEnv, activation: u64) -> Built {
+    if !ask.ctx.ok {
+        return Built::Hidden(
+            "the plugin could not read the TUI's tools or mode at the ask".into(),
+        );
+    }
+    let Some(anchor) = ask.anchor.as_ref() else {
+        return Built::Hidden("no running tool part is the one it is about".into());
+    };
+    if shadowed(&ask.ctx, &anchor.tool) || shadowed(&ask.ctx, ask.permission) {
+        return Built::Hidden(format!("the tool id `{}` is shadowed", anchor.tool));
+    }
+    if anchor.tool == "execute" {
+        return Built::Hidden("an MCP call made from code mode".into());
+    }
+    let family = match family_of(ask) {
+        Ok(family) => family,
+        Err(why) => return Built::Hidden(why),
+    };
+    let worktree = env.worktree();
+    let (repeated, family) = match family {
+        Family::DoomLoop => {
+            let Some(tool) = str_of(&ask.metadata, "tool") else {
+                return Built::Hidden("a doom loop that names no tool".into());
+            };
+            if shadowed(&ask.ctx, tool) {
+                return Built::Hidden(format!("the repeated tool id `{tool}` is shadowed"));
+            }
+            match Family::of_permission(tool).filter(|f| f.tools().contains(&tool)) {
+                Some(repeated) => (Some(tool), repeated),
+                None => {
+                    return Built::Hidden(format!(
+                        "a doom loop of `{tool}`, which is not a tool this build has a card for"
+                    ))
+                }
+            }
+        }
+        Family::Mcp => (None, Family::Mcp),
+        family => {
+            if !family.tools().contains(&anchor.tool.as_str()) {
+                return Built::Hidden(format!(
+                    "anchored to a `{}` part, not a `{}` one",
+                    anchor.tool, ask.permission
+                ));
+            }
+            if !consistent(family, ask, anchor, &worktree) {
+                return Built::Hidden(
+                    "the running tool's input is not the one the request describes".into(),
+                );
+            }
+            (None, family)
+        }
+    };
+    let family_word = if repeated.is_some() {
+        Family::DoomLoop.as_str()
+    } else {
+        family.as_str()
+    };
+    let shape = match repeated {
+        Some(tool) => {
+            // The repeated call, described as its own family would describe
+            // it: its input stands where that family's metadata would.
+            let input = ask
+                .metadata
+                .get("input")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let repeated_ask = Ask {
+                id: ask.id,
+                session: ask.session,
+                permission: tool,
+                patterns: Vec::new(),
+                always: ask.always.clone(),
+                metadata: input.clone(),
+                anchor: None,
+                ctx: Ctx {
+                    ok: true,
+                    tool_ids: Vec::new(),
+                    mcp: Vec::new(),
+                    parent: None,
+                },
+                computed_at: ask.computed_at.clone(),
+                paired: false,
+            };
+            let anchor = Anchor {
+                tool: tool.to_string(),
+                input,
+            };
+            let mut shape = shape_of(family, &repeated_ask, &anchor, env, &worktree);
+            shape.input.insert("repeated_call".into(), json!(tool));
+            shape.always = Some(format!("stop asking about repeated {tool} calls"));
+            shape
+        }
+        None => shape_of(family, ask, anchor, env, &worktree),
+    };
+    let Shape {
+        tool_name,
+        mut input,
+        classified,
+        always,
+        caveat,
+    } = shape;
+    let denies = always.as_ref().map(|_| config_denies(env, ask.permission));
+    let always = always
+        .zip(denies)
+        .map(|(text, denies)| scope(&text, caveat, &ask.always, &denies));
+    input.insert("always".into(), json!(ask.always));
+    input.insert("computed_at".into(), json!(ask.computed_at));
+    if ask.paired {
+        input.insert(
+            "part".into(),
+            json!("2 of 2: another card is about the same tool call"),
+        );
+    }
+    input.insert("options".into(), options(always, ask.ctx.parent.is_some()));
+    let input = Value::Object(input);
+    let mut without_changes = input.clone();
+    if let Some(map) = without_changes.as_object_mut() {
+        map.remove("changes");
+        map.remove("diff");
+    }
+    let size = serde_json::to_vec(&without_changes).map_or(usize::MAX, |b| b.len());
+    if size > MAX_CARD_BYTES {
+        let encoded = serde_json::to_vec(&ask.metadata).unwrap_or_default();
+        let sha256 = protocol::hash::sha256_hex(&encoded);
+        return Built::Stub {
+            family: family_word.to_string(),
+            card: stub_card(ask.id, &tool_name, encoded.len() as u64, &sha256),
+        };
+    }
+    let mut card = card(ask.id, &tool_name, input);
+    // What would run, before any display bound: the classifier reads the
+    // whole command, not the 8 KiB a card shows of it.
+    card.risk = Some(protocol::risk::classify(&tool_name, &classified));
+    card.generation = activation;
+    Built::Card {
+        family: family_word.to_string(),
+        card,
+    }
+}
+
+/// A family's card before the parts every card shares.
+struct Shape {
+    tool_name: String,
+    /// What the phone reads, bounded.
+    input: Map<String, Value>,
+    /// What the risk classifier reads, unbounded.
+    classified: Value,
+    /// The Always text, when Always is offered.
+    always: Option<String>,
+    /// A sentence the Always scope carries after the folder scope.
+    caveat: Option<&'static str>,
+}
+
+fn put(out: &mut Map<String, Value>, key: &str, value: Option<Value>) {
+    if let Some(value) = value {
+        out.insert(key.to_string(), value);
+    }
+}
+
+fn shape_of(
+    family: Family,
+    ask: &Ask,
+    anchor: &Anchor,
+    env: &dyn CardEnv,
+    worktree: &Path,
+) -> Shape {
+    let meta = &ask.metadata;
+    let input = &anchor.input;
+    let mut out = Map::new();
+    let text = |v: Option<&Value>| v.and_then(Value::as_str).map(|s| json!(bounded(s)));
+    match family {
+        Family::Bash => {
+            put(&mut out, "command", text(meta.get("command")));
+            put(&mut out, "workdir", text(input.get("workdir")));
+            put(&mut out, "description", text(input.get("description")));
+            Shape {
+                tool_name: "command".into(),
+                input: out,
+                classified: json!({"command": meta.get("command")}),
+                always: Some(format!("Allow commands starting {}", ask.always.join(", "))),
+                caveat: Some("Matching ignores redirects, $VARS and later arguments"),
+            }
+        }
+        Family::ExternalDirectory => {
+            let dirs = strings(meta.get("directories"));
+            let dir = str_of(meta, "parentDir")
+                .map(str::to_string)
+                .or_else(|| dirs.first().cloned())
+                .unwrap_or_default();
+            put(&mut out, "path", Some(json!(dir)));
+            if !dirs.is_empty() {
+                put(&mut out, "dirs", Some(json!(dirs)));
+            }
+            put(&mut out, "filepath", text(meta.get("filepath")));
+            put(&mut out, "command", text(meta.get("command")));
+            put(&mut out, "via", Some(json!(anchor.tool)));
+            let offered = !ask.always.is_empty()
+                && ask
+                    .always
+                    .iter()
+                    .all(|entry| external_always_offered(env, entry));
+            Shape {
+                tool_name: "external directory".into(),
+                input: out,
+                classified: json!({"command": meta.get("command"), "path": dir, "filepath": meta.get("filepath")}),
+                always: offered.then(|| format!("{dir} and everything below it")),
+                caveat: None,
+            }
+        }
+        Family::Edit => edit_shape(ask, anchor, env, worktree),
+        Family::Read if anchor.tool == "read" => {
+            let path = str_of(input, "filePath").map(|p| resolve(worktree, p));
+            put(&mut out, "path", path.as_ref().map(|p| json!(shown(p))));
+            if let Some(pattern) = ask.patterns.first().filter(|p| p.starts_with("..")) {
+                put(&mut out, "relative", Some(json!(bounded(pattern))));
+            }
+            Shape {
+                tool_name: "read".into(),
+                input: out,
+                classified: json!({"path": path.as_ref().map(|p| shown(p))}),
+                always: Some("all reads".into()),
+                caveat: None,
+            }
+        }
+        Family::Read => {
+            put(&mut out, "server", text(meta.get("server")));
+            put(&mut out, "uri", text(meta.get("uri")));
+            put(&mut out, "via", Some(json!(anchor.tool)));
+            Shape {
+                tool_name: "mcp resource".into(),
+                input: out,
+                classified: json!({"server": meta.get("server"), "uri": meta.get("uri")}),
+                always: Some(ask.always.join(", ")),
+                caveat: None,
+            }
+        }
+        Family::Glob | Family::Grep => {
+            put(&mut out, "pattern", text(meta.get("pattern")));
+            put(&mut out, "path", text(meta.get("path")));
+            put(&mut out, "include", text(meta.get("include")));
+            Shape {
+                tool_name: family.as_str().into(),
+                input: out,
+                classified: json!({"pattern": meta.get("pattern"), "path": meta.get("path"), "include": meta.get("include")}),
+                always: Some(format!("all {} calls", family.as_str())),
+                caveat: None,
+            }
+        }
+        Family::Webfetch => {
+            put(&mut out, "url", text(meta.get("url")));
+            put(&mut out, "format", meta.get("format").cloned());
+            put(&mut out, "timeout", meta.get("timeout").cloned());
+            put(
+                &mut out,
+                "caveat",
+                Some(json!("follows redirects to any host")),
+            );
+            Shape {
+                tool_name: "webfetch".into(),
+                input: out,
+                classified: json!({"url": meta.get("url")}),
+                always: Some("all web fetches".into()),
+                caveat: None,
+            }
+        }
+        Family::Websearch => {
+            for (key, value) in meta {
+                out.insert(key.clone(), bound_strings(value));
+            }
+            Shape {
+                tool_name: "websearch".into(),
+                input: out,
+                classified: Value::Object(meta.clone()),
+                always: Some("all searches".into()),
+                caveat: None,
+            }
+        }
+        Family::Task => {
+            put(&mut out, "subagent_type", text(meta.get("subagent_type")));
+            put(&mut out, "description", text(meta.get("description")));
+            put(&mut out, "prompt", text(input.get("prompt")));
+            Shape {
+                tool_name: "task".into(),
+                input: out,
+                classified: json!({"subagent_type": meta.get("subagent_type"), "description": meta.get("description"), "prompt": input.get("prompt")}),
+                always: Some("every subagent launch, ANY type".into()),
+                caveat: None,
+            }
+        }
+        Family::Todowrite => {
+            put(&mut out, "todos", input.get("todos").map(bound_strings));
+            Shape {
+                tool_name: "todowrite".into(),
+                input: out,
+                classified: json!({"todos": input.get("todos")}),
+                always: Some("all todo-list updates".into()),
+                caveat: None,
+            }
+        }
+        Family::Skill => {
+            put(
+                &mut out,
+                "name",
+                ask.patterns.first().map(|n| json!(bounded(n))),
+            );
+            Shape {
+                tool_name: "skill".into(),
+                input: out,
+                classified: json!({"name": ask.patterns.first()}),
+                always: Some(format!("the skill {}", ask.always.join(", "))),
+                caveat: None,
+            }
+        }
+        Family::Lsp => {
+            put(&mut out, "operation", text(meta.get("operation")));
+            put(&mut out, "filePath", text(meta.get("filePath")));
+            put(&mut out, "line", meta.get("line").cloned());
+            put(&mut out, "character", meta.get("character").cloned());
+            Shape {
+                tool_name: "lsp".into(),
+                input: out,
+                classified: Value::Object(meta.clone()),
+                always: Some("all LSP queries".into()),
+                caveat: None,
+            }
+        }
+        Family::Mcp => {
+            let server = ask
+                .ctx
+                .mcp
+                .iter()
+                .find(|s| ask.permission.starts_with(&format!("{}_", sanitize(s))))
+                .cloned()
+                .unwrap_or_default();
+            for (key, value) in input {
+                out.insert(key.clone(), bound_strings(value));
+            }
+            put(&mut out, "server", Some(json!(server)));
+            put(
+                &mut out,
+                "caveat",
+                Some(json!("arguments as the model sent them")),
+            );
+            Shape {
+                tool_name: ask.permission.into(),
+                input: out,
+                classified: Value::Object(input.clone()),
+                always: Some("every call of this MCP tool".into()),
+                caveat: None,
+            }
+        }
+        Family::DoomLoop => unreachable!("a doom loop is built as the family it repeats"),
+    }
+}
+
+/// The ceiling on one diff a card shows.
+const MAX_DIFF_BYTES: usize = 16 * 1024;
+
+/// What a card says about the content it was computed from: OpenCode computes
+/// the new content before the ask and writes it after the reply without
+/// reading the file again.
+const WRITES_COMPUTED: &str =
+    "writes the version computed at computed_at; changes made to the file since then are overwritten";
+
+/// `edit`, `write` and `apply_patch`, which share one permission and one
+/// Always.
+fn edit_shape(ask: &Ask, anchor: &Anchor, env: &dyn CardEnv, worktree: &Path) -> Shape {
+    let meta = &ask.metadata;
+    let mut out = Map::new();
+    let mut classified = Map::new();
+    let mut always = Some("Allow ALL edits".to_string());
+    let diff = meta.get("diff").cloned().unwrap_or(json!(""));
+    if anchor.tool == "apply_patch" {
+        let files = meta
+            .get("files")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut changes = Vec::new();
+        let mut unchecked = Vec::new();
+        for file in files.iter().take(32) {
+            let Some(file) = file.as_object() else {
+                continue;
+            };
+            let Some(path) = str_of(file, "filePath") else {
+                continue;
+            };
+            let kind = str_of(file, "type").unwrap_or_default();
+            let resolved = resolve(worktree, path);
+            let mut change = Map::new();
+            change.insert("path".into(), json!(shown(&resolved)));
+            if path.starts_with("..") {
+                change.insert("relative".into(), json!(bounded(path)));
+            }
+            change.insert("type".into(), json!(kind));
+            if kind == "add" && env.exists(&resolved) {
+                change.insert(
+                    "overwrites".into(),
+                    json!(format!(
+                        "overwrites existing {} (current content not shown)",
+                        shown(&resolved)
+                    )),
+                );
+            }
+            if let Some(dest) = str_of(file, "movePath") {
+                let dest_resolved = resolve(worktree, dest);
+                change.insert("move_path".into(), json!(shown(&dest_resolved)));
+                let same = dest_resolved == resolved
+                    || env
+                        .identity(&resolved)
+                        .is_some_and(|id| env.identity(&dest_resolved) == Some(id));
+                if same {
+                    change.insert(
+                        "deletes".into(),
+                        json!(format!(
+                            "DELETES {}: the move destination is the file itself",
+                            shown(&resolved)
+                        )),
+                    );
+                    always = None;
+                } else {
+                    if env.exists(&dest_resolved) {
+                        change.insert(
+                            "overwrites".into(),
+                            json!(format!(
+                                "overwrites existing {} (current content not shown)",
+                                shown(&dest_resolved)
+                            )),
+                        );
+                    }
+                    if dest != path {
+                        unchecked.push(shown(&dest_resolved));
+                    }
+                }
+            }
+            changes.push(Value::Object(change));
+        }
+        if changes.len() == 1 {
+            if let Some(Value::Object(change)) = changes.first_mut() {
+                change.insert("diff".into(), diff.clone());
+            }
+        } else {
+            out.insert("diff".into(), diff.clone());
+        }
+        let bounded_changes: Vec<Value> = changes
+            .iter()
+            .map(|c| crate::codex_approval::bounded_change(c, MAX_DIFF_BYTES))
+            .collect();
+        if let Some(Value::String(joined)) = out.get_mut("diff") {
+            *joined = crate::codex_approval::bounded(joined, MAX_DIFF_BYTES);
+        }
+        if !unchecked.is_empty() {
+            out.insert("unchecked_dest".into(), json!(unchecked));
+            out.insert(
+                "caveat".into(),
+                json!("destination not checked against your edit rules"),
+            );
+        }
+        out.insert("changes".into(), Value::Array(bounded_changes));
+        classified.insert("changes".into(), Value::Array(changes));
+    } else {
+        let path = str_of(meta, "filepath").map(|p| resolve(worktree, p));
+        let mut change = Map::new();
+        if let Some(path) = &path {
+            change.insert("path".into(), json!(shown(path)));
+            if let Some(real) = env.realpath(path).filter(|real| real != path) {
+                out.insert("realpath".into(), json!(shown(&real)));
+            }
+        }
+        change.insert(
+            "type".into(),
+            json!(if anchor.tool == "write" {
+                "write"
+            } else {
+                "update"
+            }),
+        );
+        change.insert("diff".into(), diff);
+        let change = Value::Object(change);
+        out.insert(
+            "changes".into(),
+            json!([crate::codex_approval::bounded_change(
+                &change,
+                MAX_DIFF_BYTES
+            )]),
+        );
+        classified.insert("changes".into(), json!([change]));
+    }
+    out.insert("note".into(), json!(WRITES_COMPUTED));
+    Shape {
+        tool_name: "file change".into(),
+        input: out,
+        classified: Value::Object(classified),
+        always,
+        caveat: None,
+    }
 }
 
 // ------------------------------------------------------------- snapshot read
@@ -2324,6 +3609,44 @@ impl<'a> Resync<'a> {
         self.messages(id, t, &msgs, finished)
     }
 
+    /// One listed request, judged by the plugin's verdict and the mirror of
+    /// the cards open. A request judged dead retires its open card as ended,
+    /// or, with no card, is remembered when the reason is final: the plugin's
+    /// own record says it was asked before this activation or ended by a
+    /// stop or a reload, so a card frame still in flight is not shown. The
+    /// other dead reasons are re-judged by the next snapshot and hide nothing
+    /// for the life of the run. A request the plugin could not judge changes
+    /// nothing. A live request whose card is open is not rebuilt: its bytes
+    /// are the stored card's. A request list that failed clears nothing and
+    /// retires nothing.
+    fn ask(&mut self, request: &SnapRequest) -> Vec<Emit> {
+        let Some(id) = request.id() else {
+            return Vec::new();
+        };
+        if !self.placed.insert(id.to_string()) {
+            return Vec::new();
+        }
+        let open = self.m.open_cards.iter().any(|c| c.request_id == id);
+        if self.snap.requests_ok {
+            if let Some(reason) = request.verdict.dead_reason() {
+                if open && reason != "absent" {
+                    return self.m.ended(id);
+                }
+                if !open && final_reason(reason) {
+                    self.m.remember_retired(id);
+                }
+                return Vec::new();
+            }
+            if !request.verdict.is_live() {
+                return Vec::new();
+            }
+        }
+        if open {
+            return Vec::new();
+        }
+        self.m.asked(request)
+    }
+
     /// A pending request goes right after the tool call it is about, where it
     /// was asked live.
     fn pending_for(&mut self, part: &SnapPart) -> Vec<Emit> {
@@ -2340,11 +3663,14 @@ impl<'a> Resync<'a> {
         let Some(&request) = self.pending.get(&(message.to_string(), call.to_string())) else {
             return Vec::new();
         };
-        match request.id() {
-            Some(id) if self.placed.insert(id.to_string()) => self.m.asked(request),
-            _ => Vec::new(),
-        }
+        self.ask(request)
     }
+}
+
+/// A dead verdict the next snapshot cannot overturn: the plugin's own record
+/// of the activation says so.
+fn final_reason(reason: &str) -> bool {
+    reason.starts_with("epoch:") || matches!(reason, "asked-before-activation" | "epoch-evicted")
 }
 
 /// What a rejected permission and a dismissed question leave on their tool
@@ -2506,6 +3832,114 @@ mod tests {
         SessionKey::new("01K1B3XQ8ZC0DE5FGH7JKMNPQR", "cc-1")
     }
 
+    /// A Mac the tests describe: a pinned clock, a home folder, the run's
+    /// folder, the files that exist, the links among them, and the config
+    /// files. Nothing of the real filesystem is read.
+    #[derive(Debug, Default)]
+    pub(crate) struct FakeEnv {
+        pub(crate) now: String,
+        pub(crate) home: Option<PathBuf>,
+        pub(crate) worktree: PathBuf,
+        /// Paths that exist, each with its `(device, inode)`.
+        pub(crate) files: HashMap<PathBuf, (u64, u64)>,
+        /// Link → target, for paths whose realpath is another path.
+        pub(crate) links: HashMap<PathBuf, PathBuf>,
+        /// Config files by path; `Err` is a file that cannot be read.
+        pub(crate) texts: HashMap<PathBuf, Result<String, String>>,
+        pub(crate) vars: HashMap<String, String>,
+    }
+
+    impl FakeEnv {
+        pub(crate) fn ada() -> FakeEnv {
+            let mut env = FakeEnv {
+                now: "2023-11-14T22:13:20Z".into(),
+                home: Some(PathBuf::from("/Users/ada")),
+                worktree: PathBuf::from("/Users/ada/project"),
+                ..FakeEnv::default()
+            };
+            for (n, dir) in [
+                "/",
+                "/Users",
+                "/Users/ada",
+                "/Users/ada/project",
+                "/Users/ada/outside",
+            ]
+            .iter()
+            .enumerate()
+            {
+                env.files.insert(PathBuf::from(dir), (1, n as u64 + 1));
+            }
+            env
+        }
+
+        pub(crate) fn with_file(mut self, path: &str) -> FakeEnv {
+            let n = self.files.values().map(|(_, ino)| *ino).max().unwrap_or(0) + 1;
+            self.files.insert(PathBuf::from(path), (1, n));
+            self
+        }
+
+        pub(crate) fn with_link(mut self, link: &str, target: &str) -> FakeEnv {
+            self.links
+                .insert(PathBuf::from(link), PathBuf::from(target));
+            self
+        }
+
+        pub(crate) fn with_text(mut self, path: &str, text: &str) -> FakeEnv {
+            self.texts.insert(PathBuf::from(path), Ok(text.to_string()));
+            self
+        }
+
+        fn target(&self, path: &Path) -> PathBuf {
+            self.links
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| path.to_path_buf())
+        }
+    }
+
+    impl CardEnv for FakeEnv {
+        fn now(&self) -> String {
+            self.now.clone()
+        }
+
+        fn home(&self) -> Option<PathBuf> {
+            self.home.clone()
+        }
+
+        fn worktree(&self) -> PathBuf {
+            self.worktree.clone()
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            self.files.contains_key(path) || self.links.contains_key(path)
+        }
+
+        fn realpath(&self, path: &Path) -> Option<PathBuf> {
+            let target = self.target(path);
+            self.files.contains_key(&target).then_some(target)
+        }
+
+        fn identity(&self, path: &Path) -> Option<(u64, u64)> {
+            self.files.get(&self.target(path)).copied()
+        }
+
+        fn read_text(&self, path: &Path) -> std::io::Result<Option<String>> {
+            match self.texts.get(path) {
+                None => Ok(None),
+                Some(Ok(text)) => Ok(Some(text.clone())),
+                Some(Err(why)) => Err(std::io::Error::other(why.clone())),
+            }
+        }
+
+        fn env_var(&self, name: &str) -> Option<String> {
+            self.vars.get(name).cloned()
+        }
+    }
+
+    fn adapter() -> OpencodeAdapter {
+        OpencodeAdapter::new(key(), Arc::new(FakeEnv::ada()))
+    }
+
     fn rows(text: &str) -> Vec<Value> {
         text.lines()
             .filter(|l| !l.trim().is_empty())
@@ -2592,7 +4026,7 @@ mod tests {
     impl Run {
         fn new() -> Self {
             Run {
-                adapter: OpencodeAdapter::new(key()),
+                adapter: adapter(),
                 store: Store::default(),
                 unknown: BTreeSet::new(),
                 restart: None,
@@ -2610,7 +4044,7 @@ mod tests {
 
         fn retire(&mut self) {
             self.unknown.extend(self.adapter.unknown.iter().cloned());
-            self.adapter = OpencodeAdapter::new(key());
+            self.adapter = adapter();
         }
 
         fn daemon_restart(&mut self) {
@@ -3263,7 +4697,7 @@ mod tests {
 
     #[test]
     fn a_new_agent_or_model_on_the_keyboard_is_said_once_before_the_prompt() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         let model = json!({"providerID": "mock", "modelID": "m1"});
         let events = feed(
             &mut a,
@@ -3348,7 +4782,7 @@ mod tests {
 
     #[test]
     fn a_card_asked_after_the_snapshot_began_is_not_cleared_by_it() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         feed(&mut a, &[asked("per_01")]);
         a.sync_begin();
         // Asked while the snapshot is being read, after its request list.
@@ -3369,7 +4803,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_whose_request_list_failed_clears_nothing() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         feed(&mut a, &[asked("per_01")]);
         a.sync_begin();
         let (_, staged) = a.plan_resync(&requests_snapshot(false)).unwrap();
@@ -3380,7 +4814,7 @@ mod tests {
 
     #[test]
     fn the_contract_run_reads_through_the_filter_the_snapshots_and_the_settles() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         let mut store = Store::default();
         let mut filter = SeqFilter::default();
         let mut assembly = None;
@@ -3436,11 +4870,8 @@ mod tests {
                 json!(["approval_resolved", "answered", null])
             ]
         );
-        // Still listed by every snapshot: never cleared.
-        assert_eq!(
-            card("que_0f00b00000001xxxxxxxxxxxxx"),
-            [json!(["approval_request", null, null])]
-        );
+        // Listed by every snapshot and judged dead by each: never shown.
+        assert_eq!(card("que_0f00b00000001xxxxxxxxxxxxx"), [] as [Value; 0]);
         // A card over the cap, asked live and gone from the next request list.
         assert_eq!(
             card("que_0f00b00000002xxxxxxxxxxxxx"),
@@ -3455,9 +4886,11 @@ mod tests {
             .find(|e| sid(e).ends_with("perm:per_0f00a00000001xxxxxxxxxxxxx"))
             .unwrap();
         assert_eq!(bash.payload["tool_call_id"], "call_1");
+        assert_eq!(bash.payload["answerable"], true);
+        assert_eq!(bash.payload["card"]["tool_input"]["command"], "ls -la");
         assert_eq!(
-            bash.payload["card"]["tool_input"],
-            json!({"command": "ls -la"})
+            bash.payload["card"]["tool_input"]["description"],
+            json!("list")
         );
         // The tool the snapshot showed running ends live, after its card.
         let result = store
@@ -3477,7 +4910,7 @@ mod tests {
 
     #[test]
     fn a_card_shows_the_command_or_the_permission_and_its_text_is_the_hashed_text() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         let long = format!("echo {} ; rm -rf ~/work", "x".repeat(70_000));
         let events = feed(
             &mut a,
@@ -3548,7 +4981,8 @@ mod tests {
         );
         assert_eq!(
             replied[0].payload,
-            json!({"request_id": "per_1", "status": "answered", "by": "local"})
+            json!({"request_id": "per_1", "status": "answered", "by": "local",
+                "decision": {"type": "option_id", "option_id": "once"}})
         );
     }
 
@@ -3581,7 +5015,7 @@ mod tests {
 
     #[test]
     fn a_turn_open_when_opencode_exits_gets_no_end_and_no_result() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         let mut events = feed(
             &mut a,
             &[
@@ -3606,7 +5040,7 @@ mod tests {
 
     #[test]
     fn a_fact_waits_behind_an_earlier_text_still_streaming() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         let text = |end: bool| {
             let time = if end {
                 json!({"start": 1, "end": 5})
@@ -3658,13 +5092,13 @@ mod tests {
 
     #[test]
     fn an_idle_that_closes_nothing_over_unplaced_messages_asks_for_a_snapshot() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         // A daemon that started mid-turn: the turn's prompt was never seen.
         feed(&mut a, &[assistant("msg_02", "msg_01", true), idle()]);
         assert!(a.take_resync_request());
         assert!(!a.take_resync_request(), "asked once");
 
-        let mut quiet = OpencodeAdapter::new(key());
+        let mut quiet = adapter();
         feed(&mut quiet, &[idle()]);
         assert!(!quiet.take_resync_request());
     }
@@ -3687,7 +5121,7 @@ mod tests {
     /// Two roots each mid-turn, with a card open on each; then an idle
     /// snapshot listing no request, whose `other` items are `other_items`.
     fn two_roots_then(other_items: Vec<Value>) -> (OpencodeAdapter, Vec<PendingEvent>) {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         for (session, user, reply, card) in [
             (ROOT, "msg_a1", "msg_a2", "per_a"),
             (OTHER, "msg_b1", "msg_b2", "per_b"),
@@ -3826,7 +5260,7 @@ mod tests {
 
     #[test]
     fn a_tool_update_over_the_frame_cap_ends_the_tool_only_when_it_ended() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         let model = json!({"providerID": "mock", "modelID": "m1"});
         let mut events = feed(
             &mut a,
@@ -3868,7 +5302,7 @@ mod tests {
 
     #[test]
     fn a_text_over_the_frame_cap_is_said_by_its_size_and_lets_what_waits_behind_it_go() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         let start = ev(
             "message.part.updated",
             json!({"sessionID": ROOT, "part": {"id": "prt_02a", "sessionID": ROOT,
@@ -3909,7 +5343,7 @@ mod tests {
 
     #[test]
     fn a_question_or_permission_too_large_for_a_card_is_shown_as_too_large() {
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         let question = json!({"id": "que_1", "sessionID": ROOT, "questions": [
             {"question": "x".repeat(900_000), "header": "h", "options": []}]});
         let patterns: Vec<String> = (0..120)
@@ -3992,7 +5426,7 @@ mod tests {
                 json!({"created": 6, "completed": 7}),
             ),
         ];
-        let a = OpencodeAdapter::new(key());
+        let a = adapter();
         let (facts, staged) = a.plan_resync(&full_snapshot(json!({}), items)).unwrap();
         let ends: Vec<&str> = facts
             .iter()
@@ -4028,7 +5462,7 @@ mod tests {
         // The reply is split, so its part stub joins it.
         let mut items = items;
         items[1]["split"] = json!(true);
-        let mut a = OpencodeAdapter::new(key());
+        let mut a = adapter();
         let (facts, staged) = a.plan_resync(&full_snapshot(json!({}), items)).unwrap();
         assert!(
             facts.iter().all(|e| e.kind != EventKind::TurnComplete),
@@ -4544,5 +5978,1358 @@ mod tests {
         sum.add(Some(&json!(u64::MAX)));
         sum.add(Some(&json!(i64::MAX)));
         assert_eq!(sum.value(), json!(i64::MAX));
+    }
+    // --------------------------------------------------------- answerable cards
+
+    /// One captured permission ask per family (`asked`, its anchoring tool
+    /// part and the context the plugin read), and the card this builder makes
+    /// of it. The `expected` block is this builder's own output, written by
+    /// [`regenerate_the_permission_card_fixtures`]: the byte comparison in
+    /// [`every_captured_permission_ask_builds_the_committed_card`] guards
+    /// against drift, and [`every_card_rule_holds_on_the_captured_asks`] asserts
+    /// the facts each rule stands on.
+    const S7: [(&str, &str); 24] = [
+        (
+            "apply-patch-move-over",
+            include_str!(
+                "../../../fixtures/opencode/s7-permission-apply-patch-move-over-1.18.34.json"
+            ),
+        ),
+        (
+            "bash",
+            include_str!("../../../fixtures/opencode/s7-permission-bash-1.18.34.json"),
+        ),
+        (
+            "bash-child",
+            include_str!("../../../fixtures/opencode/s7-permission-bash-child-1.18.34.json"),
+        ),
+        (
+            "custom-tool",
+            include_str!("../../../fixtures/opencode/s7-permission-custom-tool-1.18.34.json"),
+        ),
+        (
+            "doom-loop",
+            include_str!("../../../fixtures/opencode/s7-permission-doom-loop-1.18.34.json"),
+        ),
+        (
+            "edit",
+            include_str!("../../../fixtures/opencode/s7-permission-edit-1.18.34.json"),
+        ),
+        (
+            "external-directory",
+            include_str!(
+                "../../../fixtures/opencode/s7-permission-external-directory-1.18.34.json"
+            ),
+        ),
+        (
+            "external-directory-root",
+            include_str!(
+                "../../../fixtures/opencode/s7-permission-external-directory-root-1.18.34.json"
+            ),
+        ),
+        (
+            "glob",
+            include_str!("../../../fixtures/opencode/s7-permission-glob-1.18.34.json"),
+        ),
+        (
+            "grep",
+            include_str!("../../../fixtures/opencode/s7-permission-grep-1.18.34.json"),
+        ),
+        (
+            "lsp",
+            include_str!("../../../fixtures/opencode/s7-permission-lsp-1.18.34.json"),
+        ),
+        (
+            "mcp-code-mode",
+            include_str!("../../../fixtures/opencode/s7-permission-mcp-code-mode-1.18.34.json"),
+        ),
+        (
+            "mcp-tool",
+            include_str!("../../../fixtures/opencode/s7-permission-mcp-tool-1.18.34.json"),
+        ),
+        (
+            "read",
+            include_str!("../../../fixtures/opencode/s7-permission-read-1.18.34.json"),
+        ),
+        (
+            "read-mcp-resource",
+            include_str!("../../../fixtures/opencode/s7-permission-read-mcp-resource-1.18.34.json"),
+        ),
+        (
+            "shadowed-apply-patch",
+            include_str!(
+                "../../../fixtures/opencode/s7-permission-shadowed-apply-patch-1.18.34.json"
+            ),
+        ),
+        (
+            "shadowed-bash",
+            include_str!("../../../fixtures/opencode/s7-permission-shadowed-bash-1.18.34.json"),
+        ),
+        (
+            "skill",
+            include_str!("../../../fixtures/opencode/s7-permission-skill-1.18.34.json"),
+        ),
+        (
+            "task",
+            include_str!("../../../fixtures/opencode/s7-permission-task-1.18.34.json"),
+        ),
+        (
+            "todowrite",
+            include_str!("../../../fixtures/opencode/s7-permission-todowrite-1.18.34.json"),
+        ),
+        (
+            "v2-bash",
+            include_str!("../../../fixtures/opencode/s7-permission-v2-bash-1.18.34.json"),
+        ),
+        (
+            "webfetch",
+            include_str!("../../../fixtures/opencode/s7-permission-webfetch-1.18.34.json"),
+        ),
+        (
+            "websearch",
+            include_str!("../../../fixtures/opencode/s7-permission-websearch-1.18.34.json"),
+        ),
+        (
+            "s5-auto-mode",
+            include_str!("../../../fixtures/opencode/s5-auto-mode-1.18.34.json"),
+        ),
+    ];
+
+    const S5: &str = include_str!("../../../fixtures/opencode/s5-auto-mode-1.18.34.json");
+    const S6: &str = include_str!("../../../fixtures/opencode/s6-liveness-1.18.34.json");
+    const CONFIG_DENY: &str =
+        include_str!("../../../fixtures/opencode/permission-config-deny-1.18.34.json");
+
+    /// The activation the fixtures' cards are stamped with.
+    const ACTIVATION: u64 = 7;
+
+    fn s7() -> Vec<(&'static str, Value)> {
+        S7.iter()
+            .filter(|(stem, _)| *stem != "s5-auto-mode")
+            .map(|(stem, text)| (*stem, serde_json::from_str(text).expect("a JSON fixture")))
+            .collect()
+    }
+
+    fn env_of(doc: &Value) -> FakeEnv {
+        let mut env = FakeEnv::ada();
+        for file in strings(doc["context"].get("existing_files")) {
+            env = env.with_file(&file);
+        }
+        env
+    }
+
+    /// The context frame the plugin writes on a card, from what the fixture
+    /// captured of the TUI at the ask.
+    fn ctx_of(doc: &Value) -> Value {
+        json!({
+            "ok": true,
+            "tool_ids": doc["context"]["tool_ids"],
+            "mcp": doc["context"]["mcp_connected"],
+            "mode": "normal",
+            "parent": doc["anchor"]["parentID"],
+            "ms": 0,
+        })
+    }
+
+    /// The anchoring tool part as the plugin forwards it running, then the
+    /// ask with its context. A doom loop names no part: its anchor is the
+    /// repeated call, running.
+    fn frames_of(doc: &Value) -> Vec<LinkFrame> {
+        let asked = &doc["asked"];
+        let session = asked["sessionID"].as_str().unwrap();
+        let mut out = Vec::new();
+        if let Some(parent) = doc["anchor"]["parentID"].as_str() {
+            out.push(ev(
+                "session.created",
+                json!({"info": {"id": session, "parentID": parent}}),
+            ));
+        }
+        let (tool, input, message, call) = match doc["anchor"]["partTool"].as_str() {
+            Some(tool) => (
+                tool.to_string(),
+                doc["anchor"]["partInput"].clone(),
+                asked["tool"]["messageID"].clone(),
+                asked["tool"]["callID"].clone(),
+            ),
+            None if asked["permission"] == "doom_loop" => (
+                asked["metadata"]["tool"].as_str().unwrap().to_string(),
+                asked["metadata"]["input"].clone(),
+                json!("msg_doom"),
+                json!("call_doom"),
+            ),
+            None => {
+                let mut request = asked.clone();
+                request["ctx"] = ctx_of(doc);
+                out.push(ev(doc["event"].as_str().unwrap(), request));
+                return out;
+            }
+        };
+        out.push(ev(
+            "message.part.updated",
+            json!({"part": {"id": "prt_anchor", "sessionID": session, "messageID": message,
+                "type": "tool", "tool": tool, "callID": call,
+                "state": {"status": "running", "input": input}}}),
+        ));
+        let mut request = asked.clone();
+        if !input.is_null() {
+            request["anchor_input"] = input;
+        }
+        request["ctx"] = ctx_of(doc);
+        out.push(ev(doc["event"].as_str().unwrap(), request));
+        out
+    }
+
+    /// What the builder makes of one fixture, and what the adapter filed.
+    fn built(doc: &Value) -> (Option<Built>, Vec<PendingEvent>, OpencodeAdapter) {
+        let mut a = OpencodeAdapter::new(key(), Arc::new(env_of(doc)));
+        a.set_activation(ACTIVATION);
+        let frames = frames_of(doc);
+        let (ask, setup) = frames.split_last().unwrap();
+        feed(&mut a, setup);
+        let built = match ask {
+            LinkFrame::Ev { properties, .. } if doc["event"] == "permission.asked" => Some(
+                a.build_ask(properties, properties["ctx"].as_object().unwrap())
+                    .0,
+            ),
+            _ => None,
+        };
+        let events = feed(&mut a, std::slice::from_ref(ask));
+        (built, events, a)
+    }
+
+    fn option_ids(card: &ApprovalCard) -> Vec<&str> {
+        card.tool_input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect()
+    }
+
+    fn always_scope(card: &ApprovalCard) -> Option<String> {
+        card.tool_input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "always")
+            .map(|o| o["scope"].as_str().unwrap().to_string())
+    }
+
+    fn risk_class(card: &ApprovalCard) -> String {
+        serde_json::to_value(card.risk.as_ref().unwrap()).unwrap()["class"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// **Every rule, on the ask it was measured on.** Each fixture's facts are
+    /// asserted from the capture, not from the committed card: what is shown
+    /// and what is hidden, which options are offered, the Always text, the
+    /// risk class the real classifier gives the captured input, and the lines
+    /// a card carries or must not.
+    #[test]
+    fn every_card_rule_holds_on_the_captured_asks() {
+        for (stem, doc) in s7() {
+            let (built, events, _) = built(&doc);
+            let input = |card: &ApprovalCard| card.tool_input.clone();
+            match (stem, built) {
+                ("v2-bash", None) => {
+                    assert_eq!(events.len(), 1, "{stem}: one line, no card");
+                    assert_eq!(events[0].kind, EventKind::Notification);
+                    assert_eq!(
+                        sid(&events[0]),
+                        format!(
+                            "{}:perm_hidden:{}",
+                            doc["asked"]["sessionID"].as_str().unwrap(),
+                            doc["asked"]["id"].as_str().unwrap()
+                        )
+                    );
+                    assert_eq!(events[0].payload["message"], HIDDEN_REQUEST);
+                }
+                (
+                    "custom-tool" | "shadowed-bash" | "shadowed-apply-patch" | "mcp-code-mode",
+                    Some(Built::Hidden(why)),
+                ) => {
+                    assert!(
+                        events.is_empty(),
+                        "{stem}: nothing filed for a hidden request"
+                    );
+                    let expected = match stem {
+                        "custom-tool" => "not a permission this build has a card for",
+                        "mcp-code-mode" => "code mode",
+                        _ => "is shadowed",
+                    };
+                    assert!(why.contains(expected), "{stem}: {why}");
+                }
+                (_, Some(Built::Card { family, card })) => {
+                    assert_eq!(events.len(), 1, "{stem}");
+                    assert_eq!(events[0].payload["answerable"], true, "{stem}");
+                    assert_eq!(events[0].payload["family"], family, "{stem}");
+                    assert_eq!(
+                        card.generation, ACTIVATION,
+                        "{stem}: generation is the activation"
+                    );
+                    assert!(!card.identity_bound);
+                    assert_eq!(
+                        protocol::hash::sha256_hex(card.display_text.as_bytes()),
+                        card.payload_hash
+                    );
+                    let asked = &doc["asked"];
+                    assert_eq!(
+                        card.tool_input["always"], asked["always"],
+                        "{stem}: always verbatim"
+                    );
+                    assert_eq!(
+                        card.tool_input["computed_at"], "2023-11-14T22:13:20Z",
+                        "{stem}"
+                    );
+                    let child = doc["anchor"]["parentID"].is_string();
+                    let ids = option_ids(&card);
+                    assert_eq!(
+                        ids.contains(&"reject_with_words"),
+                        child,
+                        "{stem}: words only in a subagent session"
+                    );
+                    assert_eq!(ids[0], "once");
+                    assert!(ids.contains(&"reject"));
+                    if let Some(scope) = always_scope(&card) {
+                        assert!(scope.contains(SCOPE), "{stem}: {scope}");
+                    }
+                    let risk = risk_class(&card);
+                    match stem {
+                        "bash" | "bash-child" => {
+                            assert_eq!(card.tool_name, "command");
+                            assert_eq!(card.tool_input["command"], asked["metadata"]["command"]);
+                            assert_eq!(
+                                card.tool_input["description"],
+                                doc["anchor"]["partInput"]["description"]
+                            );
+                            assert_eq!(family, "bash");
+                            let scope = always_scope(&card).unwrap();
+                            assert!(scope.starts_with(&format!(
+                                "Allow commands starting {}, ",
+                                asked["always"][0].as_str().unwrap()
+                            )));
+                            assert!(scope
+                                .contains("Matching ignores redirects, $VARS and later arguments"));
+                            assert_eq!(risk, "medium");
+                        }
+                        "external-directory" => {
+                            assert_eq!(card.tool_name, "external directory");
+                            assert_eq!(card.tool_input["path"], "/Users/ada/outside");
+                            assert_eq!(
+                                card.tool_input["filepath"],
+                                "/Users/ada/outside/target.txt"
+                            );
+                            assert_eq!(card.tool_input["via"], "read");
+                            assert_eq!(family, "external_directory");
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with("/Users/ada/outside and everything below it, "));
+                            assert_eq!(risk, "medium");
+                        }
+                        "external-directory-root" => {
+                            assert_eq!(card.tool_name, "external directory");
+                            assert_eq!(card.tool_input["path"], "/");
+                            assert_eq!(card.tool_input["dirs"], json!(["/"]));
+                            assert_eq!(card.tool_input["command"], "cd / && ls");
+                            assert_eq!(card.tool_input["via"], "bash");
+                            assert!(
+                                always_scope(&card).is_none(),
+                                "the disk is never granted whole"
+                            );
+                            assert_eq!(risk, "medium");
+                        }
+                        "edit" => {
+                            assert_eq!(card.tool_name, "file change");
+                            assert_eq!(
+                                card.tool_input["changes"][0]["path"],
+                                "/Users/ada/project/a.txt"
+                            );
+                            assert_eq!(card.tool_input["changes"][0]["type"], "update");
+                            assert_eq!(
+                                card.tool_input["changes"][0]["diff"],
+                                asked["metadata"]["diff"]
+                            );
+                            assert!(card.tool_input.get("realpath").is_none());
+                            assert_eq!(card.tool_input["note"], WRITES_COMPUTED);
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with("Allow ALL edits, "));
+                            assert_eq!(family, "edit");
+                            assert_eq!(risk, "medium");
+                        }
+                        "apply-patch-move-over" => {
+                            assert_eq!(card.tool_name, "file change");
+                            let change = &card.tool_input["changes"][0];
+                            assert_eq!(change["path"], "/Users/ada/project/b.txt");
+                            assert_eq!(change["type"], "move");
+                            assert_eq!(change["move_path"], "/Users/ada/project/c2.txt");
+                            assert_eq!(change["overwrites"], "overwrites existing /Users/ada/project/c2.txt (current content not shown)");
+                            assert_eq!(change["diff"], asked["metadata"]["diff"]);
+                            assert!(change.get("deletes").is_none());
+                            assert_eq!(
+                                card.tool_input["unchecked_dest"],
+                                json!(["/Users/ada/project/c2.txt"])
+                            );
+                            assert_eq!(
+                                card.tool_input["caveat"],
+                                "destination not checked against your edit rules"
+                            );
+                            assert_eq!(card.tool_input["note"], WRITES_COMPUTED);
+                            assert!(always_scope(&card).is_some());
+                            assert_eq!(risk, "medium");
+                        }
+                        "read" => {
+                            assert_eq!(card.tool_name, "read");
+                            assert_eq!(card.tool_input["path"], "/Users/ada/outside/target.txt");
+                            assert_eq!(card.tool_input["relative"], "../outside/target.txt");
+                            assert!(always_scope(&card).unwrap().starts_with("all reads, "));
+                            assert_eq!(risk, "low");
+                        }
+                        "read-mcp-resource" => {
+                            assert_eq!(card.tool_name, "mcp resource");
+                            assert_eq!(card.tool_input["server"], "s7mcp");
+                            assert_eq!(card.tool_input["uri"], "s7://note");
+                            assert_eq!(card.tool_input["via"], "read_mcp_resource");
+                            assert_eq!(family, "read");
+                            assert!(always_scope(&card).unwrap().starts_with("mcp:s7mcp:*, "));
+                            assert_eq!(risk, "medium");
+                        }
+                        "glob" | "grep" => {
+                            assert_eq!(card.tool_name, stem);
+                            assert_eq!(card.tool_input["pattern"], asked["metadata"]["pattern"]);
+                            assert_eq!(card.tool_input["path"], "/Users/ada/outside");
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with(&format!("all {stem} calls, ")));
+                            assert_eq!(risk, "low");
+                        }
+                        "webfetch" => {
+                            assert_eq!(card.tool_input["url"], "http://mock.invalid/redir");
+                            assert_eq!(card.tool_input["format"], "text");
+                            assert_eq!(card.tool_input["caveat"], "follows redirects to any host");
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with("all web fetches, "));
+                            assert_eq!(risk, "low");
+                        }
+                        "websearch" => {
+                            assert_eq!(card.tool_input["query"], "s7 test query");
+                            assert_eq!(card.tool_input["provider"], "exa");
+                            assert!(always_scope(&card).unwrap().starts_with("all searches, "));
+                            assert_eq!(risk, "low");
+                        }
+                        "task" => {
+                            assert_eq!(card.tool_input["subagent_type"], "general");
+                            assert_eq!(card.tool_input["description"], "child job");
+                            assert_eq!(
+                                card.tool_input["prompt"],
+                                doc["anchor"]["partInput"]["prompt"]
+                            );
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with("every subagent launch, ANY type, "));
+                            assert_eq!(risk, "medium");
+                        }
+                        "todowrite" => {
+                            assert_eq!(
+                                card.tool_input["todos"],
+                                doc["anchor"]["partInput"]["todos"]
+                            );
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with("all todo-list updates, "));
+                            assert_eq!(risk, "medium");
+                        }
+                        "skill" => {
+                            assert_eq!(card.tool_input["name"], "s7skill");
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with("the skill s7skill, "));
+                            assert_eq!(risk, "medium");
+                        }
+                        "lsp" => {
+                            assert_eq!(card.tool_input["operation"], "hover");
+                            assert_eq!(card.tool_input["filePath"], "/Users/ada/project/a.txt");
+                            assert_eq!(card.tool_input["line"], 1);
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with("all LSP queries, "));
+                            assert_eq!(risk, "medium");
+                        }
+                        "doom-loop" => {
+                            assert_eq!(card.tool_name, "glob", "the repeated call's name");
+                            assert_eq!(card.tool_input["pattern"], "*.md");
+                            assert_eq!(card.tool_input["repeated_call"], "glob");
+                            assert_eq!(family, "doom_loop");
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with("stop asking about repeated glob calls, "));
+                            assert_eq!(risk, "low");
+                        }
+                        "mcp-tool" => {
+                            assert_eq!(card.tool_name, "s7mcp_run_shell");
+                            assert_eq!(card.tool_input["cmd"], "rm -rf /");
+                            assert_eq!(card.tool_input["server"], "s7mcp");
+                            assert_eq!(
+                                card.tool_input["caveat"],
+                                "arguments as the model sent them"
+                            );
+                            assert_eq!(family, "mcp");
+                            assert!(always_scope(&card)
+                                .unwrap()
+                                .starts_with("every call of this MCP tool, "));
+                            assert_eq!(risk, "high");
+                            assert_eq!(
+                                serde_json::to_value(card.risk.as_ref().unwrap()).unwrap()
+                                    ["matched_pattern"],
+                                "rm -rf"
+                            );
+                        }
+                        other => panic!("{other}: a fixture without its rule"),
+                    }
+                    let _ = input(&card);
+                }
+                (stem, other) => panic!(
+                    "{stem}: {:?}",
+                    other.map(|b| matches!(b, Built::Card { .. }))
+                ),
+            }
+        }
+    }
+
+    /// What one fixture's `expected` block says, from the builder.
+    fn expected_of(doc: &Value) -> Value {
+        let (built, _, _) = built(doc);
+        let note = doc["expected"].get("note").cloned();
+        let mut out = match built {
+            None => {
+                json!({"card": null, "hidden": true, "reason": "a v2 request: one line, never a card"})
+            }
+            Some(Built::Hidden(why)) => json!({"card": null, "hidden": true, "reason": why}),
+            Some(Built::Stub { .. }) => {
+                json!({"card": null, "hidden": false, "reason": "too large to show"})
+            }
+            Some(Built::Card { card, .. }) => {
+                let with_words = option_ids(&card).contains(&"reject_with_words");
+                json!({
+                    "card": {
+                        "tool_name": card.tool_name,
+                        "tool_input": card.tool_input,
+                        "display_text": card.display_text,
+                        "payload_hash": card.payload_hash,
+                        "risk": card.risk,
+                    },
+                    "hidden": false,
+                    "always_offered": always_scope(&card).is_some(),
+                    "always_text": always_scope(&card),
+                    "reject_with_words": with_words,
+                })
+            }
+        };
+        if let Some(note) = note {
+            out["note"] = note;
+        }
+        out
+    }
+
+    fn fixture_path(stem: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/opencode")
+            .join(format!("s7-permission-{stem}-1.18.34.json"))
+    }
+
+    /// **The committed cards are this builder's output**, byte for byte: a
+    /// change to any card's bytes shows in the fixture's diff. A regression
+    /// guard only; the rules are asserted above.
+    #[test]
+    fn every_captured_permission_ask_builds_the_committed_card() {
+        for (stem, doc) in s7() {
+            assert_eq!(
+                expected_of(&doc),
+                doc["expected"],
+                "{stem}: run the regenerator"
+            );
+        }
+    }
+
+    /// Rewrites each fixture's `expected` block from the builder. Run with
+    /// `cargo test -p ccd --bin ccd -- --ignored regenerate_the_permission_card_fixtures`.
+    #[test]
+    #[ignore]
+    fn regenerate_the_permission_card_fixtures() {
+        for (stem, mut doc) in s7() {
+            doc["expected"] = expected_of(&doc);
+            let text = format!("{}\n", serde_json::to_string_pretty(&doc).unwrap());
+            std::fs::write(fixture_path(stem), text).unwrap();
+        }
+    }
+
+    /// No card wording says or implies that a call stays inside the project:
+    /// OpenCode's path checks are lexical, and the absence of an
+    /// external-directory card proves nothing.
+    #[test]
+    fn no_card_says_a_call_stays_inside_the_project() {
+        for (stem, doc) in s7() {
+            let text = serde_json::to_string(&expected_of(&doc))
+                .unwrap()
+                .to_lowercase();
+            for forbidden in ["inside the project", "project only", "stays in the project"] {
+                assert!(!text.contains(forbidden), "{stem} says {forbidden:?}");
+            }
+        }
+    }
+
+    /// A second card about the same tool call says so; each is answered by
+    /// its own id.
+    #[test]
+    fn two_cards_about_one_tool_call_are_told_apart() {
+        let (stem, doc) = s7()
+            .into_iter()
+            .find(|(s, _)| *s == "external-directory")
+            .unwrap();
+        let (_, events, mut a) = built(&doc);
+        assert_eq!(events.len(), 1, "{stem}");
+        let mut second = doc["asked"].clone();
+        second["id"] = json!("per_second");
+        second["permission"] = json!("read");
+        second["patterns"] = json!(["../outside/target.txt"]);
+        second["always"] = json!(["*"]);
+        second["metadata"] = json!({});
+        second["anchor_input"] = doc["anchor"]["partInput"].clone();
+        second["ctx"] = ctx_of(&doc);
+        let events = feed(&mut a, &[ev("permission.asked", second)]);
+        let card = card_of(&events[0]);
+        assert_eq!(card.tool_name, "read");
+        assert_eq!(card.request_id, "per_second");
+        assert_eq!(
+            card.tool_input["part"],
+            "2 of 2: another card is about the same tool call"
+        );
+        assert_eq!(
+            events[0].payload["tool_call_id"],
+            doc["asked"]["tool"]["callID"]
+        );
+    }
+
+    /// The bounds: a command over 8 KiB is cut with a digest and classified
+    /// whole, and a card whose input is over 16 KiB without its diffs is a
+    /// stub.
+    #[test]
+    fn a_long_command_is_cut_for_the_phone_and_classified_whole() {
+        let (_, doc) = s7().into_iter().find(|(s, _)| *s == "bash").unwrap();
+        let long = format!("echo {} ; rm -rf ~/work", "x".repeat(70_000));
+        let mut doc = doc;
+        doc["asked"]["metadata"]["command"] = json!(long);
+        doc["anchor"]["partInput"]["command"] = json!(long);
+        let (outcome, _, _) = built(&doc);
+        let Some(Built::Card { card, .. }) = outcome else {
+            panic!("a card");
+        };
+        let shown = card.tool_input["command"].as_str().unwrap();
+        assert!(
+            shown.len() < 9_000 && shown.contains(&protocol::hash::sha256_hex(long.as_bytes()))
+        );
+        assert_eq!(risk_class(&card), "high", "classified on the whole command");
+
+        doc["anchor"]["partInput"]["description"] = json!("d".repeat(20_000));
+        let (outcome, events, _) = built(&doc);
+        assert!(matches!(outcome, Some(Built::Stub { .. })));
+        assert_eq!(events[0].payload["answerable"], false);
+        assert!(card_of(&events[0]).tool_input["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("This request is too large to show"));
+    }
+
+    /// A bash card shows the command OpenCode will run, never its patterns:
+    /// the patterns come from a shell scan that drops redirects, so a
+    /// redirect-only clause is a command the patterns say nothing of.
+    #[test]
+    fn a_bash_card_shows_the_command_and_never_its_patterns() {
+        let (_, doc) = s7().into_iter().find(|(s, _)| *s == "bash").unwrap();
+        let mut doc = doc;
+        let command = "{ echo pwned; } > r2.txt";
+        doc["asked"]["metadata"]["command"] = json!(command);
+        doc["asked"]["patterns"] = json!(["echo pwned"]);
+        doc["asked"]["always"] = json!(["echo *"]);
+        doc["anchor"]["partInput"]["command"] = json!(command);
+        let (outcome, _, _) = built(&doc);
+        let Some(Built::Card { card, .. }) = outcome else {
+            panic!("a card");
+        };
+        assert_eq!(card.tool_input["command"], command);
+        assert_eq!(card.tool_input["always"], json!(["echo *"]));
+        assert!(always_scope(&card)
+            .unwrap()
+            .starts_with("Allow commands starting echo *, "));
+    }
+
+    /// Hidden by what the plugin could not read: a context that failed, or a
+    /// mode it could not find, shows nothing.
+    #[test]
+    fn a_card_the_plugin_judged_against_nothing_is_not_shown() {
+        let (_, doc) = s7().into_iter().find(|(s, _)| *s == "bash").unwrap();
+        for patch in [
+            json!({"ok": false}),
+            json!({"mode": "unknown", "ok": false}),
+        ] {
+            let mut a = OpencodeAdapter::new(key(), Arc::new(env_of(&doc)));
+            let frames = frames_of(&doc);
+            let (ask, setup) = frames.split_last().unwrap();
+            feed(&mut a, setup);
+            let LinkFrame::Ev { properties, .. } = ask else {
+                panic!()
+            };
+            let mut p = properties.clone();
+            for (k, v) in patch.as_object().unwrap() {
+                p["ctx"][k] = v.clone();
+            }
+            assert!(feed(&mut a, &[ev("permission.asked", Value::Object(p))]).is_empty());
+            assert!(a.open_cards.is_empty());
+        }
+    }
+
+    /// A doom loop whose repeated tool is shadowed, or is one this build has no
+    /// card for, is not shown either.
+    #[test]
+    fn a_doom_loop_is_judged_by_the_call_it_repeats() {
+        let (_, doc) = s7().into_iter().find(|(s, _)| *s == "doom-loop").unwrap();
+        let mut shadowed = doc.clone();
+        shadowed["context"]["tool_ids"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("glob"));
+        assert!(matches!(built(&shadowed).0, Some(Built::Hidden(why)) if why.contains("shadowed")));
+        let mut custom = doc.clone();
+        custom["asked"]["metadata"]["tool"] = json!("s7custom");
+        custom["anchor"]["partTool"] = Value::Null;
+        assert!(matches!(built(&custom).0, Some(Built::Hidden(_))));
+    }
+
+    /// A running part that is not the one the request describes hides the
+    /// card: the two would describe different calls.
+    #[test]
+    fn a_card_is_hidden_when_its_anchor_and_its_request_disagree() {
+        let (_, doc) = s7().into_iter().find(|(s, _)| *s == "bash").unwrap();
+        let mut other = doc.clone();
+        other["anchor"]["partInput"]["command"] = json!("rm -rf /");
+        assert!(
+            matches!(built(&other).0, Some(Built::Hidden(why)) if why.contains("not the one the request describes"))
+        );
+        let mut tool = doc.clone();
+        tool["anchor"]["partTool"] = json!("read");
+        assert!(
+            matches!(built(&tool).0, Some(Built::Hidden(why)) if why.contains("anchored to a `read` part"))
+        );
+    }
+
+    /// Where an external-directory Always is not offered: the disk, the home
+    /// folder, the run's folder, an ancestor of either, a pattern with a
+    /// wildcard before its last segment, a folder that does not resolve; and
+    /// where it is: a plain folder outside them all.
+    #[test]
+    fn an_external_directory_always_is_withheld_for_the_folders_that_hold_everything() {
+        let env = FakeEnv::ada()
+            .with_file("/Users/ada/outside")
+            .with_file("/System/Volumes/Data")
+            .with_link("/Users/ada/link-to-home", "/Users/ada");
+        for (entry, offered) in [
+            ("/*", false),
+            ("/Users/*", false),
+            ("/Users/ada/*", false),
+            ("/Users/ada/project/*", false),
+            ("/Users/ada/link-to-home/*", false),
+            ("/System/Volumes/Data/*", false),
+            ("/Users/*/outside/*", false),
+            ("/Users/ada/n?t/*", false),
+            ("/Users/ada/missing/*", false),
+            ("/Users/ada/outside/*", true),
+        ] {
+            assert_eq!(external_always_offered(&env, entry), offered, "{entry}");
+        }
+    }
+
+    /// A move onto the file itself, by a link or by the same inode, deletes
+    /// it: the card says so and offers no Always.
+    #[test]
+    fn a_patch_that_moves_a_file_onto_itself_deletes_it() {
+        let (_, doc) = s7()
+            .into_iter()
+            .find(|(s, _)| *s == "apply-patch-move-over")
+            .unwrap();
+        let mut doc = doc;
+        doc["asked"]["metadata"]["files"][0]["movePath"] = json!("B.txt");
+        doc["context"]["existing_files"] = json!(["/Users/ada/project/b.txt"]);
+        let mut a = OpencodeAdapter::new(
+            key(),
+            Arc::new(
+                env_of(&doc).with_link("/Users/ada/project/B.txt", "/Users/ada/project/b.txt"),
+            ),
+        );
+        let frames = frames_of(&doc);
+        let events = feed(&mut a, &frames);
+        let card = card_of(events.last().unwrap());
+        assert_eq!(
+            card.tool_input["changes"][0]["deletes"],
+            "DELETES /Users/ada/project/b.txt: the move destination is the file itself"
+        );
+        assert!(always_scope(&card).is_none());
+        assert!(card.tool_input.get("unchecked_dest").is_none());
+    }
+
+    /// The Always scope names what the operator's config denies when the
+    /// grant would cover it, from the config files OpenCode's TUI reads, and
+    /// says when that could not be read.
+    #[test]
+    fn the_always_scope_names_what_the_config_denies() {
+        let doc: Value = serde_json::from_str(CONFIG_DENY).unwrap();
+        let mut env = FakeEnv::ada();
+        env.home = Some(PathBuf::from(doc["home"].as_str().unwrap()));
+        env.worktree = PathBuf::from(doc["worktree"].as_str().unwrap());
+        for (path, text) in doc["files"].as_object().unwrap() {
+            env = env.with_text(path, text.as_str().unwrap());
+        }
+        for (name, value) in doc["env"].as_object().unwrap() {
+            env.vars
+                .insert(name.clone(), value.as_str().unwrap().to_string());
+        }
+        assert_eq!(
+            config_files(&env),
+            doc["files_read"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| PathBuf::from(p.as_str().unwrap()))
+                .collect::<Vec<_>>(),
+            "the files, in merge order"
+        );
+        for case in doc["cases"].as_array().unwrap() {
+            let permission = case["permission"].as_str().unwrap();
+            let always = strings(case.get("always"));
+            let denies = config_denies(&env, permission).unwrap();
+            assert_eq!(
+                json!(denies),
+                case["denies"],
+                "{permission}: the merged deny list"
+            );
+            let scope = scope("the grant", None, &always, &Ok(denies));
+            assert_eq!(scope, case["scope"], "{permission} with always {always:?}");
+            assert!(scope.contains("including what your config denies"));
+        }
+        let unreadable = doc["unreadable"].as_str().unwrap();
+        env.texts
+            .insert(PathBuf::from(unreadable), Err("permission denied".into()));
+        let failed = config_denies(&env, "edit");
+        assert!(failed.is_err());
+        assert_eq!(
+            scope("the grant", None, &["*".to_string()], &failed),
+            doc["scope_unreadable"]
+        );
+    }
+
+    /// A request answered at the Mac before its card frame reached the
+    /// daemon, or judged ended by a snapshot before it, is never shown: the
+    /// card lost the race to its own resolution. A dead reason the next
+    /// snapshot re-judges hides nothing.
+    #[test]
+    fn a_card_that_arrives_after_its_resolution_is_not_shown() {
+        let (_, doc) = s7().into_iter().find(|(s, _)| *s == "bash").unwrap();
+        let id = doc["asked"]["id"].as_str().unwrap();
+        let session = doc["asked"]["sessionID"].as_str().unwrap();
+        let frames = frames_of(&doc);
+        let (ask, setup) = frames.split_last().unwrap();
+
+        let mut a = OpencodeAdapter::new(key(), Arc::new(env_of(&doc)));
+        assert!(
+            feed(
+                &mut a,
+                &[ev(
+                    "permission.replied",
+                    json!({"sessionID": session, "requestID": id, "reply": "once"})
+                )]
+            )
+            .is_empty(),
+            "a reply with no card files nothing"
+        );
+        feed(&mut a, setup);
+        assert!(feed(&mut a, std::slice::from_ref(ask)).is_empty());
+        assert!(a.open_cards.is_empty());
+
+        for (reason, shown) in [
+            ("epoch:abort", false),
+            ("asked-before-activation", false),
+            ("not-busy", true),
+        ] {
+            let mut a = OpencodeAdapter::new(key(), Arc::new(env_of(&doc)));
+            feed(&mut a, setup);
+            let snap = snapshot_listing(
+                vec![(
+                    doc["asked"].clone(),
+                    json!({"live": false, "dead": reason, "listed": true, "in_store": true}),
+                )],
+                true,
+            );
+            let (facts, staged) = a.plan_resync(&snap).unwrap();
+            assert!(
+                facts.is_empty(),
+                "{reason}: nothing is filed for a dead request with no card"
+            );
+            a.apply_resync(staged);
+            let events = feed(&mut a, std::slice::from_ref(ask));
+            assert_eq!(!events.is_empty(), shown, "{reason}");
+        }
+    }
+
+    /// A requests-only snapshot listing `requests` with their verdicts.
+    fn snapshot_listing(requests: Vec<(Value, Value)>, requests_ok: bool) -> Snapshot {
+        let begin = frame(
+            json!({"t": "sync_begin", "sync": 1, "reason": "trigger:session.idle",
+            "scope": "requests", "as_of": 9, "status": {}, "status_ok": true}),
+        );
+        let mut assembly = SyncAssembly::begin(&begin).unwrap();
+        for (request, verdict) in requests {
+            assembly.add(&frame(
+                json!({"t": "sync_request", "sync": 1, "kind": "permission", "request": request, "verdict": verdict}),
+            ));
+        }
+        let end = frame(
+            json!({"t": "sync_end", "sync": 1, "done_at": 9, "permissions_ok": requests_ok,
+            "questions_ok": true, "requests_ok": requests_ok, "lower": {}, "pages": 0, "items": 0,
+            "bytes": 0, "activation": 1}),
+        );
+        assembly.finish(&end).unwrap()
+    }
+
+    /// A snapshot's verdicts on an open card: dead retires it as ended under
+    /// the adapter's own key and a second snapshot with the same ghost files
+    /// nothing; live leaves it, unrebuilt; unknown changes nothing; a list
+    /// that failed applies no verdict at all.
+    #[test]
+    fn a_snapshots_verdict_retires_a_dead_card_once_and_leaves_a_live_one_as_it_is() {
+        let (_, doc) = s7().into_iter().find(|(s, _)| *s == "bash").unwrap();
+        let id = doc["asked"]["id"].as_str().unwrap();
+        let session = doc["asked"]["sessionID"].as_str().unwrap();
+        let mut listed = doc["asked"].clone();
+        listed["anchor_input"] = doc["anchor"]["partInput"].clone();
+        listed["ctx"] = ctx_of(&doc);
+        let verdict = |live: bool, dead: Option<&str>, unknown: Option<&str>| json!({"live": live, "dead": dead, "unknown": unknown, "listed": true, "in_store": true});
+
+        let (_, events, mut a) = built(&doc);
+        let card = card_of(&events[0]);
+        for (verdict, requests_ok) in [
+            (verdict(true, None, None), true),
+            (verdict(false, None, Some("server")), true),
+            (verdict(false, Some("not-busy"), None), false),
+        ] {
+            let (facts, staged) = a
+                .plan_resync(&snapshot_listing(
+                    vec![(listed.clone(), verdict)],
+                    requests_ok,
+                ))
+                .unwrap();
+            assert!(facts.is_empty(), "nothing rebuilt, nothing retired");
+            a.apply_resync(staged);
+            assert_eq!(a.open_cards.len(), 1);
+            assert_eq!(
+                a.open_cards[0].computed_at.as_deref(),
+                Some("2023-11-14T22:13:20Z")
+            );
+        }
+        // A re-delivered ask builds the same bytes: the stored time is reused.
+        let again = feed(&mut a, &[ev("permission.asked", listed.clone())]);
+        assert_eq!(card_of(&again[0]).payload_hash, card.payload_hash);
+
+        let (facts, staged) = a
+            .plan_resync(&snapshot_listing(
+                vec![(listed.clone(), verdict(false, Some("not-busy"), None))],
+                true,
+            ))
+            .unwrap();
+        a.apply_resync(staged);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(sid(&facts[0]), format!("{session}:perm_resolved:{id}"));
+        assert_eq!(facts[0].source, Source::Opencode);
+        assert_eq!(
+            facts[0].payload,
+            json!({"request_id": id, "status": "cleared", "cause": "ended"})
+        );
+        assert!(a.open_cards.is_empty());
+
+        let (facts, _) = a
+            .plan_resync(&snapshot_listing(
+                vec![(listed, verdict(false, Some("not-busy"), None))],
+                true,
+            ))
+            .unwrap();
+        assert!(
+            facts.is_empty(),
+            "the ghost is judged dead again and files nothing"
+        );
+    }
+
+    /// OpenCode's own cascade: after an Always or a Reject in a session, every
+    /// pending request of it is replied the same word, each on its own
+    /// `permission.replied` with nothing that says so. Each card is answered
+    /// at the Mac with the word on the wire, as the keyboard's reply is.
+    #[test]
+    fn a_cascaded_reply_answers_each_card_with_the_word_on_the_wire() {
+        let (_, doc) = s7().into_iter().find(|(s, _)| *s == "bash").unwrap();
+        let session = "ses_f0795e02affe02FT8ErNd6G9WO";
+        for (reply, first, second) in [
+            (
+                "always",
+                "per_0f86a29e7001I2bgsaXNXFilC5",
+                "per_0f86a29e8001RA6x6q01ZKVf06",
+            ),
+            (
+                "reject",
+                "per_0f869cfc0001Wetl7E7G4kRTpy",
+                "per_0f869cfc9001rlOrGufjSqkOLz",
+            ),
+        ] {
+            let mut a = OpencodeAdapter::new(key(), Arc::new(env_of(&doc)));
+            let mut frames = Vec::new();
+            for (id, call, command) in [
+                (first, "call_30_0", "echo one > out1.txt"),
+                (second, "call_30_1", "echo two > out2.txt"),
+            ] {
+                frames.push(ev(
+                    "message.part.updated",
+                    json!({"part": {"id": format!("prt_{call}"), "sessionID": session, "messageID": "msg_01",
+                        "type": "tool", "tool": "bash", "callID": call,
+                        "state": {"status": "running", "input": {"command": command}}}}),
+                ));
+                let mut ask = doc["asked"].clone();
+                ask["id"] = json!(id);
+                ask["sessionID"] = json!(session);
+                ask["metadata"] = json!({"command": command});
+                ask["patterns"] = json!([command]);
+                ask["tool"] = json!({"messageID": "msg_01", "callID": call});
+                ask["anchor_input"] = json!({"command": command});
+                ask["ctx"] = ctx_of(&doc);
+                frames.push(ev("permission.asked", ask));
+            }
+            let cards = feed(&mut a, &frames);
+            assert_eq!(
+                cards
+                    .iter()
+                    .filter(|e| e.kind == EventKind::ApprovalRequest)
+                    .count(),
+                2
+            );
+            let replies = feed(
+                &mut a,
+                &[
+                    ev(
+                        "permission.replied",
+                        json!({"sessionID": session, "requestID": first, "reply": reply}),
+                    ),
+                    ev(
+                        "message.part.updated",
+                        json!({"part": {"id": "prt_call_30_0", "sessionID": session,
+                        "messageID": "msg_01", "type": "tool", "tool": "bash", "callID": "call_30_0",
+                        "state": {"status": "completed", "input": {"command": "echo one > out1.txt"}, "output": ""}}}),
+                    ),
+                    ev(
+                        "permission.replied",
+                        json!({"sessionID": session, "requestID": second, "reply": reply}),
+                    ),
+                ],
+            );
+            let resolved: Vec<&PendingEvent> = replies
+                .iter()
+                .filter(|e| e.kind == EventKind::ApprovalResolved)
+                .collect();
+            assert_eq!(resolved.len(), 2, "{reply}");
+            for (event, id) in resolved.iter().zip([first, second]) {
+                assert_eq!(sid(event), format!("{session}:perm_resolved:{id}"));
+                assert_eq!(
+                    event.payload,
+                    json!({"request_id": id, "status": "answered", "by": "local",
+                        "decision": {"type": "option_id", "option_id": reply}})
+                );
+            }
+            assert!(a.open_cards.is_empty());
+        }
+    }
+
+    /// Under auto mode OpenCode replies `once` before any plugin listener
+    /// runs: no card frame is written, and the reply that follows has no card
+    /// and files nothing. A request pending when auto was switched on stays
+    /// listed and keeps its card.
+    #[test]
+    fn an_auto_handled_ask_files_nothing_and_a_pre_toggle_card_stands() {
+        let doc: Value = serde_json::from_str(S5).unwrap();
+        let (_, bash) = s7().into_iter().find(|(s, _)| *s == "bash").unwrap();
+        for case in doc["cases"].as_array().unwrap() {
+            let name = case["case"].as_str().unwrap();
+            let frames = case["frames"].as_array().unwrap();
+            let mut a = OpencodeAdapter::new(key(), Arc::new(env_of(&bash)));
+            let mut filed = 0;
+            for f in frames {
+                match f["kind"].as_str() {
+                    Some("asked") if f["inStoreSync"] == true => {
+                        let (id, sid_, cmd) = (
+                            f["id"].as_str().unwrap(),
+                            f["sid"].as_str().unwrap(),
+                            f["cmd"].as_str().unwrap(),
+                        );
+                        let mut ask = bash["asked"].clone();
+                        ask["id"] = json!(id);
+                        ask["sessionID"] = json!(sid_);
+                        ask["metadata"] = json!({"command": cmd});
+                        ask["patterns"] = json!([cmd]);
+                        ask["tool"] = json!({"messageID": "msg_01", "callID": id});
+                        ask["anchor_input"] = json!({"command": cmd});
+                        ask["ctx"] = ctx_of(&bash);
+                        let events = feed(
+                            &mut a,
+                            &[
+                                ev(
+                                    "message.part.updated",
+                                    json!({"part": {"id": format!("prt_{id}"), "sessionID": sid_,
+                                "messageID": "msg_01", "type": "tool", "tool": "bash", "callID": id,
+                                "state": {"status": "running", "input": {"command": cmd}}}}),
+                                ),
+                                ev("permission.asked", ask),
+                            ],
+                        );
+                        assert_eq!(
+                            events.len(),
+                            2,
+                            "{name}: a card for an ask the keyboard shows"
+                        );
+                        filed += 1;
+                    }
+                    // Seen under auto: the TUI never stores it, the plugin writes no frame.
+                    Some("asked") => {}
+                    Some("replied") => {
+                        let events = feed(
+                            &mut a,
+                            &[ev(
+                                "permission.replied",
+                                json!({"sessionID": f["sid"], "requestID": f["id"], "reply": f["reply"]}),
+                            )],
+                        );
+                        let open_before = filed > 0;
+                        assert_eq!(
+                            !events.is_empty(),
+                            open_before
+                                && a.retired.iter().all(|r| r != f["id"].as_str().unwrap())
+                                && events.len() == 1,
+                            "{name}: a reply files a resolution only for a card"
+                        );
+                        if !events.is_empty() {
+                            filed -= 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(a.open_cards.is_empty(), "{name}");
+        }
+    }
+
+    /// **The liveness captures replayed into cards.** Each case's asks are
+    /// raised and each recorded snapshot is applied as the plugin's verdict
+    /// on them. A request the oracle found dead is retired by the snapshot
+    /// that judged it so, and one it found live keeps its card — except the
+    /// two designed refusals the capture names.
+    #[test]
+    fn every_liveness_case_retires_exactly_the_requests_the_oracle_found_dead() {
+        let doc: Value = serde_json::from_str(S6).unwrap();
+        let (_, bash) = s7().into_iter().find(|(s, _)| *s == "bash").unwrap();
+        let known: Vec<&str> = doc["known_disagreements"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut judged: HashSet<(String, u64, String, String)> = HashSet::new();
+        for case in doc["cases"].as_array().unwrap() {
+            let name = case["case"].as_str().unwrap();
+            let mut a = OpencodeAdapter::new(key(), Arc::new(env_of(&bash)));
+            let mut asked: HashMap<String, Value> = HashMap::new();
+            // Snapshots are numbered per activation, so a judgement is
+            // keyed by the snapshot's tag as well.
+            let oracle: HashMap<(u64, String, String), String> = case["judged"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|j| {
+                    (
+                        (
+                            j["snap"].as_u64().unwrap(),
+                            j["tag"].as_str().unwrap().to_string(),
+                            j["request"].as_str().unwrap().to_string(),
+                        ),
+                        j["oracle"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            for f in case["frames"].as_array().unwrap() {
+                match (f["kind"].as_str(), f["ty"].as_str()) {
+                    (Some("ev"), Some("session.created")) => {
+                        let mut info = json!({"id": f["sid"]});
+                        if let Some(parent) = f["parent"].as_str() {
+                            info["parentID"] = json!(parent);
+                        }
+                        feed(&mut a, &[ev("session.created", json!({"info": info}))]);
+                    }
+                    (Some("ev"), Some("permission.asked")) => {
+                        let (id, sid_, perm) = (
+                            f["id"].as_str().unwrap(),
+                            f["sid"].as_str().unwrap(),
+                            f["perm"].as_str().unwrap(),
+                        );
+                        let meta: Value = f["meta"]
+                            .as_str()
+                            .map(|m| serde_json::from_str(m).unwrap())
+                            .unwrap_or(json!({}));
+                        let (tool, input) = match perm {
+                            "doom_loop" => (
+                                meta["tool"].as_str().unwrap().to_string(),
+                                meta["input"].clone(),
+                            ),
+                            "bash" => ("bash".to_string(), json!({"command": meta["command"]})),
+                            "edit" => ("edit".to_string(), json!({"filePath": meta["filepath"]})),
+                            other => (other.to_string(), meta.clone()),
+                        };
+                        let call = f["tool"]["callID"]
+                            .as_str()
+                            .unwrap_or("call_doom")
+                            .to_string();
+                        let message = f["tool"]["messageID"]
+                            .as_str()
+                            .unwrap_or("msg_doom")
+                            .to_string();
+                        let mut ask = json!({"id": id, "sessionID": sid_, "permission": perm,
+                            "patterns": [], "metadata": meta, "always": [], "anchor_input": input,
+                            "ctx": {"ok": true, "tool_ids": bash["context"]["tool_ids"], "mcp": [], "mode": "normal", "parent": null, "ms": 0}});
+                        if f["tool"].is_object() {
+                            ask["tool"] = f["tool"].clone();
+                        }
+                        let events = feed(
+                            &mut a,
+                            &[
+                                ev(
+                                    "message.part.updated",
+                                    json!({"part": {"id": format!("prt_{call}"), "sessionID": sid_,
+                                "messageID": message, "type": "tool", "tool": tool, "callID": call,
+                                "state": {"status": "running", "input": input}}}),
+                                ),
+                                ev("permission.asked", ask.clone()),
+                            ],
+                        );
+                        assert_eq!(events.len(), 2, "{name}: {perm} is carded");
+                        asked.insert(id.to_string(), ask);
+                    }
+                    (Some("ev"), Some("question.asked")) => {
+                        feed(
+                            &mut a,
+                            &[ev(
+                                "question.asked",
+                                json!({"id": f["id"], "sessionID": f["sid"], "questions": []}),
+                            )],
+                        );
+                    }
+                    (Some("ev"), Some("permission.replied" | "question.replied")) => {
+                        feed(
+                            &mut a,
+                            &[ev(
+                                f["ty"].as_str().unwrap(),
+                                json!({"sessionID": f["sid"], "requestID": f["id"], "reply": f["reply"]}),
+                            )],
+                        );
+                    }
+                    (Some("snap"), _) => {
+                        let n = f["n"].as_u64().unwrap();
+                        // The plugin lists what the server lists, or what the
+                        // TUI store holds when the list failed; a request in
+                        // neither is sent by no snapshot, and the settle after
+                        // a readable list clears its card.
+                        let reqs: Vec<(Value, Value)> = f["reqs"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|r| r["listed"] != false)
+                            .map(|r| {
+                                let id = r["id"].as_str().unwrap();
+                                let request = asked.get(id).cloned().unwrap_or(json!({"id": id, "sessionID": r["sid"], "questions": []}));
+                                let live = r["r3"] == true;
+                                // The probe says `epoch` for every record the
+                                // plugin spells as `epoch:<event>`.
+                                let dead = match (live, r["deadReason"].as_str()) {
+                                    (true, _) => Value::Null,
+                                    (false, Some("epoch")) => json!("epoch:abort"),
+                                    (false, _) => r["deadReason"].clone(),
+                                };
+                                (request, json!({"live": live, "dead": dead, "listed": r["listed"], "in_store": r["inStore"]}))
+                            })
+                            .collect();
+                        let ok = f["list"]["perm"]["ok"] == true && f["list"]["q"]["ok"] == true;
+                        a.sync_begin();
+                        let (mut facts, staged) =
+                            a.plan_resync(&snapshot_listing(reqs, ok)).unwrap();
+                        a.apply_resync(staged);
+                        facts.extend(a.settle());
+                        // A request the server still lists as live after
+                        // its card was retired is raised again: the phone is
+                        // shown the truth rather than an unblocked run.
+                        for fact in facts
+                            .iter()
+                            .filter(|f| f.kind != EventKind::ApprovalRequest)
+                        {
+                            assert_eq!(fact.kind, EventKind::ApprovalResolved, "{name} snap {n}");
+                            assert!(
+                                matches!(
+                                    fact.payload["cause"].as_str(),
+                                    Some("ended" | "superseded")
+                                ),
+                                "{name} snap {n}: {}",
+                                fact.payload
+                            );
+                        }
+                        for r in f["reqs"].as_array().unwrap() {
+                            let id = r["id"].as_str().unwrap();
+                            // A snapshot's tag may carry the activation it
+                            // was read in (`activate#2`); the judgement's
+                            // does not.
+                            let tag = f["tag"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .split('#')
+                                .next()
+                                .unwrap_or_default()
+                                .to_string();
+                            let Some(truth) = oracle.get(&(n, tag.clone(), id.to_string())) else {
+                                continue;
+                            };
+                            judged.insert((name.to_string(), n, tag, id.to_string()));
+                            // A failed permission list applies no verdict:
+                            // the cards keep their state and the plugin's
+                            // own check decides at the tap.
+                            if known.contains(&name) || !ok {
+                                continue;
+                            }
+                            let open = a.open_cards.iter().any(|c| c.request_id == id);
+                            assert_eq!(open, truth == "LIVE", "{name} snap {n} {id}: the card is open exactly while the request is live");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(
+            judged.len(),
+            doc["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["judged"].as_array().unwrap().len())
+                .sum::<usize>()
+        );
     }
 }

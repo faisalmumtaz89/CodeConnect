@@ -1,0 +1,92 @@
+{
+  "anchor": {
+    "id": "per_0f9395e31001v4cKnG1AU0gMnp",
+    "parentID": null,
+    "partInput": {
+      "cmd": "rm -rf /"
+    },
+    "partStatus": "running",
+    "partTool": "s7mcp_run_shell",
+    "perm": "s7mcp_run_shell"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f9395e31001v4cKnG1AU0gMnp",
+    "metadata": {},
+    "patterns": [
+      "*"
+    ],
+    "permission": "s7mcp_run_shell",
+    "sessionID": "ses_f06c8794bffepxkzxF836S0V86",
+    "tool": {
+      "callID": "call_62_0",
+      "messageID": "msg_0f9395dbb001FBl4kqgQpsQyUz"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "every call of this MCP tool, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "s7mcp_run_shell\n{\"always\":[\"*\"],\"caveat\":\"arguments as the model sent them\",\"cmd\":\"rm -rf /\",\"computed_at\":\"2023-11-14T22:13:20Z\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"every call of this MCP tool, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"server\":\"s7mcp\"}",
+      "payload_hash": "8e02140774a14d4021f8515c27a9dcc510455e263aa04112bdbfa14b22727976",
+      "risk": {
+        "class": "high",
+        "matched_pattern": "rm -rf"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "caveat": "arguments as the model sent them",
+        "cmd": "rm -rf /",
+        "computed_at": "2023-11-14T22:13:20Z",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "every call of this MCP tool, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "server": "s7mcp"
+      },
+      "tool_name": "s7mcp_run_shell"
+    },
+    "hidden": false,
+    "note": "MCP family (R10): permission == part.tool, not in tool.ids, patterns == always == ['*'], metadata == {}, one connected server prefix",
+    "reject_with_words": false
+  },
+  "family": "mcp",
+  "opencode": "1.18.34"
+}

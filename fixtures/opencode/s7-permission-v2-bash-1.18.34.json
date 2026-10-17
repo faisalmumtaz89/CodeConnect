@@ -1,0 +1,45 @@
+{
+  "asked": {
+    "action": "bash",
+    "id": "per_0f94b901f001PmNMZybTautxqa",
+    "metadata": {
+      "command": "rm -rf /"
+    },
+    "resources": [
+      "rm -rf /"
+    ],
+    "save": [
+      "*"
+    ],
+    "sessionID": "ses_f06b49d9fffexM4aBXc40dPk4J"
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.v2.asked",
+  "expected": {
+    "card": null,
+    "hidden": true,
+    "reason": "a v2 request: one line, never a card"
+  },
+  "family": "permission.v2",
+  "opencode": "1.18.34"
+}

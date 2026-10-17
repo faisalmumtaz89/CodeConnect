@@ -1,0 +1,210 @@
+{
+  "anchor": {
+    "id": "per_0f93952e5001Z9CjTmFGJaUcdW",
+    "parentID": null,
+    "perm": "doom_loop"
+  },
+  "asked": {
+    "always": [
+      "glob"
+    ],
+    "id": "per_0f93952e5001Z9CjTmFGJaUcdW",
+    "metadata": {
+      "input": {
+        "pattern": "*.md"
+      },
+      "tool": "glob"
+    },
+    "patterns": [
+      "glob"
+    ],
+    "permission": "doom_loop",
+    "sessionID": "ses_f06c8794bffepxkzxF836S0V86"
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "events": [
+    {
+      "kind": "asked",
+      "payload": {
+        "always": [
+          "*"
+        ],
+        "id": "per_0f93952ca0018cq09QGWkcJOLz",
+        "metadata": {
+          "pattern": "*.md"
+        },
+        "patterns": [
+          "*.md"
+        ],
+        "permission": "glob",
+        "sessionID": "ses_f06c8794bffepxkzxF836S0V86",
+        "tool": {
+          "callID": "call_60_0",
+          "messageID": "msg_0f939523a001wC1dQo4s8VQHIJ"
+        }
+      }
+    },
+    {
+      "kind": "asked",
+      "payload": {
+        "always": [
+          "*"
+        ],
+        "id": "per_0f93952d5001IDK9fiJe7Mf60L",
+        "metadata": {
+          "pattern": "*.md"
+        },
+        "patterns": [
+          "*.md"
+        ],
+        "permission": "glob",
+        "sessionID": "ses_f06c8794bffepxkzxF836S0V86",
+        "tool": {
+          "callID": "call_60_1",
+          "messageID": "msg_0f939523a001wC1dQo4s8VQHIJ"
+        }
+      }
+    },
+    {
+      "kind": "asked",
+      "payload": {
+        "always": [
+          "*"
+        ],
+        "id": "per_0f93952e0001LK1ukqxB3ITAIk",
+        "metadata": {
+          "pattern": "*.md"
+        },
+        "patterns": [
+          "*.md"
+        ],
+        "permission": "glob",
+        "sessionID": "ses_f06c8794bffepxkzxF836S0V86",
+        "tool": {
+          "callID": "call_60_2",
+          "messageID": "msg_0f939523a001wC1dQo4s8VQHIJ"
+        }
+      }
+    },
+    {
+      "kind": "asked",
+      "payload": {
+        "always": [
+          "glob"
+        ],
+        "id": "per_0f93952e5001Z9CjTmFGJaUcdW",
+        "metadata": {
+          "input": {
+            "pattern": "*.md"
+          },
+          "tool": "glob"
+        },
+        "patterns": [
+          "glob"
+        ],
+        "permission": "doom_loop",
+        "sessionID": "ses_f06c8794bffepxkzxF836S0V86"
+      }
+    },
+    {
+      "id": "per_0f93952ca0018cq09QGWkcJOLz",
+      "kind": "anchor",
+      "parentID": null,
+      "partInput": {
+        "pattern": "*.md"
+      },
+      "partStatus": "running",
+      "partTool": "glob",
+      "perm": "glob"
+    },
+    {
+      "id": "per_0f93952d5001IDK9fiJe7Mf60L",
+      "kind": "anchor",
+      "parentID": null,
+      "partInput": {
+        "pattern": "*.md"
+      },
+      "partStatus": "running",
+      "partTool": "glob",
+      "perm": "glob"
+    },
+    {
+      "id": "per_0f93952e5001Z9CjTmFGJaUcdW",
+      "kind": "anchor",
+      "parentID": null,
+      "perm": "doom_loop"
+    },
+    {
+      "id": "per_0f93952e0001LK1ukqxB3ITAIk",
+      "kind": "anchor",
+      "parentID": null,
+      "partInput": {
+        "pattern": "*.md"
+      },
+      "partStatus": "running",
+      "partTool": "glob",
+      "perm": "glob"
+    }
+  ],
+  "expected": {
+    "always_offered": true,
+    "always_text": "stop asking about repeated glob calls, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "glob\n{\"always\":[\"glob\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"stop asking about repeated glob calls, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"pattern\":\"*.md\",\"repeated_call\":\"glob\"}",
+      "payload_hash": "0654d6e99b0f285d1a14093600d15f4eef03a36d107310fc3226e97fb6cc10bf",
+      "risk": {
+        "class": "low"
+      },
+      "tool_input": {
+        "always": [
+          "glob"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "stop asking about repeated glob calls, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "pattern": "*.md",
+        "repeated_call": "glob"
+      },
+      "tool_name": "glob"
+    },
+    "hidden": false,
+    "note": "no tool on the ask: the anchor is the newest running part with tool == metadata.tool and input == metadata.input (6a)",
+    "reject_with_words": false
+  },
+  "family": "doom_loop",
+  "opencode": "1.18.34"
+}

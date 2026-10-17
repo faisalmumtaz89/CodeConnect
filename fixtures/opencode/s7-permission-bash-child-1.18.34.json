@@ -1,0 +1,97 @@
+{
+  "anchor": {
+    "id": "per_0f9392e4c001eidavtFiab4Lsk",
+    "parentID": "ses_f06c8794bffepxkzxF836S0V86",
+    "partInput": {
+      "command": "echo child > rc.txt",
+      "description": "s7 bash"
+    },
+    "partStatus": "running",
+    "partTool": "bash",
+    "perm": "bash"
+  },
+  "asked": {
+    "always": [
+      "echo *"
+    ],
+    "id": "per_0f9392e4c001eidavtFiab4Lsk",
+    "metadata": {
+      "command": "echo child > rc.txt"
+    },
+    "patterns": [
+      "echo child > rc.txt"
+    ],
+    "permission": "bash",
+    "sessionID": "ses_f06c6d21cffepTPqTzqFQkmd7e",
+    "tool": {
+      "callID": "call_53_0",
+      "messageID": "msg_0f9392dfa001n1h3eBd1Zmvs0r"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "Allow commands starting echo *, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Matching ignores redirects, $VARS and later arguments",
+    "card": {
+      "display_text": "command\n{\"always\":[\"echo *\"],\"command\":\"echo child > rc.txt\",\"computed_at\":\"2023-11-14T22:13:20Z\",\"description\":\"s7 bash\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"Allow commands starting echo *, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Matching ignores redirects, $VARS and later arguments\"},{\"id\":\"reject\",\"label\":\"Reject\"},{\"id\":\"reject_with_words\",\"label\":\"Reject with words\"}]}",
+      "payload_hash": "93b106ccc5ec79c2fa2223785c2eccb79ea2d93535f6e5f85bc627ae20a13961",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "echo *"
+        ],
+        "command": "echo child > rc.txt",
+        "computed_at": "2023-11-14T22:13:20Z",
+        "description": "s7 bash",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "Allow commands starting echo *, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies. Matching ignores redirects, $VARS and later arguments"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          },
+          {
+            "id": "reject_with_words",
+            "label": "Reject with words"
+          }
+        ]
+      },
+      "tool_name": "command"
+    },
+    "hidden": false,
+    "note": "a child-session ask: reject_with_words is offered (measured reply: reject with message 'use printf instead')",
+    "reject_with_words": true
+  },
+  "family": "bash",
+  "opencode": "1.18.34"
+}

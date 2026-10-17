@@ -373,6 +373,11 @@ pub(crate) struct Verdict {
     pub(crate) live: bool,
     /// Why it cannot, when it cannot. See [`Verdict::is_well_formed`].
     pub(crate) dead: Option<String>,
+    /// Why the plugin could not tell: a server read that failed other than
+    /// with a 404. Such a verdict says nothing about the request, and the
+    /// daemon applies it to nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) unknown: Option<String>,
     pub(crate) listed: Listed,
     pub(crate) in_store: bool,
 }
@@ -394,12 +399,25 @@ pub(crate) enum UnknownWord {
 
 impl Verdict {
     /// A live request names no reason; a dead one names a reason the plugin
-    /// knows how to give.
+    /// knows how to give; one the plugin could not judge is neither live nor
+    /// dead and says why.
     pub(crate) fn is_well_formed(&self) -> bool {
-        match self.dead.as_deref() {
-            None => self.live,
-            Some(reason) => !self.live && dead_reason_is_known(reason),
+        match (self.dead.as_deref(), &self.unknown) {
+            (None, None) => self.live,
+            (None, Some(_)) => !self.live,
+            (Some(reason), None) => !self.live && dead_reason_is_known(reason),
+            (Some(_), Some(_)) => false,
         }
+    }
+
+    /// Why the request can no longer be answered, when the plugin judged so.
+    pub(crate) fn dead_reason(&self) -> Option<&str> {
+        self.dead.as_deref().filter(|_| !self.live)
+    }
+
+    /// Whether the plugin judged the request answerable.
+    pub(crate) fn is_live(&self) -> bool {
+        self.live && self.dead.is_none() && self.unknown.is_none()
     }
 }
 
@@ -606,9 +624,8 @@ pub(crate) enum SnapPart {
 pub(crate) struct SnapRequest {
     pub(crate) kind: RequestKind,
     pub(crate) body: RequestBody,
-    /// Validated when the frame is decoded and kept with the request. No card
-    /// on an OpenCode run is answered from the phone, so only tests read it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The plugin's judgement of the request, validated when the frame was
+    /// decoded. It decides whether a card is raised, kept, or retired.
     pub(crate) verdict: Verdict,
 }
 
@@ -970,8 +987,8 @@ impl Observer {
     /// cards open, so a snapshot can still clear them; each root's last model,
     /// so a change is still said; and the turns, which the welcome and every
     /// resync acknowledge.
-    pub(crate) fn new(session: SessionKey, logged: Logged) -> Self {
-        let mut adapter = OpencodeAdapter::new(session);
+    pub(crate) fn new(session: SessionKey, logged: Logged, env: Arc<dyn CardEnv>) -> Self {
+        let mut adapter = OpencodeAdapter::new(session, env);
         for (request_id, key, turn) in logged.open_cards {
             let Some((asked_in, rest)) = key.split_once(':') else {
                 continue;
@@ -1140,6 +1157,83 @@ impl Witness for Kernel {
     }
 }
 
+/// What a card reads of the Mac it is built on: the clock, the home folder,
+/// the run's folder, and the filesystem under them. One seam, as [`Witness`]
+/// is for admission, so the card builder stays pure and its tests run against
+/// a fake filesystem.
+pub(crate) trait CardEnv: Send + Sync + std::fmt::Debug {
+    /// Now, RFC3339: when a card's content was computed.
+    fn now(&self) -> String;
+    /// The daemon user's home folder.
+    fn home(&self) -> Option<PathBuf>;
+    /// The folder OpenCode was launched in.
+    fn worktree(&self) -> PathBuf;
+    /// Whether something is at `path`, a dangling link included.
+    fn exists(&self, path: &Path) -> bool;
+    /// `path` with every link followed, when it resolves.
+    fn realpath(&self, path: &Path) -> Option<PathBuf>;
+    /// The `(device, inode)` of what `path` names, links followed.
+    fn identity(&self, path: &Path) -> Option<(u64, u64)>;
+    /// The text of a file: `None` when there is no such file, an error when
+    /// it is there and cannot be read.
+    fn read_text(&self, path: &Path) -> std::io::Result<Option<String>>;
+    fn env_var(&self, name: &str) -> Option<String>;
+}
+
+/// The Mac itself.
+#[derive(Debug)]
+pub(crate) struct Host {
+    worktree: PathBuf,
+}
+
+impl Host {
+    pub(crate) fn new(worktree: impl Into<PathBuf>) -> Host {
+        Host {
+            worktree: worktree.into(),
+        }
+    }
+}
+
+impl CardEnv for Host {
+    fn now(&self) -> String {
+        protocol::time::now_rfc3339()
+    }
+
+    fn home(&self) -> Option<PathBuf> {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+
+    fn worktree(&self) -> PathBuf {
+        self.worktree.clone()
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    fn realpath(&self, path: &Path) -> Option<PathBuf> {
+        std::fs::canonicalize(path).ok()
+    }
+
+    fn identity(&self, path: &Path) -> Option<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.dev(), meta.ino()))
+    }
+
+    fn read_text(&self, path: &Path) -> std::io::Result<Option<String>> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn env_var(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+}
+
 /// Serve one plugin connection whose first line was `hello`, until it ends.
 ///
 /// Admission runs first, in order, and the first check that fails refuses:
@@ -1201,6 +1295,7 @@ pub(crate) async fn serve_with(
     let acked = {
         let mut observer = admitted.observer.lock().await;
         observer.seq.admitted(&hello);
+        observer.adapter.set_activation(hello.activation);
         observer.sync = None;
         observer.resync_asked = false;
         observer.acked(daemon, &run.session.uid).await
@@ -1453,7 +1548,7 @@ async fn step(
                 // The facts are made durable before the adapter forgets what it
                 // held open: they are all that is left of it afterwards.
                 Some((facts, staged)) => {
-                    if record(daemon, &mut observer.turns, facts).await {
+                    if record(daemon, &run.session, observer, facts).await {
                         observer.adapter.apply_resync(staged);
                     }
                 }
@@ -1469,7 +1564,7 @@ async fn step(
         LinkFrame::Settled { .. } => {
             observer.resync_asked = false;
             let facts = observer.adapter.settle();
-            record(daemon, &mut observer.turns, facts).await;
+            record(daemon, &run.session, observer, facts).await;
         }
         LinkFrame::Ev { .. } | LinkFrame::Stub { .. } | LinkFrame::CardStub { .. } => {
             if let LinkFrame::Stub {
@@ -1490,7 +1585,7 @@ async fn step(
                 );
             }
             let facts = observer.adapter.ingest(&frame);
-            record(daemon, &mut observer.turns, facts).await;
+            record(daemon, &run.session, observer, facts).await;
         }
     }
     if observer.adapter.take_resync_request() {
@@ -1516,13 +1611,27 @@ async fn ask_resync(
 
 /// Each fact into the log, in the order made, and into the run's turns once
 /// it is there. False when one could not be written.
-async fn record(daemon: &Daemon, turns: &mut Option<Turns>, facts: Vec<PendingEvent>) -> bool {
+///
+/// A card the phone may answer and the terminal of a card go through the
+/// daemon's own raise and retire ([`Daemon::file_opencode_fact`]); every
+/// other fact is appended. A terminal, however it was filed, ends with the
+/// adapter forgetting the card: the row and the daemon's pending entry are
+/// the store of an open card, and the adapter's list only mirrors them.
+async fn record(
+    daemon: &Daemon,
+    session: &SessionKey,
+    observer: &mut Observer,
+    facts: Vec<PendingEvent>,
+) -> bool {
     let mut whole = true;
     for fact in facts {
         let counted = Turns::counted(&fact);
-        match daemon.ingest(fact).await {
+        let resolved = (fact.kind == EventKind::ApprovalResolved)
+            .then(|| fact.item_id.clone())
+            .flatten();
+        match daemon.file_opencode_fact(session, fact).await {
             Ok(_) => {
-                if let (Some(turns), Some(counted)) = (turns.as_mut(), counted) {
+                if let (Some(turns), Some(counted)) = (observer.turns.as_mut(), counted) {
                     turns.note(counted);
                 }
             }
@@ -1530,6 +1639,9 @@ async fn record(daemon: &Daemon, turns: &mut Option<Turns>, facts: Vec<PendingEv
                 crate::log_error!("opencode link: a fact could not be recorded: {err:#}");
                 whole = false;
             }
+        }
+        if let Some(request_id) = resolved {
+            observer.adapter.forget(&request_id);
         }
     }
     whole
@@ -3073,10 +3185,8 @@ mod tests {
                 json!(["approval_resolved", "answered", null])
             ]
         );
-        assert_eq!(
-            card("que_0f00b00000001xxxxxxxxxxxxx"),
-            [json!(["approval_request", null, null])]
-        );
+        // Judged dead by every snapshot: never shown.
+        assert_eq!(card("que_0f00b00000001xxxxxxxxxxxxx"), [] as [Value; 0]);
         assert_eq!(
             card("que_0f00b00000002xxxxxxxxxxxxx"),
             [
@@ -3636,5 +3746,261 @@ mod tests {
         plugin.send(&prompted(1, "msg_03", "m1")).await;
         plugin.hang_up().await;
         assert_eq!(model_notices(&daemon, &uid), []);
+    }
+
+    /// A tool part running, as the plugin forwards it.
+    fn running(seq: u64, call: &str) -> Value {
+        json!({"t": "ev", "seq": seq, "type": "message.part.updated", "properties": {
+            "part": {"id": format!("prt_{call}"), "sessionID": "ses_a", "messageID": "msg_01",
+            "type": "tool", "tool": "bash", "callID": call,
+            "state": {"status": "running", "input": {"command": "make"}}}}})
+    }
+
+    /// A bash ask the plugin judged: its anchored input and the context it
+    /// read at the ask.
+    fn judged_ask(id: &str, call: &str) -> Value {
+        json!({"id": id, "sessionID": "ses_a", "permission": "bash",
+            "patterns": ["make"], "metadata": {"command": "make"}, "always": ["make *"],
+            "tool": {"messageID": "msg_01", "callID": call},
+            "anchor_input": {"command": "make"},
+            "ctx": {"ok": true, "tool_ids": ["bash", "read"], "mcp": [], "mode": "normal",
+                "parent": null, "ms": 0}})
+    }
+
+    fn asked_frame(seq: u64, id: &str, call: &str) -> Value {
+        json!({"t": "ev", "seq": seq, "type": "permission.asked", "properties": judged_ask(id, call)})
+    }
+
+    /// The `(kind, status, cause)` of every event about one request.
+    fn card_events(daemon: &Daemon, uid: &str, id: &str) -> Vec<Value> {
+        daemon
+            .store
+            .events_after(uid, 0, 1000)
+            .unwrap()
+            .iter()
+            .filter(|e| e.item_id.as_deref() == Some(id))
+            .map(|e| {
+                json!([
+                    e.kind.as_str(),
+                    e.payload["status"],
+                    e.payload["cause"],
+                    e.source_event_id
+                ])
+            })
+            .collect()
+    }
+
+    async fn blocked_on(daemon: &Daemon, uid: &str) -> Vec<String> {
+        daemon
+            .sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.session_uid == uid)
+            .map(|s| s.blocked_on)
+            .unwrap_or_default()
+    }
+
+    /// A card the phone may answer is filed as a row and held pending, so the
+    /// run is blocked on it; a snapshot that judges its request dead retires
+    /// it as ended under the adapter's key, and a later snapshot that finds
+    /// the same ghost files nothing more.
+    #[tokio::test]
+    async fn an_answerable_card_blocks_the_run_until_a_snapshot_judges_it_dead() {
+        let daemon = daemon();
+        let (uid, _registration) = register(&daemon).await;
+        let (mut plugin, _) = admitted(&daemon, hello_for(4242, 1_700_000_000, 3)).await;
+        plugin.send(&running(1, "call_1")).await;
+        plugin.send(&asked_frame(2, "per_01", "call_1")).await;
+        until(|| async {
+            !daemon
+                .db
+                .codex_pending_approvals(uid.clone())
+                .await
+                .unwrap()
+                .is_empty()
+        })
+        .await;
+        let rows = daemon
+            .db
+            .codex_pending_approvals(uid.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                rows[0].family.as_str(),
+                rows[0].thread_id.as_str(),
+                rows[0].generation
+            ),
+            ("bash", "ses_a", 3)
+        );
+        assert_eq!(blocked_on(&daemon, &uid).await, ["per_01"]);
+        let events = daemon.store.events_after(&uid, 0, 1000).unwrap();
+        let asked = events
+            .iter()
+            .find(|e| e.kind == EventKind::ApprovalRequest)
+            .unwrap();
+        assert_eq!(asked.payload["answerable"], true);
+        assert_eq!(asked.source, Source::Opencode);
+
+        for sync in [1, 2] {
+            for frame in [
+                json!({"t": "sync_begin", "sync": sync, "reason": "trigger:session.idle",
+                    "scope": "requests", "as_of": 2, "status": {}, "status_ok": true}),
+                json!({"t": "sync_request", "sync": sync, "kind": "permission",
+                    "request": judged_ask("per_01", "call_1"),
+                    "verdict": {"live": false, "dead": "not-busy", "listed": true, "in_store": true}}),
+                json!({"t": "sync_end", "sync": sync, "done_at": 2, "permissions_ok": true,
+                    "questions_ok": true, "requests_ok": true, "lower": {}, "pages": 0,
+                    "items": 0, "bytes": 0, "activation": 3}),
+                json!({"t": "settled", "sync": sync}),
+            ] {
+                plugin.send(&frame).await;
+            }
+            until(|| async { blocked_on(&daemon, &uid).await.is_empty() }).await;
+        }
+        plugin.hang_up().await;
+        assert!(daemon
+            .db
+            .codex_pending_approvals(uid.clone())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            card_events(&daemon, &uid, "per_01"),
+            [
+                json!(["approval_request", null, null, "ses_a:perm:per_01"]),
+                json!([
+                    "approval_resolved",
+                    "cleared",
+                    "ended",
+                    "ses_a:perm_resolved:per_01"
+                ]),
+            ]
+        );
+    }
+
+    /// OpenCode's exit retires every card still open as ended: the rows and
+    /// the pending entries go, and the fleet no longer says the exited run is
+    /// blocked.
+    #[tokio::test]
+    async fn the_exit_retires_every_open_card_as_ended() {
+        let daemon = daemon();
+        let (uid, registration) = register(&daemon).await;
+        let (mut plugin, _) = admitted(&daemon, hello_for(4242, 1_700_000_000, 1)).await;
+        plugin.send(&running(1, "call_1")).await;
+        plugin.send(&asked_frame(2, "per_01", "call_1")).await;
+        plugin.send(&running(3, "call_2")).await;
+        plugin.send(&asked_frame(4, "per_02", "call_2")).await;
+        until(|| async { blocked_on(&daemon, &uid).await.len() == 2 }).await;
+        daemon
+            .session_exited("cc-1", Some(&uid), Some(0), None, Some(&registration))
+            .await;
+        plugin.hang_up().await;
+        assert!(blocked_on(&daemon, &uid).await.is_empty());
+        assert!(daemon
+            .db
+            .codex_pending_approvals(uid.clone())
+            .await
+            .unwrap()
+            .is_empty());
+        for id in ["per_01", "per_02"] {
+            assert_eq!(
+                card_events(&daemon, &uid, id)[1],
+                json!([
+                    "approval_resolved",
+                    "cleared",
+                    "ended",
+                    format!("ses_a:perm_resolved:{id}")
+                ])
+            );
+        }
+    }
+
+    /// An exit reported by a supervisor that did not register the run first,
+    /// to a daemon that restored the run's card from the log: the card is
+    /// retired as ended from the pending entry alone.
+    #[tokio::test]
+    async fn an_exit_reported_without_a_registration_retires_a_restored_card() {
+        let db = fresh_database();
+        let before = daemon_on(&db);
+        let (uid, _registration) = register(&before).await;
+        let (mut plugin, _) = admitted(&before, hello_for(4242, 1_700_000_000, 1)).await;
+        plugin.send(&running(1, "call_1")).await;
+        plugin.send(&asked_frame(2, "per_01", "call_1")).await;
+        until(|| async { blocked_on(&before, &uid).await == ["per_01"] }).await;
+        plugin.hang_up().await;
+
+        let daemon = daemon_on(&db);
+        daemon.recover().await;
+        assert_eq!(blocked_on(&daemon, &uid).await, ["per_01"], "restored");
+        daemon
+            .session_exited("cc-1", Some(&uid), Some(0), None, None)
+            .await;
+        assert!(blocked_on(&daemon, &uid).await.is_empty());
+        assert!(daemon
+            .db
+            .codex_pending_approvals(uid.clone())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            card_events(&daemon, &uid, "per_01")[1],
+            json!([
+                "approval_resolved",
+                "cleared",
+                "ended",
+                "ses_a:perm_resolved:per_01"
+            ])
+        );
+    }
+
+    /// A row whose resolution is already in the log — filed by a daemon that
+    /// did not delete the row — is dropped at recovery under the same key, and
+    /// the card is not restored.
+    #[tokio::test]
+    async fn recovery_drops_a_card_row_whose_resolution_is_already_filed() {
+        let db = fresh_database();
+        let before = daemon_on(&db);
+        let (uid, _registration) = register(&before).await;
+        let (mut plugin, _) = admitted(&before, hello_for(4242, 1_700_000_000, 1)).await;
+        plugin.send(&running(1, "call_1")).await;
+        plugin.send(&asked_frame(2, "per_01", "call_1")).await;
+        until(|| async { blocked_on(&before, &uid).await == ["per_01"] }).await;
+        plugin.hang_up().await;
+        let session = SessionKey::new(&uid, "cc-1");
+        let resolved = PendingEvent::new(
+            &session,
+            EventKind::ApprovalResolved,
+            json!({"request_id": "per_01", "status": "answered", "by": "local"}),
+            Source::Opencode,
+        )
+        .with_source_event_id("ses_a:perm_resolved:per_01")
+        .with_item_id(Some("per_01".into()));
+        before.ingest(resolved).await.unwrap();
+        assert_eq!(
+            before
+                .db
+                .codex_pending_approvals(uid.clone())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let daemon = daemon_on(&db);
+        daemon.recover().await;
+        assert!(blocked_on(&daemon, &uid).await.is_empty());
+        assert!(daemon
+            .db
+            .codex_pending_approvals(uid.clone())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            card_events(&daemon, &uid, "per_01").len(),
+            2,
+            "no second resolution"
+        );
     }
 }

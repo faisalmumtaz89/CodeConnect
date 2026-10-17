@@ -1,0 +1,93 @@
+{
+  "anchor": {
+    "id": "per_0f94be7db001I7ya4IBz13VMOG",
+    "parentID": null,
+    "partInput": {
+      "path": "/Users/ada/outside",
+      "pattern": "target"
+    },
+    "partStatus": "running",
+    "partTool": "grep",
+    "perm": "grep"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f94be7db001I7ya4IBz13VMOG",
+    "metadata": {
+      "path": "/Users/ada/outside",
+      "pattern": "target"
+    },
+    "patterns": [
+      "target"
+    ],
+    "permission": "grep",
+    "sessionID": "ses_f06b49d9fffexM4aBXc40dPk4J",
+    "tool": {
+      "callID": "call_8_0",
+      "messageID": "msg_0f94be77c0014d4c4msNdudh6C"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "all grep calls, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "grep\n{\"always\":[\"*\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"all grep calls, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"path\":\"/Users/ada/outside\",\"pattern\":\"target\"}",
+      "payload_hash": "8cd952c68bb1f75e799e3132f79a304d10496e1b4dd0886a010b5c5a6353addc",
+      "risk": {
+        "class": "low"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "all grep calls, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "path": "/Users/ada/outside",
+        "pattern": "target"
+      },
+      "tool_name": "grep"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "grep",
+  "opencode": "1.18.34"
+}

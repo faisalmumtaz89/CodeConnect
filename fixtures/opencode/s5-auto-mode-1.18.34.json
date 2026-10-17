@@ -1,0 +1,216 @@
+{
+ "opencode": "1.18.34",
+ "what": "auto-approve (--auto/--yolo/--dangerously-skip-permissions/palette): the TUI replies 'once' before plugins see the ask",
+ "mode_read": "the Permission context's synchronous `mode` getter, found from the app slot; never set or toggle",
+ "rule": "phone replies are refused unless the mode is exactly 'normal' at reply time (covers auto and unknown); an auto-handled ask is reported, never carded",
+ "cases": [
+  {
+   "case": "auto-sync-reject",
+   "what": "--auto: the TUI replies once before any plugin listener; the in-listener phone Reject gets PermissionNotFoundError",
+   "launch_args": [
+    "--auto"
+   ],
+   "plugin_loaded": true,
+   "frames": [
+    {"t":1700000000000,"mark":"launch","args":"--auto","phone":"sync-reject"},
+    {"t":1700000004998,"kind":"loaded","version":"1.18.34","phone":"sync-reject"},
+    {"t":1700000005089,"kind":"contexts","symbols":435,"permHits":1,"mode":"auto"},
+    {"t":1700000005097,"kind":"mode-changed","mode":"auto"},
+    {"t":1700000007589,"mark":"say-please run bash auto-sync-reject"},
+    {"t":1700000009976,"kind":"asked","id":"per_0f853d088001Dh2R0ONPsq7sNC","sid":"ses_f07ac371bffeaMbtzJCV51STj3","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"auto","inStoreSync":false},
+    {"t":1700000009976,"kind":"asked-micro","id":"per_0f853d088001Dh2R0ONPsq7sNC","inStore":false,"mode":"auto"},
+    {"t":1700000010002,"kind":"replied","id":"per_0f853d088001Dh2R0ONPsq7sNC","sid":"ses_f07ac371bffeaMbtzJCV51STj3","reply":"once","sinceAsked":26.208,"mode":"auto","props":["sessionID","requestID","reply"]},
+    {"t":1700000010046,"kind":"phone-reply","how":"sync-in-listener","id":"per_0f853d088001Dh2R0ONPsq7sNC","reply":"reject","ok":false,"err":"{\"_tag\":\"PermissionNotFoundError\",\"requestID\":\"per_0f853d088001Dh2R0ONPsq7sNC\",\"message\":\"Permission request not found: per_0f853d088001Dh2R0ONPsq7sNC\"}","rtt":69.629},
+    {"t":1700000010051,"kind":"asked-50ms","id":"per_0f853d088001Dh2R0ONPsq7sNC","inStore":false},
+    {"t":1700000012614,"mark":"ran-1","ran":true},
+    {"t":1700000012664,"kind":"pending","tag":"end","mode":"auto","list":[]},
+    {"t":1700000013421,"mark":"say-bash again auto-sync-reject"},
+    {"t":1700000014021,"kind":"asked","id":"per_0f853e045001U9gKZKbJqerKce","sid":"ses_f07ac371bffeaMbtzJCV51STj3","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"auto","inStoreSync":false},
+    {"t":1700000014024,"kind":"asked-micro","id":"per_0f853e045001U9gKZKbJqerKce","inStore":false,"mode":"auto"},
+    {"t":1700000014048,"kind":"replied","id":"per_0f853e045001U9gKZKbJqerKce","sid":"ses_f07ac371bffeaMbtzJCV51STj3","reply":"once","sinceAsked":27.253,"mode":"auto","props":["sessionID","requestID","reply"]},
+    {"t":1700000014049,"kind":"phone-reply","how":"sync-in-listener","id":"per_0f853e045001U9gKZKbJqerKce","reply":"reject","ok":false,"err":"{\"_tag\":\"PermissionNotFoundError\",\"requestID\":\"per_0f853e045001U9gKZKbJqerKce\",\"message\":\"Permission request not found: per_0f853e045001U9gKZKbJqerKce\"}","rtt":28.088},
+    {"t":1700000014086,"kind":"asked-50ms","id":"per_0f853e045001U9gKZKbJqerKce","inStore":false},
+    {"t":1700000018445,"mark":"ran-2","ran":true},
+    {"t":1700000018578,"kind":"pending","tag":"end2","mode":"auto","list":[]}
+   ],
+   "expected": [
+    {"request":"per_0f853d088001Dh2R0ONPsq7sNC","mode_at_asked":"auto","in_tui_store_at_asked":false,"auto_handled":true,"final_reply":"once","card":"informational row 'auto-approved at the Mac', no push","measured_phone_reply":{"reply":"reject","accepted":false},"mode_at_phone_reply":"auto","phone_reply_allowed":false,"phone_refusal":"Auto-approve is on at the Mac — answer there."},
+    {"request":"per_0f853e045001U9gKZKbJqerKce","mode_at_asked":"auto","in_tui_store_at_asked":false,"auto_handled":true,"final_reply":"once","card":"informational row 'auto-approved at the Mac', no push","measured_phone_reply":{"reply":"reject","accepted":false},"mode_at_phone_reply":"auto","phone_reply_allowed":false,"phone_refusal":"Auto-approve is on at the Mac — answer there."}
+   ]
+  },
+  {
+   "case": "yolo-sync-reject",
+   "what": "--yolo: same as --auto",
+   "launch_args": [
+    "--yolo"
+   ],
+   "plugin_loaded": true,
+   "frames": [
+    {"t":1700000039265,"mark":"launch","args":"--yolo","phone":"sync-reject"},
+    {"t":1700000044093,"kind":"loaded","version":"1.18.34","phone":"sync-reject"},
+    {"t":1700000044172,"kind":"contexts","symbols":435,"permHits":1,"mode":"auto"},
+    {"t":1700000044178,"kind":"mode-changed","mode":"auto"},
+    {"t":1700000046340,"mark":"say-please run bash yolo-sync-reject"},
+    {"t":1700000048858,"kind":"asked","id":"per_0f854686700121dcGhchfHzpVR","sid":"ses_f07ab9fbfffe9wFRNDSluo4N5f","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"auto","inStoreSync":false},
+    {"t":1700000048859,"kind":"asked-micro","id":"per_0f854686700121dcGhchfHzpVR","inStore":false,"mode":"auto"},
+    {"t":1700000048884,"kind":"replied","id":"per_0f854686700121dcGhchfHzpVR","sid":"ses_f07ab9fbfffe9wFRNDSluo4N5f","reply":"once","sinceAsked":26.264,"mode":"auto","props":["sessionID","requestID","reply"]},
+    {"t":1700000048890,"kind":"phone-reply","how":"sync-in-listener","id":"per_0f854686700121dcGhchfHzpVR","reply":"reject","ok":false,"err":"{\"_tag\":\"PermissionNotFoundError\",\"requestID\":\"per_0f854686700121dcGhchfHzpVR\",\"message\":\"Permission request not found: per_0f854686700121dcGhchfHzpVR\"}","rtt":31.607},
+    {"t":1700000048908,"kind":"asked-50ms","id":"per_0f854686700121dcGhchfHzpVR","inStore":false},
+    {"t":1700000051362,"mark":"ran-1","ran":true},
+    {"t":1700000051429,"kind":"pending","tag":"end","mode":"auto","list":[]},
+    {"t":1700000052169,"mark":"say-bash again yolo-sync-reject"},
+    {"t":1700000052788,"kind":"asked","id":"per_0f85477ab001Zmv7574RXZDoxs","sid":"ses_f07ab9fbfffe9wFRNDSluo4N5f","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"auto","inStoreSync":false},
+    {"t":1700000052790,"kind":"asked-micro","id":"per_0f85477ab001Zmv7574RXZDoxs","inStore":false,"mode":"auto"},
+    {"t":1700000052803,"kind":"replied","id":"per_0f85477ab001Zmv7574RXZDoxs","sid":"ses_f07ab9fbfffe9wFRNDSluo4N5f","reply":"once","sinceAsked":15.607,"mode":"auto","props":["sessionID","requestID","reply"]},
+    {"t":1700000052804,"kind":"phone-reply","how":"sync-in-listener","id":"per_0f85477ab001Zmv7574RXZDoxs","reply":"reject","ok":false,"err":"{\"_tag\":\"PermissionNotFoundError\",\"requestID\":\"per_0f85477ab001Zmv7574RXZDoxs\",\"message\":\"Permission request not found: per_0f85477ab001Zmv7574RXZDoxs\"}","rtt":15.933},
+    {"t":1700000052849,"kind":"asked-50ms","id":"per_0f85477ab001Zmv7574RXZDoxs","inStore":false},
+    {"t":1700000057191,"mark":"ran-2","ran":true},
+    {"t":1700000057317,"kind":"pending","tag":"end2","mode":"auto","list":[]}
+   ],
+   "expected": [
+    {"request":"per_0f854686700121dcGhchfHzpVR","mode_at_asked":"auto","in_tui_store_at_asked":false,"auto_handled":true,"final_reply":"once","card":"informational row 'auto-approved at the Mac', no push","measured_phone_reply":{"reply":"reject","accepted":false},"mode_at_phone_reply":"auto","phone_reply_allowed":false,"phone_refusal":"Auto-approve is on at the Mac — answer there."},
+    {"request":"per_0f85477ab001Zmv7574RXZDoxs","mode_at_asked":"auto","in_tui_store_at_asked":false,"auto_handled":true,"final_reply":"once","card":"informational row 'auto-approved at the Mac', no push","measured_phone_reply":{"reply":"reject","accepted":false},"mode_at_phone_reply":"auto","phone_reply_allowed":false,"phone_refusal":"Auto-approve is on at the Mac — answer there."}
+   ]
+  },
+  {
+   "case": "dsp-sync-reject",
+   "what": "--dangerously-skip-permissions: same as --auto",
+   "launch_args": [
+    "--dangerously-skip-permissions"
+   ],
+   "plugin_loaded": true,
+   "frames": [
+    {"t":1700000058631,"mark":"launch","args":"--dangerously-skip-permissions","phone":"sync-reject"},
+    {"t":1700000063833,"kind":"loaded","version":"1.18.34","phone":"sync-reject"},
+    {"t":1700000063917,"kind":"contexts","symbols":435,"permHits":1,"mode":"auto"},
+    {"t":1700000063924,"kind":"mode-changed","mode":"auto"},
+    {"t":1700000066214,"mark":"say-please run bash dsp-sync-reject"},
+    {"t":1700000068875,"kind":"asked","id":"per_0f854b69b001fOQEezvU8vF3fc","sid":"ses_f07ab521dffecvNVOT6J8UAtrf","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"auto","inStoreSync":false},
+    {"t":1700000068876,"kind":"asked-micro","id":"per_0f854b69b001fOQEezvU8vF3fc","inStore":false,"mode":"auto"},
+    {"t":1700000068896,"kind":"phone-reply","how":"sync-in-listener","id":"per_0f854b69b001fOQEezvU8vF3fc","reply":"reject","ok":false,"err":"{\"_tag\":\"PermissionNotFoundError\",\"requestID\":\"per_0f854b69b001fOQEezvU8vF3fc\",\"message\":\"Permission request not found: per_0f854b69b001fOQEezvU8vF3fc\"}","rtt":20.112},
+    {"t":1700000068897,"kind":"replied","id":"per_0f854b69b001fOQEezvU8vF3fc","sid":"ses_f07ab521dffecvNVOT6J8UAtrf","reply":"once","sinceAsked":21.971,"mode":"auto","props":["sessionID","requestID","reply"]},
+    {"t":1700000068930,"kind":"asked-50ms","id":"per_0f854b69b001fOQEezvU8vF3fc","inStore":false},
+    {"t":1700000071238,"mark":"ran-1","ran":true},
+    {"t":1700000071279,"kind":"pending","tag":"end","mode":"auto","list":[]},
+    {"t":1700000072044,"mark":"say-bash again dsp-sync-reject"},
+    {"t":1700000072706,"kind":"asked","id":"per_0f854c574001RrlkRFCyT3Fvsv","sid":"ses_f07ab521dffecvNVOT6J8UAtrf","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"auto","inStoreSync":false},
+    {"t":1700000072708,"kind":"asked-micro","id":"per_0f854c574001RrlkRFCyT3Fvsv","inStore":false,"mode":"auto"},
+    {"t":1700000072736,"kind":"replied","id":"per_0f854c574001RrlkRFCyT3Fvsv","sid":"ses_f07ab521dffecvNVOT6J8UAtrf","reply":"once","sinceAsked":30.136,"mode":"auto","props":["sessionID","requestID","reply"]},
+    {"t":1700000072736,"kind":"phone-reply","how":"sync-in-listener","id":"per_0f854c574001RrlkRFCyT3Fvsv","reply":"reject","ok":false,"err":"{\"_tag\":\"PermissionNotFoundError\",\"requestID\":\"per_0f854c574001RrlkRFCyT3Fvsv\",\"message\":\"Permission request not found: per_0f854c574001RrlkRFCyT3Fvsv\"}","rtt":30.295},
+    {"t":1700000072758,"kind":"asked-50ms","id":"per_0f854c574001RrlkRFCyT3Fvsv","inStore":false},
+    {"t":1700000077076,"mark":"ran-2","ran":true},
+    {"t":1700000077171,"kind":"pending","tag":"end2","mode":"auto","list":[]}
+   ],
+   "expected": [
+    {"request":"per_0f854b69b001fOQEezvU8vF3fc","mode_at_asked":"auto","in_tui_store_at_asked":false,"auto_handled":true,"final_reply":"once","card":"informational row 'auto-approved at the Mac', no push","measured_phone_reply":{"reply":"reject","accepted":false},"mode_at_phone_reply":"auto","phone_reply_allowed":false,"phone_refusal":"Auto-approve is on at the Mac — answer there."},
+    {"request":"per_0f854c574001RrlkRFCyT3Fvsv","mode_at_asked":"auto","in_tui_store_at_asked":false,"auto_handled":true,"final_reply":"once","card":"informational row 'auto-approved at the Mac', no push","measured_phone_reply":{"reply":"reject","accepted":false},"mode_at_phone_reply":"auto","phone_reply_allowed":false,"phone_refusal":"Auto-approve is on at the Mac — answer there."}
+   ]
+  },
+  {
+   "case": "toggle",
+   "what": "auto switched on from the palette while a request was pending: the request stays pending and visible; auto then handles the next one; switched off, the third is a normal card",
+   "launch_args": [],
+   "plugin_loaded": true,
+   "frames": [
+    {"t":1700000165079,"mark":"launch","args":"","phone":"none"},
+    {"t":1700000169935,"kind":"loaded","version":"1.18.34","phone":"none"},
+    {"t":1700000170028,"kind":"contexts","symbols":435,"permHits":1,"mode":"normal"},
+    {"t":1700000170037,"kind":"mode-changed","mode":"normal"},
+    {"t":1700000172158,"mark":"say-please run bash first"},
+    {"t":1700000174633,"kind":"asked","id":"per_0f85653b1001chS1gXUm5rjNyH","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"normal","inStoreSync":true},
+    {"t":1700000174650,"kind":"asked-micro","id":"per_0f85653b1001chS1gXUm5rjNyH","inStore":true,"mode":"normal"},
+    {"t":1700000174684,"kind":"asked-50ms","id":"per_0f85653b1001chS1gXUm5rjNyH","inStore":true},
+    {"t":1700000176302,"kind":"pending","tag":"before-toggle","mode":"normal","list":[{"id":"per_0f85653b1001chS1gXUm5rjNyH","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","perm":"bash"}]},
+    {"t":1700000176984,"mark":"toggle-on1"},
+    {"t":1700000179116,"kind":"mode-changed","mode":"auto"},
+    {"t":1700000181967,"kind":"pending","tag":"after-toggle-on","mode":"auto","list":[{"id":"per_0f85653b1001chS1gXUm5rjNyH","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","perm":"bash"}]},
+    {"t":1700000182766,"kind":"mode-dump","tag":"after-toggle-on","mode":"auto"},
+    {"t":1700000185594,"kind":"pending","tag":"after-toggle-on+2s","mode":"auto","list":[{"id":"per_0f85653b1001chS1gXUm5rjNyH","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","perm":"bash"}]},
+    {"t":1700000186238,"mark":"phone-reply-pending"},
+    {"t":1700000186401,"kind":"reply-pending-try","id":"per_0f85653b1001chS1gXUm5rjNyH","modeNow":"auto"},
+    {"t":1700000186406,"kind":"replied","id":"per_0f85653b1001chS1gXUm5rjNyH","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","reply":"reject","sinceAsked":11772.712,"mode":"auto","props":["sessionID","requestID","reply"]},
+    {"t":1700000186429,"kind":"phone-reply","how":"cmd","id":"per_0f85653b1001chS1gXUm5rjNyH","reply":"reject","ok":true,"data":true,"rtt":27.534},
+    {"t":1700000190051,"mark":"ran-1","ran":false},
+    {"t":1700000190053,"mark":"say-please run bash second"},
+    {"t":1700000190637,"kind":"asked","id":"per_0f85692250014junWiAJXwlLz3","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"auto","inStoreSync":false},
+    {"t":1700000190639,"kind":"asked-micro","id":"per_0f85692250014junWiAJXwlLz3","inStore":false,"mode":"auto"},
+    {"t":1700000190673,"kind":"replied","id":"per_0f85692250014junWiAJXwlLz3","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","reply":"once","sinceAsked":35.837,"mode":"auto","props":["sessionID","requestID","reply"]},
+    {"t":1700000190690,"kind":"asked-50ms","id":"per_0f85692250014junWiAJXwlLz3","inStore":false},
+    {"t":1700000195076,"mark":"ran-2","ran":true},
+    {"t":1700000195111,"kind":"pending","tag":"after-second","mode":"auto","list":[]},
+    {"t":1700000195883,"mark":"toggle-off1"},
+    {"t":1700000198019,"kind":"mode-changed","mode":"normal"},
+    {"t":1700000200789,"kind":"mode-dump","tag":"after-toggle-off","mode":"normal"},
+    {"t":1700000201526,"mark":"say-please run bash third"},
+    {"t":1700000202158,"kind":"asked","id":"per_0f856bf23001DDBlijpjrXQOhL","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"normal","inStoreSync":true},
+    {"t":1700000202167,"kind":"asked-micro","id":"per_0f856bf23001DDBlijpjrXQOhL","inStore":true,"mode":"normal"},
+    {"t":1700000202215,"kind":"asked-50ms","id":"per_0f856bf23001DDBlijpjrXQOhL","inStore":true},
+    {"t":1700000205648,"kind":"pending","tag":"third","mode":"normal","list":[{"id":"per_0f856bf23001DDBlijpjrXQOhL","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","perm":"bash"}]},
+    {"t":1700000206363,"kind":"replied","id":"per_0f856bf23001DDBlijpjrXQOhL","sid":"ses_f07a9b445ffeiwF7cn1kvZiSTb","reply":"once","sinceAsked":4205.253,"mode":"normal","props":["sessionID","requestID","reply"]},
+    {"t":1700000209965,"mark":"ran-3","ran":true}
+   ],
+   "expected": [
+    {"request":"per_0f85653b1001chS1gXUm5rjNyH","mode_at_asked":"normal","in_tui_store_at_asked":true,"auto_handled":false,"final_reply":"reject","card":"answerable card","measured_phone_reply":{"reply":"reject","accepted":true},"mode_at_phone_reply":"auto","phone_reply_allowed":false,"phone_refusal":"Auto-approve is on at the Mac — answer there."},
+    {"request":"per_0f85692250014junWiAJXwlLz3","mode_at_asked":"auto","in_tui_store_at_asked":false,"auto_handled":true,"final_reply":"once","card":"informational row 'auto-approved at the Mac', no push","phone_reply_allowed":false,"phone_refusal":"Auto-approve is on at the Mac — answer there."},
+    {"request":"per_0f856bf23001DDBlijpjrXQOhL","mode_at_asked":"normal","in_tui_store_at_asked":true,"auto_handled":false,"final_reply":"once","card":"answerable card","phone_reply_allowed":true}
+   ]
+  },
+  {
+   "case": "question",
+   "what": "--auto: questions are never auto-answered; the card stays and the keyboard answers it",
+   "launch_args": [
+    "--auto"
+   ],
+   "plugin_loaded": true,
+   "frames": [
+    {"t":1700000210606,"mark":"launch","args":"--auto","phone":"none"},
+    {"t":1700000215545,"kind":"loaded","version":"1.18.34","phone":"none"},
+    {"t":1700000215623,"kind":"contexts","symbols":435,"permHits":1,"mode":"auto"},
+    {"t":1700000215629,"kind":"mode-changed","mode":"auto"},
+    {"t":1700000217690,"mark":"say-ask me a question please"},
+    {"t":1700000220120,"kind":"q-asked","id":"que_0f8570566001DLsQo7saKRr7jU","sid":"ses_f07a9026affe5DGS60A2m5f4n5","mode":"auto","inStore":true},
+    {"t":1700000221121,"kind":"q-asked-1s","id":"que_0f8570566001DLsQo7saKRr7jU","inStore":true},
+    {"t":1700000222730,"kind":"mode-dump","tag":"q","mode":"auto"},
+    {"t":1700000223525,"kind":"question.replied","id":"que_0f8570566001DLsQo7saKRr7jU","answers":[["Red"]]}
+   ],
+   "expected": [
+    {"request":"que_0f8570566001DLsQo7saKRr7jU","kind":"question","mode_at_asked":"auto","in_tui_store_at_asked":true,"auto_handled":false,"card":"answerable question card"}
+   ]
+  },
+  {
+   "case": "CTL-plain-sync-reject",
+   "what": "negative control, auto off: the same in-listener phone Reject wins",
+   "launch_args": [],
+   "plugin_loaded": true,
+   "frames": [
+    {"t":1700000109305,"mark":"launch","args":"","phone":"sync-reject"},
+    {"t":1700000114270,"kind":"loaded","version":"1.18.34","phone":"sync-reject"},
+    {"t":1700000114436,"kind":"contexts","symbols":435,"permHits":1,"mode":"normal"},
+    {"t":1700000114443,"kind":"mode-changed","mode":"normal"},
+    {"t":1700000116893,"mark":"say-please run bash ctltwo"},
+    {"t":1700000119464,"kind":"asked","id":"per_0f8557c32001GLHeL5S9d7NXhW","sid":"ses_f07aa8c21ffeJQ6M659ANwGqN2","perm":"bash","cmd":"echo hello-from-mock > mock-out.txt && ls","modeAtAsked":"normal","inStoreSync":true},
+    {"t":1700000119479,"kind":"asked-micro","id":"per_0f8557c32001GLHeL5S9d7NXhW","inStore":true,"mode":"normal"},
+    {"t":1700000119485,"kind":"replied","id":"per_0f8557c32001GLHeL5S9d7NXhW","sid":"ses_f07aa8c21ffeJQ6M659ANwGqN2","reply":"reject","sinceAsked":20.942,"mode":"normal","props":["sessionID","requestID","reply"]},
+    {"t":1700000119525,"kind":"phone-reply","how":"sync-in-listener","id":"per_0f8557c32001GLHeL5S9d7NXhW","reply":"reject","ok":true,"data":true,"rtt":60.526},
+    {"t":1700000119534,"kind":"asked-50ms","id":"per_0f8557c32001GLHeL5S9d7NXhW","inStore":false},
+    {"t":1700000121921,"mark":"ran-1","ran":false},
+    {"t":1700000122051,"kind":"pending","tag":"end","mode":"normal","list":[]}
+   ],
+   "expected": [
+    {"request":"per_0f8557c32001GLHeL5S9d7NXhW","mode_at_asked":"normal","in_tui_store_at_asked":true,"auto_handled":false,"final_reply":"reject","card":"answerable card","measured_phone_reply":{"reply":"reject","accepted":true},"mode_at_phone_reply":"normal","phone_reply_allowed":true}
+   ]
+  },
+  {
+   "case": "mini",
+   "what": "--mini: no plugin loads (no plugin frames at all)",
+   "launch_args": [
+    "--mini"
+   ],
+   "plugin_loaded": false,
+   "frames": [
+    {"t":1700000335397,"mark":"launch","args":"--mini","phone":"none"}
+   ],
+   "expected": []
+  }
+ ]
+}

@@ -1,0 +1,100 @@
+{
+  "anchor": {
+    "id": "per_0f94d72aa001GTOjaqR6sSJpeQ",
+    "parentID": null,
+    "partInput": {
+      "filePath": "a.txt",
+      "newString": "hello world",
+      "oldString": "hello"
+    },
+    "partStatus": "running",
+    "partTool": "edit",
+    "perm": "edit"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f94d72aa001GTOjaqR6sSJpeQ",
+    "metadata": {
+      "diff": "Index: /Users/ada/project/a.txt\n===================================================================\n--- /Users/ada/project/a.txt\n+++ /Users/ada/project/a.txt\n@@ -1,1 +1,1 @@\n-hello\n+hello world\n",
+      "filepath": "/Users/ada/project/a.txt"
+    },
+    "patterns": [
+      "a.txt"
+    ],
+    "permission": "edit",
+    "sessionID": "ses_f06b29f30ffe8hJm55EHMlAHR1",
+    "tool": {
+      "callID": "call_24_0",
+      "messageID": "msg_0f94d725e001QvNf7XgXqwOAJ6"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "Allow ALL edits, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "file change\n{\"always\":[\"*\"],\"changes\":[{\"diff\":\"Index: /Users/ada/project/a.txt\\n===================================================================\\n--- /Users/ada/project/a.txt\\n+++ /Users/ada/project/a.txt\\n@@ -1,1 +1,1 @@\\n-hello\\n+hello world\\n\",\"path\":\"/Users/ada/project/a.txt\",\"type\":\"update\"}],\"computed_at\":\"2023-11-14T22:13:20Z\",\"note\":\"writes the version computed at computed_at; changes made to the file since then are overwritten\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"Allow ALL edits, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}]}",
+      "payload_hash": "683f981500e376fa70761e15aa469d55843bc4b683b20345ba4923ad94932025",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "changes": [
+          {
+            "diff": "Index: /Users/ada/project/a.txt\n===================================================================\n--- /Users/ada/project/a.txt\n+++ /Users/ada/project/a.txt\n@@ -1,1 +1,1 @@\n-hello\n+hello world\n",
+            "path": "/Users/ada/project/a.txt",
+            "type": "update"
+          }
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "note": "writes the version computed at computed_at; changes made to the file since then are overwritten",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "Allow ALL edits, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ]
+      },
+      "tool_name": "file change"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "edit",
+  "opencode": "1.18.34"
+}

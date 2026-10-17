@@ -1,0 +1,94 @@
+{
+  "anchor": {
+    "id": "per_0f939753e001Zayj8s9zWgH02e",
+    "parentID": null,
+    "partInput": {
+      "server": "s7mcp",
+      "uri": "s7://note"
+    },
+    "partStatus": "running",
+    "partTool": "read_mcp_resource",
+    "perm": "read"
+  },
+  "asked": {
+    "always": [
+      "mcp:s7mcp:*"
+    ],
+    "id": "per_0f939753e001Zayj8s9zWgH02e",
+    "metadata": {
+      "server": "s7mcp",
+      "uri": "s7://note"
+    },
+    "patterns": [
+      "mcp:s7mcp:s7://note"
+    ],
+    "permission": "read",
+    "sessionID": "ses_f06c8794bffepxkzxF836S0V86",
+    "tool": {
+      "callID": "call_66_0",
+      "messageID": "msg_0f93974b7001L4Fie1JOP5tZ4L"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "mcp:s7mcp:*, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "mcp resource\n{\"always\":[\"mcp:s7mcp:*\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"mcp:s7mcp:*, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"server\":\"s7mcp\",\"uri\":\"s7://note\",\"via\":\"read_mcp_resource\"}",
+      "payload_hash": "43486638da1340d5e00432972f9ff2e035dec8d2e9c45c7fe865b768aeacc552",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "mcp:s7mcp:*"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "mcp:s7mcp:*, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "server": "s7mcp",
+        "uri": "s7://note",
+        "via": "read_mcp_resource"
+      },
+      "tool_name": "mcp resource"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "read",
+  "opencode": "1.18.34"
+}

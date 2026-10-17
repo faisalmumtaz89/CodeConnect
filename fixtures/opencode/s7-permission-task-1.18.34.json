@@ -1,0 +1,95 @@
+{
+  "anchor": {
+    "id": "per_0f9392c69001f7wfRGdeYG74DQ",
+    "parentID": null,
+    "partInput": {
+      "description": "child job",
+      "prompt": "please do s7:child_bash",
+      "subagent_type": "general"
+    },
+    "partStatus": "running",
+    "partTool": "task",
+    "perm": "task"
+  },
+  "asked": {
+    "always": [
+      "*"
+    ],
+    "id": "per_0f9392c69001f7wfRGdeYG74DQ",
+    "metadata": {
+      "description": "child job",
+      "subagent_type": "general"
+    },
+    "patterns": [
+      "general"
+    ],
+    "permission": "task",
+    "sessionID": "ses_f06c8794bffepxkzxF836S0V86",
+    "tool": {
+      "callID": "call_52_0",
+      "messageID": "msg_0f9392bdc001ZrA9dRsu8Ti3Iq"
+    }
+  },
+  "context": {
+    "mcp_connected": [
+      "s7mcp"
+    ],
+    "tool_ids": [
+      "invalid",
+      "question",
+      "bash",
+      "read",
+      "glob",
+      "grep",
+      "edit",
+      "write",
+      "task",
+      "webfetch",
+      "todowrite",
+      "websearch",
+      "skill",
+      "apply_patch"
+    ]
+  },
+  "event": "permission.asked",
+  "expected": {
+    "always_offered": true,
+    "always_text": "every subagent launch, ANY type, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies",
+    "card": {
+      "display_text": "task\n{\"always\":[\"*\"],\"computed_at\":\"2023-11-14T22:13:20Z\",\"description\":\"child job\",\"options\":[{\"id\":\"once\",\"label\":\"Allow once\"},{\"id\":\"always\",\"label\":\"Allow always\",\"scope\":\"every subagent launch, ANY type, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies\"},{\"id\":\"reject\",\"label\":\"Reject\"}],\"prompt\":\"please do s7:child_bash\",\"subagent_type\":\"general\"}",
+      "payload_hash": "fe8daad9b4e6819291dfdd2a84a60abee7c9cb6ae4932bdeb6643fbda8f3d5e9",
+      "risk": {
+        "class": "medium"
+      },
+      "tool_input": {
+        "always": [
+          "*"
+        ],
+        "computed_at": "2023-11-14T22:13:20Z",
+        "description": "child job",
+        "options": [
+          {
+            "id": "once",
+            "label": "Allow once"
+          },
+          {
+            "id": "always",
+            "label": "Allow always",
+            "scope": "every subagent launch, ANY type, in this folder's OpenCode until it reloads or exits, for every session there, including what your config denies"
+          },
+          {
+            "id": "reject",
+            "label": "Reject"
+          }
+        ],
+        "prompt": "please do s7:child_bash",
+        "subagent_type": "general"
+      },
+      "tool_name": "task"
+    },
+    "hidden": false,
+    "reject_with_words": false
+  },
+  "family": "task",
+  "opencode": "1.18.34"
+}
