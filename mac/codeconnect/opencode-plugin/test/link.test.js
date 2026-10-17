@@ -455,6 +455,106 @@ describe("requests", () => {
     expect(c.frames.find((/** @type {any} */ x) => x.t === "sync_end" && x.sync === 2).permissions_ok).toBe(false)
   })
 
+  const PERM_R = { id: "per_1", sessionID: "ses_r", permission: "bash", patterns: ["ls"], metadata: { command: "ls" }, always: ["ls *"], tool: { messageID: "msg_ses_r_002", callID: "call_1" } }
+  /** A link whose first snapshot judges PERM_R live: a busy root with a running `call_1`, the ask seen and stored. */
+  const liveSetup = async () => {
+    const { ccd, f } = await setup({
+      onHello: () => {},
+      api: (f) => {
+        f.server.sessions = [session("ses_r", Date.now() + 60000)]
+        const m = msg("ses_r", 2)
+        m.info.time.completed = undefined
+        m.parts = [{ id: "prt_t", sessionID: "ses_r", messageID: m.info.id, type: "tool", callID: "call_1", tool: "bash", state: { status: "running", input: { command: "ls" } } }]
+        f.server.messages.set("ses_r", [msg("ses_r", 1, "user"), m])
+        f.server.status = { ses_r: { type: "busy" } }
+      },
+    })
+    const c = await until(() => ccd.last()?.hello && ccd.last())
+    f.emit("message.part.updated", { sessionID: "ses_r", part: f.server.messages.get("ses_r")?.[1].parts[0] })
+    f.emit("permission.asked", PERM_R)
+    f.server.permissions = [PERM_R]
+    welcome(c)
+    await until(() => settled(c, 1))
+    expect(verdictAt(c, 1)).toEqual({ live: true, dead: null, listed: true, in_store: true })
+    return { ccd, f, c }
+  }
+  /** @param {any} c */
+  const begins = (c) => c.frames.filter((/** @type {any} */ x) => x.t === "sync_begin").map((/** @type {any} */ b) => [b.sync, b.scope, b.reason])
+  /** @param {any} c @param {number} sync */
+  const verdictAt = (c, sync) => c.frames.find((/** @type {any} */ x) => x.t === "sync_request" && x.sync === sync)?.verdict
+  const resync = (/** @type {any} */ c) => c.socket.write(JSON.stringify({ type: "opencode_resync", acked: {} }) + "\n")
+
+  test("a session read that fails other than with a 404 is judged unknown and re-judged by a follow-up snapshot a second later; a 404 is session-missing", async () => {
+    const { f, c } = await liveSetup()
+
+    // 500 on session.get: unknown, then one follow-up that finds the server still failing and chains once more
+    f.server.failing.add("session.get")
+    resync(c)
+    await until(() => settled(c, 2), 3000)
+    expect(verdictAt(c, 2)).toEqual({ live: false, dead: null, unknown: "server", listed: true, in_store: true })
+    expect(begins(c).length).toBe(2)
+    await until(() => settled(c, 3), 3000)
+    expect(verdictAt(c, 3)).toEqual({ live: false, dead: null, unknown: "server", listed: true, in_store: true })
+    expect(c.at2 - c.at1).toBeGreaterThanOrEqual(950)
+    f.server.failing.delete("session.get")
+    await until(() => settled(c, 4), 3000)
+    expect(verdictAt(c, 4)).toEqual({ live: true, dead: null, listed: true, in_store: true })
+    await sleep(1300)
+    expect(begins(c)).toEqual([[1, "full", "connect"], [2, "full", "requested"], [3, "requests", "follow-up"], [4, "requests", "follow-up"]])
+
+    // a thrown call is no verdict either
+    f.server.throwing.add("session.get")
+    resync(c)
+    await until(() => settled(c, 5), 3000)
+    expect(verdictAt(c, 5)).toEqual({ live: false, dead: null, unknown: "server", listed: true, in_store: true })
+    f.server.throwing.delete("session.get")
+    await until(() => settled(c, 6), 3000)
+    expect(verdictAt(c, 6)).toEqual({ live: true, dead: null, listed: true, in_store: true })
+
+    // a 404 is definitive, and no follow-up is scheduled
+    f.server.sessions = []
+    resync(c)
+    await until(() => settled(c, 7), 3000)
+    expect(verdictAt(c, 7)).toEqual({ live: false, dead: "session-missing", listed: true, in_store: true })
+    await sleep(1300)
+    expect(begins(c).length).toBe(7)
+  }, 15000)
+
+  test("a message read that fails other than with a 404 is unknown; an idle session is not-busy regardless", async () => {
+    const { f, c } = await liveSetup()
+    f.server.failing.add("session.message")
+    resync(c)
+    await until(() => settled(c, 2), 3000)
+    expect(verdictAt(c, 2)).toEqual({ live: false, dead: null, unknown: "server", listed: true, in_store: true })
+    f.server.status = {}
+    await until(() => settled(c, 3), 3000)
+    expect(begins(c).at(-1)).toEqual([3, "requests", "follow-up"])
+    expect(verdictAt(c, 3)).toEqual({ live: false, dead: "not-busy", listed: true, in_store: true })
+    f.server.status = { ses_r: { type: "busy" } }
+    f.server.failing.delete("session.message")
+    f.server.messages.set("ses_r", [msg("ses_r", 1, "user")])
+    resync(c)
+    await until(() => settled(c, 4), 3000)
+    expect(verdictAt(c, 4)).toEqual({ live: false, dead: "anchor", listed: true, in_store: true })
+    await sleep(1300)
+    expect(begins(c).length).toBe(4)
+  })
+
+  test("a v2 ask is forwarded as its ids only, as one event and never a card", async () => {
+    const { ccd, f } = await setup()
+    const c = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())
+    const n = c.frames.length
+    f.emit("permission.v2.asked", { action: "bash", id: "per_v2", metadata: { command: "rm -rf /" }, resources: ["rm -rf /"], save: ["*"], sessionID: "ses_v" })
+    f.emit("question.v2.asked", { id: "que_v2", sessionID: "ses_v", questions: [{ question: "Which?", options: [] }] })
+    f.emit("session.status", { sessionID: "ses_v", status: { type: "busy" } })
+    await until(() => c.frames.some((/** @type {any} */ x) => x.t === "ev" && x.type === "session.status"))
+    expect(c.frames.slice(n).map((/** @type {any} */ x) => [x.t, x.type, x.properties])).toEqual([
+      ["ev", "permission.v2.asked", { id: "per_v2", sessionID: "ses_v", action: "bash" }],
+      ["ev", "question.v2.asked", { id: "que_v2", sessionID: "ses_v" }],
+      ["ev", "session.status", { sessionID: "ses_v", status: { type: "busy" } }],
+    ])
+  })
+
   test("a live card is forwarded with its anchor; an oversized one is a card stub", async () => {
     const { ccd, f } = await setup()
     const c = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())

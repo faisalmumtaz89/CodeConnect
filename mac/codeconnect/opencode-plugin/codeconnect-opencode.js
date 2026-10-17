@@ -24,7 +24,7 @@ import { fileURLToPath } from "node:url"
 /** @typedef {{ sec: number, usec: number }} Start */
 /** @typedef {{ from: string | null, inclusive: boolean }} Bound */
 /** @typedef {Record<string, Bound>} Acked */
-/** @typedef {{ live: boolean, dead: string | null, listed: boolean | "unknown", in_store: boolean }} Verdict */
+/** @typedef {{ live: boolean, dead: string | null, unknown?: string, listed: boolean | "unknown", in_store: boolean }} Verdict */
 /** @typedef {"abort" | "idle" | "retry" | "deleted" | "disposed"} EpochEventType */
 /** @typedef {{ seq: number, type: EpochEventType, sid?: string }} EpochEvent */
 /** @typedef {{ line: string, bytes: number, stub: boolean }} Encoded */
@@ -46,6 +46,8 @@ export const BACKOFF_MAX_MS = 8000
 export const STABLE_MS = 8000
 /** Full snapshots start at least this far apart. */
 export const FULL_SYNC_GAP_MS = 1000
+/** A snapshot that could not judge a request is followed by a requests-only one this long after it settles. */
+export const FOLLOW_UP_MS = 1000
 /** Most epoch events kept; past it the oldest goes, and requests asked before it are judged dead ("epoch-evicted"). */
 export const EPOCH_EVENTS_CAP = 4096
 /** A card's context (tool ids, connected MCP servers) is read in the background; past this it goes out with `ctx.ok:false`. */
@@ -57,7 +59,10 @@ const AGENT_FILE_CAP = 4096
 const API_PAGE_LIMIT = 10
 const READ_CAP = 1048576
 
-/** The v1 bus events the daemon maps. Never `message.part.delta`, `session.next.*` or a `*.v2.*` event. */
+/**
+ * The v1 bus events the daemon maps, plus the two v2 asks, forwarded as their ids only. Never `message.part.delta`
+ * or a `session.next.*` event.
+ */
 export const SUBSCRIBED = Object.freeze([
   "session.created",
   "session.status",
@@ -74,8 +79,12 @@ export const SUBSCRIBED = Object.freeze([
   "question.asked",
   "question.replied",
   "question.rejected",
+  "permission.v2.asked",
+  "question.v2.asked",
 ])
 const SUBSCRIBED_SET = new Set(SUBSCRIBED)
+/** A v2 ask is forwarded as these fields only: the daemon files one hidden-request line and never a card. */
+const V2_ASKED = new Set(["permission.v2.asked", "question.v2.asked"])
 
 /** Events after which the pending-request list is read again (no history pages). */
 const REQUEST_TRIGGERS = new Set(["session.idle", "session.error", "session.deleted", "server.instance.disposed"])
@@ -274,6 +283,7 @@ export class Filter {
    */
   apply(type, p) {
     if (!SUBSCRIBED_SET.has(type)) return null
+    if (V2_ASKED.has(type)) return { id: p.id, sessionID: p.sessionID, ...(typeof p.action === "string" ? { action: p.action } : {}) }
     if (type === "message.updated") {
       const i = p.info
       /** @type {Record<string, unknown>} */
@@ -480,12 +490,17 @@ function match(e, sid, ancestors) {
  * The liveness rule over gathered facts: PRESENT (listed, or in the TUI store when the list call failed), SERVER (the
  * session exists and is busy or retrying), ANCHOR (its own tool part is running in an unfinished, error-free
  * message; a doom-loop request: a matching running part in the newest assistant message; any other request
- * without a tool is never live), EPOCH (see EpochLog). The first failing condition names the dead reason.
- * @param {{ listed: boolean | "unknown", inStore: boolean, sessionExists: boolean, busy: boolean, anchor: boolean, epoch: string | null }} f
+ * without a tool is never live), EPOCH (see EpochLog). The first failing condition names the dead reason. A server
+ * fact that could not be read (`"unknown"`: the call failed other than with a 404) is reached before any later
+ * condition fails, and the verdict is then neither live nor dead: `unknown` names the server, and the daemon
+ * applies it to nothing.
+ * @param {{ listed: boolean | "unknown", inStore: boolean, sessionExists: boolean | "unknown", busy: boolean, anchor: boolean | "unknown", epoch: string | null }} f
  * @returns {Verdict}
  */
 export function verdict(f) {
   const present = f.listed === true || (f.listed === "unknown" && f.inStore)
+  const unknown = present && (f.sessionExists === "unknown" || (f.sessionExists && f.busy && f.anchor === "unknown"))
+  if (unknown) return { live: false, dead: null, unknown: "server", listed: f.listed, in_store: f.inStore }
   const dead = !present ? "absent" : !f.sessionExists ? "session-missing" : !f.busy ? "not-busy" : !f.anchor ? "anchor" : f.epoch
   return { live: dead === null, dead, listed: f.listed, in_store: f.inStore }
 }
@@ -705,7 +720,7 @@ export async function judge(env, kind, r, listed, status, parents) {
   const s = status[sid]
   const busy = !!s && s.type !== "idle"
   const got = await call(() => client.session.get({ sessionID: sid, directory: dir }))
-  const { anchor } = await anchorOf(client, dir, kind, r)
+  const { anchor, read } = await anchorOf(client, dir, kind, r)
   const chain = new Set(epoch.ancestors(sid))
   let cur = sid
   for (let i = 0; i < 8; i++) {
@@ -721,7 +736,14 @@ export async function judge(env, kind, r, listed, status, parents) {
     chain.add(p)
     cur = p
   }
-  return verdict({ listed, inStore, sessionExists: got.ok, busy, anchor, epoch: epoch.ended(r.id, sid, [...chain]) })
+  return verdict({
+    listed,
+    inStore,
+    sessionExists: got.ok ? true : got.response?.status === 404 ? false : "unknown",
+    busy,
+    anchor: read && !read.ok && read.response?.status !== 404 ? "unknown" : anchor,
+    epoch: epoch.ended(r.id, sid, [...chain]),
+  })
 }
 
 const yieldToLoop = () => new Promise((r) => setImmediate(r))
@@ -787,6 +809,10 @@ function activate(api, socketPath, nonce) {
   let retryTimer = null
   /** @type {ReturnType<typeof setTimeout> | null} */
   let stableTimer = null
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let followUpTimer = null
+  /** whether the snapshot in progress sent a verdict that judged nothing */
+  let unjudged = false
   /** @type {Head | null} */
   let head = null
   let headSent = ""
@@ -1219,6 +1245,7 @@ function activate(api, socketPath, nonce) {
     const sync = ++syncs
     const asOf = seq
     syncing = true
+    unjudged = false
     held = []
     heldBytes = 0
     const alive = () => sock === c && state === "live" && !disposed
@@ -1237,7 +1264,14 @@ function activate(api, socketPath, nonce) {
     held = []
     heldBytes = 0
     syncing = false
+    if (unjudged && !followUpTimer) followUpTimer = setTimeout(followUp, FOLLOW_UP_MS)
     if (pending) schedule()
+  }
+
+  /** One requests-only snapshot after one that could not judge a request, so a server hiccup is re-judged. */
+  function followUp() {
+    followUpTimer = null
+    trigger({ scope: "requests", reason: "follow-up" })
   }
 
   /**
@@ -1321,6 +1355,7 @@ function activate(api, socketPath, nonce) {
     for (const x of requests) {
       const v = await judge(env, x.kind, x.request, x.listed, status, parents)
       if (!alive()) return null
+      if (v.unknown) unjudged = true
       let request = withAnchor(x.request)
       if (x.kind === "permission") {
         const read = await readCtx(x.request.id)
@@ -1617,6 +1652,8 @@ function activate(api, socketPath, nonce) {
       if (stableTimer) clearTimeout(stableTimer)
       stableTimer = null
       if (sock !== c) return
+      if (followUpTimer) clearTimeout(followUpTimer)
+      followUpTimer = null
       sock = null
       state = "down"
       syncing = false
@@ -1678,7 +1715,8 @@ function activate(api, socketPath, nonce) {
       disposed = true
       if (retryTimer) clearTimeout(retryTimer)
       if (stableTimer) clearTimeout(stableTimer)
-      retryTimer = stableTimer = null
+      if (followUpTimer) clearTimeout(followUpTimer)
+      retryTimer = stableTimer = followUpTimer = null
       for (const off of unsubscribe.splice(0)) {
         try {
           off()

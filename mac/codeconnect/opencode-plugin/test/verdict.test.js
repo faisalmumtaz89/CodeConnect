@@ -166,6 +166,17 @@ describe("verdict rule", () => {
     expect(verdict({ ...base, epoch: "epoch:abort:ancestor" }).dead).toBe("epoch:abort:ancestor")
   })
 
+  test("a server fact that could not be read is unknown, unless an earlier condition already failed", () => {
+    const base = { listed: /** @type {true} */ (true), inStore: true, sessionExists: true, busy: true, anchor: true, epoch: null }
+    const unknown = { live: false, dead: null, unknown: "server", listed: true, in_store: true }
+    expect(verdict({ ...base, sessionExists: "unknown" })).toEqual(unknown)
+    expect(verdict({ ...base, sessionExists: "unknown", busy: false, epoch: "epoch:idle" })).toEqual(unknown)
+    expect(verdict({ ...base, anchor: "unknown" })).toEqual(unknown)
+    expect(verdict({ ...base, anchor: "unknown", epoch: "epoch:idle" })).toEqual(unknown)
+    expect(verdict({ ...base, anchor: "unknown", busy: false })).toEqual({ live: false, dead: "not-busy", listed: true, in_store: true })
+    expect(verdict({ ...base, sessionExists: "unknown", listed: "unknown", inStore: false }).dead).toBe("absent")
+  })
+
   test("the log forgets events older than its oldest open request", () => {
     const log = new EpochLog()
     log.note(1, "session.idle", { sessionID: "ses_a" })

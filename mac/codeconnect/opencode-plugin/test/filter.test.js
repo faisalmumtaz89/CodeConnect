@@ -30,14 +30,23 @@ describe("filter", () => {
     })
   }
 
-  test("subscribes to no delta, session.next or v2 event", () => {
+  test("subscribes to no delta or session.next event, and to the two v2 asks only among v2 events", () => {
     for (const t of SUBSCRIBED) {
       expect(t).not.toBe("message.part.delta")
       expect(t.startsWith("session.next.")).toBe(false)
-      expect(t.includes(".v2.")).toBe(false)
+      if (t.includes(".v2.")) expect(["permission.v2.asked", "question.v2.asked"]).toContain(t)
     }
+    expect(SUBSCRIBED).toContain("permission.v2.asked")
+    expect(SUBSCRIBED).toContain("question.v2.asked")
     expect(new Filter().apply("message.part.delta", { delta: "x" })).toBeNull()
     expect(new Filter().apply("session.diff", { diff: [] })).toBeNull()
+    expect(new Filter().apply("permission.v2.replied", { id: "per_1", sessionID: "ses_1", reply: "once" })).toBeNull()
+  })
+
+  test("a v2 ask passes as its ids and action only, never its body", () => {
+    const asked = { action: "bash", id: "per_1", metadata: { command: "rm -rf /" }, resources: ["rm -rf /"], save: ["*"], sessionID: "ses_1" }
+    expect(new Filter().apply("permission.v2.asked", asked)).toEqual({ id: "per_1", sessionID: "ses_1", action: "bash" })
+    expect(new Filter().apply("question.v2.asked", { id: "que_1", sessionID: "ses_1", questions: [{ question: "Which?" }] })).toEqual({ id: "que_1", sessionID: "ses_1" })
   })
 
   test("maps lose each tool, text and assistant entry at its terminal", () => {

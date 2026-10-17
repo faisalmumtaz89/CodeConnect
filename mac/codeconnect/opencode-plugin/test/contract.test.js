@@ -178,8 +178,11 @@ function shapeErrors(f) {
     for (const it of f.items) if (!ITEM.some((k) => JSON.stringify(k) === JSON.stringify(Object.keys(it)))) errs.push(`item keys ${JSON.stringify(Object.keys(it))}`)
   if (kind === "sync_request") {
     const v = f.verdict
-    if (JSON.stringify(Object.keys(v)) !== '["live","dead","listed","in_store"]') errs.push("verdict keys")
-    if (v.live !== (v.dead === null) || (v.dead !== null && !DEAD.test(v.dead))) errs.push("verdict " + JSON.stringify(v))
+    const keys = JSON.stringify(Object.keys(v))
+    if (keys !== '["live","dead","listed","in_store"]' && keys !== '["live","dead","unknown","listed","in_store"]') errs.push("verdict keys")
+    // Judged: live names no reason, dead names a known one. Unjudged: neither live nor dead, `unknown` names the server.
+    const judged = "unknown" in v ? v.unknown === "server" && !v.live && v.dead === null : v.live === (v.dead === null) && (v.dead === null || DEAD.test(v.dead))
+    if (!judged) errs.push("verdict " + JSON.stringify(v))
     if (![true, false, "unknown"].includes(v.listed)) errs.push("listed")
   }
   if (kind === "answer") {
