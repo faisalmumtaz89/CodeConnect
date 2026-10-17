@@ -1,7 +1,8 @@
 // The link contract as one file. A fixed script drives the plugin through a fake OpenCode and a fake daemon; every
 // line either side wrote is recorded in order as {"dir":"plugin"|"ccd","frame":…}. The run must reproduce
 // fixtures/opencode/link-v1-frames.jsonl byte for byte; the daemon's tests decode and map the same file.
-// The hello's pid is the only value normalised (to 4242). CC_OPENCODE_CONTRACT_WRITE=1 rewrites the file.
+// Two measured values are normalised: the hello's pid (to 4242) and a card context's read time `ctx.ms` (to 0).
+// CC_OPENCODE_CONTRACT_WRITE=1 rewrites the file.
 // Rows with a "case" key are hand-written examples of what this run does not reach (a failed list, a second
 // activation, split and stubbed history items, …); they are kept on a rewrite and must have the frame shapes the
 // run's own frames have, and the invariants below that tie a frame's fields to how the plugin builds it.
@@ -103,6 +104,8 @@ test("the scripted run reproduces link-v1-frames.jsonl", async () => {
   const rows = c.wire.map((/** @type {any} */ w) => {
     const frame = JSON.parse(w.line)
     if (frame.type === "opencode_hello") frame.pid = 4242
+    const ctx = frame.t === "ev" ? frame.properties?.ctx : frame.t === "sync_request" ? frame.request?.ctx : undefined
+    if (ctx) ctx.ms = 0
     return JSON.stringify({ dir: w.dir, frame }) + "\n"
   })
   const text = rows.join("")
@@ -160,7 +163,8 @@ function stageErrors(a, entry) {
   if (!only) return [`stage ${JSON.stringify(a.stage)}`]
   const extra = Object.keys(a).filter((k) => !["request_id", "stage"].includes(k) && !(k === "detail" && !entry && a.stage === "refused"))
   if (JSON.stringify(extra) !== JSON.stringify(only)) return [`${a.stage} with ${JSON.stringify(extra)}`]
-  if (a.stage === "result" && !Number.isInteger(a.http)) return ["http not a status"]
+  // The daemon decodes `http` as a u16.
+  if (a.stage === "result" && !(Number.isInteger(a.http) && a.http >= 0 && a.http <= 65535)) return ["http not a status"]
   return []
 }
 

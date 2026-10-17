@@ -2,7 +2,9 @@
 //
 // It observes the TUI it runs in and forwards what it sees to the CodeConnect daemon over the daemon's unix socket:
 // bus events (filtered and size-capped), the session the keyboard is showing, and on every connect a paged snapshot
-// read from the OpenCode server, with the liveness verdict of every pending request. It executes nothing.
+// read from the OpenCode server, with the liveness verdict of every pending request. The one thing it does on the
+// daemon's behalf is answer a permission request the phone decided, and only after checking, with nothing awaited
+// in between, that the keyboard could still answer it; every stage of that is reported back.
 //
 // The keyboard is never delayed by it: `tui()` returns at once, every listener body is synchronous, bounded and
 // wrapped in try/catch, and all socket work (connect, hello, snapshot reads, writes) runs in the background. Writes
@@ -28,6 +30,9 @@ import { fileURLToPath } from "node:url"
 /** @typedef {{ line: string, bytes: number, stub: boolean }} Encoded */
 /** @typedef {{ scope: "full" | "requests", reason: string }} Trigger */
 /** @typedef {{ route: string, session_id?: string, directory?: string | null }} Head */
+/** @typedef {"normal" | "auto" | "unknown"} Mode */
+/** @typedef {{ ok: boolean, tool_ids: string[], mcp: string[], ms: number }} CtxRead */
+/** @typedef {{ request_id: string, stage: "received" | "refused" | "sent" | "result", reason?: string, http?: number }} Command */
 
 export const WIRE = 1
 export const STRING_CAP = 65536
@@ -43,6 +48,10 @@ export const STABLE_MS = 8000
 export const FULL_SYNC_GAP_MS = 1000
 /** Most epoch events kept; past it the oldest goes, and requests asked before it are judged dead ("epoch-evicted"). */
 export const EPOCH_EVENTS_CAP = 4096
+/** A card's context (tool ids, connected MCP servers) is read in the background; past this it goes out with `ctx.ok:false`. */
+export const CTX_READ_MS = 500
+/** Answer commands remembered per activation: the newest stage of each request id, the oldest ids evicted first. */
+export const COMMANDS_CAP = 64
 const ENDED_CAP = 1024
 const AGENT_FILE_CAP = 4096
 const API_PAGE_LIMIT = 10
@@ -530,7 +539,11 @@ export function checkApi(api) {
   need("api.client.session.get", "function")
   need("api.client.session.message", "function")
   need("api.client.permission.list", "function")
+  need("api.client.permission.reply", "function")
   need("api.client.question.list", "function")
+  need("api.client.tool.ids", "function")
+  need("api.client.mcp.status", "function")
+  need("api.ui.dialog", "object")
   need("api.app.version", "string")
   /** @type {string | null} */
   let version = null
@@ -538,6 +551,69 @@ export function checkApi(api) {
     version = typeof api?.app?.version === "string" ? api.app.version : null
   } catch {}
   return { ok: missing.length === 0, missing, version }
+}
+
+/**
+ * The TUI's permission-mode getter, found from the app slot's owner chain: the one context value with a `mode`
+ * getter beside `set` and `toggle` functions (the Permission context; `Local.permission` is the same object).
+ * Only the bound getter is kept; `set` and `toggle` are never called. Zero or several hits → null, and the mode
+ * stays unknown for the activation.
+ * @param {any} owner
+ * @returns {(() => unknown) | null}
+ */
+export function findModeGetter(owner) {
+  /** @type {any[]} */
+  const hits = []
+  const seen = new Set()
+  for (let o = owner; o; o = o.owner) {
+    const ctx = o.context
+    if (!ctx || typeof ctx !== "object" || seen.has(ctx)) continue
+    seen.add(ctx)
+    for (const k of Object.getOwnPropertySymbols(ctx)) {
+      const v = ctx[k]
+      if (!v || typeof v !== "object") continue
+      for (const c of [v, v.permission]) {
+        if (!c || typeof c !== "object" || hits.includes(c)) continue
+        const d = Object.getOwnPropertyDescriptor(c, "mode")
+        if (d && typeof d.get === "function" && typeof c.set === "function" && typeof c.toggle === "function") hits.push(c)
+      }
+    }
+  }
+  if (hits.length !== 1) return null
+  const get = /** @type {() => unknown} */ (/** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(hits[0], "mode")).get)
+  return get.bind(hits[0])
+}
+
+/**
+ * Whether the request's tool call is still running: its own tool part in an unfinished, error-free message, or
+ * for a doom-loop request a matching running part in the newest assistant message. A request without a tool is
+ * never anchored. `read` is the message read's outcome, null when none was needed.
+ * @param {any} client
+ * @param {string | undefined} dir
+ * @param {"permission" | "question"} kind
+ * @param {any} r
+ * @returns {Promise<{ anchor: boolean, read: { ok: boolean, response: any } | null }>}
+ */
+async function anchorOf(client, dir, kind, r) {
+  const sid = r?.sessionID
+  const tool = r?.tool
+  if (tool?.messageID) {
+    const m = await call(() => client.session.message({ sessionID: sid, messageID: tool.messageID, directory: dir }))
+    const parts = Array.isArray(m.data?.parts) ? m.data.parts : []
+    const part = parts.find((/** @type {any} */ p) => p?.type === "tool" && p.callID === tool.callID)
+    return { anchor: m.ok && part?.state?.status === "running" && !m.data?.info?.error && !m.data?.info?.time?.completed, read: m }
+  }
+  if (kind === "permission" && r?.permission === "doom_loop") {
+    const meta = r.metadata ?? {}
+    const ms = await call(() => client.session.messages({ sessionID: sid, directory: dir, limit: 4 }))
+    const last = (Array.isArray(ms.data) ? ms.data : []).filter((/** @type {any} */ x) => x?.info?.role === "assistant").at(-1)
+    const want = JSON.stringify(meta.input)
+    const running = (Array.isArray(last?.parts) ? last.parts : []).some(
+      (/** @type {any} */ p) => p?.type === "tool" && p.tool === meta.tool && p.state?.status === "running" && JSON.stringify(p.state?.input) === want,
+    )
+    return { anchor: ms.ok && running && !last?.info?.error && !last?.info?.time?.completed, read: ms }
+  }
+  return { anchor: false, read: null }
 }
 
 // ------------------------------------------------------------------------------------------------------ plugin
@@ -627,23 +703,7 @@ export async function judge(env, kind, r, listed, status, parents) {
   const s = status[sid]
   const busy = !!s && s.type !== "idle"
   const got = await call(() => client.session.get({ sessionID: sid, directory: dir }))
-  let anchor = false
-  const tool = r.tool
-  if (tool?.messageID) {
-    const m = await call(() => client.session.message({ sessionID: sid, messageID: tool.messageID, directory: dir }))
-    const parts = Array.isArray(m.data?.parts) ? m.data.parts : []
-    const part = parts.find((/** @type {any} */ p) => p?.type === "tool" && p.callID === tool.callID)
-    anchor = m.ok && part?.state?.status === "running" && !m.data?.info?.error && !m.data?.info?.time?.completed
-  } else if (kind === "permission" && r.permission === "doom_loop") {
-    const meta = r.metadata ?? {}
-    const ms = await call(() => client.session.messages({ sessionID: sid, directory: dir, limit: 4 }))
-    const last = (Array.isArray(ms.data) ? ms.data : []).filter((/** @type {any} */ x) => x?.info?.role === "assistant").at(-1)
-    const want = JSON.stringify(meta.input)
-    const running = (Array.isArray(last?.parts) ? last.parts : []).some(
-      (/** @type {any} */ p) => p?.type === "tool" && p.tool === meta.tool && p.state?.status === "running" && JSON.stringify(p.state?.input) === want,
-    )
-    anchor = ms.ok && running && !last?.info?.error && !last?.info?.time?.completed
-  }
+  const { anchor } = await anchorOf(client, dir, kind, r)
   const chain = new Set(epoch.ancestors(sid))
   let cur = sid
   for (let i = 0; i < 8; i++) {
@@ -732,6 +792,39 @@ function activate(api, socketPath, nonce) {
   let disposeRoot = null
   /** @type {(() => void)[]} */
   const unsubscribe = []
+  /** @type {(() => unknown) | null} the TUI's permission-mode getter, once the app slot has rendered */
+  let modeGetter = null
+  /** @type {Map<string, Command>} request id -> the newest stage of the reply the daemon asked for, in first-seen order */
+  const commands = new Map()
+  /** @type {Map<string, Promise<CtxRead>>} request id -> the context read in flight for it */
+  const ctxReads = new Map()
+
+  /** The permission mode the TUI holds now; "unknown" until the getter was found, or when it says something else. */
+  const readMode = () => {
+    try {
+      const m = modeGetter?.()
+      return m === "auto" || m === "normal" ? m : "unknown"
+    } catch {
+      return "unknown"
+    }
+  }
+  /** @param {string} sid @param {string} id */
+  const inStore = (sid, id) => {
+    try {
+      return (api.state.session.permission(sid) ?? []).some((/** @type {any} */ r) => r?.id === id)
+    } catch {
+      return false
+    }
+  }
+  /** @param {string} sid */
+  const parentOf = (sid) => {
+    try {
+      const p = api.state.session.get(sid)?.parentID
+      return typeof p === "string" ? p : null
+    } catch {
+      return null
+    }
+  }
 
   const rootOf = (/** @type {string} */ s) => {
     let x = s
@@ -777,8 +870,9 @@ function activate(api, socketPath, nonce) {
     if (REQUEST_TRIGGERS.has(type) || (type === "session.status" && p.status?.type === "retry")) trigger({ scope: "requests", reason: "trigger:" + type })
     const out = filter.apply(type, p)
     if (out === null || state !== "live") return
-    if (type === "permission.asked" || type === "question.asked") enqueue(cardLine(seq, type, withAnchor(out)), seq, true)
-    else enqueue(eventLine(seq, type, out), seq)
+    if (type === "permission.asked") askCard(seq, out)
+    else if (type === "question.asked") enqueue(cardLine(seq, type, withAnchor(out)), seq, true)
+    else enqueue(eventLine(seq, type, out), seq, type === "permission.replied")
   }
 
   /** @param {any} request */
@@ -788,18 +882,79 @@ function activate(api, socketPath, nonce) {
     return known ? { ...request, anchor_input: known.input } : request
   }
 
+  /**
+   * A permission card. None when OpenCode answers the ask itself: under auto mode the TUI replies "once" before
+   * any plugin listener runs and never stores the request, so a request absent from the store was not shown at
+   * the keyboard. Otherwise the mode and the parent are read here, synchronously, and the card is written when
+   * its context read returns.
+   * @param {number} s the ask's seq
+   * @param {any} request
+   */
+  function askCard(s, request) {
+    const sid = request.sessionID
+    const mode = readMode()
+    if (mode === "auto" || !inStore(sid, request.id)) return
+    const parent = parentOf(sid)
+    void readCtx(request.id).then((read) => {
+      try {
+        enqueue(cardLine(s, "permission.asked", { ...withAnchor(request), ctx: ctxOf(read, mode, parent) }), s, true)
+      } catch {}
+    })
+  }
+
+  /**
+   * @param {CtxRead} read
+   * @param {Mode} mode
+   * @param {string | null} parent
+   */
+  const ctxOf = (read, mode, parent) => ({ ok: read.ok && mode !== "unknown", tool_ids: read.tool_ids, mcp: read.mcp, mode, parent, ms: read.ms })
+
+  /**
+   * The tool ids and the connected MCP servers the daemon judges a card against, read at every ask (tools reload)
+   * and shared by the reads in flight for one request id. Past CTX_READ_MS, or on any failure, `ok` is false.
+   * @param {string} id
+   * @returns {Promise<CtxRead>}
+   */
+  function readCtx(id) {
+    const inFlight = ctxReads.get(id)
+    if (inFlight) return inFlight
+    const p = (async () => {
+      const t0 = Date.now()
+      /** @type {ReturnType<typeof setTimeout> | undefined} */
+      let timer
+      const late = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), CTX_READ_MS)
+      })
+      const dir = directory()
+      const reads = Promise.all([call(() => client.tool.ids({ directory: dir })), call(() => client.mcp.status({ directory: dir }))])
+      const got = await Promise.race([reads, late])
+      clearTimeout(timer)
+      const ms = Date.now() - t0
+      if (!got) return { ok: false, tool_ids: [], mcp: [], ms }
+      const [ids, mcp] = got
+      const idsOk = ids.ok && Array.isArray(ids.data) && ids.data.every((/** @type {unknown} */ x) => typeof x === "string")
+      if (!idsOk || !mcp.ok || !isRecord(mcp.data)) return { ok: false, tool_ids: [], mcp: [], ms }
+      const connected = Object.entries(mcp.data).filter(([, v]) => /** @type {any} */ (v)?.status === "connected").map(([k]) => k)
+      return { ok: true, tool_ids: ids.data, mcp: connected, ms }
+    })()
+    ctxReads.set(id, p)
+    void p.finally(() => ctxReads.delete(id)).catch(() => {})
+    return p
+  }
+
   // ---- writes
   /**
-   * A frame is written at once, or held while a snapshot is being sent. A card is never held: the daemon keys it by
-   * request id, so it may arrive ahead of the snapshot.
+   * A frame is written at once, or held while a snapshot is being sent. Never held: a card, a reply to one and an
+   * answer stage, which the daemon keys by request id, so they may arrive ahead of the snapshot and are never
+   * pushed past a reply's budget.
    * @param {Encoded} e
    * @param {number} s
-   * @param {boolean} [card]
+   * @param {boolean} [unheld]
    */
-  function enqueue(e, s, card = false) {
+  function enqueue(e, s, unheld = false) {
     const c = sock
     if (!c || state !== "live") return
-    if (syncing && !card) {
+    if (syncing && !unheld) {
       if (c.writableLength + heldBytes + e.bytes > QUEUE_CAP) return overflow(c)
       held.push({ line: e.line, bytes: e.bytes, seq: s })
       heldBytes += e.bytes
@@ -823,6 +978,129 @@ function activate(api, socketPath, nonce) {
     const line = JSON.stringify(frame) + "\n"
     c.write(line)
     return utf8(line)
+  }
+
+  // ---- answers
+  /**
+   * The newest stage of the reply for `id`, kept for the activation (the daemon reads it from the next snapshot
+   * when it missed the frame). A re-recorded id keeps its slot; past the cap the oldest id goes.
+   * @param {Command} entry
+   */
+  function remember(entry) {
+    commands.set(entry.request_id, entry)
+    while (commands.size > COMMANDS_CAP) commands.delete(/** @type {string} */ (commands.keys().next().value))
+  }
+
+  /**
+   * One stage of a reply, remembered and written to the current link, never held behind a snapshot. `detail` is
+   * free text for the daemon's log and is not remembered.
+   * @param {string} id
+   * @param {Command["stage"]} stage
+   * @param {{ reason?: string, http?: number }} [fields]
+   * @param {string} [detail]
+   */
+  function stage(id, stage, fields = {}, detail) {
+    remember({ request_id: id, stage, ...fields })
+    writeStage(id, stage, fields, detail)
+  }
+
+  /**
+   * @param {string} id
+   * @param {Command["stage"]} stage
+   * @param {{ reason?: string, http?: number }} fields
+   * @param {string} [detail]
+   */
+  function writeStage(id, stage, fields, detail) {
+    if (state !== "live") return
+    seq++
+    const line = JSON.stringify({ t: "answer", seq, request_id: id, stage, ...fields, ...(detail === undefined ? {} : { detail }) }) + "\n"
+    enqueue({ line, bytes: utf8(line), stub: false }, seq, true)
+  }
+
+  /** `sync_begin.commands`, present only when something is remembered. */
+  const commandsField = () => (commands.size ? { commands: [...commands.values()] } : {})
+
+  /** @param {string} sid @param {string} id */
+  const storeRequest = (sid, id) => {
+    try {
+      return (api.state.session.permission(sid) ?? []).find((/** @type {any} */ r) => r?.id === id)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * A reply the daemon asked for. The server's facts are read first (its pending list, the session's status and
+   * record, the anchoring tool part); then one synchronous section checks every condition the keyboard would
+   * meet and issues the reply with nothing awaited in between, so what was checked is what the server sees.
+   * Every outcome is attested: a throw before `sent` is recorded is a refusal (no call was made); after it, the
+   * call's own failure, reported as a `result` with status 0.
+   * @param {Socket} c the link the command arrived on
+   * @param {any} cmd
+   */
+  async function answer(c, cmd) {
+    const id = cmd.request_id
+    let sent = false
+    try {
+      const sid = cmd.session_id
+      const reply = cmd.reply
+      const message = cmd.message
+      const words = reply === "reject" && typeof message === "string" && message.length > 0
+      const wellFormed =
+        cmd.kind === "permission" &&
+        typeof sid === "string" &&
+        (reply === "once" || reply === "always" || reply === "reject") &&
+        Number.isFinite(cmd.expires_at_ms) &&
+        (message === undefined || (typeof message === "string" && reply === "reject"))
+      if (!wellFormed) throw new Error("malformed opencode_answer")
+      const dir = directory()
+      const [list, status, got] = await Promise.all([
+        call(() => client.permission.list({ directory: dir })),
+        call(() => client.session.status({ directory: dir })),
+        call(() => client.session.get({ sessionID: sid, directory: dir })),
+      ])
+      const listData = list.ok && Array.isArray(list.data) ? list.data : null
+      const listed = listData ? listData.some((/** @type {any} */ r) => r?.id === id) : "unknown"
+      const r = listData?.find((/** @type {any} */ x) => x?.id === id) ?? storeRequest(sid, id)
+      const { anchor, read } = await anchorOf(client, dir, "permission", r)
+
+      // The synchronous section: from here to the reply call nothing is awaited.
+      /** @param {string} reason @param {string} detail */
+      const refuse = (reason, detail) => stage(id, "refused", { reason }, detail)
+      if (Date.now() > cmd.expires_at_ms) return refuse("expired", `the command expired ${Date.now() - cmd.expires_at_ms} ms ago`)
+      if (sock !== c) return refuse("link", "the link that carried the command is gone")
+      if (typeof client?.permission?.reply !== "function") return refuse("api", "permission.reply is missing")
+      const mode = modeGetter ? modeGetter() : "unknown"
+      if (mode !== "normal") return refuse("mode", `the permission mode is ${String(mode)}`)
+      if (listed === false) return refuse("not-listed", "the server no longer lists the request")
+      if (!(api.state.session.permission(sid) ?? []).some((x) => x?.id === id)) return refuse("not-in-store", "the request is not on the keyboard's screen")
+      if (!got.ok) return got.response?.status === 404 ? refuse("session-missing", "the server has no such session") : refuse("server", "the session read failed")
+      if (!status.ok || !isRecord(status.data)) return refuse("server", "the status read failed")
+      const s = status.data[sid]
+      if (!s || s.type === "idle") return refuse("not-busy", "the session is idle")
+      if (read && !read.ok && read.response?.status !== 404) return refuse("server", "the message read failed")
+      if (!anchor) return refuse("anchor", "the request's tool call is not running")
+      const stored = api.state.session.get(sid)?.parentID
+      const parent = typeof stored === "string" ? stored : typeof got.data?.parentID === "string" ? got.data.parentID : null
+      const ended = epoch.ended(id, sid, [...new Set([...epoch.ancestors(sid), ...(parent ? [parent] : [])])])
+      if (ended) return refuse("epoch", ended)
+      /** @type {any} */
+      const route = api.route.current
+      const shown = route?.name === "session" ? route.params?.sessionID : undefined
+      if (typeof shown !== "string" || (shown !== sid && shown !== parent)) return refuse("not-visible", "the keyboard shows another session")
+      if (api.ui.dialog.open) return refuse("dialog", "a dialog is open at the keyboard")
+      if (words && !parent) return refuse("words-at-root", "a root session's reject takes no message")
+      remember({ request_id: id, stage: "sent" })
+      sent = true
+      const result = call(() => client.permission.reply({ requestID: id, directory: dir, reply, ...(words ? { message } : {}) }))
+      writeStage(id, "sent", {})
+      const res = await result
+      const http = res.response?.status
+      stage(id, "result", { http: Number.isInteger(http) ? http : 0 })
+    } catch (e) {
+      if (sent) stage(id, "result", { http: 0 })
+      else stage(id, "refused", { reason: "error" }, String(/** @type {any} */ (e)?.message ?? e).slice(0, 256))
+    }
   }
 
   /** @param {Socket} c */
@@ -877,6 +1155,7 @@ function activate(api, socketPath, nonce) {
           try {
             if (started || disposed) return null
             started = true
+            modeGetter = findModeGetter(solid.getOwner())
             solid.createRoot((/** @type {() => void} */ dispose) => {
               disposeRoot = dispose
               solid.createEffect(() => {
@@ -967,7 +1246,7 @@ function activate(api, socketPath, nonce) {
   async function requestsSync(c, sync, reason, asOf, alive) {
     const reads = await readRequests()
     if (!alive()) return null
-    send(c, { t: "sync_begin", sync, reason, scope: "requests", as_of: asOf, status: reads.status.ok ? reads.status.data : {}, status_ok: reads.status.ok })
+    send(c, { t: "sync_begin", sync, reason, scope: "requests", as_of: asOf, status: reads.status.ok ? reads.status.data : {}, status_ok: reads.status.ok, ...commandsField() })
     const n = await sendRequests(c, sync, reads, alive)
     if (n === null) return null
     const doneAt = seq
@@ -1036,7 +1315,12 @@ function activate(api, socketPath, nonce) {
     for (const x of requests) {
       const v = await judge(env, x.kind, x.request, x.listed, status, parents)
       if (!alive()) return null
-      const request = withAnchor(x.request)
+      let request = withAnchor(x.request)
+      if (x.kind === "permission") {
+        const read = await readCtx(x.request.id)
+        if (!alive()) return null
+        request = { ...request, ctx: ctxOf(read, readMode(), parentOf(x.request.sessionID)) }
+      }
       const json = JSON.stringify({ t: "sync_request", sync, kind: x.kind, request: prepare(request, CARD_FIELDS), verdict: v })
       const nb = utf8(json) + 1
       const line =
@@ -1068,7 +1352,7 @@ function activate(api, socketPath, nonce) {
     if (!alive()) return null
     /** @type {Record<string, any>} */
     const statusData = status.ok ? status.data : {}
-    send(c, { t: "sync_begin", sync, reason, scope: "full", as_of: asOf, status: statusData, status_ok: status.ok })
+    send(c, { t: "sync_begin", sync, reason, scope: "full", as_of: asOf, status: statusData, status_ok: status.ok, ...commandsField() })
     const list = await call(() => client.session.list({ directory: dir }))
     if (!alive()) return null
     const listOk = list.ok && Array.isArray(list.data)
@@ -1366,6 +1650,9 @@ function activate(api, socketPath, nonce) {
     if (m?.type === "opencode_resync") {
       if (m.acked !== undefined) acked = validAcked(m.acked)
       trigger({ scope: "full", reason: "requested" })
+    } else if (m?.type === "opencode_answer" && typeof m.request_id === "string") {
+      stage(m.request_id, "received")
+      void answer(c, m).catch(() => {})
     }
   }
 

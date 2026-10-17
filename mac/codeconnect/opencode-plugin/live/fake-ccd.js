@@ -3,6 +3,8 @@
 // `ps` reports it, the session's nonce, the expected folder), answers with `acked` derived from what it has recorded,
 // and appends every frame it reads to a JSONL record. A restart reads the record back, as the daemon reads its
 // store. SIGUSR1 cuts the current link; SIGUSR2 asks for a resync. Being its own process, it can be SIGSTOPped.
+// While `<session dir>/answer.json` holds `{reply, message?, delay_ms?}`, every permission card it reads is answered
+// with that reply after the delay (300 ms by default), as the daemon would relay a phone's tap.
 //
 // Usage: bun fake-ccd.js <socket> <session dir> <directory> <record.jsonl> [<acked JSON while nothing is recorded>]
 import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs"
@@ -95,6 +97,7 @@ function main() {
         }
         frames.push(f)
         record({ conn, bytes, frame: f })
+        if (f.t === "ev" && f.type === "permission.asked") answer(f.properties)
       }
     })
     s.on("error", () => {})
@@ -115,6 +118,19 @@ function main() {
     if (JSON.stringify(h.start) !== JSON.stringify(agent.start) || JSON.stringify(b) !== JSON.stringify(agent.start)) return "stale start time"
     if (h.directory !== directory) return "another folder"
     return null
+  }
+
+  /** The answer `answer.json` asks for, sent to the live link after its delay. @param {any} card */
+  function answer(card) {
+    const path = join(sessionDir, "answer.json")
+    if (!existsSync(path)) return
+    const a = JSON.parse(readFileSync(path, "utf8"))
+    setTimeout(() => {
+      if (!live) return
+      const f = { type: "opencode_answer", kind: "permission", request_id: card.id, session_id: card.sessionID, reply: a.reply, ...(a.message === undefined ? {} : { message: a.message }), expires_at_ms: Date.now() + 10000 }
+      live.write(JSON.stringify(f) + "\n")
+      record({ op: "answer", sent: f })
+    }, a.delay_ms ?? 300)
   }
 
   process.on("SIGUSR1", () => {

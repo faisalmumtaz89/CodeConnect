@@ -443,7 +443,8 @@ describe("requests", () => {
     welcome(c)
     await until(() => settled(c, 1))
     const r = c.frames.find((/** @type {any} */ x) => x.t === "sync_request")
-    expect(r).toEqual({ t: "sync_request", sync: 1, kind: "permission", request: { ...perm, anchor_input: { command: "ls" } }, verdict: { live: true, dead: null, listed: true, in_store: false } })
+    const ctx = { ok: true, tool_ids: ["bash", "edit", "read", "question"], mcp: [], mode: "normal", parent: null, ms: expect.any(Number) }
+    expect(r).toEqual({ t: "sync_request", sync: 1, kind: "permission", request: { ...perm, anchor_input: { command: "ls" }, ctx }, verdict: { live: true, dead: null, listed: true, in_store: true } })
 
     f.server.failing.add("permission.list")
     f.store.permissions = [perm]
@@ -510,11 +511,11 @@ describe("requests across links and activations", () => {
     f1.emit("permission.asked", perm)
     const a = await until(() => ccd.last() && settled(ccd.last(), 1) && ccd.last())
     expect(a.hello.activation).toBe(1)
-    expect(verdictOf(a, 1)).toEqual({ live: true, dead: null, listed: true, in_store: false })
+    expect(verdictOf(a, 1)).toEqual({ live: true, dead: null, listed: true, in_store: true })
     a.socket.end()
     const b = await until(() => ccd.conns.length === 2 && settled(ccd.last(), 2) && ccd.last(), 4000)
     expect(b.hello.activation).toBe(1)
-    expect(verdictOf(b, 2)).toEqual({ live: true, dead: null, listed: true, in_store: false })
+    expect(verdictOf(b, 2)).toEqual({ live: true, dead: null, listed: true, in_store: true })
 
     f1.dispose()
     const f2 = fakeApi()
