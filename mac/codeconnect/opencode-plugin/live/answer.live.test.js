@@ -54,8 +54,14 @@ describe.skipIf(!LIVE)("live answer", () => {
       await sleep(1000)
       const tool = rig.frames().find((x) => x.frame.t === "ev" && x.frame.type === "message.part.updated" && x.frame.properties.part?.type === "tool" && x.frame.properties.part.state?.status !== "running")?.frame.properties.part
       console.log(reply + ": stages", JSON.stringify(got), "ctx ms", card.ctx.ms, "tool", tool?.state?.status)
-      if (reply === "reject") expect(tool?.state?.status).toBe("error")
-      else expect(tool?.state?.output).toContain("approved-run")
+      if (reply === "reject") {
+        expect(tool?.state?.status).toBe("error")
+        // the turn ends on the rejection: no step starts after the rejected part, and the model's closing text never comes
+        const parts = rig.frames().map((x) => x.frame).filter((x) => x.t === "ev" && x.type === "message.part.updated").map((x) => x.properties.part)
+        const after = parts.slice(parts.findIndex((p) => p?.id === tool?.id && p.state?.status === "error") + 1)
+        expect(after.filter((p) => p?.type === "step-start")).toEqual([])
+        expect(parts.filter((p) => p?.type === "text" && p.text?.includes("ask finished"))).toEqual([])
+      } else expect(tool?.state?.output).toContain("approved-run")
     }, 90000)
   }
 

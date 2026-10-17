@@ -556,8 +556,8 @@ export function checkApi(api) {
 /**
  * The TUI's permission-mode getter, found from the app slot's owner chain: the one context value with a `mode`
  * getter beside `set` and `toggle` functions (the Permission context; `Local.permission` is the same object).
- * Only the bound getter is kept; `set` and `toggle` are never called. Zero or several hits → null, and the mode
- * stays unknown for the activation.
+ * Only the bound getter is kept; `set` and `toggle` are never called. A context value whose read throws is skipped.
+ * Zero or several hits → null, and the mode stays unknown for the activation.
  * @param {any} owner
  * @returns {(() => unknown) | null}
  */
@@ -570,13 +570,15 @@ export function findModeGetter(owner) {
     if (!ctx || typeof ctx !== "object" || seen.has(ctx)) continue
     seen.add(ctx)
     for (const k of Object.getOwnPropertySymbols(ctx)) {
-      const v = ctx[k]
-      if (!v || typeof v !== "object") continue
-      for (const c of [v, v.permission]) {
-        if (!c || typeof c !== "object" || hits.includes(c)) continue
-        const d = Object.getOwnPropertyDescriptor(c, "mode")
-        if (d && typeof d.get === "function" && typeof c.set === "function" && typeof c.toggle === "function") hits.push(c)
-      }
+      try {
+        const v = ctx[k]
+        if (!v || typeof v !== "object") continue
+        for (const c of [v, v.permission]) {
+          if (!c || typeof c !== "object" || hits.includes(c)) continue
+          const d = Object.getOwnPropertyDescriptor(c, "mode")
+          if (d && typeof d.get === "function" && typeof c.set === "function" && typeof c.toggle === "function") hits.push(c)
+        }
+      } catch {}
     }
   }
   if (hits.length !== 1) return null
@@ -1155,7 +1157,11 @@ function activate(api, socketPath, nonce) {
           try {
             if (started || disposed) return null
             started = true
-            modeGetter = findModeGetter(solid.getOwner())
+            try {
+              modeGetter = findModeGetter(solid.getOwner())
+            } catch {
+              modeGetter = null
+            }
             solid.createRoot((/** @type {() => void} */ dispose) => {
               disposeRoot = dispose
               solid.createEffect(() => {

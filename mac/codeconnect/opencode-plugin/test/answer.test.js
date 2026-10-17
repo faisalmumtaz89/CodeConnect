@@ -6,6 +6,7 @@
 // auto mode never raises, the card context and its bound, the commands memory and its eviction, and the frames a
 // snapshot never holds.
 import { afterEach, describe, expect, test } from "bun:test"
+import { createRoot, getOwner } from "solid-js/dist/solid.js"
 import { fakeApi } from "./fake-api.js"
 import { fakeCcd, loadPlugin, settled, sleep, until, welcome } from "./helpers.js"
 
@@ -482,6 +483,41 @@ describe("auto mode", () => {
     expect(got.properties.ctx).toEqual({ ok: false, tool_ids: ["bash", "edit", "read", "question"], mcp: [], mode: "unknown", parent: null, ms: expect.any(Number) })
     c.send(command(PERM, "once"))
     expect((await done(c, PERM.id)).at(-1)).toMatchObject({ stage: "refused", reason: "mode", detail: "the permission mode is unknown" })
+  })
+
+  /** Renders the app slot under an owner holding `context` in place of the fake's. @param {any} context */
+  const renderUnder = (context) => (/** @type {ReturnType<typeof fakeApi>} */ f) => {
+    f.api.slots.register = (/** @type {any} */ plugin) => {
+      createRoot((_dispose) => {
+        ;/** @type {any} */ (getOwner()).context = context
+        plugin.slots?.app?.({}, {})
+      })
+      return "slot-1"
+    }
+  }
+  const heads = (/** @type {any} */ c) => c.frames.filter((/** @type {any} */ x) => x.t === "head")
+
+  test("a context value whose read throws is skipped: the head is pushed and the Permission context beside it is found", async () => {
+    const hostile = {
+      get permission() {
+        throw new Error("not ready")
+      },
+    }
+    const permission = { get mode() { return "normal" }, set() {}, toggle() {} }
+    const { c, f } = await setup({ api: renderUnder({ [Symbol("Permission")]: permission, [Symbol("Other")]: hostile }) })
+    await until(() => heads(c).length === 1)
+    expect(heads(c)[0]).toMatchObject({ route: "session", session_id: A, directory: DIR })
+    ask(f, PERM)
+    expect((await until(() => card(c, PERM.id))).properties.ctx).toMatchObject({ ok: true, mode: "normal" })
+  })
+
+  test("a context that throws on enumeration leaves the mode unknown, and the head is still pushed", async () => {
+    const context = new Proxy({}, { ownKeys() { throw new Error("not ready") } })
+    const { c, f } = await setup({ api: renderUnder(context) })
+    await until(() => heads(c).length === 1)
+    expect(heads(c)[0]).toMatchObject({ route: "session", session_id: A, directory: DIR })
+    ask(f, PERM)
+    expect((await until(() => card(c, PERM.id))).properties.ctx).toMatchObject({ ok: false, mode: "unknown" })
   })
 
   test("a request pending when auto was switched on: refused at the tap, listed by a snapshot under ctx.mode auto", async () => {
