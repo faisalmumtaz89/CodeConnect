@@ -52,6 +52,9 @@ struct DeckView: View {
     /// True when the Deck was opened with nothing in it: no pause, no
     /// stroke-draw, no success haptic. Nothing was cleared.
     @State private var openedEmpty = false
+    /// Opened from a notification while a catch-up held the screen: the pass
+    /// starts when the catch-up ends.
+    @State private var openedWaiting = false
     @State private var arrivedCount = 0
     @State private var arrivalNoticeTask: Task<Void, Never>?
 
@@ -72,7 +75,9 @@ struct DeckView: View {
             let cards = queue
             ZStack {
                 CC.color.bg.ignoresSafeArea()
-                if !cards.isEmpty {
+                if model.deckAwaitsCatchUp {
+                    catchingUp
+                } else if !cards.isEmpty {
                     stack(cards: cards)
                 } else if clearRevealed || openedEmpty {
                     DeckClearState(
@@ -128,7 +133,7 @@ struct DeckView: View {
             .toolbar {
                 // Nothing waiting is what the clear state says in full; a "0"
                 // beside it is the same fact twice.
-                if !cards.isEmpty {
+                if !cards.isEmpty, !model.deckAwaitsCatchUp {
                     ToolbarItem(placement: .topBarLeading) { counter(cards.count) }
                         .ccPlainToolbarItem()
                 }
@@ -144,6 +149,7 @@ struct DeckView: View {
                 openedAt = Date()
                 endedAt = nil
                 openedEmpty = queue.isEmpty
+                openedWaiting = model.deckAwaitsCatchUp
             }
             .onChange(of: cards.isEmpty) { _, isEmpty in
                 // The clock stops here, on the transition itself, rather than
@@ -154,7 +160,21 @@ struct DeckView: View {
                 guard isEmpty, !openedEmpty else { return }
                 revealClearState()
             }
-            .onChange(of: model.deck.count) { old, new in
+            .onChange(
+                of: DeckArrival(
+                    count: model.deck.count, waiting: model.deckAwaitsCatchUp,
+                    releases: model.catchUpReleases)
+            ) { old, new in
+                // Opened from a notification mid-catch-up, the pass starts when
+                // the catch-up ends: its cards are what it opened on, not
+                // arrivals. A Deck already open keeps the pass it had.
+                if old.waiting, !new.waiting, openedWaiting {
+                    openedWaiting = false
+                    openedAt = Date()
+                    endedAt = nil
+                    openedEmpty = queue.isEmpty
+                    return
+                }
                 // A card that arrives mid-pass is appended to the **back** by
                 // `DeckPass` and says so for three seconds. The stack never
                 // reorders under the thumb.
@@ -163,12 +183,42 @@ struct DeckView: View {
                 // push while the first frames are still landing, the queue goes
                 // 0 → 3 and `+3 arrived` claimed that three agents had asked for
                 // you *during this pass*. They had not; the pass had not started.
-                guard new > old, Date().timeIntervalSince(openedAt) > 1 else { return }
-                arrivedCount += new - old
+                //
+                // Nor is a card a catch-up brings to a Deck left open: it was
+                // there before the reader looked.
+                guard !new.waiting, new.releases == old.releases, new.count > old.count,
+                    Date().timeIntervalSince(openedAt) > 1
+                else { return }
+                arrivedCount += new.count - old.count
                 announceArrival()
             }
-            .onDisappear { arrivalNoticeTask?.cancel() }
+            .onDisappear {
+                arrivalNoticeTask?.cancel()
+                model.deckClosed()
+            }
         }
+    }
+
+    /// What a Deck a notification opened shows while the catch-up it waits for
+    /// is still running: the cards come in one go when it ends. A link that
+    /// cannot catch anything up says why under the ring, in its own sentence.
+    private var catchingUp: some View {
+        VStack(spacing: CC.space.sm) {
+            CCProgressRing(.md)
+            Text("Catching up…")
+                .ccType(CC.type.body)
+                .foregroundStyle(CC.text.secondary)
+            if let reason = model.actionsBlockedReason {
+                Text(reason)
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.tertiary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, CC.space.xl)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("deck-catching-up")
     }
 
     private var runningCount: Int {
@@ -801,3 +851,10 @@ struct DeckAccessoryBar: View {
     }
 }
 
+
+/// What the Deck watches to tell an arrival from the end of a catch-up.
+private struct DeckArrival: Equatable {
+    let count: Int
+    let waiting: Bool
+    let releases: Int
+}

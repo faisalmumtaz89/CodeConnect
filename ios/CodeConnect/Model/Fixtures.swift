@@ -75,6 +75,11 @@ enum Fixtures {
         /// above the screen — the geometry where the list used to carry the
         /// reader to the last line. `SessionShowAllUITests` exists for it.
         case longOutput
+        /// `stacked`, with the running agent one call further on: an MCP tool,
+        /// named the way Claude Code names every one, `mcp__<server>__<tool>`,
+        /// and wider than a phone row. The fleet's stack once sized itself to
+        /// that row and moved every band header off the screen's left edge.
+        case wideTool
 
         init?(_ raw: String?) {
             guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -84,7 +89,7 @@ enum Fixtures {
         var cards: [Card] {
             switch self {
             case .deck, .ended, .ended45, .longOutput: return deckCards
-            case .stacked: return deckCards + [stackedCard]
+            case .stacked, .wideTool: return deckCards + [stackedCard]
             }
         }
 
@@ -93,7 +98,7 @@ enum Fixtures {
             switch self {
             case .ended: return 8
             case .ended45: return 45
-            case .deck, .stacked, .longOutput: return 0
+            case .deck, .stacked, .longOutput, .wideTool: return 0
             }
         }
 
@@ -105,12 +110,12 @@ enum Fixtures {
         var sessionCount: Int {
             switch self {
             case .deck, .ended, .ended45: return 4
-            case .stacked, .longOutput: return 5
+            case .stacked, .longOutput, .wideTool: return 5
             }
         }
 
         /// Whether the last agent is mid-tool-call rather than finished.
-        var hasRunningTool: Bool { self == .stacked }
+        var hasRunningTool: Bool { self == .stacked || self == .wideTool }
     }
 
     /// Three blocked agents, one per risk class, oldest first by design so
@@ -185,6 +190,9 @@ enum Fixtures {
             for json in longOutputJSON(now: now) {
                 if let event = decode(json) { messages.append(event) }
             }
+        }
+        if variant == .wideTool, let event = decode(wideToolJSON(now: now)) {
+            messages.append(event)
         }
         return messages
     }
@@ -412,15 +420,16 @@ enum Fixtures {
     /// decisions that agent is really holding — which is what the fleet
     /// counts before a card's contents have reached the stream.
     ///
-    /// Under `stacked`, `fx-4` is a Codex run — `agent` exactly as the daemon
-    /// sends it — so the fleet renders both agent tags side by side. Every
-    /// other session omits the key, which `SessionSummary` decodes as Claude.
+    /// Under `stacked` and `wideTool`, `fx-4` is a Codex run — `agent` exactly as
+    /// the daemon sends it — so the fleet renders both agent tags side by side.
+    /// Every other session omits the key, which `SessionSummary` decodes as Claude.
     private static func sessionsJSON(now: Date, variant: Variant, cards: [Card]) -> String {
         let stamp = rfc3339(now)
         let summaries = (1...variant.sessionCount).map { index in
             let id = "fx-\(index)"
             let blocked = cards.filter { $0.sessionID == id }.map { quoted($0.requestID) }
-            let agent = variant == .stacked && index == 4 ? "\"agent\":\"codex\"," : ""
+            let codex = (variant == .stacked || variant == .wideTool) && index == 4
+            let agent = codex ? "\"agent\":\"codex\"," : ""
             return """
                 {"session_id":"\(id)","tmux_session":"\(id)",\(agent)\
                 "cwd":"/Users/dev/app-\(index)","project_label":"app-\(index)",\
@@ -611,6 +620,17 @@ enum Fixtures {
             "tool_input":{"command":"./soak/report.sh"}}}}
             """,
         ]
+    }
+
+    /// `fx-5`'s next call: a real MCP tool, whose name alone is wider than a row.
+    private static func wideToolJSON(now: Date) -> String {
+        """
+        {"type":"event","event":{"seq":25,"session_id":"fx-5","ts":"\(rfc3339(now))",\
+        "kind":"tool_call","source":"hook",\
+        "payload":{"tool_use_id":"toolu_fixture_mcp",\
+        "tool_name":"mcp__filesystem__list_directory_with_sizes",\
+        "tool_input":{"path":"/Users/dev/app"}}}}
+        """
     }
 
     private static func turnCompleteJSON(now: Date) -> String {

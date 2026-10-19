@@ -66,6 +66,7 @@ where
     let mut events = fleet.subscribe_events();
     let mut watermarks: HashMap<String, u64> = HashMap::new();
     let mut backlog = Backlog::default();
+    let mut history = History::default();
     let mut authed = false;
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // the first tick completes immediately
@@ -141,7 +142,8 @@ where
                     continue;
                 }
 
-                handle_message(&fleet, &mut sink, &mut watermarks, &mut backlog, parsed).await?;
+                handle_message(&fleet, &mut sink, &mut watermarks, &mut backlog, &mut history, parsed)
+                    .await?;
             }
 
             // One step of a replay, when one is in progress. Ready rather than
@@ -149,6 +151,12 @@ where
             // of taking or ceding priority outright.
             _ = std::future::ready(()), if backlog.in_progress() => {
                 backlog.step(&fleet, &mut sink, &mut watermarks).await?;
+                tokio::task::yield_now().await;
+            }
+
+            // One step of an earlier page, competing for each pass the same way.
+            _ = std::future::ready(()), if history.in_progress() => {
+                history.step(&fleet, &mut sink).await?;
                 tokio::task::yield_now().await;
             }
 
@@ -213,6 +221,7 @@ async fn handle_message<S>(
     sink: &mut S,
     watermarks: &mut HashMap<String, u64>,
     backlog: &mut Backlog,
+    history: &mut History,
     message: ClientMessage,
 ) -> Result<()>
 where
@@ -289,6 +298,20 @@ where
                 .await?
             }
         },
+        // `ccd`'s semantics: the newest events below the mark, capped, then one
+        // end — with the reason when the run is unknown.
+        ClientMessage::History {
+            session_id,
+            before_seq,
+            limit,
+            request_id,
+        } => history.ask(HistoryRequest::new(
+            fleet.resolve(&session_id),
+            session_id,
+            before_seq,
+            limit.min(protocol::ws::MAX_HISTORY_PAGE) as usize,
+            request_id,
+        )),
         ClientMessage::Unsubscribe { session_id } => {
             if let Some(uid) = fleet.resolve(&session_id) {
                 watermarks.remove(&uid);
@@ -498,6 +521,7 @@ fn capabilities() -> Capabilities {
         // Its cards are answered by this server and nothing else: there is no
         // screen to type into.
         hook_only_approvals: true,
+        history_pages: true,
     }
 }
 
@@ -619,6 +643,110 @@ impl Backlog {
             self.page = page.into();
         }
         Ok(())
+    }
+}
+
+/// The earlier pages this connection owes, stepped like [`Backlog`]: one page
+/// read, one event or one end per pass. Requests are answered in arrival order,
+/// a second for the same run behind the first, as `ccd` does. A page moves no
+/// watermark.
+#[derive(Default)]
+struct History {
+    requests: std::collections::VecDeque<HistoryRequest>,
+}
+
+struct HistoryRequest {
+    /// As the client sent it.
+    session_id: String,
+    /// The run it resolved to when it arrived.
+    uid: String,
+    before_seq: u64,
+    limit: usize,
+    request_id: String,
+    /// The page, oldest first; `None` until it is read.
+    page: Option<std::collections::VecDeque<Event>>,
+    /// The lowest seq sent so far.
+    first_seq: u64,
+    /// Why the page ends early: the run is unknown, or gone from the fleet.
+    error: Option<String>,
+}
+
+impl HistoryRequest {
+    fn new(
+        uid: Option<String>,
+        session_id: String,
+        before_seq: u64,
+        limit: usize,
+        request_id: String,
+    ) -> HistoryRequest {
+        HistoryRequest {
+            error: uid
+                .is_none()
+                .then(|| format!("unknown session {session_id}")),
+            uid: uid.unwrap_or_default(),
+            session_id,
+            before_seq,
+            limit,
+            request_id,
+            page: None,
+            first_seq: before_seq,
+        }
+    }
+}
+
+impl History {
+    fn ask(&mut self, request: HistoryRequest) {
+        self.requests.push_back(request);
+    }
+
+    fn in_progress(&self) -> bool {
+        !self.requests.is_empty()
+    }
+
+    async fn step<S>(&mut self, fleet: &Arc<Fleet>, sink: &mut S) -> Result<()>
+    where
+        S: SinkExt<Message> + Unpin,
+        <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let Some(request) = self.requests.front_mut() else {
+            return Ok(());
+        };
+        if request.error.is_none() {
+            if let Some(event) = request.page.as_mut().and_then(|page| page.pop_front()) {
+                request.first_seq = request.first_seq.min(event.seq);
+                return send(sink, &ServerMessage::Event { event }).await;
+            }
+            // Asked before the page is read and again before its end is sent: a run
+            // the fleet has dropped since ends its page with the reason, as `ccd`'s
+            // removed run does.
+            if fleet.resolve(&request.uid).is_none() {
+                request.error = Some(format!(
+                    "session {} is no longer in the fleet",
+                    request.session_id
+                ));
+            } else if request.page.is_none() {
+                request.page = Some(
+                    fleet
+                        .events_before(&request.uid, request.before_seq, request.limit)
+                        .into(),
+                );
+                return Ok(());
+            }
+        }
+        let Some(request) = self.requests.pop_front() else {
+            return Ok(());
+        };
+        send(
+            sink,
+            &ServerMessage::HistoryEnd {
+                session_id: request.session_id,
+                request_id: request.request_id,
+                before_seq: request.before_seq,
+                first_seq: request.first_seq,
+                error: request.error,
+            },
+        )
+        .await
     }
 }
 
@@ -1084,6 +1212,173 @@ mod tests {
                 response.starts_with("HTTP/1.1 200 OK"),
                 "{path}: {response}"
             );
+        }
+    }
+
+    /// **The demo advertises earlier pages and serves them, and its fleet names
+    /// each open card by reference and each run's facts**, read off its own log
+    /// exactly as `ccd` reads them.
+    #[tokio::test]
+    async fn the_demo_serves_earlier_pages_and_its_summaries_carry_refs_and_facts() {
+        let (fleet, addr) = start().await;
+        let mut clock = Instant::now();
+        pump(&fleet, &mut clock, 4);
+        let uid = fleet.resolve("cc-1").unwrap();
+        let log = fleet.events_after(&uid, 0, 1000);
+        let tail = log.last().unwrap().seq;
+        assert!(tail >= 4, "the premise: a log to page through");
+
+        let mut ws = connect(addr).await;
+        say(
+            &mut ws,
+            json!({"type": "hello", "protocol_version": 1, "token": TOKEN}),
+        )
+        .await;
+        let ack = hear(&mut ws).await;
+        assert_eq!(ack["capabilities"]["history_pages"], true, "{ack}");
+
+        say(
+            &mut ws,
+            json!({"type": "history", "session_id": uid, "before_seq": tail,
+                   "limit": 2, "request_id": "d1"}),
+        )
+        .await;
+        let mut seqs = Vec::new();
+        let end = loop {
+            let frame = hear(&mut ws).await;
+            match frame["type"].as_str() {
+                Some("event") => seqs.push(frame["event"]["seq"].as_u64().unwrap()),
+                Some("history_end") => break frame,
+                _ => panic!("{frame}"),
+            }
+        };
+        assert_eq!(seqs, vec![tail - 2, tail - 1]);
+        assert_eq!(end["request_id"], "d1");
+        assert_eq!(end["first_seq"], tail - 2);
+        assert_eq!(end["before_seq"], tail);
+        assert!(end.get("error").is_none(), "{end}");
+
+        say(
+            &mut ws,
+            json!({"type": "history", "session_id": "cc-nothing", "before_seq": 5,
+                   "limit": 500, "request_id": "d2"}),
+        )
+        .await;
+        let end = hear(&mut ws).await;
+        assert_eq!(end["type"], "history_end");
+        assert_eq!(end["first_seq"], 5);
+        assert!(end["error"].is_string(), "{end}");
+
+        say(&mut ws, json!({"type": "sessions"})).await;
+        let sessions = hear(&mut ws).await;
+        let summary = sessions["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|summary| summary["session_uid"] == uid.as_str())
+            .unwrap()
+            .clone();
+        let card = log
+            .iter()
+            .rfind(|event| event.kind == EventKind::ApprovalRequest)
+            .expect("cc-1 is holding a card");
+        assert_eq!(summary["blocked_on"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            summary["pending"],
+            json!([{
+                "request_id": card.payload["card"]["request_id"],
+                "seq": card.seq,
+                "hold": "held",
+            }])
+        );
+        let start = log
+            .iter()
+            .find(|event| event.kind == EventKind::SessionStart)
+            .unwrap();
+        assert_eq!(summary["model"]["value"], start.payload["model"]);
+        assert_eq!(summary["model"]["seq"], start.seq);
+        assert_eq!(summary["model"]["source"], "session_start");
+        assert_eq!(summary["model"]["at"], start.ts.as_str());
+        assert_eq!(
+            summary["permission_mode"],
+            json!({"value": "default", "seq": card.seq})
+        );
+    }
+
+    /// A sink that keeps every frame, so a test can step [`History`] directly.
+    #[derive(Default)]
+    struct Collect(Vec<Message>);
+
+    impl futures_util::Sink<Message> for Collect {
+        type Error = std::convert::Infallible;
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn start_send(
+            mut self: std::pin::Pin<&mut Self>,
+            item: Message,
+        ) -> Result<(), Self::Error> {
+            self.0.push(item);
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// **A page of a run the fleet retires ends with the reason** — retired
+    /// before the page is read, or while it is being sent.
+    #[tokio::test]
+    async fn a_page_of_a_run_retired_from_the_fleet_ends_with_an_error() {
+        let fleet = Arc::new(Fleet::new(Instant::now()).expect("the shipped script must load"));
+        let mut clock = Instant::now();
+        for (steps_before, request_id) in [(0usize, "before-read"), (2, "mid-page")] {
+            let uid = fleet.resolve("cc-5").unwrap();
+            while fleet.events_after(&uid, 0, 10).len() < 5 {
+                pump(&fleet, &mut clock, 1);
+            }
+            let mut history = History::default();
+            history.ask(HistoryRequest::new(
+                Some(uid.clone()),
+                "cc-5".into(),
+                5,
+                500,
+                request_id.into(),
+            ));
+            let mut sink = Collect::default();
+            for _ in 0..steps_before {
+                history.step(&fleet, &mut sink).await.unwrap();
+            }
+            // Played until the run is gone from the fleet: retired, then dropped
+            // when its successor retires.
+            while fleet.resolve(&uid).is_some() {
+                pump(&fleet, &mut clock, 1);
+            }
+            for _ in 0..16 {
+                if !history.in_progress() {
+                    break;
+                }
+                history.step(&fleet, &mut sink).await.unwrap();
+            }
+            let Some(Message::Text(end)) = sink.0.last() else {
+                panic!("the page sent nothing");
+            };
+            let end: serde_json::Value = serde_json::from_str(end).unwrap();
+            assert_eq!(end["type"], "history_end", "{end}");
+            assert_eq!(end["request_id"], request_id);
+            assert!(end["error"].is_string(), "{request_id}: {end}");
         }
     }
 }

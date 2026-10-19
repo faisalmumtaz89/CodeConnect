@@ -500,6 +500,10 @@ where
     // inside the arm that asked for it is the loop standing still for all of
     // them. Its own local so no other arm's borrow ever meets it.
     let mut backlog = Backlog::default();
+    // Earlier pages the phone asked for, stepped the same way and for the same
+    // reason. Its own queue rather than the backlog's: a page moves no
+    // watermark and is not a delivery the push gate may count.
+    let mut history = History::default();
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // the first tick completes immediately
 
@@ -712,8 +716,16 @@ where
                     continue;
                 }
 
-                handle_message(&daemon, &mut sink, &mut watermarks, &mut backlog, device_id.as_deref(), parsed)
-                    .await?;
+                handle_message(
+                    &daemon,
+                    &mut sink,
+                    &mut watermarks,
+                    &mut backlog,
+                    &mut history,
+                    device_id.as_deref(),
+                    parsed,
+                )
+                .await?;
             }
 
             // One step of a backlog replay, when one is in progress: the next
@@ -742,6 +754,15 @@ where
                 // parks on nothing — and a run of those would hold a
                 // current-thread executor away from the carrier's own tasks,
                 // which is the very starvation this arm exists to prevent.
+                tokio::task::yield_now().await;
+            }
+
+            // One step of an earlier page: a store read, one event, or the end.
+            // Ready rather than pending for the replay arm's reason, so a page
+            // competes for each pass with live delivery and the replay instead
+            // of holding them off for its whole length.
+            _ = std::future::ready(()), if history.in_progress() => {
+                history.step(&daemon, &mut sink).await?;
                 tokio::task::yield_now().await;
             }
 
@@ -1050,6 +1071,8 @@ async fn handle_message<S>(
     // replay awaited on that stack is the whole connection standing still for
     // however long the log is (see `Backlog`).
     backlog: &mut Backlog,
+    // Where a `history` request is queued, for the same reason.
+    history: &mut History,
     // The authenticated device, when there is one. A client on the static
     // bootstrap token has no device row, so it has nowhere to register a push
     // token — see `RegisterPush`.
@@ -1199,6 +1222,25 @@ where
                 .await?;
             }
         },
+        ClientMessage::History {
+            session_id,
+            before_seq,
+            limit,
+            request_id,
+        } => {
+            let session_uid = daemon
+                .resolve(&session_id)
+                .await
+                .map(|row| row.session_uid)
+                .map_err(|err| format!("{err}"));
+            history.ask(HistoryRequest::new(
+                session_id,
+                session_uid,
+                before_seq,
+                limit.min(protocol::ws::MAX_HISTORY_PAGE),
+                request_id,
+            ));
+        }
         ClientMessage::DeleteSession { session_uid } => {
             // **By uid, never by name.** `resolve` accepts a tmux name and maps it
             // to the newest run under it, which is right for subscribing and wrong
@@ -1234,6 +1276,8 @@ where
                 // next step would hand the new subscription a page read against
                 // the old one.
                 backlog.drop_session(&session_uid);
+                // And any page of it still being sent, which ends with the reason.
+                history.drop_session(&session_uid);
             }
             send(
                 sink,
@@ -2724,6 +2768,155 @@ impl Backlog {
     }
 }
 
+/// Why a page ended early because its run is gone.
+const SESSION_REMOVED: &str = "the session was removed while this page was being sent";
+
+/// The earlier pages a connection owes, served one unit of work per pass.
+///
+/// Stepped for [`Backlog`]'s reason — a page is up to [`protocol::ws::MAX_HISTORY_PAGE`]
+/// frames, and sending them inside the arm that asked would stop live delivery,
+/// the replay and the terminal for all of them — and kept apart from it because
+/// a page is not a delivery in order: it moves no watermark, and it never tells
+/// the push gate a device has seen anything, since events below a phone's window
+/// say nothing about whether it has seen the newest ones.
+///
+/// **A second request for a run whose page is still being sent is queued behind
+/// it**, not merged and not refused: requests are served in arrival order, and
+/// each gets its own events and its own end. A phone sends one at a time, so this
+/// is the simplest rule that still answers every request it could send.
+#[derive(Default)]
+struct History {
+    /// Requests in arrival order, the one being served at the front.
+    requests: VecDeque<HistoryRequest>,
+}
+
+/// One `history` request and how far it has got.
+struct HistoryRequest {
+    /// As the client sent it, so the end names the run the way it asked.
+    session_id: String,
+    /// The run the reference resolved to when the request arrived.
+    session_uid: String,
+    before_seq: u64,
+    /// Already capped at [`protocol::ws::MAX_HISTORY_PAGE`].
+    limit: u32,
+    request_id: String,
+    /// The page read from the store, oldest first; `None` until it is read.
+    page: Option<VecDeque<Event>>,
+    /// The lowest seq sent so far.
+    first_seq: u64,
+    /// Why the page ends early. Set when the run is unknown, when the store read
+    /// fails, or when the run is removed while its page is being sent.
+    error: Option<String>,
+}
+
+impl HistoryRequest {
+    fn new(
+        session_id: String,
+        session_uid: std::result::Result<String, String>,
+        before_seq: u64,
+        limit: u32,
+        request_id: String,
+    ) -> HistoryRequest {
+        let (session_uid, error) = match session_uid {
+            Ok(uid) => (uid, None),
+            Err(error) => (String::new(), Some(error)),
+        };
+        HistoryRequest {
+            session_id,
+            session_uid,
+            before_seq,
+            limit,
+            request_id,
+            page: None,
+            first_seq: before_seq,
+            error,
+        }
+    }
+}
+
+impl History {
+    fn ask(&mut self, request: HistoryRequest) {
+        self.requests.push_back(request);
+    }
+
+    fn in_progress(&self) -> bool {
+        !self.requests.is_empty()
+    }
+
+    /// End every page of this run still owed, for a caller that has just removed
+    /// it. Each still gets its end, carrying the reason, on its next step.
+    fn drop_session(&mut self, session_uid: &str) {
+        for request in &mut self.requests {
+            if request.session_uid == session_uid && request.error.is_none() {
+                request.page = None;
+                request.error = Some(SESSION_REMOVED.into());
+            }
+        }
+    }
+
+    /// Do exactly one unit of work: read one page, send one event, or send one
+    /// end.
+    async fn step<S>(&mut self, daemon: &Arc<Daemon>, sink: &mut S) -> Result<()>
+    where
+        S: SinkExt<Message> + Unpin,
+        <S as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let Some(request) = self.requests.front_mut() else {
+            return Ok(());
+        };
+        if request.error.is_none() {
+            if let Some(event) = request.page.as_mut().and_then(VecDeque::pop_front) {
+                request.first_seq = request.first_seq.min(event.seq);
+                return send(sink, &ServerMessage::Event { event }).await;
+            }
+            // Asked before the page is read and again before its end is sent: a
+            // run removed elsewhere — by another connection, or at the Mac — ends
+            // its page with the reason, rather than as an empty or short page that
+            // reads as the head of the log.
+            request.error = match daemon.db.get_session(request.session_uid.clone()).await {
+                Ok(Some(_)) => None,
+                Ok(None) => Some(SESSION_REMOVED.into()),
+                Err(err) => Some(format!("could not read the session: {err}")),
+            };
+            if request.error.is_none() && request.page.is_none() {
+                match daemon
+                    .db
+                    .events_before(
+                        request.session_uid.clone(),
+                        request.before_seq,
+                        request.limit,
+                    )
+                    .await
+                {
+                    Ok(page) => request.page = Some(page.into()),
+                    Err(err) => {
+                        crate::log_error!(
+                            "could not read a history page of {}: {err:#}",
+                            request.session_uid
+                        );
+                        request.error = Some(format!("could not read the log: {err}"));
+                    }
+                }
+                return Ok(());
+            }
+        }
+        let Some(request) = self.requests.pop_front() else {
+            return Ok(());
+        };
+        send(
+            sink,
+            &ServerMessage::HistoryEnd {
+                session_id: request.session_id,
+                request_id: request.request_id,
+                before_seq: request.before_seq,
+                first_seq: request.first_seq,
+                error: request.error,
+            },
+        )
+        .await
+    }
+}
+
 fn resync_marker(session_uid: &str, session_id: &str, skipped: u64) -> Event {
     marker(
         session_uid,
@@ -2898,6 +3091,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         supported_agents: Vec::new(),
         question_card: true,
         hook_only_approvals: true,
+        history_pages: true,
     }
 }
 
@@ -4920,6 +5114,395 @@ mod tests {
             announced,
             "a gap with no replay pending must still be announced"
         );
+    }
+
+    // --------------------------------------------------------------- history
+
+    /// Ask for one earlier page over a live socket, and collect what it sends:
+    /// the seq of every event frame up to the page's `history_end`, and that end.
+    async fn history_page(
+        socket: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+        session_id: &str,
+        before_seq: u64,
+        limit: u32,
+        request_id: &str,
+    ) -> (Vec<u64>, serde_json::Value) {
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "history",
+                    "session_id": session_id,
+                    "before_seq": before_seq,
+                    "limit": limit,
+                    "request_id": request_id,
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let mut seqs = Vec::new();
+        loop {
+            let message = next_json(socket).await.expect("the connection stays open");
+            match message["type"].as_str() {
+                Some("event") => seqs.push(message["event"]["seq"].as_u64().unwrap()),
+                Some("history_end") => return (seqs, message),
+                _ => panic!("a history page sends events and then its end, got {message}"),
+            }
+        }
+    }
+
+    /// **An earlier page is the newest `limit` events below `before_seq`, oldest
+    /// first, and then exactly one `history_end`** — at every edge a phone can
+    /// reach: the cap, the head of the log, past the tail, an empty run, and a
+    /// run the daemon does not know.
+    #[tokio::test]
+    async fn a_history_page_is_the_newest_events_below_the_mark_then_its_end() {
+        let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        let uid = seed_backlog(&server.daemon, 600);
+        let empty = seed_backlog(&server.daemon, 0);
+        let (mut socket, reply) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(reply["type"], "hello_ack");
+        assert_eq!(reply["capabilities"]["history_pages"], true);
+
+        // A limit above 500 is served as 500.
+        let (seqs, end) = history_page(&mut socket, &uid, 601, 1000, "h1").await;
+        assert_eq!(seqs, (101..=600).collect::<Vec<u64>>());
+        assert_eq!(end["session_id"], uid.as_str());
+        assert_eq!(end["request_id"], "h1");
+        assert_eq!(end["before_seq"], 601);
+        assert_eq!(end["first_seq"], 101);
+        assert!(end.get("error").is_none(), "{end}");
+
+        // The next page down, as a phone pages.
+        let (seqs, end) = history_page(&mut socket, &uid, 101, 500, "h2").await;
+        assert_eq!(seqs, (1..=100).collect::<Vec<u64>>());
+        assert_eq!(end["first_seq"], 1);
+
+        // Nothing is below seq 1, and nothing is below 0.
+        for before in [1u64, 0] {
+            let (seqs, end) = history_page(&mut socket, &uid, before, 500, "h3").await;
+            assert!(seqs.is_empty(), "{seqs:?}");
+            assert_eq!(end["first_seq"], before);
+            assert!(end.get("error").is_none(), "{end}");
+        }
+
+        // Past the tail is the tail, however far past.
+        for before in [700u64, u64::MAX] {
+            let (seqs, end) = history_page(&mut socket, &uid, before, 3, "h4").await;
+            assert_eq!(seqs, vec![598, 599, 600]);
+            assert_eq!(end["first_seq"], 598);
+            assert_eq!(end["before_seq"], before);
+        }
+
+        // A run with no events ends at once, at the mark it was asked about.
+        let (seqs, end) = history_page(&mut socket, &empty, 10, 500, "h5").await;
+        assert!(seqs.is_empty());
+        assert_eq!(end["first_seq"], 10);
+        assert!(end.get("error").is_none(), "{end}");
+
+        // A run nobody knows is still answered, with the reason.
+        let (seqs, end) =
+            history_page(&mut socket, "01K1B3XQ8ZC0DE5FGH7JKMNPQZ", 10, 500, "h6").await;
+        assert!(seqs.is_empty());
+        assert_eq!(end["request_id"], "h6");
+        assert_eq!(end["first_seq"], 10);
+        assert!(
+            end["error"].as_str().is_some_and(|e| !e.is_empty()),
+            "{end}"
+        );
+    }
+
+    /// A live event for a subscribed run, as `Daemon::ingest` would broadcast it.
+    fn live_event(uid: &str, seq: u64) -> Event {
+        Event {
+            seq,
+            session_uid: uid.to_string(),
+            session_id: "cc-backlog".into(),
+            ts: protocol::time::now_rfc3339(),
+            kind: EventKind::ToolCall,
+            payload: serde_json::json!({ "live": seq }),
+            source: Source::Daemon,
+            source_event_id: None,
+            turn_id: None,
+            item_id: None,
+        }
+    }
+
+    /// **A page does not hold live delivery back for its whole length.** A live
+    /// event published while a 500-event page is being sent reaches the phone
+    /// before that page's end — so it was interleaved with the page rather than
+    /// queued behind it.
+    #[tokio::test]
+    async fn live_events_keep_flowing_while_a_page_is_served() {
+        let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        let uid = seed_backlog(&server.daemon, 1000);
+        let (mut socket, reply) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(reply["type"], "hello_ack");
+        // Subscribed at the tail, so nothing is replayed and the next live seq is
+        // 1001.
+        socket
+            .send(Message::Text(
+                serde_json::json!({"type": "subscribe", "session_id": uid, "after_seq": 1000})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "history", "session_id": uid, "before_seq": 1001,
+                    "limit": 500, "request_id": "live",
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+
+        let mut page_before_live = None;
+        let mut page = Vec::new();
+        loop {
+            let message = next_json(&mut socket)
+                .await
+                .expect("the connection stays open");
+            match message["type"].as_str() {
+                Some("event") => {
+                    let seq = message["event"]["seq"].as_u64().unwrap();
+                    if seq == 1001 {
+                        page_before_live = Some(page.len());
+                        continue;
+                    }
+                    // The first page frame proves the page is being served; the
+                    // live event is published with most of it still to go.
+                    if page.is_empty() {
+                        server
+                            .daemon
+                            .events_tx
+                            .send(live_event(&uid, 1001))
+                            .unwrap();
+                    }
+                    page.push(seq);
+                }
+                Some("history_end") => break,
+                _ => panic!("unexpected frame {message}"),
+            }
+        }
+        assert_eq!(page, (501..=1000).collect::<Vec<u64>>());
+        let sent_first = page_before_live
+            .expect("the live event must arrive before the page's end, not after it");
+        assert!(
+            sent_first < 500,
+            "the live event waited for the whole page: {sent_first} page events went first"
+        );
+    }
+
+    /// **A page moves no watermark and tells the push gate nothing.** A device
+    /// handed a whole page is still not counted as having seen any of it, and a
+    /// subscription's watermark stays where `subscribe` and the replay put it: the
+    /// next live seq is delivered as the successor rather than announced as a gap.
+    #[tokio::test]
+    async fn a_page_moves_no_watermark_and_records_no_delivery() {
+        let (server, _device_id) = live_server(protocol::config::Config::default()).await;
+        let uid = seed_backlog(&server.daemon, 600);
+        let (mut socket, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+
+        // Unsubscribed: a page of 101..600 to this device, and the gate still
+        // rings it for every one of them.
+        let (seqs, _) = history_page(&mut socket, &uid, 601, 500, "unsubscribed").await;
+        assert_eq!(seqs, (101..=600).collect::<Vec<u64>>());
+        let ticket = server.daemon.push_gate.admit_turn_end(&uid);
+        let excluded = server
+            .daemon
+            .push_gate
+            .exclusions_if_valid(&uid, ticket, false, 101)
+            .expect("the ticket is current");
+        assert!(
+            excluded.is_empty(),
+            "a page was counted as delivery: {excluded:?}"
+        );
+
+        // Subscribed at 300: the replay sends 301..600 and moves the watermark.
+        socket
+            .send(Message::Text(
+                serde_json::json!({"type": "subscribe", "session_id": uid, "after_seq": 300})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        let mut replayed = Vec::new();
+        while replayed.last() != Some(&600) {
+            let message = next_json(&mut socket).await.unwrap();
+            replayed.push(message["event"]["seq"].as_u64().unwrap());
+        }
+        assert_eq!(replayed, (301..=600).collect::<Vec<u64>>());
+
+        // A page below it, and then the next live seq is still the successor.
+        let (seqs, _) = history_page(&mut socket, &uid, 301, 500, "below").await;
+        assert_eq!(seqs, (1..=300).collect::<Vec<u64>>());
+        server.daemon.events_tx.send(live_event(&uid, 601)).unwrap();
+        let message = next_json(&mut socket).await.unwrap();
+        assert_eq!(
+            message["event"]["seq"], 601,
+            "a page moved the watermark, so the next live event was not the successor: {message}"
+        );
+    }
+
+    /// **Removing a run while its page is being sent ends the page with the
+    /// reason**, rather than leaving the phone waiting on an end that never
+    /// comes or reading a short page as complete.
+    #[tokio::test]
+    async fn a_page_cut_short_by_removing_its_session_ends_with_an_error() {
+        let (daemon, _device) = daemon_with_a_device();
+        let uid = seed_backlog(&daemon, 10);
+        let mut row = daemon.store.get_session(&uid).unwrap().unwrap();
+        row.lifecycle = protocol::event::Lifecycle::Exited;
+        daemon.store.upsert_session(&row).unwrap().assert_present();
+
+        let mut sink = CollectSink::default();
+        let mut watermarks: HashMap<String, u64> = HashMap::new();
+        let mut backlog = Backlog::default();
+        let mut history = History::default();
+        let ask = |request_id: &str| ClientMessage::History {
+            session_id: uid.clone(),
+            before_seq: 11,
+            limit: 500,
+            request_id: request_id.into(),
+        };
+        for request_id in ["cut", "queued"] {
+            handle_message(
+                &daemon,
+                &mut sink,
+                &mut watermarks,
+                &mut backlog,
+                &mut history,
+                None,
+                ask(request_id),
+            )
+            .await
+            .unwrap();
+        }
+        // The page is read, and its first two events are sent.
+        for _ in 0..3 {
+            history.step(&daemon, &mut sink).await.unwrap();
+        }
+        handle_message(
+            &daemon,
+            &mut sink,
+            &mut watermarks,
+            &mut backlog,
+            &mut history,
+            None,
+            ClientMessage::DeleteSession {
+                session_uid: uid.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        for _ in 0..8 {
+            if !history.in_progress() {
+                break;
+            }
+            history.step(&daemon, &mut sink).await.unwrap();
+        }
+        assert!(!history.in_progress(), "both requests must be answered");
+
+        let frames: Vec<serde_json::Value> = sink
+            .0
+            .iter()
+            .map(|message| serde_json::to_value(message).unwrap())
+            .collect();
+        assert_eq!(frames[0]["event"]["seq"], 1);
+        assert_eq!(frames[1]["event"]["seq"], 2);
+        assert_eq!(frames[2]["type"], "delete_session_result");
+        assert_eq!(frames[2]["result"]["status"], "deleted", "{}", frames[2]);
+        let ends: Vec<&serde_json::Value> = frames
+            .iter()
+            .filter(|frame| frame["type"] == "history_end")
+            .collect();
+        assert_eq!(ends.len(), 2, "{frames:?}");
+        assert_eq!(ends[0]["request_id"], "cut");
+        assert_eq!(ends[0]["first_seq"], 1);
+        assert!(ends[0]["error"].is_string(), "{}", ends[0]);
+        assert_eq!(ends[1]["request_id"], "queued");
+        assert!(ends[1]["error"].is_string(), "{}", ends[1]);
+        assert_eq!(frames.len(), 5, "nothing else was sent: {frames:?}");
+    }
+
+    /// **A page of a run another connection removes ends with the reason**,
+    /// whether the removal lands before the page is read — where an empty page
+    /// would otherwise read as the head of the log — or while it is being sent.
+    #[tokio::test]
+    async fn a_page_of_a_session_removed_elsewhere_ends_with_an_error() {
+        let (daemon, _device) = daemon_with_a_device();
+        let mut sink = CollectSink::default();
+        let mut watermarks: HashMap<String, u64> = HashMap::new();
+        let mut backlog = Backlog::default();
+        let mut history = History::default();
+        // The connection that removes it.
+        let mut other_sink = CollectSink::default();
+        let mut other_watermarks: HashMap<String, u64> = HashMap::new();
+        let mut other_backlog = Backlog::default();
+        let mut other_history = History::default();
+
+        for (removed_after_steps, request_id) in [(0usize, "before-read"), (2, "mid-page")] {
+            let uid = seed_backlog(&daemon, 10);
+            let mut row = daemon.store.get_session(&uid).unwrap().unwrap();
+            row.lifecycle = protocol::event::Lifecycle::Exited;
+            daemon.store.upsert_session(&row).unwrap().assert_present();
+            handle_message(
+                &daemon,
+                &mut sink,
+                &mut watermarks,
+                &mut backlog,
+                &mut history,
+                None,
+                ClientMessage::History {
+                    session_id: uid.clone(),
+                    before_seq: 11,
+                    limit: 500,
+                    request_id: request_id.into(),
+                },
+            )
+            .await
+            .unwrap();
+            for _ in 0..removed_after_steps {
+                history.step(&daemon, &mut sink).await.unwrap();
+            }
+            handle_message(
+                &daemon,
+                &mut other_sink,
+                &mut other_watermarks,
+                &mut other_backlog,
+                &mut other_history,
+                None,
+                ClientMessage::DeleteSession {
+                    session_uid: uid.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            let deleted = serde_json::to_value(other_sink.last()).unwrap();
+            assert_eq!(
+                deleted["result"]["status"], "deleted",
+                "the premise: {deleted}"
+            );
+            for _ in 0..16 {
+                if !history.in_progress() {
+                    break;
+                }
+                history.step(&daemon, &mut sink).await.unwrap();
+            }
+            assert!(!history.in_progress());
+            let end = serde_json::to_value(sink.last()).unwrap();
+            assert_eq!(end["type"], "history_end", "{end}");
+            assert_eq!(end["request_id"], request_id);
+            assert!(end["error"].is_string(), "{request_id}: {end}");
+        }
     }
 
     /// How many facts the replay test seeds.

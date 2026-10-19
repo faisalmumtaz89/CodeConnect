@@ -306,6 +306,16 @@ enum ModelProvenance: Sendable, Hashable {
     /// is a property of the *receipt*, and lives on `ModelConfirmation`; here
     /// it would only be a second copy to keep in step.
     case command
+    /// The Mac named the model from a kind of event this build does not know.
+    case reported
+
+    init(_ source: ModelSource) {
+        switch source {
+        case .sessionStart: self = .sessionStart
+        case .command: self = .command
+        case .unrecognised: self = .reported
+        }
+    }
 }
 
 /// A model fact and its provenance — see `SessionState.lastConfirmedModel`.

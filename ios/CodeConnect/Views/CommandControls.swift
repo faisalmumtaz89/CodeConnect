@@ -211,7 +211,7 @@ struct ModelSheet: View {
     /// `ModelChangeWatch`.
     @State private var baselineSeq: UInt64 = 0
 
-    private var state: SessionState? { model.states[sessionKey] }
+    private var receipts: SessionState.Receipts? { model.receipts(for: sessionKey) }
 
     /// **Quiet waiting is not busy.** The watch stays armed for a receipt that
     /// may still arrive, but once the usual window has passed the controls come
@@ -227,7 +227,7 @@ struct ModelSheet: View {
     }
 
     private var current: ModelDisplay? {
-        state?.lastConfirmedModel.map { ModelDisplay.from($0.name) }
+        model.confirmedModel(for: sessionKey).map { ModelDisplay.from($0.name) }
     }
 
     var body: some View {
@@ -282,7 +282,7 @@ struct ModelSheet: View {
         .onAppear {
             if custom.isEmpty, !prefill.isEmpty { custom = prefill }
         }
-        .onChange(of: state?.lastModelCommandSignal) { _, signal in
+        .onChange(of: receipts?.modelSignal) { _, signal in
             guard case .waiting(let request, _) = phase,
                 let outcome = ModelChangeWatch.outcome(
                     after: baselineSeq, requested: request, signal: signal)
@@ -312,7 +312,7 @@ struct ModelSheet: View {
 
     private var currentCard: some View {
         CCCard(padding: 0) {
-            if let fact = state?.lastConfirmedModel, let current {
+            if let fact = model.confirmedModel(for: sessionKey), let current {
                 CCRow(
                     current.name,
                     titleIsMono: current.isRawFallback,
@@ -355,6 +355,7 @@ struct ModelSheet: View {
         switch fact.provenance {
         case .sessionStart: origin = "Confirmed at session start"
         case .command: origin = "Confirmed by /model"
+        case .reported: origin = "Reported by the Mac"
         }
         return "\(origin) · \(RelativeAge.text(since: fact.at, now: now))"
     }
@@ -515,7 +516,7 @@ struct ModelSheet: View {
                 onLanded()
                 if let outcome = ModelChangeWatch.outcome(
                     after: baselineSeq, requested: alias,
-                    signal: state?.lastModelCommandSignal)
+                    signal: receipts?.modelSignal)
                 {
                     phase = Self.phase(for: outcome)
                 } else {
@@ -620,7 +621,7 @@ struct EffortSheet: View {
     /// above this line answers this send.
     @State private var baselineSeq: UInt64 = 0
 
-    private var state: SessionState? { model.states[sessionKey] }
+    private var receipts: SessionState.Receipts? { model.receipts(for: sessionKey) }
 
     /// See `ModelSheet.busy`.
     private var busy: Bool {
@@ -669,9 +670,9 @@ struct EffortSheet: View {
         }
         // The *sequence*, not the fact: a fact can repeat verbatim, and a
         // backfill can publish a historical one into an empty slot.
-        .onChange(of: state?.lastConfirmedEffortSeq) { _, seq in
+        .onChange(of: receipts?.effortSeq) { _, seq in
             guard case .waiting = phase, let seq, seq > baselineSeq,
-                let fact = state?.lastConfirmedEffort
+                let fact = receipts?.effort
             else { return }
             timeoutTask?.cancel()
             withAnimation(CC.motion.small) { phase = Self.phase(for: fact) }
@@ -766,8 +767,8 @@ struct EffortSheet: View {
             case .sent:
                 onLanded()
                 // The receipt may already have landed while `.sending`.
-                if let fact = state?.lastConfirmedEffort,
-                    let seq = state?.lastConfirmedEffortSeq, seq > baselineSeq
+                if let fact = receipts?.effort,
+                    let seq = receipts?.effortSeq, seq > baselineSeq
                 {
                     phase = Self.phase(for: fact)
                 } else {
@@ -847,7 +848,7 @@ struct CompactSheet: View {
     /// completion signal above this line answers this request.
     @State private var baselineSeq: UInt64 = 0
 
-    private var state: SessionState? { model.states[sessionKey] }
+    private var receipts: SessionState.Receipts? { model.receipts(for: sessionKey) }
 
     /// See `ModelSheet.busy`.
     private var busy: Bool {
@@ -897,9 +898,9 @@ struct CompactSheet: View {
             if instructions.isEmpty, !prefill.isEmpty { instructions = prefill }
         }
         // The sequence, not the fact — see the Effort sheet.
-        .onChange(of: state?.lastCompactSignalSeq) { _, seq in
+        .onChange(of: receipts?.compactSeq) { _, seq in
             guard case .waiting = phase, let seq, seq > baselineSeq,
-                let signal = state?.lastCompactSignal
+                let signal = receipts?.compact
             else { return }
             timeoutTask?.cancel()
             withAnimation(CC.motion.small) {
@@ -965,8 +966,8 @@ struct CompactSheet: View {
             switch attempt {
             case .sent:
                 onLanded()
-                if let signal = state?.lastCompactSignal,
-                    let seq = state?.lastCompactSignalSeq, seq > baselineSeq
+                if let signal = receipts?.compact,
+                    let seq = receipts?.compactSeq, seq > baselineSeq
                 {
                     switch signal {
                     case .compacted:

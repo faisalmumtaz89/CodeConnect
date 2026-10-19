@@ -128,10 +128,11 @@ enum AgeTick {
     /// Keep `update` supplied with a time that is accurate enough to print, and
     /// sleep the rest of the time.
     ///
-    /// One suspended task per visible age, waking at the rate the age actually
-    /// changes. That is strictly fewer wakeups than one shared 1Hz timer the
-    /// moment anything on screen is older than a minute — and on a real fleet
-    /// almost everything is.
+    /// One suspended task per age a view draws, waking at the rate the age
+    /// actually changes. Each wakeup redraws only the age that changed, where one
+    /// shared 1Hz timer would redraw every age each second — and past its first
+    /// minute an age changes once a minute at most (a waiting row's clock
+    /// excepted), which on a real fleet is almost every age.
     @MainActor
     static func follow(_ clock: AgeClock, update: @MainActor (Date) -> Void) async {
         while !Task.isCancelled {

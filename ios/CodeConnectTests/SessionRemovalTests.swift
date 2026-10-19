@@ -287,6 +287,77 @@ final class SessionRemovalTests: XCTestCase {
             .appendingPathComponent("cc-removal-\(UUID().uuidString)", isDirectory: true)
     }
 
+    // MARK: Several at once
+
+    private let uidA = "01K1B3XQ8ZC0DE5FGH7JKMNPQA"
+    private let uidB = "01K1B3XQ8ZC0DE5FGH7JKMNPQB"
+    private let uidC = "01K1B3XQ8ZC0DE5FGH7JKMNPQC"
+
+    /// A batch in which the Mac answers `answers[uid]`, or not at all for a uid
+    /// it has no answer for.
+    private func batchModel(_ answers: [String: DeleteSessionResult]) -> AppModel {
+        let model = connectedModel()
+        model.adoptSummariesForTesting(
+            [uidA, uidB, uidC].map { summary(lifecycle: "exited", uid: $0) })
+        model.connection.deleteStub = { uid in
+            guard let answer = answers[uid] else { throw ConnectionError.sentButUnanswered }
+            return answer
+        }
+        return model
+    }
+
+    /// A refusal is one session's answer, so the batch carries on past it.
+    func testABatchCarriesOnPastARefusal() async {
+        let model = batchModel([uidA: .stillRunning, uidB: .deleted(events: 1), uidC: .notFound])
+        let refused = await model.removeSessions(keys: [uidA, uidB, uidC])
+        XCTAssertEqual(model.connection.deleteRequests, [uidA, uidB, uidC])
+        XCTAssertEqual(refused, [uidA: "Still running"])
+        XCTAssertEqual(model.summaries.map(\.sessionUID), [uidA], "only the refused one stays")
+    }
+
+    /// No answer means the link is gone: every later request would wait out the
+    /// same timeout, so the batch stops, and what it never reached shares the
+    /// reason.
+    func testABatchStopsAtTheFirstUnansweredRemoval() async {
+        let model = batchModel([uidA: .deleted(events: 1)])
+        let refused = await model.removeSessions(keys: [uidA, uidB, uidC])
+        XCTAssertEqual(model.connection.deleteRequests, [uidA, uidB], "C is never asked")
+        XCTAssertEqual(refused, [uidB: "No answer", uidC: "No answer"])
+        XCTAssertEqual(model.summaries.map(\.sessionUID), [uidB, uidC])
+    }
+
+    /// A Mac that stops removing sessions mid-batch is the same as one that
+    /// stops answering: nothing more is asked, and the reason says so.
+    func testABatchOnAMacThatNoLongerRemovesStops() async {
+        let model = connectedModel(canDelete: false)
+        model.adoptSummariesForTesting(
+            [uidA, uidB].map { summary(lifecycle: "exited", uid: $0) })
+        let refused = await model.removeSessions(keys: [uidA, uidB])
+        XCTAssertEqual(model.connection.deleteRequests, [])
+        XCTAssertEqual(refused, [uidA: "No answer", uidB: "No answer"])
+    }
+
+    /// A run chosen while ended that came back to life before its turn is kept:
+    /// an adopted run is removable at any lifecycle, so only the batch's own
+    /// check stands between it and a removal nobody chose.
+    func testABatchKeepsARunThatIsNoLongerEnded() async {
+        let model = batchModel([uidA: .deleted(events: 1), uidB: .deleted(events: 1)])
+        let adoptedAndLive = summary(lifecycle: "live", uid: uidB, tmux: "")
+        XCTAssertTrue(adoptedAndLive.isRemovable, "the premise: removable at any lifecycle")
+        model.adoptSummariesForTesting([summary(lifecycle: "exited", uid: uidA), adoptedAndLive])
+        let refused = await model.removeSessions(keys: [uidA, uidB])
+        XCTAssertEqual(model.connection.deleteRequests, [uidA], "B is not asked about")
+        XCTAssertEqual(refused, [uidB: "Changed since you chose it"])
+    }
+
+    /// A session that left the fleet while the question was up is not asked about.
+    func testABatchSkipsWhatHasLeftTheFleet() async {
+        let model = batchModel([uidA: .deleted(events: 1), uidC: .deleted(events: 1)])
+        let refused = await model.removeSessions(keys: [uidA, "01K1B3XQ8ZC0DE5FGH7JKMNPQZ", uidC])
+        XCTAssertEqual(model.connection.deleteRequests, [uidA, uidC])
+        XCTAssertEqual(refused, [:])
+    }
+
     /// **The row itself lives in `fleet.json`.** `loadCachedFleet` restores that
     /// file wholesale on a cold open, so a removal that cleared only the events
     /// file put the row back on the next launch — and while offline, kept it.

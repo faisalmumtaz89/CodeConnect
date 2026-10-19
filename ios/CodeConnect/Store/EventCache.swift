@@ -34,8 +34,10 @@ actor EventCache {
     }
 
     /// Bounds a single session file. The daemon keeps the whole log; this is a
-    /// window, and the window is always the newest events.
-    private static let maxEventsPerSession = 3000
+    /// window, and the window is always the newest events — the same 500 a chat
+    /// holds at launch. Applied on read too, so a file an earlier build wrote at
+    /// its old bound of 3,000 loads as the newest 500.
+    private static let maxEventsPerSession = Int(SessionState.windowSize)
     /// Bumped to 2 when `Keying` was introduced. A version-1 file is name-keyed
     /// by construction and is simply not read.
     private static let formatVersion = 2
@@ -177,7 +179,9 @@ actor EventCache {
             envelope.version == Self.formatVersion,
             envelope.keying == effectiveKeying
         else { return nil }
-        return CachedEvents(events: envelope.events, cachedAt: envelope.cachedAt)
+        return CachedEvents(
+            events: Array(envelope.events.suffix(Self.maxEventsPerSession)),
+            cachedAt: envelope.cachedAt)
     }
 
     func loadFleet() -> CachedFleet? {

@@ -152,12 +152,16 @@ release build:
 | `-CC_FIXTURE deck` | replays daemon frames for three blocked agents at three risk classes |
 | `-CC_FIXTURE stacked` | the same fleet plus a **second decision on one agent** and a fifth agent **running a tool**. With one card per agent, "count the agents" and "count the cards" return the same number, so the fleet's headline and its accessory bar agreed by coincidence while counting different things; and with no Running band, a shell command set in proportional type could not be reached from a fixture at all |
 | `-CC_FIXTURE longOutput` | the `deck` fleet plus `fx-5`'s turn ending in a finished command with **60 lines of output** and one more call after it. The only fixture with a tool output past its 40-line "Show all", which at the tail is the geometry where the timeline once carried the reader to the last line |
+| `-CC_FIXTURE wideTool` | the `stacked` fleet with the running agent one call further on, an MCP tool (`mcp__filesystem__list_directory_with_sizes`) whose name alone is **wider than a phone row**. A row that wide must not move the screen's edge: the fleet's stack once sized itself to it and pushed every band header off the left of the screen |
 | `-CC_QUESTION <state>` | one Claude session holding a four-question `AskUserQuestion` card from a minor-21 daemon — `held`, `at-mac`, `ended`, `answered`, or `old-mac` (minor 20, no `question_card`). See *Claude's questions* |
-| `-CC_FIXTURE_LATE_EVENT_MS <n>` | delivers the fixture's last frame `n` ms after the rest: an event that arrives while the reader is on screen, so a test can act first and then see whether it is followed or counted as "N new" |
+| `-CC_FIXTURE_LATE_EVENT_MS <n>[,<n>…]` | delivers the fixture's last frame `n` ms after the rest — or, with several delays, its last frames in stream order, one per delay, the shortest delay first: events that arrive while the reader is on screen, so a test can act first and then see whether each is followed or counted as "N new" |
 | `-CC_FIXTURE_ANSWER_MS <n>` | holds a fixture's answer `n` ms before it lands, so a test can see a card while its answer is on its way |
 | `-CC_FIXTURE_LINK stale` | withholds the fixture's keep-alive `pong`, so `LinkHealth` crosses its 45-second `staleAfter` on its own and every action disables itself **with its reason**. Pairs with either fixture; without it, `stale` is unreachable under a fixture and therefore never rendered or tested |
+| `-CC_FIXTURE_LINK_DROP_MS <n>` | drops the link once, `n` ms after the fixture's frames load, through the connection's own `stop()` (waiters failed, the handshake and the Mac's capabilities forgotten), and brings it back five seconds later with the handshake the fixture ended up with. How a fixture run takes the Mac's removal capability away and gives it back with the rows on screen; `SwipeToRemoveUITests` uses it to prove a row comes back shut and forgets its refusal. Narrower than a real drop: no socket closes, no backoff, no redial |
+| `-CC_FIXTURE_REMOVE_MS <n>` | holds a removal's answer `n` ms, then refuses it with no answer, as every fixture removal is refused. Without it a fixture refuses at once, so a removal still on its way ("Removing…", and whatever happens around it, such as the link dropping) could not be shown |
 | `-CC_FIXTURE_CACHED <seconds>` | restages the fixture's fleet as one read off **disk** that many seconds ago, so the cached banner draws its age. Without it the cached fleet — the state where every wait clock ticks off data that arrived before launch, and a reader cannot tell a `5m40s` read off disk from a live one — could not be rendered or tested at all. Compose with `-CC_FIXTURE_LINK stale` for the **compound** banner the ladder was rebuilt for: the link's classification carrying the cache's age, one banner, both facts |
 | `-CC_RENDER_PROBE YES` | adds a 1pt invisible element carrying the content-size category this process actually resolved to (`cc-render-probe`). The render harness reads it before it photographs anything — see *The render harness* below. Off by default so it cannot appear in a tree a product test is counting |
+| `-CC_ROW_RENDER_PROBE YES` | adds a 1pt invisible element (`cc-row-render-probe`) listing, per fleet row, how many times it has drawn other than on its own clock's tick, and how many times it has been made anew. `FleetRowRenderUITests` reads it to prove one session's event redraws that session's row and no other |
 | `-CC_DEEPLINK codeconnect://…` | delivers a deep link at launch, the same way a tapped notification does. `…/deck/<request-id>` opens a **named** card — a URL can name one; a notification cannot, and does not try — which is the only way to assert the read gate on one card without three drags and a postpone standing between the test and the assertion |
 | `-CC_BIOMETRICS allow\|deny\|cancel\|unavailable` | injects the Face ID *outcome*; the system sheet cannot be driven by XCUITest |
 | `-cc.debug.diff sample` | renders a diff shaped to exercise every part of the diff grid at once — all three syntax roles, word-level tints, a wrapped line, a hunk header — without a daemon or a dirty worktree |
@@ -249,6 +253,48 @@ is enforced.
   which `seq` numbers are missing and is restated — or removed — as a replay
   fills them. A warning left up after its reason is gone teaches people to
   ignore warnings.
+* **A catch-up changes the screen once.** Every new link (the launch's first
+  included) and every return to the foreground opens a catch-up: the phone
+  replays what the Mac did while it was away, and what is on screen stays as it
+  was until the replay has caught up, then changes in one publication per
+  session and one of the list — never a row stepping through old events. Caught
+  up means every session the catch-up's own list names holds that list's
+  `last_seq` on a subscription this link settled, has something to show or
+  nothing earlier to page back to, has no page or card fetch in flight, and
+  holds every open card the list names (`AppModel.advanceCatchUp`). The own list
+  is matched by position: `sessions` requests are written one at a time and
+  counted, the Mac answers them in order, a `sessions_unavailable` error takes
+  its request's place, and on a link that stayed up only replies from the
+  catch-up's own request on count — an older one in flight neither resets the
+  window nor releases. The screen is held from the moment the app leaves (once
+  there is a screen: not behind the launch's loader before any link), since a
+  resuming app reads its socket before it is active; nothing is released while
+  it is away, and the return re-aims the catch-up as it begins (the first
+  `inactive` or `active` after the background), as do a redial and a second
+  return. Away, no stall is looked for. A catch-up that gets no list and
+  advances nothing it is owed — a list repeating what is owed is not progress —
+  for fifteen seconds on a link that is up redials; it never releases part of
+  the replay, and a link that fails keeps the old screen under its banner until
+  the redial has caught up. An open chat takes the change in one step without
+  animating it (`PageAnchor.catchUpWillLand`): a reader at the latest lands at
+  the latest, one whose place survives keeps it with "N new" set once to the
+  rows below it, and one whose rows fell below the new window is at the newest
+  rows with no count. A too-short chat may page back as a second change after
+  it. A Deck opened from a notification during a catch-up shows "Catching up…"
+  and then the cards, opened as of that moment (`AppModel.deckAwaitsCatchUp`),
+  with the link's own sentence under the ring while it cannot catch up; one
+  opened from the bar shows the cards on screen, and one left open does not
+  count the cards a catch-up brings as arrivals. The clock every age reads
+  (`AppModel.now`) is set on the change to active or inactive, so no age is a
+  second stale on the way back.
+* **A cold open waits to be caught up.** The loader ("Connecting to your Mac…")
+  shows until the first link's catch-up ends, then the fleet in one step. The
+  Mac is dialled once the saved fleet is loaded and on screen, so the saved
+  fleet is what the loader holds. A Mac that has not answered gets three seconds
+  of loader, then the saved fleet under the link banner; one that has answered
+  gets until it has caught up, fifteen seconds at most, after which the saved
+  fleet shows and the catch-up, still open, updates it once. A refused token
+  ends the wait at once, so its banner shows (`AppModel.waitOutLaunch`).
 * **Cold opens are stamped.** Anything read from disk carries its age until live
   data replaces it, on the fleet and per session.
 * **No optimistic approvals.** A tap shows a spinner; the card only changes when
@@ -277,12 +323,96 @@ is enforced.
 
 ## Correctness invariants worth not breaking
 
+* **What is on screen is published; everything else reads the truth.**
+  `SessionState` holds the truth and publishes `SessionState.Shown` — the
+  timeline, cards, window, facts, freshness, Stop's running turn and the review
+  mark — at the end of each entry point; `AppModel` publishes the list, the
+  sessions screens draw and the fleet's freshness the same way
+  (`publishList`). Views read only the published side (`shown(for:)`,
+  `shownSummary(for:)`, `shownApproval(sessionKey:id:)`, `fleet`, `deck`, …).
+  Send gates, validation and requests read the truth: Stop and compose
+  (`stopBlocked`, `composeBlocked`), bulk removal, an answer — which rebuilds
+  its session and sends nothing for a card the truth has resolved — the command
+  sheets' receipts and their `eventHighWater` fence, and deep-link names. The
+  reader's own acts publish what they change at once, catch-up or not: a
+  removal takes its row and cards, a review mark is the seq on screen, and a
+  dismissed gap notice goes.
+
 * **Ingest is coalesced, and the buffer is settled before anything reads it.**
   A replay arrives one frame per turn of the main actor, so events at or below
   the tail are held and merged in one pass per 16ms window instead of one
   whole-array insert and one full timeline build each. `settlePendingEvents()`
   drains that buffer before the cache is written, so a snapshot taken mid-window
-  can never persist a log with a hole in it.
+  can never persist a log with a hole in it, and `rebuildNow()` draws every
+  timeline before the fleet is first shown, so the reveal is not followed a beat
+  later by its rows filling in.
+* **A chat holds the newest 500 events, with no hole down to its tail**, on a
+  Mac that serves pages (minor 23, `DaemonProfile.pagesHistory`). At launch and
+  on return to the foreground `SessionState.applyWindow` keeps what is held only
+  if it covers those 500 contiguously, and otherwise drops it and subscribes
+  from there; a reconnect while open keeps earlier pages unless it missed more
+  than 500. Earlier pages come one `history` request at a time and are merged
+  and drawn once, on their `history_end`; any other event below `windowStart` is
+  dropped. A window that starts past everything held skips events the Mac never
+  sends, so a Codex turn a compose reported running is forgotten then; one still
+  running names itself again in the window, and keeps Stop. A window with
+  nothing the fleet counts as activity pages back by itself until it has
+  something or reaches seq 1, and a failed page stops that. The cache keeps the
+  newest 500. An older Mac keeps the 400-event backfill and "Load all".
+* **Reaching the top of a chat loads the page above it, in place.** The head row
+  is a spinner while a page loads and blank otherwise; its probe
+  (`HeadObserver`, the top-edge twin of `TailObserver`) asks when a hand scrolls
+  within a screen of the top, or once an upward move of the offset that no
+  change of size explains reaches the top (the status bar, VoiceOver); on the
+  way there the move may be the list's own as rows above change. Never on the
+  first layout. A window shorter than its screen asks on its own, and a hand on
+  it is the reader asking, which retries a failed page. When the chat becomes
+  ready to page with nothing on screen moving (`AppModel.isReadyToPage`: the
+  link back, no catch-up holding the screen, the window drawn through what the
+  Mac listed, `SessionState.drawnThrough`), a
+  reader whose ask went out and who has not left the top since, or a chat still
+  short, gets the page, judged by `PageAnchor` once the list shows the rows
+  published with it; a chat opened at its latest with the top within a screen
+  does not. An ask that comes due while `PageAnchor` holds a row in place is
+  dropped, and the probe reads again once the row is let go. During a catch-up
+  the reader's asks wait for its end; the fill and card fetches run on the
+  truth. `PageAnchor` is told as the rows above the reader are replaced on
+  screen (`SessionState.onWindowChange`, at publication, with the strongest
+  change since the last): a page committing, or the window set afresh on a
+  return. It notes the first row on screen the change leaves standing (or,
+  where a tool result folds into the call the page brought, that call), and once
+  the list shows the published timeline puts that row back where it was, from a
+  view inside the collection view, then gives back what the rows above grow by
+  as they settle, during a fling as at rest, until the main actor turns. The row
+  is never left above the screen. Putting the row back stops any motion of the
+  offset but a hand's on a page: the list's own animated correction of an offset
+  a reset's shorter content no longer reaches, or a scroll to the top the status
+  bar started, would otherwise carry on from the row put back to the new top. A
+  reset stops a fling under way too; a finger still on the list keeps moving it.
+  It leaves a reader at the latest to the tail's follow, and one that leaves
+  nothing on screen standing goes to the latest. Whether the next page follows
+  is decided in that same pass, once the page is drawn: a reader still at the
+  top, or a chat still short. "N new" counts the rows from events after the last
+  one drawn before (`TimelineEnd`), so a page adds nothing, even a row it gives
+  an older event the context to show.
+* **Open cards and the run's facts outlive the window.** The Mac lists each open
+  card in `SessionSummary.pending` by its request's seq. A card whose request is
+  below `windowStart` is fetched alone (`history` with `limit` 1) and kept as a
+  pin: never drawn in the chat, but built with the window's events, so a
+  resolution in the window closes it and the window's rows know it is there. It
+  feeds the Deck, the fleet, links and sheets. Only a list the current link sent
+  pins anything; a pin shares the one request in flight with pages, never shows
+  the head row's spinner, and a reader's ask behind it is woken when it ends
+  (`AppModel.isReadyToPage`). Pins are checked against a list once the window
+  holds everything it counts: a card the Mac stops listing is dropped unless the
+  phone holds its answer, which an open sheet shows and which stays with the
+  card when the window moves past it; one a page reaches is the window's again,
+  one a trim takes stays pinned without a fetch, and a fetch that brings nothing
+  is not repeated until a new link or window. The fill asks for open cards
+  before any page. A pinned question's hold is the newest held for it, else the
+  Mac's. The permission mode and the model shown are the newer, by seq, of what
+  the window says and the Mac's own account (`AppModel.permissionMode(for:)`,
+  `confirmedModel(for:)`); an older Mac sends neither and nothing changes.
 * **One live request per correlation key** (`DaemonConnection.request`).
   `send_text_result`, `capture_result` and `diff` carry only a `session_id`, so
   replies can only be matched by position; two concurrent requests for one key
@@ -304,8 +434,10 @@ is enforced.
   what this build's own reading of the command justifies. `git push --force`
   cannot become a single tap because a rule file said `low`.
 * **Nothing in the Deck is a swipe.** Advancing is a button and answering is a
-  button. Even the "Done, unreviewed" fleet row opens diff-first on a tap rather
-  than growing a swipe action, so the gesture is never taught anywhere.
+  button.
+* **A fleet row opens its session, whatever its status.** A Done row's turn
+  may have been watched at the Mac or changed nothing, so its diff is one tap
+  away on the session screen, never where the tap lands.
 * **HIGH-risk approvals need `biometryCurrentSet`,** not
   `deviceOwnerAuthentication` — the flag that invalidates when the enrolled set
   changes. A phone with no passcode cannot approve a HIGH card at all; it says

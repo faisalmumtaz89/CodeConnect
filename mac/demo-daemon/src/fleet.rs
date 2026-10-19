@@ -224,6 +224,24 @@ impl Fleet {
             .collect()
     }
 
+    /// One earlier page of a run's log: the newest `limit` events below
+    /// `before_seq`, oldest first.
+    pub fn events_before(&self, uid: &str, before_seq: u64, limit: usize) -> Vec<Event> {
+        let inner = self.lock();
+        let Some(run) = inner.runs.iter().find(|run| run.uid == uid) else {
+            return Vec::new();
+        };
+        let below: Vec<&Event> = run
+            .log
+            .iter()
+            .filter(|event| event.seq < before_seq)
+            .collect();
+        below[below.len().saturating_sub(limit)..]
+            .iter()
+            .map(|event| (*event).clone())
+            .collect()
+    }
+
     // ---------------------------------------------------------- write paths
 
     /// Apply an answer, or say exactly why not.
@@ -604,6 +622,11 @@ impl Run {
     }
 
     fn summary(&self) -> SessionSummary {
+        // Read off the whole log, which is never longer than a run's ceiling.
+        let mut facts = protocol::facts::SessionFacts::default();
+        for event in &self.log {
+            facts.observe(event);
+        }
         SessionSummary {
             session_uid: self.uid.clone(),
             session_id: self.name.clone(),
@@ -633,6 +656,26 @@ impl Run {
             // over a Codex link, and the phone reads that off this field rather
             // than off the demo's silence.
             codex_link: protocol::event::CodexLink::None,
+            // Each card by the seq of the request event `raise_card` filed for it.
+            pending: self
+                .cards
+                .iter()
+                .filter_map(|card| {
+                    let filed = format!("perm:{}", card.request_id);
+                    let request = self
+                        .log
+                        .iter()
+                        .find(|event| event.source_event_id.as_deref() == Some(filed.as_str()))?;
+                    Some(protocol::event::PendingRef {
+                        request_id: card.request_id.clone(),
+                        seq: request.seq,
+                        hold: card.question_hold,
+                        turn_id: None,
+                    })
+                })
+                .collect(),
+            model: facts.model,
+            permission_mode: facts.permission_mode,
         }
     }
 

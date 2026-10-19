@@ -599,6 +599,17 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// Whether this Mac can stop or speak to this Codex session **right now**.
     /// Defaulted to `.none` so a daemon predating the field still parses.
     let codexLink: CodexLinkState
+    /// Every card in this run still waiting on a human, by reference (minor
+    /// 23): the seq of each one's `approval_request`, so a phone holding only
+    /// the newest events can fetch the event that carries the card. Empty from
+    /// an older daemon and on a run with nothing open.
+    let pending: [PendingRef]
+    /// The model this run last confirmed, with the event that confirmed it
+    /// (minor 23). `nil` until something has said.
+    let model: ModelFact?
+    /// The permission mode the main agent last reported, with the event that
+    /// reported it (minor 23). `nil` until something has said.
+    let permissionMode: SessionFact?
 
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
@@ -617,6 +628,9 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case agent
         case codexThreadID = "codex_thread_id"
         case codexLink = "codex_link"
+        case pending
+        case model
+        case permissionMode = "permission_mode"
     }
 
     init(from decoder: Decoder) throws {
@@ -637,6 +651,9 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         agent = try c.decodeIfPresent(AgentKind.self, forKey: .agent) ?? .claude
         codexThreadID = try c.decodeIfPresent(String.self, forKey: .codexThreadID)
         codexLink = try c.decodeIfPresent(CodexLinkState.self, forKey: .codexLink) ?? .none
+        pending = try c.decodeIfPresent([PendingRef].self, forKey: .pending) ?? []
+        model = try c.decodeIfPresent(ModelFact.self, forKey: .model)
+        permissionMode = try c.decodeIfPresent(SessionFact.self, forKey: .permissionMode)
     }
 
     /// Whether the Codex vocabulary applies here. The one place the question is
@@ -661,6 +678,78 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     var id: String { sessionKey }
     var updatedDate: Date { ISO8601.parse(updatedAt) ?? .distantPast }
     var createdDate: Date { ISO8601.parse(createdAt) ?? .distantPast }
+}
+
+/// One open card, named without its body (`SessionSummary.pending`).
+struct PendingRef: Codable, Sendable, Hashable {
+    let requestID: String
+    /// The seq of the card's `approval_request` event.
+    let seq: UInt64
+    /// The card's hold as it stands now. Absent on a card that has none, which
+    /// is every Codex card.
+    let hold: QuestionHold?
+    /// The turn a Codex card belongs to. Absent on a Claude card.
+    let turnID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case requestID = "request_id"
+        case seq
+        case hold
+        case turnID = "turn_id"
+    }
+}
+
+/// A fact and the seq of the event that decided it, so the phone can keep
+/// whichever of this and its own events is newer.
+struct SessionFact: Codable, Sendable, Hashable {
+    let value: String
+    let seq: UInt64
+}
+
+/// The model fact, with which kind of event said it and when.
+struct ModelFact: Codable, Sendable, Hashable {
+    let value: String
+    let seq: UInt64
+    let source: ModelSource
+    /// The deciding event's `ts`.
+    let at: String
+}
+
+/// Which kind of event said what the model is.
+enum ModelSource: Sendable, Hashable {
+    /// The `model` of a `session_start`.
+    case sessionStart
+    /// Claude Code's own `/model` receipt.
+    case command
+    /// A word this build does not know.
+    case unrecognised(String)
+
+    init(wire: String) {
+        switch wire {
+        case "session_start": self = .sessionStart
+        case "command": self = .command
+        default: self = .unrecognised(wire)
+        }
+    }
+
+    var wire: String {
+        switch self {
+        case .sessionStart: return "session_start"
+        case .command: return "command"
+        case .unrecognised(let raw): return raw
+        }
+    }
+}
+
+extension ModelSource: Codable {
+    init(from decoder: Decoder) throws {
+        self.init(wire: try decoder.singleValueContainer().decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(wire)
+    }
 }
 
 // MARK: - Capabilities
@@ -835,6 +924,10 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// screen, which can be another agent's, so its Claude approvals are shown
     /// read-only.
     var hookOnlyApprovals: Bool { advertises(["hook_only_approvals"]) }
+    /// This daemon serves earlier pages of a run's log (`history`) and puts each
+    /// run's open cards, model and mode on its summary (minor 23). Absent is
+    /// false: an older daemon answers `history` with `bad_request`.
+    var historyPages: Bool { advertises(["history_pages"]) }
     /// Which agents this daemon hosts. **Omitted entirely while it would only
     /// name Claude** (`ws.rs`), so empty and absent both read as `["claude"]`.
     var supportedAgents: [String] {
@@ -1662,6 +1755,10 @@ enum ClientMessage: Sendable {
     case sessions
     case subscribe(session: String, afterSeq: UInt64)
     case unsubscribe(session: String)
+    /// One earlier page of a run's log (minor 23, `history_pages`): the newest
+    /// `limit` events below `beforeSeq`, as ordinary `event` frames, then one
+    /// `history_end` carrying `requestID`. Moves no subscription.
+    case history(session: String, beforeSeq: UInt64, limit: UInt32, requestID: String)
     /// Remove one **ended** run's record from the Mac. Minor 7.
     ///
     /// By uid, never by tmux name: a name is handed to the next run, so a stale
@@ -1734,6 +1831,8 @@ extension ClientMessage: Encodable {
         case sessionID = "session_id"
         case sessionUID = "session_uid"
         case afterSeq = "after_seq"
+        case beforeSeq = "before_seq"
+        case limit
         case environment
         case relayCredential = "relay_credential"
         case requestID = "request_id"
@@ -1788,6 +1887,12 @@ extension ClientMessage: Encodable {
         case .unsubscribe(let session):
             try c.encode("unsubscribe", forKey: .type)
             try c.encode(session, forKey: .sessionID)
+        case .history(let session, let beforeSeq, let limit, let requestID):
+            try c.encode("history", forKey: .type)
+            try c.encode(session, forKey: .sessionID)
+            try c.encode(beforeSeq, forKey: .beforeSeq)
+            try c.encode(limit, forKey: .limit)
+            try c.encode(requestID, forKey: .requestID)
         case .deleteSession(let sessionUID):
             try c.encode("delete_session", forKey: .type)
             try c.encode(sessionUID, forKey: .sessionUID)
@@ -2072,6 +2177,12 @@ enum ServerMessage: Sendable {
     case helloAck(HelloAck)
     case sessions([SessionSummary])
     case event(Event)
+    /// The end of one `history` page, after its events (minor 23). `sessionID`
+    /// and `requestID` are echoed as the phone sent them. `firstSeq` is the
+    /// lowest seq the page sent, or `beforeSeq` when it sent none; `error` says
+    /// why a page is incomplete, and such a page may have sent some events first.
+    case historyEnd(
+        sessionID: String, requestID: String, beforeSeq: UInt64, firstSeq: UInt64, error: String?)
     case answerResult(requestID: String, result: AnswerResult)
     case sendTextResult(sessionID: String, result: SendTextResult)
     case captureResult(sessionID: String, text: String)
@@ -2144,6 +2255,9 @@ extension ServerMessage: Decodable {
         case bytes
         case data
         case reason
+        case beforeSeq = "before_seq"
+        case firstSeq = "first_seq"
+        case error
     }
 
     init(from decoder: Decoder) throws {
@@ -2167,6 +2281,13 @@ extension ServerMessage: Decodable {
             self = .sessions(try c.decode([SessionSummary].self, forKey: .sessions))
         case "event":
             self = .event(try c.decode(Event.self, forKey: .event))
+        case "history_end":
+            self = .historyEnd(
+                sessionID: try c.decode(String.self, forKey: .sessionID),
+                requestID: try c.decode(String.self, forKey: .requestID),
+                beforeSeq: try c.decode(UInt64.self, forKey: .beforeSeq),
+                firstSeq: try c.decode(UInt64.self, forKey: .firstSeq),
+                error: try c.decodeIfPresent(String.self, forKey: .error))
         case "answer_result":
             self = .answerResult(
                 requestID: try c.decode(String.self, forKey: .requestID),

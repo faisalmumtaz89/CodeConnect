@@ -32,7 +32,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use protocol::event::{Event, Lifecycle, PendingEvent};
+use protocol::event::{Event, Lifecycle, PendingEvent, Source};
 use protocol::pairing::DeviceSummary;
 use protocol::ws::AnswerOutcome;
 
@@ -109,6 +109,8 @@ db_ops! {
     fn append_event(pending: PendingEvent) -> Option<Event>;
     fn max_seq(session_uid: String) -> u64;
     fn hook_event_seq(session_uid: String, source_event_id: String) -> Option<u64>;
+    fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
+    fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
     fn load_cursor(session_uid: String) -> Option<crate::store::TailCursor>;
     fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;
@@ -193,6 +195,16 @@ impl Db {
         limit: u32,
     ) -> Result<Vec<Event>> {
         self.run(move |store| store.events_after(&session_uid, after_seq, limit))
+            .await
+    }
+
+    pub async fn events_before(
+        &self,
+        session_uid: String,
+        before_seq: u64,
+        limit: u32,
+    ) -> Result<Vec<Event>> {
+        self.run(move |store| store.events_before(&session_uid, before_seq, limit))
             .await
     }
 

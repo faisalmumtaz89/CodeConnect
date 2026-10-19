@@ -876,7 +876,7 @@ final class TerminalWiringTests: XCTestCase {
 /// A window off the scene rather than a bare frame: the lifecycle these tests
 /// measure is the app's, and the app's runs in a scene.
 @MainActor
-private final class Host {
+final class Host {
     let view: UIView
     private let window: UIWindow
     private let previousKey: UIWindow?

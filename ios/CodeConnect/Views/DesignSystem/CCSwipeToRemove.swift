@@ -51,8 +51,8 @@ final class CCSwipeCloseCoordinator {
 /// Swipe a row aside to reveal a single destructive action.
 ///
 /// **Hand-built because the fleet is not a `List`.** `.swipeActions` exists only
-/// inside `List`, and the fleet is a `ScrollView` over a `LazyVStack` — a choice
-/// made for the row measurement and banding this screen needs. Attaching
+/// inside `List`, and the fleet is a `ScrollView` over a `VStack` of bands — a
+/// choice made for the row measurement and banding this screen needs. Attaching
 /// `.swipeActions` here compiles and silently does nothing, which is the worst
 /// available outcome.
 ///
@@ -100,6 +100,10 @@ struct CCSwipeToRemove<Content: View>: View {
     /// the row would stay and the user would not know why". That was exactly the
     /// shipped behaviour for every answer except success.
     var action: () async -> String?
+    /// Asks before `action` runs, and calls the closure it is handed only if
+    /// the answer is yes. The screen owns the question, so every route to a
+    /// removal asks it the same way.
+    var confirm: (@escaping () -> Void) -> Void
     /// This row's stable identity with the coordinator — the session key.
     var rowID: String = ""
     /// The screen's close rules. Optional so the component stands alone, but
@@ -107,7 +111,47 @@ struct CCSwipeToRemove<Content: View>: View {
     var coordinator: CCSwipeCloseCoordinator?
     @ViewBuilder var content: () -> Content
 
+    /// The request and its answer, here rather than on the swipe: they belong
+    /// to the removal, not to the opening. A removal still running when the
+    /// swipe is switched off is still running when it comes back — it must
+    /// still read "Removing…" and refuse a second confirmation — and its
+    /// answer must reach the row as it is then, not the swipe that asked.
     @State private var busy = false
+    /// Held rather than flashed. A message that clears itself is one the user
+    /// can miss by looking away, and the row staying open is itself the signal
+    /// that nothing happened to it.
+    @State private var refusal: String?
+
+    var body: some View {
+        if isEnabled {
+            RevealingRow(
+                title: title, action: action, confirm: confirm, rowID: rowID,
+                coordinator: coordinator, busy: $busy, refusal: $refusal, content: content)
+        } else {
+            content()
+        }
+    }
+}
+
+/// The swipe itself, and everything it knows about being open.
+///
+/// **Its own view so that knowledge lives exactly as long as the scroll view it
+/// describes.** The swipe is switched off whenever the Mac cannot remove — the
+/// link drops, and the handshake's capabilities go with it — and comes back
+/// shut. Held on `CCSwipeToRemove`, the open flag and the pending close outlived
+/// the scroll view: a row that read shut kept the catcher that turns a tap into
+/// a close, so the next tap opened nothing, and its next opening, still
+/// believing itself open, did not clear the refusal and showed the old reason.
+private struct RevealingRow<Content: View>: View {
+    let title: String
+    let action: () async -> String?
+    let confirm: (@escaping () -> Void) -> Void
+    let rowID: String
+    let coordinator: CCSwipeCloseCoordinator?
+    @Binding var busy: Bool
+    @Binding var refusal: String?
+    @ViewBuilder var content: () -> Content
+
     /// This row's own account of being open. Row-local so the catcher overlay
     /// invalidates only this row, and so a close pulse can be ignored by rows
     /// that were never open.
@@ -119,10 +163,6 @@ struct CCSwipeToRemove<Content: View>: View {
     /// callback never came, discarding every future open. Within the animation
     /// window a settle(true) is the stale echo; after it, it is the user.
     @State private var closingSince: Date?
-    /// Held rather than flashed. A message that clears itself is one the user
-    /// can miss by looking away, and the row staying open is itself the signal
-    /// that nothing happened to it.
-    @State private var refusal: String?
     @Environment(\.dynamicTypeSize) private var typeSize
 
     /// How far the row slides. Scaled, because the label inside grows: a fixed
@@ -133,75 +173,77 @@ struct CCSwipeToRemove<Content: View>: View {
     private static var closedID: Int { 0 }
 
     var body: some View {
-        if isEnabled {
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal) {
-                    HStack(spacing: 0) {
-                        content()
-                            // The row keeps the full width it would have had;
-                            // the button lives past the edge until asked for.
-                            .containerRelativeFrame(.horizontal)
-                            .id(Self.closedID)
-                            // While open, a tap on the row shuts it rather than
-                            // opening the session — `.swipeActions` behaviour,
-                            // and the difference between a destructive control
-                            // left armed under a stray tap and one that stands
-                            // down.
-                            .overlay {
-                                if openLocal {
-                                    Color.clear
-                                        .contentShape(Rectangle())
-                                        .onTapGesture { close(proxy) }
-                                        .accessibilityHidden(true)
-                                }
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                HStack(spacing: 0) {
+                    content()
+                        // The row keeps the full width it would have had;
+                        // the button lives past the edge until asked for.
+                        .containerRelativeFrame(.horizontal)
+                        .id(Self.closedID)
+                        // While open, a tap on the row shuts it rather than
+                        // opening the session — `.swipeActions` behaviour,
+                        // and the difference between a destructive control
+                        // left armed under a stray tap and one that stands
+                        // down.
+                        .overlay {
+                            if openLocal {
+                                Color.clear
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { close(proxy) }
+                                    .accessibilityHidden(true)
                             }
-                        removeButton(proxy)
-                    }
-                }
-                .onChange(of: coordinator?.signal ?? 0) {
-                    // A pulse names at most one exempt row: the one that just
-                    // opened. Everyone else that is actually open shuts; rows
-                    // that never were have nothing to do and no state to touch.
-                    if openLocal, coordinator?.except != rowID { close(proxy) }
-                }
-                .scrollIndicators(.hidden)
-                // Without this the row rests wherever the finger left it. The
-                // behavior is also the open-state instrument: it is the one
-                // code that knows, at the moment a drag lets go, which of the
-                // two positions the row is about to rest at. (An offset
-                // preference was tried first and measured dead — a geometry
-                // reader inside this scroll view reports its frame once and
-                // never again as the content moves.)
-                .scrollTargetBehavior(
-                    RevealBehavior(reveal: revealWidth) { open in
-                        if open {
-                            // The stale echo of a programmatic close reports
-                            // "open" from the old offset within the close
-                            // animation; a report after that window is a real
-                            // re-open by the user.
-                            if let since = closingSince, Date().timeIntervalSince(since) < 0.4 {
-                                return
-                            }
-                            closingSince = nil
-                            openLocal = true
-                            coordinator?.noteOpened(rowID)
-                        } else {
-                            closingSince = nil
-                            openLocal = false
-                            refusal = nil
-                            coordinator?.noteClosed(rowID)
                         }
-                    })
-                // `revealWidth` is scaled, so changing type size while a row is
-                // open moves the open position out from under the offset: the
-                // row is left resting at 112 when open is now 168, which is
-                // exactly the part-way state `RevealBehavior` exists to make
-                // impossible. Shut it and let the user swipe again at the new
-                // size.
-                .onChange(of: typeSize) { close(proxy) }
+                    removeButton(proxy)
+                }
             }
-        } else {
-            content()
+            .onChange(of: coordinator?.signal ?? 0) {
+                // A pulse names at most one exempt row: the one that just
+                // opened. Everyone else that is actually open shuts; rows
+                // that never were have nothing to do and no state to touch.
+                if openLocal, coordinator?.except != rowID { close(proxy) }
+            }
+            .scrollIndicators(.hidden)
+            // Without this the row rests wherever the finger left it. The
+            // behavior is also the open-state instrument: it is the one
+            // code that knows, at the moment a drag lets go, which of the
+            // two positions the row is about to rest at. (An offset
+            // preference was tried first and measured dead — a geometry
+            // reader inside this scroll view reports its frame once and
+            // never again as the content moves.)
+            .scrollTargetBehavior(
+                RevealBehavior(reveal: revealWidth) { open in
+                    if open {
+                        // The stale echo of a programmatic close reports
+                        // "open" from the old offset within the close
+                        // animation; a report after that window is a real
+                        // re-open by the user.
+                        if let since = closingSince, Date().timeIntervalSince(since) < 0.4 {
+                            return
+                        }
+                        closingSince = nil
+                        // A refusal can land while the row is shut — the
+                        // question stays up while the row closes under it
+                        // — and an old reason must not greet the next open.
+                        // Only an opening clears it: a nudge that leaves an
+                        // open row open keeps the reason on screen.
+                        if !openLocal { refusal = nil }
+                        openLocal = true
+                        coordinator?.noteOpened(rowID)
+                    } else {
+                        closingSince = nil
+                        openLocal = false
+                        refusal = nil
+                        coordinator?.noteClosed(rowID)
+                    }
+                })
+            // `revealWidth` is scaled, so changing type size while a row is
+            // open moves the open position out from under the offset: the
+            // row is left resting at 112 when open is now 168, which is
+            // exactly the part-way state `RevealBehavior` exists to make
+            // impossible. Shut it and let the user swipe again at the new
+            // size.
+            .onChange(of: typeSize) { close(proxy) }
         }
     }
 
@@ -218,25 +260,12 @@ struct CCSwipeToRemove<Content: View>: View {
     private func removeButton(_ proxy: ScrollViewProxy) -> some View {
         Button {
             guard !busy else { return }
-            busy = true
-            refusal = nil
-            Task {
-                let reason = await action()
-                busy = false
-                refusal = reason
-                guard let reason else {
-                    // On success the row is already gone and this does nothing.
-                    // It matters for the answers that leave the row in place.
-                    close(proxy)
-                    return
-                }
-                // The row is open and the label now reads the reason, which a
-                // screen reader has no way to notice on its own: nothing moved
-                // and focus did not change.
-                UIAccessibility.post(notification: .announcement, argument: reason)
-            }
+            confirm { remove(proxy) }
         } label: {
-            Text(busy ? "Removing…" : (refusal ?? title))
+            // The reason only on an open row. One that arrived while the row
+            // was shut is cleared when the next opening settles, and must not
+            // show on the button while that opening is still being dragged out.
+            Text(busy ? "Removing…" : ((openLocal ? refusal : nil) ?? title))
                 .ccType(CC.type.footnote.weight(.semibold))
                 .foregroundStyle(CC.color.onAccent)
                 .multilineTextAlignment(.center)
@@ -252,12 +281,37 @@ struct CCSwipeToRemove<Content: View>: View {
         // Red, and this is the one place on this screen that earns it: the row
         // is being destroyed. Every other use of `danger` in the app is a
         // failure or a destructive control, never emphasis.
-        .background(CC.color.danger)
+        //
+        // The shape is named: on iOS 26 a bare `.background(style)` on a button
+        // fills the button's own rounded shape, and the reveal is a full-height
+        // rectangle beside the row.
+        .background(CC.color.danger, in: Rectangle())
         // VoiceOver reaches removal by the row's own named action, which works
         // whether or not the row is open. Left visible, it would be a second
         // route to the same thing, reachable only after a gesture a screen
         // reader user has no reason to perform.
         .accessibilityHidden(true)
+    }
+
+    private func remove(_ proxy: ScrollViewProxy) {
+        guard !busy else { return }
+        busy = true
+        refusal = nil
+        Task {
+            let reason = await action()
+            busy = false
+            refusal = reason
+            guard let reason else {
+                // On success the row is already gone and this does nothing.
+                // It matters for the answers that leave the row in place.
+                close(proxy)
+                return
+            }
+            // The row is open and the label now reads the reason, which a
+            // screen reader has no way to notice on its own: nothing moved
+            // and focus did not change.
+            UIAccessibility.post(notification: .announcement, argument: reason)
+        }
     }
 }
 

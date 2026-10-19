@@ -172,7 +172,8 @@ extension CCCard where Footer == EmptyView {
 /// So the number moved into the component. **Place a section header flush** —
 /// no leading inset, no horizontal inset. It owns 36 on the leading edge (52 on
 /// screen) and `CC.space.md` on the trailing one, which is what puts a trailing
-/// note on 370 rather than 386. A header nested in a container that has already
+/// note on 370 rather than 386 — unless it carries a button, whose own border
+/// belongs on the card's edge at 386. A header nested in a container that has already
 /// stepped out to the content column — a `CCCard` header slot — adds nothing and
 /// still lands on 52, because the container declares its inset through
 /// `.ccColumnInset(_:)` and the header asks for the remainder rather than
@@ -195,6 +196,10 @@ struct CCSectionHeader: View {
     var noteAction: (() -> Void)?
     var actionTitle: String?
     var action: (() -> Void)?
+    /// A second action, drawn before the first. The fleet's Ended band is the
+    /// one header with two: Select and Hide.
+    var secondaryActionTitle: String?
+    var secondaryAction: (() -> Void)?
 
     init(
         _ title: String,
@@ -204,7 +209,9 @@ struct CCSectionHeader: View {
         note: String? = nil,
         noteAction: (() -> Void)? = nil,
         actionTitle: String? = nil,
-        action: (() -> Void)? = nil
+        action: (() -> Void)? = nil,
+        secondaryActionTitle: String? = nil,
+        secondaryAction: (() -> Void)? = nil
     ) {
         self.title = title
         self.count = count
@@ -214,6 +221,8 @@ struct CCSectionHeader: View {
         self.noteAction = noteAction
         self.actionTitle = actionTitle
         self.action = action
+        self.secondaryActionTitle = secondaryActionTitle
+        self.secondaryAction = secondaryAction
     }
 
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -247,6 +256,7 @@ struct CCSectionHeader: View {
                 VStack(alignment: .leading, spacing: CC.space.xxs) {
                     label
                     noteLabel
+                    secondaryActionButton
                     actionButton
                 }
             } else {
@@ -254,6 +264,7 @@ struct CCSectionHeader: View {
                     label
                     Spacer(minLength: CC.space.xs)
                     noteLabel
+                    secondaryActionButton
                     actionButton
                 }
             }
@@ -283,7 +294,10 @@ struct CCSectionHeader: View {
         .padding(
             .leading,
             dotColor == nil ? 0 : CCColumn.step(from: columnInset, scaledDot: scaledDot))
-        .padding(.trailing, CC.space.md)
+        // A trailing note is text, so it ends on the text column inside the
+        // card; a trailing button draws its own border, so that border ends on
+        // the card's edge instead.
+        .padding(.trailing, hasAction ? 0 : CC.space.md)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(count.map { "\(title), \($0)" } ?? title)
         .accessibilityAddTraits(.isHeader)
@@ -365,6 +379,18 @@ struct CCSectionHeader: View {
             // aligned with the content below it; a ghost button now draws a 1pt
             // edge of its own, and the thing that has to align is the edge.
             CCButton(actionTitle, variant: .ghost, size: .sm, action: action)
+        }
+    }
+
+    private var hasAction: Bool {
+        (actionTitle != nil && action != nil)
+            || (secondaryActionTitle != nil && secondaryAction != nil)
+    }
+
+    @ViewBuilder
+    private var secondaryActionButton: some View {
+        if let secondaryActionTitle, let secondaryAction {
+            CCButton(secondaryActionTitle, variant: .ghost, size: .sm, action: secondaryAction)
         }
     }
 }

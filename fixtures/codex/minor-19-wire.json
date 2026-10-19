@@ -80,6 +80,13 @@
       "last_seq": 2,
       "lifecycle": "live",
       "link": "attached",
+      "pending": [
+        {
+          "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QUVIAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtZDI3MDBlZDMtYzY5ZC00OTE1LWE2MjAtMzZjMDAxZTdmNTc3AAAAAAAAAAE",
+          "seq": 2,
+          "turn_id": "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee"
+        }
+      ],
       "project_label": "tmp",
       "session_id": "cc-1",
       "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",

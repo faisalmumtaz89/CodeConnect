@@ -463,6 +463,70 @@ pub struct SessionSummary {
     /// delivered, `lifecycle` whether there is still a run to deliver it to.
     #[serde(default)]
     pub codex_link: CodexLink,
+    /// **Every card in this run still waiting on a human, by reference** (minor
+    /// 23): the same cards as `blocked_on`, each with the seq of its
+    /// `approval_request` event, so a client holding only the newest events can
+    /// still fetch the one that carries a card's body. A card whose request event
+    /// is not yet in the log is left out; that event follows live.
+    ///
+    /// Never a card body: three open cards can carry megabytes between them, and
+    /// this list rides every `sessions` reply. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<PendingRef>,
+    /// The model this run last confirmed, and the event that confirmed it (minor
+    /// 23). See [`crate::facts`]. Omitted when nothing has said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelFact>,
+    /// The permission mode the main agent last reported, and the event that
+    /// reported it (minor 23). See [`crate::facts`]. Omitted when nothing has
+    /// said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<Fact>,
+}
+
+/// One open card, named without its body. See [`SessionSummary::pending`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRef {
+    pub request_id: String,
+    /// The seq of the card's `approval_request` event.
+    pub seq: u64,
+    /// The card's hold as it stands now — the value its latest `question_hold`
+    /// event carried. Absent on a card that has none, which is every Codex card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<crate::ws::QuestionHold>,
+    /// The turn a Codex card belongs to, which a Stop has to name. Absent on a
+    /// Claude card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+}
+
+/// A fact and the seq of the event that decided it, so a client can keep
+/// whichever of this and its own events is newer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fact {
+    pub value: String,
+    pub seq: u64,
+}
+
+/// The model fact, with where it came from and when, because the phone says
+/// both beside the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelFact {
+    pub value: String,
+    pub seq: u64,
+    pub source: ModelSource,
+    /// The deciding event's `ts`.
+    pub at: String,
+}
+
+/// Which kind of event said what the model is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSource {
+    /// The `model` of a `session_start`.
+    SessionStart,
+    /// Claude Code's own `/model` receipt, `Set model to …` or `Kept model as …`.
+    Command,
 }
 
 #[cfg(test)]
@@ -578,6 +642,9 @@ mod tests {
             agent: crate::agent::AgentKind::Claude,
             codex_thread_id: None,
             codex_link: CodexLink::None,
+            pending: Vec::new(),
+            model: None,
+            permission_mode: None,
         };
         let dead = summary("01K1B3XQ8ZC0DE5FGH7JKMNPQR", Lifecycle::Exited);
         let live = summary("01K1B3XZZZC0DE5FGH7JKMNPQR", Lifecycle::Live);

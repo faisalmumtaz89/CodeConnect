@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use protocol::event::{
-    Event, EventKind, Lifecycle, Link, PendingEvent, SessionKey, SessionSummary, Source,
+    Event, EventKind, Lifecycle, Link, PendingEvent, PendingRef, SessionKey, SessionSummary, Source,
 };
 use protocol::hash::{approval_payload_hash, approval_payload_text, sha256_hex};
 use protocol::hook::{Decision, HookDecision, HookEventName, HookInput};
@@ -534,6 +534,8 @@ struct Inner {
     /// this adds nothing to it and does not repair it.
     row_writes: HashMap<String, u64>,
     pending: HashMap<ApprovalId, PendingApproval>,
+    /// The last [`PendingApproval::raise`] handed out.
+    next_raise: u64,
     /// Monotonic, so a supervisor's old connection cannot release the slot its
     /// new one has taken. Never reused; a `u64` of registrations is not a
     /// number this daemon will reach.
@@ -574,6 +576,11 @@ struct Inner {
     /// whose `PreToolUse` saw fewer was asked in a turn that has since ended.
     main_turn_ends: HashMap<String, u64>,
     last_seen_ms: HashMap<String, i64>,
+    /// Per run: its model and permission mode as of the newest event that
+    /// decided each, for the session list. Rebuilt from the log by
+    /// [`Daemon::recover`] and kept current by every ingest after it. One entry
+    /// per run that has ingested anything, the same bound as `last_seen_ms`.
+    session_facts: HashMap<String, protocol::facts::SessionFacts>,
     /// When pairing attempts failed, inside the current window.
     ///
     /// Oldest first, and never longer than `pairing_max_attempts`, so this is a
@@ -1537,10 +1544,66 @@ enum Actuation {
     Unknown(String),
 }
 
+/// Takes a Codex raise's card back out of `pending` unless the raise disarms it
+/// — on a refused commit, or when the raise is dropped at any await before it
+/// completes. It removes the entry only while it is still the one this raise
+/// inserted ([`PendingApproval::raise`]), never one put there since.
+struct CardTakeBack {
+    inner: Arc<Mutex<Inner>>,
+    id: ApprovalId,
+    raise: u64,
+    armed: bool,
+}
+
+impl CardTakeBack {
+    fn remove(inner: &mut Inner, id: &ApprovalId, raise: u64) {
+        if inner
+            .pending
+            .get(id)
+            .is_some_and(|entry| entry.raise == raise)
+        {
+            inner.pending.remove(id);
+        }
+    }
+
+    /// Take the card back now, for a raise that did not open — if this raise
+    /// put it there.
+    async fn now(mut self) {
+        if self.armed {
+            Self::remove(&mut *self.inner.lock().await, &self.id, self.raise);
+            self.armed = false;
+        }
+    }
+}
+
+impl Drop for CardTakeBack {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Dropping cannot wait for the lock. Held elsewhere at this instant, the
+        // removal is handed to a task.
+        match self.inner.try_lock() {
+            Ok(mut inner) => Self::remove(&mut inner, &self.id, self.raise),
+            Err(_) => {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    let (inner, id, raise) = (Arc::clone(&self.inner), self.id.clone(), self.raise);
+                    runtime
+                        .spawn(async move { Self::remove(&mut *inner.lock().await, &id, raise) });
+                }
+            }
+        }
+    }
+}
+
 struct PendingApproval {
     card: ApprovalCard,
     session: SessionKey,
     created_ms: i64,
+    /// Which Codex raise put this card here, so that raise's take-back removes
+    /// only its own card ([`CardTakeBack`]). Unique per raise; 0 on a card no
+    /// Codex raise inserted.
+    raise: u64,
     /// The held hook: the only way this card's answer reaches its call. Set
     /// only while Claude is waiting on it.
     responder: Option<oneshot::Sender<HookDecision>>,
@@ -2122,6 +2185,7 @@ impl Daemon {
                                 .unwrap_or_default(),
                             agent,
                             created_ms: row.created_ms,
+                            raise: 0,
                             responder: None,
                             claimed: false,
                             local_misses: 0,
@@ -2199,6 +2263,33 @@ impl Daemon {
         // The third kind, and it needs nothing of the card ordering above for the same
         // reason the interrupt does not: there is no card beside the row.
         self.recover_codex_composes().await;
+        self.recover_session_facts().await;
+    }
+
+    /// Rebuild every run's summary facts from the newest event that decided each,
+    /// so a run that has been quiet since the last start reports them too. Every
+    /// ingest keeps them current from here on.
+    async fn recover_session_facts(&self) {
+        let rows = match self.db.list_sessions().await {
+            Ok(rows) => rows,
+            Err(err) => {
+                crate::log_error!(
+                    "recovery: could not list sessions to rebuild their facts: {err:#}"
+                );
+                return;
+            }
+        };
+        let mut rebuilt = Vec::with_capacity(rows.len());
+        for row in rows {
+            match self.db.session_facts(row.session_uid.clone()).await {
+                Ok(facts) => rebuilt.push((row.session_uid, facts)),
+                Err(err) => crate::log_error!(
+                    "recovery: could not rebuild the facts of {}: {err:#}",
+                    row.session_uid
+                ),
+            }
+        }
+        self.inner.lock().await.session_facts.extend(rebuilt);
     }
 
     /// Record a claimed-but-unsettled answer as a terminal unknown: one a
@@ -2728,6 +2819,11 @@ impl Daemon {
         if let Some(event) = &event {
             let mut inner = self.inner.lock().await;
             inner
+                .session_facts
+                .entry(session_uid.clone())
+                .or_default()
+                .observe(event);
+            inner
                 .last_seen_ms
                 .insert(session_uid, protocol::time::now_unix_ms());
             note_tool_result(&mut inner, event);
@@ -2782,9 +2878,15 @@ impl Daemon {
         };
 
         if !events.is_empty() {
-            self.inner
-                .lock()
-                .await
+            let mut inner = self.inner.lock().await;
+            let facts = inner
+                .session_facts
+                .entry(session_uid.to_string())
+                .or_default();
+            for event in &events {
+                facts.observe(event);
+            }
+            inner
                 .last_seen_ms
                 .insert(session_uid.to_string(), protocol::time::now_unix_ms());
         }
@@ -3203,6 +3305,7 @@ impl Daemon {
                         project_label: label.clone(),
                         agent,
                         created_ms,
+                        raise: 0,
                         responder: responder_tx,
                         claimed: false,
                         local_misses: 0,
@@ -4112,6 +4215,28 @@ impl Daemon {
             family: family.to_string(),
         };
 
+        let label = self.effective_project_label(&session.uid).await;
+        let id: ApprovalId = (session.uid.clone(), request_id.clone());
+        let card_entry = |raise: u64| PendingApproval {
+            card: card.clone(),
+            session: session.clone(),
+            project_label: label.clone(),
+            agent: protocol::agent::AgentKind::Codex,
+            created_ms,
+            raise,
+            // No hook is held open on a Codex approval: the app-server
+            // asked the TUI, not this daemon, and nothing here is
+            // blocking on an answer to hand back.
+            responder: None,
+            claimed: false,
+            local_misses: 0,
+            tool_ran: false,
+            rejected: false,
+            // No Claude agent asked it.
+            fork: false,
+            question: None,
+        };
+
         // **One commit boundary, and nothing is exposed before it holds.**
         //
         // The event used to be filed first and the row written after, which made
@@ -4130,9 +4255,43 @@ impl Daemon {
         //
         // Published inside the gate for `ingest`'s reason: no later seq may
         // overtake this one on the way to a socket.
+        //
+        // **The card is pending before the commit**, and inserted only once the
+        // gate is held. The request event becomes visible at the commit — a replay
+        // or an earlier page can read it from the log from then on — and on the
+        // broadcast after it, so a phone that sees the event and asks for the
+        // session list must find the card there. A re-delivery finds its card
+        // pending already; a raise that does not open takes back the card it put
+        // there.
+        //
+        // **Taken back at whatever await the raise stops on.** A link teardown
+        // aborts the task that raises; aborted after the insert, the card would
+        // otherwise stay with no row and no event — one nothing can expire,
+        // retire or delete. A commit already handed to the blocking pool still
+        // finishes, so an abort inside it can leave the row and the event with no
+        // card: that is a durable card the next start's recovery restores, as
+        // before this card was inserted early.
         let gate = self.publish_gate(&session.uid).await;
-        let raised = {
+        let (raised, registered, raise) = {
             let _ordered = gate.lock().await;
+            let mut take_back = {
+                let mut inner = self.inner.lock().await;
+                inner.next_raise += 1;
+                let raise = inner.next_raise;
+                let registered = match inner.pending.entry(id.clone()) {
+                    std::collections::hash_map::Entry::Occupied(_) => false,
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(card_entry(raise));
+                        true
+                    }
+                };
+                CardTakeBack {
+                    inner: Arc::clone(&self.inner),
+                    id: id.clone(),
+                    raise,
+                    armed: registered,
+                }
+            };
             let raised = self.db.raise_codex_pending_approval(row, pending).await;
             if let Ok(crate::store::CodexCardRaise {
                 event: Some(event), ..
@@ -4140,10 +4299,16 @@ impl Daemon {
             {
                 let _ = self.events_tx.send(event.clone());
             }
-            raised
+            let (registered, raise) = (take_back.armed, take_back.raise);
+            if matches!(&raised, Ok(raise) if raise.is_open()) {
+                take_back.armed = false;
+            } else {
+                take_back.now().await;
+            }
+            (raised, registered, raise)
         };
         let approval_event = match raised {
-            Ok(raise) if raise.is_open() => raise.event,
+            Ok(raise) if raise.is_open() => Some(raise.event),
             // The re-delivery carried a DIFFERENT question under the same item
             // id. Refused loudly and the stored card stands: merging it would
             // move the row and the in-memory card to the new content while the
@@ -4162,7 +4327,7 @@ impl Daemon {
                      event would leave the two disagreeing. This shape is unmeasured.",
                     session.name
                 );
-                return false;
+                None
             }
             // The run was deleted between the frame arriving and the card being
             // filed. Neither half landed, so there is nothing to undo.
@@ -4172,7 +4337,7 @@ impl Daemon {
                      while it was in flight",
                     session.name
                 );
-                return false;
+                None
             }
             Err(err) => {
                 crate::log_error!(
@@ -4181,37 +4346,23 @@ impl Daemon {
                      rings. The request stands and is answerable at the keyboard: {err:#}",
                     session.name
                 );
-                return false;
+                None
             }
         };
+        let Some(approval_event) = approval_event else {
+            return false;
+        };
 
-        let label = self.effective_project_label(&session.uid).await;
         {
             let mut inner = self.inner.lock().await;
             inner
                 .last_seen_ms
                 .insert(session.uid.clone(), protocol::time::now_unix_ms());
-            inner.pending.insert(
-                (session.uid.clone(), request_id.clone()),
-                PendingApproval {
-                    card,
-                    session: session.clone(),
-                    project_label: label.clone(),
-                    agent: protocol::agent::AgentKind::Codex,
-                    created_ms,
-                    // No hook is held open on a Codex approval: the app-server
-                    // asked the TUI, not this daemon, and nothing here is
-                    // blocking on an answer to hand back.
-                    responder: None,
-                    claimed: false,
-                    local_misses: 0,
-                    tool_ran: false,
-                    rejected: false,
-                    // No Claude agent asked it.
-                    fork: false,
-                    question: None,
-                },
-            );
+            // A re-delivery's card is replaced, as it always was; a first
+            // sighting's is already the one above.
+            if !registered {
+                inner.pending.insert(id, card_entry(raise));
+            }
         }
 
         // The doorbell hangs off the FILED event, and only a first sighting
@@ -9143,11 +9294,35 @@ impl Daemon {
                 self.db.max_seq(row.session_uid.clone()).await?,
             );
         }
+        // And the request event of every open card, one query per card on the
+        // dedup index: the seq its pending ref names, and a Codex card's turn. The
+        // cards are snapshotted first, so one raised after the snapshot is listed in
+        // `blocked_on` without a ref this time; its event reaches the phone live.
+        let cards: Vec<(ApprovalId, Source)> = {
+            let inner = self.inner.lock().await;
+            inner
+                .pending
+                .iter()
+                .map(|(id, entry)| (id.clone(), request_event_source(&entry.agent)))
+                .collect()
+        };
+        let mut requests: HashMap<ApprovalId, (u64, Option<String>)> =
+            HashMap::with_capacity(cards.len());
+        for ((uid, request_id), source) in cards {
+            let filed = self
+                .db
+                .filed_event(uid.clone(), source, format!("perm:{request_id}"))
+                .await?;
+            if let Some(filed) = filed {
+                requests.insert((uid, request_id), filed);
+            }
+        }
         let inner = self.inner.lock().await;
         Ok(Self::assemble_sessions(
             &inner,
             rows,
             &last_seqs,
+            &requests,
             &self.config,
         ))
     }
@@ -9161,6 +9336,7 @@ impl Daemon {
         inner: &Inner,
         rows: Vec<SessionRow>,
         last_seqs: &HashMap<String, u64>,
+        requests: &HashMap<ApprovalId, (u64, Option<String>)>,
         config: &Config,
     ) -> Vec<SessionSummary> {
         let now = protocol::time::now_unix_ms();
@@ -9181,6 +9357,26 @@ impl Daemon {
                 .filter(|p| p.session.uid == row.session_uid)
                 .map(|p| p.card.request_id.clone())
                 .collect();
+            // The same cards, by reference. A card whose request event was not
+            // found is not yet in the log, and is left out.
+            let mut pending: Vec<PendingRef> = inner
+                .pending
+                .iter()
+                .filter(|((uid, _), _)| *uid == row.session_uid)
+                .filter_map(|(id, entry)| {
+                    let (seq, turn_id) = requests.get(id)?;
+                    Some(PendingRef {
+                        request_id: id.1.clone(),
+                        seq: *seq,
+                        hold: entry.card.question_hold,
+                        // The request event's own turn: a Codex card's, and none
+                        // on a Claude card, whose request event carries none.
+                        turn_id: turn_id.clone(),
+                    })
+                })
+                .collect();
+            pending.sort_by_key(|card| card.seq);
+            let facts = inner.session_facts.get(&row.session_uid);
             // **One read, two fields.** The thread this run is on and the state of
             // the link carrying it are both answers about the same addressee, and
             // resolving it twice would let one summary disagree with itself: the
@@ -9241,6 +9437,9 @@ impl Daemon {
                 // `NoLink` and reports `none` on its own, so the two fields are
                 // independently true rather than one derived from the other.
                 codex_link: addressee.wire_link(),
+                pending,
+                model: facts.and_then(|facts| facts.model.clone()),
+                permission_mode: facts.and_then(|facts| facts.permission_mode.clone()),
             });
         }
         out
@@ -10394,6 +10593,15 @@ const DENIAL_WITH_REASON: &str = "The user doesn't want to proceed with this too
                                   use was rejected (eg. if it was a file edit, the new_string \
                                   was NOT written to the file). To tell you how to proceed, the \
                                   user said:\n";
+
+/// The source a card's `approval_request` event is filed under: Claude's by its
+/// hook, Codex's by this daemon with the card's row.
+fn request_event_source(agent: &protocol::agent::AgentKind) -> Source {
+    match agent {
+        protocol::agent::AgentKind::Codex => Source::Daemon,
+        _ => Source::Hook,
+    }
+}
 
 /// A hook from the main conversation rather than a background agent.
 fn main_thread(payload: &serde_json::Value) -> bool {
@@ -15657,6 +15865,7 @@ mod tests {
             project_label: label.into(),
             agent,
             created_ms: 0,
+            raise: 0,
             responder: None,
             claimed: false,
             local_misses: 0,
@@ -27675,6 +27884,7 @@ mod tests {
                 // memory some other way, so it is a Codex card here too.
                 agent: protocol::agent::AgentKind::Codex,
                 created_ms: protocol::time::now_unix_ms(),
+                raise: 0,
                 responder: Some(responder_tx),
                 claimed: false,
                 local_misses: 0,
@@ -27817,6 +28027,7 @@ mod tests {
                 agent: protocol::agent::AgentKind::Codex,
                 // Old enough that the grace cannot be what saves it.
                 created_ms: 0,
+                raise: 0,
                 responder: None,
                 claimed: false,
                 local_misses: 0,
@@ -31202,5 +31413,621 @@ mod tests {
         }
         normalise(&mut out);
         out
+    }
+
+    // ----------------------------------------- summary refs and facts (minor 23)
+
+    /// The Codex approval every test below raises: its thread, turn and item.
+    const CODEX_THREAD: &str = "01a06db1-1f8e-7db2-8fd5-10f13af55d1b";
+    const CODEX_TURN: &str = "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee";
+    const CODEX_ITEM: &str = "exec-d2700ed3-c69d-4915-a620-36c001e7f577";
+
+    /// A card's `approval_request` event, read back from the log by its dedup id.
+    fn request_event(daemon: &Arc<Daemon>, uid: &str, request_id: &str) -> Event {
+        let id = format!("perm:{request_id}");
+        daemon
+            .store
+            .events_after(uid, 0, 100_000)
+            .unwrap()
+            .into_iter()
+            .find(|event| {
+                event.kind == EventKind::ApprovalRequest
+                    && event.source_event_id.as_deref() == Some(id.as_str())
+            })
+            .expect("the card's request event is in the log")
+    }
+
+    async fn summary_of(daemon: &Arc<Daemon>, uid: &str) -> SessionSummary {
+        daemon
+            .sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.session_uid == uid)
+            .expect("the run is listed")
+    }
+
+    fn fork_permission_request() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../fixtures/claude/askuq-fork-permissionrequest-2.1.286.json"
+        ))
+        .unwrap()
+    }
+
+    /// **A pending ref names the seq of its own request event**, for a Claude
+    /// card (filed by the hook, source `hook`) and a Codex card (filed with its
+    /// row, source `daemon`, carrying its turn).
+    #[tokio::test]
+    async fn a_pending_ref_names_the_seq_of_its_request_event_for_both_agents() {
+        let daemon = test_daemon();
+        for n in 0..3 {
+            tool_call(&daemon, "cc-1", TEST_UID, &format!("toolu_{n}")).await;
+        }
+        let request_id = raise_prompt(&daemon, TEST_UID, "p1", "touch /tmp/a").await;
+        let request = request_event(&daemon, TEST_UID, &request_id);
+        assert_eq!(
+            request.seq, 4,
+            "the premise: the request is not the first event"
+        );
+        let summary = summary_of(&daemon, TEST_UID).await;
+        assert_eq!(summary.blocked_on, vec![request_id.clone()]);
+        assert_eq!(
+            summary.pending,
+            vec![protocol::event::PendingRef {
+                request_id,
+                seq: request.seq,
+                hold: serde_json::from_value(request.payload["card"]["question_hold"].clone())
+                    .unwrap(),
+                turn_id: None,
+            }]
+        );
+
+        let codex = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+        register_codex_session(&daemon, codex, "cc-2").await;
+        let session = SessionKey::new(codex, "cc-2");
+        tool_call(&daemon, "cc-2", codex, "toolu_codex").await;
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &session,
+                    codex_command_card("codex-req-1"),
+                    CODEX_THREAD,
+                    CODEX_TURN,
+                    CODEX_ITEM,
+                    "commandExecution",
+                )
+                .await
+        );
+        let request = request_event(&daemon, codex, "codex-req-1");
+        assert_eq!(request.source, Source::Daemon);
+        assert!(
+            request.seq > 1,
+            "the premise: the request is not the first event"
+        );
+        let summary = summary_of(&daemon, codex).await;
+        assert_eq!(
+            summary.pending,
+            vec![protocol::event::PendingRef {
+                request_id: "codex-req-1".into(),
+                seq: request.seq,
+                hold: None,
+                turn_id: Some(CODEX_TURN.into()),
+            }]
+        );
+    }
+
+    /// **Three open cards of 600 KB each cost the session list nothing**: a
+    /// `sessions` reply names them by reference, stays under 64 KiB, and decodes.
+    #[tokio::test]
+    async fn a_sessions_reply_with_three_huge_cards_stays_small_and_decodes() {
+        let daemon = test_daemon();
+        let big = "x".repeat(600 * 1024);
+        for n in 0..3 {
+            raise_prompt(&daemon, TEST_UID, &format!("p{n}"), &format!("{big}{n}")).await;
+        }
+        let sessions = daemon.sessions().await.unwrap();
+        assert_eq!(
+            sessions[0].blocked_on.len(),
+            3,
+            "the premise: three open cards"
+        );
+        let encoded =
+            serde_json::to_string(&protocol::ws::ServerMessage::Sessions { sessions }).unwrap();
+        let decoded: protocol::ws::ServerMessage = serde_json::from_str(&encoded).unwrap();
+        let protocol::ws::ServerMessage::Sessions { sessions } = decoded else {
+            panic!("a sessions reply decodes as one");
+        };
+        assert_eq!(sessions[0].pending.len(), 3, "{encoded}");
+        assert!(
+            encoded.len() < 64 * 1024,
+            "a sessions reply of {} bytes carries the cards' bodies",
+            encoded.len()
+        );
+    }
+
+    /// **A background agent's hooks never change the run's permission mode** —
+    /// its tool call or its question, measured on 2.1.286 with mode `bubble` and
+    /// an effort of its own.
+    #[tokio::test]
+    async fn a_background_agents_hooks_never_change_the_permission_mode() {
+        let daemon = test_daemon();
+        daemon
+            .handle_hook(post(
+                TEST_UID,
+                json!({
+                    "hook_event_name": "PreToolUse",
+                    "cwd": "/tmp",
+                    "permission_mode": "acceptEdits",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "ls"},
+                    "tool_use_id": "toolu_main",
+                }),
+                false,
+            ))
+            .await;
+        let main_seq = daemon.store.max_seq(TEST_UID).unwrap();
+
+        let question = fork_permission_request();
+        let mut call = question.clone();
+        call["hook_event_name"] = json!("PreToolUse");
+        call["tool_use_id"] = json!("toolu_fork");
+        daemon.handle_hook(post(TEST_UID, call, false)).await;
+        daemon.handle_hook(post(TEST_UID, question, false)).await;
+        let filed = daemon.store.events_after(TEST_UID, main_seq, 100).unwrap();
+        assert_eq!(
+            filed.len(),
+            2,
+            "the premise: both of the fork's hooks were filed"
+        );
+        assert!(filed.iter().all(|event| event
+            .payload
+            .to_string()
+            .contains("\"permission_mode\":\"bubble\"")));
+
+        assert_eq!(
+            summary_of(&daemon, TEST_UID).await.permission_mode,
+            Some(protocol::event::Fact {
+                value: "acceptEdits".into(),
+                seq: main_seq,
+            })
+        );
+    }
+
+    /// **A quiet run's facts are right after a restart**, rebuilt from the log:
+    /// the model a `/model` receipt set after the `SessionStart`, and the mode a
+    /// transcript line set after the main agent's hook — and a background
+    /// agent's later hook changes neither, before the restart or after it.
+    #[tokio::test]
+    async fn a_quiet_sessions_facts_are_rebuilt_from_the_log_after_a_restart() {
+        let store = shared_store();
+        let daemon = daemon_on(Arc::clone(&store), Config::default());
+        daemon
+            .handle_hook(post(
+                TEST_UID,
+                json!({
+                    "hook_event_name": "SessionStart",
+                    "cwd": "/tmp",
+                    "source": "startup",
+                    "model": "claude-opus-5[1m]",
+                    "permission_mode": "default",
+                }),
+                false,
+            ))
+            .await;
+        tool_call(&daemon, "cc-1", TEST_UID, "toolu_1").await;
+        let key = test_key();
+        let line = |uuid: &str, kind: EventKind, payload: serde_json::Value| {
+            PendingEvent::new(&key, kind, payload, Source::Transcript)
+                .with_source_event_id(uuid.to_string())
+        };
+        let cursor = crate::store::TailCursor {
+            path: "/dev/null".into(),
+            dev: 0,
+            ino: 0,
+            offset: 0,
+            last_line_start: 0,
+            last_line_sha: String::new(),
+        };
+        daemon
+            .ingest_scan(
+                TEST_UID,
+                vec![
+                    line(
+                        "u1",
+                        EventKind::UserMessage,
+                        json!({"type": "user", "uuid": "u1", "message": {"role": "user",
+                            "content": "<local-command-stdout>Set model to claude-sonnet-5 and saved as your default for new sessions</local-command-stdout>"}}),
+                    ),
+                    line(
+                        "u2",
+                        EventKind::Other("transcript_permission-mode".into()),
+                        json!({"type": "permission-mode", "uuid": "u2", "permissionMode": "acceptEdits"}),
+                    ),
+                    line(
+                        "u3",
+                        EventKind::UserMessage,
+                        json!({"type": "user", "uuid": "u3", "message": {"role": "user", "content": "thanks"}}),
+                    ),
+                ],
+                cursor,
+            )
+            .await
+            .unwrap();
+        let mut call = fork_permission_request();
+        call["hook_event_name"] = json!("PreToolUse");
+        call["tool_use_id"] = json!("toolu_fork");
+        daemon.handle_hook(post(TEST_UID, call, false)).await;
+
+        let log = store.events_after(TEST_UID, 0, 100).unwrap();
+        let by_id = |id: &str| {
+            log.iter()
+                .find(|event| event.source_event_id.as_deref() == Some(id))
+                .unwrap()
+                .clone()
+        };
+        let (receipt, mode) = (by_id("u1"), by_id("u2"));
+        let model = Some(protocol::event::ModelFact {
+            value: "claude-sonnet-5".into(),
+            seq: receipt.seq,
+            source: protocol::event::ModelSource::Command,
+            at: receipt.ts.clone(),
+        });
+        let permission_mode = Some(protocol::event::Fact {
+            value: "acceptEdits".into(),
+            seq: mode.seq,
+        });
+        assert!(
+            log.last().unwrap().seq > mode.seq,
+            "the premise: newer events follow both deciding ones"
+        );
+
+        let live = summary_of(&daemon, TEST_UID).await;
+        assert_eq!(
+            (&live.model, &live.permission_mode),
+            (&model, &permission_mode)
+        );
+
+        let restarted = daemon_on(Arc::clone(&store), Config::default());
+        restarted.recover().await;
+        let rebuilt = summary_of(&restarted, TEST_UID).await;
+        assert_eq!(
+            (&rebuilt.model, &rebuilt.permission_mode),
+            (&model, &permission_mode)
+        );
+    }
+
+    /// **A Codex card is in `pending` before anyone can see its request event** —
+    /// in the log, where a replay or a page reads it, or on the broadcast.
+    ///
+    /// Proved at the commit itself: the test holds the database's write lock from
+    /// a connection of its own, so the raise stalls inside its commit with the
+    /// request event not yet in the log. The card must already be pending there.
+    /// A raise that inserts the card after its commit — whatever locks it takes on
+    /// the way — cannot have, because its commit cannot finish while the lock is
+    /// held.
+    #[tokio::test]
+    async fn a_codex_card_is_pending_before_its_request_event_is_visible() {
+        let (store, path) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        let id = (TEST_UID.to_string(), "codex-req-1".to_string());
+        let mut events = daemon.events_tx.subscribe();
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let raising = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .raise_codex_approval(
+                        &test_key(),
+                        codex_command_card("codex-req-1"),
+                        CODEX_THREAD,
+                        CODEX_TURN,
+                        CODEX_ITEM,
+                        "commandExecution",
+                    )
+                    .await
+            })
+        };
+        // Within the store's five-second busy timeout, so the stalled commit is
+        // still waiting rather than refused.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !daemon.inner.lock().await.pending.contains_key(&id) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the raise reached its commit with no card pending"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !daemon
+                .store
+                .events_after(TEST_UID, 0, 100)
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == EventKind::ApprovalRequest),
+            "the premise: the request event is not in the log yet"
+        );
+        writer.execute_batch("COMMIT").unwrap();
+
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.kind == EventKind::ApprovalRequest {
+                break;
+            }
+        }
+        assert!(daemon.inner.lock().await.pending.contains_key(&id));
+        assert!(raising.await.unwrap(), "the card was raised");
+    }
+
+    /// **A Codex raise aborted while it waits leaves no card behind** — a card
+    /// with no row and no event is one nothing can expire, retire or delete. A
+    /// link teardown aborts the task that raises, at whatever await it is on;
+    /// here it is aborted while waiting for the run's publish gate, and nothing of
+    /// it lands once the gate is free.
+    #[tokio::test]
+    async fn an_aborted_codex_raise_leaves_no_card_without_its_row_and_event() {
+        let daemon = test_daemon();
+        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        let id = (TEST_UID.to_string(), "codex-req-1".to_string());
+        let gate = daemon.publish_gate(TEST_UID).await;
+        let held = gate.lock().await;
+        let raising = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                daemon
+                    .raise_codex_approval(
+                        &test_key(),
+                        codex_command_card("codex-req-1"),
+                        CODEX_THREAD,
+                        CODEX_TURN,
+                        CODEX_ITEM,
+                        "commandExecution",
+                    )
+                    .await
+            })
+        };
+        // The raise has the gate in hand and is waiting for it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&gate) < 3 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the raise never reached the gate"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        raising.abort();
+        assert!(raising.await.unwrap_err().is_cancelled());
+        assert!(
+            !daemon.inner.lock().await.pending.contains_key(&id),
+            "an aborted raise left a card with no row and no event"
+        );
+
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let card = daemon.inner.lock().await.pending.contains_key(&id);
+        let event = daemon
+            .store
+            .events_after(TEST_UID, 0, 100)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == EventKind::ApprovalRequest);
+        let row = !daemon
+            .store
+            .codex_pending_approvals(TEST_UID)
+            .unwrap()
+            .is_empty();
+        assert_eq!(
+            (card, event),
+            (row, row),
+            "a card, its event and its row go together"
+        );
+    }
+
+    /// Raise the test's Codex card in a task of its own, so the test can abort it.
+    fn raise_in_a_task(daemon: &Arc<Daemon>) -> tokio::task::JoinHandle<bool> {
+        let daemon = Arc::clone(daemon);
+        tokio::spawn(async move {
+            daemon
+                .raise_codex_approval(
+                    &test_key(),
+                    codex_command_card("codex-req-1"),
+                    CODEX_THREAD,
+                    CODEX_TURN,
+                    CODEX_ITEM,
+                    "commandExecution",
+                )
+                .await
+        })
+    }
+
+    /// The card in memory, its request event in the log, its row in the table.
+    async fn card_event_row(daemon: &Arc<Daemon>) -> (bool, bool, bool) {
+        let id = (TEST_UID.to_string(), "codex-req-1".to_string());
+        let card = daemon.inner.lock().await.pending.contains_key(&id);
+        let event = daemon
+            .store
+            .events_after(TEST_UID, 0, 100)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == EventKind::ApprovalRequest);
+        let row = !daemon
+            .store
+            .codex_pending_approvals(TEST_UID)
+            .unwrap()
+            .is_empty();
+        (card, event, row)
+    }
+
+    /// Wait until the commit a raise handed to the blocking pool has finished, on
+    /// a pool thread, so a take-back handed to a task meanwhile still runs.
+    async fn wait_out_the_writer(daemon: &Arc<Daemon>) {
+        let store = Arc::clone(&daemon.store);
+        tokio::task::spawn_blocking(move || store.wait_out_the_writer_for_tests())
+            .await
+            .unwrap();
+    }
+
+    /// Start a raise against a database another connection holds the write lock
+    /// of, and wait until it is stalled inside its commit with its card pending.
+    async fn a_raise_stalled_in_its_commit(daemon: &Arc<Daemon>) -> tokio::task::JoinHandle<bool> {
+        let id = (TEST_UID.to_string(), "codex-req-1".to_string());
+        let raising = raise_in_a_task(daemon);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !daemon.inner.lock().await.pending.contains_key(&id) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the raise reached its commit with no card pending"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        raising
+    }
+
+    /// **A raise aborted inside a commit that then fails leaves nothing.** The
+    /// test holds its write lock until the commit the aborted raise handed to the
+    /// blocking pool has given up, so that commit is refused.
+    #[tokio::test]
+    async fn a_raise_aborted_inside_a_commit_that_fails_leaves_nothing() {
+        let (store, path) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let raising = a_raise_stalled_in_its_commit(&daemon).await;
+        raising.abort();
+        assert!(raising.await.unwrap_err().is_cancelled());
+        wait_out_the_writer(&daemon).await;
+        writer.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            card_event_row(&daemon).await,
+            (false, false, false),
+            "(card, event, row) after an aborted raise whose commit failed"
+        );
+    }
+
+    /// **A raise aborted inside a commit that then succeeds leaves no card in
+    /// memory**; what is durable is the commit the blocking pool finished — the
+    /// row and the request event, which this daemon's next start restores as a
+    /// card. Nothing is broadcast: the raise that would have was dropped.
+    #[tokio::test]
+    async fn a_raise_aborted_inside_a_commit_that_succeeds_leaves_only_the_durable_half() {
+        let (store, path) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        let mut events = daemon.events_tx.subscribe();
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let raising = a_raise_stalled_in_its_commit(&daemon).await;
+        raising.abort();
+        assert!(raising.await.unwrap_err().is_cancelled());
+        writer.execute_batch("COMMIT").unwrap();
+        // The commit the pool was running lands once the lock is free.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while daemon
+            .store
+            .codex_pending_approvals(TEST_UID)
+            .unwrap()
+            .is_empty()
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the commit never landed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            card_event_row(&daemon).await,
+            (false, true, true),
+            "(card, event, row) after an aborted raise whose commit succeeded"
+        );
+        let broadcast = std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| event.kind == EventKind::ApprovalRequest);
+        assert!(!broadcast, "a dropped raise published its event");
+    }
+
+    /// A commit that fails with nobody aborting: the caller is told `false` and
+    /// the card it put in is taken back.
+    #[tokio::test]
+    async fn a_raise_whose_commit_fails_takes_its_card_back() {
+        let (store, path) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let raised = raise_in_a_task(&daemon).await.unwrap();
+        writer.execute_batch("COMMIT").unwrap();
+        assert!(!raised);
+        assert_eq!(card_event_row(&daemon).await, (false, false, false));
+    }
+
+    /// **The same, with the state lock held by someone else at the moment of the
+    /// abort**, so the take-back cannot be done on the spot and is handed on.
+    #[tokio::test]
+    async fn a_raise_aborted_while_the_state_lock_is_held_still_leaves_nothing() {
+        let (store, path) = shared_store_on_disk();
+        let daemon = daemon_on(store, Config::default());
+        register_codex_session(&daemon, TEST_UID, "cc-1").await;
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let raising = a_raise_stalled_in_its_commit(&daemon).await;
+        let held = daemon.inner.lock().await;
+        raising.abort();
+        assert!(raising.await.unwrap_err().is_cancelled());
+        drop(held);
+        wait_out_the_writer(&daemon).await;
+        writer.execute_batch("COMMIT").unwrap();
+        assert_eq!(
+            card_event_row(&daemon).await,
+            (false, false, false),
+            "(card, event, row) after an aborted raise whose commit failed"
+        );
+    }
+
+    /// **A raise takes back only its own card.** A card put in its place since —
+    /// here one recovery would restore, inserted by no raise — survives the
+    /// raise's take-back on every path: a refused commit, an abort with the
+    /// state lock free, and an abort while it is held, when the take-back is
+    /// handed on.
+    #[tokio::test]
+    async fn a_raise_takes_back_only_the_card_it_put_there() {
+        let id = (TEST_UID.to_string(), "codex-req-1".to_string());
+        for path in ["refused commit", "abort", "abort under the state lock"] {
+            let (store, db) = shared_store_on_disk();
+            let daemon = daemon_on(store, Config::default());
+            register_codex_session(&daemon, TEST_UID, "cc-1").await;
+            let writer = rusqlite::Connection::open(&db).unwrap();
+            writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let raising = a_raise_stalled_in_its_commit(&daemon).await;
+            let mut held = daemon.inner.lock().await;
+            let mut replaced = held.pending.remove(&id).unwrap();
+            replaced.raise = 0;
+            held.pending.insert(id.clone(), replaced);
+            match path {
+                "refused commit" => {
+                    drop(held);
+                    assert!(
+                        !raising.await.unwrap(),
+                        "the premise: the commit is refused"
+                    );
+                }
+                "abort" => {
+                    drop(held);
+                    raising.abort();
+                    assert!(raising.await.unwrap_err().is_cancelled());
+                }
+                _ => {
+                    raising.abort();
+                    assert!(raising.await.unwrap_err().is_cancelled());
+                    drop(held);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                daemon.inner.lock().await.pending.contains_key(&id),
+                "{path}: the raise took back a card it did not put there"
+            );
+            writer.execute_batch("COMMIT").unwrap();
+        }
     }
 }

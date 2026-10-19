@@ -284,6 +284,14 @@ final class CodexControls {
         observedTurns.append(turn)
     }
 
+    /// The phone skipped events it will never be sent — a window that starts
+    /// past everything it held — so `turns`, which a compose told it about
+    /// before then, may have ended among them. One still running names itself
+    /// again in the window.
+    func forgetObservedTurns(_ turns: [String]) {
+        observedTurns.removeAll { turns.contains($0) }
+    }
+
     /// The frame never left this phone. Recorded in the app's own words, never
     /// dressed as something the daemon said.
     /// **A refusal is an outcome too.**
@@ -308,9 +316,20 @@ final class CodexControls {
     }
 
     /// Whether the bounded grey is still in force.
-    func isStopGreyed(now: Date) -> Bool {
+    ///
+    /// **The clock is read only while a grey stands.** The fleet asks for every
+    /// row on every pass, passing `model.now`, which ticks every second;
+    /// evaluated up front, it made an idle fleet redraw every row once a second.
+    func isStopGreyed(now: @autoclosure () -> Date) -> Bool {
         guard let stopGreyedUntil else { return false }
-        return now < stopGreyedUntil
+        return now() < stopGreyedUntil
+    }
+
+    /// A grey whose time is up is gone, so nothing goes on timing it. Called on
+    /// the model's tick: left in place, an expired grey kept the fleet reading
+    /// the clock, and re-running, every second until the next compose.
+    func expireStopGrey(now: Date) {
+        if let stopGreyedUntil, now >= stopGreyedUntil { self.stopGreyedUntil = nil }
     }
 
     /// **Which refusals are worth waiting out** — the daemon's own answer.

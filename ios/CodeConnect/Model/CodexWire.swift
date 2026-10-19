@@ -301,14 +301,18 @@ enum CodexTurnTracker {
     /// Deliberately agnostic about the agent. Who is allowed to act on a running
     /// turn is decided at the call site by `SessionSummary.agent`, because that
     /// is where the answer can be wrong in a way a reader would notice.
+    ///
+    /// `knownEnded` are turns the session saw end whose terminals `events` may no
+    /// longer hold; they count as ended from the start of the scan.
     static func runningTurn(
-        in events: [Event], observed: [String] = [], retired: Set<String> = []
+        in events: [Event], observed: [String] = [], retired: Set<String> = [],
+        knownEnded: Set<String> = []
     ) -> String? {
         var candidate: String?
         // **Which turns the events say are over**, kept by id rather than
         // collapsed into "nothing is running". The two are not the same fact,
         // and treating them as one is what let an ended turn come back below.
-        var ended: Set<String> = []
+        var ended = knownEnded
         for event in events {
             guard let turn = event.turnID, !turn.isEmpty else { continue }
             if event.isTurnComplete {

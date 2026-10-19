@@ -1320,6 +1320,27 @@ impl Store {
         .expect("test fixture");
     }
 
+    /// Wait until a write that is about to take the writer, or has taken it, has
+    /// finished.
+    ///
+    /// Test-only, for a test that holds another connection's write lock so that a
+    /// commit already handed to the blocking pool fails: that lock has to be held
+    /// until the commit has given up. A fixed hold cannot promise it, because
+    /// `busy_timeout` totals the sleeps SQLite asks for, not the time they take,
+    /// and on a loaded machine they take longer.
+    #[cfg(test)]
+    pub fn wait_out_the_writer_for_tests(&self) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while self.writer.try_lock().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no write took the writer"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        drop(self.write());
+    }
+
     /// Make every device query fail.
     ///
     /// Test-only, and it exists for the same reason `punch_hole_for_tests` does:
@@ -1579,20 +1600,29 @@ impl Store {
     /// The sequence number of the event a hook filed under `source_event_id`
     /// in this run, read on the dedup index.
     pub fn hook_event_seq(&self, session_uid: &str, source_event_id: &str) -> Result<Option<u64>> {
+        Ok(self
+            .filed_event(session_uid, &Source::Hook, source_event_id)?
+            .map(|(seq, _)| seq))
+    }
+
+    /// The seq and turn of the event `source` filed under `source_event_id` in
+    /// this run, read on the dedup index.
+    pub fn filed_event(
+        &self,
+        session_uid: &str,
+        source: &Source,
+        source_event_id: &str,
+    ) -> Result<Option<(u64, Option<String>)>> {
         let conn = self.read();
-        let seq: Option<i64> = conn
+        let filed: Option<(i64, Option<String>)> = conn
             .query_row(
-                "SELECT seq FROM events
+                "SELECT seq, turn_id FROM events
                   WHERE session_uid = ?1 AND source = ?2 AND source_event_id = ?3",
-                params![
-                    session_uid,
-                    protocol::event::Source::Hook.as_str(),
-                    source_event_id
-                ],
-                |row| row.get(0),
+                params![session_uid, source.as_str(), source_event_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(seq.map(|seq| seq as u64))
+        Ok(filed.map(|(seq, turn_id)| (seq as u64, turn_id)))
     }
 
     /// A transcript entry this run filed under Claude's `uuid` for it.
@@ -1648,28 +1678,76 @@ impl Store {
         )?;
         let rows = stmt.query_map(
             params![session_uid, after_seq as i64, limit as i64],
-            |row| {
-                let payload: String = row.get(4)?;
-                let source: String = row.get(5)?;
-                Ok(Event {
-                    seq: row.get::<_, i64>(0)? as u64,
-                    session_uid: session_uid.to_string(),
-                    session_id: row.get(1)?,
-                    ts: row.get(2)?,
-                    kind: EventKind::from_str_lossy(&row.get::<_, String>(3)?),
-                    payload: serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null),
-                    source: parse_source(&source),
-                    source_event_id: row.get(6)?,
-                    turn_id: row.get(7)?,
-                    item_id: row.get(8)?,
-                })
-            },
+            |row| event_from_row(session_uid, row),
         )?;
         let mut events = Vec::new();
         for row in rows {
             events.push(row?);
         }
         Ok(events)
+    }
+
+    /// The newest `limit` events below `before_seq`, oldest first — one earlier
+    /// page. Read backwards on the `(session_uid, seq)` primary key.
+    pub fn events_before(
+        &self,
+        session_uid: &str,
+        before_seq: u64,
+        limit: u32,
+    ) -> Result<Vec<Event>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
+               FROM events
+              WHERE session_uid = ?1 AND seq < ?2
+              ORDER BY seq DESC
+              LIMIT ?3",
+        )?;
+        // Clamped, because SQLite integers are signed and a mark past `i64::MAX`
+        // is still past the tail rather than below the head.
+        let before = i64::try_from(before_seq).unwrap_or(i64::MAX);
+        let rows = stmt.query_map(params![session_uid, before, limit as i64], |row| {
+            event_from_row(session_uid, row)
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        events.reverse();
+        Ok(events)
+    }
+
+    /// A run's facts as of the newest event that decided each: one read per
+    /// fact, newest first, stopped at the first event that decides it.
+    ///
+    /// Each read is narrowed in SQL to the rows that can decide its fact under
+    /// [`protocol::facts`] — a `session_start` or a user line for the model, a
+    /// hook or Claude's permission-mode line for the mode — so a long run costs
+    /// those rows down to the deciding one, not its whole log.
+    pub fn session_facts(&self, session_uid: &str) -> Result<protocol::facts::SessionFacts> {
+        let conn = self.read();
+        Ok(protocol::facts::SessionFacts {
+            model: newest_decided(
+                &conn,
+                session_uid,
+                "kind IN (?2, ?3)",
+                &[
+                    EventKind::SessionStart.as_str(),
+                    EventKind::UserMessage.as_str(),
+                ],
+                protocol::facts::model_fact,
+            )?,
+            permission_mode: newest_decided(
+                &conn,
+                session_uid,
+                "(kind = ?2 OR source = ?3)",
+                &[
+                    protocol::facts::TRANSCRIPT_PERMISSION_MODE,
+                    Source::Hook.as_str(),
+                ],
+                protocol::facts::permission_mode_fact,
+            )?,
+        })
     }
 
     /// Write or update one session row — unless its uid has been deliberately
@@ -5951,6 +6029,52 @@ fn parse_source(value: &str) -> Source {
         // must not out-rank a real hook or transcript fact in dedup.
         _ => Source::Unknown,
     }
+}
+
+/// What the newest of a run's events matching `filter` decides, walking them
+/// newest first and stopping at the first that decides anything. `filter` binds
+/// `?2` onwards to `bind`.
+fn newest_decided<T>(
+    conn: &Connection,
+    session_uid: &str,
+    filter: &str,
+    bind: &[&str],
+    decide: fn(&Event) -> Option<T>,
+) -> Result<Option<T>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id
+           FROM events
+          WHERE session_uid = ?1 AND {filter}
+          ORDER BY seq DESC"
+    ))?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(
+        std::iter::once(session_uid).chain(bind.iter().copied()),
+    ))?;
+    while let Some(row) = rows.next()? {
+        if let Some(fact) = decide(&event_from_row(session_uid, row)?) {
+            return Ok(Some(fact));
+        }
+    }
+    Ok(None)
+}
+
+/// One event, from a row selected as `seq, session_id, ts, kind, payload, source,
+/// source_event_id, turn_id, item_id`.
+fn event_from_row(session_uid: &str, row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
+    let payload: String = row.get(4)?;
+    let source: String = row.get(5)?;
+    Ok(Event {
+        seq: row.get::<_, i64>(0)? as u64,
+        session_uid: session_uid.to_string(),
+        session_id: row.get(1)?,
+        ts: row.get(2)?,
+        kind: EventKind::from_str_lossy(&row.get::<_, String>(3)?),
+        payload: serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null),
+        source: parse_source(&source),
+        source_event_id: row.get(6)?,
+        turn_id: row.get(7)?,
+        item_id: row.get(8)?,
+    })
 }
 
 #[cfg(test)]

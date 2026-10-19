@@ -26,6 +26,16 @@ final class SampleModeUITests: XCTestCase {
         return app
     }
 
+    /// The sample is the whole fleet already, so it shows at once: no loader
+    /// waiting on a Mac that does not exist.
+    func testTheSampleFleetIsNotHeldBehindTheLoader() {
+        let app = launchUnpaired()
+        let enter = app.buttons["pairing-sample-mode"]
+        XCTAssertTrue(enter.waitForExistence(timeout: 15))
+        enter.tap()
+        XCTAssertTrue(sampleBanner(app).waitForExistence(timeout: 2))
+    }
+
     func testAReviewerWithNoMacCanReachTheFleetAndGetBack() {
         let app = launchUnpaired()
 
