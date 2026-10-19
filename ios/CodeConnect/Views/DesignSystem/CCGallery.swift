@@ -335,6 +335,7 @@ import SwiftUI
                     contrastRow("textSecondary", CC.text.secondary, "8.13:1")
                     contrastRow("textTertiary", CC.text.tertiary, "5.42:1")
                     contrastRow("textDisabled", CC.text.disabled, "2.69:1 · exempt")
+                    contrastRow("textPlaceholder", CC.text.placeholder, "3.24:1 · composer only")
                 }
 
                 Text("SEMANTIC")
@@ -1051,7 +1052,7 @@ import SwiftUI
                         error: "That is not a valid pairing token.")
                     CCField(
                         label: "Message", text: $multiline,
-                        placeholder: "Say something to this agent",
+                        placeholder: "Ask anything",
                         axis: .vertical, lineLimit: 1...5)
 
                     Text("NO LABEL - THE COMPOSE BAR'S FORM")
@@ -1065,7 +1066,7 @@ import SwiftUI
                     .fixedSize(horizontal: false, vertical: true)
                     CCField(
                         text: $unlabelled,
-                        placeholder: "Say something to this agent",
+                        placeholder: "Ask anything",
                         axis: .vertical, lineLimit: 1...5)
                 }
             }

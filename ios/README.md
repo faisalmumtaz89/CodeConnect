@@ -874,7 +874,7 @@ point inside the `Button`'s own frame); it shipped with the border drawn around
 the hit target and measured **49.67pt**. `CCFreshnessPill` draws its 36 inside
 44 — it shipped as the height of its own content, **22.33pt**, beside a 36pt
 bordered circle on the same baseline. And a `CCBadge` that carries an `action` is
-not a badge: file chips, compose templates and toggles are `CC.size.chip`
+not a badge: file chips and toggles are `CC.size.chip`
 32, not the label's 20, so a row of things to press stops reading as a strip of
 captions.
 
@@ -1062,6 +1062,7 @@ actually produce was checked.
 | `textSecondary` #A1A1A1 | 8.13 | 7.66 | 7.19 | 6.74 |
 | `textTertiary` #828282 | 5.42 | 5.11 | 4.79 | 4.50 |
 | `textDisabled` #525252 | 2.69 | 2.53 | 2.38 | 2.23 — exempt |
+| `textPlaceholder` #5E5E5E | 3.24 | 3.05 | 2.87 | 2.68 — below AA |
 
 - **`textTertiary` was #737373 and failed AA on all four surfaces** (4.43 / 4.18
   / 3.92 / 3.67). A first correction to #7D7D7D cleared the first three but sat
@@ -1073,6 +1074,9 @@ actually produce was checked.
   ("inactive user interface component"). Permitted uses only: diff gutter line
   numbers, the cwd breadcrumb, the `·` between a project and its start time, disabled-button
   labels — each of which sits beside a full-contrast explanation.
+- `textPlaceholder` is below AA by choice and has one use: the session
+  composer's empty-field prompt, which recedes behind the chat. The field's
+  accessibility label names it, so VoiceOver does not depend on the prompt.
 
 **Semantic on surface** — all ✅: success 10.52 / info 5.71 / warning 10.36 /
 danger 6.43 on `bg`; the tightest is info on `surfaceOverlay` at 4.73.

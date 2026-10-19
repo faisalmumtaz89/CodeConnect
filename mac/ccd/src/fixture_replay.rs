@@ -406,3 +406,66 @@ fn transcript_and_hooks_coexist_without_collapsing_each_other() {
         "the two planes must not dedup against each other"
     );
 }
+
+/// **The user lines a phone reads, as this build emits them.** Every
+/// `type:"user"` line of `transcript/turn-ends-2.1.290.jsonl` that is not a tool
+/// result, driven through the production tailer and store and serialised as the
+/// events a phone is sent: the typed prompts, three lines Claude Code wrote for
+/// the model and marked `isMeta` (Stop hook feedback twice, the `/rename`
+/// reminder), and a background agent's `<task-notification>`. The phone's
+/// timeline tests read the copy under `ios/` (byte-identical, by
+/// `fixtures/check-duplicated-fixtures.sh`), so what they draw is drawn from what
+/// this daemon sends, not from a payload written by hand.
+#[test]
+fn the_user_lines_wire_fixture_is_what_this_build_emits() {
+    const FIXTURE: &str = include_str!("../../../fixtures/claude/transcript-user-lines-wire.json");
+    let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(
+        derived_user_lines_wire(),
+        committed,
+        "the committed user-lines wire no longer matches what this build emits. Regenerate \
+         it with cargo test -p ccd --bin ccd -- --ignored \
+         regenerate_the_user_lines_wire_fixture, then copy it over its copy under ios/ \
+         (fixtures/check-duplicated-fixtures.sh names it)"
+    );
+}
+
+/// Rewrite `fixtures/claude/transcript-user-lines-wire.json` with what this
+/// build emits.
+#[test]
+#[ignore = "generator, not a gate"]
+fn regenerate_the_user_lines_wire_fixture() {
+    let wire = serde_json::to_string_pretty(&derived_user_lines_wire()).unwrap();
+    std::fs::write(
+        fixture("claude/transcript-user-lines-wire.json"),
+        wire + "\n",
+    )
+    .unwrap();
+}
+
+fn derived_user_lines_wire() -> serde_json::Value {
+    let store = temp_store();
+    // A fixed run, so the derivation is the same bytes on every build.
+    let run = protocol::event::SessionKey::new("01K1B3XQ8ZC0DE5FGH7JKMNPQR", "cc-1");
+    seed_session(&store, &run);
+    let path = fixture("transcript/turn-ends-2.1.290.jsonl");
+    let scan = crate::tailer::scan_file(&store, &run, path.to_str().unwrap())
+        .unwrap()
+        .unwrap();
+    store
+        .append_batch_with_cursor(&run.uid, &scan.events, &scan.cursor)
+        .unwrap();
+    let events: Vec<serde_json::Value> = store
+        .events_after(&run.uid, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::UserMessage)
+        .map(|event| {
+            let mut value = serde_json::to_value(event).unwrap();
+            // The scan's clock read, the one field that is not the recording's.
+            value["ts"] = serde_json::json!("2026-10-06T20:30:00.000Z");
+            value
+        })
+        .collect();
+    serde_json::Value::Array(events)
+}

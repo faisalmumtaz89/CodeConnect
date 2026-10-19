@@ -2,18 +2,8 @@ import XCTest
 
 @testable import CodeConnect
 
-/// What the session screen's header and composer say about the run.
+/// What the session screen's header says about the run.
 final class SessionHeaderTests: XCTestCase {
-
-    /// The composer names the agent whenever the app knows it — Claude too,
-    /// which used to be "this agent" on a screen that says CLAUDE CODE above it.
-    func testTheComposerNamesTheAgentItKnows() {
-        XCTAssertEqual(ComposerTemplates.placeholder(for: .claude), "Ask Claude to do anything")
-        XCTAssertEqual(ComposerTemplates.placeholder(for: .codex), "Ask Codex to do anything")
-        XCTAssertEqual(ComposerTemplates.placeholder(for: nil), "Say something to this agent")
-        XCTAssertEqual(
-            ComposerTemplates.placeholder(for: .unsupported("gemini")), "Say something to this agent")
-    }
 
     /// The diff control's count: a clean tree is a counted zero, not the same
     /// bare `±` as a diff nobody has asked for.

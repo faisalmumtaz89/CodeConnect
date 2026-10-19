@@ -3,6 +3,18 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A plainer message box, and Claude's notes to itself stay its own
+
+- The message box says "Ask anything", in a quieter grey, and the suggestion chips under it
+  (Continue, Fix it, Run the tests, …) are gone.
+- When a background agent or command finishes, the chat shows the line the Mac shows —
+  `Agent "Audit the parser" finished · 4m 3s`, its dot coloured by how the task ended —
+  instead of Claude Code's raw report under YOU.
+- Lines Claude Code writes for itself, not for you, no longer appear as yours: another
+  session's message, a scheduled prompt, Stop hook feedback, and the summary that continues
+  a compacted conversation.
+- iPhone only (1.1.6); the Mac needs no update.
+
 ## Chat history in pages, and a fleet that keeps up
 
 - A chat opens on its newest 500 events, at launch and on every return to the app, however

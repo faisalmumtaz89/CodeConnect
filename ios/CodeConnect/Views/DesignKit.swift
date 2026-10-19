@@ -59,6 +59,10 @@ private enum Hex {
     /// component". A disabled control must *look* disabled; the reason it is
     /// disabled is carried by the accessibility hint, not by the contrast.
     static let textDisabled: UInt32 = 0x525252
+    /// The composer's placeholder: `textTertiary` at 70% over `surface`,
+    /// 3.05:1 there. Below AA by choice — an empty composer's prompt recedes
+    /// behind the chat, and the field's accessibility label carries its name.
+    static let textPlaceholder: UInt32 = 0x5E5E5E
 
     // Accent — the Vercel signature: the primary action is white-on-black.
     static let accent: UInt32 = 0xEDEDED
@@ -208,6 +212,7 @@ extension CC {
         static let secondary = Color(cc: Hex.textSecondary)
         static let tertiary = Color(cc: Hex.textTertiary)
         static let disabled = Color(cc: Hex.textDisabled)
+        static let placeholder = Color(cc: Hex.textPlaceholder)
         /// The label that sits on top of `color.accent`.
         static let onAccent = Color(cc: Hex.onAccent)
     }
@@ -420,10 +425,10 @@ extension CC {
         ///
         /// A `CCBadge` with no action is a 20pt *label on something*. The same
         /// construction with an action is a control — the compose bar's file
-        /// chips, the compose templates, the `SINCE YOU LOOKED` toggle — and a
-        /// control of that kind is drawn at 32. Both shipped at the badge's 20
-        /// (measured 19.67), so a row of things to press read as a strip of
-        /// small captions; the 44pt finger around them was real but invisible.
+        /// chips, the `SINCE YOU LOOKED` toggle — and a control of that kind is
+        /// drawn at 32. Both shipped at the badge's 20 (measured 19.67), so a row
+        /// of things to press read as a strip of small captions; the 44pt finger
+        /// around them was real but invisible.
         static let chip: CGFloat = 32
         /// How far a chip's **floor** may outgrow its nominal height.
         ///
