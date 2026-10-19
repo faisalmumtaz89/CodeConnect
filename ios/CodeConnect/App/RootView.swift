@@ -6,11 +6,32 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if model.showsFleet {
+        if !model.showsFleet {
+            PairingView(isOnboarding: true)
+        } else if model.launchSettled {
             FleetView()
         } else {
-            PairingView(isOnboarding: true)
+            LaunchLoader()
         }
+    }
+}
+
+/// What the app shows until it has caught up with the Mac. How long it waits is
+/// `AppModel.waitOutLaunch`.
+private struct LaunchLoader: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(spacing: CC.space.sm) {
+            CCProgressRing(.md)
+            Text("Connecting to your Mac…")
+                .ccType(CC.type.body)
+                .foregroundStyle(CC.text.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(CC.color.bg)
+        .accessibilityElement(children: .combine)
+        .task { await model.waitOutLaunch() }
     }
 }
 

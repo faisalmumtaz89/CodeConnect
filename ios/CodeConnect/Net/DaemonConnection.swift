@@ -822,6 +822,43 @@ final class DaemonConnection {
         Task { [weak self] in try? await self?.send(message) }
     }
 
+    /// Write `message` to the socket now, in call order, and say whether it
+    /// went: for a request the daemon answers in order, whose reply is matched
+    /// by its position among the requests written.
+    ///
+    /// **A write that fails drops the link.** The reply it would have earned
+    /// never comes, so every position counted after it is wrong; the redial is
+    /// a new link, where counting starts again.
+    func sendInOrder(_ message: ClientMessage) -> Bool {
+        #if DEBUG
+            if let sendStub { return (try? sendStub(message)) != nil }
+        #endif
+        guard let socket, let data = try? encoder.encode(message) else { return false }
+        socket.send(.string(String(decoding: data, as: UTF8.self))) { [weak self] error in
+            guard error != nil else { return }
+            Task { @MainActor in
+                guard let self, self.socket === socket else { return }
+                self.redial()
+            }
+        }
+        return true
+    }
+
+    /// Drop the link and dial again: a new generation, on which everything is
+    /// asked for afresh.
+    func redial() {
+        #if DEBUG
+            redialsForTesting += 1
+        #endif
+        socket?.cancel(with: .goingAway, reason: nil)
+    }
+
+    #if DEBUG
+        /// How many times `redial` was asked for. A test link has no socket to
+        /// drop, so this is how a test sees the decision.
+        private(set) var redialsForTesting = 0
+    #endif
+
     // MARK: - Request/response
 
     /// Idempotent by `(session, requestID)` on the daemon side, so a retry after
@@ -1252,7 +1289,7 @@ final class DaemonConnection {
             unreadableFrame =
                 "This phone cannot read a “\(Self.boundedType(type))” message from the Mac."
             unreadableFrameAt = Date()
-        case .pong, .sessions, .event:
+        case .pong, .sessions, .event, .historyEnd:
             break
         }
         onMessage?(message)
@@ -1346,6 +1383,12 @@ final class DaemonConnection {
         func simulateConnectedForTesting() {
             phase = .connected(since: Date())
             lastContactAt = Date()
+        }
+
+        /// Test seam: put the link in a phase without the socket that would
+        /// get it there — a drop (`.connecting`), a refusal (`.failed`).
+        func setPhaseForTesting(_ phase: Phase) {
+            self.phase = phase
         }
 
         /// Test seam: answer `deleteSession` locally, and record what was asked.

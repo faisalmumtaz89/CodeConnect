@@ -47,11 +47,10 @@ final class AlignmentAuditUITests: XCTestCase {
     ///
     /// `minY > 110` drops the navigation bar, which is not part of the layout
     /// being audited and whose centred title would otherwise be matched by name:
-    /// the fleet's nav title and its eyebrow are both the word `Fleet`, and an
-    /// early version of this test compared the band header against the title at
-    /// x=181 and reported a defect that did not exist. `minX > 0` drops the
-    /// full-width accessibility containers, which report an edge of 0 and are not
-    /// text anybody sees.
+    /// the fleet's nav title is the word `Fleet`, and an early version of this
+    /// test compared the band header against the title at x=181 and reported a
+    /// defect that did not exist. `minX > 0` drops the full-width accessibility
+    /// containers, which report an edge of 0 and are not text anybody sees.
     private func edges(_ app: XCUIApplication) -> [(x: CGFloat, label: String)] {
         var rows: [(CGFloat, String)] = []
         for element in app.staticTexts.allElementsBoundByIndex {
@@ -121,17 +120,54 @@ final class AlignmentAuditUITests: XCTestCase {
         let app = launch(fixture: "deck", size: .medium)
         sleep(3)
         let all = edges(app)
+        // The headline, not the `Fleet` eyebrow above it: the eyebrow is hidden
+        // from accessibility, because the headline already says "Fleet." first.
         guard let band = all.first(where: { $0.label.caseInsensitiveCompare("Blocked") == .orderedSame })?.x,
-            let eyebrow = all.first(where: { $0.label == "Fleet" })?.x
+            let headline = all.first(where: { $0.label.hasPrefix("Fleet. ") })?.x
         else {
-            XCTFail("expected a Blocked band and a Fleet eyebrow on the fleet screen")
+            XCTFail("expected a Blocked band and the Fleet headline on the fleet screen")
             return
         }
         XCTAssertEqual(
-            band, eyebrow, accuracy: tolerance,
+            band, headline, accuracy: tolerance,
             """
             The BLOCKED band header sits at \(band) while the screen's own text \
-            sits at \(eyebrow). Both are screen-level text and must share one edge.
+            sits at \(headline). Both are screen-level text and must share one edge.
+            """)
+    }
+
+    /// A row wider than the screen does not move the screen's edge.
+    ///
+    /// An MCP tool name is wider than a phone row, and the fleet's stack once
+    /// sized itself to that row: the scroll view centred the whole fleet on it
+    /// and the headline and every band header sat off the left edge. Compared
+    /// against the same fleet without the wide row, at a size that draws the
+    /// tool column. Read off the headline directly rather than through
+    /// `edges`, which drops anything left of the screen — the very failure.
+    func testAWideRowLeavesTheFleetEdgeAlone() {
+        let wideTool = "mcp__filesystem__list_directory_with_sizes"
+        func headlineEdge(_ fixture: String) -> CGFloat? {
+            let app = launch(fixture: fixture, size: .medium)
+            defer { app.terminate() }
+            let headline = app.staticTexts
+                .matching(NSPredicate(format: "label BEGINSWITH 'Fleet. '")).firstMatch
+            guard headline.waitForExistence(timeout: 20) else { return nil }
+            sleep(3)
+            if fixture == "wideTool" {
+                // Without the wide row on screen this compares two plain fleets.
+                XCTAssertTrue(app.staticTexts[wideTool].exists, "the wideTool fleet shows no MCP row")
+            }
+            return headline.frame.minX
+        }
+        guard let plain = headlineEdge("stacked"), let wide = headlineEdge("wideTool") else {
+            XCTFail("expected the Fleet headline on both fleets")
+            return
+        }
+        XCTAssertEqual(
+            wide, plain, accuracy: tolerance,
+            """
+            With an MCP tool's row on the fleet the headline sits at \(wide); \
+            without it, at \(plain). One row must not move the screen's edge.
             """)
     }
 

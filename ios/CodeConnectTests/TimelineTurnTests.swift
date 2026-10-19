@@ -260,7 +260,7 @@ final class TimelineTurnTests: XCTestCase {
         for event in events { state.ingest(event) }
         await state.settleForTesting()
         XCTAssertFalse(state.timeline.isEmpty, "the rebuild did not run; the test proves nothing")
-        return FleetStatusRule.status(summary: summary(), state: state, reviewedSeq: reviewedSeq)
+        return FleetStatusRule.status(summary: summary(), shown: state.shown, reviewedSeq: reviewedSeq)
     }
 
     /// ccd records the turn's reply before its `Stop`, so the turn's end is

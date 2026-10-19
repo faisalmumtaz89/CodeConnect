@@ -393,7 +393,7 @@ final class PersistedApprovalRowTests: XCTestCase {
 /// The whole CLASS closed in one place: a decision card must never
 /// present an actionable pending state, or claim an outcome, it cannot back with
 /// authoritative LIVE state. Every scenario here is driven through the REAL
-/// production resolver the card view uses — `AppModel.liveApproval(...)` — and
+/// production resolver the card view uses — `AppModel.shownApproval(...)` — and
 /// the real gate functions it feeds (`DecisionCardView.resolvedBanner` /
 /// `.actionBarAvailable`). A revert of the resolver (e.g. `reset()` no longer
 /// clearing `pendingApprovals`, or `liveApproval` returning a frozen snapshot) or
@@ -428,7 +428,7 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         model.connection.injectForTesting(.event(try event(json)))
     }
     private func settle(_ model: AppModel) async {
-        for state in model.states.values { await state.settleForTesting() }
+        for state in model.statesForTesting.values { await state.settleForTesting() }
     }
 
     /// **A card's run, described.** `AppModel.answer` fails closed when no
@@ -455,18 +455,18 @@ final class DecisionCardLiveBackingTests: XCTestCase {
     private func liveBanner(_ model: AppModel, attempt: AnswerAttempt?)
         -> DecisionCardView.ResolvedBanner
     {
-        let live = model.liveApproval(sessionKey: sessionKey, id: cardID)
+        let live = model.shownApproval(sessionKey: sessionKey, id: cardID)
         return DecisionCardView.resolvedBanner(
             attempt: attempt, persisted: live?.outcome, isBacked: live != nil)
     }
     private func liveBarAvailable(_ model: AppModel, attempt: AnswerAttempt?) -> Bool {
-        let live = model.liveApproval(sessionKey: sessionKey, id: cardID)
+        let live = model.shownApproval(sessionKey: sessionKey, id: cardID)
         return DecisionCardView.actionBarAvailable(
             outcome: live?.outcome, codex: live?.codexResolution, attempt: attempt,
             isBacked: live != nil)
     }
     private func pendingItem(_ model: AppModel) -> ApprovalItem? {
-        model.liveApproval(sessionKey: sessionKey, id: cardID)
+        model.shownApproval(sessionKey: sessionKey, id: cardID)
     }
 
     // MARK: normal live paths
@@ -550,7 +550,7 @@ final class DecisionCardLiveBackingTests: XCTestCase {
 
         // A fleet refresh that no longer lists this run drops its state.
         model.connection.injectForTesting(.sessions([]))
-        XCTAssertNil(model.states[sessionKey], "the departed session's state is gone")
+        XCTAssertNil(model.statesForTesting[sessionKey], "the departed session's state is gone")
 
         let attempt = model.lastAttempt(for: pending)  // the stale .failed survives
         XCTAssertNil(pendingItem(model), "no live state backs the card")
@@ -569,7 +569,7 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         let model = AppModel(cache: EventCache())
         try ingest(requestEvent, into: model)
         await settle(model)
-        let state = try XCTUnwrap(model.states[sessionKey])
+        let state = try XCTUnwrap(model.statesForTesting[sessionKey])
         XCTAssertFalse(state.pendingApprovals.isEmpty, "the pending card is projected")
         XCTAssertTrue(
             model.deck.contains { $0.id == cardID }, "and appears in the cross-fleet Deck")
@@ -662,14 +662,14 @@ final class DecisionCardLiveBackingTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(snapshot.outcome).indeterminate)
 
         // (snapshot resolved, live nil): reset clears the log.
-        try XCTUnwrap(model.states[sessionKey]).resetForRewoundLog()
+        try XCTUnwrap(model.statesForTesting[sessionKey]).resetForRewoundLog()
         assertResolvedAndDisabled(model, snapshot: snapshot, "snapshot resolved + live nil")
 
         // (snapshot resolved, live PENDING): a behind replay re-supplies the same
         // request id as pending — THE regression trigger.
         try ingest(requestEvent, into: model)
         await settle(model)
-        let live = model.liveApproval(sessionKey: sessionKey, id: cardID)
+        let live = model.shownApproval(sessionKey: sessionKey, id: cardID)
         XCTAssertNotNil(live, "the replay re-supplied a live pending card")
         XCTAssertNil(live?.outcome, "which is pending (no outcome of its own)")
         assertResolvedAndDisabled(model, snapshot: snapshot, "snapshot resolved + live pending")
@@ -681,7 +681,7 @@ final class DecisionCardLiveBackingTests: XCTestCase {
     private func assertResolvedAndDisabled(
         _ model: AppModel, snapshot: ApprovalItem, _ what: String
     ) {
-        let live = model.liveApproval(sessionKey: sessionKey, id: cardID)
+        let live = model.shownApproval(sessionKey: sessionKey, id: cardID)
         let eff = DecisionCardView.effectiveOutcome(live: live?.outcome, snapshot: snapshot.outcome)
         XCTAssertNotNil(eff, "\(what): the resolved outcome still governs")
         XCTAssertFalse(

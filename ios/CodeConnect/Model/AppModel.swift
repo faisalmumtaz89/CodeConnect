@@ -163,17 +163,29 @@ final class AppModel {
     let terminal: TerminalCarrier
     private let cache: EventCache
 
+    /// The Mac's list of runs, as it last said. The truth: what is on screen is
+    /// `shownSummaries`.
     private(set) var summaries: [SessionSummary] = []
     /// Per-run state, keyed by `SessionSummary.sessionKey` — the `session_uid`
     /// where the daemon mints them, the tmux name on an older one. Never by the
     /// display name on a uid-capable daemon: `cc-1` is handed to the next
     /// session when this one exits, and keying by it is what spliced two agents'
     /// timelines into one.
-    private(set) var states: [String: SessionState] = [:]
+    ///
+    /// The truth, so no view reads it: screens draw `shownSessions`, each
+    /// session's `shown`.
+    private var states: [String: SessionState] = [:]
+    /// **The fleet on screen**: the list, and the sessions whose `shown` the
+    /// screens draw. Published from `summaries` and `states` by `publishList`.
+    private var shownSummaries: [SessionSummary] = []
+    private var shownSessions: [String: SessionState] = [:]
+    /// Runs gone from the Mac whose review marks go when the list without them
+    /// is published.
+    private var departedMarks: Set<String> = []
     /// One `CodexControls` per session, created on demand by `codexControls(for:)`.
     ///
     /// **`@ObservationIgnored`, and that is load-bearing.** Views read this
-    /// during `body` — the fleet row asks whether Stop is greyed, the session
+    /// during `body` — the fleet asks whether Stop is greyed, the session
     /// header asks what the daemon last said — and the lookup *creates* the
     /// controller on a miss. Observed, that insertion is a mutation during view
     /// update: `body` reads it, the write invalidates, `body` re-runs, and the
@@ -195,13 +207,34 @@ final class AppModel {
     /// refused by the first one's uncertainty — which is the interlock working,
     /// and useless as a fixture.
     @ObservationIgnored let codexSpentLedger: CodexSpentLedger
-    /// Age of the fleet list when it came off disk rather than the wire.
-    private(set) var fleetCachedAt: Date?
-    /// When *this launch* put that cached list on screen. The cached banner's
-    /// grace clock — distinct from `fleetCachedAt`, which is how old the data
-    /// is, not how long the launch has had to replace it.
-    private(set) var fleetCacheRestoredAt: Date?
-    private(set) var hasLiveFleet = false
+    /// Where the fleet list came from, and when.
+    private struct FleetSource: Equatable {
+        var isLive = false
+        /// Age of the list when it came off disk rather than the wire.
+        var cachedAt: Date?
+        /// When *this launch* put that cached list on screen. The cached
+        /// banner's grace clock — distinct from `cachedAt`, which is how old the
+        /// data is, not how long the launch has had to replace it.
+        var restoredAt: Date?
+    }
+    private var fleetSource = FleetSource()
+    /// Where the list on screen came from: published with it.
+    private var shownFleetSource = FleetSource()
+    var hasLiveFleet: Bool { shownFleetSource.isLive }
+    var fleetCachedAt: Date? { shownFleetSource.cachedAt }
+    var fleetCacheRestoredAt: Date? { shownFleetSource.restoredAt }
+    /// Whether the fleet may be shown. Until then the app shows its loader, so
+    /// the cached list, the live list and each session's backlog replay are
+    /// never painted one after another. True once every session in the first
+    /// live list has replayed to the `last_seq` that list reported — or once
+    /// the loader has waited long enough — and never false again.
+    private(set) var launchSettled = false
+    /// What the first live list said each session had, by key.
+    private var launchTargets: [String: UInt64]?
+    /// Sessions whose subscription has settled what history it keeps — after
+    /// the cache read and any rewind — so a cache from a reset log is never
+    /// taken for caught up.
+    private var preparedForLaunch: Set<String> = []
     /// Ticks once a second so every age on screen stays true without each view
     /// owning a timer.
     private(set) var now = Date()
@@ -218,12 +251,56 @@ final class AppModel {
     private static let fleetRefreshInterval: Duration = .seconds(15)
 
     private var subscribed: Set<String> = []
+    /// Where each run's subscription was last asked from, and on which
+    /// connection. See `subscribe(_:after:)`.
+    private var subscribedAfter: [String: (generation: Int, afterSeq: UInt64)] = [:]
     /// Keyed by `ApprovalItem.id` — the run *and* the request. A `request_id` is
     /// only unique within one run, so keying by it alone would have one card's
     /// spinner and one card's confirmed outcome appear on another run's card.
     private var answersInFlight: Set<String> = []
     private var answerAttempts: [String: AnswerAttempt] = [:]
     private var loadingEarlier: Set<String> = []
+    /// Sessions back in the foreground whose window the next fleet list resets
+    /// to the newest 500, since only that list says where the newest 500 start.
+    /// During a catch-up only a list that answers it does.
+    private var windowResetDue: Set<String> = []
+
+    /// **A catch-up**: the truth replaying what the Mac did while the screen
+    /// was not watching — a return, a redial, the launch's first link — with
+    /// the screen held as it was until the truth has caught up, then changed
+    /// once. See `advanceCatchUp`.
+    private struct CatchUp {
+        let epoch: Int
+        /// The link it is catching up on.
+        var generation: Int
+        /// Where its own `sessions` request stands among those written on that
+        /// link, once one has been.
+        var position: Int?
+        /// The latest list that answers it: what caught up means.
+        var list: [SessionSummary]?
+        /// Something owed advanced since the last look.
+        var progressed = false
+    }
+    @ObservationIgnored private var catchUp: CatchUp?
+    @ObservationIgnored private var catchUpEpochs = 0
+    /// Whether the screen is held for a catch-up. Observed, unlike `catchUp`,
+    /// whose progress changes with every event.
+    private(set) var isCatchingUp = false
+    @ObservationIgnored private var releasing = false
+    @ObservationIgnored private var stallWatch: Task<Void, Never>?
+    /// `sessions` requests written and replies taken on the link
+    /// `sessionsCountGeneration`.
+    @ObservationIgnored private var sessionsWritten = 0
+    @ObservationIgnored private var sessionsAnswered = 0
+    @ObservationIgnored private var sessionsCountGeneration = -1
+    /// The link generation whose session list `summaries` is. Open cards are
+    /// fetched only from a list the current link sent: one loaded from the
+    /// cache, or sent on a link since gone, can name cards the Mac has resolved.
+    private var listGeneration: Int?
+    /// The app went to the background, so the next `active` is a return. An
+    /// `inactive` alone — Control Center, a pulled-down notification — never
+    /// left the foreground, and the reader's place is left alone.
+    private var wentToBackground = false
     /// Runs the cache migration, at most once per connection. Awaited by every
     /// subscription before it reads the cache, so a file written under the old
     /// keying can never be loaded into a run it may not belong to.
@@ -277,6 +354,9 @@ final class AppModel {
             // fixture's values happen to stop both downstream, but a system
             // permission prompt held back by a data file is not a guarantee.
             guard let self, !self.fixturesActive else { return }
+            // Held first, so what the old link's end changes — a page or a card
+            // it will never answer — waits for the release with the rest.
+            self.openCatchUp(onNewLink: true)
             self.resubscribeAll()
             // After every handshake, not only after a pairing: a phone that
             // paired before push existed must start registering the first
@@ -652,9 +732,28 @@ final class AppModel {
     /// kinds have no card in that list and never will — `Finished a turn` has
     /// nothing to decide — so sending them there would be a wrong answer rather
     /// than a stale one.
+    ///
+    /// Opened while a catch-up holds the screen — and one does from the moment
+    /// the app leaves — the list waits for it and says so
+    /// (`deckAwaitsCatchUp`), then shows its cards in one go.
     func openFromNotification(kind: String?) {
         pendingDeepLink = kind == "approval" ? .deck(requestID: nil) : .fleet
+        if kind == "approval", isCatchingUp { deckAwaitsCatchUp = true }
     }
+
+    /// The Deck a notification opened is waiting for the catch-up to end.
+    private(set) var deckAwaitsCatchUp = false
+
+    /// The Deck closed: whatever it was waiting for, the next one opened from
+    /// the bar shows the cards on screen.
+    func deckClosed() {
+        deckAwaitsCatchUp = false
+    }
+
+    /// How many catch-ups have changed the screen. A Deck left open tells the
+    /// cards one brings from arrivals by it: they were there before the reader
+    /// looked.
+    private(set) var catchUpReleases = 0
 
     /// Drain a tap that arrived before anything was listening.
     func consumePendingTap() {
@@ -674,18 +773,28 @@ final class AppModel {
             applyAutomationDeepLink()
         #endif
         startTicking()
-        guard !fixturesActive else { return }
+        // A fixture run is the whole fleet already; nothing is catching up.
+        guard !fixturesActive else {
+            launchSettled = true
+            return
+        }
         startFleetRefresh()
-        Task { await loadCachedFleet() }
-        // A pairing exchange is already dialling; starting a second connection
-        // would spend the single-use code twice.
-        if !pairedByCode, let endpoint = pairing.endpoint {
-            connect(to: endpoint)
-            // Push registration deliberately does NOT happen here: before the
-            // handshake the daemon's capabilities are unknown, and asking for
-            // notification permission on behalf of a daemon that may not
-            // advertise push is a system prompt nothing can honour.
-            // `onConnected` registers once the `hello_ack` says it can ring.
+        Task {
+            // **The saved fleet is on screen before the Mac is dialled.** The
+            // first link's catch-up holds the screen as it is, and the launch
+            // falls back to what is on it: dialled first, a local Mac answers
+            // before the cache is read, and that fallback is an empty fleet.
+            await loadCachedFleet()
+            // A pairing exchange is already dialling; starting a second
+            // connection would spend the single-use code twice.
+            if !pairedByCode, let endpoint = pairing.endpoint {
+                connect(to: endpoint)
+                // Push registration deliberately does NOT happen here: before
+                // the handshake the daemon's capabilities are unknown, and
+                // asking for notification permission on behalf of a daemon that
+                // may not advertise push is a system prompt nothing can honour.
+                // `onConnected` registers once the `hello_ack` says it can ring.
+            }
         }
     }
 
@@ -706,6 +815,11 @@ final class AppModel {
     }
 
     #if DEBUG
+        /// How many of `-CC_FIXTURE_LATE_EVENT_MS`'s held-back frames have been
+        /// delivered, so a test can see an event land behind a screen that
+        /// does not draw it. Not observed: reading it redraws nothing.
+        static var lateFramesDelivered = 0
+
         /// Test seam: `-CC_HOST <host> -CC_TOKEN <token>` on the launch command
         /// line pairs the app without anyone typing, which is what lets the UI
         /// test drive a real daemon. Debug builds only — a release build has no
@@ -905,15 +1019,23 @@ final class AppModel {
             let lateApprovalsMS = UserDefaults.standard.integer(
                 forKey: "CC_FIXTURE_LATE_APPROVALS_MS")
             var frames = Fixtures.frames(variant: variant)
-            // **`-CC_FIXTURE_LATE_EVENT_MS <n>` is an event arriving while the
-            // reader is on screen.** The stream's last frame is delivered `n` ms
-            // after the rest, so a UI test can act first and then see how that
-            // event is counted. `SessionShowAllUITests` is what drives it.
-            let lateEventMS = UserDefaults.standard.integer(forKey: "CC_FIXTURE_LATE_EVENT_MS")
-            if lateEventMS > 0, let last = frames.popLast() {
-                Task { @MainActor [weak connection] in
-                    try? await Task.sleep(for: .milliseconds(lateEventMS))
-                    connection?.injectForTesting(last)
+            // **`-CC_FIXTURE_LATE_EVENT_MS <n>[,<n>…]` is events arriving while
+            // the reader is on screen.** The stream's last frames are held back,
+            // one per delay, and delivered in stream order — the shortest delay
+            // first — each that many ms after the rest, so a UI test can act
+            // first and then see how each event is counted.
+            // `SessionShowAllUITests` and `FleetRowRenderUITests` drive it.
+            let lateEventMS = (UserDefaults.standard.string(forKey: "CC_FIXTURE_LATE_EVENT_MS")
+                ?? "").split(separator: ",").compactMap { Int($0) }.filter { $0 > 0 }.sorted()
+            if !lateEventMS.isEmpty, frames.count >= lateEventMS.count {
+                let late = frames.suffix(lateEventMS.count)
+                frames.removeLast(lateEventMS.count)
+                for (delay, frame) in zip(lateEventMS, late) {
+                    Task { @MainActor [weak connection] in
+                        try? await Task.sleep(for: .milliseconds(delay))
+                        connection?.injectForTesting(frame)
+                        Self.lateFramesDelivered += 1
+                    }
                 }
             }
             if lateApprovalsMS > 0,
@@ -938,6 +1060,36 @@ final class AppModel {
             }
             applyCachedFixture()
             applyPushStateFixture()
+            // **`-CC_FIXTURE_LINK_DROP_MS <n>` drops the link once, `n` ms in,**
+            // through the connection's own `stop()` — every waiter failed, the
+            // handshake and the Mac's capabilities forgotten — and brings it back
+            // five seconds later with the handshake the fixture ended up with
+            // (after the push seam, which replaces it). It is how a fixture run
+            // takes the Mac's removal capability away and gives it back, with
+            // the rows still on screen. It is narrower than a real drop: no
+            // socket closes, no backoff runs, no redial is counted.
+            // **`-CC_FIXTURE_REMOVE_MS <n>` holds a removal's answer `n` ms,**
+            // then refuses it the way every fixture removal is refused, with no
+            // answer. Without it a fixture refuses at once, so a removal still
+            // on its way — "Removing…", and whatever happens around it — is a
+            // state no fixture run can show.
+            let removeMS = UserDefaults.standard.integer(forKey: "CC_FIXTURE_REMOVE_MS")
+            if removeMS > 0 {
+                connection.deleteStub = { _ in
+                    try await Task.sleep(for: .milliseconds(removeMS))
+                    throw ConnectionError.sentButUnanswered
+                }
+            }
+            let linkDropMS = UserDefaults.standard.integer(forKey: "CC_FIXTURE_LINK_DROP_MS")
+            if linkDropMS > 0, let ack = connection.helloAck {
+                Task { @MainActor [weak connection] in
+                    try? await Task.sleep(for: .milliseconds(linkDropMS))
+                    connection?.stop()
+                    connection?.setPhaseForTesting(.connecting)
+                    try? await Task.sleep(for: .seconds(5))
+                    connection?.injectForTesting(.helloAck(ack))
+                }
+            }
             // Link health is measured from when a frame last *arrived*, so a
             // fixture run needs frames to keep arriving or the link correctly
             // goes stale mid-test and disables every action.
@@ -982,12 +1134,12 @@ final class AppModel {
                 let age = TimeInterval(raw), age > 0
             else { return }
             fixtureCachedFleet = true
-            hasLiveFleet = false
-            fleetCachedAt = Date().addingTimeInterval(-age)
             // The seam stages "the banner is up", so the grace is staged as
             // already passed — the render harness is photographing the earned
             // state, not the launch that leads to it.
-            fleetCacheRestoredAt = .distantPast
+            fleetSource = FleetSource(
+                isLive: false, cachedAt: Date().addingTimeInterval(-age), restoredAt: .distantPast)
+            publishList()
         }
 
         /// Test seam: **`-CC_PUSH_STATE enrolling|failed|unsupported|ready`** puts
@@ -1057,11 +1209,15 @@ final class AppModel {
         // `commitPendingPairing`, and a pending typed-token endpoint would be
         // saved to the Keychain on the strength of a frame no daemon sent.
         guard !fixturesActive, !pairing.isPaired, pendingPairing == nil else { return }
+        // A return holds the screen even with no Mac, and none will catch it up.
+        closeCatchUp()
         sampleFleetActive = true
         fixturesActive = true
         for message in Fixtures.sampleFrames() {
             connection.ingest(message)
         }
+        // The sample is the whole fleet already; there is no Mac to wait for.
+        settleLaunch()
         // Every sample session, not just the diff's own: the replayed ack
         // advertises diff support, so the ± control appears on all of them, and
         // a tap that answers "Not paired with a daemon." inside the sample
@@ -1088,6 +1244,8 @@ final class AppModel {
         fixturesActive = false
         connection.stop()
         forgetFleet()
+        // The real fleet that follows has to be caught up with like any other.
+        launchSettled = false
     }
 
     /// Ask the Mac to forget a run, and forget it here too.
@@ -1123,6 +1281,11 @@ final class AppModel {
 
         forgetLocalState(of: key)
         summaries.removeAll { $0.sessionKey == key }
+        if catchUp != nil {
+            unpublishRemoved(key)
+        } else {
+            publishList()
+        }
         // **The row itself lives here.** `loadCachedFleet` restores this file
         // wholesale on a cold open and is what the app shows before the first
         // live reply, so a removal that skipped it survived only until the app
@@ -1132,6 +1295,38 @@ final class AppModel {
         enqueueCacheWork { await $0.saveFleet(remaining) }
         await cacheSettled()
         return result
+    }
+
+    /// Removes each ended session in turn, and returns why each one still in
+    /// the fleet was not removed, by key.
+    ///
+    /// Each is looked up again when its turn comes: one that left the fleet
+    /// while the question was up is not asked about, and one that is no longer
+    /// an ended, removable run is kept. A refusal is that session's own answer
+    /// and the batch carries on; no answer at all — the link is gone, or the Mac
+    /// no longer says it removes sessions — means every later request would
+    /// fail the same way, so the rest are not asked and share that reason.
+    func removeSessions(keys: [String]) async -> [String: String] {
+        var refused: [String: String] = [:]
+        var stopped: String?
+        for key in keys {
+            guard let summary = summary(for: key) else { continue }
+            if let stopped {
+                refused[key] = stopped
+                continue
+            }
+            let status = FleetStatusRule.status(
+                summary: summary, shown: states[key]?.current,
+                reviewedSeq: ReviewMarks.reviewedSeq(for: key))
+            guard status == .ended, summary.isRemovable else {
+                refused[key] = "Changed since you chose it"
+                continue
+            }
+            let result = await removeSession(summary)
+            if let reason = result.refusal { refused[key] = reason }
+            if result == nil { stopped = result.refusal }
+        }
+        return refused
     }
 
     #if DEBUG
@@ -1147,7 +1342,13 @@ final class AppModel {
         /// test has to begin with the row present, and injecting the frame would
         /// also start subscriptions and cache migrations that have nothing to do
         /// with what is being tested.
-        func adoptSummariesForTesting(_ list: [SessionSummary]) { summaries = list }
+        func adoptSummariesForTesting(_ list: [SessionSummary]) {
+            summaries = list
+            publishList()
+        }
+
+        /// Test seam: the truth, keyed by session. Views read `shown(for:)`.
+        var statesForTesting: [String: SessionState] { states }
     #endif
 
     /// The fleet is the root once there is something to show it from.
@@ -1255,20 +1456,34 @@ final class AppModel {
         // material is a separate store on purpose and is NOT cleared here:
         // "what this phone has already sent" survives losing the list.
         codexControlsByKey.removeAll()
-        hasLiveFleet = false
-        fleetCachedAt = nil
-        fleetCacheRestoredAt = nil
+        fleetSource = FleetSource()
+        // Nothing held is owed to a screen that no longer has a Mac.
+        closeCatchUp()
+        commitList()
+        #if DEBUG
+            listPublications.append(.live)
+        #endif
     }
 
     func scenePhaseChanged(to phase: ScenePhase) {
         switch phase {
         case .active:
+            // Every age on screen is true on the first frame back, not a tick
+            // later.
+            now = Date()
             connection.retryNow()
-            refreshFleet()
+            if !comeBack() { refreshFleet() }
             startTicking()
             startFleetRefresh()
             foregroundPushCheck()
         case .background, .inactive:
+            if phase == .background {
+                wentToBackground = true
+                holdForReturn()
+            } else {
+                now = Date()
+                comeBack()
+            }
             flushCache()
             tickTask?.cancel()
             tickTask = nil
@@ -1279,6 +1494,22 @@ final class AppModel {
         }
     }
 
+    /// Back from the background: the newest 500 again, and the catch-up aimed
+    /// at this return. The way back starts with `inactive`, while the app is
+    /// still being brought to the front and already reading its socket, so a
+    /// short backlog is caught up by the time it is active. A return on a link
+    /// that stayed up asks now; one on a link that is down is aimed by the
+    /// redial's handshake. Says whether this return's list was asked for.
+    @discardableResult
+    private func comeBack() -> Bool {
+        guard wentToBackground else { return false }
+        wentToBackground = false
+        windowResetDue = Set(states.keys)
+        guard connection.phase.isConnected else { return false }
+        openCatchUp(onNewLink: false)
+        return true
+    }
+
     private func startTicking() {
         guard tickTask == nil else { return }
         tickTask = Task { [weak self] in
@@ -1286,6 +1517,9 @@ final class AppModel {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, !Task.isCancelled else { return }
                 self.now = Date()
+                for controls in self.codexControlsByKey.values {
+                    controls.expireStopGrey(now: self.now)
+                }
             }
         }
     }
@@ -1305,8 +1539,43 @@ final class AppModel {
     }
 
     func refreshFleet() {
+        requestSessions()
+    }
+
+    /// The one way a `sessions` request leaves, so each is counted in the order
+    /// it was written: the Mac answers them in that order, and a reply is
+    /// matched to its request by that count. The first written on a catch-up's
+    /// link after it opened is its own.
+    private func requestSessions() {
         guard connection.phase.isConnected else { return }
-        connection.sendIgnoringFailure(.sessions)
+        syncSessionsCount()
+        guard connection.sendInOrder(.sessions) else { return }
+        let position = sessionsWritten
+        sessionsWritten += 1
+        if catchUp?.generation == connection.generation, catchUp?.position == nil {
+            catchUp?.position = position
+        }
+    }
+
+    /// Take the next reply's position on this link — a list, or the Mac saying
+    /// it has none — and say whether it answers the open catch-up: written at
+    /// or after its own request.
+    private func takeSessionsReply() -> Bool {
+        syncSessionsCount()
+        let position = sessionsAnswered
+        sessionsAnswered += 1
+        guard let catchUp, catchUp.generation == connection.generation,
+            let own = catchUp.position
+        else { return false }
+        return position >= own
+    }
+
+    /// Counting starts again on every link.
+    private func syncSessionsCount() {
+        guard sessionsCountGeneration != connection.generation else { return }
+        sessionsCountGeneration = connection.generation
+        sessionsWritten = 0
+        sessionsAnswered = 0
     }
 
     // MARK: - Derived state
@@ -1343,51 +1612,53 @@ final class AppModel {
     /// so this is O(sessions + cards) rather than O(sessions × events) — which
     /// matters because `FleetView.body` re-runs on the one-second tick.
     var deck: [ApprovalItem] {
-        DeckOrdering.sort(states.values.flatMap(\.pendingApprovals), profile: daemonProfile)
+        DeckOrdering.sort(
+            shownSessions.values.flatMap(\.shown.pendingApprovals), profile: daemonProfile)
     }
 
     var deckCount: Int { deck.count }
 
-    /// The authoritative, LIVE approval for a card identity — the single resolver
-    /// every decision surface (the open sheet, the Deck cell, the card view)
-    /// derives from before offering an action or claiming an outcome.
+    /// The card with this identity as it is drawn — the single resolver every
+    /// decision surface (the open sheet, the Deck cell, the card view) renders
+    /// from before offering an action or claiming an outcome.
     ///
-    /// **`nil` means nothing live backs this card** — the session departed the
-    /// fleet (`forgetLocalState`), its log was reset/rewound, or the card left
-    /// the timeline. A `nil` here must render as a NON-actionable "no longer
-    /// available" state, never a frozen actionable snapshot: acting on, or
-    /// claiming an outcome for, a card no daemon would accept an answer for is
-    /// exactly the class this resolver exists to close. Routed by `sessionKey`
-    /// (the id's own prefix) so it is one timeline scan, not a fleet-wide one.
-    func liveApproval(sessionKey: String, id: String) -> ApprovalItem? {
-        states[sessionKey]?.approval(id: id)
+    /// **`nil` means nothing on screen backs this card** — the session departed
+    /// the fleet (`forgetLocalState`), its log was reset/rewound, or the card
+    /// left the timeline. A `nil` here must render as a NON-actionable "no
+    /// longer available" state, never a frozen actionable snapshot: acting on,
+    /// or claiming an outcome for, a card no daemon would accept an answer for
+    /// is exactly the class this resolver exists to close. Routed by
+    /// `sessionKey` (the id's own prefix) so it is one timeline scan, not a
+    /// fleet-wide one. What may actually be sent is `answer`'s to decide, from
+    /// the truth.
+    func shownApproval(sessionKey: String, id: String) -> ApprovalItem? {
+        shownSessions[sessionKey]?.shown.approval(id: id)
     }
 
     /// Working directories the daemon has reported, newest session first. The
     /// only evidence the app has for the Mac's account name.
     var sessionPaths: [String] {
-        summaries.sorted { $0.updatedDate > $1.updatedDate }.map(\.cwd)
+        shownSummaries.sorted { $0.updatedDate > $1.updatedDate }.map(\.cwd)
     }
 
     var fleet: [FleetRow] {
-        let labels = RunLabel.labels(for: summaries)
+        let labels = RunLabel.labels(for: shownSummaries)
         return FleetOrdering.sort(
-            summaries.map { summary in
-                let state = states[summary.sessionKey]
-                let pending = state?.pendingApprovals ?? []
+            shownSummaries.map { summary in
+                let shown = shownSessions[summary.sessionKey]?.shown
+                let pending = shown?.pendingApprovals ?? []
                 return FleetRow(
                     summary: summary,
                     status: FleetStatusRule.status(
-                        summary: summary, state: state,
-                        reviewedSeq: ReviewMarks.reviewedSeq(for: summary.sessionKey)),
-                    subtitle: subtitle(for: summary, state: state),
-                    activity: activity(for: state),
+                        summary: summary, shown: shown, reviewedSeq: shown?.reviewedSeq ?? 0),
+                    subtitle: subtitle(for: summary, shown: shown),
+                    activity: activity(for: shown),
                     label: labels[summary.sessionKey] ?? .unknown,
                     capability: FleetStatusRule.capability(
                         summary: summary, capabilities: connection.capabilities),
                     blockedCount: max(summary.blockedOn.count, pending.count),
-                    lastEventAt: state?.lastEventAt,
-                    cachedAt: (state?.hasLiveData ?? false) ? nil : state?.loadedFromCacheAt)
+                    lastEventAt: shown?.lastEventAt,
+                    cachedAt: (shown?.hasLiveData ?? false) ? nil : shown?.loadedFromCacheAt)
             })
     }
 
@@ -1395,16 +1666,160 @@ final class AppModel {
 
     /// Creates on demand. Only ever called from event handling — a view that
     /// called it during `body` would be mutating state mid-render, so views read
-    /// `states[key]`, which is always populated for a session in `summaries`.
+    /// `shown(for:)`.
     private func state(for key: String) -> SessionState {
         if let existing = states[key] { return existing }
         let fresh = SessionState(sessionKey: key, recordsReviewMarks: !fixturesActive)
+        fresh.onTimelineRebuilt = { [weak self] in
+            guard let self else { return }
+            self.fillWindow(of: key)
+            if !self.launchSettled { self.settleLaunchIfCaughtUp() }
+        }
+        fresh.codexTurns = { [weak self] in
+            guard let controls = self?.codexControlsByKey[key] else { return ([], []) }
+            return (controls.observedTurns, controls.retiredTurns)
+        }
         states[key] = fresh
+        if catchUp == nil {
+            shownSessions[key] = fresh
+        } else {
+            fresh.holdsPresentation = true
+        }
         return fresh
     }
 
+    /// Put the list and its sessions on screen as the truth now has them,
+    /// unless a catch-up holds the screen.
+    private func publishList() {
+        guard catchUp == nil else { return }
+        commitList()
+        #if DEBUG
+            listPublications.append(.live)
+        #endif
+    }
+
+    private func commitList() {
+        // A run that left the Mac takes its review mark with it as its row
+        // leaves the screen, not before: a row drawn as reviewed stays reviewed
+        // until it goes, and one listed again by then keeps its mark.
+        for key in departedMarks where states[key] == nil {
+            ReviewMarks.forget(sessionKey: key)
+        }
+        departedMarks.removeAll()
+        if diffs.contains(where: { states[$0.key] == nil }) {
+            diffs = diffs.filter { states[$0.key] != nil }
+        }
+        // Each assigned only when it differs: `@Observable` fires on the
+        // assignment, and an equal list redraws every row for nothing.
+        if shownSummaries != summaries { shownSummaries = summaries }
+        if shownSessions.count != states.count
+            || states.contains(where: { shownSessions[$0.key] !== $0.value })
+        {
+            shownSessions = states
+        }
+        if shownFleetSource != fleetSource { shownFleetSource = fleetSource }
+    }
+
+    #if DEBUG
+        /// Why the list was published, once per publication. See
+        /// `SessionState.publications`.
+        enum ListPublication: Equatable {
+            case live
+            case release
+            /// The reader removed a run.
+            case removal
+        }
+        private(set) var listPublications: [ListPublication] = []
+    #endif
+
+    /// The run as the Mac last listed it. The truth: send paths and validation
+    /// read it, and screens read `shownSummary(for:)`.
     func summary(for key: String) -> SessionSummary? {
         summaries.first { $0.sessionKey == key }
+    }
+
+    /// The run as the list on screen has it.
+    func shownSummary(for key: String) -> SessionSummary? {
+        shownSummaries.first { $0.sessionKey == key }
+    }
+
+    /// What is on screen for this run, or nil when the screen has no such run.
+    func shown(for key: String) -> SessionState.Shown? {
+        shownSessions[key]?.shown
+    }
+
+    /// The reader has seen this run through what is drawn.
+    func markReviewed(_ key: String) {
+        shownSessions[key]?.markReviewed()
+    }
+
+    /// The reader acknowledged this run's gap notice.
+    func dismissGap(_ key: String) {
+        shownSessions[key]?.dismissGap()
+    }
+
+    /// The screen showing this chat is told as the rows above its reader are
+    /// replaced. See `SessionState.onWindowChange`.
+    func onWindowChange(
+        of key: String,
+        _ observer: ((_ shown: [TimelineItem], _ next: [TimelineItem], _ change: SessionState.WindowChange) -> Void)?
+    ) {
+        shownSessions[key]?.onWindowChange = observer
+    }
+
+    /// The screen showing this chat is told as a catch-up's one change lands.
+    /// See `SessionState.onCatchUpLanding`.
+    func onCatchUpLanding(
+        of key: String, _ observer: ((_ shown: SessionState.Shown, _ next: SessionState.Shown) -> Void)?
+    ) {
+        shownSessions[key]?.onCatchUpLanding = observer
+    }
+
+    /// What the command sheets watch for: the run's newest receipts as they
+    /// arrive, never as drawn — a receipt is the answer to a send, and the sheet
+    /// fences it against `eventHighWater`, which is the truth too.
+    func receipts(for key: String) -> SessionState.Receipts? {
+        states[key]?.receipts
+    }
+
+    /// What the diagnostics sheet reports of the sessions this phone holds, as
+    /// they are now.
+    var sessionDiagnostics: SessionDiagnostics {
+        SessionDiagnostics(
+            known: summaries.count,
+            gaps: states.values.filter { $0.gap != nil }.count,
+            highestSeq: states.values.map(\.lastSeq).filter { $0 > 0 }.max(),
+            fromCache: states.values.filter { $0.loadedFromCacheAt != nil && !$0.hasLiveData }.count)
+    }
+
+    struct SessionDiagnostics {
+        let known: Int
+        /// Sessions whose event log has a discontinuity the app has not seen filled.
+        let gaps: Int
+        let highestSeq: UInt64?
+        let fromCache: Int
+    }
+
+    /// The run's permission mode as drawn: what its held events last said, or
+    /// the Mac's own account where that rests on a newer event — the event that
+    /// set the mode can be older than the window.
+    func permissionMode(for key: String) -> String? {
+        let shown = shown(for: key)
+        if let fact = shownSummary(for: key)?.permissionMode, fact.seq > shown?.permissionModeSeq ?? 0 {
+            return fact.value
+        }
+        return shown?.permissionMode
+    }
+
+    /// The run's model, likewise.
+    func confirmedModel(for key: String) -> ConfirmedModel? {
+        let shown = shown(for: key)
+        if let fact = shownSummary(for: key)?.model, fact.seq > shown?.confirmedModelSeq ?? 0 {
+            return ConfirmedModel(
+                name: fact.value, provenance: ModelProvenance(fact.source),
+                at: ISO8601.parse(fact.at) ?? .distantPast)
+        }
+        return shown?.confirmedModel
     }
 
     /// How far this run's event stream has got, as far as anything here knows.
@@ -1426,7 +1841,7 @@ final class AppModel {
     /// second run in the same project is what earns a qualifier, and no run can
     /// know that alone.
     func runLabel(for key: String) -> RunLabel {
-        RunLabel.labels(for: summaries)[key] ?? .unknown
+        RunLabel.labels(for: shownSummaries)[key] ?? .unknown
     }
 
     /// The tmux session name to attach to, or nil when the daemon no longer
@@ -1437,7 +1852,7 @@ final class AppModel {
     /// uid — and the name is only safe to use while the daemon still vouches
     /// that it belongs to this run.
     func tmuxName(for key: String) -> String? {
-        guard let summary = summary(for: key) else { return nil }
+        guard let summary = shownSummary(for: key) else { return nil }
         // Empty is the daemon saying "no known location": an adopted run whose
         // hooks arrived but which nothing ever put in tmux. Falling back to the
         // session id here was a guess wearing a fact's clothes — the exact
@@ -1447,11 +1862,11 @@ final class AppModel {
         return summary.tmuxSession
     }
 
-    private func subtitle(for summary: SessionSummary, state: SessionState?) -> String {
+    private func subtitle(for summary: SessionSummary, shown: SessionState.Shown?) -> String {
         // **Nothing, rather than the run's own name back.** A run that has said
         // nothing has no sentence, and repeating the title underneath itself
         // reads as a fact and is not one.
-        guard let last = state?.timeline.last else { return "" }
+        guard let last = shown?.timeline.last else { return "" }
         switch last.content {
         case .userMessage(let text, _): return "you: \(text.firstLine)"
         case .agentMessage(let text, _): return text.firstLine
@@ -1471,7 +1886,7 @@ final class AppModel {
         }
     }
 
-    /// The same last item as `subtitle(for:state:)`, kept as **two strings** so
+    /// The same last item as `subtitle(for:shown:)`, kept as **two strings** so
     /// the row can set the tool in prose and its argument in monospace.
     ///
     /// The flat sentence above is still built, and is still what VoiceOver
@@ -1479,8 +1894,8 @@ final class AppModel {
     /// is the same fact spoken. What the split buys is that `echo soak` — a
     /// shell command — stops being drawn in proportional type on Running and
     /// Idle rows while an identical construction two rows above it is monospace.
-    private func activity(for state: SessionState?) -> FleetActivity? {
-        guard let last = state?.timeline.last else { return nil }
+    private func activity(for shown: SessionState.Shown?) -> FleetActivity? {
+        guard let last = shown?.timeline.last else { return nil }
         switch last.content {
         case .tool(let tool):
             return FleetActivity(tool: tool.name, argument: tool.argument?.firstLine)
@@ -1513,6 +1928,13 @@ final class AppModel {
             // read it: bytes off that screen are never facts this model holds.
             break
         case .sessions(let list):
+            let answersCatchUp = takeSessionsReply()
+            if answersCatchUp {
+                // Its first list is progress; the fleet refresh's later ones
+                // restate what is owed and pay none of it.
+                if catchUp?.list == nil { catchUp?.progressed = true }
+                catchUp?.list = list
+            }
             markFleetLive()
             // **Assigned only when it differs.** The fleet is re-asked every 15
             // seconds because `link` and `blocked_on` can change without an
@@ -1525,6 +1947,7 @@ final class AppModel {
             // on screen. `SessionSummary` is `Hashable` on every wire field, so
             // this comparison is the whole fact.
             if summaries != list { summaries = list }
+            listGeneration = connection.generation
             enqueueCacheWork { await $0.saveFleet(list) }
             // Anything the daemon does not list is not something this app can
             // claim to know about. Dropping those states is what stops a
@@ -1541,26 +1964,68 @@ final class AppModel {
             for departed in states.keys.filter({ !live.contains($0) }) {
                 forgetLocalState(of: departed)
             }
-            // Guarded for the same reason the assignment above is: `filter`
-            // always returns a new dictionary, and assigning one that dropped
-            // nothing is an invalidation carrying no news.
-            if diffs.contains(where: { !live.contains($0.key) }) {
-                diffs = diffs.filter { live.contains($0.key) }
-            }
             for summary in list {
                 let sessionState = state(for: summary.sessionKey)
                 if sessionState.lastSeq >= summary.lastSeq {
                     sessionState.noteConfirmedCurrent()
                 }
-                subscribeIfNeeded(summary)
+                // A catch-up's own list spends the reset, never an older one.
+                let resetDue =
+                    (catchUp == nil || answersCatchUp)
+                    && windowResetDue.remove(summary.sessionKey) != nil
+                if resetDue, daemonProfile.pagesHistory, subscribed.contains(summary.sessionKey) {
+                    restartWindow(of: summary)
+                }
+                subscribeIfNeeded(summary, resetWindow: resetDue)
+                if daemonProfile.pagesHistory, sessionState.lastSeq >= summary.lastSeq {
+                    sessionState.keepPins(summary.pending)
+                }
             }
+            if !launchSettled {
+                // The first live list sets what "caught up" means; a later one
+                // can only take away a session that has left.
+                launchTargets =
+                    launchTargets?.filter { live.contains($0.key) }
+                    ?? Dictionary(list.map { ($0.sessionKey, $0.lastSeq) }) { first, _ in first }
+                settleLaunchIfCaughtUp()
+            }
+            publishList()
+            advanceCatchUp()
         case .event(let event):
-            state(for: event.sessionKey).ingest(event)
+            let sessionState = state(for: event.sessionKey)
+            let heldThrough = sessionState.lastSeq
+            sessionState.ingest(event)
             scheduleCacheWrite(event.sessionKey)
+            if !launchSettled { settleLaunchIfCaughtUp() }
             // A resolution or a new card changes the fleet's top band.
             if event.kind == .approvalRequest || event.kind == .approvalResolved {
                 refreshFleet()
             }
+            if catchUp != nil {
+                // Only a session still short of what it owes is progress: one
+                // already there, or one the list does not name, is busy, not
+                // catching up.
+                if let target = catchUp?.list?.first(where: { $0.sessionKey == event.sessionKey })?
+                    .lastSeq, heldThrough < target, sessionState.lastSeq > heldThrough
+                {
+                    catchUp?.progressed = true
+                }
+                advanceCatchUp()
+            }
+        case .historyEnd(let sessionID, let requestID, _, let firstSeq, let error):
+            // Echoed as it was sent, which is the session's key.
+            if let sessionState = states[sessionID],
+                sessionState.pageRequest?.id == requestID || sessionState.pinRequest?.id == requestID
+            {
+                catchUp?.progressed = true
+            }
+            states[sessionID]?.endHistory(requestID: requestID, firstSeq: firstSeq, failed: error != nil)
+            // The one request in flight is free: open cards first, then the fill.
+            // A reader at the top is woken through `isReadyToPage`.
+            fillWindow(of: sessionID)
+            // A failed page ends the fill, which may be what the loader waits on.
+            if !launchSettled { settleLaunchIfCaughtUp() }
+            advanceCatchUp()
         case .helloAck(let ack):
             // The daemon accepted this credential, which is the only proof a
             // hand-typed token ever gets.
@@ -1575,6 +2040,10 @@ final class AppModel {
             // minted. Nothing here may act on one: a stop or a message is a
             // mutation somebody pressed, and its outcome belongs to that press.
             break
+        case .error(let code, _) where code == "sessions_unavailable":
+            // The Mac's answer to a `sessions` request it could not serve: it
+            // takes that request's place, so the replies after it stay matched.
+            if takeSessionsReply() { catchUp?.progressed = true }
         case .answerResult, .sendTextResult, .captureResult, .commandCatalog, .diff, .error,
             .pong, .unknown:
             break
@@ -1628,8 +2097,12 @@ final class AppModel {
     /// prefer the run with a supervisor attached, else the newest — because that
     /// is the run somebody following the link means, and `mac/README.md` makes
     /// that the contract.
+    ///
+    /// During a catch-up a name waits — nil — for the list the catch-up ends
+    /// on: until then the name may still belong to a run that has gone.
     func resolveSessionKey(reference: String) -> String? {
         if summary(for: reference) != nil { return reference }
+        guard !isCatchingUp else { return nil }
         let named = summaries.filter { $0.sessionID == reference }
         guard !named.isEmpty else { return nil }
         let attached = named.filter { $0.link == .attached }
@@ -1640,7 +2113,21 @@ final class AppModel {
 
     private func resubscribeAll() {
         subscribed.removeAll()
-        refreshFleet()
+        // Asked on a link that has gone: none of them is settled on this one.
+        subscribedAfter.removeAll()
+        // A page asked for on the old connection ends on that connection or not
+        // at all.
+        for state in states.values {
+            state.cancelPage()
+            state.cancelPin()
+        }
+        // Before the fleet is shown, a new connection starts the catch-up over:
+        // its first list says what caught up means, and what was prepared
+        // against the old one says nothing about the new.
+        if !launchSettled {
+            launchTargets = nil
+            preparedForLaunch = []
+        }
     }
 
     /// Resume where the cache left off, and be explicit whenever that is not
@@ -1650,7 +2137,11 @@ final class AppModel {
     /// there is one. Subscribing by name would follow *whichever* run holds that
     /// name — the daemon says so in `ws.rs` — so a dead `cc-1` on screen would
     /// quietly start showing a live `cc-1`'s work.
-    private func subscribeIfNeeded(_ summary: SessionSummary) {
+    ///
+    /// On a Mac that serves pages the chat is the newest 500 at launch and on
+    /// `resetWindow` (a return to the foreground), and on any other reconnect
+    /// keeps what it holds unless it missed more than that.
+    private func subscribeIfNeeded(_ summary: SessionSummary, resetWindow: Bool = false) {
         let key = summary.sessionKey
         guard !fixturesActive else { return }
         guard !subscribed.contains(key) else { return }
@@ -1662,6 +2153,13 @@ final class AppModel {
         // daemon's log was reset, and wipe a perfectly good timeline while
         // announcing a rewind that never happened.
         let generation = connection.generation
+        // Likewise a window: one applied while this task reads the cache — a
+        // return to the foreground on this same connection — is the newer
+        // decision, and this task must not lay its own over it.
+        let epoch = state(for: key).windowEpoch
+        // And the turns a compose had reported by now: one reported later began
+        // after any events this window skips.
+        let observed = codexControlsByKey[key]?.observedTurns ?? []
         Task { [weak self] in
             guard let self else { return }
             guard self.connection.generation == generation else {
@@ -1692,28 +2190,329 @@ final class AppModel {
                 self.subscribed.remove(key)
                 return
             }
+            guard sessionState.windowEpoch == epoch else {
+                return self.subscribeUnderNewerWindow(key, sessionState, generation: generation)
+            }
             let known = max(sessionState.lastSeq, cached?.lastSeq ?? 0)
             var afterSeq: UInt64
             if known > summary.lastSeq {
                 // The daemon's log is shorter than ours: it was reset behind us.
                 sessionState.resetForRewoundLog()
                 await self.cache.clearEvents(key: key)
-                afterSeq = Self.backfillStart(lastSeq: summary.lastSeq, state: sessionState)
+                // Checked before the window is touched: a link replaced during
+                // the clear has a task of its own for this run, which reads a
+                // window change made here as a newer decision and stands down.
+                // Its key in `subscribed` is that task's, so it stays.
+                guard self.connection.generation == generation else { return }
+                guard sessionState.windowEpoch == epoch else {
+                    return self.subscribeUnderNewerWindow(key, sessionState, generation: generation)
+                }
+                afterSeq =
+                    self.daemonProfile.pagesHistory
+                    ? self.applyWindow(
+                        sessionState, daemonLast: summary.lastSeq, keepEarlier: false, observed: observed)
+                    : Self.backfillStart(lastSeq: summary.lastSeq, state: sessionState)
+            } else if self.daemonProfile.pagesHistory {
+                afterSeq = self.applyWindow(
+                    sessionState, daemonLast: summary.lastSeq,
+                    keepEarlier: sessionState.windowStart != nil && !resetWindow, observed: observed)
             } else if known > 0 {
                 afterSeq = known
             } else {
                 afterSeq = Self.backfillStart(lastSeq: summary.lastSeq, state: sessionState)
             }
 
+            if !self.launchSettled {
+                self.preparedForLaunch.insert(key)
+                self.settleLaunchIfCaughtUp()
+            }
             guard self.connection.phase.isConnected,
                 self.connection.generation == generation
             else {
                 self.subscribed.remove(key)
                 return
             }
-            self.connection.sendIgnoringFailure(.subscribe(session: key, afterSeq: afterSeq))
+            self.subscribe(key, after: afterSeq)
+            self.advanceCatchUp()
         }
     }
+
+    /// Ask for a run's events after `afterSeq`, unless this connection was
+    /// already asked from there or earlier.
+    ///
+    /// The replay of that ask is already bringing everything after it, and the
+    /// live stream follows it, so holding fewer events now — a trim, or events
+    /// sent but not yet ingested — is local and asks for nothing. Asking again
+    /// would restart the daemon's replay. Only a start below the asked one, or a
+    /// new connection, needs a new ask.
+    private func subscribe(_ key: String, after afterSeq: UInt64) {
+        let generation = connection.generation
+        if let asked = subscribedAfter[key], asked.generation == generation,
+            asked.afterSeq <= afterSeq
+        {
+            return
+        }
+        subscribedAfter[key] = (generation, afterSeq)
+        connection.sendIgnoringFailure(.subscribe(session: key, afterSeq: afterSeq))
+    }
+
+    /// A window applied while this run's subscription read the cache decided what
+    /// it holds, and this connection still needs a subscription from its tail —
+    /// unless that application already asked for one.
+    private func subscribeUnderNewerWindow(
+        _ key: String, _ sessionState: SessionState, generation: Int
+    ) {
+        if !launchSettled {
+            preparedForLaunch.insert(key)
+            settleLaunchIfCaughtUp()
+        }
+        guard connection.phase.isConnected, connection.generation == generation else { return }
+        let start = sessionState.windowStart.map { $0 - 1 } ?? 0
+        subscribe(key, after: max(sessionState.lastSeq, start))
+        advanceCatchUp()
+    }
+
+    /// Back in the foreground on a link that stayed up: the newest 500 again.
+    /// Usually a local trim — the subscription on this link already brings what
+    /// follows — and an ask only where this link has none yet, or one that
+    /// starts later than the window now needs.
+    private func restartWindow(of summary: SessionSummary) {
+        let sessionState = state(for: summary.sessionKey)
+        let afterSeq = applyWindow(
+            sessionState, daemonLast: summary.lastSeq, keepEarlier: false,
+            observed: codexControlsByKey[summary.sessionKey]?.observedTurns ?? [])
+        subscribe(summary.sessionKey, after: afterSeq)
+    }
+
+    /// `SessionState.applyWindow`, then the fill: any application may leave a
+    /// window that still has nothing to show, and one that kept everything draws
+    /// nothing new, so no rebuild would ask for the page below it. `observed` are
+    /// the turns a compose had reported when the list deciding this window came.
+    private func applyWindow(
+        _ sessionState: SessionState, daemonLast: UInt64, keepEarlier: Bool, observed: [String]
+    ) -> UInt64 {
+        let heldThrough = sessionState.lastSeq
+        let afterSeq = sessionState.applyWindow(
+            daemonLast: daemonLast, keepEarlier: keepEarlier,
+            pending: summary(for: sessionState.sessionKey)?.pending ?? [])
+        if heldThrough < afterSeq, let controls = codexControlsByKey[sessionState.sessionKey] {
+            controls.forgetObservedTurns(observed)
+            sessionState.codexTurnsChanged()
+        }
+        fillWindow(of: sessionState.sessionKey)
+        return afterSeq
+    }
+
+    private func settleLaunchIfCaughtUp() {
+        // A catch-up's release is the launch's, so the loader never gives way
+        // to a screen the release changes a moment later.
+        guard !launchSettled, catchUp == nil, let launchTargets else { return }
+        // Caught up means holding what the list reported, and, on a Mac that
+        // serves pages, a window that has something to show or nothing earlier
+        // to page back to.
+        let caughtUp = launchTargets.allSatisfy { key, target in
+            guard preparedForLaunch.contains(key), let state = states[key] else { return false }
+            return state.lastSeq >= target && !state.needsEarlierPage
+        }
+        if caughtUp { settleLaunch() }
+    }
+
+    /// The loader's patience. A Mac that has not answered since the loader came
+    /// up gets `offline`, then the saved fleet under the link banner. One that
+    /// has answered is catching up, and showing the fleet then would show the
+    /// replay the loader hides, so it gets until it has caught up, through any
+    /// blip and redial on the way. A refusal needs the user, so it ends the wait
+    /// at once. Nothing waits past `cap`: a spinner that does not end is worse
+    /// than any fleet.
+    func waitOutLaunch(offline: Duration = .seconds(3), cap: Duration = .seconds(15)) async {
+        let started = ContinuousClock.now
+        // A handshake bumps the generation, so one that came and went between
+        // two looks at the phase still counts.
+        let connectedAtStart = connection.phase.isConnected
+        let generationAtStart = connection.generation
+        while !launchSettled {
+            if case .failed = connection.phase { break }
+            let answered = connectedAtStart || connection.generation != generationAtStart
+            let waited = ContinuousClock.now - started
+            if waited >= cap || (waited >= offline && !answered) { break }
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return
+            }
+        }
+        settleLaunch()
+    }
+
+    /// Shows the fleet, with every timeline already drawn.
+    func settleLaunch() {
+        guard !launchSettled else { return }
+        for state in states.values { state.rebuildNow() }
+        launchSettled = true
+        launchTargets = nil
+        preparedForLaunch = []
+    }
+
+    // MARK: - Catch-up
+
+    /// Hold the screen while the truth catches up with the Mac on this link —
+    /// or, with a catch-up already open, aim it here: a redial or a return
+    /// re-targets it rather than starting a second. Its own `sessions` request
+    /// goes out now.
+    ///
+    /// On a new link every reply answers a request written after the
+    /// handshake, so the link's first list is the catch-up's. On a link that
+    /// stayed up, an older request may still be answering: only replies from
+    /// its own request on count.
+    private func openCatchUp(onNewLink: Bool) {
+        guard !fixturesActive else { return }
+        let epoch = holdScreen()
+        catchUp?.generation = connection.generation
+        catchUp?.list = nil
+        catchUp?.position = onNewLink ? 0 : nil
+        watchForStall(epoch: epoch)
+        requestSessions()
+    }
+
+    /// **Leaving holds the screen at once.** A resuming app reads its socket
+    /// while it is still coming back, before it is active, and one the system
+    /// leaves running reads it all the while it is away: either way what
+    /// arrives waits for the return's catch-up. Whatever an open catch-up was
+    /// owed is old news by then, so nothing is released until the return
+    /// aims it again.
+    ///
+    /// Not behind the launch's loader before any link: nothing is on screen to
+    /// hold yet, and the saved fleet still being read must reach the screen the
+    /// loader gives way to. The first link's catch-up holds what is there.
+    private func holdForReturn() {
+        guard !fixturesActive, catchUp != nil || launchSettled else { return }
+        holdScreen()
+        catchUp?.list = nil
+        catchUp?.position = nil
+        stallWatch?.cancel()
+        stallWatch = nil
+    }
+
+    /// Hold the screen as it is, unless a catch-up already does. Returns the
+    /// catch-up's epoch.
+    @discardableResult
+    private func holdScreen() -> Int {
+        if let open = catchUp { return open.epoch }
+        catchUpEpochs += 1
+        catchUp = CatchUp(epoch: catchUpEpochs, generation: connection.generation)
+        isCatchingUp = true
+        for state in states.values { state.holdsPresentation = true }
+        return catchUpEpochs
+    }
+
+    /// Let go of the screen without publishing.
+    private func closeCatchUp() {
+        stallWatch?.cancel()
+        stallWatch = nil
+        catchUp = nil
+        isCatchingUp = false
+        deckAwaitsCatchUp = false
+        for state in states.values { state.holdsPresentation = false }
+    }
+
+    /// **Release the catch-up once the truth has caught up, in one change.**
+    ///
+    /// Caught up means, for every session the catch-up's latest list names: it
+    /// holds what that list says it has, its subscription on this link has
+    /// settled, its window has something to show or nothing earlier to page
+    /// back to, no page or card is on its way, and every open card the list
+    /// names is held — in the window, pinned, or fetched and found missing.
+    ///
+    /// Every session is built first, and any fill or card fetch that starts is
+    /// waited for: its end comes back here. Between the last check and the
+    /// commit nothing suspends, so what is checked is what is published. Never
+    /// while the app is away: the return aims the catch-up again.
+    private func advanceCatchUp() {
+        guard let open = catchUp, !releasing, !wentToBackground, let list = open.list else { return }
+        releasing = true
+        defer { releasing = false }
+        guard list.allSatisfy({ hasArrived($0, on: open.generation) }) else { return }
+        for state in states.values { state.rebuildNow() }
+        for summary in list { fillWindow(of: summary.sessionKey) }
+        guard catchUp?.epoch == open.epoch,
+            list.allSatisfy({ isCaughtUp($0, on: open.generation) })
+        else { return }
+        releaseCatchUp()
+    }
+
+    /// Everything the list says the session has is here, on a subscription this
+    /// link has settled.
+    private func hasArrived(_ summary: SessionSummary, on generation: Int) -> Bool {
+        guard let state = states[summary.sessionKey] else { return false }
+        return state.lastSeq >= summary.lastSeq
+            && subscribedAfter[summary.sessionKey]?.generation == generation
+    }
+
+    private func isCaughtUp(_ summary: SessionSummary, on generation: Int) -> Bool {
+        guard hasArrived(summary, on: generation), let state = states[summary.sessionKey] else {
+            return false
+        }
+        return !state.needsEarlierPage && state.pageRequest == nil && state.pinRequest == nil
+            && (!daemonProfile.pagesHistory || summary.pending.allSatisfy(state.holds(card:)))
+    }
+
+    private func releaseCatchUp() {
+        closeCatchUp()
+        for state in states.values { state.commitPresentation(asCatchUp: true) }
+        commitList()
+        catchUpReleases += 1
+        #if DEBUG
+            listPublications.append(.release)
+        #endif
+        if !launchSettled { settleLaunch() }
+    }
+
+    /// The reader removed a run mid-catch-up: its row and its cards leave the
+    /// screen now, every other row stays as it is, and the catch-up stops
+    /// waiting for it.
+    private func unpublishRemoved(_ key: String) {
+        shownSummaries.removeAll { $0.sessionKey == key }
+        shownSessions[key] = nil
+        if departedMarks.remove(key) != nil { ReviewMarks.forget(sessionKey: key) }
+        diffs[key] = nil
+        catchUp?.list?.removeAll { $0.sessionKey == key }
+        catchUp?.progressed = true
+        #if DEBUG
+            listPublications.append(.removal)
+        #endif
+        advanceCatchUp()
+    }
+
+    /// **No progress on a link that is up means retry, never release.** Every
+    /// fleet refresh interval — long enough for a healthy Mac to answer — a
+    /// catch-up that got no list and advanced nothing it is owed redials, which
+    /// asks for the list and subscribes everything afresh. A link that is down
+    /// is its own supervision's to redial.
+    private func watchForStall(epoch: Int) {
+        stallWatch?.cancel()
+        stallWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.fleetRefreshInterval)
+                guard let self, !Task.isCancelled, self.catchUp?.epoch == epoch else { return }
+                self.checkCatchUp()
+            }
+        }
+    }
+
+    private func checkCatchUp() {
+        // Away, nothing is released, so nothing could count as progress.
+        guard let open = catchUp, connection.phase.isConnected, !wentToBackground else { return }
+        guard !open.progressed else {
+            catchUp?.progressed = false
+            return
+        }
+        connection.redial()
+    }
+
+    #if DEBUG
+        /// Test seam: what the stall watch does when its interval ends.
+        func checkCatchUpForTesting() { checkCatchUp() }
+    #endif
 
     private static func backfillStart(lastSeq: UInt64, state: SessionState) -> UInt64 {
         guard lastSeq > initialBackfill else { return 0 }
@@ -1721,10 +2520,21 @@ final class AppModel {
         return lastSeq - initialBackfill
     }
 
-    /// Pull the whole log for one session, for when the truncated head matters.
-    /// Guarded: a full replay is expensive and repeat taps only duplicate it.
+    /// The events before the ones on screen: one page of 500 from a Mac that
+    /// serves pages, the whole log from one that does not. Guarded: one page is in
+    /// flight at a time, and a full replay is expensive and repeat taps only
+    /// duplicate it.
+    ///
+    /// The reader's ask waits out a catch-up: the page belongs above rows the
+    /// screen is not showing yet. `isReadyToPage` turning true asks again.
     func loadEarlier(key: String) {
-        guard !loadingEarlier.contains(key), connection.phase.isConnected else { return }
+        guard connection.phase.isConnected else { return }
+        if daemonProfile.pagesHistory {
+            guard !isCatchingUp else { return }
+            requestPage(of: key)
+            return
+        }
+        guard !loadingEarlier.contains(key) else { return }
         loadingEarlier.insert(key)
         connection.sendIgnoringFailure(.subscribe(session: key, afterSeq: 0))
         Task { [weak self] in
@@ -1733,7 +2543,80 @@ final class AppModel {
         }
     }
 
-    func isLoadingEarlier(_ key: String) -> Bool { loadingEarlier.contains(key) }
+    /// Ask for the page below this window, on the truth.
+    private func requestPage(of key: String) {
+        guard connection.phase.isConnected, let page = states[key]?.beginPage() else { return }
+        connection.sendIgnoringFailure(
+            .history(
+                session: key, beforeSeq: page.beforeSeq, limit: UInt32(page.limit),
+                requestID: page.id))
+    }
+
+    /// Asks for the request event of the first open card the Mac lists below the
+    /// window and the phone does not hold, one request at a time; the next is
+    /// asked when this one ends. Only from a list this link sent, and once the
+    /// window holds what that list counts, the pins are reconciled with it.
+    private func pinCards(of key: String) {
+        guard connection.phase.isConnected, daemonProfile.pagesHistory,
+            listGeneration == connection.generation, let state = states[key],
+            let summary = summary(for: key)
+        else { return }
+        if state.lastSeq >= summary.lastSeq { state.keepPins(summary.pending) }
+        for ref in summary.pending {
+            guard let request = state.beginPin(ref) else { continue }
+            connection.sendIgnoringFailure(
+                .history(
+                    session: key, beforeSeq: ref.seq + 1, limit: 1, requestID: request.id))
+            return
+        }
+    }
+
+    /// A window with nothing to show asks for the page below it once it has
+    /// caught up with what the Mac listed — before then the newest events are
+    /// still arriving and may be all it needs. An open card the window lacks is
+    /// asked for first: one event, where the page is 500.
+    private func fillWindow(of key: String) {
+        pinCards(of: key)
+        guard let state = states[key], state.needsEarlierPage,
+            let summary = summary(for: key), state.lastSeq >= summary.lastSeq
+        else { return }
+        requestPage(of: key)
+    }
+
+    /// The reader reached the top of a chat a Mac that serves pages windowed.
+    /// Theirs to ask, so it asks again after a page that failed.
+    func reachedTop(key: String) {
+        guard states[key]?.windowStart != nil, daemonProfile.pagesHistory else { return }
+        loadEarlier(key: key)
+    }
+
+    /// The open chat needs the page below without the reader asking: it does not
+    /// fill its screen, or a page added nothing and the reader is still at its
+    /// top. Like the fill, it waits until the window has caught up with what the
+    /// Mac listed, and stops at a page that failed.
+    func pageBackOnItsOwn(key: String) {
+        guard isReadyToPage(key), states[key]?.pagesBackOnItsOwn == true else { return }
+        loadEarlier(key: key)
+    }
+
+    /// The window can page now: the link is up to a Mac that serves pages, no
+    /// catch-up holds the screen, its timeline is drawn through what that Mac
+    /// listed, and there is earlier history. The open chat's screen watches
+    /// this, so a link coming back or a catch-up ending wakes a chat that still
+    /// needs the page below, with nothing on screen having moved — and only
+    /// once the caught-up rows are the ones on screen, since whether the chat
+    /// is short is read off them.
+    func isReadyToPage(_ key: String) -> Bool {
+        guard connection.phase.isConnected, !isCatchingUp, daemonProfile.pagesHistory,
+            let state = states[key], let windowStart = state.windowStart, windowStart > 1,
+            state.pinRequest == nil, let summary = summary(for: key)
+        else { return false }
+        return state.drawnThrough >= summary.lastSeq
+    }
+
+    func isLoadingEarlier(_ key: String) -> Bool {
+        daemonProfile.pagesHistory ? states[key]?.pageRequest != nil : loadingEarlier.contains(key)
+    }
 
     // MARK: - Cache
 
@@ -1830,18 +2713,20 @@ final class AppModel {
         // The run is gone, so there is nothing left for its material to reach.
         codexSpentLedger.forget(session: key)
         subscribed.remove(key)
+        subscribedAfter.removeValue(forKey: key)
         states.removeValue(forKey: key)
-        diffs.removeValue(forKey: key)
         pendingCacheWrites.remove(key)
         // A departed run's unsettled mutations die with it. Left behind, a
         // reused session *name* would collide a brand-new send with a dead
         // mutation's identity and the daemon would refuse it as a conflict.
         pendingSendIdentities = pendingSendIdentities.filter { $0.key.key != key }
-        // Gated exactly like the cache line below it: the sample fleet's
-        // `.sessions` frame lists only sample runs, so an ungated forget here
-        // would take one tap on "look around" as permission to destroy every
-        // real run's review marks — the cached fleet is loaded even unpaired.
-        if !fixturesActive { ReviewMarks.forget(sessionKey: key) }
+        // Its review mark and its diff go when the list without it is
+        // published (`commitList`). The mark is gated exactly like the cache
+        // line below: the sample fleet's `.sessions` frame lists only sample
+        // runs, so an ungated forget would take one tap on "look around" as
+        // permission to destroy every real run's review marks — the cached
+        // fleet is loaded even unpaired.
+        if !fixturesActive { departedMarks.insert(key) }
         enqueueCacheWork { await $0.clearEvents(key: key) }
     }
 
@@ -1854,21 +2739,23 @@ final class AppModel {
         #if DEBUG
             if fixtureCachedFleet { return }
         #endif
-        hasLiveFleet = true
-        fleetCachedAt = nil
-        fleetCacheRestoredAt = nil
+        fleetSource = FleetSource(isLive: true)
     }
 
-    /// Cold open: show the last-known fleet immediately, stamped with its age,
-    /// and let the live list replace it when it arrives.
+    /// Cold open: hold the last-known fleet, stamped with its age, for when the
+    /// loader gives up waiting on a Mac that is not answering; a live list
+    /// replaces it as soon as one arrives.
     private func loadCachedFleet() async {
         // A fixture run is hermetic: it *is* the cache, and reading the real one
         // over it is how half a previous live session ends up in a render.
         guard !fixturesActive else { return }
-        guard let cached = await cache.loadFleet(), !hasLiveFleet else { return }
+        guard let cached = await cache.loadFleet(), !fleetSource.isLive else { return }
         summaries = cached.sessions
-        fleetCachedAt = cached.cachedAt
-        fleetCacheRestoredAt = Date()
+        fleetSource = FleetSource(isLive: false, cachedAt: cached.cachedAt, restoredAt: Date())
+        for summary in cached.sessions {
+            _ = state(for: summary.sessionKey)
+        }
+        publishList()
         for summary in cached.sessions {
             let sessionState = state(for: summary.sessionKey)
             if let events = await cache.loadEvents(key: summary.sessionKey) {
@@ -1912,7 +2799,8 @@ final class AppModel {
         return fresh
     }
 
-    /// The turn this session is running, or nil when the phone holds none.
+    /// The turn this session is running, or nil when the phone holds none. The
+    /// truth, for the send path; a screen reads `Shown.runningTurn`.
     ///
     /// Derived from the event envelopes, because there is no "a turn began"
     /// fact on this wire at all — see `CodexTurnTracker`. The approval event's
@@ -1921,14 +2809,28 @@ final class AppModel {
     /// because both arrive as `Event.turnID`.
     func runningTurn(for key: String) -> String? {
         let controls = codexControls(for: key)
+        // A turn this session saw end is over even where the window no longer
+        // holds its terminal: what a compose observed, or a later event of the
+        // same turn, never brings it back.
         return CodexTurnTracker.runningTurn(
             in: states[key]?.events ?? [],
             observed: controls.observedTurns,
-            retired: controls.retiredTurns)
+            retired: controls.retiredTurns,
+            knownEnded: states[key]?.endedTurns ?? [])
     }
 
-    /// Why Stop is not offered on this session, or nil when it is.
+    /// Why Stop is not offered on this session as drawn, or nil when it is.
     func stopUnavailable(for key: String) -> String? {
+        guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
+        return CodexProse.stopUnavailable(
+            agent: summary.agent,
+            daemonHonoursStop: daemonProfile.stopsCodexTurns,
+            link: summary.codexLink,
+            runningTurn: shown(for: key)?.runningTurn)
+    }
+
+    /// The same rule against the truth: what decides whether a stop may leave.
+    private func stopBlocked(for key: String) -> String? {
         guard let summary = summary(for: key) else { return "This run is not in the fleet." }
         return CodexProse.stopUnavailable(
             agent: summary.agent,
@@ -1937,12 +2839,24 @@ final class AppModel {
             runningTurn: runningTurn(for: key))
     }
 
-    /// Why the Codex composer cannot send, or nil when it can.
+    /// Why the Codex composer cannot send as drawn, or nil when it can.
     func composeUnavailable(for key: String) -> String? {
+        guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
+        return Self.composeUnavailable(summary, profile: daemonProfile)
+    }
+
+    /// The same rule against the truth: what decides whether a message may leave.
+    private func composeBlocked(for key: String) -> String? {
         guard let summary = summary(for: key) else { return "This run is not in the fleet." }
-        return CodexProse.composeUnavailable(
+        return Self.composeUnavailable(summary, profile: daemonProfile)
+    }
+
+    private static func composeUnavailable(_ summary: SessionSummary, profile: DaemonProfile)
+        -> String?
+    {
+        CodexProse.composeUnavailable(
             agent: summary.agent,
-            daemonUnderstandsCompose: daemonProfile.composesToCodex,
+            daemonUnderstandsCompose: profile.composesToCodex,
             link: summary.codexLink)
     }
 
@@ -1954,9 +2868,9 @@ final class AppModel {
     ///
     /// **The whole gate lives here**, in one guard chain, and no surface
     /// re-derives any part of it: `stopUnavailable(for:)` answers the same
-    /// question for the controls, off the same inputs. Two readers of one rule
-    /// is how the link state came to be enforced when drawing a button and not
-    /// when sending a frame.
+    /// question for the controls, by the same rule over what is drawn. Two
+    /// rules is how the link state came to be enforced when drawing a button
+    /// and not when sending a frame.
     @discardableResult
     func stopCodexTurn(sessionKey key: String) async -> InterruptResult? {
         let controls = codexControls(for: key)
@@ -1966,7 +2880,7 @@ final class AppModel {
         }
         // Agent, daemon capability, running turn and **link state**, in the one
         // place that decides whether a frame may leave.
-        if let blocked = stopUnavailable(for: key) {
+        if let blocked = stopBlocked(for: key) {
             controls.stopNotSent(blocked)
             return nil
         }
@@ -1998,6 +2912,7 @@ final class AppModel {
             let result = try await connection.interrupt(
                 session: reference, requestID: requestID, turnID: turn, payloadHash: hash)
             controls.settleStop(result, material: hash, turnID: turn, now: now)
+            states[key]?.codexTurnsChanged()
             refreshFleet()
             return result
         } catch let refusal as DaemonConnection.CodexRefusal {
@@ -2022,7 +2937,7 @@ final class AppModel {
             controls.composeNotSent("This run is not in the fleet.")
             return nil
         }
-        if let blocked = composeUnavailable(for: key) {
+        if let blocked = composeBlocked(for: key) {
             controls.composeNotSent(blocked)
             return nil
         }
@@ -2054,6 +2969,7 @@ final class AppModel {
             let result = try await connection.compose(
                 session: reference, requestID: requestID, text: text, payloadHash: hash)
             controls.settleCompose(result, material: hash)
+            states[key]?.codexTurnsChanged()
             return result
         } catch let refusal as DaemonConnection.CodexRefusal {
             controls.composeNotSent(Self.sentence(for: refusal, verb: "carry this message"))
@@ -2132,11 +3048,35 @@ final class AppModel {
         guard !answersInFlight.contains(item.id) else {
             return .failed("An answer for this card is already being sent.")
         }
+        if let resolved = resolution(of: item) {
+            answerAttempts[item.id] = resolved
+            return resolved
+        }
         answersInFlight.insert(item.id)
         defer { answersInFlight.remove(item.id) }
         let attempt = await sendAnswer(item: item, decision: decision)
         answerAttempts[item.id] = attempt
         return attempt
+    }
+
+    /// What became of this card by now, as the truth has it, or nil while it is
+    /// still open there.
+    ///
+    /// Read after the reader's tap and any face check, never from what was
+    /// drawn when they tapped: an answer the Mac recorded meanwhile — arrived
+    /// and not yet drawn, or held back by a catch-up — leaves nothing to send.
+    /// Rebuilt first, so an event ingested and not yet built still counts.
+    private func resolution(of item: ApprovalItem) -> AnswerAttempt? {
+        guard let state = states[item.sessionKey] else { return nil }
+        state.rebuildNow()
+        guard let card = state.approval(id: item.id) else { return nil }
+        if let outcome = card.outcome {
+            return AnswerAttempt.classify(duplicate: outcome, staleHash: false)
+        }
+        if card.codexResolution != nil {
+            return .failed("This card was resolved on the Mac before your answer left, so nothing was sent.")
+        }
+        return nil
     }
 
     /// Why this decision cannot be sent to this agent, or nil when it can.

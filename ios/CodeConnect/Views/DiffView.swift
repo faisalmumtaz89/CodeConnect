@@ -1401,7 +1401,7 @@ private struct DiffCommentSheet: View {
     /// controls stay live and answer in their own vocabulary at the send.
     private var blockedReason: CCDisabledReason? {
         if let reason = model.actionsBlockedReason { return CCDisabledReason(reason) }
-        if let summary = model.summary(for: key) {
+        if let summary = model.shownSummary(for: key) {
             let capability = FleetStatusRule.capability(
                 summary: summary, capabilities: model.connection.capabilities)
             if !capability.canAct, let reason = capability.reason {

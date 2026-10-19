@@ -342,8 +342,51 @@ final class CodexGateTests: XCTestCase {
         XCTAssertTrue(controls.isStopGreyed(now: now.addingTimeInterval(1)))
         XCTAssertTrue(controls.isStopGreyed(now: now.addingTimeInterval(9)))
         XCTAssertFalse(
+            controls.isStopGreyed(now: now.addingTimeInterval(10)), "ten seconds, not eleven")
+        XCTAssertFalse(
             controls.isStopGreyed(now: now.addingTimeInterval(11)),
             "the grey is a cooldown, not a verdict")
+    }
+
+    /// **The clock is read only while a grey stands.** The fleet asks this for
+    /// every row on every pass, and `model.now` ticks every second: read whether
+    /// or not anything was greyed, it redrew every row of an idle fleet once a
+    /// second.
+    func testTheClockIsReadOnlyWhileAGreyStands() {
+        let controls = CodexControls()
+        let now = Date()
+        var reads = 0
+        let clock = { () -> Date in
+            reads += 1
+            return now.addingTimeInterval(1)
+        }
+        XCTAssertFalse(controls.isStopGreyed(now: clock()))
+        XCTAssertEqual(reads, 0, "nothing greyed, so nothing to time")
+        controls.settleStop(
+            .rejected(
+                reason:
+                    "this Mac has lost its control link to the Codex session and is reconnecting, "
+                    + "so nothing was sent; try again shortly, or stop the turn at the Mac"),
+            material: "m", turnID: "t-1", now: now)
+        XCTAssertTrue(controls.isStopGreyed(now: clock()))
+        XCTAssertEqual(reads, 1, "a standing grey is timed")
+
+        controls.expireStopGrey(now: now.addingTimeInterval(9))
+        XCTAssertTrue(controls.isStopGreyed(now: now.addingTimeInterval(9)), "not yet up")
+        controls.expireStopGrey(now: now.addingTimeInterval(10))
+        reads = 0
+        XCTAssertFalse(controls.isStopGreyed(now: clock()))
+        XCTAssertEqual(reads, 0, "a grey whose time is up is no longer timed")
+
+        controls.settleStop(
+            .rejected(
+                reason:
+                    "this Mac has lost its control link to the Codex session and is reconnecting, "
+                    + "so nothing was sent; try again shortly, or stop the turn at the Mac"),
+            material: "m", turnID: "t-1", now: now)
+        controls.beginCompose()
+        XCTAssertFalse(controls.isStopGreyed(now: clock()))
+        XCTAssertEqual(reads, 0, "a compose that left clears the grey, and its clock")
     }
 
     /// A refusal the reader can fix **now** does not grey: a stale hash, an

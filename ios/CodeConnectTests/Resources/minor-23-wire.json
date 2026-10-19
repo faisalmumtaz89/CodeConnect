@@ -1,0 +1,300 @@
+{
+  "head_events": [
+    {
+      "event": {
+        "kind": "session_start",
+        "payload": {
+          "hook_event_name": "SessionStart",
+          "model": "claude-opus-5[1m]"
+        },
+        "seq": 1,
+        "session_id": "cc-5",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRQ",
+        "source": "hook",
+        "ts": "2026-10-15T01:58:08.822Z"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "user_message",
+        "payload": {
+          "message": {
+            "content": "Run the soak suite and tell me what breaks.",
+            "role": "user"
+          },
+          "type": "user"
+        },
+        "seq": 2,
+        "session_id": "cc-5",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRQ",
+        "source": "transcript",
+        "ts": "2026-10-15T01:58:11.824Z"
+      },
+      "type": "event"
+    }
+  ],
+  "hello_ack": {
+    "capabilities": {
+      "answer_path": "hook_return",
+      "can_approve_reliably": true,
+      "capture": false,
+      "codex_compose": false,
+      "codex_interrupt": false,
+      "command_catalog": false,
+      "delete_session": false,
+      "diff": true,
+      "fail_mode": "fail_open",
+      "history_pages": true,
+      "hold_secs": 0,
+      "hook_only_approvals": true,
+      "prompt_identity": true,
+      "push": false,
+      "push_relay": false,
+      "question_card": false,
+      "risk_class": true,
+      "send_text": true,
+      "send_text_idempotent": true,
+      "session_uid": true,
+      "slash_composer_recovery": false,
+      "terminal_pty": false,
+      "test_push": false,
+      "tls": false,
+      "tls_active": false
+    },
+    "device_name": "Review demo",
+    "protocol_minor": 23,
+    "protocol_version": 1,
+    "server_time": "2026-10-15T01:59:23.914Z",
+    "type": "hello_ack"
+  },
+  "history_end": {
+    "before_seq": 29,
+    "first_seq": 26,
+    "request_id": "b1-page",
+    "session_id": "01M4YMFXNN8SZ0Y0D9M3FGQGRQ",
+    "type": "history_end"
+  },
+  "history_end_error": {
+    "before_seq": 10,
+    "error": "unknown session 01K0000000000000000000NONE",
+    "first_seq": 10,
+    "request_id": "b1-unknown",
+    "session_id": "01K0000000000000000000NONE",
+    "type": "history_end"
+  },
+  "page_events": [
+    {
+      "event": {
+        "kind": "tool_call",
+        "payload": {
+          "hook_event_name": "PreToolUse",
+          "tool_input": {
+            "command": "./soak/run.sh --pass 2"
+          },
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_demo_soak_2_2"
+        },
+        "seq": 26,
+        "session_id": "cc-5",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRQ",
+        "source": "hook",
+        "ts": "2026-10-15T01:59:12.074Z"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "tool_result",
+        "payload": {
+          "duration_ms": 3902,
+          "hook_event_name": "PostToolUse",
+          "tool_input": {
+            "command": "./soak/run.sh --pass 2"
+          },
+          "tool_name": "Bash",
+          "tool_response": {
+            "interrupted": false,
+            "stderr": "",
+            "stdout": "pass 2: duplicate hook delivery; the second was refused as a replay"
+          },
+          "tool_use_id": "toolu_demo_soak_2_2"
+        },
+        "seq": 27,
+        "session_id": "cc-5",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRQ",
+        "source": "hook",
+        "ts": "2026-10-15T01:59:16.323Z"
+      },
+      "type": "event"
+    },
+    {
+      "event": {
+        "kind": "tool_call",
+        "payload": {
+          "hook_event_name": "PreToolUse",
+          "tool_input": {
+            "file_path": "/Users/dev/app-5/soak/README.md"
+          },
+          "tool_name": "Read",
+          "tool_use_id": "toolu_demo_soak_read_2"
+        },
+        "seq": 28,
+        "session_id": "cc-5",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRQ",
+        "source": "hook",
+        "ts": "2026-10-15T01:59:18.073Z"
+      },
+      "type": "event"
+    }
+  ],
+  "sessions": {
+    "sessions": [
+      {
+        "agent": "claude",
+        "blocked_on": [
+          "toolu_demo_force_push_0"
+        ],
+        "codex_link": "none",
+        "created_at": "2026-10-15T01:58:08.821Z",
+        "cwd": "/Users/dev/app-1",
+        "last_seq": 4,
+        "lifecycle": "live",
+        "link": "attached",
+        "model": {
+          "at": "2026-10-15T01:58:08.822Z",
+          "seq": 1,
+          "source": "session_start",
+          "value": "claude-opus-5[1m]"
+        },
+        "pending": [
+          {
+            "hold": "held",
+            "request_id": "toolu_demo_force_push_0",
+            "seq": 4
+          }
+        ],
+        "permission_mode": {
+          "seq": 4,
+          "value": "default"
+        },
+        "project_label": "app-1",
+        "session_id": "cc-1",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRK",
+        "tmux_session": "cc-1",
+        "updated_at": "2026-10-15T01:58:12.075Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [
+          "toolu_demo_edit_router_0"
+        ],
+        "codex_link": "none",
+        "created_at": "2026-10-15T01:58:08.821Z",
+        "cwd": "/Users/dev/app-2",
+        "last_seq": 4,
+        "lifecycle": "live",
+        "link": "attached",
+        "model": {
+          "at": "2026-10-15T01:58:08.822Z",
+          "seq": 1,
+          "source": "session_start",
+          "value": "claude-opus-5[1m]"
+        },
+        "pending": [
+          {
+            "hold": "held",
+            "request_id": "toolu_demo_edit_router_0",
+            "seq": 4
+          }
+        ],
+        "permission_mode": {
+          "seq": 4,
+          "value": "default"
+        },
+        "project_label": "app-2",
+        "session_id": "cc-2",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRM",
+        "tmux_session": "cc-2",
+        "updated_at": "2026-10-15T01:58:12.075Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [
+          "toolu_demo_read_readme_0"
+        ],
+        "codex_link": "none",
+        "created_at": "2026-10-15T01:58:08.821Z",
+        "cwd": "/Users/dev/app-3",
+        "last_seq": 3,
+        "lifecycle": "live",
+        "link": "attached",
+        "model": {
+          "at": "2026-10-15T01:58:08.822Z",
+          "seq": 1,
+          "source": "session_start",
+          "value": "claude-opus-5[1m]"
+        },
+        "pending": [
+          {
+            "hold": "held",
+            "request_id": "toolu_demo_read_readme_0",
+            "seq": 3
+          }
+        ],
+        "permission_mode": {
+          "seq": 3,
+          "value": "default"
+        },
+        "project_label": "app-3",
+        "session_id": "cc-3",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRN",
+        "tmux_session": "cc-3",
+        "updated_at": "2026-10-15T01:58:09.825Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-10-15T01:58:08.821Z",
+        "cwd": "/Users/dev/app-4",
+        "last_seq": 4,
+        "lifecycle": "live",
+        "link": "attached",
+        "model": {
+          "at": "2026-10-15T01:58:08.822Z",
+          "seq": 1,
+          "source": "session_start",
+          "value": "claude-opus-5[1m]"
+        },
+        "project_label": "app-4",
+        "session_id": "cc-4",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRP",
+        "tmux_session": "cc-4",
+        "updated_at": "2026-10-15T01:58:12.575Z"
+      },
+      {
+        "agent": "claude",
+        "blocked_on": [],
+        "codex_link": "none",
+        "created_at": "2026-10-15T01:58:08.821Z",
+        "cwd": "/Users/dev/app-5",
+        "last_seq": 31,
+        "lifecycle": "live",
+        "link": "attached",
+        "model": {
+          "at": "2026-10-15T01:58:08.822Z",
+          "seq": 1,
+          "source": "session_start",
+          "value": "claude-opus-5[1m]"
+        },
+        "project_label": "app-5",
+        "session_id": "cc-5",
+        "session_uid": "01M4YMFXNN8SZ0Y0D9M3FGQGRQ",
+        "tmux_session": "cc-5",
+        "updated_at": "2026-10-15T01:59:23.823Z"
+      }
+    ],
+    "type": "sessions"
+  }
+}

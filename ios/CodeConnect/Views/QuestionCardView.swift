@@ -46,7 +46,7 @@ struct QuestionCardView: View {
     // MARK: State
 
     private var live: ApprovalItem? {
-        model.liveApproval(sessionKey: approval.sessionKey, id: approval.id)
+        model.shownApproval(sessionKey: approval.sessionKey, id: approval.id)
     }
 
     private var attempt: AnswerAttempt? { model.lastAttempt(for: approval) }

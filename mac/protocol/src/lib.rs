@@ -23,6 +23,7 @@ pub mod build_identity;
 pub mod composite_id;
 pub mod config;
 pub mod event;
+pub mod facts;
 pub mod fsperm;
 pub mod hash;
 pub mod hook;
@@ -540,7 +541,27 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     hook; any other `option` is refused before anything is claimed, and so
 ///     is any decision on a card that is not held. `identity_bound` is true
 ///     exactly on a held approval.
-pub const PROTOCOL_MINOR: u32 = 22;
+///   * `23` — **Earlier pages, and what a session's latest facts are without
+///     its whole log.**
+///
+///     A phone that holds only a run's newest events needs two things from the
+///     Mac. Additive, and a client written against minor 22 needs all of it:
+///       - [`ws::Capabilities::history_pages`] — this daemon understands the rest.
+///       - [`ws::ClientMessage::History`] and [`ws::ServerMessage::HistoryEnd`] —
+///         the newest events below a seq, at most [`ws::MAX_HISTORY_PAGE`], as
+///         ordinary `event` frames, then one end naming the request.
+///       - [`event::SessionSummary::pending`] — every open card as a reference
+///         (request id, the seq of its request event, its hold, a Codex card's
+///         turn), never its body.
+///       - [`event::SessionSummary::model`] and
+///         [`event::SessionSummary::permission_mode`] — each with the seq of the
+///         event that decided it, so a client keeps whichever of these and its
+///         own events is newer.
+///
+///     What changed for every client, including older ones: nothing. The new
+///     summary fields are omitted when empty and a client that never sends
+///     `history` never receives `history_end`.
+pub const PROTOCOL_MINOR: u32 = 23;
 
 #[cfg(test)]
 mod ledger_tests {

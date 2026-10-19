@@ -803,7 +803,7 @@ gate then refuses.
 `hello_ack.capabilities` reports `tls`, `tls_active`, `diff`, `risk_class`,
 `session_uid`, `send_text_idempotent`, `prompt_identity`, `push`, `push_relay`,
 `send_text`, `capture`, `delete_session`, `test_push`, `codex_interrupt`,
-`codex_compose`, `question_card`, `hook_only_approvals` and `supported_agents` so the app disables
+`codex_compose`, `question_card`, `hook_only_approvals`, `history_pages` and `supported_agents` so the app disables
 affordances it does not see advertised instead of failing at tap time. `push`
 and `push_relay` are one-hot: `push` means this Mac holds an Apple key and talks
 to Apple itself, `push_relay` means it sends through the CodeConnect relay and a
@@ -852,6 +852,16 @@ card, and `text` on a Claude approval as a denial with that reason. For every
 client, any `option` but `1` on an approval is refused, and so is any decision
 on a card that is not held. A phone answers Claude approvals only from a daemon that
 advertises `hook_only_approvals`.
+`>= 23` serves earlier pages and says what a session's latest facts are: the
+`history_pages` capability, `history {session_id, before_seq, limit, request_id}`
+answered with the newest events below `before_seq` (at most 500) as ordinary
+`event` frames and then one `history_end {session_id, request_id, before_seq,
+first_seq, error?}`, and on `SessionSummary` the open cards by reference
+(`pending`: request id, the seq of its request event, its hold, a Codex card's
+turn) and the `model` and `permission_mode` facts, each with the seq of the
+event that decided it. A page moves no subscription watermark and is not counted
+as a delivery for notifications; a second page asked for a session while one is
+being sent is queued behind it. The new summary fields are omitted when empty.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

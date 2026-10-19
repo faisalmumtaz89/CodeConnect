@@ -79,7 +79,7 @@ final class FleetStatusTests: XCTestCase {
         XCTAssertFalse(state.timeline.isEmpty, "the rebuild did not run; the test proves nothing")
         return FleetStatusRule.status(
             summary: summary(lifecycle: lifecycle, blockedOn: blockedOn),
-            state: state, reviewedSeq: reviewedSeq)
+            shown: state.shown, reviewedSeq: reviewedSeq)
     }
 
     // MARK: The defect

@@ -312,14 +312,14 @@ enum FleetStatusRule {
     /// timeline is consulted too so a card that arrived on the stream counts
     /// even before the next `sessions` refresh.
     static func status(
-        summary: SessionSummary, state: SessionState?, reviewedSeq: UInt64
+        summary: SessionSummary, shown: SessionState.Shown?, reviewedSeq: UInt64
     ) -> FleetStatus {
-        let pending = state?.pendingApprovals.count ?? 0
+        let pending = shown?.pendingApprovals.count ?? 0
         if !summary.blockedOn.isEmpty || pending > 0 { return .blocked }
         if summary.lifecycle == .exited {
-            return endedAbnormally(state) ? .failed : .ended
+            return endedAbnormally(shown) ? .failed : .ended
         }
-        guard let state, let last = lastSubstantiveItem(state) else {
+        guard let shown, let last = lastSubstantiveItem(in: shown.timeline) else {
             return summary.lifecycle == .live ? .idle : .ended
         }
         if isTurnBoundary(last) {
@@ -327,9 +327,9 @@ enum FleetStatusRule {
             // the highest seq of any raw event, including `usage`, `reasoning` and
             // link chatter that produce no timeline item at all. Compared against
             // it, one link flap after you reviewed a turn flipped the row back to
-            // Done-unreviewed, re-sorted it up the fleet, and made it open
-            // diff-first again. What was reviewed is a turn, so the question is
-            // whether *that turn* is newer than the mark.
+            // Done-unreviewed and re-sorted it up the fleet. What was reviewed is
+            // a turn, so the question is whether *that turn* is newer than the
+            // mark.
             return last.seq > reviewedSeq ? .doneUnreviewed : .idle
         }
         return .running
@@ -337,9 +337,10 @@ enum FleetStatusRule {
 
     /// Link and lifecycle chatter says nothing about whether the agent is
     /// working, so a `link_state` arriving after a finished turn must not make
-    /// the session look busy again.
-    private static func lastSubstantiveItem(_ state: SessionState) -> TimelineItem? {
-        state.timeline.last { item in
+    /// the session look busy again. Also what a chat's window must hold before
+    /// it stops paging back (`SessionState.needsEarlierPage`).
+    static func lastSubstantiveItem(in timeline: [TimelineItem]) -> TimelineItem? {
+        timeline.last { item in
             guard case .notice(let notice) = item.content else { return true }
             switch notice.kind {
             // `.failure` sits with `.link` rather than with the agent's own events:
@@ -388,9 +389,9 @@ enum FleetStatusRule {
     /// same reason. Until something observes a real exit status, every ended run is
     /// `Ended`, which is what is known. Inventing a failure from weaker evidence is
     /// the defect this replaced.
-    private static func endedAbnormally(_ state: SessionState?) -> Bool {
-        guard let state else { return false }
-        return state.timeline.reversed().contains { item in
+    private static func endedAbnormally(_ shown: SessionState.Shown?) -> Bool {
+        guard let shown else { return false }
+        return shown.timeline.reversed().contains { item in
             guard case .notice(let notice) = item.content else { return false }
             return notice.kind == .sessionEnded && notice.severity == .failure
         }

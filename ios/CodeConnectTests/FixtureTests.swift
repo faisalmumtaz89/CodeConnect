@@ -156,10 +156,19 @@ final class FixtureTests: XCTestCase {
             pairing: PairingStore(), cache: EventCache(root: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)),
             settings: AppSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!))
         model.connection.simulateConnectedForTesting()
-        for frame in Fixtures.frames() { model.connection.injectForTesting(frame) }
+        // The app replays these with no catch-up — a fixture run is no link —
+        // so the ack's capabilities are taken without replaying a handshake,
+        // whose catch-up would wait for the ten events each listed run never
+        // sends.
+        var frames = Fixtures.frames()
+        if case .helloAck(let ack) = frames.first {
+            model.connection.simulateCapabilitiesForTesting(ack.capabilities, minor: ack.protocolMinor)
+            frames.removeFirst()
+        }
+        for frame in frames { model.connection.injectForTesting(frame) }
         // The timeline rebuild is scheduled on the main actor; await the
         // fact rather than sleeping a guess at it.
-        for state in model.states.values { await state.settleForTesting() }
+        for state in model.statesForTesting.values { await state.settleForTesting() }
         XCTAssertEqual(model.summaries.count, 4)
         XCTAssertEqual(model.deckCount, 3, "three agents blocked")
         // Urgency-ranked, and the fixture is built to make the difference
@@ -237,7 +246,7 @@ final class SampleFleetTests: XCTestCase {
         model.startSampleFleet()
         // The timeline rebuild is scheduled on the main actor; await the fact
         // rather than sleeping a guess at it.
-        for state in model.states.values { await state.settleForTesting() }
+        for state in model.statesForTesting.values { await state.settleForTesting() }
 
         XCTAssertTrue(model.showsFleet, "the sample fleet is a fleet, or it shows nothing")
         XCTAssertEqual(model.summaries.count, 4)
@@ -273,7 +282,7 @@ final class SampleFleetTests: XCTestCase {
     func testPairingTearsTheSampleFleetDown() async {
         let model = makeModel()
         model.startSampleFleet()
-        for state in model.states.values { await state.settleForTesting() }
+        for state in model.statesForTesting.values { await state.settleForTesting() }
         XCTAssertEqual(model.deckCount, 3)
 
         model.pair(
@@ -291,7 +300,7 @@ final class SampleFleetTests: XCTestCase {
     func testLeavingTheSampleFleetReturnsToOnboarding() async {
         let model = makeModel()
         model.startSampleFleet()
-        for state in model.states.values { await state.settleForTesting() }
+        for state in model.statesForTesting.values { await state.settleForTesting() }
         model.stopSampleFleet()
 
         XCTAssertFalse(model.showsFleet)

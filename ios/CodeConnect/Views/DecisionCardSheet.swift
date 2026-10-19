@@ -24,7 +24,7 @@ struct DecisionCardSheet: View {
     private var title: String {
         guard
             let questions = DecisionCardView.questionCard(
-                card: approval.card, agent: model.summary(for: approval.sessionKey)?.agent)
+                card: approval.card, agent: model.shownSummary(for: approval.sessionKey)?.agent)
         else { return "Decision" }
         return questions.questions.count == 1 ? "Question" : "\(questions.questions.count) questions"
     }

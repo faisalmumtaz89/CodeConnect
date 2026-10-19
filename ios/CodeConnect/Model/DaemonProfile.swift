@@ -132,6 +132,16 @@ struct DaemonProfile: Sendable, Hashable {
     /// agent's.
     var answersApprovalsByHook: Bool { capabilities?.hookOnlyApprovals == true }
 
+    /// **The daemon serves a run's log a page at a time** — minor 23 *and* the
+    /// `history_pages` capability. With it a chat holds the newest 500 events
+    /// and asks for earlier ones; without it the app backfills and loads the
+    /// whole log as it always has, because an older daemon cannot answer
+    /// `history` at all.
+    var pagesHistory: Bool {
+        (protocolVersion > Wire.protocolVersion || protocolMinor >= 23)
+            && capabilities?.historyPages == true
+    }
+
     /// Why a Codex card cannot be answered from this phone, or nil when it can.
     ///
     /// **What is wrong, what to do now, what to do about it** — in that order,

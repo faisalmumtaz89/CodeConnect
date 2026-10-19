@@ -3,6 +3,25 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Chat history in pages, and a fleet that keeps up
+
+- A chat opens on its newest 500 events, at launch and on every return to the app, however
+  long the app was away. Reaching the top loads the 500 before them in place, without moving
+  what you are reading. Open approvals and questions, the model and the mode stay right even
+  when they are older than what the chat holds.
+- At launch the fleet waits behind "Connecting to your Mac…" until it has caught up, and
+  shows the saved list if the Mac cannot be reached. Coming back to the app updates the
+  screen once, instead of stepping through everything that happened while it was away.
+- Tapping a row opens its chat. Removing a session asks first. Ended sessions can be selected
+  and removed together with one confirmation, and the Ended section folds away with Hide.
+- The fleet scrolls at the largest text sizes, a row swiped open starts fresh after the link
+  drops and returns, and a link that opens another chat opens that chat.
+- The fleet does far less work: an idle fleet no longer redraws every row each second, a row
+  redraws only when what it shows changes, and the fleet does nothing while a chat or the
+  Deck covers it.
+- Pages need a Mac with this update (CodeConnect 0.13.0, protocol minor 23); with an older
+  Mac the phone (1.1.6) keeps "Load all".
+
 ## A phone answer goes only to the call it was for
 
 An approval's Allow, Deny or "always allow" from the phone could reach a different Claude

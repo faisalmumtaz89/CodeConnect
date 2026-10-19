@@ -200,12 +200,14 @@ extension EnvironmentValues {
 /// measured, 191 moves and 1.3s of main thread for one tap.
 private struct TailObserver: UIViewRepresentable {
     let watch: TailWatch
+    let anchor: PageAnchor
 
-    func makeUIView(context: Context) -> Probe { Probe(watch: watch) }
+    func makeUIView(context: Context) -> Probe { Probe(watch: watch, anchor: anchor) }
     func updateUIView(_ probe: Probe, context: Context) { probe.watch = watch }
 
     final class Probe: UIView {
         var watch: TailWatch
+        let anchor: PageAnchor
         private var watchers: [NSKeyValueObservation] = []
         /// The last geometry seen, for telling a scroll away from the tail
         /// apart from content or a viewport changing size under a still reader.
@@ -224,8 +226,9 @@ private struct TailObserver: UIViewRepresentable {
             giveBack.scrollView.contentOffset.y -= giveBack.dy
         }
 
-        init(watch: TailWatch) {
+        init(watch: TailWatch, anchor: PageAnchor) {
             self.watch = watch
+            self.anchor = anchor
             super.init(frame: .zero)
             isUserInteractionEnabled = false
         }
@@ -243,6 +246,7 @@ private struct TailObserver: UIViewRepresentable {
             var view = superview
             while view != nil, !(view is UIScrollView) { view = view?.superview }
             guard let scrollView = view as? UIScrollView else { return }
+            anchor.attach(scrollView)
             // A row opened while this probe was out of the window grew where
             // it could not see, and the first reading below is `.initial`: its
             // move from zero must not be taken for the collection view's.
@@ -344,6 +348,563 @@ private struct TailObserver: UIViewRepresentable {
     }
 }
 
+/// **Keeps the reader's place while the rows above them are replaced** — an
+/// earlier page drawn above, or the window set afresh on a return to the app.
+///
+/// The list keeps its content offset when rows are inserted or removed above
+/// the ones on screen, so on its own a page arriving moves everything the
+/// reader was looking at down by the height of the page. Before the new
+/// timeline is published this reads where the first row on screen that the
+/// change leaves standing sits, and once the list has laid the new rows out it
+/// puts that row back there. A reset that leaves nothing the reader was
+/// looking at takes them to the latest, as opening the chat does.
+///
+/// The same UIKit path as `TailObserver`'s give-back, for the same measured
+/// reason: the move is made from a view's own `layoutSubviews`, later in the
+/// layout pass that drew the rows, never from inside the collection view's
+/// call and never through `scrollTo`, which can only land a row's top on an
+/// edge. That view is added to the collection view itself rather than riding a
+/// row, because the change can land while no particular row is on screen.
+@MainActor
+final class PageAnchor {
+    private enum Target {
+        /// This row, its top this far below the viewport's.
+        case row(id: String, top: CGFloat)
+        /// The newest rows.
+        case latest
+    }
+
+    private struct Hold {
+        let target: Target
+        /// Which hold this is, so letting go of one never lets go of the next.
+        let number: Int
+        /// The window was set afresh: nothing the reader was doing carries
+        /// over, a hand's motion included.
+        let isReset: Bool
+        /// The row's top in the content once placed. Later passes give back only
+        /// what the layout moved it by, so a hand or a deceleration under it
+        /// keeps its own motion.
+        var placedMinY: CGFloat?
+        /// Where the row's top was put below the viewport's.
+        var placedTop: CGFloat = 0
+    }
+
+    /// The list's rows before the timeline's: the banner and the head row, at
+    /// most. After the timeline there is one, the tail anchor.
+    private static let leadingRows = 0...2
+
+    /// The chat's published timeline, which the list's rows are matched against.
+    var timeline: () -> [TimelineItem] = { [] }
+    /// Asks for the next page without the reader; see `continueIfAtTop`.
+    var pageBackOnItsOwn: () -> Void = {}
+    /// Told when a held row is let go: until then the offset moved with the
+    /// list's update and the placement, so the top is read again from here.
+    var letGo: () -> Void = {}
+    /// Sets "N new" for a catch-up that landed: the rows below the reader's
+    /// place, or nil for a reader now at the newest rows, who has nothing new.
+    var settlePill: (Int?) -> Void = { _ in }
+    /// Told by the screen when the chat becomes able to page with nothing on
+    /// screen having moved. Not through the head row: SwiftUI holds back what
+    /// it tells a row that is off screen, and a reader within a screen of the
+    /// top can have that row off screen.
+    var wake: () -> Void = {}
+    private weak var scrollView: UICollectionView?
+    private var hold: Hold? {
+        didSet { if oldValue != nil, hold == nil { letGo() } }
+    }
+    private var holds = 0
+    /// A catch-up landed: its tail follow does not animate, and its "N new" was
+    /// set rather than added to. Each taken once, by the change it belongs to.
+    private var quietFollow = false
+    private var pillSet = false
+    /// Once the list shows the published timeline, the next page is asked for
+    /// if the reader is at the top or the chat is short: a page committed, or
+    /// the chat became able to page.
+    private var continuing = false
+    private var sizeWatch: NSKeyValueObservation?
+    private lazy var restorer = Restorer(anchor: self)
+
+    /// A row is held while the rows above it change: until it is let go the
+    /// list's update and its placement move the offset, not the reader.
+    var isPlacing: Bool { hold != nil }
+
+    /// Called by any probe that finds the timeline's scroll view.
+    func attach(_ scrollView: UIScrollView) {
+        guard let list = scrollView as? UICollectionView, list !== self.scrollView else { return }
+        self.scrollView = list
+        list.addSubview(restorer)
+        sizeWatch = list.observe(\.contentSize) { [weak self] _, _ in
+            MainActor.assumeIsolated {
+                guard let self, self.hold != nil || self.continuing else { return }
+                self.restorer.setNeedsLayout()
+            }
+        }
+    }
+
+    /// The chat became able to page with nothing on screen having moved. The
+    /// geometry is read once the list shows the timeline published now, which
+    /// may have changed in this same turn.
+    func recheck() {
+        continuing = true
+        restorer.setNeedsLayout()
+    }
+
+    /// A catch-up's one change is about to replace `shown` with `next`, after
+    /// any `willChange` for it. A reader at the latest lands at the latest, with
+    /// no scroll through what arrived; one whose place survives keeps it, with
+    /// "N new" set to the rows below it; one whose rows are gone is at the
+    /// newest rows, with none. `endMoves` says whether the change moves what
+    /// "N new" counts from (`TimelineEnd`): only then does a count set here
+    /// stand in for the one that change would make.
+    func catchUpWillLand(shown: [TimelineItem], next: [TimelineItem], endMoves: Bool) {
+        // Only a last row it changes has a follow to quieten.
+        quietFollow = shown.last != next.last
+        pillSet = false
+        guard let list = scrollView, list.window != nil, list.numberOfSections == 1 else { return }
+        switch hold?.target {
+        case .row(let id, _)?:
+            guard let index = next.firstIndex(where: { $0.id == id }) else { return }
+            settlePill(next.count - 1 - index)
+            pillSet = endMoves
+        case .latest?:
+            settlePill(nil)
+            pillSet = endMoves
+        case nil:
+            guard Self.isAtLatest(list) else { return }
+            holds += 1
+            hold = Hold(target: .latest, number: holds, isReset: true)
+            restorer.setNeedsLayout()
+        }
+    }
+
+    /// Whether the tail follow for the change on screen is a catch-up's, which
+    /// lands without animating. Taken once.
+    func takeQuietFollow() -> Bool {
+        defer { quietFollow = false }
+        return quietFollow
+    }
+
+    /// Whether "N new" for the change on screen was already set by its
+    /// catch-up. Taken once.
+    func takePillSet() -> Bool {
+        defer { pillSet = false }
+        return pillSet
+    }
+
+    /// The rows above the reader are about to change from `shown` to `next`.
+    func willChange(shown: [TimelineItem], next: [TimelineItem], change: SessionState.WindowChange) {
+        hold = nil
+        guard let list = scrollView, list.window != nil, list.numberOfSections == 1 else { return }
+        guard shown.map(\.id) != next.map(\.id) else {
+            // Nothing is drawn, so there is no layout to wait for.
+            if change == .page { Task { [weak self] in self?.continueIfAtTop() } }
+            return
+        }
+        if change == .page { continuing = true }
+        restorer.setNeedsLayout()
+        // A reader at the latest is the tail's to keep there; holding a row
+        // would stop its scroll to the newest.
+        if change == .reset, Self.isAtLatest(list) { return }
+        // Each entry is one row, counted from the tail anchor, which is the last.
+        let first = list.numberOfItems(inSection: 0) - 1 - shown.count
+        guard Self.leadingRows.contains(first) else { return }
+        let viewportTop = list.contentOffset.y + list.adjustedContentInset.top
+        func top(_ index: Int) -> CGFloat? {
+            list.layoutAttributesForItem(at: IndexPath(item: first + index, section: 0))
+                .map { $0.frame.minY - viewportTop }
+        }
+        let visible = list.indexPathsForVisibleItems.map { $0.item - first }
+            .filter { shown.indices.contains($0) }
+            .compactMap { index -> (index: Int, top: CGFloat)? in
+                guard let attributes = list.layoutAttributesForItem(
+                    at: IndexPath(item: first + index, section: 0)),
+                    attributes.frame.maxY > viewportTop
+                else { return nil }
+                return (index, attributes.frame.minY - viewportTop)
+            }
+            .sorted { $0.index < $1.index }
+        holds += 1
+        let below: ((Int) -> CGFloat?)? = change == .page ? { top($0) } : nil
+        let isReset = change == .reset
+        if let kept = Self.choose(visible: visible, shown: shown, next: next, below: below) {
+            hold = Hold(target: .row(id: next[kept.index].id, top: kept.top), number: holds, isReset: isReset)
+        } else if isReset {
+            hold = Hold(target: .latest, number: holds, isReset: true)
+        }
+    }
+
+    /// The row to keep, as its index in `next` and its top from the viewport's.
+    ///
+    /// The first row on screen that is still there after the change. Where none
+    /// is, a row on screen that folded into one the page brought — a tool's
+    /// result whose call was on the page — stands for the call that absorbed
+    /// it. Failing both, and given `below`, the nearest surviving row below the
+    /// screen.
+    static func choose(
+        visible: [(index: Int, top: CGFloat)], shown: [TimelineItem], next: [TimelineItem],
+        below top: ((Int) -> CGFloat?)?
+    ) -> (index: Int, top: CGFloat)? {
+        var nextIndex: [String: Int] = [:]
+        for (index, item) in next.enumerated() where nextIndex[item.id] == nil {
+            nextIndex[item.id] = index
+        }
+        for row in visible {
+            if let index = nextIndex[shown[row.index].id] { return (index, row.top) }
+        }
+        for row in visible {
+            guard case .tool(let tool) = shown[row.index].content, let use = tool.toolUseID,
+                let index = next.firstIndex(where: {
+                    if case .tool(let call) = $0.content { return call.toolUseID == use }
+                    return false
+                })
+            else { continue }
+            return (index, row.top)
+        }
+        guard let top else { return nil }
+        let below = visible.last.map { $0.index + 1 } ?? 0
+        for index in shown.indices.dropFirst(below) {
+            if let kept = nextIndex[shown[index].id], let rowTop = top(index) {
+                return (kept, rowTop)
+            }
+        }
+        return nil
+    }
+
+    /// Runs in each layout pass while there is something to do, and acts once
+    /// the list holds the published timeline's rows — the banner or the head
+    /// row may have come or gone with them — since their layout is the one the
+    /// offset is read against.
+    ///
+    /// It places the row, then keeps it there while the rows just above it,
+    /// laid out for the first time, settle from their estimated heights to
+    /// their real ones: the list does not give back what they grow by, and at
+    /// AX5 that moved the row 84pt. It lets go when the main actor next turns,
+    /// before a row the reader opens could be pulled back.
+    ///
+    /// Never above the screen: a row that folded into a shorter one would
+    /// otherwise put the reader past it, as would one measured shorter than
+    /// first estimated while it is held.
+    fileprivate func restore() {
+        guard let list = scrollView, list.numberOfSections == 1 else { return }
+        let timeline = timeline()
+        let first = list.numberOfItems(inSection: 0) - 1 - timeline.count
+        guard Self.leadingRows.contains(first) else { return }
+        if var hold {
+            let inset = list.adjustedContentInset
+            let lowest = -inset.top
+            let highest = max(lowest, list.contentSize.height + inset.bottom - list.bounds.height)
+            switch hold.target {
+            case .latest:
+                Self.stop(list, at: highest)
+                self.hold = nil
+            case .row(let id, let top):
+                guard let index = timeline.firstIndex(where: { $0.id == id }),
+                    let frame = list.layoutAttributesForItem(
+                        at: IndexPath(item: first + index, section: 0))?.frame
+                else {
+                    self.hold = nil
+                    break
+                }
+                let rowTop = top + frame.height > 0 ? top : 0
+                // A hand's drag or fling over a page keeps its own motion. Any
+                // other — the list's animated correction of an offset a reset's
+                // shorter content no longer reaches, a scroll to the top the
+                // status bar started — is stopped where the row is put: left
+                // running, it carries on from there to the new top.
+                let keepsMotion = !hold.isReset && (list.isTracking || list.isDecelerating)
+                if let placedMinY = hold.placedMinY {
+                    let moved = frame.minY - placedMinY - (rowTop - hold.placedTop)
+                    if !keepsMotion {
+                        Self.stop(list, at: min(max(list.contentOffset.y + moved, lowest), highest))
+                    } else if abs(moved) > 0.5 {
+                        list.contentOffset.y += moved
+                    }
+                } else {
+                    let target = min(max(frame.minY - rowTop - inset.top, lowest), highest)
+                    if !keepsMotion {
+                        Self.stop(list, at: target)
+                    } else if abs(target - list.contentOffset.y) > 0.5 {
+                        list.contentOffset.y = target
+                    }
+                    let number = hold.number
+                    // Until the main actor next turns: the layout passes that
+                    // draw the rows and size those it brings on screen run
+                    // before then.
+                    Task { [weak self] in
+                        if self?.hold?.number == number { self?.hold = nil }
+                    }
+                }
+                hold.placedMinY = frame.minY
+                hold.placedTop = rowTop
+                self.hold = hold
+            }
+        }
+        if continuing {
+            continuing = false
+            Task { [weak self] in self?.continueIfAtTop() }
+        }
+    }
+
+    /// Puts the offset at `y` and stops any animation of it: a set of the
+    /// property alone is taken by a running one as a shift of its path.
+    private static func stop(_ list: UIScrollView, at y: CGFloat) {
+        list.setContentOffset(CGPoint(x: list.contentOffset.x, y: y), animated: false)
+    }
+
+    /// A page that left the reader at the top — it added nothing to read, or
+    /// too little to fill a screen above them — or a chat still shorter than
+    /// its screen gets the next page without the reader moving; so does a chat
+    /// that became able to page with the reader at its top.
+    private func continueIfAtTop() {
+        guard let list = scrollView, list.window != nil, Self.isShort(list) || Self.isNearTop(list)
+        else { return }
+        pageBackOnItsOwn()
+    }
+
+    /// The content is shorter than the viewport.
+    static func isShort(_ scrollView: UIScrollView) -> Bool {
+        scrollView.contentSize.height
+            < scrollView.bounds.height - scrollView.adjustedContentInset.top
+            - scrollView.adjustedContentInset.bottom
+    }
+
+    /// At the bottom, with `TailObserver`'s slack.
+    static func isAtLatest(_ scrollView: UIScrollView) -> Bool {
+        scrollView.contentOffset.y + scrollView.bounds.height
+            - scrollView.adjustedContentInset.bottom >= scrollView.contentSize.height - 32
+    }
+
+    /// Within a screen of the top: the page is asked for before the reader runs
+    /// out of rows.
+    static func isNearTop(_ scrollView: UIScrollView) -> Bool {
+        scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+            <= scrollView.bounds.height
+    }
+
+    /// A zero-size view inside the collection view whose layout runs after the
+    /// collection view's own, in the same pass.
+    private final class Restorer: UIView {
+        unowned let anchor: PageAnchor
+
+        init(anchor: PageAnchor) {
+            self.anchor = anchor
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+            isAccessibilityElement = false
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            anchor.restore()
+        }
+    }
+}
+
+/// Reads "has the reader reached the top" off the hosting scroll view, the way
+/// `TailObserver` reads the bottom, from the head row, which is in the list only
+/// near the top.
+///
+/// It asks for the page above when a hand is scrolling within a screen of the
+/// top, or when the offset, moving up by more than any change of size explains,
+/// arrives at the top — a scroll the reader asked for another way, the status
+/// bar or VoiceOver. On its way there the move may be the list's own, as rows
+/// above change; at the top it cannot be. Never on its first reading: opening a chat
+/// lays it out at the top for an instant before it goes to the tail, and that is
+/// not a reader arriving. A window whose content does not fill the screen asks
+/// on its own, and a hand on it is the reader asking. When the chat becomes able
+/// to page without the reader — the link is back, or the catch-up has ended —
+/// with nothing on screen having moved, a reader whose ask went out and who has
+/// not left the top since, or a chat still short, gets the page, judged by
+/// `PageAnchor` once the list shows the rows published with it. Every ask is
+/// deferred and re-checks the geometry when it runs, so nothing is written
+/// during layout, and is dropped while `PageAnchor` holds a row in place: the
+/// offset is moving with the list's update, not the reader. Once the row is let
+/// go the probe reads again; after a page the anchor also judges the top.
+struct HeadObserver: UIViewRepresentable {
+    let anchor: PageAnchor
+    let reachedTop: () -> Void
+    let pageBackOnItsOwn: () -> Void
+
+    func makeUIView(context: Context) -> Probe {
+        Probe(anchor: anchor)
+    }
+
+    func updateUIView(_ probe: Probe, context: Context) {
+        probe.reachedTop = reachedTop
+        probe.pageBackOnItsOwn = pageBackOnItsOwn
+    }
+
+    final class Probe: UIView {
+        let anchor: PageAnchor
+        var reachedTop: () -> Void = {}
+        var pageBackOnItsOwn: () -> Void = {}
+        private weak var scrollView: UIScrollView?
+        private var watchers: [NSKeyValueObservation] = []
+        private var seen = false
+        /// The reader's ask went out and they have not left the top since.
+        private var arrived = false
+        private var lastOffsetY = CGFloat.zero
+        private var lastContentSize = CGSize.zero
+        private var lastBoundsSize = CGSize.zero
+        private var lastInsets = UIEdgeInsets.zero
+        /// The one pending ask; a burst of readings replaces it.
+        private var ask: Task<Void, Never>?
+
+        init(anchor: PageAnchor) {
+            self.anchor = anchor
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            seen = false
+            arrived = false
+            ask?.cancel()
+            guard window != nil else {
+                watchers = []
+                return
+            }
+            var view = superview
+            while view != nil, !(view is UIScrollView) { view = view?.superview }
+            guard let scrollView = view as? UIScrollView else { return }
+            self.scrollView = scrollView
+            anchor.attach(scrollView)
+            anchor.letGo = { [weak self] in
+                guard let self, self.window != nil, let scrollView = self.scrollView else { return }
+                self.read(scrollView)
+            }
+            anchor.wake = { [weak self] in
+                guard let self, self.window != nil else { return }
+                self.wake()
+            }
+            watchers = [
+                scrollView.observe(\.contentOffset, options: [.initial, .new]) {
+                    [weak self] scrollView, _ in
+                    MainActor.assumeIsolated { self?.read(scrollView) }
+                },
+                scrollView.observe(\.contentSize) { [weak self] scrollView, _ in
+                    MainActor.assumeIsolated { self?.read(scrollView) }
+                },
+                scrollView.observe(\.bounds) { [weak self] scrollView, _ in
+                    MainActor.assumeIsolated { self?.read(scrollView) }
+                },
+            ]
+        }
+
+        private func read(_ scrollView: UIScrollView) {
+            let dy = scrollView.contentOffset.y - lastOffsetY
+            let grown = scrollView.contentSize.height - lastContentSize.height
+            let resized = scrollView.bounds.size != lastBoundsSize
+                || scrollView.adjustedContentInset != lastInsets
+            let wasAtTop = lastOffsetY + lastInsets.top <= 0.5
+            lastOffsetY = scrollView.contentOffset.y
+            lastContentSize = scrollView.contentSize
+            lastBoundsSize = scrollView.bounds.size
+            lastInsets = scrollView.adjustedContentInset
+            let hand = scrollView.isTracking || scrollView.isDecelerating
+            if PageAnchor.isShort(scrollView) {
+                if hand {
+                    readerAsks { PageAnchor.isShort($0) }
+                } else {
+                    later(pageBackOnItsOwn) { PageAnchor.isShort($0) }
+                }
+                return
+            }
+            guard seen else {
+                seen = true
+                return
+            }
+            guard PageAnchor.isNearTop(scrollView) else {
+                arrived = false
+                return
+            }
+            // The status bar's scroll eases in a pixel at a time, so the step
+            // that arrives at the top can be a fraction of a point.
+            let arrives = dy < 0 && !wasAtTop && Self.isAtTop(scrollView)
+                && !resized && abs(grown) < -dy
+            guard hand || arrives else { return }
+            readerAsks { PageAnchor.isNearTop($0) }
+        }
+
+        private static func isAtTop(_ scrollView: UIScrollView) -> Bool {
+            scrollView.contentOffset.y + scrollView.adjustedContentInset.top <= 0.5
+        }
+
+        /// The reader's own ask: once it goes out, they have come to the top.
+        private func readerAsks(if still: @escaping (UIScrollView) -> Bool) {
+            later({ [weak self] in
+                self?.arrived = true
+                self?.reachedTop()
+            }, if: still)
+        }
+
+        /// A reader who came to the top, or a short chat. One opened at its
+        /// latest with the top within a screen never went there.
+        private func wake() {
+            guard let scrollView, arrived || PageAnchor.isShort(scrollView) else { return }
+            anchor.recheck()
+        }
+
+        private func later(_ action: @escaping () -> Void, if still: @escaping (UIScrollView) -> Bool) {
+            ask?.cancel()
+            ask = Task { [weak self] in
+                guard !Task.isCancelled, let self, !self.anchor.isPlacing else { return }
+                guard let scrollView = self.scrollView, still(scrollView) else { return }
+                action()
+            }
+        }
+    }
+}
+
+/// The row above the earliest event a chat holds: its own view, so the loading
+/// flag repaints this row and never the list.
+///
+/// On a Mac that serves pages it is a spinner while a page is loading and
+/// nothing otherwise, at one height either way: reaching it is how a reader
+/// asks for earlier history, and its probe is what notices. Which kind of row
+/// it is follows the chat's own window, set only by such a Mac — not the
+/// daemon's profile, which is empty while the link reconnects. An older Mac's
+/// chat keeps its "Load all".
+private struct HistoryHead: View {
+    let key: String
+    let anchor: PageAnchor
+
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if model.shown(for: key)?.windowStart != nil {
+            let loading = model.shown(for: key)?.loadingPage == true
+            ZStack {
+                if loading { CCProgressRing(.md) }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: CC.size.controlMd)
+            .background(
+                HeadObserver(
+                    anchor: anchor,
+                    reachedTop: { model.reachedTop(key: key) },
+                    pageBackOnItsOwn: { model.pageBackOnItsOwn(key: key) }))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading earlier history")
+            .accessibilityHidden(!loading)
+        } else {
+            CCGapMarker(
+                label: model.isLoadingEarlier(key)
+                    ? "Earlier history not loaded · Loading…"
+                    : "Earlier history not loaded · Load all",
+                actionLabel: "Load the earlier events",
+                action: model.isLoadingEarlier(key) ? nil : { model.loadEarlier(key: key) })
+        }
+    }
+}
+
 /// The semantic timeline for one session, plus the two things you can do to it:
 /// answer a card, or say something.
 ///
@@ -425,8 +986,8 @@ struct SessionDetailView: View {
     /// `cc-1` that exits while the screen is open cannot hand the screen to its
     /// successor.
     private var key: String { route.key }
-    private var state: SessionState? { model.states[key] }
-    private var summary: SessionSummary? { model.summary(for: key) }
+    private var shown: SessionState.Shown? { model.shown(for: key) }
+    private var summary: SessionSummary? { model.shownSummary(for: key) }
     /// What to call this run — see `RunLabel`. The same words the fleet row,
     /// the card and the lock screen use.
     private var label: RunLabel { model.runLabel(for: key) }
@@ -480,9 +1041,9 @@ struct SessionDetailView: View {
             // so it is hidden rather than destroyed.
             ZStack {
                 if surface == .timeline {
-                    if let state {
+                    if shown != nil {
                         SessionTimeline(
-                            key: key, state: state, tailWatch: tailWatch,
+                            key: key, tailWatch: tailWatch,
                             openApproval: $openApproval, showLinkDetail: $showLinkDetail,
                             composerFocused: $composerFocused
                         )
@@ -503,7 +1064,7 @@ struct SessionDetailView: View {
                     TerminalTabView(
                         sessionUID: key,
                         tmuxName: model.tmuxName(for: key),
-                        unhosted: model.summary(for: key)?.tmuxSession.isEmpty == true,
+                        unhosted: model.shownSummary(for: key)?.tmuxSession.isEmpty == true,
                         runLabel: label.spoken,
                         onScreen: surface == .terminal
                     )
@@ -616,7 +1177,7 @@ struct SessionDetailView: View {
         .sheet(item: $openApproval) { approval in
             // `openApproval` is only the sheet's IDENTITY (and a last-known
             // display). `DecisionCardView` re-derives the authoritative, live
-            // card from `AppModel.liveApproval(...)` on every render, so a
+            // card from `AppModel.shownApproval(...)` on every render, so a
             // crash-recovery rebuild, a resolution, or the session leaving the
             // fleet all reach the open sheet: the outcome wins the banner and the
             // action bar disables, or — with no live backing at all — the card
@@ -632,22 +1193,21 @@ struct SessionDetailView: View {
         .sheet(isPresented: $showLinkDetail) { LinkHealthSheet() }
         .onAppear {
             appearedAt = Date()
-            state?.markReviewed()
-            // Arrived from a "Done, unreviewed" row: what you came for is the
-            // diff, so it opens without a second tap.
-            if route.openDiff { showDiff = true }
+            model.markReviewed(key)
             if let requestID = route.openRequestID { wantedRequestID = requestID }
             consumeDeepLink()
             openWantedApproval()
         }
         .onDisappear {
-            state?.markReviewed()
+            model.markReviewed(key)
             composeResultClearTask?.cancel()
             wantedRequestID = nil
         }
         .onChange(of: model.pendingDeepLink) { _, _ in consumeDeepLink() }
+        // A name that waited out a catch-up is resolved at its release.
+        .onChange(of: model.isCatchingUp) { _, _ in consumeDeepLink() }
         // The card the link named arriving is the moment to open it.
-        .onChange(of: state?.pendingApprovals.map(\.card.requestID) ?? []) { _, _ in
+        .onChange(of: shown?.pendingApprovals.map(\.card.requestID) ?? []) { _, _ in
             openWantedApproval()
         }
     }
@@ -662,8 +1222,8 @@ struct SessionDetailView: View {
             CCStatusDot(
                 color: dotColour,
                 size: CCStatusDot.Size.cardHeader.rawValue,
-                isHollow: state?.loadedFromCacheAt != nil && state?.hasLiveData != true,
-                pulses: (state?.pendingApprovals.isEmpty == false))
+                isHollow: shown?.loadedFromCacheAt != nil && shown?.hasLiveData != true,
+                pulses: (shown?.pendingApprovals.isEmpty == false))
             Text(verbatim: label.project)
                 .ccType(CC.type.headline)
                 .foregroundStyle(CC.text.primary)
@@ -687,8 +1247,8 @@ struct SessionDetailView: View {
                 CCStatusDot(
                     color: dotColour,
                     size: CCStatusDot.Size.cardHeader.rawValue,
-                    isHollow: state?.loadedFromCacheAt != nil && state?.hasLiveData != true,
-                    pulses: (state?.pendingApprovals.isEmpty == false))
+                    isHollow: shown?.loadedFromCacheAt != nil && shown?.hasLiveData != true,
+                    pulses: (shown?.pendingApprovals.isEmpty == false))
                 // The same gutter the timeline's glyphs sit in, so the block's
                 // three lines start on the screen's one content column — 52,
                 // the number the fleet's rows use — and the dot on its one
@@ -704,7 +1264,7 @@ struct SessionDetailView: View {
                             .lineLimit(2)
                             .truncationMode(.tail)
                         Spacer(minLength: CC.space.xs)
-                        SessionFreshness(lastEventAt: state?.lastEventAt)
+                        SessionFreshness(lastEventAt: shown?.lastEventAt)
                     }
                     // A phrase about this run — `started 1:51 PM` — so small
                     // prose, not `micro`, which is the uppercase section label.
@@ -771,7 +1331,9 @@ struct SessionDetailView: View {
                     // deciding for itself is a thing the operator chose, and a
                     // product that shouts about a deliberate setting teaches
                     // people to ignore the places it shouts.
-                    if let notice = state?.silentBecauseOfPermissions {
+                    if let notice = SessionState.silentNotice(
+                        permissionMode: model.permissionMode(for: key))
+                    {
                         Text(notice)
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.tertiary)
@@ -860,8 +1422,7 @@ struct SessionDetailView: View {
     private var dotColour: Color {
         guard let summary else { return CC.text.tertiary }
         let status = FleetStatusRule.status(
-            summary: summary, state: state,
-            reviewedSeq: ReviewMarks.reviewedSeq(for: key))
+            summary: summary, shown: shown, reviewedSeq: shown?.reviewedSeq ?? 0)
         return status.ccDotColor
     }
 
@@ -897,7 +1458,7 @@ struct SessionDetailView: View {
         .accessibilityIdentifier("open-diff")
     }
 
-    private var changedFileCount: Int? { model.diffs[key]?.changedFileCount }
+    private var changedFileCount: Int? { model.diffState(for: key).changedFileCount }
 
     /// A deep link aimed at *this* session opens what it asked for.
     private func consumeDeepLink() {
@@ -918,8 +1479,8 @@ struct SessionDetailView: View {
     /// A miss keeps the request standing; `pendingApprovals` changing is what
     /// asks again.
     private func openWantedApproval() {
-        guard let requestID = wantedRequestID, let state,
-            let approval = state.pendingApprovals.first(where: { $0.card.requestID == requestID })
+        guard let requestID = wantedRequestID, let shown,
+            let approval = shown.pendingApprovals.first(where: { $0.card.requestID == requestID })
         else { return }
         wantedRequestID = nil
         openApproval = approval
@@ -1027,7 +1588,7 @@ struct SessionDetailView: View {
 
     // MARK: - Codex
 
-    private var isCodexSession: Bool { model.summary(for: key)?.isCodex == true }
+    private var isCodexSession: Bool { model.shownSummary(for: key)?.isCodex == true }
 
     /// **Say something to a Codex session.**
     ///
@@ -1163,7 +1724,6 @@ struct SessionDetailView: View {
 /// to the few things it sets, none of which typing touches.
 private struct SessionTimeline: View {
     let key: String
-    let state: SessionState
     let tailWatch: TailWatch
     @Binding var openApproval: ApprovalItem?
     @Binding var showLinkDetail: Bool
@@ -1173,6 +1733,11 @@ private struct SessionTimeline: View {
     /// The widest tool label in this timeline, so every command beside one
     /// starts on the same edge. See `CCToolColumn`.
     @State private var toolColumn: CGFloat = 0
+    @State private var pageAnchor = PageAnchor()
+
+    /// What is on screen for this run, read here so a publication re-runs this
+    /// body and not the screen around it.
+    private var state: SessionState.Shown { model.shown(for: key) ?? SessionState.Shown() }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -1206,18 +1771,12 @@ private struct SessionTimeline: View {
             // eager `VStack` also cured the freeze but took ~3s to open 3000.
             List {
                 Group {
-                    SessionBanner(state: state) { showLinkDetail = true }
+                    SessionBanner(key: key) { showLinkDetail = true }
 
                     if state.headTruncated {
                         // At its position in time — the very top — rather than
                         // as a banner floated above the list.
-                        CCGapMarker(
-                            label: model.isLoadingEarlier(key)
-                                ? "Earlier history not loaded · Loading…"
-                                : "Earlier history not loaded · Load all",
-                            actionLabel: "Load the earlier events",
-                            action: model.isLoadingEarlier(key)
-                                ? nil : { model.loadEarlier(key: key) })
+                        HistoryHead(key: key, anchor: pageAnchor)
                     }
 
                     if state.timeline.isEmpty {
@@ -1234,7 +1793,7 @@ private struct SessionTimeline: View {
                         VStack(alignment: .leading, spacing: 0) {
                             TimelineRow(
                                 item: item, profile: model.daemonProfile,
-                                agent: model.summary(for: key)?.agent,
+                                agent: model.shownSummary(for: key)?.agent,
                                 // Fired *before* the collapse — see
                                 // `AgentMessageRow` — so the target is the row in
                                 // its expanded geometry, which is always reachable.
@@ -1266,7 +1825,7 @@ private struct SessionTimeline: View {
                                 CCGapMarker(
                                     label: gap.message,
                                     actionLabel: "Dismiss this notice",
-                                    action: { state.dismissGap() })
+                                    action: { model.dismissGap(key) })
                             }
                         }
                         .id(item.id)
@@ -1289,7 +1848,7 @@ private struct SessionTimeline: View {
                     Color.clear
                         .frame(height: 1)
                         .padding(.bottom, CC.space.lg)
-                        .background(TailObserver(watch: tailWatch))
+                        .background(TailObserver(watch: tailWatch, anchor: pageAnchor))
                         .id(Self.tailAnchor)
                 }
                 // No list chrome at all: the page margin the stack's padding
@@ -1327,13 +1886,18 @@ private struct SessionTimeline: View {
             .environment(\.tailWatch, tailWatch)
             .ccCollectsToolColumn(into: $toolColumn)
             .background(CC.color.bg)
-            .onChange(of: state.timeline.count) { old, new in
+            .onChange(of: TimelineEnd(state.timeline, drawnThrough: state.drawnThrough)) { old, new in
+                // A catch-up that landed has set the count once already.
+                guard !pageAnchor.takePillSet() else { return }
                 // `isAway`, not `!following`: events landing inside the
                 // departure debounce belong to "while you were away" too —
                 // gated on the settled flag alone they went uncounted and
                 // the pill said "Latest" over rows never seen.
                 guard tailWatch.isAway else { return }
-                tailWatch.newSinceLeaving += max(0, new - old)
+                tailWatch.newSinceLeaving += TimelineEnd.rowsAfter(old, in: state.timeline)
+            }
+            .onChange(of: model.isReadyToPage(key)) { _, ready in
+                if ready { pageAnchor.wake() }
             }
             // The follow trigger is the tail *item*, not the count: the
             // builder merges some events into the row they belong to, so the
@@ -1342,17 +1906,49 @@ private struct SessionTimeline: View {
             // a debounce later. Any change to the last item — new row or
             // grown row — is exactly "the tail moved".
             .onChange(of: state.timeline.last) { _, _ in
+                let quiet = pageAnchor.takeQuietFollow()
                 // `isAway`, not `following`: the settled flag lags a real
                 // departure by the debounce, and an event landing in that
                 // lag must not yank a reader who just scrolled up or just
                 // expanded a message back to the tail.
                 guard !tailWatch.isAway else { return }
-                withAnimation(CC.motion.medium) {
+                // A catch-up lands in one step: animated, the follow would
+                // scroll through every row it brought.
+                if quiet {
                     proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
+                } else {
+                    withAnimation(CC.motion.medium) {
+                        proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
+                    }
                 }
             }
             .onAppear {
                 proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
+                pageAnchor.timeline = { [weak model, key] in model?.shown(for: key)?.timeline ?? [] }
+                pageAnchor.pageBackOnItsOwn = { [weak model, key] in
+                    model?.pageBackOnItsOwn(key: key)
+                }
+                model.onWindowChange(of: key) { [weak anchor = pageAnchor] shown, next, change in
+                    anchor?.willChange(shown: shown, next: next, change: change)
+                }
+                model.onCatchUpLanding(of: key) { [weak anchor = pageAnchor] shown, next in
+                    anchor?.catchUpWillLand(
+                        shown: shown.timeline, next: next.timeline,
+                        endMoves: TimelineEnd(shown.timeline, drawnThrough: shown.drawnThrough)
+                            != TimelineEnd(next.timeline, drawnThrough: next.drawnThrough))
+                }
+                pageAnchor.settlePill = { [weak tailWatch] below in
+                    guard let tailWatch else { return }
+                    if let below {
+                        if tailWatch.isAway { tailWatch.newSinceLeaving = below }
+                    } else {
+                        tailWatch.arrive()
+                    }
+                }
+            }
+            .onDisappear {
+                model.onWindowChange(of: key, nil)
+                model.onCatchUpLanding(of: key, nil)
             }
     }
 
@@ -1397,6 +1993,26 @@ private struct SessionTimeline: View {
                 proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
             }
         }
+    }
+}
+
+/// Where a timeline ends: how many rows it has and the last event it was
+/// drawn from. "N new" counts the rows drawn from events after that one — a
+/// timeline's rows are in event order — so an earlier page drawn above adds
+/// nothing: not where the old last row folded into a call the page brought,
+/// nor where it gives a later event the context that shows it.
+struct TimelineEnd: Equatable {
+    let count: Int
+    let drawnThrough: UInt64
+
+    init(_ timeline: [TimelineItem], drawnThrough: UInt64) {
+        count = timeline.count
+        self.drawnThrough = drawnThrough
+    }
+
+    /// The rows of `timeline` from events after the last one `old` was drawn from.
+    static func rowsAfter(_ old: TimelineEnd, in timeline: [TimelineItem]) -> Int {
+        timeline.reversed().prefix { $0.seq > old.drawnThrough }.count
     }
 }
 
@@ -1534,7 +2150,7 @@ private struct SessionLinkPill: View {
 /// lines of text ticking, rather than the whole timeline behind it.
 private struct SessionBanner: View {
     @Environment(AppModel.self) private var model
-    let state: SessionState
+    let key: String
     let onSettings: () -> Void
 
     var body: some View {
@@ -1559,7 +2175,9 @@ private struct SessionBanner: View {
     }
 
     private var cachedBanner: CCBannerItem? {
-        guard let cachedAt = state.loadedFromCacheAt, !state.hasLiveData else { return nil }
+        guard let state = model.shown(for: key), let cachedAt = state.loadedFromCacheAt,
+            !state.hasLiveData
+        else { return nil }
         // The same earned rule as the fleet's cached banner, for the same flash:
         // a cold deep link paints this screen from the cache and the live replay
         // lands half a second later. Amber in that half-second is noise.

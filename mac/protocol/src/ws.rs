@@ -234,6 +234,20 @@ pub enum ClientMessage {
     Unsubscribe {
         session_id: String,
     },
+    /// **One earlier page of a run's log** (minor 23, `history_pages`): the newest
+    /// `limit` events with `seq < before_seq`, sent oldest first as ordinary
+    /// `event` frames, then one [`ServerMessage::HistoryEnd`] carrying the same
+    /// `request_id`. The daemon serves at most [`MAX_HISTORY_PAGE`] whatever
+    /// `limit` asks for.
+    ///
+    /// Independent of `subscribe`: it moves no subscription and needs none.
+    /// `session_id` is a session reference, as for `subscribe`.
+    History {
+        session_id: String,
+        before_seq: u64,
+        limit: u32,
+        request_id: String,
+    },
     /// Remove one run's record from the Mac.
     ///
     /// Deliberately the only destructive verb the phone has, and deliberately
@@ -551,6 +565,22 @@ pub enum ServerMessage {
     },
     Event {
         event: Event,
+    },
+    /// The end of one [`ClientMessage::History`] page, sent exactly once per
+    /// request after the page's events. `session_id` and `request_id` are echoed
+    /// as the client sent them.
+    ///
+    /// `first_seq` is the lowest seq the page sent, or `before_seq` when it sent
+    /// none. `error` says why the page is incomplete — an unknown run, a store
+    /// failure, or a run removed while its page was being sent — and a page that
+    /// carries one may have sent some of its events first.
+    HistoryEnd {
+        session_id: String,
+        request_id: String,
+        before_seq: u64,
+        first_seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     AnswerResult {
         request_id: String,
@@ -910,7 +940,18 @@ pub struct Capabilities {
     /// shows its Claude approval cards read-only.
     #[serde(default)]
     pub hook_only_approvals: bool,
+    /// **This daemon serves earlier pages** ([`ClientMessage::History`]) and its
+    /// sessions carry their open cards and current facts
+    /// ([`crate::event::SessionSummary::pending`], `model`, `permission_mode`)
+    /// (minor 23). Absent decodes `false`: an older daemon answers `history` with
+    /// `bad_request`, so a client sends it only when this is advertised.
+    #[serde(default)]
+    pub history_pages: bool,
 }
+
+/// The most events one [`ClientMessage::History`] page carries, whatever its
+/// `limit` asks for.
+pub const MAX_HISTORY_PAGE: u32 = 500;
 
 /// How the daemon applies an answer on the *installed* Claude Code build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1713,10 +1754,15 @@ mod tests {
              `hook_only_approvals`, `question_hold` on every Claude card, and \
              `text` as a denial with that reason — is minor 22"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 23,
+            "earlier pages — `history`, `history_end`, `history_pages` — and the \
+             session's open cards and current facts on its summary are minor 23"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 22);
+        assert_eq!(crate::PROTOCOL_MINOR, 23);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2206,6 +2252,7 @@ mod tests {
             supported_agents: vec![crate::agent::AgentKind::Claude],
             question_card: true,
             hook_only_approvals: true,
+            history_pages: true,
         }
     }
 

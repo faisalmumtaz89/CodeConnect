@@ -199,7 +199,7 @@ struct DecisionCardView: View {
     /// Codex card at accessibility sizes and printed "If you deny, Claude…"
     /// over a Codex refusal.
     private var sessionAgent: AgentKind? {
-        model.summary(for: approval.sessionKey)?.agent
+        model.shownSummary(for: approval.sessionKey)?.agent
     }
 
     private var isCodexCard: Bool { sessionAgent == .codex }
@@ -422,7 +422,7 @@ struct DecisionCardView: View {
             .accessibilityLabel(label.spoken)
             .padding(.top, 6)
 
-            if let cwd = model.summary(for: approval.sessionKey)?.cwd {
+            if let cwd = model.shownSummary(for: approval.sessionKey)?.cwd {
                 Text(cwd)
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.disabled)
@@ -1078,7 +1078,7 @@ struct DecisionCardView: View {
     /// left the timeline). The passed `approval` supplies identity and a
     /// last-known display only; it never decides whether the card is actionable.
     private var live: ApprovalItem? {
-        model.liveApproval(sessionKey: approval.sessionKey, id: approval.id)
+        model.shownApproval(sessionKey: approval.sessionKey, id: approval.id)
     }
 
     /// The outcome that governs this card, from **either** the live lookup or the
@@ -1739,7 +1739,7 @@ struct DecisionCardView: View {
         // saying "waiting" is the honest version of the same refusal.
         if inFlight { return "Waiting for the daemon to confirm…" }
         if let reason = model.actionsBlockedReason { return reason }
-        if let summary = model.summary(for: approval.sessionKey) {
+        if let summary = model.shownSummary(for: approval.sessionKey) {
             let badge = FleetStatusRule.capability(
                 summary: summary, capabilities: model.connection.capabilities)
             if let reason = badge.reason { return reason }

@@ -131,21 +131,21 @@ final class SessionIdentityTests: XCTestCase {
         model.connection.simulateConnectedForTesting()
         model.connection.injectForTesting(try decode(helloAckJSON(minor: 2, sessionUID: true)))
         model.connection.injectForTesting(
-            try decode(twoRunsSharingTheName(liveSeq: 2, deadSeq: 2)))
+            try decode(twoRunsSharingTheName(liveSeq: 1, deadSeq: 1)))
         model.connection.injectForTesting(
             try decode(
                 eventFrame(uid: liveUID, name: "cc-1", seq: 1, text: "the live run said this")))
         model.connection.injectForTesting(
             try decode(
                 eventFrame(uid: deadUID, name: "cc-1", seq: 1, text: "the dead run said this")))
-        await settle(model)
+        await caughtUp(model)
 
-        XCTAssertEqual(model.states.count, 2, "one store per run, not one per name")
+        XCTAssertEqual(model.statesForTesting.count, 2, "one store per run, not one per name")
         XCTAssertEqual(model.fleet.count, 2)
         XCTAssertEqual(
-            model.states[liveUID]?.events.count, 1,
+            model.statesForTesting[liveUID]?.events.count, 1,
             "each run holds only its own events — this is the splice")
-        XCTAssertEqual(model.states[deadUID]?.events.count, 1)
+        XCTAssertEqual(model.statesForTesting[deadUID]?.events.count, 1)
         // Neither row says `cc-1`: the counter is reused by the next run and
         // names nothing. This daemon named no project either, so both rows say
         // so — and are still told apart, by the one honest thing left.
@@ -181,8 +181,8 @@ final class SessionIdentityTests: XCTestCase {
             try decode(eventFrame(uid: nil, name: "cc-1", seq: 2, text: "two")))
         await settle(model)
 
-        XCTAssertEqual(model.states.count, 1)
-        XCTAssertEqual(model.states["cc-1"]?.events.count, 2)
+        XCTAssertEqual(model.statesForTesting.count, 1)
+        XCTAssertEqual(model.statesForTesting["cc-1"]?.events.count, 2)
         XCTAssertEqual(
             model.fleet.first?.label, .unknown,
             "one run, no project named, and nothing to tell it from")
@@ -200,7 +200,7 @@ final class SessionIdentityTests: XCTestCase {
         model.connection.injectForTesting(
             try decode(eventFrame(uid: deadUID, name: "cc-1", seq: 1, text: "gone")))
         await settle(model)
-        XCTAssertNotNil(model.states[deadUID])
+        XCTAssertNotNil(model.statesForTesting[deadUID])
 
         model.connection.injectForTesting(
             try decode(
@@ -211,8 +211,8 @@ final class SessionIdentityTests: XCTestCase {
                  "updated_at":"2026-07-31T09:05:00.000Z"}]}
                 """))
         await settle(model)
-        XCTAssertNil(model.states[deadUID], "the daemon stopped vouching for it")
-        XCTAssertNotNil(model.states[liveUID])
+        XCTAssertNil(model.statesForTesting[deadUID], "the daemon stopped vouching for it")
+        XCTAssertNotNil(model.statesForTesting[liveUID])
     }
 
     func testADeepLinkByNameResolvesToTheRunTheDaemonWouldPick() async throws {
@@ -221,7 +221,11 @@ final class SessionIdentityTests: XCTestCase {
         model.connection.injectForTesting(try decode(helloAckJSON(minor: 2, sessionUID: true)))
         model.connection.injectForTesting(
             try decode(twoRunsSharingTheName(liveSeq: 1, deadSeq: 1)))
-        await settle(model)
+        for uid in [liveUID, deadUID] {
+            model.connection.injectForTesting(
+                try decode(eventFrame(uid: uid, name: "cc-1", seq: 1, text: "said this")))
+        }
+        await caughtUp(model)
 
         XCTAssertEqual(
             model.resolveSessionKey(reference: "cc-1"), liveUID,
@@ -452,9 +456,16 @@ final class SessionIdentityTests: XCTestCase {
     /// awaiting the task is a fact where any fixed sleep is a bet a starved
     /// machine eventually loses.
     private func settle(_ model: AppModel) async {
-        for state in model.states.values {
+        for state in model.statesForTesting.values {
             await state.settleForTesting()
         }
+    }
+
+    /// The handshake opened a catch-up: wait, boundedly, for it to end, since
+    /// the fleet on screen is the one it publishes.
+    private func caughtUp(_ model: AppModel) async {
+        await settle(model)
+        for _ in 0..<300 where model.isCatchingUp { try? await Task.sleep(for: .milliseconds(10)) }
     }
 
     private func decode(_ json: String) throws -> ServerMessage {

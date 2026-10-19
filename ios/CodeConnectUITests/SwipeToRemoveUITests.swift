@@ -34,9 +34,9 @@ final class SwipeToRemoveUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func launchFleet() -> XCUIApplication {
+    private func launchFleet(_ extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"]
+        app.launchArguments = ["-CC_FIXTURE", "ended", "-CC_BIOMETRICS", "allow"] + extra
         app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 30))
         return app
@@ -170,6 +170,237 @@ final class SwipeToRemoveUITests: XCTestCase {
             "the first must have stood down when the second opened")
     }
 
+    /// The revealed button is a full-height rectangle: every corner red. A middle
+    /// row, so no corner of it meets the card's own rounded outline.
+    func testTheRevealedButtonHasSquareCorners() {
+        let app = launchFleet()
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+        let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
+
+        drag(app, from: middle, dx: -180, dy: 0)
+        let content = row(app, middle).frame
+        XCTAssertLessThan(content.minX, 16 - revealWidth + 2, "the row is open")
+
+        // The button sits just past the row's content and spans its height.
+        let button = CGRect(
+            x: content.maxX, y: content.minY, width: revealWidth, height: content.height)
+        let shot = app.screenshot().image
+        let inset: CGFloat = 1.5
+        let corners = [
+            CGPoint(x: button.minX + inset, y: button.minY + inset),
+            CGPoint(x: button.maxX - inset, y: button.minY + inset),
+            CGPoint(x: button.minX + inset, y: button.maxY - inset),
+            CGPoint(x: button.maxX - inset, y: button.maxY - inset),
+        ]
+        for corner in corners {
+            let (red, green, blue) = pixel(shot, at: corner)
+            XCTAssertTrue(
+                red > 200 && green < 120 && blue < 120,
+                "corner \(corner) is not the button's red: rgb(\(red), \(green), \(blue))")
+        }
+    }
+
+    /// The revealed button asks before anything is removed, and Cancel leaves the
+    /// row exactly as it was. Confirming hands the removal to the row; the sample
+    /// fleet has no Mac to grant it, so the row stays, showing the refusal.
+    func testRemoveAsksFirst() {
+        let app = launchFleet()
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+        let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
+
+        drag(app, from: middle, dx: -180, dy: 0)
+        let open = row(app, middle).frame
+        XCTAssertLessThan(open.minX, 16 - revealWidth + 2, "the row is open")
+        // The button is hidden from accessibility (VoiceOver has the row's own
+        // action), so it is reached where it is drawn.
+        let button = app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: open.maxX + revealWidth / 2, dy: open.midY))
+
+        // What the button draws is the instrument: the sample fleet refuses at
+        // once, so a removal that ran replaces "Remove" with the refusal.
+        let face = CGRect(x: open.maxX, y: open.minY, width: revealWidth, height: open.height)
+        let resting = pixels(app.screenshot().image, in: face)
+        let redrawn = { (expected: Bool) in
+            XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in
+                    (self.pixels(app.screenshot().image, in: face) != resting) == expected
+                }, object: nil)
+        }
+
+        button.tap()
+        let confirm = app.buttons["Remove"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5), "Remove must ask first")
+        XCTAssertTrue(
+            app.alerts["Remove app-6?"].exists, "the question names what is being removed")
+        app.buttons["Cancel"].tap()
+        XCTAssertFalse(confirm.waitForExistence(timeout: 2), "Cancel dismisses the question")
+        XCTAssertEqual(
+            row(app, middle).frame.minX, open.minX, accuracy: 2,
+            "Cancel leaves the row exactly as it was")
+        wait(for: [redrawn(false)], timeout: 5)
+
+        button.tap()
+        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5))
+        app.buttons["Remove"].tap()
+        XCTAssertFalse(app.alerts.firstMatch.waitForExistence(timeout: 2), "confirming answers it")
+        wait(for: [redrawn(true)], timeout: 5)
+        XCTAssertEqual(
+            row(app, middle).frame.minX, open.minX, accuracy: 2,
+            "a refused removal leaves the row open, showing why")
+
+        // A nudge that leaves the row open keeps the reason on screen.
+        drag(app, from: middle, dx: -40, dy: 0)
+        XCTAssertEqual(row(app, middle).frame.minX, open.minX, accuracy: 2, "still open")
+        wait(for: [redrawn(true)], timeout: 2)
+    }
+
+    // MARK: Across a link drop
+
+    /// When the fixture drops the link, for the tests below: late enough for
+    /// each one's setup to finish first, which each of them checks. Counted
+    /// here from before the launch and in the app from its fixture loading,
+    /// so the check is stricter than the truth and can only fail safe.
+    private let linkDropMS = 30_000
+
+    /// The link dropping takes the Mac's removal capability with it, which
+    /// switches every row's swipe off; its return switches them back on, shut.
+    /// Waited out through the one control that says so on screen: Select is
+    /// offered only while the Mac can remove.
+    private func waitForTheLinkToDropAndReturn(_ app: XCUIApplication, launchedAt: Date) {
+        XCTAssertLessThan(
+            Date().timeIntervalSince(launchedAt), Double(linkDropMS) / 1000,
+            "the setup must finish before the link drops, or nothing below is tested")
+        let select = app.buttons["Select"]
+        XCTAssertTrue(select.exists, "Select is offered while the Mac can remove")
+        XCTAssertTrue(select.waitForNonExistence(timeout: 30), "the link never dropped")
+        XCTAssertTrue(select.waitForExistence(timeout: 15), "the link never came back")
+    }
+
+    /// A refusal belongs to the opening that showed it. After the link drops
+    /// and returns the row comes back shut, and opening it again offers
+    /// "Remove", not the old reason.
+    func testARefusedRowReopensOfferingRemoveAfterTheLinkReturns() {
+        let launched = Date()
+        let app = launchFleet(["-CC_FIXTURE_LINK_DROP_MS", "\(linkDropMS)"])
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+        let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
+
+        drag(app, from: middle, dx: -180, dy: 0)
+        let open = row(app, middle).frame
+        XCTAssertLessThan(open.minX, 16 - revealWidth + 2, "the row is open")
+        let face = CGRect(x: open.maxX, y: open.minY, width: revealWidth, height: open.height)
+        let resting = pixels(app.screenshot().image, in: face)
+        let showsResting = { (expected: Bool) in
+            let shows = XCTNSPredicateExpectation(
+                predicate: NSPredicate { _, _ in
+                    (self.pixels(app.screenshot().image, in: face) == resting) == expected
+                }, object: nil)
+            shows.expectationDescription =
+                expected ? "the reopened row offers Remove, not the old refusal" : "the refusal shows"
+            return shows
+        }
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: open.maxX + revealWidth / 2, dy: open.midY)).tap()
+        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5), "Remove asks first")
+        app.buttons["Remove"].tap()
+        wait(for: [showsResting(false)], timeout: 5)
+
+        waitForTheLinkToDropAndReturn(app, launchedAt: launched)
+        XCTAssertEqual(row(app, middle).frame.minX, 16, accuracy: 2, "the row comes back shut")
+
+        drag(app, from: middle, dx: -180, dy: 0)
+        XCTAssertEqual(row(app, middle).frame.minX, open.minX, accuracy: 2, "the row opens again")
+        wait(for: [showsResting(true)], timeout: 3)
+    }
+
+    /// A row left open when the link dropped comes back shut, and a tap on it
+    /// opens its session, as a tap on any shut row does.
+    func testARowOpenAcrossALinkDropOpensItsSessionOnATap() {
+        let launched = Date()
+        let app = launchFleet(["-CC_FIXTURE_LINK_DROP_MS", "\(linkDropMS)"])
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+
+        drag(app, from: endedRow, dx: -180, dy: 0)
+        XCTAssertLessThan(row(app, endedRow).frame.minX, 16 - revealWidth + 2, "the row is open")
+
+        waitForTheLinkToDropAndReturn(app, launchedAt: launched)
+        XCTAssertEqual(row(app, endedRow).frame.minX, 16, accuracy: 2, "the row comes back shut")
+
+        row(app, endedRow).tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["session-timeline"].waitForExistence(timeout: 10),
+            "a tap on the shut row must open its session")
+    }
+
+    /// A removal confirmed in a question asked before the link dropped, and
+    /// refused after it returned, still shows its reason on the row as it is
+    /// now: the answer belongs to the request, not to the swipe that asked.
+    func testARefusalAfterTheLinkReturnsShowsOnTheReopenedRow() {
+        let launched = Date()
+        let app = launchFleet([
+            "-CC_FIXTURE_LINK_DROP_MS", "\(linkDropMS)", "-CC_FIXTURE_REMOVE_MS", "10000",
+        ])
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+        let middle = "session-01K1B3XQ8ZC0DE5FGH7JKMNP01"
+
+        drag(app, from: middle, dx: -180, dy: 0)
+        let open = row(app, middle).frame
+        XCTAssertLessThan(open.minX, 16 - revealWidth + 2, "the row is open")
+        let face = CGRect(x: open.maxX, y: open.minY, width: revealWidth, height: open.height)
+        let faceNow = { self.pixels(app.screenshot().image, in: face) }
+        let resting = faceNow()
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: open.maxX + revealWidth / 2, dy: open.midY)).tap()
+        XCTAssertTrue(app.buttons["Remove"].waitForExistence(timeout: 5), "Remove asks first")
+
+        waitForTheLinkToDropAndReturn(app, launchedAt: launched)
+        app.buttons["Remove"].tap()
+        drag(app, from: middle, dx: -180, dy: 0)
+        XCTAssertEqual(row(app, middle).frame.minX, open.minX, accuracy: 2, "the row opens again")
+        let removing = faceNow()
+        XCTAssertNotEqual(removing, resting, "the reopened row reads Removing… while the answer is on its way")
+
+        let refused = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                let now = faceNow()
+                return now != removing && now != resting
+            }, object: nil)
+        refused.expectationDescription = "the refusal shows on the reopened row"
+        wait(for: [refused], timeout: 20)
+        XCTAssertEqual(
+            row(app, middle).frame.minX, open.minX, accuracy: 2,
+            "the row stays open showing why, so a closed row cannot pass for a refusal")
+    }
+
+    /// One pixel of a screenshot, at a point in screen coordinates.
+    private func pixel(_ image: UIImage, at point: CGPoint) -> (UInt8, UInt8, UInt8) {
+        let one = pixels(image, in: CGRect(origin: point, size: CGSize(width: 1, height: 1)))
+        return (one[0], one[1], one[2])
+    }
+
+    /// The RGBA bytes of a screenshot region, given in screen coordinates.
+    private func pixels(_ image: UIImage, in rect: CGRect) -> [UInt8] {
+        let scale = image.scale
+        let width = Int(rect.width * scale)
+        let height = Int(rect.height * scale)
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        let context = CGContext(
+            data: &rgba, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.draw(
+            image.cgImage!,
+            in: CGRect(
+                x: -rect.minX * scale, y: rect.maxY * scale - image.size.height * scale,
+                width: image.size.width * scale, height: image.size.height * scale))
+        return rgba
+    }
+
 
 
     /// The worst real fleet on record: 45 ended runs, every one materialized
@@ -197,6 +428,71 @@ final class SwipeToRemoveUITests: XCTestCase {
         let elapsed = Date().timeIntervalSince(started)
         print("MEASURE ended45 expansion wall-clock: \(Int(elapsed * 1000))ms")
         XCTAssertLessThan(elapsed, 3.0, "expansion degraded from an animation to a stall")
+    }
+
+    /// An opened Ended band folds back from its own header, without a relaunch.
+    func testTheEndedBandHidesAgain() {
+        let app = launchFleet()
+        revealEndedRows(app)
+
+        let hide = app.buttons["Hide"]
+        XCTAssertTrue(hide.waitForExistence(timeout: 5), "the opened band offers Hide")
+        hide.tap()
+
+        XCTAssertTrue(app.buttons["Show"].waitForExistence(timeout: 5), "back to the footer")
+        XCTAssertFalse(row(app, endedRow).exists, "the ended rows are folded away")
+        XCTAssertFalse(app.buttons["Hide"].exists)
+    }
+
+    /// A chat opened from an Ended row and closed again leaves the fleet as it
+    /// was: the band still open, scrolled where it was.
+    func testAChatKeepsTheEndedBandOpenAndTheScroll() {
+        let app = launchFleet()
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+        let before = row(app, endedRow).frame
+
+        row(app, endedRow).tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["session-timeline"].waitForExistence(timeout: 10),
+            "the row opens its session")
+        app.navigationBars.buttons.firstMatch.tap()
+
+        XCTAssertTrue(app.buttons["Hide"].waitForExistence(timeout: 10), "the band is still open")
+        XCTAssertEqual(
+            row(app, endedRow).frame.minY, before.minY, accuracy: 2,
+            "the fleet is scrolled where it was")
+    }
+
+    /// A header button is a bordered control, so its border sits on the card's
+    /// edge below it, not on the text column inside the card.
+    func testHeaderButtonsSitOnTheCardEdge() {
+        let app = launchFleet()
+        revealEndedRows(app)
+        let hide = app.buttons["Hide"]
+        XCTAssertTrue(hide.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            hide.frame.maxX, row(app, endedRow).frame.maxX, accuracy: 1,
+            "Hide's right edge is the card's right edge")
+    }
+
+    /// A row left open when the band folds must not come back armed: Hide stands
+    /// it down, like any other way of leaving the rows.
+    func testHidingStandsAnOpenRowDown() {
+        let app = launchFleet()
+        revealEndedRows(app)
+        liftRowsClearOfTheBar(app)
+        drag(app, from: endedRow, dx: -180, dy: 0)
+        XCTAssertLessThan(row(app, endedRow).frame.minX, 16 - revealWidth + 2, "the row is open")
+
+        let hide = app.buttons["Hide"]
+        XCTAssertTrue(hide.waitForExistence(timeout: 5))
+        hide.tap()
+        app.buttons["Show"].tap()
+
+        XCTAssertTrue(row(app, endedRow).waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            row(app, endedRow).frame.minX, 16, accuracy: 2, "the row comes back shut")
     }
 
     /// The control for the measurement above: identical instrument, 8 rows.

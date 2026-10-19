@@ -9,8 +9,29 @@ struct SessionRoute: Hashable {
     let key: String
     /// Set when arriving from the Deck, so the card opens without a second tap.
     var openRequestID: String?
-    /// Set from a "Done, unreviewed" fleet row: what you came for is the diff.
-    var openDiff: Bool = false
+}
+
+/// What the removal question says, and what confirming it does.
+///
+/// Removal deletes CodeConnect's own record only; the agent's transcript on the
+/// Mac is untouched, so the question says so.
+private struct PendingRemoval {
+    let title: String
+    let message: String
+    let remove: () -> Void
+
+    @MainActor
+    init(row: SessionSummary, model: AppModel, remove: @escaping () -> Void) {
+        title = "Remove \(model.runLabel(for: row.sessionKey).project)?"
+        message = "\(row.agent.displayName)'s own transcript stays on the Mac."
+        self.remove = remove
+    }
+
+    init(count: Int, remove: @escaping () -> Void) {
+        title = "Remove \(count) sessions?"
+        message = "Their own transcripts stay on the Mac."
+        self.remove = remove
+    }
 }
 
 /// The 2am glance. Fixed sort, every fact stamped with its age, and the one
@@ -50,6 +71,17 @@ struct FleetView: View {
     @State private var showEnded = false
     /// The band's own observe-only reason, set when its header note is tapped.
     @State private var capabilityReason: CapabilityReason?
+    /// A removal waiting on its confirmation. One question for the screen,
+    /// asked the same way whichever route raised it.
+    @State private var pendingRemoval: PendingRemoval?
+    /// Choosing ended sessions to remove together, and the ones chosen.
+    @State private var selecting = false
+    @State private var selected: Set<String> = []
+    @State private var batchRunning = false
+    /// Why each session the last batch did not remove was kept, by key. The
+    /// note is drawn from whichever of them are still ended rows, so it shrinks
+    /// as they go and is gone when they are.
+    @State private var batchRefused: [String: String] = [:]
     /// Whether the scroll header's title has travelled far enough for the
     /// inline one to take over, so the screen never shows its name twice.
     ///
@@ -63,6 +95,13 @@ struct FleetView: View {
     /// When this screen first appeared, so the loading state can tick an honest
     /// elapsed counter instead of a spinner with no scale.
     @State private var appearedAt = Date()
+    /// The fleet as it was when a chat or the Deck covered it, drawn instead of
+    /// the model until it is uncovered. Drawn from this the body reads no
+    /// session, so after at most one pass another session's event does not run
+    /// it behind the cover. It is let go before the fleet's first pixel is back
+    /// — as a swipe-back begins, or as the Deck starts to close — so the reader
+    /// never sees it.
+    @State private var hidden: FleetScreen?
     /// The dot's own Dynamic Type ramp, mirrored so that the text column a band
     /// header lands on is the text column its rows land on.
     ///
@@ -79,23 +118,43 @@ struct FleetView: View {
     private static let scrollSpace = "cc.fleet.scroll"
 
     var body: some View {
-        // One sort per body: `model.fleet` re-sorts on every access. Nothing on
-        // this screen ticks it any more — see `FleetRowView.now` — so a body
-        // pass now means the fleet itself changed.
-        let rows = model.fleet
-        // Hoisted for the same reason, and for a sharper one: `model.deck`
-        // flat-maps `pendingApprovals` across every session, which walks every
-        // event log the app holds. Read inside the `safeAreaInset` builder it was
-        // re-evaluated on every *layout* pass — so one flick on a 24-session
-        // daemon walked two dozen logs a frame and took the main thread down for
-        // thirty seconds. Measured. Read it once per body instead.
-        let pending = model.deck
+        #if DEBUG
+            FleetRowRenders.fleetBody()
+        #endif
+        let screen = hidden ?? liveScreen()
         return NavigationStack(path: $path) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    scrollHeader(rows)
-                    content(rows)
+                // A `VStack`, **not** a `LazyVStack`. Each band is one item
+                // holding all its rows, so at the accessibility sizes a band is
+                // several screens tall, and over items that tall the lazy stack
+                // never settled its placement: one of the first few drags pinned
+                // the main thread for over a minute (`sample`: spinning in
+                // `LazySubviewPlacements`), the same failure the timeline had
+                // before it became a `List`. The bands are eager inside, at most
+                // eight sit in this stack, and the eager stack measured no cost
+                // at the largest real fleet — 45 ended runs expanded, default
+                // size: expanding 1.59–1.62s lazy against 1.61–1.63s eager,
+                // drags alike, idle CPU 12.7–14.4% against 11.6–12.5%.
+                VStack(alignment: .leading, spacing: 0) {
+                    scrollHeader(screen)
+                    content(screen)
                 }
+                // Whether the fleet is in the window, which is whether any of it
+                // can be on screen: the navigation controller takes it out when
+                // a chat has covered it and puts it back as a pop or a back
+                // swipe begins. Not `onAppear`/`onDisappear`: a chat pushed as
+                // the fleet first appears — a link followed at launch — leaves
+                // those saying "appeared" until it is gone, and silent after.
+                // Back in the window under the Deck — a Deck link followed from
+                // a chat pops the chat beneath it — the fleet is still covered.
+                .background(
+                    FleetWindowPresence { inWindow in inWindow && !showDeck ? thaw() : freeze() })
+                // The scroll view's width, which the lazy stack took on its own.
+                // A `VStack` is as wide as its widest row, and a long MCP tool
+                // name makes a row wider than the screen: the scroll view then
+                // centred the whole fleet on that row, and every band header
+                // sat off the left edge.
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 // The Deck bar's own height is reserved by `safeAreaInset`, and
                 // that height triples at AX5 — a hard-coded 76 would leave the
                 // last row under the bar exactly when the rows are tallest.
@@ -153,7 +212,13 @@ struct FleetView: View {
             .navigationTitle("Fleet")
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: SessionRoute.self) { route in
+                // One chat per session. A link that swaps the chat on top for
+                // another session's lands at the same place in the stack, and
+                // SwiftUI would otherwise keep the old chat's view — its draft,
+                // its open sheets, its timeline wiring — under the new key, and
+                // never show it appearing, so the link it came by stays unread.
                 SessionDetailView(route: route)
+                    .id(route.key)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -193,7 +258,26 @@ struct FleetView: View {
             // The bar prints the headline's own number, not its own count of the
             // cards it happens to hold — see `FleetCount`.
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                deckBar(pending, waiting: FleetCount.decisions(in: rows))
+                if selecting {
+                    selectionBar(screen.selectable)
+                } else {
+                    deckBar(screen)
+                }
+            }
+            // A row that leaves the fleet, or stops being removable, leaves the
+            // selection with it; with nothing left to choose, choosing ends. The
+            // note about a batch stays: it is what says what was not removed.
+            // Behind a chat the screen holds still, so this runs as it is
+            // revealed, against the fleet as it is then.
+            .onChange(of: screen.selectable) { _, keys in
+                selected.formIntersection(keys)
+                if keys.isEmpty {
+                    // A question about a selection that just ended has nothing
+                    // left to answer for.
+                    if selecting { pendingRemoval = nil }
+                    selecting = false
+                    selected = []
+                }
             }
             // Leaving the screen — a push, or any sheet — stands the open
             // swipe row down. A destructive control must not sit armed under
@@ -213,12 +297,118 @@ struct FleetView: View {
                 DiffSheet(key: route.key)
                     .environment(model)
             }
+            // An alert, not a confirmation dialog: on iOS 26 a dialog pops out of
+            // whatever it is attached to, and this one is attached to the screen.
+            .alert(
+                pendingRemoval?.title ?? "",
+                isPresented: Binding(
+                    get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
+                presenting: pendingRemoval
+            ) { removal in
+                Button("Remove", role: .destructive, action: removal.remove)
+            } message: { removal in
+                Text(removal.message)
+            }
             .onChange(of: model.pendingDeepLink) { _, _ in consumeDeepLink() }
+            // A name that waited out a catch-up is resolved at its release.
+            .onChange(of: model.isCatchingUp) { _, _ in consumeDeepLink() }
             .onAppear {
                 appearedAt = Date()
                 consumeDeepLink()
             }
+            // Held from the moment a chat is pushed, as well as when the fleet
+            // leaves the window: a chat pushed as the fleet first appears never
+            // brings the fleet into the window, so it never leaves it either.
+            // The sheets leave the fleet in the window and in sight, and live.
+            .onChange(of: path.isEmpty) { _, empty in
+                if !empty { freeze() }
+            }
+            // The Deck covers all of the fleet but leaves it in the window, so
+            // the window says nothing: the cover itself holds the fleet, and
+            // lets it go as it closes — unless a chat is on top, which keeps
+            // the fleet out of the window and held.
+            .onChange(of: showDeck) { _, shown in
+                if shown {
+                    freeze()
+                } else if path.isEmpty {
+                    thaw()
+                }
+            }
         }
+        #if DEBUG
+            .overlay(alignment: .topLeading) { FleetRowRenderProbe() }
+        #endif
+    }
+
+    // MARK: Screen
+
+    /// Everything the fleet draws from the model, read in one place —
+    /// `liveScreen()` — so that drawing it reads nothing. Actions still resolve
+    /// the model when they run.
+    private struct FleetScreen {
+        let rows: [FleetRow]
+        let bands: [Band]
+        /// The rows a selection can hold, in fleet order: ended, and removable.
+        let selectable: [String]
+        /// The headline's count, which the Deck bar prints too.
+        let decisions: Int
+        /// What the Deck bar says about the card `Review` opens first; nil with
+        /// nothing waiting.
+        let deck: DeckPreview?
+        let hasLiveFleet: Bool
+    }
+
+    private struct DeckPreview {
+        let place: String
+        let command: String
+        let waitingSince: Date
+    }
+
+    /// Hold the fleet as it is now, unless it is already held.
+    private func freeze() {
+        if hidden == nil { hidden = liveScreen() }
+    }
+
+    /// Draw from the model again. Unanimated: what changed behind the chat is
+    /// already true, not news arriving now — a count that rolls from its old
+    /// value as the fleet slides back in is a count shown stale.
+    private func thaw() {
+        guard hidden != nil else { return }
+        var unanimated = Transaction()
+        unanimated.disablesAnimations = true
+        withTransaction(unanimated) { hidden = nil }
+    }
+
+    /// The fleet as the model has it now.
+    private func liveScreen() -> FleetScreen {
+        #if DEBUG
+            FleetRowRenders.fleetRead()
+        #endif
+        // One sort per screen: `model.fleet` re-sorts on every access. Nothing
+        // on this screen ticks it any more — see `FleetRowView.now` — so a body
+        // pass now means the fleet itself changed, or a Stop cooldown is
+        // counting down (`stopBlockedReason`).
+        let rows = model.fleet
+        // Read once for the same reason, and for a sharper one: `model.deck`
+        // flat-maps `pendingApprovals` across every session, which walks every
+        // event log the app holds. Read inside the `safeAreaInset` builder it was
+        // re-evaluated on every *layout* pass — so one flick on a 24-session
+        // daemon walked two dozen logs a frame and took the main thread down for
+        // thirty seconds. Measured.
+        let top = model.deck.first
+        return FleetScreen(
+            rows: rows,
+            // Everything each row draws, read here and nowhere below: a model
+            // read inside a row's own builders would redraw that row on any
+            // session's event. See `FleetRowCell`.
+            bands: bands(of: rows),
+            selectable: selectableKeys(rows),
+            decisions: FleetCount.decisions(in: rows),
+            deck: top.map {
+                DeckPreview(
+                    place: place(for: $0), command: command(for: $0), waitingSince: $0.requestedAt)
+            },
+            hasLiveFleet: model.hasLiveFleet)
     }
 
     // MARK: Header
@@ -232,13 +422,13 @@ struct FleetView: View {
     /// order is *how many need me* → *what is left* → *which agent*. It is set
     /// at `title` (22), not `display` (32), which leaves the rows below it room
     /// to be read.
-    private func scrollHeader(_ rows: [FleetRow]) -> some View {
+    private func scrollHeader(_ screen: FleetScreen) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             Text("Fleet")
                 .ccType(CC.type.micro)
                 .foregroundStyle(CC.text.tertiary)
                 .accessibilityHidden(true)
-            Text(headline(rows))
+            Text(headline(screen))
                 // `title` caps at 30pt, below the eyebrow and the summary line at
                 // accessibility sizes, so there the sentence keeps `display`.
                 .ccType(typeSize.isAccessibilitySize ? CC.type.display : CC.type.title)
@@ -246,8 +436,8 @@ struct FleetView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .contentTransition(.numericText(countsDown: true))
                 .accessibilityAddTraits(.isHeader)
-                .accessibilityLabel("Fleet. \(headline(rows))")
-            if let summary = summaryLine(rows) {
+                .accessibilityLabel("Fleet. \(headline(screen))")
+            if let summary = summaryLine(screen.rows) {
                 Text(summary)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
@@ -268,15 +458,14 @@ struct FleetView: View {
     /// It used to count rows in the Blocked band while the bar counted cards in
     /// the Deck, which is a lie the moment one agent stacks two approvals. See
     /// `FleetCount`.
-    private func headline(_ rows: [FleetRow]) -> String {
-        guard !rows.isEmpty else {
-            return model.hasLiveFleet ? "No agents registered" : "Nothing has arrived yet"
+    private func headline(_ screen: FleetScreen) -> String {
+        guard !screen.rows.isEmpty else {
+            return screen.hasLiveFleet ? "No agents registered" : "Nothing has arrived yet"
         }
-        let waiting = FleetCount.decisions(in: rows)
-        if waiting > 0 { return FleetCount.needsYou(waiting) }
+        if screen.decisions > 0 { return FleetCount.needsYou(screen.decisions) }
         // Nothing is held, but something broke, and that is still the first
         // thing a reader should be told.
-        let failed = rows.filter { $0.status == .failed }.count
+        let failed = screen.rows.filter { $0.status == .failed }.count
         if failed > 0 { return failed == 1 ? "1 failed" : "\(failed) failed" }
         return "Nothing needs you"
     }
@@ -303,19 +492,19 @@ struct FleetView: View {
     // MARK: Content
 
     @ViewBuilder
-    private func content(_ rows: [FleetRow]) -> some View {
+    private func content(_ screen: FleetScreen) -> some View {
         // Its own view, and deliberately: it reads the link's age, and read from
         // here that read belonged to the whole fleet.
         FleetBanner { showSettings = true }
 
-        if rows.isEmpty {
-            if model.hasLiveFleet {
+        if screen.rows.isEmpty {
+            if screen.hasLiveFleet {
                 emptyState
             } else {
                 loadingState
             }
         } else {
-            ForEach(bands(of: rows), id: \.status) { band in
+            ForEach(screen.bands, id: \.status) { band in
                 if band.status == .ended && !showEnded {
                     endedFooter(band)
                 } else {
@@ -334,6 +523,10 @@ struct FleetView: View {
         /// they do not — and a band that does not agree is exactly the band
         /// where capability is worth printing per row.
         let capability: CapabilityBadge?
+        /// What each row draws, in band order.
+        let cells: [FleetRowCell.Content]
+        /// Whether its header offers Select: it holds a row a selection can.
+        let offersSelect: Bool
     }
 
     private func bands(of rows: [FleetRow]) -> [Band] {
@@ -349,7 +542,19 @@ struct FleetView: View {
                 $0.capability.canAct == first.canAct
                     && $0.capability.isSettled == first.isSettled
             }
-            return Band(status: status, rows: matching, capability: uniform ? first : nil)
+            let capability = uniform ? first : nil
+            // None for a folded Ended band: it draws a footer, not its rows,
+            // and a cell costs a Stop lookup per row on every pass.
+            let cells =
+                status == .ended && !showEnded
+                ? []
+                : matching.enumerated().map { index, row in
+                    cellContent(
+                        row, bandCapability: capability, isLast: index == matching.count - 1)
+                }
+            return Band(
+                status: status, rows: matching, capability: capability, cells: cells,
+                offersSelect: !selectableKeys(matching).isEmpty)
         }
     }
 
@@ -370,10 +575,16 @@ struct FleetView: View {
     private func bandView(_ band: Band) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xs) {
             bandHeader(band)
+            if band.status == .ended, let note = batchNote(band.rows) {
+                CCBanner(
+                    note.title, message: note.reasons, tone: .warning,
+                    icon: "exclamationmark.triangle")
+                    .padding(.horizontal, CC.space.md)
+            }
             CCCard(padding: 0, border: bandBorder(band.status)) {
                 VStack(spacing: 0) {
-                    ForEach(Array(band.rows.enumerated()), id: \.element.id) { index, row in
-                        rowWithStopOutcome(row, in: band, isLast: index == band.rows.count - 1)
+                    ForEach(band.cells, id: \.row.id) { cell in
+                        rowCell(cell)
                     }
                 }
             }
@@ -394,136 +605,77 @@ struct FleetView: View {
     }
 
 
-    /// One fleet row, wrapped in its removal gesture.
-    ///
-    /// Extracted from `bandView` because the nesting defeated the type checker —
-    /// a `ForEach` over a wrapper over a row over a trailing closure is more than
-    /// it will infer in reasonable time. Splitting it is also the honest shape:
-    /// the row and the gesture that can destroy it are two ideas.
-    /// The row, and whatever the daemon last said about a stop on it.
-    ///
-    /// **Directly under the row that produced it**, rather than in a screen-wide
-    /// banner slot: on a fleet of two dozen runs, "Nothing was sent" floating at
-    /// the top of the list is a sentence about a row the reader has to go and
-    /// find. The outcome belongs where the tap was.
-    @ViewBuilder
-    private func rowWithStopOutcome(_ row: FleetRow, in band: Band, isLast: Bool) -> some View {
-        VStack(spacing: 0) {
-            rowView(row, in: band, isLast: isLast)
-            stopOutcome(for: row)
-        }
-    }
-
-    @ViewBuilder
-    private func stopOutcome(for row: FleetRow) -> some View {
-        let controls = model.codexControls(for: row.summary.sessionKey)
-        switch controls.stop {
-        case .settled(let result):
-            let banner = CodexProse.interrupt(result)
-            CCBanner(
-                banner.title,
-                // **The daemon's sentence, verbatim.** Every one of the eleven
-                // refusals names which condition failed and what to do instead;
-                // they were written to be shown.
-                message: banner.message,
-                tone: banner.tone.ccTone, icon: banner.icon)
-                .padding(.horizontal, CC.space.md)
-                .padding(.bottom, CC.space.sm)
-        case .notSent(let reason):
-            // The app's own words, never dressed as the daemon's: nothing was
-            // sent, so the daemon has said nothing about it.
-            CCBanner(
-                "Nothing was sent", message: reason, tone: .warning,
-                icon: "exclamationmark.triangle.fill")
-                .padding(.horizontal, CC.space.md)
-                .padding(.bottom, CC.space.sm)
-        case .sentNoAnswer(let reason):
-            // **Not "nothing was sent".** The frame left; what became of it is
-            // the thing nobody knows.
-            CCBanner(
-                "Sent, no answer heard", message: reason, tone: .warning,
-                icon: "questionmark.circle")
-                .padding(.horizontal, CC.space.md)
-                .padding(.bottom, CC.space.sm)
-        case .idle, .inFlight:
-            EmptyView()
-        }
-    }
-
-    private func rowView(_ row: FleetRow, in band: Band, isLast: Bool) -> some View {
-        // **Derived once.** The gesture and the named accessibility action have
-        // to agree about whether this row can be removed, and about what happens
-        // when it is. Written twice, they drift, and the drift is invisible:
-        // VoiceOver offers an action the swipe does not, or the reverse.
-        //
+    /// Everything one row draws or decides, read here — from `liveScreen()`,
+    /// through `bands(of:)` — so the row itself reads nothing.
+    private func cellContent(
+        _ row: FleetRow, bandCapability: CapabilityBadge?, isLast: Bool
+    ) -> FleetRowCell.Content {
+        let key = row.summary.sessionKey
         // Removable runs only, and only when the daemon says it accepts the
         // request. `isRemovable` is `lifecycle`, not the derived status — the
         // rule can read Ended without the run being proven exited — plus the
         // unhosted case, where no proof of death can ever exist.
-        let remove: (() async -> String?)? =
-            row.summary.isRemovable && model.daemonProfile.removesSessions
-            ? { await model.removeSession(row.summary).refusal } : nil
-
-        return CCSwipeToRemove(
-            isEnabled: remove != nil,
-            // "Remove", not "Delete". Claude keeps its own transcript under
-            // `~/.claude/projects`, so the conversation survives and
-            // `claude --resume` still works; only CodeConnect's record goes.
-            title: "Remove",
-            action: { await remove?() },
-            rowID: row.summary.sessionKey,
-            coordinator: swipeCloses
-        ) {
-            FleetRowView(
-                row: row,
-                waitingSince: waitingSince(row),
-                blocked: blockedCard(row),
-                showsCapability: showsCapability(row, in: band),
-                separator: !isLast,
-                onOpenDiff: { diffRoute = DiffRoute(key: row.summary.sessionKey) },
-                onMarkReviewed: { model.states[row.summary.sessionKey]?.markReviewed() },
-                onRemove: remove,
-                // **Offered only when the phone genuinely holds a turn to name.**
-                // `stopUnavailable` returns nil exactly when this run is Codex,
-                // the daemon honours a stop, its control link is subscribed and
-                // an unterminated turn is in the log — and `runningTurn` is the
-                // one honest hide: with no turn there is nothing to stop, so the
-                // control is absent rather than dead.
-                onStop: stopAction(for: row),
-                stopBlockedReason: stopBlockedReason(for: row),
-                stopping: isStopping(row)
-            ) {
-                // "Done, unreviewed" is exactly the moment the diff is what you
-                // want: the agent finished and you have not looked at what it did.
-                // So the row opens diff-first rather than growing a second control.
-                //
-                // This note used to end "and emphatically not a swipe, which is the
-                // one gesture this app does not teach anywhere". That held while
-                // every row action was non-destructive and could be a tap. Removal
-                // cannot: it must not sit under the tap that opens the run, and it
-                // belongs to ended rows alone. Swipe is now taught in exactly one
-                // place for one action, and mirrored as a named accessibility
-                // action, because a gesture that is the only route to a feature is
-                // not a feature everyone has.
-                path.append(
-                    SessionRoute(
-                        key: row.summary.sessionKey,
-                        openDiff: row.status == .doneUnreviewed))
-            }
-        }
+        let removable = canRemove(row.summary)
+        let choosable = selecting && row.status == .ended && removable
+        return FleetRowCell.Content(
+            row: row,
+            waitingSince: waitingSince(row),
+            blocked: blockedCard(row),
+            showsCapability: showsCapability(row, bandCapability: bandCapability),
+            separator: !isLast,
+            // Not while choosing: removal then goes through the selection, and
+            // a second route would race the batch for the same session.
+            removalOffered: removable && !selecting,
+            selection: choosable ? selected.contains(key) : nil,
+            // **Offered only when the phone genuinely holds a turn to name.**
+            // `stopUnavailable` returns nil exactly when this run is Codex, the
+            // daemon honours a stop, its control link is subscribed and an
+            // unterminated turn is in the log — and `runningTurn` is the one
+            // honest hide: with no turn there is nothing to stop, so the
+            // control is absent rather than dead.
+            //
+            // **`stopUnavailable(for:)` is the only reader of the rule.** This
+            // used to re-derive it — agent, capability, running turn, and
+            // deliberately *not* the link state — while the session header
+            // re-derived it a third way and the send path a fourth. They
+            // disagreed, and the disagreement shipped: an `interrupt` left for
+            // sessions the phone already knew were `bound`, `offline` or `none`,
+            // measured at the send stub.
+            stopOffered: model.stopUnavailable(for: key) == nil,
+            stopBlockedReason: stopBlockedReason(for: row),
+            stop: model.codexControls(for: key).stop)
     }
-    /// The tap, or nil when this row cannot be stopped.
-    ///
-    /// **`stopUnavailable(for:)` is the only reader of the rule.** This used to
-    /// re-derive it — agent, capability, running turn, and deliberately *not*
-    /// the link state — while the session header re-derived it a third way and
-    /// the send path a fourth. They disagreed, and the disagreement shipped: an
-    /// `interrupt` left for sessions the phone already knew were `bound`,
-    /// `offline` or `none`, measured at the send stub.
-    private func stopAction(for row: FleetRow) -> (() -> Void)? {
-        let key = row.summary.sessionKey
-        guard model.stopUnavailable(for: key) == nil else { return nil }
-        return { Task { await model.stopCodexTurn(sessionKey: key) } }
+
+    /// One row, and the actions it is handed. Each action is built from what
+    /// `FleetRowCell` allows: see its rule.
+    private func rowCell(_ cell: FleetRowCell.Content) -> some View {
+        let key = cell.row.summary.sessionKey
+        let summary = cell.row.summary
+        return FleetRowCell(
+            content: cell,
+            remove: { await model.removeSession(summary).refusal },
+            confirm: { removal in
+                pendingRemoval = PendingRemoval(row: summary, model: model, remove: removal)
+            },
+            coordinator: swipeCloses,
+            onOpenDiff: { diffRoute = DiffRoute(key: key) },
+            onMarkReviewed: { model.markReviewed(key) },
+            onStop: { Task { await model.stopCodexTurn(sessionKey: key) } },
+            onTap: { tap(cell) }
+        )
+        .equatable()
+    }
+
+    /// A row tapped: chosen or unchosen while choosing, opened otherwise.
+    private func tap(_ cell: FleetRowCell.Content) {
+        let key = cell.row.summary.sessionKey
+        if cell.selection != nil {
+            // The batch already holds what was chosen when it was asked.
+            guard !batchRunning else { return }
+            if selected.contains(key) { selected.remove(key) } else { selected.insert(key) }
+        } else {
+            path.append(SessionRoute(key: key))
+        }
     }
 
     /// Why the offered control is greyed, or nil when it is live.
@@ -543,15 +695,93 @@ struct FleetView: View {
     ///     identical warnings side by side read as two problems", which is the
     ///     rule the decision card already states about Deny. Measured on
     ///     `codex-stop-link-down--L.png`.
+    ///
+    /// Read in `liveScreen()`, like everything a row draws, so while a
+    /// cooldown stands and the fleet is on screen the clock runs the body once
+    /// a second; every other row is skipped.
     private func stopBlockedReason(for row: FleetRow) -> String? {
         guard model.codexControls(for: row.summary.sessionKey).isStopGreyed(now: model.now)
         else { return nil }
         return "Try again in a moment."
     }
 
-    private func isStopping(_ row: FleetRow) -> Bool {
-        if case .inFlight = model.codexControls(for: row.summary.sessionKey).stop { return true }
-        return false
+    /// Whether this Mac will remove this run: the one rule the swipe, VoiceOver
+    /// and a selection all ask.
+    private func canRemove(_ summary: SessionSummary) -> Bool {
+        summary.isRemovable && model.daemonProfile.removesSessions
+    }
+
+    /// The rows a selection can hold, in fleet order: ended, and removable.
+    private func selectableKeys(_ rows: [FleetRow]) -> [String] {
+        rows.filter { $0.status == .ended && canRemove($0.summary) }.map(\.summary.sessionKey)
+    }
+
+    private func endSelection() {
+        selecting = false
+        selected = []
+        batchRefused = [:]
+    }
+
+    /// What the last batch did not remove, among these ended rows.
+    private func batchNote(_ ended: [FleetRow]) -> (title: String, reasons: String)? {
+        let kept = ended.compactMap { batchRefused[$0.summary.sessionKey] }
+        guard !kept.isEmpty else { return nil }
+        return ("\(kept.count) not removed", Set(kept).sorted().joined(separator: " · "))
+    }
+
+    /// Replaces the deck bar while choosing.
+    private func selectionBar(_ selectable: [String]) -> some View {
+        let all = !selectable.isEmpty && selected.isSuperset(of: selectable)
+        return VStack(spacing: 0) {
+            CCHairline()
+            CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
+                CCButton(all ? "Deselect All" : "Select All", variant: .ghost, size: .md) {
+                    selected = all ? [] : Set(selectable)
+                }
+                .disabled(batchRunning)
+                CCAdaptiveSpacer(minLength: CC.space.sm)
+                CCButton(
+                    batchRunning ? "Removing…" : "Remove (\(selected.count))",
+                    variant: .destructive, size: .md
+                ) {
+                    confirmBatch(in: selectable)
+                }
+                .disabled(selected.isEmpty || batchRunning)
+            }
+            .padding(.horizontal, CC.space.md)
+            .padding(.vertical, CC.space.sm)
+        }
+        .background(CC.color.surfaceRaised)
+    }
+
+    /// One question for the whole selection, then each removal in fleet order.
+    /// Whatever the Mac did not remove stays selected, with its reason.
+    private func confirmBatch(in selectable: [String]) {
+        let keys = selectable.filter(selected.contains)
+        let run = {
+            batchRunning = true
+            batchRefused = [:]
+            Task {
+                let refused = await model.removeSessions(keys: keys)
+                batchRunning = false
+                batchRefused = refused
+                // What the batch did not remove is exactly what it has a reason
+                // for. Still choosing, that is what stays chosen; if the link
+                // went and choosing ended, the note is what is left to say so.
+                if selecting {
+                    selected = Set(refused.keys).intersection(selectableKeys(model.fleet))
+                }
+                if let note = batchNote(model.fleet.filter { $0.status == .ended }) {
+                    UIAccessibility.post(
+                        notification: .announcement, argument: "\(note.title). \(note.reasons)")
+                }
+            }
+        }
+        if keys.count == 1, let row = model.shownSummary(for: keys[0]) {
+            pendingRemoval = PendingRemoval(row: row, model: model, remove: run)
+        } else {
+            pendingRemoval = PendingRemoval(count: keys.count, remove: run)
+        }
     }
 
     private func bandHeader(_ band: Band) -> some View {
@@ -571,6 +801,29 @@ struct FleetView: View {
             note: observeNote(band),
             noteAction: band.capability?.reason.map { reason in
                 { capabilityReason = CapabilityReason(text: reason) }
+            },
+            // Ended is the one band that can be folded, so it is the one that
+            // folds back from its own header — standing any open row down
+            // first, so a destructive control is not waiting when it unfolds.
+            // No Done while a batch runs: the batch owns the selection until it
+            // has answered.
+            actionTitle: band.status == .ended
+                ? (selecting ? (batchRunning ? nil : "Done") : "Hide") : nil,
+            action: {
+                if selecting {
+                    endSelection()
+                } else {
+                    swipeCloses.closeAll()
+                    batchRefused = [:]
+                    withAnimation(CC.motion.small) { showEnded = false }
+                }
+            },
+            secondaryActionTitle: band.status == .ended && !selecting && band.offersSelect
+                ? "Select" : nil,
+            secondaryAction: {
+                swipeCloses.closeAll()
+                batchRefused = [:]
+                selecting = true
             }
         )
         // **The page margin, not the column.** `CCSectionHeader` owns the step
@@ -596,10 +849,10 @@ struct FleetView: View {
         band.capability?.bandNote
     }
 
-    private func showsCapability(_ row: FleetRow, in band: Band) -> Bool {
+    private func showsCapability(_ row: FleetRow, bandCapability: CapabilityBadge?) -> Bool {
         // An unsettled badge is never shown, uniform band or not.
         guard row.capability.isSettled else { return false }
-        guard let summary = band.capability else { return true }
+        guard let summary = bandCapability else { return true }
         return summary.canAct != row.capability.canAct
     }
 
@@ -613,7 +866,7 @@ struct FleetView: View {
         guard row.status == .blocked || row.status == .failed else {
             return row.summary.updatedDate
         }
-        return model.states[row.summary.sessionKey]?.pendingApprovals
+        return model.shown(for: row.summary.sessionKey)?.pendingApprovals
             .map(\.requestedAt).min() ?? row.summary.updatedDate
     }
 
@@ -627,7 +880,7 @@ struct FleetView: View {
     /// how a reader learns to distrust both.
     private func blockedCard(_ row: FleetRow) -> BlockedCard? {
         guard row.status == .blocked else { return nil }
-        let pending = model.states[row.summary.sessionKey]?.pendingApprovals ?? []
+        let pending = model.shown(for: row.summary.sessionKey)?.pendingApprovals ?? []
         guard let front = DeckOrdering.sort(pending, profile: model.daemonProfile).first else {
             return nil
         }
@@ -714,20 +967,20 @@ struct FleetView: View {
     /// The accessory bar that rises when decisions are pending, and the door to
     /// the cross-fleet queue behind it.
     ///
-    /// `waiting` is the *fleet's* count, handed down rather than recomputed:
+    /// Its count is the *fleet's*, the headline's own, rather than recomputed:
     /// the bar and the headline say the same sentence, so they must not each
     /// arrive at the number their own hand happens to hold.
     @ViewBuilder
-    private func deckBar(_ pending: [ApprovalItem], waiting: Int) -> some View {
-        if let top = pending.first {
+    private func deckBar(_ screen: FleetScreen) -> some View {
+        if let top = screen.deck {
             // The bar counts a wait in seconds, so it is one of the few things
             // here that has earned a tick. It owns that read rather than
             // charging it to the list above it.
             FleetDeckBar(
-                count: waiting,
-                topPlace: place(for: top),
-                topCommand: command(for: top),
-                waitingSince: top.requestedAt
+                count: screen.decisions,
+                topPlace: top.place,
+                topCommand: top.command,
+                waitingSince: top.waitingSince
             ) {
                 deckStartsAt = nil
                 showDeck = true
@@ -796,8 +1049,11 @@ struct FleetView: View {
             // appear, and it consumes the link itself so the two cannot both
             // act on it. A reference that resolves to no known run is pushed
             // as it stands, so the detail view can say that plainly rather than
-            // the tap doing nothing at all.
-            let key = model.resolveSessionKey(reference: reference) ?? reference
+            // the tap doing nothing at all — except during a catch-up, when the
+            // name waits for the list it ends on.
+            guard let key = model.resolveSessionKey(reference: reference)
+                ?? (model.isCatchingUp ? nil : reference)
+            else { return }
             if path.last?.key != key {
                 path = [SessionRoute(key: key)]
             }
@@ -1125,6 +1381,186 @@ private struct FleetWaitingNotice: View {
     }
 }
 
+/// Reports whether the fleet is in the window. A zero-size view placed in the
+/// fleet's content, so it joins and leaves the window with it.
+private struct FleetWindowPresence: UIViewRepresentable {
+    let changed: (Bool) -> Void
+
+    func makeUIView(context: Context) -> Probe { Probe(changed: changed) }
+    func updateUIView(_ probe: Probe, context: Context) { probe.changed = changed }
+
+    final class Probe: UIView {
+        var changed: (Bool) -> Void
+
+        init(changed: @escaping (Bool) -> Void) {
+            self.changed = changed
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            changed(window != nil)
+        }
+    }
+}
+
+/// **One fleet row, drawn only when what it draws changed.**
+///
+/// On screen, `FleetView.body` reads every session, so any session's event runs
+/// it. A row built there is handed closures, which SwiftUI cannot compare, so it
+/// used to redraw every row on every event — measured on a streaming fleet,
+/// about 46 row bodies where one row had changed. This view is compared by
+/// `content` alone (`.equatable()`), so an unchanged row is skipped.
+///
+/// Two rules make that safe, and both are about something being left out:
+///
+///  * **`Content` holds everything the row draws or decides**, and its
+///    equality is synthesized, so no field can be missed by `==`. Nothing
+///    below reads the model: a read there would run in the row's own scope,
+///    where the comparison cannot see it. The row reads only `Content`, the
+///    environment and its own state.
+///  * **An action captures only what stays true while `content` is equal**:
+///    the row's key, values in `Content`, `FleetView`'s state read when the
+///    action runs (never copied into a `let` first), the one `AppModel`, and
+///    the screen's swipe coordinator. A skipped row keeps the actions it was
+///    last handed, so anything else would act on stale state.
+struct FleetRowCell: View, Equatable {
+    struct Content: Equatable {
+        let row: FleetRow
+        /// When the oldest still-unanswered card in this run was raised.
+        let waitingSince: Date
+        let blocked: BlockedCard?
+        let showsCapability: Bool
+        let separator: Bool
+        /// The swipe and VoiceOver's named action: this Mac will remove the
+        /// run, and no selection is being made.
+        let removalOffered: Bool
+        /// Whether the row is chosen, while ended rows are being chosen to
+        /// remove and this one can be; nil otherwise.
+        let selection: Bool?
+        let stopOffered: Bool
+        let stopBlockedReason: String?
+        /// The Stop in flight, or what the daemon last said about it.
+        let stop: CodexControls.Activity<InterruptResult>
+    }
+
+    let content: Content
+    /// Returns `nil` when it worked, or the reason it did not.
+    let remove: () async -> String?
+    /// Asks before a removal runs, and runs it only on a yes.
+    let confirm: (@escaping () -> Void) -> Void
+    let coordinator: CCSwipeCloseCoordinator
+    let onOpenDiff: () -> Void
+    let onMarkReviewed: () -> Void
+    let onStop: () -> Void
+    let onTap: () -> Void
+
+    nonisolated static func == (lhs: FleetRowCell, rhs: FleetRowCell) -> Bool {
+        lhs.content == rhs.content
+    }
+
+    /// The row, and whatever the daemon last said about a stop on it.
+    ///
+    /// **Directly under the row that produced it**, rather than in a screen-wide
+    /// banner slot: on a fleet of two dozen runs, "Nothing was sent" floating at
+    /// the top of the list is a sentence about a row the reader has to go and
+    /// find. The outcome belongs where the tap was.
+    var body: some View {
+        VStack(spacing: 0) {
+            row
+            stopOutcome
+        }
+    }
+
+    /// The row, wrapped in its removal gesture.
+    ///
+    /// **Derived once.** The gesture and the named accessibility action have to
+    /// agree about whether this row can be removed, and about what happens when
+    /// it is. Written twice, they drift, and the drift is invisible: VoiceOver
+    /// offers an action the swipe does not, or the reverse.
+    private var row: some View {
+        CCSwipeToRemove(
+            isEnabled: content.removalOffered,
+            // "Remove", not "Delete". Claude keeps its own transcript under
+            // `~/.claude/projects`, so the conversation survives and
+            // `claude --resume` still works; only CodeConnect's record goes.
+            title: "Remove",
+            action: remove,
+            confirm: confirm,
+            rowID: content.row.summary.sessionKey,
+            coordinator: coordinator
+        ) {
+            FleetRowView(
+                row: content.row,
+                waitingSince: content.waitingSince,
+                blocked: content.blocked,
+                showsCapability: content.showsCapability,
+                separator: content.separator,
+                onOpenDiff: onOpenDiff,
+                onMarkReviewed: onMarkReviewed,
+                onRemove: content.removalOffered ? { removeWithAnnouncement() } : nil,
+                onStop: content.stopOffered ? onStop : nil,
+                stopBlockedReason: content.stopBlockedReason,
+                stopping: content.stop == .inFlight,
+                selection: content.selection,
+                action: onTap)
+        }
+    }
+
+    private func removeWithAnnouncement() {
+        confirm {
+            Task {
+                // The swipe shows a refusal in the button it revealed. There is
+                // no button here — the row either disappears or it does not —
+                // so the reason has to be spoken, or a VoiceOver user gets
+                // silence and an unchanged list.
+                if let refusal = await remove() {
+                    UIAccessibility.post(notification: .announcement, argument: refusal)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var stopOutcome: some View {
+        switch content.stop {
+        case .settled(let result):
+            let banner = CodexProse.interrupt(result)
+            CCBanner(
+                banner.title,
+                // **The daemon's sentence, verbatim.** Every one of the eleven
+                // refusals names which condition failed and what to do instead;
+                // they were written to be shown.
+                message: banner.message,
+                tone: banner.tone.ccTone, icon: banner.icon)
+                .padding(.horizontal, CC.space.md)
+                .padding(.bottom, CC.space.sm)
+        case .notSent(let reason):
+            // The app's own words, never dressed as the daemon's: nothing was
+            // sent, so the daemon has said nothing about it.
+            CCBanner(
+                "Nothing was sent", message: reason, tone: .warning,
+                icon: "exclamationmark.triangle.fill")
+                .padding(.horizontal, CC.space.md)
+                .padding(.bottom, CC.space.sm)
+        case .sentNoAnswer(let reason):
+            // **Not "nothing was sent".** The frame left; what became of it is
+            // the thing nobody knows.
+            CCBanner(
+                "Sent, no answer heard", message: reason, tone: .warning,
+                icon: "questionmark.circle")
+                .padding(.horizontal, CC.space.md)
+                .padding(.bottom, CC.space.sm)
+        case .idle, .inFlight:
+            EmptyView()
+        }
+    }
+}
+
 struct FleetRowView: View {
     let row: FleetRow
     /// When the oldest still-unanswered card in this run was raised. The clock
@@ -1142,8 +1578,8 @@ struct FleetRowView: View {
     /// route to a feature — that is the rule `CCDiffPrimitives` writes down for
     /// context menus and it applies with more force to a swipe, which is
     /// invisible and unreachable by Switch Control.
-    /// Returns `nil` when the run was removed, or the reason it was not.
-    var onRemove: (() async -> String?)?
+    /// Asks before it removes, the same question the swipe asks.
+    var onRemove: (() -> Void)?
     /// **Stop this Codex session's running turn**, or nil when there is nothing
     /// to stop or nothing that could stop it.
     ///
@@ -1157,6 +1593,9 @@ struct FleetRowView: View {
     var stopBlockedReason: String?
     /// True from the tap until the daemon answers.
     var stopping: Bool = false
+    /// Whether this row is chosen, while ended rows are being chosen to remove;
+    /// nil otherwise. The checkmark takes the status dot's place.
+    var selection: Bool?
     let action: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -1211,8 +1650,17 @@ struct FleetRowView: View {
     }
 
     var body: some View {
+        #if DEBUG
+            let _ = FleetRowRenders.record(row.summary.sessionKey, lastTick: lastTick)
+        #endif
         Group {
-            if let dot = dotColour {
+            if let selection {
+                content {
+                    CCIcon(selection ? "checkmark.circle.fill" : "circle", size: 18)
+                        .foregroundStyle(selection ? CC.text.primary : CC.text.tertiary)
+                        .accessibilityHidden(true)
+                }
+            } else if let dot = dotColour {
                 content {
                     CCStatusDot(
                         color: dot, isHollow: row.cachedAt != nil, pulses: false,
@@ -1223,6 +1671,7 @@ struct FleetRowView: View {
             }
         }
         .accessibilityIdentifier("session-\(row.summary.sessionKey)")
+        .accessibilityAddTraits(selection == true ? .isSelected : [])
         // The class as a *property*, so it survives any future label override —
         // which is exactly how it went missing the first time.
         .accessibilityValue(blocked.map { "Risk \($0.risk.label)" } ?? "")
@@ -1240,23 +1689,16 @@ struct FleetRowView: View {
         .accessibilityAction(named: "Mark reviewed", onMarkReviewed)
         .accessibilityActions {
             if let onRemove {
-                Button("Remove from CodeConnect") {
-                    Task {
-                        // The swipe shows a refusal in the button it revealed.
-                        // There is no button here — the row either disappears or
-                        // it does not — so the reason has to be spoken, or a
-                        // VoiceOver user gets silence and an unchanged list.
-                        if let refusal = await onRemove() {
-                            UIAccessibility.post(notification: .announcement, argument: refusal)
-                        }
-                    }
-                }
+                Button("Remove from CodeConnect", action: onRemove)
             }
         }
         // Restarted whenever the timestamp this row is counting from changes —
         // a new event, or a blocked row's oldest card being answered — because
         // the old deadline was computed from the old anchor.
         .task(id: clock) { await AgeTick.follow(clock) { lastTick = $0 } }
+        #if DEBUG
+            .onAppear { FleetRowRenders.mounted(row.summary.sessionKey) }
+        #endif
     }
 
     /// **The dot is gone from the Blocked and Failed bands**, where it was a
@@ -1532,6 +1974,83 @@ struct FleetRowView: View {
     }
 }
 
+#if DEBUG
+
+    /// **How often each fleet row has drawn other than on its own clock, and
+    /// how often it has been made anew**, so a UI test can see whether one
+    /// session's event redraws the others — and how often the fleet's own body
+    /// has run and read the model, so it can see whether the fleet does work
+    /// while a chat covers it.
+    ///
+    /// A row's clock redraws it on its own schedule — every second while it
+    /// counts a wait — and that redraw is right. A pass whose `lastTick` is the
+    /// one the row last drew with was not the clock's, and is counted. A row
+    /// made anew starts with a fresh `lastTick`, so its first pass looks like
+    /// the clock's: it is counted as a mount instead, when it appears. Recorded
+    /// only under `-CC_ROW_RENDER_PROBE YES`, and `#if DEBUG` so it cannot
+    /// exist in a shipped build.
+    @MainActor
+    enum FleetRowRenders {
+        static let enabled = UserDefaults.standard.bool(forKey: "CC_ROW_RENDER_PROBE")
+        private static var rows: [String: (renders: Int, mounts: Int, lastTick: Date?)] = [:]
+        private static var fleetBodies = 0
+        private static var fleetReads = 0
+
+        static func fleetBody() {
+            guard enabled else { return }
+            fleetBodies += 1
+        }
+
+        /// A `FleetScreen` built: the fleet read from the model.
+        static func fleetRead() {
+            guard enabled else { return }
+            fleetReads += 1
+        }
+
+        static func record(_ key: String, lastTick: Date) {
+            guard enabled else { return }
+            var seen = rows[key] ?? (0, 0, nil)
+            if seen.lastTick == lastTick { seen.renders += 1 }
+            seen.lastTick = lastTick
+            rows[key] = seen
+        }
+
+        static func mounted(_ key: String) {
+            guard enabled else { return }
+            rows[key, default: (0, 0, nil)].mounts += 1
+        }
+
+        /// `fleet=12+12 late=1 fx-1=0+1 fx-2=3+1 …`: the fleet's body passes,
+        /// then how often it built its screen from the model; the held-back fixture frames delivered
+        /// (`AppModel.lateFramesDelivered`); then, by row, draws other than the
+        /// clock's, then mounts.
+        static var label: String {
+            (["fleet=\(fleetBodies)+\(fleetReads)", "late=\(AppModel.lateFramesDelivered)"]
+                + rows.keys.sorted().map { key in
+                    "\(key)=\(rows[key]?.renders ?? 0)+\(rows[key]?.mounts ?? 0)"
+                }).joined(separator: " ")
+        }
+    }
+
+    /// The counts, as an invisible element `cc-row-render-probe` re-read four
+    /// times a second. Its own view, so re-reading them redraws nothing else.
+    struct FleetRowRenderProbe: View {
+        var body: some View {
+            if FleetRowRenders.enabled {
+                TimelineView(.periodic(from: .now, by: 0.25)) { _ in
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .accessibilityElement()
+                        .accessibilityIdentifier("cc-row-render-probe")
+                        .accessibilityLabel(FleetRowRenders.label)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+    }
+
+#endif
+
 // MARK: - Capability sheet
 
 /// The honest expansion of a four-character claim: what observe-only means, and
@@ -1690,9 +2209,7 @@ struct LinkHealthSheet: View {
     }
 
     /// Sessions whose event log has a discontinuity the app has not seen filled.
-    private var gapCount: Int {
-        model.states.values.filter { $0.gap != nil }.count
-    }
+    private var gapCount: Int { model.sessionDiagnostics.gaps }
 
     private var linkSection: some View {
         section("Link") {
@@ -1837,18 +2354,13 @@ struct LinkHealthSheet: View {
         }
     }
 
-    private var highestSeq: UInt64? {
-        let seqs = model.states.values.map(\.lastSeq).filter { $0 > 0 }
-        return seqs.max()
-    }
+    private var highestSeq: UInt64? { model.sessionDiagnostics.highestSeq }
 
-    private var cachedSessionCount: Int {
-        model.states.values.filter { $0.loadedFromCacheAt != nil && !$0.hasLiveData }.count
-    }
+    private var cachedSessionCount: Int { model.sessionDiagnostics.fromCache }
 
     private var fleetSection: some View {
         section("Fleet") {
-            CCFactRow("Known sessions", value: "\(model.summaries.count)", separator: true)
+            CCFactRow("Known sessions", value: "\(model.sessionDiagnostics.known)", separator: true)
             CCFactRow(
                 "Blocked", value: "\(model.blockedCount)",
                 tone: model.blockedCount > 0 ? .warning : .neutral, separator: true)
