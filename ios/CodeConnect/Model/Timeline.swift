@@ -119,6 +119,12 @@ enum NoticeKind: Sendable, Hashable {
     /// The run starting again after its first start: a restart or resume under
     /// the reader. Not work, so not activity.
     case sessionStart
+    /// A background task's report handed to the agent. Claude Code delivers it
+    /// as input, which wakes the agent — a turn the report starts, or the one it
+    /// lands in — so it is activity, and never a boundary. A report recorded
+    /// without being delivered (`queueTranscriptOnly`) is `.other`: it starts
+    /// nothing.
+    case taskReport
     /// Observation-about-our-observation; never evidence about the agent.
     case link
     case failure
@@ -323,7 +329,22 @@ enum TimelineBuilder {
                                             severity: .info))))
                         }
                     }
-                } else if let text = event.userText {
+                } else if let notification = event.taskNotification {
+                    // The Mac's one row: `⏺ <summary> · <time>`, its dot
+                    // coloured by the task's status. A report with no summary
+                    // draws nothing, as it says nothing the reader can use.
+                    if let line = notification.line {
+                        items.append(
+                            event.item(
+                                .notice(
+                                    NoticeItem(
+                                        kind: event.isTranscriptOnly ? .other : .taskReport,
+                                        symbol: "circle.fill",
+                                        title: line,
+                                        detail: nil,
+                                        severity: notification.severity))))
+                    }
+                } else if event.isPersonsWords, let text = event.userText {
                     items.append(event.item(.userMessage(text)))
                 }
 

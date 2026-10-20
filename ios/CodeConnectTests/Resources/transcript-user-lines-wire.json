@@ -1,0 +1,511 @@
+[
+  {
+    "item_id": "8ca70902-2c08-4bce-bb56-3fcd96767832",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:p1 goSCEN:p1 go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": null,
+      "permissionMode": "default",
+      "promptId": "5f10a2a0-552e-4049-8c2d-033126f7acd3",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:28:50.434Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 1,
+        "turnIndex": 1
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "8ca70902-2c08-4bce-bb56-3fcd96767832",
+      "version": "2.1.290"
+    },
+    "seq": 5,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "8ca70902-2c08-4bce-bb56-3fcd96767832",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "d74526c6-b348-4fab-8b95-99f139e6c615",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:tool go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "c95e3bed-0447-46a5-8291-45fa55d16b05",
+      "permissionMode": "default",
+      "promptId": "27082e68-72bb-48bf-8fbc-430aa5403d4d",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:28:54.009Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 2,
+        "turnIndex": 2
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "d74526c6-b348-4fab-8b95-99f139e6c615",
+      "version": "2.1.290"
+    },
+    "seq": 21,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "d74526c6-b348-4fab-8b95-99f139e6c615",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "bfcd3459-d68f-426a-8b55-936be143823c",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:q go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "8a99c1f6-b134-4135-8d84-afa325d19ac7",
+      "permissionMode": "default",
+      "promptId": "add95d16-769c-4d0d-b7a5-532486056932",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:28:57.560Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 3,
+        "turnIndex": 3
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "bfcd3459-d68f-426a-8b55-936be143823c",
+      "version": "2.1.290"
+    },
+    "seq": 30,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "bfcd3459-d68f-426a-8b55-936be143823c",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "203f8fe7-c0cf-40f9-acf6-8859bae303dc",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:mend go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "02bce471-c5df-4050-b248-f0fd50a6bb76",
+      "permissionMode": "default",
+      "promptId": "08ff871f-c883-4c26-a5dc-2ef0bae9aa02",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:01.819Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 4,
+        "turnIndex": 4
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "203f8fe7-c0cf-40f9-acf6-8859bae303dc",
+      "version": "2.1.290"
+    },
+    "seq": 40,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "203f8fe7-c0cf-40f9-acf6-8859bae303dc",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "fd2482ab-e766-44a5-b9e8-9699de5b4d17",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:blk go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "b4f9a1eb-f02c-4dbe-9fb3-562cb2caeef5",
+      "permissionMode": "default",
+      "promptId": "e4c56ec1-adba-4ed6-b4fe-f43801821d48",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:05.387Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 5,
+        "turnIndex": 5
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "fd2482ab-e766-44a5-b9e8-9699de5b4d17",
+      "version": "2.1.290"
+    },
+    "seq": 46,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "fd2482ab-e766-44a5-b9e8-9699de5b4d17",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "04fdcf63-9e9c-4f2d-9ef0-9dbefc05d14f",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isMeta": true,
+      "isSidechain": false,
+      "message": {
+        "content": "Stop hook feedback:\nContinue once more.",
+        "role": "user"
+      },
+      "parentUuid": "49b0fd82-71c6-4bcc-a20f-9f0327a0c4f8",
+      "promptId": "e4c56ec1-adba-4ed6-b4fe-f43801821d48",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "session_id": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:05.470Z",
+      "type": "user",
+      "userType": "external",
+      "uuid": "04fdcf63-9e9c-4f2d-9ef0-9dbefc05d14f",
+      "version": "2.1.290"
+    },
+    "seq": 49,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "04fdcf63-9e9c-4f2d-9ef0-9dbefc05d14f",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "73105fcf-837a-408d-8643-f09659c9d238",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:blkmcp go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "d05d7dbd-c78b-42f8-9ce9-516ba1a042c2",
+      "permissionMode": "default",
+      "promptId": "3332a241-a4e8-418f-bf2e-b76cfd763fb4",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:08.933Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 6,
+        "turnIndex": 6
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "73105fcf-837a-408d-8643-f09659c9d238",
+      "version": "2.1.290"
+    },
+    "seq": 56,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "73105fcf-837a-408d-8643-f09659c9d238",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "969013fb-c339-4357-9fdc-d62425cb3717",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isMeta": true,
+      "isSidechain": false,
+      "message": {
+        "content": "Stop hook feedback:\nContinue once more.",
+        "role": "user"
+      },
+      "parentUuid": "2561463e-2ba4-40d1-bdc4-8a070fe9e4fb",
+      "promptId": "3332a241-a4e8-418f-bf2e-b76cfd763fb4",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "session_id": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:08.980Z",
+      "type": "user",
+      "userType": "external",
+      "uuid": "969013fb-c339-4357-9fdc-d62425cb3717",
+      "version": "2.1.290"
+    },
+    "seq": 59,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "969013fb-c339-4357-9fdc-d62425cb3717",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "afd14c17-a20c-49de-a326-6cdddf3aaeb6",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:err go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "c57a2687-0042-4283-a6c2-7b7e1a6864ac",
+      "permissionMode": "default",
+      "promptId": "3519cd38-efdb-4c82-9d63-bf113820ce52",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:12.478Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 7,
+        "turnIndex": 7
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "afd14c17-a20c-49de-a326-6cdddf3aaeb6",
+      "version": "2.1.290"
+    },
+    "seq": 67,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "afd14c17-a20c-49de-a326-6cdddf3aaeb6",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "f29914f0-5e07-41fe-8223-ce341c84c829",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:slow go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "b96e7edb-8229-4d6e-970a-f03e3c19190e",
+      "permissionMode": "default",
+      "promptId": "f6ee9ae5-9044-491d-be3d-141516cc8153",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:15.765Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 8,
+        "turnIndex": 8
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "f29914f0-5e07-41fe-8223-ce341c84c829",
+      "version": "2.1.290"
+    },
+    "seq": 72,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "f29914f0-5e07-41fe-8223-ce341c84c829",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "3b31955e-8664-4b8d-9674-010775eacfd1",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isMeta": true,
+      "isSidechain": false,
+      "message": {
+        "content": "<system-reminder>\nThe user named this session \"held-row\". This may indicate the session's focus or intent.\n</system-reminder>",
+        "role": "user"
+      },
+      "parentUuid": "481929df-54cc-49f6-ab25-6d76d78ce8fa",
+      "promptId": "f6ee9ae5-9044-491d-be3d-141516cc8153",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:17.082Z",
+      "type": "user",
+      "userType": "external",
+      "uuid": "3b31955e-8664-4b8d-9674-010775eacfd1",
+      "version": "2.1.290"
+    },
+    "seq": 78,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "3b31955e-8664-4b8d-9674-010775eacfd1",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "90067040-48b5-4170-a558-8d2f0417bb4c",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:bga go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "3ad3e3a1-6717-4dff-bb59-1b05e1ce6d9f",
+      "permissionMode": "default",
+      "promptId": "7ca39dcb-46d8-4d00-8b01-10989c32eb59",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:23.188Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 9,
+        "turnIndex": 9
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "90067040-48b5-4170-a558-8d2f0417bb4c",
+      "version": "2.1.290"
+    },
+    "seq": 81,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "90067040-48b5-4170-a558-8d2f0417bb4c",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "50896bf2-2f49-4c4a-af99-47c1323dc147",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "<task-notification>\n<task-id>a2de139683191b5ef</task-id>\n<tool-use-id>toolu_fake_1851819</tool-use-id>\n<output-file>/scratch/projects/-scratch-work/f3276f69-85bb-4b91-8211-b3343688dd95/tasks/a2de139683191b5ef.output</output-file>\n<status>completed</status>\n<summary>Agent \"Background helper\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Subagent done.</result>\n<usage><subagent_tokens>15</subagent_tokens><tool_uses>0</tool_uses><duration_ms>4079</duration_ms></usage>\n</task-notification>",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "task-notification",
+        "producer": "session-task"
+      },
+      "parentUuid": "e0ee996d-257a-4780-a98e-74e52a7bcc15",
+      "permissionMode": "default",
+      "promptId": "bfbba95e-9c08-4f77-80be-478ffd45515b",
+      "promptSource": "system",
+      "queueSkipAttachments": true,
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:27.350Z",
+      "turnOrigin": "task_notification",
+      "turnPosition": {
+        "promptIndex": 9,
+        "turnIndex": 10
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "50896bf2-2f49-4c4a-af99-47c1323dc147",
+      "version": "2.1.290"
+    },
+    "seq": 91,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "50896bf2-2f49-4c4a-af99-47c1323dc147",
+    "ts": "2026-10-06T20:30:00.000Z"
+  },
+  {
+    "item_id": "35115802-4382-4176-9966-7a8bdbf8bf93",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": "SCEN:p1 go",
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "6c189fea-4db1-417b-9dda-1ddc4285bcc9",
+      "permissionMode": "default",
+      "promptId": "806adfc3-4433-4903-9dd6-83c0326fc4e5",
+      "promptSource": "typed",
+      "sessionId": "f3276f69-85bb-4b91-8211-b3343688dd95",
+      "timestamp": "2026-10-06T20:29:33.910Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 10,
+        "turnIndex": 11
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "35115802-4382-4176-9966-7a8bdbf8bf93",
+      "version": "2.1.290"
+    },
+    "seq": 96,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "35115802-4382-4176-9966-7a8bdbf8bf93",
+    "ts": "2026-10-06T20:30:00.000Z"
+  }
+]

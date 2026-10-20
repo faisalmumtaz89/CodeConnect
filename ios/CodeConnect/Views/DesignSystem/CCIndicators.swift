@@ -39,7 +39,7 @@ struct CCBadge: View {
     /// is an abbreviation.
     var accessibilityText: String?
     /// Makes the badge a control: 44pt hit area and a press state. For file
-    /// chips, template chips and the `SINCE YOU LOOKED` toggle.
+    /// chips and the `SINCE YOU LOOKED` toggle.
     var action: (() -> Void)?
     /// A tappable badge that is currently on.
     var isSelected: Bool = false
@@ -59,9 +59,9 @@ struct CCBadge: View {
     @ScaledMetric(relativeTo: .caption) private var chipInset: CGFloat = CC.space.xs
     /// **A chip that is pressed is a control, not a label.** A control of that
     /// kind is 32; it shipped at the badge's own 20 (measured 19.67), so the
-    /// compose templates and the file strip read as captions with an invisible
-    /// 44pt target around them. The inset steps with the height, or a 32pt chip
-    /// is a portrait box with a word wedged into it.
+    /// file strip read as captions with an invisible 44pt target around them.
+    /// The inset steps with the height, or a 32pt chip is a portrait box with a
+    /// word wedged into it.
     @ScaledMetric(relativeTo: .caption) private var controlHeight: CGFloat = CC.size.chip
     @ScaledMetric(relativeTo: .caption) private var controlInset: CGFloat = CC.space.sm
 

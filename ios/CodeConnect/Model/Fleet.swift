@@ -352,7 +352,8 @@ enum FleetStatusRule {
             // that has already ended, and counted as activity it turned every
             // finished session back to Running a minute later.
             case .link, .sessionStart, .other, .failure, .agentIdle: return false
-            case .turnComplete, .sessionEnded, .agentWaiting, .agentFinished: return true
+            case .turnComplete, .sessionEnded, .agentWaiting, .agentFinished, .taskReport:
+                return true
             }
         }
     }

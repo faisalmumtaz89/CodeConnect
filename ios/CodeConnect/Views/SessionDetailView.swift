@@ -1,42 +1,6 @@
 import SwiftUI
 import UIKit
 
-/// What a developer most often tells an agent from a phone, most-used first.
-///
-/// **No "Stop" chip**, and the reason has narrowed rather than gone away. It
-/// used to read *"an injected message needs the Mac's composer to be present,
-/// so it cannot interrupt a running turn — a chip that reads like an interrupt
-/// would be a control the product does not have"*. That is still exactly right
-/// about `send_text` and Claude's TTY, and it is **not** right about Codex,
-/// whose `interrupt` really does abort the turn over its own control link.
-///
-/// So Stop exists now, for a Codex session, as a real control with its own
-/// affordance — and it is still not a chip here, because a chip *inserts text*
-/// and a stop is a mutation. A control that looks like a phrase to type and
-/// behaves like an abort would be the same lie in a new place.
-///
-/// Internal (not view-private) solely so the tests can pin the set.
-enum ComposerTemplates {
-    static let all = [
-        "Continue", "Fix it", "Run the tests", "Commit & push", "Explain this",
-        "Use a simpler approach",
-    ]
-
-    /// The composer's reading-size placeholder. **Named, where the app knows the
-    /// name**: "Say something to this agent" is the honest phrasing only when
-    /// the app cannot say which agent. The two paths behind the field are
-    /// genuinely different messages (`send_text` into a TTY, `compose` over a
-    /// control link), and a reader who knows which one they are talking to is a
-    /// reader who can read the outcome sentence that comes back.
-    static func placeholder(for agent: AgentKind?) -> String {
-        switch agent {
-        case .claude: return "Ask Claude to do anything"
-        case .codex: return "Ask Codex to do anything"
-        case .unsupported, nil: return "Say something to this agent"
-        }
-    }
-}
-
 /// The tail-following verdict, deliberately outside the screen's own state.
 ///
 /// `following` flips as `TailObserver` reads the scroll offset, and as
@@ -2266,16 +2230,14 @@ private struct SessionComposeBar: View {
 
     // MARK: The one card
 
-    /// Chips, field and button stopped being three stacked strips: one
-    /// `surface` card, input on top, controls along the bottom edge. The focus
-    /// ring wraps the whole instrument — and so does recording, because while
-    /// the mic is hot the card *is* the transcript.
+    /// One `surface` card, input on top, controls along the bottom edge. The
+    /// focus ring wraps the whole instrument — and so does recording, because
+    /// while the mic is hot the card *is* the transcript.
     ///
     /// One 44pt circle does the whole job — mic when the field is empty, send
     /// once a single character exists — so the row never grows a second button
     /// for a thumb to arbitrate at 2am. At AX sizes nothing here stacks: the
-    /// circle is fixed, the chips wrap inside their strip, and the field
-    /// already owns the full measure.
+    /// circle is fixed and the field already owns the full measure.
     private var composer: some View {
         VStack(alignment: .leading, spacing: CC.space.xs) {
             if dictation.isRecording {
@@ -2288,19 +2250,6 @@ private struct SessionComposeBar: View {
                 // the live transcript above is proof the mic hears you, and
                 // the button's stop face is the recording state. Chrome that
                 // restates both was removed at the owner's call.
-                // **Withdrawn when the composer cannot send.**
-                //
-                // The mic already dims in that state; the chips did not, so on a
-                // too-old Mac three of them read at full contrast beside "this
-                // Mac's CodeConnect is too old to carry a message" — a
-                // live-looking affordance on a dead composer. They are withdrawn
-                // rather than dimmed because the kit's own rule is that a list
-                // never holds an item whose only behaviour is refusing the tap,
-                // and a chip that inserts text into a field with no destination
-                // is exactly that. The field itself stays draftable.
-                if !dictation.isRecording, sendBlockedReason == nil {
-                    templateChips
-                }
                 Spacer(minLength: 0)
                 byteCounter
                 if dictation.isRecording {
@@ -2321,7 +2270,7 @@ private struct SessionComposeBar: View {
     private var field: some View {
         TextField(
             "", text: $text,
-            prompt: Text(placeholder).foregroundStyle(CC.text.tertiary),
+            prompt: Text("Ask anything").foregroundStyle(CC.text.placeholder),
             // `.vertical` keeps the system keyboard's dictation key available
             // too — the mic in the circle is the first-class door, not the
             // only one.
@@ -2520,57 +2469,6 @@ private struct SessionComposeBar: View {
     private func openSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         openURL(url)
-    }
-
-    /// Tapping a chip **inserts** the template. It never sends: a one-tap send
-    /// is a decision taken without reading, which is the failure this whole
-    /// product is arranged around.
-    private var templateChips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: CC.space.xs) {
-                ForEach(Self.templates, id: \.self) { template in
-                    CCBadge(template) {
-                        insert(template)
-                    }
-                }
-            }
-            .padding(.trailing, CC.space.xl)
-        }
-        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-        // A right-edge fade says there are more chips rather than guillotining
-        // one mid-word.
-        .mask {
-            LinearGradient(
-                stops: [
-                    .init(color: .black, location: 0),
-                    .init(color: .black, location: 0.86),
-                    .init(color: .black.opacity(0), location: 1),
-                ],
-                startPoint: .leading, endPoint: .trailing)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Message templates")
-    }
-
-    /// The full sentence at reading sizes; two words once the type is large
-    /// enough that the sentence would own the screen. The field is already
-    /// labelled `MESSAGE`, so the short form loses nothing.
-    private var placeholder: String {
-        typeSize.isAccessibilitySize
-            ? "Say something" : ComposerTemplates.placeholder(for: summary?.agent)
-    }
-
-    /// What a developer most often tells an agent from a phone, most-used
-    /// first. **No "Stop" chip** — see `ComposerTemplates`, where the rationale
-    /// now says which agent it is about. These insert, never send; the contract
-    /// lives at `insert(_:)`.
-    private static let templates = ComposerTemplates.all
-
-    private func insert(_ template: String) {
-        text =
-            text.isEmpty
-            ? template
-            : text.trimmingCharacters(in: .whitespacesAndNewlines) + " " + template
     }
 
     @ViewBuilder

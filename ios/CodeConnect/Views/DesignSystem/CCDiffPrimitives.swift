@@ -744,7 +744,7 @@ struct CCDiffFileChip: View {
     }
 
     /// The kit's chip height, shared with `CCBadge`'s control form rather than
-    /// written twice — a file chip and a compose chip are the same object.
+    /// written twice — a file chip and a tappable badge are the same object.
     @ScaledMetric(relativeTo: .caption) private var chipHeight: CGFloat = CC.size.chip
 }
 

@@ -222,6 +222,46 @@ extension Event {
         return LocalCommandLine.parse(content)
     }
 
+    /// The background-task report this user line is — see `TaskNotification`.
+    /// Claude Code stamps one `origin.kind: "task-notification"`; a line with
+    /// no origin at all is still read by its shape, as the TUI reads it, and a
+    /// line stamped as anything else never is.
+    var taskNotification: TaskNotification? {
+        guard kind == .userMessage,
+            let content = payload["message"]?["content"]?.stringValue
+        else { return nil }
+        if let origin = payload["origin"], origin != .null,
+            origin["kind"]?.stringValue != "task-notification"
+        {
+            return nil
+        }
+        return TaskNotification.parse(content)
+    }
+
+    /// A user line Claude Code recorded without handing it to the agent
+    /// (`queueTranscriptOnly`, queued with `shouldQuery: false`) — measured, a
+    /// background task that "didn't finish before the previous session ended",
+    /// or an agent's result that arrived when no turn could take it. It is
+    /// history, and starts no turn.
+    var isTranscriptOnly: Bool { payload["queueTranscriptOnly"]?.boolValue == true }
+
+    /// Whether this user line is the person's own words, by Claude Code's own
+    /// test (2.1.304): not `isMeta`, not a compaction summary, and either
+    /// unstamped or stamped `origin.kind: "human"`. Everything else in a
+    /// `type:"user"` line was written by the system for the model — another
+    /// session's message, a scheduled prompt, Stop hook feedback, the summary
+    /// that continues a compacted conversation — and the Mac draws none of it
+    /// as something the person said. A Codex message carries none of these
+    /// fields and is always the person's.
+    var isPersonsWords: Bool {
+        guard kind == .userMessage,
+            payload["isMeta"]?.boolValue != true,
+            payload["isCompactSummary"]?.boolValue != true
+        else { return false }
+        guard let origin = payload["origin"], origin != .null else { return true }
+        return origin["kind"]?.stringValue == "human"
+    }
+
     /// **A message that is a flat `text`, which is how Codex sends one.**
     ///
     /// `ccd/src/codex_adapter.rs` `message_payload` builds exactly

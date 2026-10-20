@@ -747,17 +747,6 @@ final class AgentTableTests: XCTestCase {
     }
 }
 
-/// The composer chips: exact labels, exact order, and the reason "Stop" is
-/// absent is a product fact — injection cannot interrupt a running turn.
-final class ComposerTemplateTests: XCTestCase {
-    func testTheTemplatesAreTheAgreedSetInOrder() {
-        XCTAssertEqual(
-            ComposerTemplates.all,
-            ["Continue", "Fix it", "Run the tests", "Commit & push", "Explain this",
-             "Use a simpler approach"])
-    }
-}
-
 
 /// The agent-seam decode-safety wire (PROTOCOL_MINOR 15): the single rule under
 /// all of it is that an unknown wire value never becomes an *actuation claim* —
