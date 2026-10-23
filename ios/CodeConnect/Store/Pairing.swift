@@ -191,7 +191,7 @@ struct PairingQRPayload: Sendable, Hashable {
                 return "That pairing code has an impossible port (\(port))."
             case .unreachableHost(let host, let why):
                 return
-                    "That pairing code points at \(host), which \(why). Bring Tailscale up on the Mac, run `codeconnect daemon restart`, then `codeconnect pair` again."
+                    "That pairing code points at \(host), which \(why). Connect the Mac to the network your iPhone reaches it on (Tailscale, by default), run `codeconnect daemon restart`, then `codeconnect pair` again."
             }
         }
     }

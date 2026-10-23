@@ -375,12 +375,23 @@ enum AgentProse {
     /// of asterisks, line breaks and list markers survive as written. Malformed
     /// markdown falls back to the literal text; rendering something is always
     /// better than throwing about it.
+    ///
+    /// `displaySafe` on what the markdown *reads as*, run by run with each
+    /// run's attributes kept: `&#x202e;` holds no override until it is parsed,
+    /// and then it is one.
     static func inline(_ text: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace)
         let safe = neutralizeLoneTildes(text)
-        return (try? AttributedString(markdown: safe, options: options))
-            ?? AttributedString(text)
+        let parsed =
+            (try? AttributedString(markdown: safe, options: options)) ?? AttributedString(text)
+        var shown = AttributedString()
+        for run in parsed.runs {
+            var piece = AttributedString(String(parsed[run.range].characters).displaySafe)
+            piece.setAttributes(run.attributes)
+            shown += piece
+        }
+        return shown
     }
 
     /// Escape the tildes that mean "approximately" so they cannot mean

@@ -46,6 +46,38 @@ final class PairingFailureTests: XCTestCase {
             Staying in `.waiting` is what left the pairing screen spinning on a code \
             that had already expired.
             """)
+        // And it says where it looked and how to find out why, not only the
+        // system's own sentence.
+        guard case .failed(let reason) = connection.phase else { return }
+        XCTAssertTrue(reason.contains("Could not reach the Mac at 127.0.0.1:1"), reason)
+        XCTAssertTrue(reason.contains("`codeconnect daemon status`"), reason)
+    }
+
+    /// The transport footnote claims protection only as far as the daemon vouched
+    /// for it: to a paired phone, the terminal is offered exactly on a private
+    /// connection.
+    func testTheTransportFootnoteClaimsOnlyWhatTheDaemonVouchedFor() {
+        let offered = Capabilities(extra: ["terminal_pty": .bool(true)])
+        let withheld = Capabilities(extra: ["terminal_pty": .bool(false)])
+        let silent = Capabilities(extra: [:])
+        let tailnet = PairingView.transportFootnote(
+            encrypted: false, paired: true, capabilities: offered)
+        XCTAssertTrue(tailnet.contains("WireGuard"), tailnet)
+        let lan = PairingView.transportFootnote(
+            encrypted: false, paired: true, capabilities: withheld)
+        XCTAssertTrue(lan.contains("nothing encrypts"), lan)
+        XCTAssertFalse(lan.contains("WireGuard"), lan)
+        for unknown in [
+            PairingView.transportFootnote(encrypted: false, paired: false, capabilities: withheld),
+            PairingView.transportFootnote(encrypted: false, paired: true, capabilities: silent),
+        ] {
+            XCTAssertFalse(unknown.contains("WireGuard carries"), unknown)
+            XCTAssertFalse(unknown.contains("nothing encrypts"), unknown)
+        }
+        XCTAssertFalse(
+            PairingView.transportFootnote(encrypted: true, paired: true, capabilities: offered)
+                .contains("tailscale cert"),
+            "a certificate can be the operator's own")
     }
 
     /// A token typed at the pairing screen is still a pairing: nothing is saved

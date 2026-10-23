@@ -206,11 +206,17 @@ pub fn extract(archive: &Path, into: &Path) -> Result<()> {
 
 /// What a freshly extracted binary says it is.
 pub fn version_of(binary: &Path) -> Result<String> {
+    answer_of(binary, "--version")
+}
+
+/// What a binary prints when asked one question: `--version`, `cc-tmux -V`,
+/// or `codeconnect --tmux-version` for the tmux a build requires.
+pub fn answer_of(binary: &Path, question: &str) -> Result<String> {
     let output = std::process::Command::new(binary)
-        .arg("--version")
+        .arg(question)
         .stdin(std::process::Stdio::null())
         .output()
-        .with_context(|| format!("running {} --version", binary.display()))?;
+        .with_context(|| format!("running {} {question}", binary.display()))?;
     if !output.status.success() {
         anyhow::bail!("{} does not run", binary.display());
     }
@@ -773,14 +779,23 @@ mod tests {
             members.iter().all(|m| m.is_regular_file && m.size == 8),
             "mode and size are read from the right columns: {members:?}"
         );
-        crate::update_release::validate_members(&members, version)
-            .expect("the packaged shape is one the updater installs");
+        crate::update_release::validate_members(
+            &members,
+            version,
+            crate::update_release::Archive::Core,
+        )
+        .expect("the packaged shape is one the updater installs");
 
         // The obvious way, which writes a directory member the updater refuses.
         tar(&["codeconnect-9.9.9"], "with-dir.tar.gz");
         let members = list_members(&root.join("with-dir.tar.gz")).unwrap();
         assert!(
-            crate::update_release::validate_members(&members, version).is_err(),
+            crate::update_release::validate_members(
+                &members,
+                version,
+                crate::update_release::Archive::Core
+            )
+            .is_err(),
             "packaging the directory must be refused, not silently installed"
         );
     }

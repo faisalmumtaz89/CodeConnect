@@ -1,0 +1,657 @@
+[
+  {
+    "kind": "transcript_mode",
+    "payload": {
+      "mode": "normal",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "type": "mode"
+    },
+    "seq": 1,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:ce91a61fef70d15dd4648f16e917fbcc6b97afffbdd75a8120c091c1d2e05473",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_permission-mode",
+    "payload": {
+      "permissionMode": "default",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "type": "permission-mode"
+    },
+    "seq": 2,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:8d79a43537e4da49643f48644380479107c689ba0e139e78a93bcd07d6f5df8c",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_atis-latch",
+    "payload": {
+      "atis": "",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "type": "atis-latch"
+    },
+    "seq": 3,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:99960363c30965e2792f96860233a80afbf7d4571220c43b672ab1b6a58c37c2",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_file-history-snapshot",
+    "payload": {
+      "isSnapshotUpdate": false,
+      "messageId": "b845702c-3e73-4e8d-b734-3349f64dddf8",
+      "snapshot": {
+        "messageId": "b845702c-3e73-4e8d-b734-3349f64dddf8",
+        "timestamp": "2026-10-22T13:36:13.896Z",
+        "trackedFileBackups": {}
+      },
+      "type": "file-history-snapshot"
+    },
+    "seq": 4,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:953f5e2b2937bd4c50a5d35949c30aae9b2e717232cbfb90f8d65b1e1da52b45",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "b845702c-3e73-4e8d-b734-3349f64dddf8",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work/s3",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "imagePasteIds": [
+        1
+      ],
+      "isSidechain": false,
+      "message": {
+        "content": [
+          {
+            "text": "[Image #1] SLOW what is in this picture",
+            "type": "text"
+          },
+          {
+            "source": {
+              "data": "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",
+              "media_type": "image/jpeg",
+              "type": "base64"
+            },
+            "type": "image"
+          }
+        ],
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "04146ea1-0230-4d5a-9835-469e1da373e8",
+      "permissionMode": "default",
+      "promptId": "a7ff9e7a-2532-46f5-a21b-bb9708e40e42",
+      "promptSource": "typed",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "timestamp": "2026-10-22T13:36:13.894Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 2,
+        "turnIndex": 2
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "b845702c-3e73-4e8d-b734-3349f64dddf8",
+      "version": "2.1.308"
+    },
+    "seq": 5,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "b845702c-3e73-4e8d-b734-3349f64dddf8",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "77be18f5-b6a3-4dfa-a4ed-e1d35628d8b0",
+    "kind": "transcript_attachment",
+    "payload": {
+      "attachment": {
+        "text": "<total_tokens>15000000 tokens left</total_tokens>",
+        "type": "total_tokens_reminder"
+      },
+      "cwd": "/scratch/work/s3",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "parentUuid": "b845702c-3e73-4e8d-b734-3349f64dddf8",
+      "rendered": [
+        {
+          "content": "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+        }
+      ],
+      "renderedRole": "system",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "timestamp": "2026-10-22T13:36:13.894Z",
+      "type": "attachment",
+      "userType": "external",
+      "uuid": "77be18f5-b6a3-4dfa-a4ed-e1d35628d8b0",
+      "version": "2.1.308"
+    },
+    "seq": 6,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "77be18f5-b6a3-4dfa-a4ed-e1d35628d8b0",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "43f9ef66-3a7c-4cb9-b741-2c95f6877b7f",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work/s3",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isMeta": true,
+      "isSidechain": false,
+      "message": {
+        "content": [
+          {
+            "text": "[Image: source: /scratch/work/s3/noise.png]",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      "parentUuid": "77be18f5-b6a3-4dfa-a4ed-e1d35628d8b0",
+      "promptId": "a7ff9e7a-2532-46f5-a21b-bb9708e40e42",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "timestamp": "2026-10-22T13:36:13.894Z",
+      "turnCompanion": true,
+      "type": "user",
+      "userType": "external",
+      "uuid": "43f9ef66-3a7c-4cb9-b741-2c95f6877b7f",
+      "version": "2.1.308"
+    },
+    "seq": 7,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "43f9ef66-3a7c-4cb9-b741-2c95f6877b7f",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_last-prompt",
+    "payload": {
+      "lastPrompt": "[Image #1] SLOW what is in this picture",
+      "leafUuid": "43f9ef66-3a7c-4cb9-b741-2c95f6877b7f",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "type": "last-prompt"
+    },
+    "seq": 8,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:f40f728e4183421319da4d0c9e855db900e97947ce5a0b0a461f0d18904b263f",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "768b85bc-1ed1-4334-976f-f9b1575b0225",
+    "kind": "agent_message",
+    "payload": {
+      "apiBlockIndex": 0,
+      "cwd": "/scratch/work/s3",
+      "effort": "medium",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": [
+          {
+            "text": "Slow reply.",
+            "type": "text"
+          }
+        ],
+        "id": "msg_ce67b3f2f80e42f0af3fa1c3",
+        "model": "claude-sonnet-5-5",
+        "role": "assistant",
+        "stop_details": null,
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "type": "message",
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "fallback_credit": null,
+          "inference_geo": "",
+          "input_tokens": 10,
+          "iterations": [],
+          "output_tokens": 5,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        }
+      },
+      "parentUuid": "43f9ef66-3a7c-4cb9-b741-2c95f6877b7f",
+      "perTurnEffort": "medium",
+      "requestRef": "99a1d3be-4b5b-469b-be0f-41cbd9c9469c",
+      "requestedModel": "claude-sonnet-5-5",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "session_id": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "timestamp": "2026-10-22T13:36:15.411Z",
+      "type": "assistant",
+      "userType": "external",
+      "uuid": "768b85bc-1ed1-4334-976f-f9b1575b0225",
+      "version": "2.1.308"
+    },
+    "seq": 9,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "768b85bc-1ed1-4334-976f-f9b1575b0225",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "aa7b2d83-c67d-4496-af6e-5e63bf4e47f1",
+    "kind": "turn_complete",
+    "payload": {
+      "cwd": "/scratch/work/s3",
+      "durationMs": 1536,
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isMeta": false,
+      "isSidechain": false,
+      "messageCount": 18,
+      "parentUuid": "768b85bc-1ed1-4334-976f-f9b1575b0225",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "subtype": "turn_duration",
+      "timestamp": "2026-10-22T13:36:15.414Z",
+      "type": "system",
+      "userType": "external",
+      "uuid": "aa7b2d83-c67d-4496-af6e-5e63bf4e47f1",
+      "version": "2.1.308"
+    },
+    "seq": 10,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "aa7b2d83-c67d-4496-af6e-5e63bf4e47f1",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_file-history-snapshot",
+    "payload": {
+      "isSnapshotUpdate": false,
+      "messageId": "761181c6-1c42-4173-bf8b-8e4f89bd553f",
+      "snapshot": {
+        "messageId": "761181c6-1c42-4173-bf8b-8e4f89bd553f",
+        "timestamp": "2026-10-22T13:36:33.370Z",
+        "trackedFileBackups": {}
+      },
+      "type": "file-history-snapshot"
+    },
+    "seq": 11,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:9d1cad7b2fb04223ca2613ffa07c230b4fae98621041a9cfc3363b18cbb925a8",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "761181c6-1c42-4173-bf8b-8e4f89bd553f",
+    "kind": "user_message",
+    "payload": {
+      "_codeconnect_truncated": true,
+      "_original_bytes": 4545,
+      "cwd": "/scratch/work/s3",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "imagePasteIds": [
+        2
+      ],
+      "isSidechain": false,
+      "message": {
+        "content": [
+          {
+            "text": "[Image #2] SLOW and this bigger one",
+            "type": "text"
+          },
+          {
+            "type": "image"
+          }
+        ],
+        "role": "user"
+      },
+      "origin": {
+        "kind": "human"
+      },
+      "parentUuid": "aa7b2d83-c67d-4496-af6e-5e63bf4e47f1",
+      "permissionMode": "default",
+      "promptId": "35f00d24-764e-4a74-9ef3-ff37e1a45264",
+      "promptSource": "typed",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "timestamp": "2026-10-22T13:36:33.368Z",
+      "turnOrigin": "human",
+      "turnPosition": {
+        "promptIndex": 3,
+        "turnIndex": 3
+      },
+      "type": "user",
+      "userType": "external",
+      "uuid": "761181c6-1c42-4173-bf8b-8e4f89bd553f",
+      "version": "2.1.308"
+    },
+    "seq": 12,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "761181c6-1c42-4173-bf8b-8e4f89bd553f",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "8773c13a-3fe0-452c-8135-36acc1963c98",
+    "kind": "transcript_attachment",
+    "payload": {
+      "attachment": {
+        "text": "<total_tokens>15000000 tokens left</total_tokens>",
+        "type": "total_tokens_reminder"
+      },
+      "cwd": "/scratch/work/s3",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "parentUuid": "761181c6-1c42-4173-bf8b-8e4f89bd553f",
+      "rendered": [
+        {
+          "content": "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+        }
+      ],
+      "renderedRole": "system",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "timestamp": "2026-10-22T13:36:33.368Z",
+      "type": "attachment",
+      "userType": "external",
+      "uuid": "8773c13a-3fe0-452c-8135-36acc1963c98",
+      "version": "2.1.308"
+    },
+    "seq": 13,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "8773c13a-3fe0-452c-8135-36acc1963c98",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "f231a42f-0b48-483e-b081-a402e738a2c5",
+    "kind": "user_message",
+    "payload": {
+      "cwd": "/scratch/work/s3",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isMeta": true,
+      "isSidechain": false,
+      "message": {
+        "content": [
+          {
+            "text": "[Image: source: /scratch/work/s3/noise2.png]",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      "parentUuid": "8773c13a-3fe0-452c-8135-36acc1963c98",
+      "promptId": "35f00d24-764e-4a74-9ef3-ff37e1a45264",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "timestamp": "2026-10-22T13:36:33.368Z",
+      "turnCompanion": true,
+      "type": "user",
+      "userType": "external",
+      "uuid": "f231a42f-0b48-483e-b081-a402e738a2c5",
+      "version": "2.1.308"
+    },
+    "seq": 14,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "f231a42f-0b48-483e-b081-a402e738a2c5",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_last-prompt",
+    "payload": {
+      "lastPrompt": "[Image #2] SLOW and this bigger one",
+      "leafUuid": "f231a42f-0b48-483e-b081-a402e738a2c5",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "type": "last-prompt"
+    },
+    "seq": 15,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:5636c6089687741af60119d52431e40126816c08ce7ba0606757ac7c51afedd3",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "d1d17b53-56bb-4570-91e3-98a1dca73f21",
+    "kind": "agent_message",
+    "payload": {
+      "apiBlockIndex": 0,
+      "cwd": "/scratch/work/s3",
+      "effort": "medium",
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isSidechain": false,
+      "message": {
+        "content": [
+          {
+            "text": "Slow reply.",
+            "type": "text"
+          }
+        ],
+        "id": "msg_97e31b3e35294d9bb4ac28f8",
+        "model": "claude-sonnet-5-5",
+        "role": "assistant",
+        "stop_details": null,
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "type": "message",
+        "usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "fallback_credit": null,
+          "inference_geo": "",
+          "input_tokens": 10,
+          "iterations": [],
+          "output_tokens": 5,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        }
+      },
+      "parentUuid": "f231a42f-0b48-483e-b081-a402e738a2c5",
+      "perTurnEffort": "medium",
+      "requestRef": "0feaca62-d8d9-43ec-99d7-d8a376842f01",
+      "requestedModel": "claude-sonnet-5-5",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "session_id": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "timestamp": "2026-10-22T13:36:34.926Z",
+      "type": "assistant",
+      "userType": "external",
+      "uuid": "d1d17b53-56bb-4570-91e3-98a1dca73f21",
+      "version": "2.1.308"
+    },
+    "seq": 16,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "d1d17b53-56bb-4570-91e3-98a1dca73f21",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "item_id": "a984cd84-885f-45f6-9eeb-b6e311353dec",
+    "kind": "turn_complete",
+    "payload": {
+      "cwd": "/scratch/work/s3",
+      "durationMs": 1626,
+      "entrypoint": "cli",
+      "gitBranch": "HEAD",
+      "isMeta": false,
+      "isSidechain": false,
+      "messageCount": 23,
+      "parentUuid": "d1d17b53-56bb-4570-91e3-98a1dca73f21",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "subtype": "turn_duration",
+      "timestamp": "2026-10-22T13:36:34.929Z",
+      "type": "system",
+      "userType": "external",
+      "uuid": "a984cd84-885f-45f6-9eeb-b6e311353dec",
+      "version": "2.1.308"
+    },
+    "seq": 17,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "a984cd84-885f-45f6-9eeb-b6e311353dec",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_cost-state",
+    "payload": {
+      "hasUnknownModelCost": false,
+      "modelUsage": {
+        "claude-haiku-5-5": {
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "costUSD": 0.0000105,
+          "inputTokens": 30,
+          "outputTokens": 15,
+          "thinkingTokens": 0,
+          "webSearchRequests": 0
+        },
+        "claude-sonnet-5-5": {
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "costUSD": 0.00021,
+          "inputTokens": 30,
+          "outputTokens": 15,
+          "thinkingTokens": 0,
+          "webSearchRequests": 0
+        }
+      },
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "startTime": 1792676154118,
+      "totalAPIDuration": 4691,
+      "totalAPIDurationWithoutRetries": 4570,
+      "totalCostUSD": 0.00022050000000000005,
+      "totalDuration": 55409,
+      "totalLinesAdded": 0,
+      "totalLinesRemoved": 0,
+      "totalToolDuration": 0,
+      "type": "cost-state"
+    },
+    "seq": 18,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:38851c191437c5d490ea34792137dcf16ce8b652955612434c74926a93469c4f",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_file-history-snapshot",
+    "payload": {
+      "isSnapshotUpdate": false,
+      "messageId": "22c90ad8-bfe1-4e0e-bf68-0b68726eb777",
+      "snapshot": {
+        "messageId": "22c90ad8-bfe1-4e0e-bf68-0b68726eb777",
+        "timestamp": "2026-10-22T13:36:49.533Z",
+        "trackedFileBackups": {}
+      },
+      "type": "file-history-snapshot"
+    },
+    "seq": 19,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:9a20ac10dc521424d360c3370f6d3bf7eb9ca488d8d0a533974c44f4bbf36ca8",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_last-prompt",
+    "payload": {
+      "lastPrompt": "[Image #2] SLOW and this bigger one",
+      "leafUuid": "a984cd84-885f-45f6-9eeb-b6e311353dec",
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "type": "last-prompt"
+    },
+    "seq": 20,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:dfc7c089c9f8cc24acd671d2e05e9e0a43ae1554e8946aa59bebaa8842b70694",
+    "ts": "2026-10-22T13:36:40.000Z"
+  },
+  {
+    "kind": "transcript_cost-state",
+    "payload": {
+      "hasUnknownModelCost": false,
+      "modelUsage": {
+        "claude-haiku-5-5": {
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "costUSD": 0.0000105,
+          "inputTokens": 30,
+          "outputTokens": 15,
+          "thinkingTokens": 0,
+          "webSearchRequests": 0
+        },
+        "claude-sonnet-5-5": {
+          "cacheCreationInputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "costUSD": 0.00021,
+          "inputTokens": 30,
+          "outputTokens": 15,
+          "thinkingTokens": 0,
+          "webSearchRequests": 0
+        }
+      },
+      "sessionId": "71c2f44e-016a-4e57-b671-a4049ec9f87d",
+      "startTime": 1792676154118,
+      "totalAPIDuration": 4691,
+      "totalAPIDurationWithoutRetries": 4570,
+      "totalCostUSD": 0.00022050000000000005,
+      "totalDuration": 55417,
+      "totalLinesAdded": 0,
+      "totalLinesRemoved": 0,
+      "totalToolDuration": 0,
+      "type": "cost-state"
+    },
+    "seq": 21,
+    "session_id": "cc-1",
+    "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+    "source": "transcript",
+    "source_event_id": "sha:d34527497b11eccf3fca4aee91b990ec582376a4aad8a851e4b75d9a381463e2",
+    "ts": "2026-10-22T13:36:40.000Z"
+  }
+]

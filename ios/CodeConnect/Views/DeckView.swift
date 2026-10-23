@@ -507,8 +507,7 @@ private struct DeckClearState: View {
                     spokenValue: settled == 1 ? "1 decision" : "\(settled) decisions"),
                 CCStat(
                     "This pass", value: Format.age(elapsed),
-                    spokenValue: Format.spokenAge(elapsed).replacingOccurrences(
-                        of: " ago", with: "")),
+                    spokenValue: Format.spokenDuration(elapsed)),
             ])
         } else {
             Text("Nothing was waiting.")
@@ -845,7 +844,7 @@ struct DeckAccessoryBar: View {
         var parts = [topPlace]
         if let topCommand { parts.append(topCommand) }
         if let waitingSince {
-            parts.append("waiting \(Format.age(since: waitingSince, now: now))")
+            parts.append("waiting \(Format.spokenDuration(now.timeIntervalSince(waitingSince)))")
         }
         return parts.joined(separator: " · ")
     }

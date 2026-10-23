@@ -11,8 +11,8 @@
 # WHAT THIS PROVES. Two things:
 #
 #   * **Additive-column round-trip.** The seam columns the new binary writes
-#     (`sessions.agent`, `codex_thread_id`, `codex_socket`, `codex_generation`;
-#     `devices.features`, `features_epoch`) come back byte-for-byte through the
+#     (`sessions.agent`, `codex_thread_id`, `codex_socket`, `codex_generation`)
+#     come back byte-for-byte through the
 #     real old daemon's own write, because it names none of them.
 #     `codex_generation` is the durable generation high-water — the number a Codex
 #     registration is refused against — so its round-trip is not just data
@@ -98,8 +98,35 @@ NEW="$TARGET_DIR/debug/ccd"
 # `report_exit` are only reachable by running the binary that owns them — a
 # hand-written frame down the socket exercises neither.
 NEWCC="$TARGET_DIR/debug/codeconnect"
-WT="$(mktemp -d)/cc-old"
-H="$(mktemp -d)"
+# Under the caller's TMPDIR, named, and removed by `cleanup`: a bare `mktemp -d`
+# ignores TMPDIR on macOS and left both behind in the per-user temp dir.
+WTP="$(mktemp -d "${TMPDIR:-/tmp}/cc-rollback-wt.XXXXXX")"
+WT="$WTP/cc-old"
+# Installed the moment there is anything to remove, before any check can exit.
+# Every background process this harness owns dies with it. The daemons and the
+# supervisors are killed explicitly at the end of the step that started them; this
+# is the net under an early `exit`, and it matters most for the supervisors, which
+# are the only children here that would otherwise outlive the script's own home
+# directory and go on reconnecting to a socket nobody is listening on.
+cleanup() {
+  # Each pid guarded on being SET, never defaulted to `0`: `kill 0` is not a
+  # no-op, it signals the whole process group — this script, the shell that
+  # started it, and whatever else shares that group. An unset variable here
+  # means the process was never started, so there is nothing to kill.
+  local pid
+  # `NEWPID` included: a failure after step 7(g) spawns the sandbox
+  # daemon and before its explicit kill would otherwise leak it, and it is the one
+  # child here holding the home directory this script removes.
+  for pid in "${SUPPID:-}" "${SUPXPID:-}" "${OLDPID:-}" "${NEWPID:-}" "${PINPID:-}"; do
+    if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
+  done
+  git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || true
+  # Every scratch home this harness makes lives under `$H`, so this one removal
+  # covers all of them, whichever step exited.
+  rm -rf "$WTP" "${H:-}"
+}
+trap cleanup EXIT
+H="$(mktemp -d "${TMPDIR:-/tmp}/cc-rollback-home.XXXXXX")"
 # The Codex run seeded below. A ULID ending CX so it is obvious in a log.
 CX=01K1B3XQ8ZC0DE5FGH7JKMNPCX
 # Its thread id, in a variable for the same reason the uid is: the seed below
@@ -140,27 +167,6 @@ done
 # A free ephemeral port, chosen at run time so the harness never collides with a
 # live ccd (or a parallel run) on a fixed port.
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
-
-# Every background process this harness owns dies with it. The daemons and the
-# supervisors are killed explicitly at the end of the step that started them; this
-# is the net under an early `exit`, and it matters most for the supervisors, which
-# are the only children here that would otherwise outlive the script's own home
-# directory and go on reconnecting to a socket nobody is listening on.
-cleanup() {
-  # Each pid guarded on being SET, never defaulted to `0`: `kill 0` is not a
-  # no-op, it signals the whole process group — this script, the shell that
-  # started it, and whatever else shares that group. An unset variable here
-  # means the process was never started, so there is nothing to kill.
-  local pid
-  # `NEWPID` included: a failure after step 7(g) spawns the sandbox
-  # daemon and before its explicit kill would otherwise leak it, and it is the one
-  # child here holding the home directory this script removes.
-  for pid in "${SUPPID:-}" "${SUPXPID:-}" "${OLDPID:-}" "${NEWPID:-}"; do
-    if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
-  done
-  git -C "$REPO" worktree remove --force "$WT" 2>/dev/null || true
-}
-trap cleanup EXIT
 
 echo "== building new ccd + codeconnect (working tree) =="
 # `codeconnect` too, and for the same reason the OLD one is built below: half of
@@ -286,18 +292,13 @@ OLD_UV=""
 # generation it liked on the way back up — so "the old daemon cannot reach it"
 # is a claim this harness has to make about it by name.
 SEAM_COLS_SESSIONS="agent codex_thread_id codex_socket codex_generation"
-SEAM_COLS_DEVICES="features features_epoch"
 assert_seam_columns_exist() {
   local when="$1" table col
   for col in $SEAM_COLS_SESSIONS; do
     q "PRAGMA table_info(sessions);" | awk -F'|' '{print $2}' | grep -qx "$col" \
       || { echo "FAIL: sessions.$col missing $when"; exit 1; }
   done
-  for col in $SEAM_COLS_DEVICES; do
-    q "PRAGMA table_info(devices);" | awk -F'|' '{print $2}' | grep -qx "$col" \
-      || { echo "FAIL: devices.$col missing $when"; exit 1; }
-  done
-  echo "  all seam columns present $when: sessions($SEAM_COLS_SESSIONS) devices($SEAM_COLS_DEVICES)"
+  echo "  all seam columns present $when: sessions($SEAM_COLS_SESSIONS)"
 }
 # The SESSION seam columns, pipe-joined: nothing on either binary's code path
 # touches these, so they must round-trip byte-for-byte through the whole
@@ -307,27 +308,21 @@ session_seam() {
             COALESCE(codex_generation,'') \
      FROM sessions WHERE session_uid='01K1B3XQ8ZC0DE5FGH7JKMNPQR';"
 }
-# The DEVICE seam columns, pipe-joined. They round-trip byte-for-byte through
-# BOTH binaries: the old one because it does not know the columns, the new one
-# because **nothing in production writes them at all**. There is no device-feature
-# write side — it would be machinery for an input no shipping client can send —
-# so `Store::set_device_features` is `allow(dead_code)` outside tests and no
-# production path can clear anything, including a startup *fail-closed
-# invalidation* of a set not stamped by the current run. There is no clearing
-# to assert.
-#
-# The fail-closed property did not go away, it moved to the READ: a set stamped
-# with another run's epoch decodes as `DeviceFeatures::Unconfirmable` and
-# authorizes nothing, which `a_stored_feature_set_is_only_this_runs_word_if_this_run_stamped_it`
-# pins. So the honest assertion here is survival of the bytes, exactly as for the
-# session seam — `epoch_probe` is not any real run's epoch, so the surviving set
-# grants nothing.
-device_seam() {
-  q "SELECT COALESCE(features,''), COALESCE(features_epoch,'') \
-     FROM devices WHERE device_id='dev-probe';"
-}
 SESSION_SEAM_EXPECT="claude|th_probe|/sock_probe|99"
-DEVICE_SEAM_SEEDED='{"agents":["codex"]}|epoch_probe'
+# A seeded `devices` row in the shape a paired, push-registered phone leaves: a
+# device-token hash, then `register_push`'s token, environment and relay bearer.
+# It is a row written with SQL, not a pairing — its hash belongs to no token, so
+# no `hello` could authenticate as it — and what it proves is that the row comes
+# through every downgrade and back unchanged; a rollback that rewrote or dropped
+# it would be a phone that silently stops ringing.
+PHONE_TOKEN=aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899
+phone_row() {
+  q "SELECT device_id || '|' || token_hash || '|' || COALESCE(push_token,'') || '|' ||
+            COALESCE(push_environment,'') || '|' || COALESCE(push_credential,'') || '|' ||
+            COALESCE(revoked_at,'')
+     FROM devices WHERE device_id='dev-phone';"
+}
+PHONE_EXPECT="dev-phone|th-phone|$PHONE_TOKEN|production|bearer-probe|"
 
 echo "== 1) new ccd migrates the DB =="
 run "$NEW" new1
@@ -343,7 +338,7 @@ echo "  agent-scoped storage built: codex_sessions, all_sessions, codex_pending_
 echo "                              all_pending_approvals, pending_approvals_refuse_codex_card,"
 echo "                              mutation_ledger"
 
-echo "== 2) seed a live Claude session + a device, with PROBE values in every seam column =="
+echo "== 2) seed a live Claude session, with PROBE values in every seam column, and a registered phone's row =="
 # A raw insert (not registration) so we can put a distinct value in each seam
 # column and prove the old daemon leaves them byte-for-byte intact. The old
 # binary knows none of these columns, so its positional writes must not touch
@@ -351,10 +346,10 @@ echo "== 2) seed a live Claude session + a device, with PROBE values in every se
 # storage-layer round-trip probe, not a registration.)
 q "INSERT INTO sessions(session_uid,session_id,tmux_session,tmux_socket,cwd,claude_session_id,transcript_path,lifecycle,created_at,updated_at,agent,codex_thread_id,codex_socket,codex_generation)
    VALUES('01K1B3XQ8ZC0DE5FGH7JKMNPQR','cc-9','cc-9','codeconnect','/tmp',NULL,NULL,'live','t','t','claude','th_probe','/sock_probe',99);
-   INSERT INTO devices(device_id,name,token_hash,created_at,features,features_epoch)
-   VALUES('dev-probe','iPhone','th-1','t','{\"agents\":[\"codex\"]}','epoch_probe');"
+   INSERT INTO devices(device_id,name,token_hash,created_at,push_token,push_environment,push_credential)
+   VALUES('dev-phone','iPhone','th-phone','t','$PHONE_TOKEN','production','bearer-probe');"
 [ "$(session_seam)" = "$SESSION_SEAM_EXPECT" ] || { echo "FAIL: session seed did not land: $(session_seam)"; exit 1; }
-[ "$(device_seam)" = "$DEVICE_SEAM_SEEDED" ] || { echo "FAIL: device seed did not land: $(device_seam)"; exit 1; }
+[ "$(phone_row)" = "$PHONE_EXPECT" ] || { echo "FAIL: phone seed did not land: $(phone_row)"; exit 1; }
 
 echo "== 2b) seed a LIVE Codex run in codex_sessions, with events =="
 # Where a real Codex registration will put it. The old binary has no statement
@@ -461,11 +456,11 @@ OLD_UV="$LAST_UV"
 [ "$(q "SELECT lifecycle FROM sessions;")" = "exited" ] || { echo "FAIL: old daemon did not write"; exit 1; }
 assert_seam_columns_exist "after old daemon"
 # The old daemon knows none of the seam columns, so its write (marking the
-# session exited) must leave EVERY seam value byte-for-byte intact — session and
-# device alike.
+# session exited) must leave EVERY seam value byte-for-byte intact.
 [ "$(session_seam)" = "$SESSION_SEAM_EXPECT" ] || { echo "FAIL: old daemon disturbed a session seam column: $(session_seam)"; exit 1; }
-[ "$(device_seam)" = "$DEVICE_SEAM_SEEDED" ] || { echo "FAIL: old daemon disturbed a device seam column: $(device_seam)"; exit 1; }
-echo "  seam columns intact through the old daemon: session=$(session_seam) device=$(device_seam)"
+echo "  seam columns intact through the old daemon: session=$(session_seam)"
+[ "$(phone_row)" = "$PHONE_EXPECT" ] || { echo "FAIL: the old daemon disturbed the seeded phone row: $(phone_row)"; exit 1; }
+echo "  the seeded paired-and-registered phone row is unchanged through the old daemon"
 
 # (2) MUTATION, first old-daemon window — closed here. Between the baseline
 # captured after the seed and this line, the ONLY thing that ran is this old
@@ -493,10 +488,9 @@ assert_uv 5 "after new reopen"
   || { echo "FAIL: a Codex row is in the shared sessions table"; exit 1; }
 # Session seam columns still round-trip byte-for-byte.
 [ "$(session_seam)" = "$SESSION_SEAM_EXPECT" ] || { echo "FAIL: a session seam column did not survive the round-trip: $(session_seam)"; exit 1; }
-# And so do the device seam columns: nothing in production writes them, and the
-# foreign-epoch stamp is what makes the surviving set authorize nothing.
-[ "$(device_seam)" = "$DEVICE_SEAM_SEEDED" ] || { echo "FAIL: a device seam column did not survive the round-trip: $(device_seam)"; exit 1; }
-echo "  after new reopen: session seam intact=$(session_seam); device seam intact=$(device_seam) (foreign epoch ⇒ Unconfirmable ⇒ authorizes nothing)"
+echo "  after new reopen: session seam intact=$(session_seam)"
+[ "$(phone_row)" = "$PHONE_EXPECT" ] || { echo "FAIL: the seeded phone row did not survive new -> old -> new: $(phone_row)"; exit 1; }
+echo "  after new reopen: the seeded phone row keeps its token hash, push token, environment and bearer"
 
 echo "== 5) AGENT-SCOPED ISOLATION: the old daemon and its real prune, live =="
 # A SECOND baseline, re-taken HERE rather than reused from the seed, because a
@@ -608,7 +602,7 @@ echo "== 5b) THE FALSIFIABILITY ARM FOR THE CARD SPLIT =="
 # already recovered. `$H` has been through two old-daemon windows and a real
 # prune by this point, and staging on top of that would make the measurement
 # depend on all of it.
-H3="$H.sharedcard"
+H3="$H/sharedcard"
 mkdir -p "$H3"
 sed "s/\"ws_port\": $PORT/\"ws_port\": $((PORT + 1))/" "$H/config.json" > "$H3/config.json"
 run_at() { CODECONNECT_HOME="$3" timeout "$DAEMON_WINDOW" "$1" > "$3/$2.log" 2>&1 || [ $? = 124 ]; }
@@ -702,7 +696,8 @@ assert_uv 5 "after the final new reopen"
   || { echo "FAIL: a Codex answer leaked into the shared claim table on the way back up"; exit 1; }
 [ "$(q "SELECT COUNT(*) FROM answers WHERE session_uid='$CX';")" = "0" ] \
   || { echo "FAIL: a Codex outcome leaked into the shared answers table"; exit 1; }
-echo "  the Codex run, its open card and its terminal answer survived"
+[ "$(phone_row)" = "$PHONE_EXPECT" ] || { echo "FAIL: the seeded phone row did not survive the whole round trip: $(phone_row)"; exit 1; }
+echo "  the Codex run, its open card, its terminal answer and the seeded phone row survived"
 echo "  new -> old -> new -> old + real prune -> new"
 
 echo "== 6b) a LIVE answer claim, recovered by the new binary the way a restart does =="
@@ -721,7 +716,7 @@ echo "== 6b) a LIVE answer claim, recovered by the new binary the way a restart 
 # first and retirement claims one by removing it from that map, so a card the
 # restore had to drop would make the retire find nothing and hide the very
 # ordering this step exists to check.
-H4="$H.livedanswer"
+H4="$H/livedanswer"
 mkdir -p "$H4"
 sed "s/\"ws_port\": $PORT/\"ws_port\": $((PORT + 2))/" "$H/config.json" > "$H4/config.json"
 run_at "$NEW" new-livedanswer-build "$H4"
@@ -837,7 +832,7 @@ NEGOTIATE='{"type":"negotiate_support","agent":"codex"}'
 # is the thing every later arm reasons about, and a `DROP TRIGGER` on it would
 # leave the guard off for the rest of the run if anything between here and the
 # restore exited early. A copy costs one `cp` and cannot.
-H2="$H.pretrigger"
+H2="$H/pretrigger"
 mkdir -p "$H2"
 cp "$H/config.json" "$H2/"
 # `.backup`, not `cp`: the database is in WAL mode, so a plain file copy can
@@ -1047,6 +1042,27 @@ SUPTMUX="$H/tmux-none"
 mkdir -p "$SUPTMUX"
 SUP_UID=01K1B3XQ8ZC0DE5FGH7JKMNPSV
 SUPLOG="$H/logs/supervisor-cc-sup-$SUP_UID.log"
+# A supervisor given a uid must also be told which tmux server its session is on
+# (`--tmux-session-id`, `--server-pid`, `--server-start-time`, `--session-created`
+# and `--server-birth`, as `codeconnect claude` passes them), and it ends its
+# session once that server is proven dead by pid and birth. The tmux root above
+# is empty, so the census never reads the pin's session fields; what matters is a
+# server process that stays alive for the whole step. A `sleep` this harness owns
+# stands in for it, with its real birth read the way `proc_identity` reads one
+# (`proc_pidinfo(PROC_PIDTBSDINFO)`: `pbi_start_tvsec`/`_tvusec`).
+sleep 600 &
+PINPID=$!
+PIN_BIRTH="$(python3 - "$PINPID" <<'PY'
+import ctypes, struct, sys
+libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+buf = ctypes.create_string_buffer(136)
+n = libproc.proc_pidinfo(int(sys.argv[1]), 3, ctypes.c_uint64(0), buf, 136)
+if n != 136:
+    sys.exit(f"proc_pidinfo answered {n} bytes, not a proc_bsdinfo")
+sec, usec = struct.unpack_from("<QQ", buf.raw, 120)
+print(f"{sec}.{usec}")
+PY
+)"
 
 # Live IPC connections the old daemon is holding, counted off that process's own
 # open unix-domain descriptors. The listening socket is one of them, so this is
@@ -1108,7 +1124,9 @@ echo "  old daemon idle IPC descriptors: $CONNS_BASE (its listener)"
 # itself.
 CODECONNECT_HOME="$H" TMUX_TMPDIR="$SUPTMUX" timeout 90 \
   "$NEWCC" supervise --session cc-sup --session-uid "$SUP_UID" \
-  --tmux-session cc-sup --cwd "$H" > "$H/sup-live.log" 2>&1 &
+  --tmux-session cc-sup --cwd "$H" --tmux-session-id '$0' --server-pid "$PINPID" \
+  --server-start-time 0 --session-created 0 --server-birth "$PIN_BIRTH" \
+  > "$H/sup-live.log" 2>&1 &
 SUPPID=$!
 for _ in $(seq 1 40); do
   [ "$(q "SELECT COUNT(*) FROM sessions WHERE session_uid='$SUP_UID';")" = "1" ] && break
@@ -1562,7 +1580,6 @@ echo "PASS: a REAL v$OLD_UV-binary-opens-a-v$NEW_UV-database downgrade, driven $
 echo "      real binaries: the old daemon rewrote user_version to its own $OLD_UV, as measured,"
 echo "      and that is harmless because the isolation never rested on the number."
 echo "      Seam columns round-tripped byte-for-byte through the old daemon's write;"
-echo "      the foreign-epoch device set survived as bytes and authorizes nothing;"
 echo "      both old-daemon runs were bracketed individually — bytes captured immediately"
 echo "      before each run and compared immediately after it — and in the first bracket"
 echo "      the Codex run was LIVE and stayed live, so the old sweep's live -> exited"

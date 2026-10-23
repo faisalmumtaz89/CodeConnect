@@ -45,7 +45,7 @@ The **iPhone app** connects to:
 The **Mac daemon and tools** connect to:
 
 1. **Your paired iPhone** — directly.
-2. **GitHub** — after `codeconnect claude` starts a session, a background request to GitHub's public Releases API checks for a newer release when the 24-hour cache is stale. GitHub receives your IP address and ordinary HTTP request metadata; CodeConnect sends no session, prompt, file, or project data. Set `"update_check": false` in `~/.codeconnect/config.json` to disable it. `codeconnect update`, when you run it, asks the same API and downloads that release's files from GitHub — it is only ever a thing you type.
+2. **GitHub** — after `codeconnect claude` starts a session, a background request to GitHub's public Releases API checks for a newer release when the 24-hour cache is stale. GitHub receives your IP address and ordinary HTTP request metadata; CodeConnect sends no session, prompt, file, or project data. Set `"update_check": false` in `~/.codeconnect/config.json` to disable it. `codeconnect update`, when you run it, asks the same API and downloads that release's files from GitHub — it is only ever a thing you type. One more request is made without being typed, and that setting does not stop it, because sessions run on CodeConnect's own tmux even on a Mac that has another: when a release's binaries are installed without CodeConnect's tmux beside them, the next `codeconnect claude` or `codeconnect codex` asks the same API for that release and downloads its tmux from GitHub, until it is installed.
 
 3. **Apple** — only when your daemon holds its own Apple push key (direct mode): the Mac sends notifications straight to Apple's push service, with the minimal content described above and nothing else.
 

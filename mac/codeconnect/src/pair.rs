@@ -32,9 +32,10 @@ const INK: &str = "\u{1b}[30;47m";
 const RESET: &str = "\u{1b}[0m";
 
 pub fn pair(args: &[String]) -> Result<()> {
-    if let Some(first) = args.first() {
-        bail!("unknown option {first:?}; usage: codeconnect pair");
-    }
+    crate::no_arguments(args, "codeconnect pair")?;
+    // Where the daemon listens comes from this file; one it could not read is
+    // why it found no `ws_bind`.
+    protocol::config::Config::load();
 
     let reply = daemon::request(&ClientFrame::CreatePairing {
         ttl_secs: PAIRING_TTL_SECS,
@@ -68,10 +69,12 @@ pub fn pair(args: &[String]) -> Result<()> {
         bail!(
             "this daemon is listening on {host}, which {problem}, so a paired \
              phone could never reach it.\n\n  \
-             `ccd` resolves its address once when it starts, so this usually means \
-             Tailscale was not up yet at that moment — launchd starts the daemon at \
-             login and does not wait for the tunnel.\n\n  \
-             Bring Tailscale up, then:\n\n      \
+             `ccd` picks its address once, when it starts: this Mac's Tailscale \
+             address, or the one `ws_bind` names in ~/.codeconnect/config.json. It \
+             found neither — usually because Tailscale was not up yet when launchd \
+             started it at login, or is not set up on this Mac.\n\n  \
+             Bring Tailscale up, or set `ws_bind` (https://codeconnect.sh/support \
+             explains both), then:\n\n      \
              codeconnect daemon restart\n      \
              codeconnect pair\n\n  \
              `codeconnect daemon status` shows the address it is currently bound to."
@@ -129,8 +132,8 @@ pub fn devices(args: &[String]) -> Result<()> {
                     .unwrap_or_default()
             );
         }
-        bail!("unexpected argument {first:?}; usage: codeconnect devices");
     }
+    crate::no_arguments(args, "codeconnect devices")?;
 
     let reply = daemon::request(&ClientFrame::ListDevices)?;
     let DaemonFrame::Devices { devices } = reply else {
@@ -163,9 +166,15 @@ pub fn devices(args: &[String]) -> Result<()> {
 }
 
 pub fn revoke(args: &[String]) -> Result<()> {
-    let Some(device) = args.first() else {
+    // A flag or nothing in the device's place — `revoke --help` — is a question
+    // about the command, never a device to cut off.
+    let Some(device) = args
+        .first()
+        .filter(|device| !device.is_empty() && !device.starts_with('-'))
+    else {
         bail!("usage: cc revoke <device>   (`codeconnect devices` lists them)");
     };
+    crate::no_arguments(&args[1..], "codeconnect revoke <device>")?;
     let reply = daemon::request(&ClientFrame::RevokeDevice {
         device: device.clone(),
         ssh_only: false,

@@ -191,7 +191,7 @@ final class DeckUITests: XCTestCase {
     /// It used to arm on `onAppear` of a marker nested inside an
     /// already-materialised `LazyVStack` child, which fires on creation and not
     /// on scroll. A HIGH card at AX5 then showed `Hold to allow`
-    /// fully armed with the words `EXACT COMMAND` as the last thing on screen
+    /// fully armed with the command's header as the last thing on screen
     /// and **zero characters of the command rendered** — a face authenticating a
     /// command the product never showed.
     ///
@@ -333,6 +333,31 @@ final class DeckUITests: XCTestCase {
             "and the gate says nothing, because it is not in the way")
     }
 
+    /// An answer the Mac has not confirmed says how long it has waited, and
+    /// VoiceOver hears that as a duration — "4 seconds" — never as "4s",
+    /// which it reads "four ess".
+    func testAnUnconfirmedAnswerSpeaksHowLongItHasWaited() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+            "-UIPreferredContentSizeCategoryName", TypeSize.medium.rawValue,
+            "-CC_FIXTURE_ANSWER_MS", "20000",
+            "-CC_DEEPLINK", "codeconnect://deck/\(Self.lowRequestID)",
+        ]
+        app.launch()
+        let allow = allowButton(app, tool: "Read")
+        XCTAssertTrue(allow.waitForExistence(timeout: 25))
+        allow.tap()
+        let notice = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH 'Still waiting on the Mac'")
+        ).firstMatch
+        XCTAssertTrue(notice.waitForExistence(timeout: 15), "the unconfirmed notice")
+        XCTAssertNotNil(
+            notice.label.range(
+                of: #"^Still waiting on the Mac, \d+ seconds?\.$"#, options: .regularExpression),
+            notice.label)
+    }
+
     /// The same card at a reading size, where the command does fit.
     func testMediumCardIsArmedWhenTheCommandFitsAtMedium() {
         let app = launch(size: .medium, openingCard: Self.mediumRequestID)
@@ -427,6 +452,9 @@ final class DeckUITests: XCTestCase {
 
         let first = stat.value as? String ?? ""
         XCTAssertFalse(first.isEmpty, "and it reports a value, not a blank")
+        XCTAssertNotNil(
+            first.range(of: #"^\d+ seconds?$"#, options: .regularExpression),
+            "a duration, never an age: \(first)")
         attach(app, "this-pass-frozen-t0")
 
         // Long enough that a live clock could not have stayed still: the

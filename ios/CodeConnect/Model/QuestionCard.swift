@@ -2,6 +2,10 @@ import Foundation
 
 /// Claude's `AskUserQuestion`, read from the card's verified `tool_input`.
 ///
+/// Every string Claude wrote is held `displaySafe`: this is what the card draws
+/// and speaks, and nothing here is sent — an answer is option indices, the
+/// "Other" text and notes the person typed (`QuestionAnswer`).
+///
 /// Claude Code asks every such question through a `PermissionRequest`, so it
 /// arrives as an approval card. From protocol minor 21 the daemon answers it
 /// through Claude's own hook: the phone sends the choices as option indices and
@@ -52,16 +56,19 @@ struct QuestionCard: Sendable, Hashable {
             var options: [Option] = []
             for option in rawOptions {
                 guard let label = option["label"]?.stringValue else { return nil }
+                // Whether there is a preview is read on the bytes the daemon
+                // read, before anything is mapped for the screen.
                 let preview = option["preview"]?.stringValue
                 options.append(
                     Option(
-                        label: label, description: option["description"]?.stringValue,
+                        label: label.displaySafe,
+                        description: option["description"]?.stringValue?.displaySafe,
                         preview: preview?.trimmingCharacters(in: .whitespacesAndNewlines)
-                            .isEmpty == false ? preview : nil))
+                            .isEmpty == false ? preview?.displaySafe : nil))
             }
             questions.append(
                 Question(
-                    header: item["header"]?.stringValue, text: text,
+                    header: item["header"]?.stringValue?.displaySafe, text: text.displaySafe,
                     multiSelect: item["multiSelect"]?.boolValue ?? false, options: options))
         }
         self.questions = questions

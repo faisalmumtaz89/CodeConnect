@@ -473,6 +473,40 @@ enum RenderCatalog {
     static let all: [RenderScenario] = product + codex + questions + gallery
 
     static let product: [RenderScenario] = [
+        // The first screen, launched unpaired with no arguments, exactly as the
+        // App Store build opens. Taller than a phone at any type size, so it is
+        // photographed three times: the top, the steps, and the way to pair.
+        RenderScenario(
+            name: "onboarding",
+            purpose: "the first screen a stranger sees: what this is, and the way in with no Mac",
+            arguments: [],
+            reach: { app, driver in
+                try driver.require(app.buttons["pairing-sample-mode"], "the first screen")
+            }),
+
+        RenderScenario(
+            name: "onboarding-steps",
+            purpose: "the setup steps, from installing on the Mac onwards",
+            arguments: [],
+            reach: { app, driver in
+                try driver.require(app.buttons["pairing-sample-mode"], "the first screen")
+                try driver.scrollUntil(app, "the network step on screen") {
+                    driver.element(containing: "reach your Mac", in: app).isHittable
+                }
+            }),
+
+        RenderScenario(
+            name: "onboarding-pair",
+            purpose: "the end of the steps and the button that pairs",
+            arguments: [],
+            reach: { app, driver in
+                try driver.require(app.buttons["pairing-sample-mode"], "the first screen")
+                try driver.scrollUntil(app, "the pairing button on screen") {
+                    app.buttons["Pair by hand"].isHittable
+                        || app.buttons["Scan pairing code"].isHittable
+                }
+            }),
+
         RenderScenario(
             name: "fleet",
             purpose: "the 4-second surface, with one agent holding two decisions",

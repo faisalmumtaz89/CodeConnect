@@ -60,6 +60,9 @@ final class SessionState {
     /// The last event `timeline` was built from. The timeline is rebuilt a
     /// moment after events arrive, so `lastSeq` can be ahead of what is drawn.
     private(set) var drawnThrough: UInt64 = 0 { didSet { unpublished = true } }
+    /// The newest prompt handed to the agent, built with `timeline`
+    /// (`TimelineBuilder.lastPromptSeq`).
+    private(set) var lastPromptSeq: UInt64 = 0 { didSet { unpublished = true } }
     /// When the on-disk copy was written. Non-nil only until live data arrives,
     /// so the UI can say "as of 6 minutes ago" and mean it.
     private(set) var loadedFromCacheAt: Date? { didSet { unpublished = true } }
@@ -385,6 +388,7 @@ final class SessionState {
         // The cheap fields come first: comparing two presentations stops at the
         // first difference, and the timeline is the costly one.
         var drawnThrough: UInt64 = 0
+        var lastPromptSeq: UInt64 = 0
         var lastEventAt: Date?
         var gap: GapNotice?
         var windowStart: UInt64?
@@ -431,7 +435,8 @@ final class SessionState {
     var current: Shown {
         let turns = codexTurns()
         return Shown(
-            drawnThrough: drawnThrough, lastEventAt: lastEventAt, gap: gap,
+            drawnThrough: drawnThrough, lastPromptSeq: lastPromptSeq, lastEventAt: lastEventAt,
+            gap: gap,
             windowStart: windowStart, headTruncated: headTruncated,
             loadingPage: pageRequest != nil,
             permissionMode: permissionMode, permissionModeSeq: permissionModeSeq,
@@ -849,6 +854,7 @@ final class SessionState {
         events.removeAll()
         timeline.removeAll()
         drawnThrough = 0
+        lastPromptSeq = 0
         // Cleared with the timeline it is a projection of. Left behind, a
         // rewound/reset log would keep feeding stale cards to the Deck
         // (`AppModel.deck` flat-maps this) and to any open sheet's live lookup —
@@ -1107,6 +1113,7 @@ final class SessionState {
         if let change { unpublishedChange = Self.stronger(unpublishedChange, change) }
         timeline = next
         drawnThrough = lastSeq
+        lastPromptSeq = TimelineBuilder.lastPromptSeq(events)
         // Derived here, in the one place the timeline can change, so the cached
         // copy cannot go stale — a Deck holding a card the log has resolved
         // would invite a second answer to a decision already made.

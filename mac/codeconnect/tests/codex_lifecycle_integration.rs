@@ -81,26 +81,13 @@ const TUI_EXITS_MARKER: &str = "tui-exits";
 const TUI_STOPS_MARKER: &str = "tui-stops";
 
 fn tmux_bin() -> PathBuf {
-    for cand in [
-        "/opt/homebrew/bin/tmux",
-        "/usr/local/bin/tmux",
-        "/usr/bin/tmux",
-    ] {
-        if Path::new(cand).exists() {
-            return PathBuf::from(cand);
-        }
-    }
-    if let Ok(out) = Command::new("/usr/bin/which").arg("tmux").output() {
-        let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
-        if path.is_file() {
-            return path;
-        }
-    }
-    panic!(
-        "no tmux found (/opt/homebrew/bin, /usr/local/bin, /usr/bin, or PATH). These gates \
-         drive real tmux sessions, and reporting them green having executed nothing is the \
-         vacuous pass every gate in this repo forbids."
-    )
+    protocol::tmux::tmux_bin().unwrap_or_else(|| {
+        panic!(
+            "no tmux found ($CODECONNECT_TMUX, /opt/homebrew/bin, /usr/local/bin, /usr/bin, or \
+             PATH). These gates drive real tmux sessions, and reporting them green having \
+             executed nothing is the vacuous pass every gate in this repo forbids."
+        )
+    })
 }
 
 /// Locate python3 for the fake codex, or **fail the test**. Mirrors

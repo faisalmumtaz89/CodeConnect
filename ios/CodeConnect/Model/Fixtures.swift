@@ -80,6 +80,14 @@ enum Fixtures {
         /// and wider than a phone row. The fleet's stack once sized itself to
         /// that row and moved every band header off the screen's left edge.
         case wideTool
+        /// `stacked`, with `fx-5`'s turn held on an MCP tool's approval: the
+        /// one fixture that puts an `mcp__<server>__<tool>` name on the chat's
+        /// approval row, below tool rows whose commands share its column.
+        case mcpApproval
+        /// One card on `fx-1`, whose command carries a right-to-left override
+        /// and whose description a NUL — `spoofedCard`. The one fixture whose
+        /// command, drawn as it arrives, reads as a different command.
+        case spoofedCommand
 
         init?(_ raw: String?) {
             guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -89,16 +97,22 @@ enum Fixtures {
         var cards: [Card] {
             switch self {
             case .deck, .ended, .ended45, .longOutput: return deckCards
-            case .stacked, .wideTool: return deckCards + [stackedCard]
+            case .stacked, .wideTool, .mcpApproval: return deckCards + [stackedCard]
+            case .spoofedCommand: return [spoofedCard]
             }
         }
+
+        /// The card `fx-5`'s turn is held on, after its last call. Numbered
+        /// after the turn rather than with the cards above: a session's `seq`
+        /// has to run on without a hole, and `fx-5`'s run from 12.
+        var heldCard: Card? { self == .mcpApproval ? Fixtures.mcpCard : nil }
 
         /// Sessions after the cards' own, reported `exited`.
         var endedCount: Int {
             switch self {
             case .ended: return 8
             case .ended45: return 45
-            case .deck, .stacked, .longOutput, .wideTool: return 0
+            case .deck, .stacked, .longOutput, .wideTool, .mcpApproval, .spoofedCommand: return 0
             }
         }
 
@@ -109,13 +123,13 @@ enum Fixtures {
         /// either.
         var sessionCount: Int {
             switch self {
-            case .deck, .ended, .ended45: return 4
-            case .stacked, .longOutput, .wideTool: return 5
+            case .deck, .ended, .ended45, .spoofedCommand: return 4
+            case .stacked, .longOutput, .wideTool, .mcpApproval: return 5
             }
         }
 
         /// Whether the last agent is mid-tool-call rather than finished.
-        var hasRunningTool: Bool { self == .stacked || self == .wideTool }
+        var hasRunningTool: Bool { self == .stacked || self == .wideTool || self == .mcpApproval }
     }
 
     /// Three blocked agents, one per risk class, oldest first by design so
@@ -161,13 +175,35 @@ enum Fixtures {
         ]),
         riskClass: "medium", matchedPattern: "edit outside worktree", ageSeconds: 240)
 
+    /// `fx-5` held on an MCP call. Medium with no pattern, as the daemon
+    /// classifies every tool it does not recognise (`protocol/src/risk.rs`).
+    static let mcpCard = Card(
+        sessionID: "fx-5", requestID: "toolu_fixture_mcp_approval",
+        tool: "mcp__filesystem__list_directory_with_sizes",
+        input: .object(["path": .string("/Users/dev/app")]),
+        riskClass: "medium", matchedPattern: nil, ageSeconds: 0)
+
+    /// A force-push that is not one. Drawn as it arrives, the right-to-left
+    /// override reverses everything after it, and `git push origin <RLO>niam
+    /// ecrof--` reads `git push origin --force main`. Medium with no pattern,
+    /// as the daemon classifies these bytes (`protocol/src/risk.rs`). Its
+    /// description carries a NUL, which a `Text` draws as nothing.
+    static let spoofedCard = Card(
+        sessionID: "fx-1", requestID: "toolu_fixture_spoofed", tool: "Bash",
+        input: .object([
+            "command": .string("git push origin \u{202E}niam ecrof--"),
+            "description": .string("Force-push\u{0} the rebased branch"),
+        ]),
+        riskClass: "medium", matchedPattern: nil, ageSeconds: 60)
+
     // MARK: Frames
 
     static func frames(now: Date = Date(), variant: Variant = .deck) -> [ServerMessage] {
         let cards = variant.cards
+        let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
         if let ack = decode(helloAckJSON) { messages.append(ack) }
-        if let sessions = decode(sessionsJSON(now: now, variant: variant, cards: cards)) {
+        if let sessions = decode(sessionsJSON(now: now, variant: variant, cards: cards + held)) {
             messages.append(sessions)
         }
         for (index, card) in cards.enumerated() {
@@ -192,6 +228,9 @@ enum Fixtures {
             }
         }
         if variant == .wideTool, let event = decode(wideToolJSON(now: now)) {
+            messages.append(event)
+        }
+        if let card = variant.heldCard, let event = decode(approvalEventJSON(card, seq: 25, now: now)) {
             messages.append(event)
         }
         return messages
@@ -428,7 +467,8 @@ enum Fixtures {
         let summaries = (1...variant.sessionCount).map { index in
             let id = "fx-\(index)"
             let blocked = cards.filter { $0.sessionID == id }.map { quoted($0.requestID) }
-            let codex = (variant == .stacked || variant == .wideTool) && index == 4
+            let codex =
+                (variant == .stacked || variant == .wideTool || variant == .mcpApproval) && index == 4
             let agent = codex ? "\"agent\":\"codex\"," : ""
             return """
                 {"session_id":"\(id)","tmux_session":"\(id)",\(agent)\

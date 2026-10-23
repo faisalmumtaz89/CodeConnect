@@ -222,11 +222,6 @@ pub struct PushRegistration {
     /// stays wrapped, and the type is what keeps it so rather than a hand-written
     /// `Debug` a later field could break.
     pub credential: Option<Redacted>,
-    /// **What this device said it can render, as far as this run can confirm
-    /// it** — the read side of `devices.features`, and the reason the push read
-    /// is the authorization point rather than merely the address book. See
-    /// [`DeviceFeatures`] for the two shapes and why they are not one.
-    pub features: DeviceFeatures,
 }
 
 /// The columns a [`PushRegistration`] is decoded from, in the order
@@ -236,7 +231,7 @@ pub struct PushRegistration {
 /// a column added to one and not the other would be a decode that reads a
 /// different row than it thinks it does.
 const PUSH_TARGET_COLUMNS: &str = "SELECT device_id, push_token, \
-     COALESCE(push_environment, 'sandbox'), push_credential, features, features_epoch \
+     COALESCE(push_environment, 'sandbox'), push_credential \
      FROM devices";
 
 /// Who may be pushed to at all — the authorization predicate, shared for the
@@ -245,10 +240,8 @@ const PUSH_TARGET_COLUMNS: &str = "SELECT device_id, push_token, \
 const PUSH_TARGET_ELIGIBLE: &str =
     "WHERE push_token IS NOT NULL AND push_token <> '' AND revoked_at IS NULL";
 
-/// One row of [`PUSH_TARGET_COLUMNS`], decoded under this run's feature epoch.
-fn push_registration(row: &rusqlite::Row<'_>, epoch: &str) -> rusqlite::Result<PushRegistration> {
-    let features: Option<String> = row.get(4)?;
-    let features_epoch: Option<String> = row.get(5)?;
+/// One row of [`PUSH_TARGET_COLUMNS`].
+fn push_registration(row: &rusqlite::Row<'_>) -> rusqlite::Result<PushRegistration> {
     Ok(PushRegistration {
         device_id: row.get(0)?,
         token: row.get(1)?,
@@ -256,91 +249,7 @@ fn push_registration(row: &rusqlite::Row<'_>, epoch: &str) -> rusqlite::Result<P
         // Wrapped the instant it leaves the database, so the raw bearer
         // exists as a bare `String` only inside this function.
         credential: row.get::<_, Option<String>>(3)?.map(Redacted::from),
-        // **The column's three states, kept as the two answers they
-        // are** — see [`DeviceFeatures`]. `NULL` is the genuine floor: a
-        // device that has advertised nothing gets Claude, which is what
-        // every phone predating the field has always got. A set that IS
-        // stored and this run cannot vouch for — another process's epoch,
-        // or bytes that will not decode — is not a quieter version of
-        // that; it is a claim this run cannot read, and reading it as
-        // "advertised nothing" would hand a `[Codex]`-only phone back the
-        // Claude doorbells its own claim excluded.
-        features: match features {
-            None => DeviceFeatures::Advertised(Default::default()),
-            Some(json) if features_epoch.as_deref() == Some(epoch) => serde_json::from_str(&json)
-                .map(DeviceFeatures::Advertised)
-                .unwrap_or(DeviceFeatures::Unconfirmable),
-            Some(_) => DeviceFeatures::Unconfirmable,
-        },
     })
-}
-
-/// What a device's stored feature set authorizes **this run** — the decode of
-/// `devices.features` beside the token it rides with.
-///
-/// # Two shapes, and the broadening that collapsing them causes
-///
-/// The column has three states, not two, and the third is the one that matters:
-/// no set at all, a set this run can confirm, and a set this run *cannot*. The
-/// first two are one variant here because they mean the same thing to a push —
-/// a phone that has advertised nothing (a legacy build, or one that named no
-/// agents) gets the Claude floor from [`protocol::ws::ClientFeatures::supports`],
-/// and a confirmed set gets exactly what it names.
-///
-/// The third is [`DeviceFeatures::Unconfirmable`], and it was once folded into
-/// the floor along with the others. That fold is a **broadening**: a phone that
-/// explicitly advertised `[Codex]` has said it cannot render a Claude alert, and
-/// decoding its stored set as "advertised nothing" after a restart hands it back
-/// the Claude doorbells its own claim excluded — a write that broadens
-/// authorization, arriving through the read.
-///
-/// So the rule the whole projection now holds, on both sides: **`NULL` is the
-/// genuine Claude floor; a stored set this run cannot vouch for means the device
-/// hears nothing.** It is the only direction that cannot grant a device something
-/// it never claimed.
-///
-/// **Nothing in production writes this column, so today the third state cannot
-/// arise and every row is `NULL`.** The advertisement write side was deleted —
-/// nothing that ships can fill `RegisterPush::features`, so it was a write path
-/// with no input — and the daemon discards an advertised set rather than
-/// persisting it. The `Unconfirmable` branch is therefore a fail-closed decode
-/// kept for the day a write lands, not a state incident response will
-/// meet: until then, silence here is not repaired by a later advertisement,
-/// because there is no later advertisement to repair it with.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DeviceFeatures {
-    /// The device's own word: the set it advertised and this run confirmed, or
-    /// the empty set left by a device that advertised nothing (`NULL`), which is
-    /// the Claude floor.
-    Advertised(protocol::ws::ClientFeatures),
-    /// A set is stored and this run cannot vouch for it: stamped with another
-    /// process's [`crate::state::feature_epoch`], or bytes that will not decode.
-    /// Whatever the device last said, this is not it.
-    Unconfirmable,
-}
-
-/// **`NULL`'s answer**, because that is the row a device with no history has and
-/// the value every test fleet means by "an ordinary phone". A derived `Default`
-/// cannot name a variant with a payload, so it is written out here.
-impl Default for DeviceFeatures {
-    fn default() -> Self {
-        DeviceFeatures::Advertised(protocol::ws::ClientFeatures::default())
-    }
-}
-
-impl DeviceFeatures {
-    /// Whether a doorbell for `agent` may be sent to this device.
-    ///
-    /// The one predicate, so the two senders and every test ask the question the
-    /// same way. `Unconfirmable` answers `false` for every agent, Claude included:
-    /// Claude is the floor of what an *advertisement* grants, and a set this run
-    /// cannot read is not one.
-    pub fn supports(&self, agent: &protocol::agent::AgentKind) -> bool {
-        match self {
-            DeviceFeatures::Advertised(features) => features.supports(agent),
-            DeviceFeatures::Unconfirmable => false,
-        }
-    }
 }
 
 /// **The token is abbreviated.** The credential renders itself safely — it is a
@@ -2933,16 +2842,6 @@ impl Store {
     /// fact as a phone that has gone away. For the same reason the strip clears
     /// all three columns: a row that has lost the token has no business keeping
     /// the credential minted to address it.
-    ///
-    /// **`features` and `features_epoch` are deliberately not in that tuple, and
-    /// this statement does not touch them.** It used to write the device's
-    /// advertised agent list beside the token, so two overlapping registrations
-    /// could not commit their tokens A→B and their sets B→A. No shipping client can
-    /// send that field, so the write was acting on an input the wire cannot
-    /// produce and it is gone. The columns stay and are left exactly as they are —
-    /// which today is `NULL` on every row, the Claude floor
-    /// [`Store::push_targets`] reads. The write belongs back in this transaction,
-    /// with the phone that exercises it, for the reason it was here.
     pub fn set_push_token(
         &self,
         device_id: &str,
@@ -3049,26 +2948,10 @@ impl Store {
     /// The credential comes back in the same row as the token it authorizes, so
     /// a sender cannot assemble a request from two reads taken either side of a
     /// rotation.
-    ///
-    /// **The feature set rides the same row, for the same reason.** Which agents a
-    /// device can render decides whether it may be rung at all, and reading it
-    /// separately would be a second read to pair with the first — the very thing
-    /// the credential note above exists to forbid. `epoch` is this run's
-    /// [`crate::state::feature_epoch`]; a stored set stamped with any other one is
-    /// [`DeviceFeatures::Unconfirmable`], and that device hears nothing until it
-    /// re-advertises to *this* run — which is what makes a restart start from the
-    /// honest floor rather than from whatever the last process was told.
-    ///
-    /// **Nothing in production writes that column**, so in a live database it is
-    /// `NULL` on every row and this decode always answers the Claude floor. The
-    /// other branches are kept rather than deferred because they cost one string
-    /// comparison, because they are what the column *means*, and because a write,
-    /// once one exists, must arrive at a read that already refuses everything it
-    /// cannot vouch for — not at one that has to be taught to.
-    pub fn push_targets(&self, epoch: &str) -> Result<Vec<PushRegistration>> {
+    pub fn push_targets(&self) -> Result<Vec<PushRegistration>> {
         let conn = self.read();
         let mut stmt = conn.prepare(&format!("{PUSH_TARGET_COLUMNS} {PUSH_TARGET_ELIGIBLE}"))?;
-        let rows = stmt.query_map([], |row| push_registration(row, epoch))?;
+        let rows = stmt.query_map([], push_registration)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -3076,9 +2959,8 @@ impl Store {
     ///
     /// **The same question [`Store::push_targets`] answers, asked about one row.**
     /// The predicate is the same and so is the decode — both come from the
-    /// constants below, so the fan-out's list and this lookup cannot come to
-    /// disagree about who may be pushed to or about what a stored feature set
-    /// means. A device that is revoked, has no token, or does not exist answers
+    /// constants above, so the fan-out's list and this lookup cannot come to
+    /// disagree about who may be pushed to. A device that is revoked, has no token, or does not exist answers
     /// `None`, which is the same "nothing to vouch for" the fan-out reads as an
     /// absence from its list.
     ///
@@ -3089,17 +2971,13 @@ impl Store {
     /// with as many attempts in flight as there are devices with work. This is
     /// the indexed lookup that question deserves. See
     /// [`crate::push_queue::still_authorized`].
-    pub fn push_target_for(
-        &self,
-        device_id: &str,
-        epoch: &str,
-    ) -> Result<Option<PushRegistration>> {
+    pub fn push_target_for(&self, device_id: &str) -> Result<Option<PushRegistration>> {
         let conn = self.read();
         Ok(conn
             .query_row(
                 &format!("{PUSH_TARGET_COLUMNS} {PUSH_TARGET_ELIGIBLE} AND device_id = ?1"),
                 params![device_id],
-                |row| push_registration(row, epoch),
+                push_registration,
             )
             .optional()?)
     }
@@ -3142,71 +3020,6 @@ impl Store {
         )?;
         Ok(())
     }
-
-    /// Replace a device's advertised feature set (its agent list, as JSON) under
-    /// the current daemon feature epoch. `Some(json)` records the set; `None`
-    /// clears the column, which is the row a device that advertised **nothing**
-    /// leaves — so absence *overwrites* any prior set rather than leaving stale
-    /// Codex eligibility standing.
-    ///
-    /// **Nothing in the daemon calls this.** No shipping client can send a
-    /// `features` field — `hello` and `register_push` both carry the wire-legal
-    /// `Option<ClientFeatures>` and both ignore it — so the handlers that used to
-    /// call this were machinery for an input the wire cannot produce, and they are
-    /// gone. Every `devices.features` cell is `NULL`, which is the Claude floor.
-    ///
-    /// What it survives as is the **fixture writer for the read side**: the tests
-    /// that assert [`Store::push_targets`] tells a confirmed set from another run's
-    /// stamp, from bytes that will not decode, and from an empty column need rows in
-    /// all four shapes, and this is the only thing that can produce them. Kept
-    /// rather than re-derived from raw SQL in each test, because it is also the
-    /// write production needs once a phone that advertises arrives with the wire
-    /// that exercises it.
-    ///
-    /// **`None` means the device said nothing, and nothing else.** It is not a
-    /// repair for a write that failed: clearing writes the empty legacy set, which
-    /// grants Claude ([`protocol::ws::ClientFeatures::supports`]), so using it to
-    /// tidy up after a failure would hand a `[Codex]`-only phone doorbells its own
-    /// claim excluded. See [`DeviceFeatures`] for the read that keeps the same rule.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn set_device_features(
-        &self,
-        device_id: &str,
-        features_json: Option<&str>,
-        epoch: &str,
-    ) -> Result<()> {
-        let conn = self.write();
-        match features_json {
-            Some(json) => conn.execute(
-                "UPDATE devices SET features = ?2, features_epoch = ?3 WHERE device_id = ?1",
-                params![device_id, json, epoch],
-            )?,
-            None => conn.execute(
-                "UPDATE devices SET features = NULL, features_epoch = NULL WHERE device_id = ?1",
-                params![device_id],
-            )?,
-        };
-        Ok(())
-    }
-
-    // The read side — projecting a device's stored feature set into a push
-    // authorization decision — is `push_targets`. It decodes this column beside
-    // the token the same row authorizes, and fails closed on every input that is
-    // not a set confirmed under the running daemon's own epoch.
-    //
-    // **There is deliberately no startup sweep of stale sets.** There was one:
-    // it cleared every set not stamped with this run's epoch, on the reasoning
-    // that a rollback must not resurrect Codex eligibility. The read already
-    // refuses those rows, so the sweep never made a device less eligible — and
-    // once the read learned to tell `NULL` from an unconfirmable set
-    // ([`DeviceFeatures`]), the sweep could only make one MORE eligible: it
-    // rewrote a stored `[Codex]` claim into the empty legacy set, which is the
-    // Claude floor. A tidy-up that broadens authorization is not a tidy-up, and
-    // the untouched bytes are what carry the distinction the read depends on.
-    //
-    // Today there is nothing to sweep either way: no handler writes this
-    // column, so every row holds `NULL` and reads as the floor. The read's other
-    // branches are what a write, once one lands, will meet.
 
     pub fn list_devices(&self) -> Result<Vec<DeviceRow>> {
         let conn = self.read();
@@ -4871,16 +4684,11 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             -- rotation is refused for every push while the row still looks
             -- registered.
             push_credential   TEXT,
-            -- The device's advertised feature set (its agent list) as JSON, and
-            -- the feature epoch of the daemon run that confirmed it. **Null on
-            -- every row today, and nothing in production writes either one**: no
-            -- shipping client can send a `features` field, so the daemon has no
-            -- input to record and does not pretend otherwise. Null is the Claude
-            -- floor, which is also what every row predating the agent seam holds.
-            -- The columns are declared now because the read (`push_targets`) is
-            -- already fail-closed against them — a set stamped with another run's
-            -- epoch, or bytes that will not decode, authorize nothing — and a later build
-            -- can turn the write on without a migration.
+            -- An agent list a phone could once advertise, and the daemon run
+            -- that confirmed it. **Read and written by nothing**: no shipping
+            -- phone ever sent one, and a push is not scoped by agent. Declared
+            -- so a new database has the shape every release since v0.7.0 made;
+            -- the bundled SQLite cannot drop `features_epoch` from those tables.
             features          TEXT,
             features_epoch    TEXT
         );
@@ -5282,19 +5090,8 @@ const COLUMN_ADDITIONS: &[(&str, &str, &str)] = &[
     // on a fresh database and on an upgraded one alike.
     ("sessions", "codex_generation", "INTEGER"),
     ("codex_sessions", "codex_generation", "INTEGER"),
-    // Per-device feature set and the daemon-version epoch it was last confirmed
-    // under. Both nullable, and today both are `NULL` for every row:
-    // **nothing writes them.** No shipping client can advertise a feature set —
-    // the phone encodes no such field — so the write side was deleted rather than
-    // carried, and an inbound `features` is ignored. `NULL` is the Claude-only
-    // floor, which is exactly what every device is entitled to today.
-    //
-    // The columns stay because the READ side is live and fail-closed: a set
-    // stamped with another run's epoch, or bytes that will not decode, is
-    // [`DeviceFeatures::Unconfirmable`] and authorizes nothing. That is what makes
-    // a Codex doorbell reach no device at all until a phone genuinely advertises
-    // one, and it is why a write, when a phone needs one, lands here rather
-    // than in a migration.
+    // Read and written by nothing; declared for one shape across every database.
+    // See the `devices` table above.
     ("devices", "features", "TEXT"),
     ("devices", "features_epoch", "TEXT"),
 ];
@@ -6086,13 +5883,6 @@ mod tests {
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-    /// The epoch these tests write feature sets under and read them back with.
-    ///
-    /// A fixed string rather than `crate::state::feature_epoch()`: the tests that
-    /// care about the epoch are about the *mismatch*, and a value that changes per
-    /// process cannot be written into a fixture and then disagreed with on purpose.
-    const TEST_FEATURE_EPOCH: &str = "test-epoch";
-
     fn temp_store() -> (Store, std::path::PathBuf) {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -6669,126 +6459,6 @@ mod tests {
         assert!(store.unsettled_claims(OPERATION_ANSWER).unwrap().is_empty());
     }
 
-    /// **What the column holds, and what each shape of it authorizes.**
-    ///
-    /// The read side is what is under test, and it is the only side that ships:
-    /// nothing writes this column, so a live row is always `NULL` —
-    /// the Claude floor, and the row every phone predating the field has.
-    /// [`Store::set_device_features`] is here as the fixture writer, because the
-    /// other three shapes have to exist for the decode to be asked about at all.
-    ///
-    /// The epoch is spent on the read: only a set stamped with the asking run's own
-    /// epoch is the device's word, and the two ways of not being one — another
-    /// run's stamp, and a `features_epoch IS NULL` row — are the same answer, which
-    /// is not the floor.
-    ///
-    /// **Mutation:** decode a mismatched or null-epoch set as
-    /// `DeviceFeatures::Advertised(Default::default())` (what the old chain's
-    /// `unwrap_or_default` did) and the two `Unconfirmable` assertions fail.
-    #[test]
-    fn a_stored_feature_set_is_only_this_runs_word_if_this_run_stamped_it() {
-        let (store, _p) = temp_store();
-        let now = protocol::time::now_rfc3339();
-        store
-            .insert_device("dev-1", "iPhone", "tok-hash", &now)
-            .unwrap();
-        store
-            .set_push_token("dev-1", "token", "sandbox", None)
-            .unwrap();
-
-        let read_features = |store: &Store| -> (Option<String>, Option<String>) {
-            store
-                .read()
-                .query_row(
-                    "SELECT features, features_epoch FROM devices WHERE device_id = ?1",
-                    params!["dev-1"],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .unwrap()
-        };
-        let decoded =
-            |store: &Store, epoch: &str| store.push_targets(epoch).unwrap()[0].features.clone();
-
-        // A device that has never advertised: the column is empty, and empty is
-        // the floor rather than a refusal.
-        assert_eq!(read_features(&store), (None, None));
-        assert_eq!(decoded(&store, "epoch-A"), DeviceFeatures::default());
-
-        // Persist a Codex feature set under epoch A, and prove it was written.
-        store
-            .set_device_features("dev-1", Some(r#"{"agents":["claude","codex"]}"#), "epoch-A")
-            .unwrap();
-        assert_eq!(
-            read_features(&store).0.as_deref(),
-            Some(r#"{"agents":["claude","codex"]}"#)
-        );
-        assert_eq!(read_features(&store).1.as_deref(), Some("epoch-A"));
-        assert!(decoded(&store, "epoch-A").supports(&AgentKind::Codex));
-
-        // **The same bytes, asked about by a different run.** Nothing was swept
-        // and nothing needs to be: the stamp is what the answer turns on.
-        assert_eq!(decoded(&store, "epoch-B"), DeviceFeatures::Unconfirmable);
-
-        // **Absence clears.** `None` writes the empty row rather than leaving what
-        // is there — and *that* row is the floor, because a device that names no
-        // features is exactly a device that can render Claude and nothing else.
-        store.set_device_features("dev-1", None, "epoch-A").unwrap();
-        assert_eq!(read_features(&store), (None, None));
-        assert_eq!(decoded(&store, "epoch-A"), DeviceFeatures::default());
-
-        // **The half-written row**: `features` present, `features_epoch` NULL. It
-        // is not this run's word either, and it is not the floor.
-        store
-            .write()
-            .execute(
-                "UPDATE devices SET features = '{\"agents\":[\"codex\"]}', features_epoch = NULL
-                  WHERE device_id = 'dev-1'",
-                [],
-            )
-            .unwrap();
-        assert_eq!(decoded(&store, "epoch-A"), DeviceFeatures::Unconfirmable);
-    }
-
-    /// **The read is the whole defense, and nothing has to have run first.**
-    ///
-    /// The same bytes, asked about by the run that wrote them and by any other
-    /// run: confirmation to the first, and to the second a set it cannot vouch for,
-    /// which authorizes nothing at all. No sweep, no flag, no startup step — and
-    /// deliberately so, because every one of those is a defense that can fail to
-    /// run, while this one is the read that authorizes the push.
-    ///
-    /// This is also why nothing latches a process-wide "trust no device" flag
-    /// anywhere: it could only repeat what this assertion already shows, and —
-    /// being process-wide — nothing a phone did afterwards could clear it.
-    #[test]
-    fn a_feature_set_from_another_run_never_authorizes_this_one() {
-        let (store, _p) = temp_store();
-        let now = protocol::time::now_rfc3339();
-        store
-            .insert_device("dev-1", "iPhone", "tok-hash", &now)
-            .unwrap();
-        store
-            .set_push_token("dev-1", "token", "sandbox", None)
-            .unwrap();
-        store
-            .set_device_features("dev-1", Some(r#"{"agents":["codex"]}"#), "epoch-OLD")
-            .unwrap();
-
-        assert!(
-            store.push_targets("epoch-OLD").unwrap()[0]
-                .features
-                .supports(&AgentKind::Codex),
-            "the run that confirmed it reads it back as confirmation"
-        );
-        assert_eq!(
-            store.push_targets("epoch-NEW").unwrap()[0].features,
-            DeviceFeatures::Unconfirmable,
-            "and to any other run the same bytes are a claim it cannot read — not \
-             the floor, which would hand this phone Claude doorbells it said it \
-             cannot render"
-        );
-    }
-
     /// **Additive-column compatibility (new → old → new).**
     ///
     /// The invariant this asserts: the agent-seam columns are purely additive,
@@ -6814,21 +6484,11 @@ mod tests {
     fn additive_columns_are_transparent_to_a_legacy_reader_and_lose_no_data() {
         let (_p, path) = {
             let (store, path) = temp_store();
-            // NEW daemon writes only Claude rows (the only kind the shared table holds)
-            // plus a device with a feature set.
+            // NEW daemon writes only Claude rows (the only kind the shared table holds).
             store
                 .upsert_session(&session_row(&key("AA", "cc-1")))
                 .unwrap()
                 .assert_present();
-            let now = protocol::time::now_rfc3339();
-            store.insert_device("dev-1", "iPhone", "tok", &now).unwrap();
-            store
-                .set_device_features(
-                    "dev-1",
-                    Some(r#"{"agents":["claude","codex"]}"#),
-                    "epoch-NEW",
-                )
-                .unwrap();
             drop(store);
             ((), path)
         };
@@ -6886,27 +6546,6 @@ mod tests {
             by_name("cc-2").agent,
             AgentKind::Claude,
             "a legacy write backfills to Claude, never NULL/unknown"
-        );
-
-        // **The device's set survives the reopen byte-for-byte**, which is the
-        // additive-column contract this test is about — a legacy binary neither
-        // reads nor rewrites the column. What a *fresh* run may do with those
-        // bytes is the read's business and not a rollback's: they carry
-        // `epoch-NEW`, so any other run finds them
-        // [`DeviceFeatures::Unconfirmable`] and rings that phone about nothing.
-        // Pinned by `a_stored_feature_set_is_only_this_runs_word_if_this_run_stamped_it`.
-        let features: Option<String> = store
-            .read()
-            .query_row(
-                "SELECT features FROM devices WHERE device_id = 'dev-1'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            features.as_deref(),
-            Some(r#"{"agents":["claude","codex"]}"#),
-            "a legacy round trip leaves the column exactly as it found it"
         );
     }
 
@@ -11221,6 +10860,117 @@ mod tests {
         assert!(retired_columns_present(&conn).unwrap().is_empty());
     }
 
+    /// The `devices` table every release from v0.10.0 to v0.14.0 created, copied
+    /// from `git show v0.14.0:mac/ccd/src/store.rs` byte for byte — the comment
+    /// lines included, because they are what SQLite 3.46 trips over when asked to
+    /// drop `features_epoch` from this table.
+    const SHIPPED_DEVICES_DDL: &str = r#"
+        CREATE TABLE IF NOT EXISTS devices(
+            device_id         TEXT PRIMARY KEY,
+            name              TEXT NOT NULL,
+            token_hash        TEXT NOT NULL UNIQUE,
+            created_at        TEXT NOT NULL,
+            last_seen_at      TEXT,
+            revoked_at        TEXT,
+            -- APNs. Null until the phone has been granted notification
+            -- permission *and* Apple has issued a token; "registered for push"
+            -- and "asked and refused" are both absent here, deliberately, so
+            -- nothing infers consent from a row that merely exists.
+            push_token        TEXT,
+            push_environment  TEXT,
+            -- The relay's bearer credential, for a daemon that has no Apple
+            -- key of its own and asks CodeConnect's relay to address APNs for
+            -- it. Null for the direct path, which is never issued one, and
+            -- null for every phone that has not been through the relay's
+            -- attestation. **Written and cleared only alongside the token it
+            -- was minted against**: the relay checks the credential against
+            -- the token in the same request, so a credential left behind by a
+            -- rotation is refused for every push while the row still looks
+            -- registered.
+            push_credential   TEXT,
+            -- The device's advertised feature set (its agent list) as JSON, and
+            -- the feature epoch of the daemon run that confirmed it. **Null on
+            -- every row today, and nothing in production writes either one**: no
+            -- shipping client can send a `features` field, so the daemon has no
+            -- input to record and does not pretend otherwise. Null is the Claude
+            -- floor, which is also what every row predating the agent seam holds.
+            -- The columns are declared now because the read (`push_targets`) is
+            -- already fail-closed against them — a set stamped with another run's
+            -- epoch, or bytes that will not decode, authorize nothing — and a later build
+            -- can turn the write on without a migration.
+            features          TEXT,
+            features_epoch    TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS devices_name ON devices(name);
+"#;
+
+    /// **A database a shipping build made keeps its phone, keeps its two unused
+    /// feature columns, and opens without a warning.**
+    ///
+    /// Every release from v0.7.0 to v0.14.0 declared `devices.features` and
+    /// `devices.features_epoch`; this one reads and writes neither. They stay
+    /// where they are: the bundled SQLite cannot drop `features_epoch` from the
+    /// table those builds created, so retiring them left a column behind and a
+    /// warning at every start naming a remedy that does not exist.
+    ///
+    /// **Mutation:** put the two columns back on [`RETIRED_COLUMNS`] and
+    /// `features` is dropped while `features_epoch` stays behind with a warning.
+    #[test]
+    fn a_shipping_database_keeps_its_phone_and_its_feature_columns_without_a_warning() {
+        let (store, path) = temp_store();
+        drop(store);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("DROP INDEX devices_name; DROP TABLE devices;")
+                .unwrap();
+            conn.execute_batch(SHIPPED_DEVICES_DDL).unwrap();
+            conn.execute(
+                "INSERT INTO devices(device_id, name, token_hash, created_at, push_token,
+                                     push_environment, push_credential, features,
+                                     features_epoch)
+                 VALUES('phone', 'iPhone', 'hash-phone', '2026-10-01T00:00:00Z', 'tok-phone',
+                        'production', 'bearer-phone', '{\"agents\":[\"codex\"]}',
+                        'a-previous-daemon-run')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .device_by_token_hash("hash-phone")
+                .unwrap()
+                .expect("the phone is still paired")
+                .device_id,
+            "phone"
+        );
+        let targets = store.push_targets().unwrap();
+        assert_eq!(targets.len(), 1, "the phone is still registered for push");
+        assert_eq!(
+            (
+                targets[0].token.as_str(),
+                targets[0].environment.as_str(),
+                targets[0].credential.as_ref().map(|c| c.expose())
+            ),
+            ("tok-phone", "production", Some("bearer-phone"))
+        );
+        drop(store);
+
+        let mut conn = Connection::open(&path).unwrap();
+        let columns = table_columns(&conn, "devices").unwrap();
+        assert!(
+            columns.iter().any(|c| c == "features")
+                && columns.iter().any(|c| c == "features_epoch"),
+            "both columns stay where the shipping build put them: {columns:?}"
+        );
+        assert_eq!(
+            drop_retired_columns(&mut conn).unwrap(),
+            Vec::<String>::new(),
+            "and a start has nothing to warn about"
+        );
+    }
+
     #[test]
     fn a_legacy_credential_table_gives_up_its_retired_columns_without_losing_a_device() {
         // A device row *is* a phone's pairing: the token hash is the only copy
@@ -11705,7 +11455,7 @@ mod tests {
     /// a convenience worth offering.
     fn registrations(store: &Store) -> Vec<(String, String, String, Option<String>)> {
         let mut rows: Vec<_> = store
-            .push_targets(TEST_FEATURE_EPOCH)
+            .push_targets()
             .unwrap()
             .into_iter()
             .map(|target| {
@@ -11772,7 +11522,7 @@ mod tests {
             .set_push_token("dev-new", "tok-same", "production", None)
             .unwrap();
 
-        let targets = store.push_targets(TEST_FEATURE_EPOCH).unwrap();
+        let targets = store.push_targets().unwrap();
         assert_eq!(
             targets.len(),
             1,
@@ -11787,7 +11537,7 @@ mod tests {
         store
             .set_push_token("dev-old", "tok-other", "production", None)
             .unwrap();
-        assert_eq!(store.push_targets(TEST_FEATURE_EPOCH).unwrap().len(), 2);
+        assert_eq!(store.push_targets().unwrap().len(), 2);
     }
 
     /// **A late environment correction cannot move a token it is not about.**
@@ -11826,7 +11576,7 @@ mod tests {
             .set_push_environment("dev-1", "tok-b", None, "production")
             .unwrap();
         assert_eq!(
-            store.push_targets(TEST_FEATURE_EPOCH).unwrap()[0].environment,
+            store.push_targets().unwrap()[0].environment,
             "production",
             "a correction about the live token still applies"
         );
@@ -11876,7 +11626,7 @@ mod tests {
             "clearing the registered token reports that it did"
         );
         assert!(
-            store.push_targets(TEST_FEATURE_EPOCH).unwrap().is_empty(),
+            store.push_targets().unwrap().is_empty(),
             "a device Apple has disowned stops being a target"
         );
     }
@@ -11901,7 +11651,7 @@ mod tests {
                 .is_err(),
             "an unknown device cannot claim a token"
         );
-        let targets = store.push_targets(TEST_FEATURE_EPOCH).unwrap();
+        let targets = store.push_targets().unwrap();
         assert_eq!(targets.len(), 1, "the owner survived: {targets:?}");
         assert_eq!(targets[0].device_id, "dev-live");
         assert_eq!(
@@ -11929,10 +11679,7 @@ mod tests {
                 .is_err(),
             "a revoked device cannot claim a token"
         );
-        assert_eq!(
-            store.push_targets(TEST_FEATURE_EPOCH).unwrap()[0].device_id,
-            "dev-live"
-        );
+        assert_eq!(store.push_targets().unwrap()[0].device_id, "dev-live");
     }
 
     /// **A token never arrives carrying its predecessor's credential.**
@@ -12062,7 +11809,7 @@ mod tests {
             None,
             "the credential for a token Apple has disowned does not outlive it"
         );
-        assert!(store.push_targets(TEST_FEATURE_EPOCH).unwrap().is_empty());
+        assert!(store.push_targets().unwrap().is_empty());
     }
 
     /// **A late correction for a superseded *credential* is a no-op**, the
@@ -12096,7 +11843,7 @@ mod tests {
             .set_push_environment("dev-1", "tok-a", Some("cred-1"), "production")
             .unwrap();
         assert_eq!(
-            store.push_targets(TEST_FEATURE_EPOCH).unwrap()[0].environment,
+            store.push_targets().unwrap()[0].environment,
             "sandbox",
             "a correction under the superseded credential must not move the live one"
         );
@@ -12106,7 +11853,7 @@ mod tests {
             .set_push_environment("dev-1", "tok-a", Some("cred-2"), "production")
             .unwrap();
         assert_eq!(
-            store.push_targets(TEST_FEATURE_EPOCH).unwrap()[0].environment,
+            store.push_targets().unwrap()[0].environment,
             "production",
             "a correction under the current credential is the one that lands"
         );
@@ -12154,7 +11901,7 @@ mod tests {
                 .unwrap(),
             "a 410 about the current credential does clear it"
         );
-        assert!(store.push_targets(TEST_FEATURE_EPOCH).unwrap().is_empty());
+        assert!(store.push_targets().unwrap().is_empty());
     }
 
     /// **An accepted push never invalidates the credential that carried it.**
@@ -12252,7 +11999,7 @@ mod tests {
         // The row is still a target — it kept its token — but now credential-less,
         // which the relay path answers as a missing tuple and the phone repairs
         // by re-registering. That is the whole intent: coherent, not deleted.
-        let targets = store.push_targets(TEST_FEATURE_EPOCH).unwrap();
+        let targets = store.push_targets().unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].token, "tok-2");
         assert_eq!(
@@ -12332,7 +12079,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
 
         assert_eq!(
-            store.push_targets(TEST_FEATURE_EPOCH).unwrap()[0]
+            store.push_targets().unwrap()[0]
                 .credential
                 .as_ref()
                 .map(|c| c.expose()),
@@ -12460,69 +12207,21 @@ mod tests {
             None,
             "an empty token is not a registration to either read"
         );
-        assert!(store.push_targets(TEST_FEATURE_EPOCH).unwrap().is_empty());
+        assert!(store.push_targets().unwrap().is_empty());
     }
 
-    /// **What a push target is allowed to say it can render, and every way of not
-    /// saying it.**
+    /// **The fleet read and the per-device lookup are one rule.**
     ///
-    /// The read that authorizes a push decodes the device's advertised agent set,
-    /// and four of the five inputs it can meet are *not* a confirmed set. They do
-    /// **not** all land on the same answer, and the split is the whole point:
+    /// The lookup exists so a push worker need not scan the fleet before each
+    /// transport attempt, so a predicate that drifted between the two would be a
+    /// device authorized differently depending on which question was asked.
     ///
-    ///   * never advertised (a phone that predates the field) — the genuine
-    ///     Claude floor, and the row every legacy phone in the fleet has;
-    ///   * advertised, then cleared — the same floor, because advertising nothing
-    ///     is itself a claim and the device made it;
-    ///   * advertised under a **different daemon run's** epoch — a claim this run
-    ///     cannot vouch for, so the device hears nothing;
-    ///   * stored bytes that no longer decode — the same.
-    ///
-    /// **The fixture advertises `[Codex]` and not Claude on purpose.** With a
-    /// `[Claude, Codex]` set, every one of these inputs supports Claude either way
-    /// and the last two cases cannot be told from the first two — the test would
-    /// pass while a restart quietly broadened a Codex-only phone into a
-    /// Claude-eligible one. A set that names Codex *without*
-    /// Claude is the shape that makes the difference observable.
-    ///
-    /// **Mutation:** decode the unconfirmable shapes as
-    /// `DeviceFeatures::Advertised(Default::default())` and the Claude assertions
-    /// on `other-epoch`/`corrupt` fail.
+    /// **Mutation:** drop `PUSH_TARGET_ELIGIBLE` from `push_target_for`'s
+    /// statement and the revoked and tokenless devices are offered by the lookup.
     #[test]
-    fn only_a_set_this_run_confirmed_authorizes_anything_beyond_claude() {
+    fn the_per_device_lookup_refuses_what_the_fleet_read_refuses() {
         let (store, _path) = temp_store();
-        let codex = serde_json::to_string(&protocol::ws::ClientFeatures {
-            agents: vec![protocol::agent::AgentKind::Codex],
-        })
-        .unwrap();
-        // **Both reads, every time.** The fleet list and the per-device lookup
-        // are two statements of one rule, and the second exists so a push
-        // worker need not scan the fleet — so a decode that drifted between
-        // them would be a device authorized differently depending on which
-        // question was asked. Asserting they agree HERE, over the four shapes
-        // below, is what keeps them one rule.
-        let features_of = |device: &str| {
-            let from_fleet = store
-                .push_targets(TEST_FEATURE_EPOCH)
-                .unwrap()
-                .into_iter()
-                .find(|t| t.device_id == device)
-                .expect("the device is registered for push")
-                .features;
-            let from_lookup = store
-                .push_target_for(device, TEST_FEATURE_EPOCH)
-                .unwrap()
-                .expect("the per-device lookup finds the same registration")
-                .features;
-            assert_eq!(
-                from_fleet, from_lookup,
-                "{device}: the fleet read and the per-device lookup disagree"
-            );
-            from_fleet
-        };
-        let codex_kind = protocol::agent::AgentKind::Codex;
-
-        for device in ["silent", "confirmed", "other-epoch", "corrupt", "cleared"] {
+        for device in ["silent", "confirmed"] {
             store
                 .insert_device(
                     device,
@@ -12535,56 +12234,20 @@ mod tests {
             store
                 .set_push_token(device, &format!("tok-{device}"), "production", None)
                 .unwrap();
-        }
-        store
-            .set_device_features("confirmed", Some(&codex), TEST_FEATURE_EPOCH)
-            .unwrap();
-        store
-            .set_device_features("other-epoch", Some(&codex), "a-previous-daemon-run")
-            .unwrap();
-        store
-            .set_device_features("corrupt", Some("{not json"), TEST_FEATURE_EPOCH)
-            .unwrap();
-        store
-            .set_device_features("cleared", Some(&codex), TEST_FEATURE_EPOCH)
-            .unwrap();
-        store
-            .set_device_features("cleared", None, TEST_FEATURE_EPOCH)
-            .unwrap();
-
-        assert!(
-            features_of("confirmed").supports(&codex_kind),
-            "a set written under this run's epoch is the one thing that grants Codex"
-        );
-        assert!(
-            !features_of("confirmed").supports(&protocol::agent::AgentKind::Claude),
-            "and it grants exactly what it names: this phone said it cannot render Claude"
-        );
-        for device in ["silent", "other-epoch", "corrupt", "cleared"] {
-            assert!(
-                !features_of(device).supports(&codex_kind),
-                "{device}: this is not a confirmed advertisement, so it must not \
-                 authorize a Codex push"
-            );
-        }
-        for device in ["silent", "cleared"] {
-            assert!(
-                features_of(device).supports(&protocol::agent::AgentKind::Claude),
-                "{device}: an empty column is the floor a device gets by saying nothing, \
-                 and failing closed must not take it away"
-            );
-        }
-        for device in ["other-epoch", "corrupt"] {
+            let from_fleet = store
+                .push_targets()
+                .unwrap()
+                .into_iter()
+                .find(|t| t.device_id == device)
+                .expect("the device is registered for push");
+            let from_lookup = store
+                .push_target_for(device)
+                .unwrap()
+                .expect("the per-device lookup finds the same registration");
             assert_eq!(
-                features_of(device),
-                DeviceFeatures::Unconfirmable,
-                "{device}: a set is stored and this run cannot read it as the device's \
-                 word, so the device hears nothing until it re-advertises"
-            );
-            assert!(
-                !features_of(device).supports(&protocol::agent::AgentKind::Claude),
-                "{device}: reading an unreadable [Codex] claim as the Claude floor is \
-                 the broadening this split exists to prevent"
+                (from_fleet.token, from_fleet.environment),
+                (from_lookup.token, from_lookup.environment),
+                "{device}: the fleet read and the per-device lookup disagree"
             );
         }
 
@@ -12595,26 +12258,20 @@ mod tests {
         // A device that does not exist is the same answer, for the same reason:
         // nothing to vouch for.
         assert!(
-            store
-                .push_target_for("never-paired", TEST_FEATURE_EPOCH)
-                .unwrap()
-                .is_none(),
+            store.push_target_for("never-paired").unwrap().is_none(),
             "a device that does not exist has no registration to offer"
         );
         store
             .revoke_device("confirmed", "2026-08-04T00:00:00Z")
             .unwrap();
         assert!(
-            store
-                .push_target_for("confirmed", TEST_FEATURE_EPOCH)
-                .unwrap()
-                .is_none(),
+            store.push_target_for("confirmed").unwrap().is_none(),
             "a revoked device is refused by the lookup exactly as the fleet read \
              refuses it; revocation must not survive only in the list"
         );
         assert!(
             store
-                .push_targets(TEST_FEATURE_EPOCH)
+                .push_targets()
                 .unwrap()
                 .iter()
                 .all(|t| t.device_id != "confirmed"),
@@ -12624,10 +12281,7 @@ mod tests {
             .clear_push_token("silent", "tok-silent", None)
             .unwrap();
         assert!(
-            store
-                .push_target_for("silent", TEST_FEATURE_EPOCH)
-                .unwrap()
-                .is_none(),
+            store.push_target_for("silent").unwrap().is_none(),
             "a device with no token has no registration to offer either"
         );
     }
@@ -12648,7 +12302,6 @@ mod tests {
             token: TOKEN.to_string(),
             environment: "production".to_string(),
             credential: Some(Redacted::from(CREDENTIAL)),
-            features: Default::default(),
         };
 
         let rendered = format!("{relay:?}");

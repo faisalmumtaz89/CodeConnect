@@ -1116,6 +1116,17 @@ impl RealCoordinatorDeps {
         argv
     }
 
+    /// What the pane's environment file sets: [`Self::pane_env`], and the
+    /// `TERM` Codex runs on, the same whichever tmux started the server.
+    /// `TERM` cannot travel as `new-session -e`: tmux applies a session's
+    /// variables before its own `default-terminal`, and only the file, which
+    /// the pane's first program applies last, can name it.
+    fn caller_env_own(&self) -> Vec<(String, String)> {
+        let mut own = self.pane_env();
+        own.push(("TERM".to_string(), crate::tmux::pane_terminal().to_string()));
+        own
+    }
+
     /// The variables CodeConnect sets for the pane. Each wins over the caller's
     /// value of the same name.
     fn pane_env(&self) -> Vec<(String, String)> {
@@ -1590,7 +1601,7 @@ impl CoordinatorDeps for RealCoordinatorDeps {
         let caller_env = match crate::caller_env::write(
             &codex_launch::session_dir(&self.uid),
             std::env::vars_os(),
-            &self.pane_env(),
+            &self.caller_env_own(),
         ) {
             Ok(path) => path,
             Err(why) => return NewSessionOutcome::Failed(format!("{why:#}")),
@@ -2065,6 +2076,9 @@ fn supervise_ready_session(deps: &RealCoordinatorDeps) -> Result<()> {
             // here. It is passed as the `Option` it is rather than unwrapped: an
             // unpinned supervisor is the old behaviour, not a panic.
             server_a: deps.session_a.clone(),
+            // The coordinator pins its server before supervising, so the
+            // silence is answered by the pin.
+            ended_unwatched: false,
         },
         &protocol::config::Config::load(),
     )
@@ -3969,7 +3983,7 @@ mod tests {
             (protocol::ENV_SESSION_UID.into(), "the caller's".into()),
         ]);
         let handed =
-            crate::caller_env::write(&server.dir.join("session"), caller, &deps.pane_env())
+            crate::caller_env::write(&server.dir.join("session"), caller, &deps.caller_env_own())
                 .unwrap();
         let mut argv = deps.new_session_argv(&handed);
         let host = argv
@@ -4010,6 +4024,11 @@ mod tests {
         );
         assert!(records.contains(&format!("CC_PANE_BIG={big}").as_bytes()));
         assert!(records.contains(&format!("{}={}", protocol::ENV_SESSION_UID, deps.uid).as_bytes()));
+        // On a server started with no options at all, as a Codex-first one is.
+        assert!(
+            records.contains(&format!("TERM={}", crate::tmux::pane_terminal()).as_bytes()),
+            "the pane runs on CodeConnect's TERM, not the server's default"
+        );
         assert!(
             !handed.exists(),
             "the pane deleted the caller's environment"

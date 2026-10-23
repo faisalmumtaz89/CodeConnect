@@ -176,6 +176,14 @@ pub fn liveness(identity: &ProcessIdentity) -> Liveness {
     }
 }
 
+/// Whether `pid` is proven to have exited, whatever process it was: no such pid,
+/// or a zombie. A pid that exists and cannot be described is not proven exited.
+pub fn exited(pid: i32) -> bool {
+    let missing = unsafe { libc::kill(pid, 0) } != 0
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    missing || is_zombie(pid) == Some(true)
+}
+
 /// Whether `pid` is a **zombie** (exited, awaiting reap). `Some(true)`/`Some(false)`
 /// on a successful status read; `None` when the kernel could not be asked.
 ///
@@ -309,6 +317,36 @@ mod tests {
             verdict = liveness(&id);
         }
         assert_eq!(verdict, Liveness::Gone, "a reaped child must read Gone");
+    }
+
+    /// A pid with nothing behind it — a running process is not; an exited child is,
+    /// whether or not it has been reaped.
+    #[test]
+    fn exited_is_true_only_once_the_process_is_dead() {
+        use std::process::{Command, Stdio};
+        assert!(
+            !exited(std::process::id() as i32),
+            "this process is running"
+        );
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn cat");
+        let pid = child.id() as i32;
+        assert!(!exited(pid), "a child blocked on its input is running");
+        drop(child.stdin.take());
+        let mut zombie = exited(pid);
+        for _ in 0..500 {
+            if zombie {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            zombie = exited(pid);
+        }
+        assert!(zombie, "an unreaped zombie has exited");
+        child.wait().expect("reap");
+        assert!(exited(pid), "a reaped child has exited");
     }
 
     #[test]

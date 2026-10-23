@@ -155,12 +155,17 @@ pub struct SupervisorArgs {
     /// server answering on the same socket cannot supply a stranger's session
     /// under our uid.
     ///
-    /// `codeconnect claude`'s supervisor pins the server its session is on as it
-    /// starts. That server is shared with every other Claude run, so its socket
-    /// going quiet is still indeterminate; its process proven dead is not, for the
-    /// same reason — and without the pin a killed server left the supervisor
-    /// polling `Unknown` for ever.
+    /// `codeconnect claude`'s supervisor is handed the pin its launcher took from
+    /// the server that created the session. That server is shared with every
+    /// other Claude run, so its socket going quiet is still indeterminate; its
+    /// process proven dead is not, for the same reason — and without the pin a
+    /// killed server left the supervisor polling `Unknown` for ever.
     pub server_a: Option<protocol::tmux::OwnedSession>,
+    /// The session ended before this supervisor could watch it: its launcher
+    /// found the server that created it already exited — with this session, its
+    /// last — so there is no birth to prove that server's death by. Its exit is
+    /// reported at once, instead of the silence being read as `Unknown` for ever.
+    pub ended_unwatched: bool,
 }
 
 /// What a Codex supervisor knows about the session it hosts.
@@ -186,7 +191,7 @@ type Link = Arc<Mutex<Option<UnixStream>>>;
 pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
     let started_at = protocol::time::now_rfc3339();
     let socket = protocol::socket_path();
-    let session_gone = Arc::new(AtomicBool::new(false));
+    let session_gone = Arc::new(AtomicBool::new(args.ended_unwatched));
     let link: Link = Arc::new(Mutex::new(None));
     // Built once and held for the life of the supervisor, because it has to
     // outlive the daemon: a session that starts and ends while `ccd` is down
@@ -269,6 +274,9 @@ pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
     loop {
         if session_gone.load(Ordering::SeqCst) {
             report_exit_within(&socket, &registration, &args, EXIT_REPORT_BUDGET);
+            if let Some(uid) = &args.session_uid {
+                crate::early_output::discard(&crate::settings::session_dir(&args.session_id, uid));
+            }
             return Ok(());
         }
 
@@ -321,36 +329,10 @@ fn probe_liveness(
 ) -> tmux::SessionPresence {
     match session_uid {
         Some(uid) if protocol::uid::is_well_formed(uid) => {
-            match protocol::tmux::owned_liveness(tmux_socket, uid, server_a) {
-                protocol::tmux::OwnedLiveness::Live => tmux::SessionPresence::Present,
-                protocol::tmux::OwnedLiveness::Gone => tmux::SessionPresence::Gone,
-                protocol::tmux::OwnedLiveness::Unknown(_)
-                    if server_a.is_some_and(server_is_proven_dead) =>
-                {
-                    tmux::SessionPresence::Gone
-                }
-                protocol::tmux::OwnedLiveness::Unknown(why) => tmux::SessionPresence::Unknown(why),
-            }
+            tmux::owned_presence(tmux_socket, uid, server_a)
         }
         _ => protocol::tmux::session_presence_on(tmux_socket, tmux_session),
     }
-}
-
-/// Whether the tmux server this session was resolved against is **provably** gone.
-///
-/// The same binding the custodian's own `server_gone_evidence` uses, and the same
-/// two refusals: a server whose birth identity was never captured proves nothing
-/// (`server_birth: None` ⇒ `false`), and a pid that exists but cannot be described
-/// proves nothing either — [`protocol::proc_identity::liveness`] answers `Unknown`
-/// for both, and only a positive `Gone` is read as death here.
-fn server_is_proven_dead(server_a: &protocol::tmux::OwnedSession) -> bool {
-    let Some(birth) = server_a.server_birth else {
-        return false;
-    };
-    protocol::proc_identity::liveness(&protocol::proc_identity::ProcessIdentity {
-        pid: server_a.server_pid as i32,
-        birth,
-    }) == protocol::proc_identity::Liveness::Gone
 }
 
 fn serve_once(
@@ -374,6 +356,14 @@ fn serve_once(
     // holding the connection and its bounded IPC permit for the whole reconnect
     // backoff of a supervisor it had already refused.
     let _link = LinkGuard::publish(link, stream.try_clone().context("cloning the socket")?);
+    // **Asked again once published.** The liveness thread marks the session gone
+    // and only then looks for a link to shut; a session that ended in the moment
+    // between the loop's own check and this publish found none, so nothing would
+    // ever break the reads below. Both sides take the link's lock, so either it
+    // saw this link or this sees the end.
+    if session_gone.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let mut reader = BufReader::new(stream);
 
     // **Withheld, not sent, when this daemon cannot host what we are.** Ordered
@@ -1935,6 +1925,11 @@ fn log_root() -> std::path::PathBuf {
 /// a worker thread that only carries the session's name can still write to it.
 fn log_for(session_id: &str, session_uid: Option<&str>, message: &str) {
     let dir = log_root();
+    // A supervisor still reporting its run's end after CodeConnect was
+    // uninstalled writes nowhere, rather than bringing its directory back.
+    if !dir.parent().is_some_and(std::path::Path::exists) {
+        return;
+    }
     // Owner-only: a supervisor log carries the session's name, its working
     // directory and whatever a refusal reason quoted off the pane.
     if protocol::fsperm::private_dir(&dir).is_err() {
@@ -2071,7 +2066,7 @@ mod tests {
     /// exits, and the custodian's `ready` arm never fires. One drained server wedges
     /// the launch.
     ///
-    /// **Mutation:** delete the `server_is_proven_dead` arm in `probe_liveness` and
+    /// **Mutation:** delete the `server_is_proven_dead` arm in `tmux::owned_presence` and
     /// the first assertion goes red — the wedge is exactly what it restores.
     #[test]
     fn a_pinned_server_proven_dead_makes_the_silence_gone_not_unknown() {
@@ -2239,6 +2234,7 @@ mod tests {
             claude_bin: None,
             codex: None,
             server_a: None,
+            ended_unwatched: false,
         };
         let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
         // A budget the test can wait out, exercising the same loop production
@@ -2313,6 +2309,7 @@ mod tests {
                 generation: 1,
             }),
             server_a: None,
+            ended_unwatched: false,
         };
         let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
         let started = std::time::Instant::now();
@@ -2484,6 +2481,7 @@ mod tests {
                 generation: 1,
             }),
             server_a: None,
+            ended_unwatched: false,
         }
     }
 
@@ -2748,6 +2746,7 @@ mod tests {
             claude_bin: None,
             codex: None,
             server_a: None,
+            ended_unwatched: false,
         };
         let config = Config::load();
         let reader = BufReader::new(supervisor_side.try_clone().expect("clone"));
@@ -2833,6 +2832,7 @@ mod tests {
             claude_bin: None,
             codex: None,
             server_a: None,
+            ended_unwatched: false,
         };
         let config = Config::load();
         let reader = BufReader::new(supervisor_side.try_clone().expect("clone"));
@@ -2926,6 +2926,7 @@ mod tests {
             claude_bin: None,
             codex: None,
             server_a: None,
+            ended_unwatched: false,
         };
         let config = Config::load();
         let mut reader = BufReader::new(supervisor_side.try_clone().expect("clone"));
@@ -4618,6 +4619,7 @@ means the full history gets re-read on your next message.
             claude_bin: None,
             codex: None,
             server_a: None,
+            ended_unwatched: false,
         };
         let registration = registration_frame(&args, "2026-07-31T00:00:00Z");
         report_exit(&path, &registration, EXIT_REPORT_TIMEOUT).unwrap();
@@ -4747,6 +4749,7 @@ means the full history gets re-read on your next message.
                 generation: 1,
             }),
             server_a: None,
+            ended_unwatched: false,
         };
         registration_frame(&args, "2026-08-28T00:00:00.000Z")
     }
@@ -4782,6 +4785,7 @@ means the full history gets re-read on your next message.
             claude_bin: None,
             codex: None,
             server_a: None,
+            ended_unwatched: false,
         };
         serve_once(
             path,
@@ -4995,6 +4999,53 @@ means the full history gets re-read on your next message.
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A session that ended before its link was published is reported, not read
+    /// on for ever: with the end already known, `serve_once` returns before it
+    /// asks a daemon anything — here one that never answers.
+    #[test]
+    fn a_link_published_after_the_session_ended_is_never_read_on() {
+        let path = withhold_socket("ended");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (hang_up, told) = std::sync::mpsc::channel::<()>();
+        let daemon = std::thread::spawn(move || {
+            let (silent, _) = listener.accept().unwrap();
+            let _ = told.recv_timeout(Duration::from_secs(10));
+            drop(silent);
+        });
+        let args = SupervisorArgs {
+            session_id: "cc-7".into(),
+            session_uid: Some("01K1B3XQ8ZC0DE5FGH7JKMNPQR".into()),
+            tmux_session: "cc-7".into(),
+            tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+            cwd: "/tmp/project".into(),
+            claude_bin: None,
+            codex: None,
+            server_a: None,
+            ended_unwatched: false,
+        };
+        let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let served = serve_once(
+                &path,
+                &args,
+                &registration,
+                &Config::load(),
+                &Arc::new(AtomicBool::new(true)),
+                &Arc::new(Mutex::new(None)),
+            );
+            let _ = done.send(served.is_ok());
+        });
+        let served = finished.recv_timeout(Duration::from_secs(5));
+        let _ = hang_up.send(());
+        daemon.join().unwrap();
+        assert_eq!(
+            served,
+            Ok(true),
+            "serve_once read on after the session had ended"
+        );
+    }
+
     /// A Claude session does not ask, and that is not an oversight.
     ///
     /// Claude is every build's floor — the daemon's own `supported_agents()`
@@ -5017,6 +5068,7 @@ means the full history gets re-read on your next message.
             claude_bin: None,
             codex: None,
             server_a: None,
+            ended_unwatched: false,
         };
         let registration = registration_frame(&args, "2026-08-28T00:00:00.000Z");
         assert_eq!(registration.agent, protocol::agent::AgentKind::Claude);
@@ -5113,6 +5165,7 @@ means the full history gets re-read on your next message.
             claude_bin: Some("/usr/local/bin/claude".into()),
             codex: None,
             server_a: None,
+            ended_unwatched: false,
         };
         let frame = registration_frame(&args, "2026-07-31T00:00:00Z");
         assert_eq!(frame.session_id, args.session_id);

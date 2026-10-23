@@ -2678,6 +2678,16 @@ pub(crate) mod tests {
     /// spirit the daemon's latch — was told everything was done about a record nobody
     /// had opened. Both halves are wrong together: wait out a brief holder, and when
     /// the wait does not win, say the record was not examined.
+    ///
+    /// **It waits for the pass that examines the record, not for one 2 s window.**
+    /// On a loaded machine the holder can let go only after a pass's own wait
+    /// ([`codex_launch::SWEEP_LAUNCH_LOCK_BUDGET`]) has run out, and that pass is
+    /// rightly `Busy`; the next one examines the record. What is wrong is a pass
+    /// that declines without waiting, so every `Busy` pass here must have waited the
+    /// whole budget.
+    ///
+    /// **Mutation:** make the sweep's lock wait a single `try_acquire` and the first
+    /// pass is `Busy` within milliseconds.
     #[test]
     fn a_briefly_held_launch_lock_is_waited_out_rather_than_declined() {
         let uid = "sweep-brief-lock";
@@ -2709,21 +2719,33 @@ pub(crate) mod tests {
             drop(lock);
         });
 
-        let actions = codex_launch::recovery_sweep();
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let started = std::time::Instant::now();
+            let actions = codex_launch::recovery_sweep();
+            let waited = started.elapsed();
+            if actions.contains(&codex_launch::SweepAction::FailedStalePending { uid: uid.into() })
+            {
+                break;
+            }
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    codex_launch::SweepAction::Busy { uid: u, .. } if u == uid
+                )),
+                "a pass that neither examined the record nor waited on it: {actions:?}"
+            );
+            assert!(
+                waited >= codex_launch::SWEEP_LAUNCH_LOCK_BUDGET,
+                "a pass declined the record after {waited:?} rather than waiting the \
+                 holder out: {actions:?}"
+            );
+            assert!(
+                std::time::Instant::now() < give_up,
+                "the record was never examined: {actions:?}"
+            );
+        }
         holder.join().unwrap();
-
-        assert!(
-            !actions.iter().any(|a| matches!(
-                a,
-                codex_launch::SweepAction::Busy { uid: u, .. } if u == uid
-            )),
-            "a holder that lets go inside the wait must not end as an unexamined \
-             record: {actions:?}"
-        );
-        assert!(
-            actions.contains(&codex_launch::SweepAction::FailedStalePending { uid: uid.into() }),
-            "and the record must actually be examined and repaired: {actions:?}"
-        );
     }
 
     /// **A launch lock held for the whole pass is a record that was not examined, and

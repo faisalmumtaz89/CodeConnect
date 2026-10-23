@@ -285,7 +285,7 @@ struct CCSectionHeader: View {
         // draws — 17 production call sites, none passing `dotColor` — so every
         // section label in the app sat 36pt right of the text it labelled, with
         // nothing in the gap. Measured on the decision card: body on 16.00,
-        // `EXACT COMMAND` on 52.00, inside one card.
+        // the command's header on 52.00, inside one card.
         //
         // The rule itself was never wrong, only its premise. A header that hangs
         // a mark in the gutter still has to clear it, and still has to land on the

@@ -19,7 +19,10 @@ extension JSONValue {
 extension Event {
     // MARK: Truncation
 
-    /// The daemon replaces oversized payloads rather than dropping the fact.
+    /// The daemon replaces an oversized payload rather than dropping the fact.
+    /// A user line whose content is blocks keeps its fields and text, every
+    /// block that is not text cut to its `type`, when that fits; otherwise it
+    /// is replaced too.
     var isTruncated: Bool { payload["_codeconnect_truncated"]?.boolValue == true }
 
     // MARK: Hook facts
@@ -157,8 +160,9 @@ extension Event {
 
     /// `capture-pane` text the daemon attaches to a `permission_prompt`
     /// notification — the only place the phone can learn Claude's *exact*
-    /// option list, which is what makes `Option{index}` safe to offer.
-    var paneSnapshot: String? { payload["_codeconnect_pane"]?.stringValue }
+    /// option list, which is what makes `Option{index}` safe to offer. Drawn
+    /// on the card, so `displaySafe`.
+    var paneSnapshot: String? { payload["_codeconnect_pane"]?.stringValue?.displaySafe }
 
     // MARK: Lifecycle
 
@@ -238,12 +242,86 @@ extension Event {
         return TaskNotification.parse(content)
     }
 
+    /// Claude Code's own record that the person stopped the turn: an unstamped,
+    /// non-meta user line whose content is exactly one text block reading
+    /// `[Request interrupted by user]` or `[Request interrupted by user for tool
+    /// use]` (2.1.304, recorded). Claude writes it on Esc and on "No" at a tool's
+    /// prompt, and an Esc writes no turn end at all — not a Stop hook, not a
+    /// `turn_duration` — so this line is where the turn ended. A typed prompt is
+    /// stamped `origin.kind: "human"` and is never this, whatever it says.
+    var isClaudeInterrupt: Bool {
+        guard kind == .userMessage,
+            payload["isMeta"]?.boolValue != true,
+            (payload["origin"] ?? .null) == .null,
+            let blocks = payload["message"]?["content"]?.arrayValue,
+            blocks.count == 1,
+            blocks[0]["type"]?.stringValue == "text",
+            let text = blocks[0]["text"]?.stringValue
+        else { return false }
+        return text == "[Request interrupted by user]"
+            || text == "[Request interrupted by user for tool use]"
+    }
+
+    /// Claude Code's own placeholder reply: resuming a session whose last line
+    /// is an interrupt, it inserts an assistant line from model `<synthetic>`
+    /// reading exactly "No response requested." so the conversation alternates
+    /// (2.1.304, recorded: written with the next prompt). Its TUI never draws
+    /// it, and it is not the agent answering anything. Claude's own test, here
+    /// as there: not an API error, and the text the whole content — one text
+    /// block, as in all 399 `<synthetic>` replies in the owner's transcripts.
+    var isClaudePlaceholderReply: Bool {
+        guard kind == .agentMessage,
+            payload["isApiErrorMessage"]?.boolValue != true,
+            payload["message"]?["model"]?.stringValue == "<synthetic>",
+            let content = payload["message"]?["content"]
+        else { return false }
+        guard let blocks = content.arrayValue, blocks.count == 1,
+            blocks[0]["type"]?.stringValue == "text"
+        else { return false }
+        return blocks[0]["text"]?.stringValue == "No response requested."
+    }
+
     /// A user line Claude Code recorded without handing it to the agent
     /// (`queueTranscriptOnly`, queued with `shouldQuery: false`) — measured, a
     /// background task that "didn't finish before the previous session ended",
     /// or an agent's result that arrived when no turn could take it. It is
     /// history, and starts no turn.
     var isTranscriptOnly: Bool { payload["queueTranscriptOnly"]?.boolValue == true }
+
+    /// A prompt handed to the agent, which starts a turn whether or not it
+    /// draws a row. Claude Code stamps `promptSource` on exactly the lines it
+    /// submits as a prompt (2.1.305, recorded): typed, queued or accepted
+    /// suggestions, and — `"system"` — background reports, scheduled prompts,
+    /// another session's message and the continuation after a usage limit.
+    /// Its own notes to the model carry none: Stop hook feedback, reminders,
+    /// attachments, compaction summaries, local commands, the interrupt
+    /// marker. A line recorded without being delivered starts nothing.
+    ///
+    /// `turnOrigin` alone starts a turn too. A built-in command that asks the
+    /// model — `/plan <description>`, `/goal <condition>` — stamps its output
+    /// line with it and no `promptSource`, and Claude replies: the one recorded
+    /// case of a turn started from idle by that stamp (2.1.308; `/model`
+    /// stamps nothing). In the owner's transcripts 11,066 user lines carry
+    /// both stamps and 204 carry `turnOrigin` alone (2.1.278–2.1.303): 194
+    /// automatic compaction summaries, each written after a tool's result
+    /// (163) or a prompt (31) inside a turn already running, and 10 that draw
+    /// a row of their own (`!` command output, skill invocations). Counting
+    /// them changes no status. No line recorded without being delivered
+    /// carries `turnOrigin`.
+    ///
+    /// A skill's invocation starts a turn too, stamped or not. Claude Code
+    /// records it `<command-message>` first and then runs the skill, and it
+    /// draws as a command row, which the fleet does not count as work. Of the
+    /// six real skill lines every one was answered, and one — 2.1.220
+    /// `/code-review` — carries neither stamp; counted by its stamps alone, that
+    /// run read Done for the 29 s Claude worked on it.
+    var startsTurn: Bool {
+        guard kind == .userMessage, !isTranscriptOnly else { return false }
+        if let source = payload["promptSource"]?.stringValue, !source.isEmpty { return true }
+        if payload["turnOrigin"]?.stringValue != nil { return true }
+        return payload["message"]?["content"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("<command-message>") == true
+    }
 
     /// Whether this user line is the person's own words, by Claude Code's own
     /// test (2.1.304): not `isMeta`, not a compaction summary, and either
@@ -372,8 +450,13 @@ extension Event {
 /// call "is".
 enum ToolSummary {
     /// The argument that actually identifies the call — the command for Bash,
-    /// the path for a file tool. Verbatim: never elided, never re-wrapped.
+    /// the path for a file tool. Verbatim: never elided, never re-wrapped, and
+    /// `displaySafe`, because every caller draws or speaks it.
     static func principalArgument(tool: String, input: JSONValue?) -> String? {
+        argument(tool: tool, input: input)?.displaySafe
+    }
+
+    private static func argument(tool: String, input: JSONValue?) -> String? {
         guard let input else { return nil }
         switch tool {
         case "Bash", "BashOutput":
@@ -411,7 +494,7 @@ enum ToolSummary {
 
     /// A fuller, still-single-purpose description for the decision card header.
     static func intent(tool: String, input: JSONValue?) -> String? {
-        input?.firstString("description")
+        input?.firstString("description")?.displaySafe
     }
 
     static func symbol(tool: String) -> String {

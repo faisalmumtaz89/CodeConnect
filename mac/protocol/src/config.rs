@@ -474,8 +474,6 @@ pub struct Config {
     /// The window those attempts are counted over.
     #[serde(default = "default_pairing_window_secs")]
     pub pairing_window_secs: u64,
-
-    pub apns: ApnsConfig,
 }
 
 impl Default for Config {
@@ -528,21 +526,21 @@ impl Default for Config {
             ipc_write_queue: default_ipc_write_queue(),
             pairing_max_attempts: default_pairing_max_attempts(),
             pairing_window_secs: default_pairing_window_secs(),
-            apns: ApnsConfig::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ApnsConfig {
-    /// Path to the `.p8` key. Absent keeps the logging stub in place.
-    pub key_path: Option<String>,
-    pub key_id: Option<String>,
-    pub team_id: Option<String>,
-    pub topic: Option<String>,
-    /// TestFlight uses PRODUCTION APNs — the single most common misconfiguration.
-    pub production: bool,
+/// The keys in `given` that `known` — the default config, serialised — has no
+/// place for.
+fn unknown_settings(given: &serde_json::Value, known: &serde_json::Value) -> Vec<String> {
+    let (Some(given), Some(known)) = (given.as_object(), known.as_object()) else {
+        return Vec::new();
+    };
+    given
+        .keys()
+        .filter(|key| !known.contains_key(*key))
+        .cloned()
+        .collect()
 }
 
 impl Config {
@@ -560,7 +558,21 @@ impl Config {
             }
         };
         match serde_json::from_str::<Config>(&raw) {
-            Ok(config) => config.sanitised(),
+            Ok(config) => {
+                // A key serde does not recognise is dropped without a word, so a
+                // misspelled setting would read as one the user never set.
+                if let Ok(given) = serde_json::from_str(&raw) {
+                    let known = serde_json::to_value(Config::default())
+                        .expect("the default config serialises");
+                    for key in unknown_settings(&given, &known) {
+                        eprintln!(
+                            "codeconnect: config at {} has no setting {key:?}; ignoring it",
+                            path.display()
+                        );
+                    }
+                }
+                config.sanitised()
+            }
             Err(err) => {
                 eprintln!(
                     "codeconnect: config invalid at {}: {err}; using defaults",
@@ -574,6 +586,17 @@ impl Config {
     /// Clamp values whose extremes would break an invariant rather than merely
     /// behave oddly.
     fn sanitised(mut self) -> Config {
+        // The daemon binds this address as given; one it cannot parse — most
+        // often with a port on it — is the same as none.
+        if let Some(bind) = &self.ws_bind {
+            if bind.parse::<std::net::IpAddr>().is_err() {
+                eprintln!(
+                    "codeconnect: ws_bind {bind:?} is not an IP address; ignoring it \
+                     (give the bare address; ws_port sets the port)"
+                );
+                self.ws_bind = None;
+            }
+        }
         // Below 1,000 the wheel hits a wall mid-conversation and the scroll fix
         // this exists for is silently undone; above 200,000 a handful of panes
         // can hold gigabytes of one agent's stdout.
@@ -642,6 +665,64 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    /// Every key the config knows is accepted; a misspelled one is named, and
+    /// only it. So is an `apns` block, which no setting ever read: the APNs
+    /// settings are the top-level `apns_*` keys.
+    #[test]
+    fn a_setting_the_config_does_not_have_is_named() {
+        let known = serde_json::to_value(super::Config::default()).unwrap();
+        let everything = known.clone();
+        assert!(super::unknown_settings(&everything, &known).is_empty());
+        let given: serde_json::Value = serde_json::from_str(
+            r#"{"ws_bnd": "192.168.1.5", "ws_allow_plaintext": true,
+                "apns": {"key_id": "X"}, "claude_bin": null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            super::unknown_settings(&given, &known),
+            vec!["apns".to_string(), "ws_bnd".to_string()]
+        );
+    }
+
+    /// **An `apns` block no longer costs the file its settings.** It was a
+    /// field nothing read, and a `null` or a mistyped value in it failed the
+    /// whole file, so every setting fell back to its default. Now it is a key
+    /// with no setting like any other: named, ignored, and the rest applies.
+    #[test]
+    fn an_apns_block_is_named_and_the_rest_of_the_file_applies() {
+        let known = serde_json::to_value(super::Config::default()).unwrap();
+        for apns in ["null", r#""x""#, r#"{"production": "yes"}"#] {
+            let raw = format!(r#"{{"ws_allow_plaintext": true, "apns": {apns}}}"#);
+            let config: super::Config = serde_json::from_str(&raw).expect(&raw);
+            assert!(config.ws_allow_plaintext, "{raw}");
+            let given: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(
+                super::unknown_settings(&given, &known),
+                vec!["apns".to_string()]
+            );
+        }
+    }
+
+    /// An address with a port, or a name, is not something the daemon can bind:
+    /// it is dropped, as an absent `ws_bind` is; addresses of either family stay.
+    #[test]
+    fn a_ws_bind_that_is_not_an_ip_address_is_dropped() {
+        for given in ["192.168.1.5:8787", "mac.local", ""] {
+            let config = super::Config {
+                ws_bind: Some(given.into()),
+                ..super::Config::default()
+            };
+            assert_eq!(config.sanitised().ws_bind, None, "{given:?}");
+        }
+        for given in ["192.168.1.5", "::1", "fd7a:115c:a1e0::1"] {
+            let config = super::Config {
+                ws_bind: Some(given.into()),
+                ..super::Config::default()
+            };
+            assert_eq!(config.sanitised().ws_bind.as_deref(), Some(given));
+        }
+    }
+
     use super::*;
 
     #[test]

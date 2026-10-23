@@ -652,11 +652,14 @@ mod tests {
         assert!(why.contains("cannot be read"), "{why}");
         assert!(!why.contains("not a usable"), "{why}");
 
-        // Neither message carries what was in the file.
+        // Neither message carries what was in the file. Checked with the file's
+        // path taken out, because the path is the scratch directory's and can
+        // hold any letters at all.
         std::fs::write(&key_file, "wRoNgFiLe-32-bytes-of-key-materia").unwrap();
         let leaked = with_key(&key_file);
         let why = leaked.sandbox.absence().unwrap();
-        assert!(!why.contains("wRoNgFiLe"), "{why}");
+        let without_path = why.replace(key_file.to_str().unwrap(), "");
+        assert!(!without_path.contains("wRoNgFiLe"), "{why}");
 
         // The key Apple hands you, unconverted, is the one that is ready.
         std::fs::write(&key_file, crate::apns::fake_apple::signing_key_file()).unwrap();
@@ -698,10 +701,13 @@ mod tests {
         let mounted = "wRoNgFiLe-32-bytes-of-key-materia";
         std::fs::write(&floor_file, mounted).unwrap();
         let err = config.generation_floor().unwrap_err().to_string();
-        assert!(!err.contains(mounted), "{err}");
+        // The path is the scratch directory's and can hold any letters at all,
+        // so the contents are looked for in the message with the path taken out.
+        let without_path = err.replace(floor_file.to_str().unwrap(), "");
+        assert!(!without_path.contains(mounted), "{err}");
         for len in 2..=mounted.len() {
             assert!(
-                !err.contains(&mounted[..len]),
+                !without_path.contains(&mounted[..len]),
                 "the message leaked the {len}-character prefix: {err}"
             );
         }

@@ -574,7 +574,7 @@ final class ReadOnlyCardProseTests: XCTestCase {
     ///
     /// The sentence moved out of the pinned bar at accessibility sizes because
     /// a pinned footer is capped at 45% of the screen: at AX5 it covered the
-    /// EXACT COMMAND block and still clipped its own last word off the bottom.
+    /// COMMAND block and still clipped its own last word off the bottom.
     /// A bar of controls has to stay reachable and earns that cap; a sentence
     /// saying there is nothing to tap does not. The risk of moving it is
     /// drawing it twice or losing it, so that is what this asserts.

@@ -118,7 +118,7 @@ final class HookOnlyApprovalTests: XCTestCase {
             ResolutionBanner.provenance(for: attempt) ?? "",
             DecisionCardView.alreadyResolvedTitle(for: outcome),
             DecisionCardView.alreadyResolvedMessage(for: outcome, now: Date()),
-            ApprovalRow.resolvedAccessibilityLabel(for: outcome, toolName: "Bash"),
+            ApprovalRow.resolvedAccessibilityLabel(for: outcome, call: "Bash"),
         ].joined(separator: " | ").lowercased()
         XCTAssertFalse(shown.contains("confirm"), shown)
     }

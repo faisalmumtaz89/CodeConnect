@@ -111,6 +111,15 @@ static WAKE: AtomicI32 = AtomicI32::new(-1);
 static ATTACHED: AtomicI32 = AtomicI32::new(-1);
 
 impl Terminal {
+    /// Whether there is a terminal for [`Terminal::open`] to show a session in:
+    /// one it can size, read keys from and draw on.
+    pub fn available() -> bool {
+        use std::io::IsTerminal;
+        crate::tmux::terminal_size().is_some()
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+    }
+
     /// Put the terminal in raw mode and ask it for its colours and cursor.
     pub fn open() -> Result<Self> {
         let size = crate::tmux::terminal_size().context("reading the terminal size")?;
@@ -420,11 +429,14 @@ pub struct Client {
 
 impl Client {
     /// Start `tmux argv` and show `pane` of `session` in the terminal.
+    /// `on_paint` runs once, on the viewer's thread, when the pane's first paint
+    /// is on the terminal.
     pub fn spawn(
         mut terminal: Terminal,
         argv: Vec<String>,
         session: String,
         pane: String,
+        on_paint: Option<Box<dyn FnOnce() + Send>>,
     ) -> Result<Self> {
         let mut child = Command::new(crate::tmux::tmux_bin()?)
             .args(argv)
@@ -440,6 +452,7 @@ impl Client {
             let typed = std::mem::take(&mut terminal.typed);
             let wake = terminal.wake[0];
             let mut view = View::new(session, pane, input, typed, terminal.row, client, terminal);
+            view.on_paint = on_paint;
             let result = view.run(output, wake);
             ATTACHED.store(-1, Ordering::SeqCst);
             drop(view);
@@ -547,6 +560,8 @@ struct View {
     resume_after_paint: bool,
     /// Stop markers seen whose question to tmux is not answered yet.
     confirming: usize,
+    /// Told once the first paint is on the terminal; see [`Client::spawn`].
+    on_paint: Option<Box<dyn FnOnce() + Send>>,
     /// Answers still to come to questions asked before this terminal was last stopped.
     stale: usize,
     terminal: Terminal,
@@ -578,6 +593,7 @@ impl View {
             resized: false,
             resume_after_paint: false,
             confirming: 0,
+            on_paint: None,
             stale: 0,
             terminal,
         }
@@ -802,6 +818,9 @@ impl View {
         }
         ALTERNATE.store(state.alternate, Ordering::SeqCst);
         write_all(libc::STDOUT_FILENO, &paint)?;
+        if let Some(painted) = self.on_paint.take() {
+            painted();
+        }
         self.phase = Phase::Streaming;
         let resume = std::mem::take(&mut self.resume_after_paint);
         // A marker in the paint is answered by the state read with it.

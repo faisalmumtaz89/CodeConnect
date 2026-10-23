@@ -186,34 +186,22 @@ impl ApnsPushSender {
         registry: Arc<dyn PushRegistry>,
     ) {
         let gate = Arc::clone(&registry);
-        Self::serve_attempting(
-            queue,
-            gate,
-            move |target, payload, collapse, authorized_for| {
-                let tls = tls.clone();
-                let token = Arc::clone(&token);
-                let registry = Arc::clone(&registry);
-                async move {
-                    match tokio::time::timeout(
-                        DELIVERY_DEADLINE,
-                        Self::deliver(
-                            tls,
-                            token,
-                            registry,
-                            target,
-                            payload,
-                            collapse,
-                            authorized_for,
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(outcome) => outcome,
-                        Err(_) => bail!("delivery timed out after {DELIVERY_DEADLINE:?}"),
-                    }
+        Self::serve_attempting(queue, gate, move |target, payload, collapse, recheck| {
+            let tls = tls.clone();
+            let token = Arc::clone(&token);
+            let registry = Arc::clone(&registry);
+            async move {
+                match tokio::time::timeout(
+                    DELIVERY_DEADLINE,
+                    Self::deliver(tls, token, registry, target, payload, collapse, recheck),
+                )
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => bail!("delivery timed out after {DELIVERY_DEADLINE:?}"),
                 }
-            },
-        )
+            }
+        })
         .await
     }
 
@@ -229,12 +217,12 @@ impl ApnsPushSender {
         registry: Arc<dyn PushRegistry>,
         attempt: A,
     ) where
-        A: Fn(PushTarget, String, &'static str, Option<protocol::agent::AgentKind>) -> Fut,
+        A: Fn(PushTarget, String, &'static str, bool) -> Fut,
         Fut: std::future::Future<Output = Result<Option<String>>>,
     {
-        serve_with(queue, attempt, move |device_id, agent| {
+        serve_with(queue, attempt, move |device_id| {
             let registry = Arc::clone(&registry);
-            async move { crate::push_queue::still_authorized(&*registry, &device_id, &agent).await }
+            async move { crate::push_queue::still_authorized(&*registry, &device_id).await }
         })
         .await
     }
@@ -339,14 +327,14 @@ impl ApnsPushSender {
         target: PushTarget,
         payload: String,
         collapse: &'static str,
-        authorized_for: Option<protocol::agent::AgentKind>,
+        recheck: bool,
     ) -> Result<Option<String>> {
         Self::deliver_with(
             registry,
             target,
             payload,
             collapse,
-            authorized_for,
+            recheck,
             move |target, payload, collapse| {
                 Self::post(tls.clone(), Arc::clone(&token), target, payload, collapse)
             },
@@ -375,7 +363,7 @@ impl ApnsPushSender {
         target: PushTarget,
         payload: String,
         collapse: &'static str,
-        authorized_for: Option<protocol::agent::AgentKind>,
+        recheck: bool,
         post: P,
     ) -> Result<Option<String>>
     where
@@ -428,16 +416,13 @@ impl ApnsPushSender {
         // that window is exactly the case the dequeue check exists for. Asking
         // again here is the same question [`serve_with`] asks, asked at the only
         // other moment this daemon is about to hand a notification to Apple.
-        if let Some(agent) = &authorized_for {
-            if !crate::push_queue::still_authorized(&*registry, &target.device_id, agent).await {
-                bail!(
-                    "APNs refused the push on {}, and {} stopped being a recipient for {} \
-                     while that answer was on its way; the other host is not tried",
-                    target.environment.as_str(),
-                    target.device_id,
-                    agent.as_str()
-                );
-            }
+        if recheck && !crate::push_queue::still_authorized(&*registry, &target.device_id).await {
+            bail!(
+                "APNs refused the push on {}, and {} stopped being registered while that \
+                 answer was on its way; the other host is not tried",
+                target.environment.as_str(),
+                target.device_id
+            );
         }
         crate::log_info!(
             "push: {} refused on {}; trying {}",
@@ -500,15 +485,15 @@ impl PushSender for ApnsPushSender {
             return;
         }
         let payload = Self::payload(hint);
-        for target in recipients(targets, excluded, &hint.agent) {
+        for target in recipients(targets, excluded) {
             self.enqueue(Delivery {
                 target,
                 payload: payload.clone(),
                 collapse: COLLAPSE_ID,
                 respond: None,
-                // The subject the fan-out above just authorized, carried so the
-                // worker can ask again immediately before it posts.
-                authorized_for: Some(hint.agent.clone()),
+                // The registration the fan-out above just read, asked again by
+                // the worker immediately before it posts.
+                recheck: true,
             });
         }
     }
@@ -525,10 +510,8 @@ impl PushSender for ApnsPushSender {
         let (respond, rx) = tokio::sync::oneshot::channel();
         // The one registered target with this identity, or the honest refusal.
         //
-        // **Deliberately not agent-filtered**, and it does not go through
-        // `recipients` for exactly that reason: this push is about the transport,
-        // not about any run. A Claude-only phone asking "does push work?" is
-        // entitled to the answer.
+        // It does not go through `recipients`: this push is about the transport,
+        // not about any run, and no live socket makes it redundant.
         let Some(target) = self
             .registry
             .targets()
@@ -560,10 +543,9 @@ impl PushSender for ApnsPushSender {
             payload,
             collapse: TEST_COLLAPSE_ID,
             respond: Some(respond),
-            // Not about any run, so there is nothing to re-authorize: a phone
-            // asking "does push work?" is entitled to the answer whatever it can
-            // render. This is the same reason it skips `recipients` above.
-            authorized_for: None,
+            // Not about any run, so there is nothing to re-check: a phone asking
+            // "does push work?" is entitled to the answer.
+            recheck: false,
         });
         rx
     }
@@ -597,15 +579,11 @@ impl StoreRegistry {
 
 impl PushRegistry for StoreRegistry {
     fn targets(&self) -> Vec<PushTarget> {
-        // **This run's epoch, resolved here.** A feature set confirmed by some
-        // earlier process is not evidence about this one, and the read is what
-        // turns that rule into the decoded value the fan-out sees.
-        match self.store.push_targets(crate::state::feature_epoch()) {
+        match self.store.push_targets() {
             Ok(rows) => rows
                 .into_iter()
                 .map(|row| PushTarget {
                     environment: ApnsEnvironment::parse(&row.environment),
-                    features: row.features,
                     token: row.token,
                     device_id: row.device_id,
                     credential: row.credential,
@@ -623,18 +601,10 @@ impl PushRegistry for StoreRegistry {
     fn eligible<'a>(
         &'a self,
         device_id: String,
-        agent: protocol::agent::AgentKind,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
-            // **This run's epoch, resolved here**, on the same terms as the
-            // fleet read above: a feature set confirmed by some earlier process
-            // is not evidence about this one.
-            match self
-                .db
-                .push_target_for(device_id.clone(), crate::state::feature_epoch().to_string())
-                .await
-            {
-                Ok(Some(row)) => row.features.supports(&agent),
+            match self.db.push_target_for(device_id.clone()).await {
+                Ok(Some(_)) => true,
                 // No row to offer: the device is revoked, has no token, or is
                 // gone. Nothing to vouch for, so nothing is vouched for.
                 Ok(None) => false,
@@ -771,28 +741,22 @@ fn shellexpand_home(path: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The agent every one of these fleets is about, named once so a test that is
-    /// not about agent eligibility does not read as though it were.
-    const CLAUDE: protocol::agent::AgentKind = protocol::agent::AgentKind::Claude;
-
     fn hint(blocked: usize) -> PushHint {
         PushHint {
             project_label: "Aion".into(),
             kind: crate::apns::PushKind::Approval,
             blocked_sessions: blocked,
             session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
-            agent: protocol::agent::AgentKind::Claude,
         }
     }
 
-    /// A device that advertised nothing — the legacy shape, and Claude-only.
+    /// A registered device.
     fn target(device: &str) -> PushTarget {
         PushTarget {
             token: "aa".into(),
             environment: ApnsEnvironment::Sandbox,
             device_id: device.into(),
             credential: None,
-            features: Default::default(),
         }
     }
 
@@ -816,13 +780,8 @@ mod tests {
         fn eligible<'a>(
             &'a self,
             device_id: String,
-            agent: protocol::agent::AgentKind,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
-            let answer = self
-                .0
-                .iter()
-                .find(|target| target.device_id == device_id)
-                .is_some_and(|target| target.features.supports(&agent));
+            let answer = self.0.iter().any(|target| target.device_id == device_id);
             Box::pin(std::future::ready(answer))
         }
 
@@ -855,12 +814,12 @@ mod tests {
         };
 
         assert_eq!(
-            ids(recipients(fleet(), &["phone-2".to_string()], &CLAUDE)),
+            ids(recipients(fleet(), &["phone-2".to_string()])),
             vec!["phone-1".to_string(), "phone-3".to_string()],
             "the one that saw it live is dropped and the others are kept"
         );
         assert_eq!(
-            ids(recipients(fleet(), &[], &CLAUDE)),
+            ids(recipients(fleet(), &[])),
             vec![
                 "phone-1".to_string(),
                 "phone-2".to_string(),
@@ -876,266 +835,10 @@ mod tests {
                     "phone-2".to_string(),
                     "phone-3".to_string()
                 ],
-                &CLAUDE
             )
             .is_empty(),
             "a fleet that has all seen it live is a push with nobody to send to"
         );
-    }
-
-    /// **A doorbell reaches only the phones that can open what it is about.**
-    ///
-    /// Claude is the floor and needs no advertisement — that is the shape every
-    /// phone predating the field sends, and taking the floor away from them would
-    /// silence the fleet. Every other agent has to have been named, so a Codex
-    /// doorbell reaches exactly the devices that said the word and no others.
-    ///
-    /// The two filters compose rather than override: a Codex-capable phone that
-    /// already saw the fact on its live socket is still not rung.
-    ///
-    /// **And the floor belongs to advertisements only.** A device whose stored set
-    /// this run cannot read ([`crate::store::DeviceFeatures::Unconfirmable`]) is
-    /// not a device that advertised nothing: it said something, and what it said
-    /// cannot be established, so it hears nothing at all until it says it again.
-    ///
-    /// **And an unknown agent grants nothing even to the device that named it.**
-    /// The fleet below therefore includes a phone advertising the very unknown
-    /// value the last assertion asks about — the one shape that could possibly
-    /// claim it, and the one the old assertion (which asked about an agent
-    /// *nobody* had advertised) could not distinguish. `Vec::contains` matched
-    /// `Unsupported("gemini")` against itself, so that phone was authorized for an
-    /// agent this build cannot name; see [`protocol::ws::ClientFeatures::supports`].
-    ///
-    /// **Mutations:** decode `Unconfirmable` as the empty set and
-    /// `unconfirmable-phone` joins the Claude fan-out; drop the `Unsupported` arm
-    /// from `ClientFeatures::supports` and `gemini-phone` joins the gemini fan-out.
-    #[test]
-    fn only_a_device_that_advertised_the_agent_is_told_about_its_run() {
-        let advertising = |device: &str, agents: Vec<protocol::agent::AgentKind>| PushTarget {
-            features: crate::store::DeviceFeatures::Advertised(protocol::ws::ClientFeatures {
-                agents,
-            }),
-            ..target(device)
-        };
-        let codex = protocol::agent::AgentKind::Codex;
-        let fleet = || {
-            vec![
-                // The legacy shape: advertised nothing at all.
-                target("silent-phone"),
-                advertising(
-                    "claude-only-phone",
-                    vec![protocol::agent::AgentKind::Claude],
-                ),
-                advertising(
-                    "codex-phone",
-                    vec![protocol::agent::AgentKind::Claude, codex.clone()],
-                ),
-                // A row this run cannot read as the device's word — a set left by
-                // an earlier daemon run, or bytes that will not decode. Not the
-                // floor, and not silent-phone: this one SAID something, and what
-                // it said cannot be established.
-                PushTarget {
-                    features: crate::store::DeviceFeatures::Unconfirmable,
-                    ..target("unconfirmable-phone")
-                },
-                // A device that advertised an agent this build cannot name. It is
-                // the only phone in the fleet that could possibly claim `gemini`,
-                // which is what makes it the one worth asking about.
-                advertising(
-                    "gemini-phone",
-                    vec![protocol::agent::AgentKind::Unsupported("gemini".into())],
-                ),
-            ]
-        };
-        let ids = |targets: Vec<PushTarget>| -> Vec<String> {
-            targets.into_iter().map(|t| t.device_id).collect()
-        };
-
-        assert_eq!(
-            ids(recipients(fleet(), &[], &codex)),
-            vec!["codex-phone".to_string()],
-            "a Codex doorbell is unactionable on a phone that cannot render one, and \
-             a device that advertised nothing has not asked for it"
-        );
-        assert_eq!(
-            ids(recipients(fleet(), &[], &CLAUDE)),
-            vec![
-                "silent-phone".to_string(),
-                "claude-only-phone".to_string(),
-                "codex-phone".to_string()
-            ],
-            "Claude is the floor: the silent phone gets it without ever having asked, \
-             and the unconfirmable one does not — the floor is what an ADVERTISEMENT \
-             grants, and a set this run cannot read is not one"
-        );
-        assert!(
-            recipients(fleet(), &["codex-phone".to_string()], &codex).is_empty(),
-            "eligible and already-seen compose: the one phone that could open it \
-             already has it"
-        );
-        assert!(
-            recipients(
-                fleet(),
-                &[],
-                &protocol::agent::AgentKind::Unsupported("gemini".into())
-            )
-            .is_empty(),
-            "an unknown agent reaches nobody — not even the phone that advertised \
-             that very name. Agreeing about a name this build cannot act on is not \
-             a capability, and it does not fall back to the floor either"
-        );
-        assert!(
-            !ids(recipients(fleet(), &[], &CLAUDE)).contains(&"gemini-phone".to_string()),
-            "and naming an unknown agent does not buy the floor: a non-empty set \
-             grants exactly what it names, and this one named nothing this build knows"
-        );
-    }
-
-    /// **The two halves of push authorization, composed once through the real
-    /// parts.**
-    ///
-    /// Authorization is a projection and a filter, and every test above builds the
-    /// projection's *output* by hand. [`StoreRegistry`] — the one thing that turns
-    /// a `devices` row into a [`PushTarget`], and the only reader of this run's
-    /// [`crate::state::feature_epoch`] on the push path — is constructed nowhere
-    /// else in the suite, so its own mapping has never executed under test. A
-    /// hand-built fleet cannot catch a projection that hands the filter the wrong
-    /// features, because the hand-built fleet *is* the answer the projection was
-    /// supposed to produce. This starts from four database rows and ends at the
-    /// list a sender iterates, so a mistake anywhere between them is visible here.
-    ///
-    /// The fleet is the four shapes the column has, and each is a different reason
-    /// a device may or may not be rung:
-    ///
-    /// - `silent` never wrote the column. That is the row every phone predating the
-    ///   field has, and it reads as the Claude floor — Claude yes, Codex no.
-    /// - `codex-only` advertised Codex and nothing else under this run's epoch, so
-    ///   it hears Codex doorbells and is *not* handed Claude back: a non-empty set
-    ///   grants exactly what it names.
-    /// - `both` named the two, and is the only device in either fan-out twice.
-    /// - `stale` wrote a perfectly well-formed Codex set — under some other
-    ///   process's epoch. This run cannot vouch for it, so it hears nothing at all,
-    ///   which is the one answer a hand-built `Unconfirmable` can state but only a
-    ///   real row can *earn*.
-    ///
-    /// The epoch is `crate::state::feature_epoch()` rather than a fixture string
-    /// because [`StoreRegistry::targets`] resolves it itself — it is not injectable
-    /// — so a row written under anything else is by construction the `stale` case.
-    ///
-    /// **Mutations:** in [`crate::store::Store::push_targets`], decode the foreign
-    /// epoch as `Advertised(Default::default())` and `stale` joins the Claude
-    /// fan-out; in [`crate::push_queue::recipients`], filter on a hard-coded Claude
-    /// instead of the hint's agent and the Codex fan-out becomes the Claude one.
-    #[test]
-    fn the_projection_and_the_filter_agree_about_which_devices_a_codex_run_may_ring() {
-        // A database nobody else is using. The counter is load-bearing: tests run
-        // in parallel threads and a millisecond timestamp alone lets two of them
-        // open the same file.
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-registry-fleet-{}-{}-{}.db",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            protocol::time::now_unix_ms()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let store = Arc::new(crate::store::Store::open(&path).unwrap());
-
-        // Every device is registered for push, because `push_targets` filters on
-        // the token: a phone with no token is absent for a reason that has nothing
-        // to do with what it can render, and would blur the question being asked.
-        for device in ["silent", "codex-only", "both", "stale"] {
-            store
-                .insert_device(
-                    device,
-                    // Device names are unique, so each phone needs its own.
-                    &format!("iPhone ({device})"),
-                    &format!("hash-{device}"),
-                    "2026-08-01T00:00:00Z",
-                )
-                .unwrap();
-            store
-                .set_push_token(device, &format!("tok-{device}"), "production", None)
-                .unwrap();
-        }
-        let epoch = crate::state::feature_epoch();
-        store
-            .set_device_features("codex-only", Some(r#"{"agents":["codex"]}"#), epoch)
-            .unwrap();
-        store
-            .set_device_features("both", Some(r#"{"agents":["claude","codex"]}"#), epoch)
-            .unwrap();
-        // Well-formed, decodable, and stamped by somebody else. The bytes are not
-        // what disqualifies it — the stamp is.
-        store
-            .set_device_features(
-                "stale",
-                Some(r#"{"agents":["codex"]}"#),
-                "a-previous-daemon-run",
-            )
-            .unwrap();
-
-        let registry = StoreRegistry::new(Arc::clone(&store));
-        assert_eq!(
-            registry.targets().len(),
-            4,
-            "the premise: all four rows are registered for push, so anything missing \
-             below was refused for what it can render and not for lacking a token"
-        );
-        // Sorted, because `push_targets` has no ORDER BY: the set of devices is the
-        // claim, and asserting an accidental row order would make this test fail for
-        // a reason it is not about.
-        let rung = |agent: &protocol::agent::AgentKind| -> Vec<String> {
-            let mut ids: Vec<String> = recipients(registry.targets(), &[], agent)
-                .into_iter()
-                .map(|t| t.device_id)
-                .collect();
-            ids.sort();
-            ids
-        };
-
-        assert_eq!(
-            rung(&protocol::agent::AgentKind::Codex),
-            vec!["both".to_string(), "codex-only".to_string()],
-            "a Codex doorbell reaches exactly the phones whose own word, confirmed by \
-             this run, says they can open one. `silent` failing here means the floor \
-             leaked past Claude into an agent nobody advertised; `stale` failing here \
-             means a set this process cannot vouch for was read as one it can"
-        );
-        assert_eq!(
-            rung(&CLAUDE),
-            vec!["both".to_string(), "silent".to_string()],
-            "and Claude is the floor an advertisement grants, not a default the \
-             projection hands out. `codex-only` appearing here means a non-empty set \
-             stopped meaning exactly what it names; `stale` appearing here means an \
-             unconfirmable row was decoded as the floor, which would hand a phone \
-             doorbells its own claim never asked for"
-        );
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// The one fleet both fan-out tests below run over: every shape the feature
-    /// column has an answer for, so each test's recipient list is a partition of
-    /// the same four phones rather than of a fleet chosen to suit it.
-    fn a_fleet_of_every_shape() -> Vec<PushTarget> {
-        let advertising = |device: &str, agents: Vec<protocol::agent::AgentKind>| PushTarget {
-            features: crate::store::DeviceFeatures::Advertised(protocol::ws::ClientFeatures {
-                agents,
-            }),
-            ..target(device)
-        };
-        let codex = protocol::agent::AgentKind::Codex;
-        vec![
-            // The legacy shape: advertised nothing at all, which is the Claude
-            // floor. It is what a widened Codex filter would sweep in, and what a
-            // narrowed Claude filter would drop — and today, when nothing in
-            // production writes the column, it is the shape every real phone has.
-            target("claude-floor-phone"),
-            advertising("claude-only-phone", vec![CLAUDE]),
-            advertising("codex-only-phone", vec![codex.clone()]),
-            advertising("both-phone", vec![CLAUDE, codex]),
-        ]
     }
 
     /// Which devices `send` filed a delivery for, sorted.
@@ -1149,62 +852,6 @@ mod tests {
         let mut ids: Vec<String> = sender.queues.lock().unwrap().keys().cloned().collect();
         ids.sort();
         ids
-    }
-
-    /// **The direct sender asks the hint's agent, and only a send can tell.**
-    ///
-    /// Every other assertion about agent eligibility here calls
-    /// [`recipients`] itself, which proves what the filter answers and nothing
-    /// about what the sender asks it. There are two independent senders, so a
-    /// constant hard-coded at either call site is a fleet-wide authorization
-    /// change that every direct test of the filter survives. This goes through
-    /// [`ApnsPushSender`]'s real [`PushSender::send`] over a heterogeneous fleet,
-    /// and its Codex-only recipients are the answer only the hint's own agent
-    /// produces.
-    ///
-    /// **The hint is a shape production raises: a finished Codex turn, nothing
-    /// blocked.** It is no longer the only one — `Daemon::raise_codex_approval`
-    /// files `kind: Approval` with `agent: Codex`, and `describing` keeps the
-    /// ringing run's own agent rather than forcing the subject to Claude, so a
-    /// Codex approval deck is now raisable and is covered by
-    /// [`a_codex_approval_doorbell_is_filed_only_for_the_phones_that_advertised_codex`].
-    /// This one stays on the completed turn, so the two doorbell kinds are
-    /// asserted separately and a change to either is visible on its own.
-    ///
-    /// **Nothing is awaited between the send and the read, and that is
-    /// load-bearing.** `enqueue` starts a worker for a device it has not seen
-    /// before, and a worker's first act is to dial `api.push.apple.com`. A task
-    /// spawned on the current-thread runtime this test runs under is not polled
-    /// until the test yields, so reading the queues without yielding observes the
-    /// whole fan-out and opens no socket.
-    ///
-    /// **Mutations:** filter on a hard-coded `AgentKind::Claude` at this sender's
-    /// call to [`recipients`], or drop the agent filter from [`recipients`]
-    /// altogether, and the two phones that never named Codex join the fan-out.
-    #[tokio::test]
-    async fn a_codex_doorbell_is_filed_only_for_the_phones_that_advertised_codex() {
-        let sender =
-            ApnsPushSender::without_a_network(Arc::new(FakeRegistry(a_fleet_of_every_shape())));
-
-        sender.send(
-            &PushHint {
-                agent: protocol::agent::AgentKind::Codex,
-                // The production shape, and the only one: a finished Codex turn,
-                // nothing blocked. See the note above.
-                kind: crate::apns::PushKind::Completed,
-                ..hint(0)
-            },
-            &[],
-        );
-
-        assert_eq!(
-            filed(&sender),
-            vec!["both-phone".to_string(), "codex-only-phone".to_string()],
-            "a Codex doorbell is filed for exactly the phones that said the word. \
-             Either Claude phone appearing here means the sender asked about an \
-             agent the run is not, and told a device about a session it has no \
-             screen to open"
-        );
     }
 
     /// How many deliveries are waiting for one device — `0` when the fan-out
@@ -1223,60 +870,6 @@ mod tests {
             .map_or(0, |queue| queue.depth())
     }
 
-    /// A Codex approval doorbell, in the shape `Daemon::raise_codex_approval`
-    /// files and `describing` then re-describes: the ringing run is the subject,
-    /// and its own open deck is what `blocked` counts.
-    fn codex_approval_hint(blocked: usize) -> PushHint {
-        PushHint {
-            agent: protocol::agent::AgentKind::Codex,
-            kind: crate::apns::PushKind::Approval,
-            ..hint(blocked)
-        }
-    }
-
-    /// **The Codex APPROVAL doorbell, per device, with the zero proved rather
-    /// than assumed.**
-    ///
-    /// The completed-turn fan-out above is the same filter reached by a
-    /// different hint, and until a Codex approval could be raised at all that was
-    /// the only Codex doorbell in existence. It can be raised now, and an
-    /// approval doorbell is the one whose tap opens a decision list — so a phone
-    /// rung by one that cannot render the run is handed an empty list rather than
-    /// a stale one, which is worse than not ringing.
-    ///
-    /// The counts are the claim, not the set: `0` for each phone that never
-    /// named Codex is the number the whole per-device authorization story rests
-    /// on, and a queue that exists with nothing in it would satisfy a set-shaped
-    /// assertion while a doorbell sat in it.
-    ///
-    /// **Mutation:** filter on a hard-coded `AgentKind::Claude` at this sender's
-    /// call to [`recipients`], or drop the agent filter from [`recipients`], and
-    /// both zeros become ones.
-    #[tokio::test]
-    async fn a_codex_approval_doorbell_is_filed_only_for_the_phones_that_advertised_codex() {
-        let sender =
-            ApnsPushSender::without_a_network(Arc::new(FakeRegistry(a_fleet_of_every_shape())));
-
-        sender.send(&codex_approval_hint(1), &[]);
-
-        assert_eq!(
-            filed(&sender),
-            vec!["both-phone".to_string(), "codex-only-phone".to_string()]
-        );
-        for (device, expected) in [
-            ("claude-floor-phone", 0),
-            ("claude-only-phone", 0),
-            ("codex-only-phone", 1),
-            ("both-phone", 1),
-        ] {
-            assert_eq!(
-                queued(&sender, device),
-                expected,
-                "{device} must hold exactly {expected} Codex approval doorbell(s)"
-            );
-        }
-    }
-
     /// **The same approval, rung again, does not queue a second time.**
     ///
     /// A reconnecting phone replays from an older sequence and a re-delivered
@@ -1287,28 +880,21 @@ mod tests {
     /// layer, which stops a second doorbell being dispatched at all, is
     /// `state.rs`\'s ring-once assertion over a re-delivery.)
     ///
-    /// The unauthorized phones are asserted at zero after all three sends too:
-    /// a filter that let one through on a later pass would otherwise be hidden
-    /// by the coalescing that makes the authorized ones read `1` either way.
-    ///
     /// **Mutation:** delete the doorbell-replacement arm in
-    /// [`super::super::push_queue::DeviceQueue::push`] and the authorized phones
-    /// hold three.
+    /// [`super::super::push_queue::DeviceQueue::push`] and each phone holds
+    /// three.
     #[tokio::test]
-    async fn the_same_codex_approval_doorbell_filed_again_does_not_queue_a_second_time() {
-        let sender =
-            ApnsPushSender::without_a_network(Arc::new(FakeRegistry(a_fleet_of_every_shape())));
+    async fn the_same_approval_doorbell_filed_again_does_not_queue_a_second_time() {
+        let sender = ApnsPushSender::without_a_network(Arc::new(FakeRegistry(vec![
+            target("phone-1"),
+            target("phone-2"),
+        ])));
 
         for _ in 0..3 {
-            sender.send(&codex_approval_hint(1), &[]);
+            sender.send(&hint(1), &[]);
         }
 
-        for (device, expected) in [
-            ("claude-floor-phone", 0),
-            ("claude-only-phone", 0),
-            ("codex-only-phone", 1),
-            ("both-phone", 1),
-        ] {
+        for (device, expected) in [("phone-1", 1), ("phone-2", 1)] {
             assert_eq!(
                 queued(&sender, device),
                 expected,
@@ -1317,15 +903,13 @@ mod tests {
         }
     }
 
-    /// **Authorization is read at the fan-out, so a device that stops being
-    /// authorized between one doorbell and the next is not rung.**
+    /// **The registry is read at the fan-out, so a device that leaves it between
+    /// one doorbell and the next is not rung.**
     ///
-    /// The whole per-device story is worth nothing if the recipient list is
-    /// computed once and reused: a phone whose advertisement is withdrawn, or
-    /// whose stored set this run stops being able to vouch for, would keep
-    /// hearing about a run it can no longer open. The registry here answers
-    /// differently on its second call, which is the only way to tell a list read
-    /// afresh from one captured earlier.
+    /// The recipient list is worth nothing if it is computed once and reused: a
+    /// phone that was revoked or lost its token would keep hearing about runs.
+    /// The registry here answers differently on its second call, which is the
+    /// only way to tell a list read afresh from one captured earlier.
     ///
     /// Two senders, because one sender\'s queue survives its own first send and
     /// a second send into it would read `1` whether it was refused or coalesced
@@ -1336,14 +920,13 @@ mod tests {
     /// [`ApnsPushSender::send`] into a value computed once at construction and
     /// the second fan-out rings the withdrawn phone.
     #[tokio::test]
-    async fn a_device_that_stops_being_authorized_between_doorbells_is_not_rung_again() {
-        /// Advertises Codex the first time it is asked and nothing the second.
+    async fn a_device_that_leaves_the_registry_between_doorbells_is_not_rung_again() {
+        /// Registered the first time it is asked and gone the second.
         struct Withdrawing(std::sync::Mutex<usize>);
         impl PushRegistry for Withdrawing {
             fn eligible<'a>(
                 &'a self,
                 _device_id: String,
-                _agent: protocol::agent::AgentKind,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>
             {
                 // This test is about the FAN-OUT, and it never awaits, so no
@@ -1354,19 +937,11 @@ mod tests {
             fn targets(&self) -> Vec<PushTarget> {
                 let mut calls = self.0.lock().unwrap();
                 *calls += 1;
-                let features = if *calls == 1 {
-                    crate::store::DeviceFeatures::Advertised(protocol::ws::ClientFeatures {
-                        agents: vec![protocol::agent::AgentKind::Codex],
-                    })
+                if *calls == 1 {
+                    vec![target("withdrawing-phone")]
                 } else {
-                    // The phone\'s advertisement is gone, which is the Claude
-                    // floor: Claude yes, Codex no.
-                    Default::default()
-                };
-                vec![PushTarget {
-                    features,
-                    ..target("withdrawing-phone")
-                }]
+                    Vec::new()
+                }
             }
             fn forget(
                 &self,
@@ -1392,11 +967,11 @@ mod tests {
         let sender =
             ApnsPushSender::without_a_network(Arc::clone(&registry) as Arc<dyn PushRegistry>);
 
-        sender.send(&codex_approval_hint(1), &[]);
+        sender.send(&hint(1), &[]);
         assert_eq!(
             filed(&sender),
             vec!["withdrawing-phone".to_string()],
-            "the premise: while it advertised Codex it was rung"
+            "the premise: while it was registered it was rung"
         );
 
         // **The queue is retired between the two, so the second fan-out is
@@ -1409,18 +984,18 @@ mod tests {
         sender.retire("withdrawing-phone");
         assert!(filed(&sender).is_empty(), "the retirement took the queue");
 
-        sender.send(&codex_approval_hint(1), &[]);
+        sender.send(&hint(1), &[]);
         assert!(
             filed(&sender).is_empty(),
-            "the doorbell after the withdrawal reached {:?}; authorization must be \
+            "the doorbell after the withdrawal reached {:?}; the registry must be \
              read at the fan-out, not captured before it",
             filed(&sender)
         );
         assert_eq!(queued(&sender, "withdrawing-phone"), 0);
     }
 
-    /// **And authorization is read again at the DEQUEUE, because the fan-out's
-    /// answer can go stale before the push leaves.**
+    /// **And the registration is read again at the DEQUEUE, because the
+    /// fan-out's answer can go stale before the push leaves.**
     ///
     /// A device's deliveries are served one at a time and each attempt is
     /// awaited whole, so a doorbell filed while a phone was eligible can wait
@@ -1429,12 +1004,12 @@ mod tests {
     /// at the fan-out would post it anyway.
     ///
     /// **Two halves, because they are two files apart.** First: the fan-out files
-    /// the SUBJECT beside the delivery, which is what makes a second check
-    /// possible at all — a sender that filed none would pass every ordering test
+    /// the re-check flag beside the delivery, which is what makes a second check
+    /// happen at all — a sender that filed none would pass every ordering test
     /// and simply never re-check anything. Second: this sender's own worker loop
     /// asks again, and the order is the claim — the worker is BLOCKED inside its
     /// first attempt, the second doorbell is filed while the phone is still
-    /// eligible, the authorization is withdrawn, and only then is the first
+    /// registered, the registration is withdrawn, and only then is the first
     /// attempt released.
     ///
     /// **The queue is driven directly rather than through `send`, and that is
@@ -1446,41 +1021,34 @@ mod tests {
     ///
     /// **Mutation:** drop the gate argument from
     /// [`ApnsPushSender::serve_attempting`] (pass one that always answers `true`)
-    /// and the withdrawn doorbell is posted; stop setting `authorized_for` at the
+    /// and the withdrawn doorbell is posted; stop setting `recheck` at the
     /// fan-out and the first half goes red.
     #[tokio::test]
     async fn a_doorbell_that_waited_out_a_withdrawal_is_not_posted() {
-        /// Advertises Codex until a test says otherwise.
+        /// Registered until a test says otherwise.
         struct Switchable(std::sync::atomic::AtomicBool);
         impl Switchable {
-            /// What this phone can render right now — the one fact both answers
-            /// are built from, so the fan-out list and the per-device re-check
-            /// cannot disagree about the switch.
-            fn features(&self) -> crate::store::DeviceFeatures {
-                if self.0.load(std::sync::atomic::Ordering::SeqCst) {
-                    crate::store::DeviceFeatures::Advertised(protocol::ws::ClientFeatures {
-                        agents: vec![protocol::agent::AgentKind::Codex],
-                    })
-                } else {
-                    // The Claude floor: Claude yes, Codex no.
-                    Default::default()
-                }
+            /// Whether this phone is registered right now — the one fact both
+            /// answers are built from, so the fan-out list and the per-device
+            /// re-check cannot disagree about the switch.
+            fn registered(&self) -> bool {
+                self.0.load(std::sync::atomic::Ordering::SeqCst)
             }
         }
         impl PushRegistry for Switchable {
             fn targets(&self) -> Vec<PushTarget> {
-                vec![PushTarget {
-                    features: self.features(),
-                    ..target("waiting-phone")
-                }]
+                if self.registered() {
+                    vec![target("waiting-phone")]
+                } else {
+                    Vec::new()
+                }
             }
             fn eligible<'a>(
                 &'a self,
                 device_id: String,
-                agent: protocol::agent::AgentKind,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>
             {
-                let answer = device_id == "waiting-phone" && self.features().supports(&agent);
+                let answer = device_id == "waiting-phone" && self.registered();
                 Box::pin(std::future::ready(answer))
             }
             fn forget(
@@ -1505,17 +1073,17 @@ mod tests {
 
         let registry = Arc::new(Switchable(std::sync::atomic::AtomicBool::new(true)));
 
-        // Half one: the fan-out files the subject beside the delivery.
+        // Half one: the fan-out files the re-check flag beside the delivery.
         {
             let sender =
                 ApnsPushSender::without_a_network(Arc::clone(&registry) as Arc<dyn PushRegistry>);
-            sender.send(&codex_approval_hint(1), &[]);
+            sender.send(&hint(1), &[]);
             let queues = sender.queues.lock().unwrap();
             let queue = queues.get("waiting-phone").expect("the queue was created");
             assert_eq!(
-                queue.waiting_subjects(),
-                vec![Some(protocol::agent::AgentKind::Codex)],
-                "the fan-out must file what it authorized, or nothing can re-check it"
+                queue.waiting_rechecks(),
+                vec![true],
+                "the fan-out must file the re-check, or nothing re-checks it"
             );
         }
 
@@ -1523,11 +1091,11 @@ mod tests {
         let mut queues = HashMap::new();
         let (queue, _) = queue_for(&mut queues, "waiting-phone");
         let doorbell = || Delivery {
-            target: registry.targets().remove(0),
+            target: target("waiting-phone"),
             payload: "{}".into(),
             collapse: COLLAPSE_ID,
             respond: None,
-            authorized_for: Some(protocol::agent::AgentKind::Codex),
+            recheck: true,
         };
         queue.push(doorbell(), "waiting-phone");
 
@@ -1546,7 +1114,7 @@ mod tests {
                 ApnsPushSender::serve_attempting(
                     queue,
                     registry,
-                    move |target, _payload, _c, _subject| {
+                    move |target, _payload, _c, _recheck| {
                         let (posted, release, started) = (
                             Arc::clone(&posted),
                             Arc::clone(&release),
@@ -1568,7 +1136,7 @@ mod tests {
         started.notified().await;
         assert_eq!(posted.lock().unwrap().len(), 1, "the premise");
 
-        // A second doorbell, filed while the phone is STILL eligible: this is
+        // A second doorbell, filed while the phone is STILL registered: this is
         // the fan-out's answer, which the dequeue check is there to outlive.
         queue.push(doorbell(), "waiting-phone");
         assert_eq!(queue.depth(), 1, "it is waiting its turn");
@@ -1588,7 +1156,7 @@ mod tests {
             posted.lock().unwrap().as_slice(),
             ["waiting-phone".to_string()],
             "the doorbell that waited out the withdrawal must not be posted; \
-             authorization is read at the dequeue, not only at the fan-out"
+             the registration is read at the dequeue, not only at the fan-out"
         );
         worker.abort();
     }
@@ -1600,8 +1168,8 @@ mod tests {
     /// it happens *inside* one turn of the worker loop, so the dequeue check the
     /// loop makes cannot cover it. The window is not theoretical: the first host's
     /// answer costs a connect, a TLS handshake, a request and a response body, and
-    /// a phone that stops being a recipient for this agent in that time is precisely
-    /// the case the dequeue check exists for.
+    /// a phone that is revoked or loses its token in that time is precisely the
+    /// case the dequeue check exists for.
     ///
     /// The withdrawal is staged *by the first post itself*, so the ordering is not
     /// a matter of timing: the answer that triggers the retry is the same event
@@ -1615,15 +1183,15 @@ mod tests {
     ///
     /// **Mutation:** drop the `still_authorized` check in
     /// [`ApnsPushSender::deliver_with`] and the withdrawn phone is posted to on
-    /// the other host. The other half of the wiring — that a delivery's subject
-    /// reaches the transport at all, without which this check would be handed
-    /// `None` and ask nothing for ever — is one file up and asserted there, in
-    /// `push_queue`'s `the_attempt_is_handed_the_subject_the_delivery_carries`.
+    /// the other host. The other half of the wiring — that a delivery's re-check
+    /// flag reaches the transport at all, without which this check would be
+    /// handed `false` and ask nothing for ever — is one file up and asserted
+    /// there, in `push_queue`'s `the_attempt_is_handed_the_recheck_the_delivery_carries`.
     #[tokio::test]
     async fn the_other_host_retry_is_not_posted_to_a_phone_that_was_withdrawn() {
-        /// Advertises Codex until something turns it off, and records repairs.
+        /// Registered until something turns it off, and records repairs.
         struct Retrying {
-            advertises_codex: std::sync::atomic::AtomicBool,
+            registered: std::sync::atomic::AtomicBool,
             corrected: std::sync::Mutex<Vec<ApnsEnvironment>>,
         }
         impl PushRegistry for Retrying {
@@ -1633,12 +1201,9 @@ mod tests {
             fn eligible<'a>(
                 &'a self,
                 _device_id: String,
-                _agent: protocol::agent::AgentKind,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>
             {
-                let answer = self
-                    .advertises_codex
-                    .load(std::sync::atomic::Ordering::SeqCst);
+                let answer = self.registered.load(std::sync::atomic::Ordering::SeqCst);
                 Box::pin(std::future::ready(answer))
             }
             fn forget(
@@ -1678,7 +1243,7 @@ mod tests {
                 target("retrying-phone"),
                 "{}".into(),
                 COLLAPSE_ID,
-                Some(protocol::agent::AgentKind::Codex),
+                true,
                 {
                     let (posted, registry) = (Arc::clone(&posted), Arc::clone(&registry));
                     move |target: PushTarget, _payload, _collapse| {
@@ -1692,7 +1257,7 @@ mod tests {
                                 // moves it, so no sleep decides the order.
                                 if withdraw_on_first_answer {
                                     registry
-                                        .advertises_codex
+                                        .registered
                                         .store(false, std::sync::atomic::Ordering::SeqCst);
                                 }
                                 return Ok(wrong_host());
@@ -1710,7 +1275,7 @@ mod tests {
         // The premise: while the phone is still a recipient, the retry is exactly
         // the repair it is there to be — the other host is tried and remembered.
         let still_here = Arc::new(Retrying {
-            advertises_codex: std::sync::atomic::AtomicBool::new(true),
+            registered: std::sync::atomic::AtomicBool::new(true),
             corrected: std::sync::Mutex::new(Vec::new()),
         });
         let (outcome, posted) = run(Arc::clone(&still_here), false).await;
@@ -1731,14 +1296,14 @@ mod tests {
 
         // The finding: withdrawn while the first host was answering.
         let withdrawn = Arc::new(Retrying {
-            advertises_codex: std::sync::atomic::AtomicBool::new(true),
+            registered: std::sync::atomic::AtomicBool::new(true),
             corrected: std::sync::Mutex::new(Vec::new()),
         });
         let (outcome, posted) = run(Arc::clone(&withdrawn), true).await;
         assert_eq!(
             posted,
             vec![ApnsEnvironment::Sandbox],
-            "the phone stopped being a recipient while the first host was answering; \
+            "the phone stopped being registered while the first host was answering; \
              the retry is a second post to Apple and must be authorized like one"
         );
         assert!(
@@ -1781,19 +1346,11 @@ mod tests {
             fn targets(&self) -> Vec<PushTarget> {
                 self.fleet_reads
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                vec![PushTarget {
-                    features: crate::store::DeviceFeatures::Advertised(
-                        protocol::ws::ClientFeatures {
-                            agents: vec![protocol::agent::AgentKind::Codex],
-                        },
-                    ),
-                    ..target("counted-phone")
-                }]
+                vec![target("counted-phone")]
             }
             fn eligible<'a>(
                 &'a self,
                 device_id: String,
-                _agent: protocol::agent::AgentKind,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>
             {
                 self.device_reads.lock().unwrap().push(device_id);
@@ -1830,18 +1387,11 @@ mod tests {
         let (queue, _) = queue_for(&mut queues, "counted-phone");
         queue.push(
             Delivery {
-                target: PushTarget {
-                    features: crate::store::DeviceFeatures::Advertised(
-                        protocol::ws::ClientFeatures {
-                            agents: vec![protocol::agent::AgentKind::Codex],
-                        },
-                    ),
-                    ..target("counted-phone")
-                },
+                target: target("counted-phone"),
                 payload: "{}".into(),
                 collapse: COLLAPSE_ID,
                 respond: None,
-                authorized_for: Some(protocol::agent::AgentKind::Codex),
+                recheck: true,
             },
             "counted-phone",
         );
@@ -1857,7 +1407,7 @@ mod tests {
                 ApnsPushSender::serve_attempting(
                     queue,
                     gate,
-                    move |target, _payload, _c, _subject| {
+                    move |target, _payload, _c, _recheck| {
                         let posted = Arc::clone(&posted);
                         async move {
                             posted.lock().unwrap().push(target.device_id.clone());
@@ -1878,7 +1428,7 @@ mod tests {
         assert_eq!(
             posted.lock().unwrap().as_slice(),
             ["counted-phone".to_string()],
-            "the premise: the delivery was authorized and posted"
+            "the premise: the delivery was re-checked and posted"
         );
         assert_eq!(
             registry
@@ -1896,41 +1446,35 @@ mod tests {
         worker.abort();
     }
 
-    /// **A phone at the Claude floor is never queued a Codex doorbell, and a
-    /// device that leaves the fleet takes its queued doorbell with it.**
+    /// **Every paired phone is filed a doorbell, and a device that leaves the
+    /// fleet takes its queued doorbell with it.**
     ///
-    /// The device rows are the real ones, through the real projection: an app
-    /// that advertises nothing leaves `features` NULL, which reads as the Claude
-    /// floor. That floor is what every phone in the field has today, because no
-    /// shipping handler writes the column — nothing outside the tests calls the
-    /// store\'s writer, which is compiled all the same, and every hello path drops
-    /// the wire-legal feature field — so a Codex approval doorbell is refused at
-    /// the fan-out and no queue for it is ever created.
+    /// The device rows are the real ones, through the real registry: each phone
+    /// is paired and registered exactly as a shipping app does it — a device row,
+    /// then a token — and nothing else. A doorbell carries no agent, so an
+    /// approval and a finished turn are filed for every one of them whichever
+    /// agent raised it. The relayed half of the same claim is `relay_sender`'s
+    /// `a_paired_phone_is_rung_for_an_approval_and_a_finished_turn`.
     ///
-    /// **What this does NOT show is a device losing an advertisement it had
-    /// made.** That transition needs a producer that records the advertisement in
-    /// the first place, and nothing in this build does; the phase that lands the
-    /// write side is where a device\'s word can change, and the checklist leaves
-    /// that gate open rather than claiming this test closes it. What IS shown is
-    /// the retirement this build really has — the one path by which a phone
-    /// leaves the fleet, a revoked device or one whose token another device
-    /// claimed — taking the queue with it.
+    /// Each kind gets a fresh sender, because a second doorbell into a queue that
+    /// already holds one coalesces and would read `1` whether or not it was filed.
+    /// Nothing is awaited between a send and its read, so no worker is polled and
+    /// no socket is opened.
     ///
-    /// **Mutation:** decode a NULL `features` column as "everything" in
-    /// [`crate::store::Store::push_targets`] and the floor phone is queued a
-    /// doorbell it has no screen to open.
+    /// **Mutation:** return early from [`ApnsPushSender::send`] for a finished
+    /// turn and its counts read `0`.
     #[tokio::test]
-    async fn a_floor_phone_gets_no_codex_doorbell_and_a_departing_device_takes_its_own() {
+    async fn a_doorbell_is_filed_for_every_paired_phone_and_a_departing_device_takes_its_own() {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let path = std::env::temp_dir().join(format!(
-            "ccd-floor-fleet-{}-{}-{}.db",
+            "ccd-paired-fleet-{}-{}-{}.db",
             std::process::id(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             protocol::time::now_unix_ms()
         ));
         let _ = std::fs::remove_file(&path);
         let store = Arc::new(crate::store::Store::open(&path).unwrap());
-        for device in ["old-app", "codex-app"] {
+        for device in ["phone-1", "phone-2"] {
             store
                 .insert_device(
                     device,
@@ -1943,101 +1487,41 @@ mod tests {
                 .set_push_token(device, &format!("tok-{device}"), "production", None)
                 .unwrap();
         }
-        // Only the new app says anything. The old one\'s handshake carries no
-        // feature set, and the handshake path writes nothing either way, so its
-        // row stays NULL.
-        store
-            .set_device_features(
-                "codex-app",
-                Some(r#"{"agents":["codex"]}"#),
-                crate::state::feature_epoch(),
-            )
-            .unwrap();
+        let turn_end = PushHint {
+            kind: crate::apns::PushKind::Completed,
+            ..hint(0)
+        };
 
+        for (what, doorbell) in [("an approval", hint(1)), ("a finished turn", turn_end)] {
+            let sender =
+                ApnsPushSender::without_a_network(Arc::new(StoreRegistry::new(Arc::clone(&store))));
+            sender.send(&doorbell, &[]);
+            for device in ["phone-1", "phone-2"] {
+                assert_eq!(
+                    queued(&sender, device),
+                    1,
+                    "{what} must be filed once for {device}"
+                );
+            }
+        }
+
+        // **And when a device leaves the fleet, what was queued for it goes with
+        // it.** Retirement is the one path by which a phone leaves — a revoked
+        // device, or one whose token another device claimed — and it takes the
+        // queue with it rather than leaving a doorbell waiting for a socket nobody
+        // will open.
         let sender =
             ApnsPushSender::without_a_network(Arc::new(StoreRegistry::new(Arc::clone(&store))));
-        sender.send(&codex_approval_hint(1), &[]);
-
+        sender.send(&hint(1), &[]);
+        assert_eq!(queued(&sender, "phone-1"), 1, "the premise");
+        sender.retire("phone-1");
         assert_eq!(
-            filed(&sender),
-            vec!["codex-app".to_string()],
-            "a Codex approval doorbell reaches the phone that said the word and no other"
-        );
-        assert_eq!(
-            queued(&sender, "old-app"),
-            0,
-            "the old app is not delivered a Codex doorbell and is not left holding one"
-        );
-        assert_eq!(queued(&sender, "codex-app"), 1);
-
-        // **And when a device does stop being a recipient, what was queued for
-        // it goes with it.** Retirement is the one path in this build by which a
-        // phone leaves the fleet — a revoked device, or one whose token another
-        // device claimed — and it takes the queue with it rather than leaving a
-        // doorbell waiting for a socket nobody will open.
-        sender.retire("codex-app");
-        assert_eq!(
-            queued(&sender, "codex-app"),
+            queued(&sender, "phone-1"),
             0,
             "a retired device is not left holding an undelivered doorbell"
         );
 
         let _ = std::fs::remove_file(&path);
-    }
-
-    /// **And the same seam in the direction that carries the traffic: a Claude
-    /// doorbell reaches the ordinary fleet.**
-    ///
-    /// The test above alone is one-sided, and a one-sided test of a filter masks
-    /// the failure that costs more. Hard-code `&AgentKind::Codex` in place of
-    /// `&hint.agent` at this sender's call to [`recipients`] and that test passes
-    /// unchanged — while every ordinary Claude push is authorized to Codex-capable
-    /// phones only. Nothing in production writes the features column, so every real
-    /// row is the `NULL` Claude floor: the whole fleet stops ringing, silently,
-    /// because a suppression produces no error anywhere — it produces a phone that
-    /// does not buzz, which nothing but an assertion about *inclusion* can see.
-    ///
-    /// The two phones that make the difference are `claude-floor-phone`, the shape
-    /// every pre-Codex device sends, and `claude-only-phone`, which named Claude
-    /// and nothing else. Both are refused by a Codex subject, and both must have a
-    /// Claude one.
-    ///
-    /// The hint is `hint(2)` — an `Approval` speaking for two blocked runs, which
-    /// is exactly what `describing` hands the sender when a deck is open, since the
-    /// deck is Claude's in this build.
-    ///
-    /// Same no-network property as the test above: nothing is awaited between the
-    /// send and the read, so no worker is ever polled and no socket is opened.
-    ///
-    /// **Mutation:** hard-code `&protocol::agent::AgentKind::Codex` in place of
-    /// `&hint.agent` at [`ApnsPushSender::send`]'s call to [`recipients`]. This
-    /// goes red on the two Claude-only phones;
-    /// `a_codex_doorbell_is_filed_only_for_the_phones_that_advertised_codex` stays
-    /// green.
-    #[tokio::test]
-    async fn a_claude_doorbell_is_filed_for_the_legacy_fleet_and_not_only_the_codex_capable() {
-        let sender =
-            ApnsPushSender::without_a_network(Arc::new(FakeRegistry(a_fleet_of_every_shape())));
-
-        sender.send(&hint(2), &[]);
-
-        assert_eq!(
-            filed(&sender),
-            vec![
-                "both-phone".to_string(),
-                "claude-floor-phone".to_string(),
-                "claude-only-phone".to_string()
-            ],
-            "a Claude doorbell is filed for every phone that can open a Claude run — \
-             the floor included, which is every phone in the field today. A missing \
-             one means the sender asked about an agent the run is not, and a device \
-             that could have answered was never told"
-        );
-        assert!(
-            !filed(&sender).contains(&"codex-only-phone".to_string()),
-            "and a non-empty advertisement still grants exactly what it names: a \
-             phone that said Codex and only Codex is not handed the floor back"
-        );
     }
 
     #[test]
@@ -2051,7 +1535,6 @@ mod tests {
                         kind,
                         blocked_sessions: blocked,
                         session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
-                        agent: protocol::agent::AgentKind::Claude,
                     };
                     let payload = ApnsPushSender::payload(&hint);
                     let parsed: serde_json::Value =

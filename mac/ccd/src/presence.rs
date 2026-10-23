@@ -1,24 +1,33 @@
-//! Whether someone is at the Mac, for a background agent's question.
+//! Whether someone is at the Mac: keyboard or mouse input anywhere on it
+//! within a time each caller chooses.
 //!
-//! Claude draws a background agent's question only after its
-//! `PermissionRequest` hook returns, so while the daemon holds it for the phone
-//! the Mac shows nothing. It is therefore held only while nobody is at the Mac:
-//! "at the Mac" is keyboard or mouse input anywhere on it in the last
-//! [`IDLE_THRESHOLD`], and input resuming hands the question back to the Mac.
+//! Two callers, one check:
+//!
+//!   * **A background agent's question.** Claude draws it only after its
+//!     `PermissionRequest` hook returns, so while the daemon holds it for the
+//!     phone the Mac shows nothing. It is held only while nobody has touched
+//!     the Mac for [`QUESTION_IDLE`], and input resuming hands it back.
+//!   * **A ring.** The phone is for when the owner is away: a ring raised while
+//!     someone has used the Mac within [`RING_IDLE`] waits, and rings once the
+//!     Mac has been left that long.
 
 use std::time::Duration;
 
-/// How recent the last keyboard or mouse input must be to count as someone at
-/// the Mac.
-pub const IDLE_THRESHOLD: Duration = Duration::from_secs(10);
+/// How recent input must be for a background agent's question to stay at the
+/// Mac.
+pub const QUESTION_IDLE: Duration = Duration::from_secs(10);
 
-/// How often a held background question checks whether someone is back.
+/// How long the Mac must be left before a ring reaches the phone.
+pub const RING_IDLE: Duration = Duration::from_secs(120);
+
+/// How often a held question or a held ring checks the Mac again.
 pub const POLL: Duration = Duration::from_millis(100);
 
 /// Time since the last keyboard or mouse input on this Mac, as the HID system
 /// counts it (`IOHIDSystem`'s `HIDIdleTime`). Needs no permission and prompts
-/// for none. `None` when it cannot be read, which callers treat as "someone
-/// may be here": a question then goes to the Mac rather than being hidden.
+/// for none. `None` when it cannot be read, and each caller reads that so that
+/// nothing is hidden: a background question counts someone as here and goes to
+/// the Mac; a ring counts nobody as here and goes to the phone.
 pub fn hid_idle() -> Option<Duration> {
     use std::ffi::{c_char, c_void};
     type CFTypeRef = *const c_void;
@@ -70,15 +79,16 @@ pub fn hid_idle() -> Option<Duration> {
     }
 }
 
-/// Someone is at the Mac: it has had keyboard or mouse input within the
-/// threshold, or its idle time cannot be read, in which case nothing is hidden
-/// from it.
-pub fn at_the_mac() -> bool {
-    present(idle())
+/// Whether the Mac has had keyboard or mouse input within `within`; `None`
+/// when its idle time cannot be read. What `None` means is the caller's, and
+/// both read it so that nothing is hidden: a question goes to the Mac, a ring
+/// goes to the phone.
+pub fn at_the_mac(within: Duration) -> Option<bool> {
+    used_within(idle(), within)
 }
 
-fn present(idle: Option<Duration>) -> bool {
-    idle.is_none_or(|idle| idle < IDLE_THRESHOLD)
+fn used_within(idle: Option<Duration>, within: Duration) -> Option<bool> {
+    idle.map(|idle| idle < within)
 }
 
 #[cfg(not(test))]
@@ -87,8 +97,8 @@ fn idle() -> Option<Duration> {
 }
 
 /// In tests the Mac's idle time is the test's, set per thread with
-/// [`set_idle`]; unset, someone is at the Mac, so no test hides a question
-/// by accident of how long this machine has been left alone.
+/// [`set_idle`]; unset, it cannot be read, so no test hides a question or
+/// holds a ring by accident of how long this machine has been left alone.
 #[cfg(test)]
 fn idle() -> Option<Duration> {
     IDLE.with(|idle| idle.get())
@@ -96,7 +106,7 @@ fn idle() -> Option<Duration> {
 
 #[cfg(test)]
 thread_local! {
-    static IDLE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(Some(Duration::ZERO)) };
+    static IDLE: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -119,13 +129,31 @@ mod tests {
         assert_ne!(idle, again, "the value is computed at read time");
     }
 
-    /// The presence rule as a table: recent input is someone there, and so is
-    /// an idle time that cannot be read.
+    /// The presence rule as a table: input more recent than the caller's time
+    /// is someone there, and an idle time that cannot be read is no answer.
     #[test]
-    fn someone_is_at_the_mac_only_with_recent_input() {
-        assert!(present(Some(Duration::from_secs(2))));
-        assert!(present(None));
-        assert!(!present(Some(IDLE_THRESHOLD)));
-        assert!(!present(Some(Duration::from_secs(600))));
+    fn someone_is_at_the_mac_only_with_input_within_the_callers_time() {
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            used_within(Some(Duration::from_secs(2)), minute),
+            Some(true)
+        );
+        assert_eq!(
+            used_within(Some(minute - Duration::from_millis(1)), minute),
+            Some(true)
+        );
+        assert_eq!(used_within(Some(minute), minute), Some(false));
+        assert_eq!(
+            used_within(Some(Duration::from_secs(600)), minute),
+            Some(false)
+        );
+        assert_eq!(used_within(None, minute), None);
+    }
+
+    /// The owner's two times.
+    #[test]
+    fn a_question_waits_ten_seconds_and_a_ring_two_minutes() {
+        assert_eq!(QUESTION_IDLE, Duration::from_secs(10));
+        assert_eq!(RING_IDLE, Duration::from_secs(120));
     }
 }

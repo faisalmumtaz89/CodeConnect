@@ -268,6 +268,26 @@ final class FleetStatusTests: XCTestCase {
         XCTAssertEqual(CapabilityBadge.observe(reason: "detached").bandNote, "Observe only")
     }
 
+    /// An ended run is said to have ended — not to be answerable at the Mac,
+    /// which no ended run is — whatever its link reads, and only once the daemon
+    /// has answered, like every other verdict.
+    func testAnEndedSessionSaysItHasEnded() throws {
+        let caps = try JSONDecoder().decode(
+            Capabilities.self,
+            from: Data(
+                #"{"can_approve_reliably":true,"fail_mode":"fail_open","answer_path":"hook_return","hold_secs":25,"send_text":true,"capture":true,"push":true,"tls":false}"#
+                    .utf8))
+        for link in ["attached", "detached", "stale"] {
+            let badge = FleetStatusRule.capability(
+                summary: summary(lifecycle: "exited", link: link), capabilities: caps)
+            XCTAssertFalse(badge.canAct, link)
+            XCTAssertEqual(badge.reason, "This session has ended.", link)
+        }
+        guard case .unknown = FleetStatusRule.capability(
+            summary: summary(lifecycle: "exited", link: "detached"), capabilities: nil)
+        else { return XCTFail("before the handshake an ended run is not a verdict either") }
+    }
+
     /// The settled truth table stays settled.
     func testSettledCapabilityTruthTable() throws {
         let caps = try JSONDecoder().decode(

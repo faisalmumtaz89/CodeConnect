@@ -106,19 +106,6 @@ const PROBE_OUTPUT_LIMIT: u64 = 64 * 1024;
 
 // ---------------------------------------------------------------- scaffolding
 
-fn tmux_bin() -> Option<PathBuf> {
-    for cand in [
-        "/opt/homebrew/bin/tmux",
-        "/usr/local/bin/tmux",
-        "/usr/bin/tmux",
-    ] {
-        if Path::new(cand).exists() {
-            return Some(PathBuf::from(cand));
-        }
-    }
-    None
-}
-
 fn nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -283,7 +270,7 @@ fn live_gate() -> Option<PathBuf> {
         ),
     };
     assert!(
-        tmux_bin().is_some(),
+        protocol::tmux::tmux_bin().is_some(),
         "CC_CODEX_LIVE=1 was set but no tmux was found; the coordinator puts the host in a \
          tmux pane, so there is nothing to test without one."
     );
@@ -680,7 +667,7 @@ impl LiveSandbox {
             home,
             codex_home,
             tmux_tmpdir,
-            tmux: tmux_bin().expect("tmux checked by the gate"),
+            tmux: protocol::tmux::tmux_bin().expect("tmux checked by the gate"),
             uid,
             nonce,
             run_dir,

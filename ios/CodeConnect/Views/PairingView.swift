@@ -75,6 +75,17 @@ struct PairingView: View {
             .ccAnimation(CC.motion.medium, value: model.isPairing)
         }
         .background(CC.color.bg)
+        // No navigation bar draws behind the status bar here, so scrolled text
+        // would run under the clock: the status bar keeps the screen's own
+        // background instead.
+        .overlay(alignment: .top) {
+            GeometryReader { proxy in
+                CC.color.bg
+                    .frame(height: proxy.safeAreaInsets.top)
+                    .ignoresSafeArea(edges: .top)
+            }
+            .allowsHitTesting(false)
+        }
         .scrollDismissesKeyboard(.interactively)
     }
 
@@ -137,10 +148,11 @@ struct PairingView: View {
 
         CCSectionHeader("To get started")
 
-        // **Four steps, because four things are genuinely required**, and the
-        // screen used to name only two of them. Installing the Mac side and
-        // joining a tailnet were assumed; a reader who had done neither was told
-        // to run a command that does not exist on their machine.
+        // **Five steps, because five things are genuinely required**, and the
+        // screen once named only two of them. Each step left out was a reader
+        // told to run a command that could not work yet: `codeconnect pair`
+        // with no daemon to answer it, or a pairing that showed nothing because
+        // no session had been started through CodeConnect.
         //
         // They are *instructions*, not verified state: no tick marks, and nothing
         // here claims to know anything about the reader's Mac. The app cannot see
@@ -151,28 +163,40 @@ struct PairingView: View {
                 // The command is the only thing on this screen a reader cannot
                 // get anywhere else, and it is given exactly as it must be
                 // typed — monospaced, complete, copyable — the same affordance
-                // step 3 gets, for the same reason. The endpoint installs the
-                // latest signed release; there is no repository to find first.
+                // the later commands get, for the same reason. The endpoint
+                // installs the latest signed release; there is no repository to
+                // find first.
                 CCStepRow(
                     index: 1,
                     title: "Install CodeConnect on your Mac",
                     message:
-                        "Run this in Terminal. It installs the signed release and enables nothing for you. You only do this once.",
+                        "Run this in Terminal, then open a new Terminal window. It installs the signed release and enables nothing for you. Your Mac also needs Claude Code or Codex.",
                     command: "curl -fsSL https://codeconnect.sh | sh")
                 CCHairline()
+                // Tailscale is the default, never a requirement: another
+                // private network works with `ws_bind` on the Mac, and an app
+                // may not demand another app (App Review 4.2.3).
                 CCStepRow(
                     index: 2,
                     title: "Make sure your iPhone can reach your Mac",
                     message:
-                        "Your phone connects straight to the address `codeconnect pair` prints, over whatever private network links the two; many people use Tailscale. It never goes through a server of ours.")
+                        "By default they connect over Tailscale, with both signed in to the same tailnet; another private network works with a setting on the Mac. The connection never goes through a server of ours.")
                 CCHairline()
-                CCStepRow(index: 3, title: "Run this at the Mac", command: "codeconnect pair")
+                CCStepRow(
+                    index: 3, title: "Start CodeConnect on the Mac",
+                    command: "codeconnect daemon install")
                 CCHairline()
                 CCStepRow(
                     index: 4,
-                    title: "Scan the code it prints",
-                    message:
-                        "That is everything. The timeline and the live terminal both run over this one paired connection.")
+                    title: "Pair this iPhone",
+                    message: "Run this at the Mac, then scan the code it prints.",
+                    command: "codeconnect pair")
+                CCHairline()
+                CCStepRow(
+                    index: 5,
+                    title: "Start your agent through CodeConnect",
+                    message: "Run it from your project's folder; sessions you start this way appear here. For Codex: `codeconnect codex`.",
+                    command: "codeconnect claude")
             }
         }
         .padding(.top, CC.rhythm.textSurface)
@@ -200,7 +224,7 @@ struct PairingView: View {
 
             if !showManualEntry {
                 CCButton(
-                    "Enter an address and token instead", variant: .ghost, size: .md,
+                    "Enter the address and code instead", variant: .ghost, size: .md,
                     fullWidth: true
                 ) {
                     withAnimation(CC.motion.small) { showManualEntry = true }
@@ -230,9 +254,10 @@ struct PairingView: View {
                 .transition(.opacity)
         }
 
-        Text("The code is single-use and expires five minutes after codeconnect pair prints it.")
-            .ccType(CC.type.footnote)
-            .foregroundStyle(CC.text.tertiary)
+        CCProse(
+            "The code is single-use and expires five minutes after `codeconnect pair` prints it.",
+            style: CC.type.footnote, color: CC.text.tertiary
+        )
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: 320, alignment: .leading)
             .padding(.top, CC.space.xl)
@@ -243,24 +268,26 @@ struct PairingView: View {
     /// it: what is happening is the only thing happening.
     private var pairingProgress: some View {
         VStack(alignment: .leading, spacing: CC.space.md) {
-            CCProgressRing(.lg)
-
-            Text("Exchanging the code for a device token…")
-                .ccType(CC.type.headline)
-                .foregroundStyle(CC.text.primary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Text("The code is spent on this one connection and never stored.")
-                .ccType(CC.type.footnote)
-                .foregroundStyle(CC.text.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Text(Format.age(pairingElapsed))
-                .ccType(CC.type.monoSmall)
-                .foregroundStyle(CC.text.tertiary)
-
+            // A failed exchange is over: a spinner and a running clock beside
+            // its reason would say it is still going.
             if let error = model.pairingError {
                 CCBanner("Pairing failed", message: error, tone: .danger)
+            } else {
+                CCProgressRing(.lg)
+
+                Text("Exchanging the code for a device token…")
+                    .ccType(CC.type.headline)
+                    .foregroundStyle(CC.text.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("The code is spent on this one connection and never stored.")
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(Format.age(pairingElapsed))
+                    .ccType(CC.type.monoSmall)
+                    .foregroundStyle(CC.text.tertiary)
             }
 
             // `ghost`, which draws its own 1pt edge at rest now, so a recovery
@@ -269,7 +296,9 @@ struct PairingView: View {
             // has stalled, and it stands alone in whitespace: borderless it was
             // a bare centred label, indistinguishable from the body copy above
             // it.
-            CCButton("Cancel pairing", variant: .ghost, size: .md) {
+            CCButton(
+                model.pairingError == nil ? "Cancel pairing" : "Back", variant: .ghost, size: .md
+            ) {
                 model.cancelPairing()
                 pairingStartedAt = nil
             }
@@ -565,15 +594,38 @@ struct PairingView: View {
                 }
             }
 
-            Text(
-                encrypted
-                    ? "The daemon serves its own certificate from `tailscale cert`."
-                    : "Plain ws:// inside the tailnet, WireGuard carries the encryption. The app moves to wss:// as soon as the daemon offers a certificate for its MagicDNS name."
+            // `CCProse`, so the config key it names is set as code.
+            CCProse(
+                Self.transportFootnote(
+                    encrypted: encrypted,
+                    paired: model.connection.helloAck?.deviceID != nil,
+                    capabilities: model.connection.capabilities),
+                style: CC.type.footnote, color: CC.text.tertiary
             )
-            .ccType(CC.type.footnote)
-            .foregroundStyle(CC.text.tertiary)
             .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// What protects a connection, said only as far as the daemon has vouched
+    /// for it. A paired phone is offered the terminal exactly when its
+    /// connection is private — TLS, the daemon's tailnet address or loopback —
+    /// so that one answer separates "WireGuard carries it" from "nothing
+    /// does"; with no paired answer the footnote claims neither.
+    static func transportFootnote(
+        encrypted: Bool, paired: Bool, capabilities: Capabilities?
+    ) -> String {
+        if encrypted {
+            return "The daemon serves its own certificate."
+        }
+        if paired, let capabilities {
+            if capabilities.servesTerminal {
+                return "Plain ws:// on a private path: inside the tailnet, WireGuard carries the encryption. The app moves to wss:// as soon as the daemon offers a certificate."
+            }
+            if capabilities.withholdsTerminal {
+                return "Plain ws:// that nothing encrypts: the Mac allows it on this network (`ws_allow_plaintext`). The live terminal is not offered over it."
+            }
+        }
+        return "Plain ws://: private only where a VPN such as Tailscale carries it. The app moves to wss:// as soon as the daemon offers a certificate."
     }
 
     @ViewBuilder

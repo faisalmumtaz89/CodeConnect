@@ -212,11 +212,14 @@ extension JSONValue {
         out += "\""
     }
 
-    /// Human-readable rendering for disclosure rows — pretty, stable key order.
+    /// Human-readable rendering for disclosure rows — pretty, stable key order,
+    /// and `displaySafe`: it is only ever drawn. Mapped once the rendering is
+    /// finished, never in the escaper it shares with `canonicalJSONString`,
+    /// which the render check compares byte for byte.
     var prettyJSONString: String {
         var out = ""
         writePretty(indent: 0, into: &out)
-        return out
+        return out.displaySafe
     }
 
     private func writePretty(indent: Int, into out: inout String) {

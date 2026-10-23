@@ -368,7 +368,7 @@ final class PersistedApprovalRowTests: XCTestCase {
         XCTAssertEqual(footer, "Answer not confirmed")
 
         let spoken = ApprovalRow.resolvedAccessibilityLabel(
-            for: outcome, toolName: approval.card.toolName)
+            for: outcome, call: approval.card.toolName)
         XCTAssertFalse(spoken.contains("Resolved approval"), spoken)
         XCTAssertTrue(spoken.hasPrefix("Unconfirmed approval"), spoken)
     }
@@ -384,7 +384,7 @@ final class PersistedApprovalRowTests: XCTestCase {
         // resolved_by "local" in the fixture → "at the Mac".
         XCTAssertEqual(ApprovalRow.resolutionText(for: outcome), "Allowed at the Mac")
         XCTAssertTrue(
-            ApprovalRow.resolvedAccessibilityLabel(for: outcome, toolName: approval.card.toolName)
+            ApprovalRow.resolvedAccessibilityLabel(for: outcome, call: approval.card.toolName)
                 .hasPrefix("Resolved approval"))
     }
 }

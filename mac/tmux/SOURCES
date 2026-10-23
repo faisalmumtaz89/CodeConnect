@@ -1,0 +1,10 @@
+# The sources CodeConnect's own tmux (`cc-tmux`) is built from: name, version,
+# URL, SHA-256. Each checksum was confirmed against a second, independent
+# publisher (GitHub's release digest for tmux; Homebrew's formula for the
+# libraries) when it was pinned. Changing any line is a new bundle: bump
+# BUNDLE, which `cc-tmux -V` reports and `codeconnect` requires.
+BUNDLE 3.7c-cc1
+tmux 3.7c https://github.com/tmux/tmux/releases/download/3.7c/tmux-3.7c.tar.gz 7c60cae9a0e25288e2e24750aafc9e8800fc7fd4555e447e1b29ee4201cfb3bf
+libevent 2.1.13-stable https://github.com/libevent/libevent/releases/download/release-2.1.13-stable/libevent-2.1.13-stable.tar.gz f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c
+utf8proc 2.12.0 https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.12.0.tar.gz f564011d38b2888d583d510b08e69ffa15aa117155db1b9b49ef1dfe1fa25111
+jemalloc 5.4.0 https://github.com/jemalloc/jemalloc/releases/download/5.4.0/jemalloc-5.4.0.tar.bz2 200776fac271093e7c2f21edd6d62657ecd2be578d9328633f2a86bfa6ef4f1d

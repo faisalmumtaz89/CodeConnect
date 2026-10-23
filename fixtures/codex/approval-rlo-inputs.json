@@ -1,0 +1,109 @@
+{
+  "command_wrapped": {
+    "params": {
+      "kind": "command",
+      "threadId": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+      "turnId": "01a06db1-3933-73c2-a871-bde7f1db46fc",
+      "itemId": "exec-aaaaaaaa-0000-4000-8000-000000000001",
+      "startedAtMs": 1788546730914,
+      "environmentId": "local",
+      "reason": "May I push to ‮etomer eht?",
+      "command": "/bin/zsh -lc 'git push origin ‮niam ecrof--'",
+      "cwd": "/work/‮ppa-tset",
+      "commandActions": [
+        {
+          "type": "unknown",
+          "command": "/bin/zsh -lc 'git push origin ‮niam ecrof--'"
+        }
+      ],
+      "proposedExecpolicyAmendment": [
+        "/bin/zsh",
+        "-lc",
+        "git push origin ‮niam ecrof--"
+      ],
+      "availableDecisions": [
+        "accept",
+        {
+          "acceptWithExecpolicyAmendment": {
+            "execpolicy_amendment": [
+              "/bin/zsh",
+              "-lc",
+              "git push origin ‮niam ecrof--"
+            ]
+          }
+        },
+        "cancel"
+      ]
+    }
+  },
+  "command_tokens": {
+    "params": {
+      "kind": "command",
+      "threadId": "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+      "turnId": "01a06db1-3933-73c2-a871-bde7f1db46fc",
+      "itemId": "exec-aaaaaaaa-0000-4000-8000-000000000002",
+      "startedAtMs": 1788546730914,
+      "environmentId": "local",
+      "reason": "Push?",
+      "command": "git push origin ‮niam ecrof--",
+      "cwd": "/work/p",
+      "commandActions": [
+        {
+          "type": "unknown",
+          "command": "git push origin ‮niam ecrof--"
+        }
+      ],
+      "proposedExecpolicyAmendment": [
+        "git",
+        "push",
+        "‮niam ecrof--"
+      ],
+      "availableDecisions": [
+        "accept",
+        {
+          "acceptWithExecpolicyAmendment": {
+            "execpolicy_amendment": [
+              "git",
+              "push",
+              "‮niam ecrof--"
+            ]
+          }
+        },
+        "cancel"
+      ]
+    }
+  },
+  "file_change": {
+    "params": {
+      "threadId": "01a06db1-b6a5-7500-8956-6c35b83b32d2",
+      "turnId": "01a06db1-ce36-79d0-a0c1-9eecc7865ac0",
+      "itemId": "exec-aaaaaaaa-0000-4000-8000-000000000003",
+      "startedAtMs": 1788546773489,
+      "reason": "Write ‮elif eht?",
+      "grantRoot": null
+    },
+    "started": {
+      "type": "fileChange",
+      "id": "exec-aaaaaaaa-0000-4000-8000-000000000003",
+      "changes": [
+        {
+          "path": "/work/‮txt.olleh",
+          "kind": {
+            "type": "update",
+            "move_path": "/work/‮hs.nimda"
+          },
+          "diff": "@@ -1 +1 @@\n-hello\n+git push origin ‮niam ecrof--\n"
+        },
+        {
+          "path": "/work/b.txt",
+          "kind": {
+            "type": "add",
+            "move_path": null
+          },
+          "diff": "@@ -0,0 +1 @@\n+plain\n"
+        }
+      ],
+      "status": "inProgress"
+    }
+  }
+}

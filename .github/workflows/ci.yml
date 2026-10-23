@@ -23,9 +23,22 @@ jobs:
         run: rustup component add rustfmt clippy
 
       # The launcher's lifecycle gates drive real tmux sessions and refuse to
-      # report green without one; the macOS image does not ship tmux.
-      - name: Install tmux
-        run: brew install tmux
+      # report green without one; the macOS image does not ship tmux. They run
+      # against the tmux a release ships, built from the same pinned sources,
+      # never whatever version a package manager has moved on to.
+      - name: Cache the pinned tmux
+        id: tmux-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tmux
+          key: ${{ runner.os }}-${{ runner.arch }}-tmux-${{ hashFiles('mac/tmux/**') }}
+
+      - name: Build the pinned tmux
+        if: steps.tmux-cache.outputs.cache-hit != 'true'
+        run: mac/tmux/build.sh "$RUNNER_TEMP/tmux"
+
+      - name: Use the pinned tmux
+        run: echo "CODECONNECT_TMUX=$RUNNER_TEMP/tmux/cc-tmux-$(uname -m)" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: actions/cache@v4

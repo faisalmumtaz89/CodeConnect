@@ -1,0 +1,133 @@
+{
+  "command_tokens": {
+    "display_text": "command\n{\"command\":\"git push origin ‮niam ecrof--\",\"cwd\":\"/work/p\",\"options\":[{\"id\":\"accept\",\"label\":\"Yes, proceed\"},{\"id\":\"acceptWithExecpolicyAmendment\",\"label\":\"Yes, and don't ask again for commands that start with `git push '‮niam ecrof--'`\",\"payload\":{\"execpolicy_amendment\":[\"git\",\"push\",\"‮niam ecrof--\"]}},{\"id\":\"cancel\",\"label\":\"No, and tell Codex what to do differently\"}],\"proposed_amendment\":[\"git\",\"push\",\"‮niam ecrof--\"],\"reason\":\"Push?\"}",
+    "generation": 1,
+    "identity_bound": false,
+    "payload_hash": "706155e0764c48a7201c470ab6c3d14f956037f743c19e7cfd108feaaada7a20",
+    "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtYWFhYWFhYWEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAyAAAAAAAAAAE",
+    "risk": {
+      "class": "medium"
+    },
+    "tool_input": {
+      "command": "git push origin ‮niam ecrof--",
+      "cwd": "/work/p",
+      "options": [
+        {
+          "id": "accept",
+          "label": "Yes, proceed"
+        },
+        {
+          "id": "acceptWithExecpolicyAmendment",
+          "label": "Yes, and don't ask again for commands that start with `git push '‮niam ecrof--'`",
+          "payload": {
+            "execpolicy_amendment": [
+              "git",
+              "push",
+              "‮niam ecrof--"
+            ]
+          }
+        },
+        {
+          "id": "cancel",
+          "label": "No, and tell Codex what to do differently"
+        }
+      ],
+      "proposed_amendment": [
+        "git",
+        "push",
+        "‮niam ecrof--"
+      ],
+      "reason": "Push?"
+    },
+    "tool_name": "command"
+  },
+  "command_wrapped": {
+    "display_text": "command\n{\"command\":\"/bin/zsh -lc 'git push origin ‮niam ecrof--'\",\"cwd\":\"/work/‮ppa-tset\",\"options\":[{\"id\":\"accept\",\"label\":\"Yes, proceed\"},{\"id\":\"acceptWithExecpolicyAmendment\",\"label\":\"Yes, and don't ask again for commands that start with `git push origin ‮niam ecrof--`\",\"payload\":{\"execpolicy_amendment\":[\"/bin/zsh\",\"-lc\",\"git push origin ‮niam ecrof--\"]}},{\"id\":\"cancel\",\"label\":\"No, and tell Codex what to do differently\"}],\"proposed_amendment\":[\"/bin/zsh\",\"-lc\",\"git push origin ‮niam ecrof--\"],\"reason\":\"May I push to ‮etomer eht?\"}",
+    "generation": 1,
+    "identity_bound": false,
+    "payload_hash": "9d581979a32579259621f7fc0c26c408f7df876f9aec312bd52002d9f2ee01df",
+    "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gAJDAxYTA2ZGIxLTFmOGUtN2RiMi04ZmQ1LTEwZjEzYWY1NWQxYgEAKWV4ZWMtYWFhYWFhYWEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAxAAAAAAAAAAE",
+    "risk": {
+      "class": "medium"
+    },
+    "tool_input": {
+      "command": "/bin/zsh -lc 'git push origin ‮niam ecrof--'",
+      "cwd": "/work/‮ppa-tset",
+      "options": [
+        {
+          "id": "accept",
+          "label": "Yes, proceed"
+        },
+        {
+          "id": "acceptWithExecpolicyAmendment",
+          "label": "Yes, and don't ask again for commands that start with `git push origin ‮niam ecrof--`",
+          "payload": {
+            "execpolicy_amendment": [
+              "/bin/zsh",
+              "-lc",
+              "git push origin ‮niam ecrof--"
+            ]
+          }
+        },
+        {
+          "id": "cancel",
+          "label": "No, and tell Codex what to do differently"
+        }
+      ],
+      "proposed_amendment": [
+        "/bin/zsh",
+        "-lc",
+        "git push origin ‮niam ecrof--"
+      ],
+      "reason": "May I push to ‮etomer eht?"
+    },
+    "tool_name": "command"
+  },
+  "file_change": {
+    "display_text": "file change\n{\"changes\":[{\"diff\":\"@@ -1 +1 @@\\n-hello\\n+git push origin ‮niam ecrof--\\n\",\"kind\":{\"move_path\":\"/work/‮hs.nimda\",\"type\":\"update\"},\"path\":\"/work/‮txt.olleh\"},{\"diff\":\"@@ -0,0 +1 @@\\n+plain\\n\",\"kind\":{\"move_path\":null,\"type\":\"add\"},\"path\":\"/work/b.txt\"}],\"options\":[{\"id\":\"accept\",\"label\":\"Yes, proceed\"},{\"id\":\"acceptForSession\",\"label\":\"Yes, and don't ask again for these files\"},{\"id\":\"cancel\",\"label\":\"No, and tell Codex what to do differently\"}],\"path\":\"/work/‮txt.olleh\",\"reason\":\"Write ‮elif eht?\"}",
+    "generation": 1,
+    "identity_bound": false,
+    "payload_hash": "e795a09f9c496e430e1669e7ca632233febdc2c1ad407e83880d0661a2614130",
+    "request_id": "AQAaMDFLMUIzWFE4WkMwREU1RkdIN0pLTU5QQ1gAJDAxYTA2ZGIxLWI2YTUtNzUwMC04OTU2LTZjMzViODNiMzJkMgEAKWV4ZWMtYWFhYWFhYWEtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAzAAAAAAAAAAE",
+    "risk": {
+      "class": "medium"
+    },
+    "tool_input": {
+      "changes": [
+        {
+          "diff": "@@ -1 +1 @@\n-hello\n+git push origin ‮niam ecrof--\n",
+          "kind": {
+            "move_path": "/work/‮hs.nimda",
+            "type": "update"
+          },
+          "path": "/work/‮txt.olleh"
+        },
+        {
+          "diff": "@@ -0,0 +1 @@\n+plain\n",
+          "kind": {
+            "move_path": null,
+            "type": "add"
+          },
+          "path": "/work/b.txt"
+        }
+      ],
+      "options": [
+        {
+          "id": "accept",
+          "label": "Yes, proceed"
+        },
+        {
+          "id": "acceptForSession",
+          "label": "Yes, and don't ask again for these files"
+        },
+        {
+          "id": "cancel",
+          "label": "No, and tell Codex what to do differently"
+        }
+      ],
+      "path": "/work/‮txt.olleh",
+      "reason": "Write ‮elif eht?"
+    },
+    "tool_name": "file change"
+  }
+}

@@ -317,35 +317,69 @@ fn real_transcript_maps_to_known_kinds_and_dedups() {
 }
 
 /// Every way a 2.1.290 turn ends, recorded: each turn gets one end, a turn a
-/// tool ended (no `stop_hook_summary`) at its `turn_duration`, an API error
-/// none, read in one scan as a resumed transcript is or one line per scan, so
-/// no answer depends on what an earlier scan saw.
+/// tool ended (no `stop_hook_summary`) or an API error ended at its
+/// `turn_duration`.
 #[test]
 fn every_recorded_turn_ends_once_however_the_file_is_read() {
-    const ENDS: [&str; 12] = [
-        "6963bfa6-64dc-40e4-8e35-28f553e293f1", // plain reply: summary
-        "c94ee365-8b09-46b7-9a4e-50aa631de65c", // after a tool: summary
-        "2c2657a0-896e-4824-8de3-ca5471002aa4", // question answered from the phone: summary
-        "b4f9a1eb-f02c-4dbe-9fb3-562cb2caeef5", // MCP `claude/endTurn`: turn_duration
-        "1adf2598-1c7b-44cc-9e8c-d2a7e0e74a7e", // Stop hook blocks: summary
-        "5fb42419-8093-484f-b41b-b692682c241d", // then ends: summary
-        "26b2bce5-9ea0-474c-a76d-bc96cf21468c", // Stop hook blocks: summary
-        "c57a2687-0042-4283-a6c2-7b7e1a6864ac", // then an MCP end: turn_duration
-        // The API error (c07e9856…) and its turn_duration (b96e7edb…): no end.
-        // `/rename` typed during the turn: its row is held until the turn ends,
-        // between the summary and the turn_duration (3ad3e3a1…), which is no end.
-        "481929df-54cc-49f6-ab25-6d76d78ce8fa",
-        "0cb45a75-ed80-46f8-9b22-7a5b12e6d65c", // a background agent launched: summary
-        "4a66ee3c-601f-4081-8d9b-114778762092", // its result: summary
-        "92b952f2-e7f5-4391-b68f-d13753143860", // plain reply: summary
-    ];
-    let recorded = std::fs::read_to_string(fixture("transcript/turn-ends-2.1.290.jsonl")).unwrap();
+    each_turn_ends_once_however_the_file_is_read(
+        "transcript/turn-ends-2.1.290.jsonl",
+        &[
+            "6963bfa6-64dc-40e4-8e35-28f553e293f1", // plain reply: summary
+            "c94ee365-8b09-46b7-9a4e-50aa631de65c", // after a tool: summary
+            "2c2657a0-896e-4824-8de3-ca5471002aa4", // question answered from the phone: summary
+            "b4f9a1eb-f02c-4dbe-9fb3-562cb2caeef5", // MCP `claude/endTurn`: turn_duration
+            "1adf2598-1c7b-44cc-9e8c-d2a7e0e74a7e", // Stop hook blocks: summary
+            "5fb42419-8093-484f-b41b-b692682c241d", // then ends: summary
+            "26b2bce5-9ea0-474c-a76d-bc96cf21468c", // Stop hook blocks: summary
+            "c57a2687-0042-4283-a6c2-7b7e1a6864ac", // then an MCP end: turn_duration
+            "b96e7edb-8229-4d6e-970a-f03e3c19190e", // API error (c07e9856…): turn_duration
+            // `/rename` typed during the turn: its row is held until the turn ends,
+            // between the summary and the turn_duration (3ad3e3a1…), which is no end.
+            "481929df-54cc-49f6-ab25-6d76d78ce8fa",
+            "0cb45a75-ed80-46f8-9b22-7a5b12e6d65c", // a background agent launched: summary
+            "4a66ee3c-601f-4081-8d9b-114778762092", // its result: summary
+            "92b952f2-e7f5-4391-b68f-d13753143860", // plain reply: summary
+        ],
+    );
+}
+
+/// Turns 2.1.305 ended on, or carried on past, an API error, recorded: an
+/// error ends its turn at the `turn_duration` Claude writes after it, which is
+/// where the Mac draws its "✻ … done" line. Claude's retries that succeed leave
+/// no error behind, and an error mid-turn (the stream cut while a tool was
+/// being called) is followed by the tool's result and a reply, with no end
+/// until the turn's own.
+#[test]
+fn every_recorded_api_error_turn_ends_once_however_the_file_is_read() {
+    each_turn_ends_once_however_the_file_is_read(
+        "transcript/api-errors-2.1.305.jsonl",
+        &[
+            "5d95abd5-1864-4615-8f3f-bf64da90c63b", // plain reply: summary
+            "14151849-0967-49dc-ae4c-8477a29e4d10", // HTTP 400: turn_duration
+            "a962cc2a-5a8a-433e-a100-ccecbb899483", // 529 twice, then a reply: summary
+            "32a14618-de10-4dd2-a9cf-9ed332e3be6f", // repeated 529: turn_duration
+            "802b93f1-70ad-4896-b8fe-6e27055ba2f4", // HTTP 400 after a tool: turn_duration
+            "5b5285b9-f0a2-4bca-a406-da4c69802f6c", // plain reply: summary
+            // The stream cut mid-turn (cc1eb9f4…), then the tool's result and a
+            // reply: one end, the summary.
+            "b2d13652-12f2-491d-9061-cf7aaac790dd",
+        ],
+    );
+}
+
+/// Read in one scan, as a resumed transcript is, or one line per scan, so no
+/// answer depends on what an earlier scan saw.
+fn each_turn_ends_once_however_the_file_is_read(relative: &str, expected: &[&str]) {
+    let recorded = std::fs::read_to_string(fixture(relative)).unwrap();
     for per_line in [false, true] {
         let store = temp_store();
         let run = run();
         seed_session(&store, &run);
+        // Named for the fixture too: the tests that share this run in parallel
+        // threads of one process, and may start in the same millisecond.
         let path = std::env::temp_dir().join(format!(
-            "ccd-turn-ends-{}-{}-{per_line}.jsonl",
+            "ccd-turn-ends-{}-{}-{}-{per_line}.jsonl",
+            relative.replace('/', "_"),
             std::process::id(),
             protocol::time::now_unix_ms()
         ));
@@ -374,7 +408,7 @@ fn every_recorded_turn_ends_once_however_the_file_is_read() {
             .filter(|event| event.kind == EventKind::TurnComplete)
             .filter_map(|event| event.source_event_id)
             .collect();
-        assert_eq!(ends, ENDS, "one line per scan: {per_line}");
+        assert_eq!(ends, expected, "{relative}, one line per scan: {per_line}");
     }
 }
 
@@ -444,28 +478,274 @@ fn regenerate_the_user_lines_wire_fixture() {
 }
 
 fn derived_user_lines_wire() -> serde_json::Value {
+    let lines = emitted_wire(
+        "transcript/turn-ends-2.1.290.jsonl",
+        "2026-10-06T20:30:00.000Z",
+    )
+    .into_iter()
+    .filter(|event| event["kind"] == "user_message")
+    .collect();
+    serde_json::Value::Array(lines)
+}
+
+/// **Interrupted Claude turns, as this build emits them.** Recorded from
+/// Claude Code 2.1.304 against a fake model (`transcript/interrupts-2.1.304/`):
+/// Esc while the reply streams, Esc while a tool runs, and "No" at a tool's
+/// permission prompt, each followed by a later prompt answered in full, and a
+/// session resumed after an Esc, where Claude writes its `<synthetic>` "No
+/// response requested." placeholder with the next prompt. An Esc
+/// writes Claude's interrupt marker and no turn end at all; the refusal writes
+/// the same marker and a `turn_duration` straight after it. Every event of each
+/// run, serialised as a phone is sent it; the phone's timeline tests read the
+/// copy under `ios/` (byte-identical, by `fixtures/check-duplicated-fixtures.sh`).
+#[test]
+fn the_interrupts_wire_fixture_is_what_this_build_emits() {
+    const FIXTURE: &str = include_str!("../../../fixtures/claude/transcript-interrupts-wire.json");
+    let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(
+        derived_interrupts_wire(),
+        committed,
+        "the committed interrupts wire no longer matches what this build emits. Regenerate \
+         it with cargo test -p ccd --bin ccd -- --ignored \
+         regenerate_the_interrupts_wire_fixture, then copy it over its copy under ios/ \
+         (fixtures/check-duplicated-fixtures.sh names it)"
+    );
+}
+
+/// Rewrite `fixtures/claude/transcript-interrupts-wire.json` with what this
+/// build emits.
+#[test]
+#[ignore = "generator, not a gate"]
+fn regenerate_the_interrupts_wire_fixture() {
+    let wire = serde_json::to_string_pretty(&derived_interrupts_wire()).unwrap();
+    std::fs::write(
+        fixture("claude/transcript-interrupts-wire.json"),
+        wire + "\n",
+    )
+    .unwrap();
+}
+
+fn derived_interrupts_wire() -> serde_json::Value {
+    let mut runs = serde_json::Map::new();
+    for name in [
+        "esc-mid-reply",
+        "esc-during-tool",
+        "refuse-tool",
+        "resume-after-esc",
+    ] {
+        let events = emitted_wire(
+            &format!("transcript/interrupts-2.1.304/{name}.jsonl"),
+            "2026-10-20T11:50:00.000Z",
+        );
+        runs.insert(name.to_string(), serde_json::Value::Array(events));
+    }
+    serde_json::Value::Object(runs)
+}
+
+/// **A scheduled prompt, as this build emits it.** Recorded from Claude Code
+/// 2.1.305 against a fake model (`transcript/scheduled-prompt-2.1.305.jsonl`):
+/// a typed prompt that schedules a one-shot prompt with `CronCreate`, the
+/// prompt firing with nothing typed — an `isMeta` user line stamped
+/// `promptSource: "system"`, `turnOrigin: "scheduled"`, no `origin` — answered
+/// and closed by a `turn_duration`, then a typed prompt answered in full. Every
+/// event, serialised as a phone is sent it; the phone's fleet-status tests read
+/// the copy under `ios/` (byte-identical, by `fixtures/check-duplicated-fixtures.sh`).
+#[test]
+fn the_scheduled_prompt_wire_fixture_is_what_this_build_emits() {
+    const FIXTURE: &str =
+        include_str!("../../../fixtures/claude/transcript-scheduled-prompt-wire.json");
+    let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(
+        derived_scheduled_prompt_wire(),
+        committed,
+        "the committed scheduled-prompt wire no longer matches what this build emits. \
+         Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+         regenerate_the_scheduled_prompt_wire_fixture, then copy it over its copy under ios/ \
+         (fixtures/check-duplicated-fixtures.sh names it)"
+    );
+}
+
+/// Rewrite `fixtures/claude/transcript-scheduled-prompt-wire.json` with what
+/// this build emits.
+#[test]
+#[ignore = "generator, not a gate"]
+fn regenerate_the_scheduled_prompt_wire_fixture() {
+    let wire = serde_json::to_string_pretty(&derived_scheduled_prompt_wire()).unwrap();
+    std::fs::write(
+        fixture("claude/transcript-scheduled-prompt-wire.json"),
+        wire + "\n",
+    )
+    .unwrap();
+}
+
+fn derived_scheduled_prompt_wire() -> serde_json::Value {
+    serde_json::Value::Array(emitted_wire(
+        "transcript/scheduled-prompt-2.1.305.jsonl",
+        "2026-10-22T02:50:00.000Z",
+    ))
+}
+
+/// **Turns an API error ended, as this build emits them.** Recorded from
+/// Claude Code 2.1.305 against a fake model (`transcript/api-errors-2.1.305.jsonl`):
+/// a plain reply, an HTTP 400, two 529s Claude retried past, a repeated 529, a
+/// 400 after a tool call, and a stream cut mid-turn that Claude carried on
+/// past. Each turn an error ended closes with the `turn_duration` Claude writes
+/// after the error, filed as its end. Every event, serialised as a phone is sent
+/// it; the phone's fleet-status tests read the copy under `ios/` (byte-identical,
+/// by `fixtures/check-duplicated-fixtures.sh`).
+#[test]
+fn the_api_errors_wire_fixture_is_what_this_build_emits() {
+    const FIXTURE: &str = include_str!("../../../fixtures/claude/transcript-api-errors-wire.json");
+    let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(
+        derived_api_errors_wire(),
+        committed,
+        "the committed API-errors wire no longer matches what this build emits. Regenerate \
+         it with cargo test -p ccd --bin ccd -- --ignored \
+         regenerate_the_api_errors_wire_fixture, then copy it over its copy under ios/ \
+         (fixtures/check-duplicated-fixtures.sh names it)"
+    );
+}
+
+/// Rewrite `fixtures/claude/transcript-api-errors-wire.json` with what this
+/// build emits.
+#[test]
+#[ignore = "generator, not a gate"]
+fn regenerate_the_api_errors_wire_fixture() {
+    let wire = serde_json::to_string_pretty(&derived_api_errors_wire()).unwrap();
+    std::fs::write(
+        fixture("claude/transcript-api-errors-wire.json"),
+        wire + "\n",
+    )
+    .unwrap();
+}
+
+fn derived_api_errors_wire() -> serde_json::Value {
+    serde_json::Value::Array(emitted_wire(
+        "transcript/api-errors-2.1.305.jsonl",
+        "2026-10-22T07:35:00.000Z",
+    ))
+}
+
+/// **Built-in slash commands, as this build emits them.** Recorded from Claude
+/// Code 2.1.308 against a fake model (`transcript/*-2.1.308.jsonl`):
+/// `model-after-turn`, `/model sonnet` typed after a turn ended — caveat,
+/// `<command-name>` and `<local-command-stdout>` lines and nothing else, no
+/// reply — then a typed prompt; `plan-goal`, `/plan <description>` and `/goal
+/// <condition>`, each typed after a turn ended and each answered, with no
+/// `promptSource` on any of their lines and `turnOrigin: "human"` on their
+/// output line only; and `commands-mid-turn`, `/model sonnet`, `/rename` and
+/// `/plan <description>` each typed while a turn ran — `/model` writes no line,
+/// `/rename` a reminder for the model before the turn's end, and `/plan` waits
+/// for the turn to end and then starts its own. Every event of each run,
+/// serialised as a phone is sent it; the phone's fleet-status tests read the
+/// copy under `ios/` (byte-identical, by `fixtures/check-duplicated-fixtures.sh`).
+#[test]
+fn the_local_commands_wire_fixture_is_what_this_build_emits() {
+    const FIXTURE: &str =
+        include_str!("../../../fixtures/claude/transcript-local-commands-wire.json");
+    let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(
+        derived_local_commands_wire(),
+        committed,
+        "the committed local-commands wire no longer matches what this build emits. \
+         Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+         regenerate_the_local_commands_wire_fixture, then copy it over its copy under ios/ \
+         (fixtures/check-duplicated-fixtures.sh names it)"
+    );
+}
+
+/// Rewrite `fixtures/claude/transcript-local-commands-wire.json` with what this
+/// build emits.
+#[test]
+#[ignore = "generator, not a gate"]
+fn regenerate_the_local_commands_wire_fixture() {
+    let wire = serde_json::to_string_pretty(&derived_local_commands_wire()).unwrap();
+    std::fs::write(
+        fixture("claude/transcript-local-commands-wire.json"),
+        wire + "\n",
+    )
+    .unwrap();
+}
+
+fn derived_local_commands_wire() -> serde_json::Value {
+    let mut runs = serde_json::Map::new();
+    for name in ["model-after-turn", "plan-goal", "commands-mid-turn"] {
+        let events = emitted_wire(
+            &format!("transcript/{name}-2.1.308.jsonl"),
+            "2026-10-22T14:20:00.000Z",
+        );
+        runs.insert(name.to_string(), serde_json::Value::Array(events));
+    }
+    serde_json::Value::Object(runs)
+}
+
+/// **A skill invoked after a finished turn, its line unstamped, as this build
+/// emits it.** `transcript/skill-invocation-unstamped.jsonl` is
+/// `plan-goal-2.1.308.jsonl`'s closed turn followed by the shape Claude Code
+/// 2.1.220 wrote for `/code-review` — a `<command-message>`-first line with
+/// neither `promptSource` nor `turnOrigin`, the skill's `isMeta` body, the reply
+/// and the turn's end. Every event, serialised as a phone is sent it; the
+/// phone's fleet-status tests read the copy under `ios/` (byte-identical, by
+/// `fixtures/check-duplicated-fixtures.sh`).
+#[test]
+fn the_skill_invocation_wire_fixture_is_what_this_build_emits() {
+    const FIXTURE: &str =
+        include_str!("../../../fixtures/claude/transcript-skill-invocation-wire.json");
+    let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(
+        derived_skill_invocation_wire(),
+        committed,
+        "the committed skill-invocation wire no longer matches what this build emits. \
+         Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+         regenerate_the_skill_invocation_wire_fixture, then copy it over its copy under \
+         ios/ (fixtures/check-duplicated-fixtures.sh names it)"
+    );
+}
+
+/// Rewrite `fixtures/claude/transcript-skill-invocation-wire.json` with what this
+/// build emits.
+#[test]
+#[ignore = "generator, not a gate"]
+fn regenerate_the_skill_invocation_wire_fixture() {
+    let wire = serde_json::to_string_pretty(&derived_skill_invocation_wire()).unwrap();
+    std::fs::write(
+        fixture("claude/transcript-skill-invocation-wire.json"),
+        wire + "\n",
+    )
+    .unwrap();
+}
+
+fn derived_skill_invocation_wire() -> serde_json::Value {
+    serde_json::Value::Array(emitted_wire(
+        "transcript/skill-invocation-unstamped.jsonl",
+        "2026-10-22T14:20:00.000Z",
+    ))
+}
+
+/// Every event `relative`'s recording becomes, through the production tailer and
+/// store, serialised as a phone is sent it. The scan's clock read is the one
+/// field that is not the recording's; it is set to `ts`.
+fn emitted_wire(relative: &str, ts: &str) -> Vec<serde_json::Value> {
     let store = temp_store();
     // A fixed run, so the derivation is the same bytes on every build.
     let run = protocol::event::SessionKey::new("01K1B3XQ8ZC0DE5FGH7JKMNPQR", "cc-1");
     seed_session(&store, &run);
-    let path = fixture("transcript/turn-ends-2.1.290.jsonl");
+    let path = fixture(relative);
     let scan = crate::tailer::scan_file(&store, &run, path.to_str().unwrap())
         .unwrap()
         .unwrap();
     store
         .append_batch_with_cursor(&run.uid, &scan.events, &scan.cursor)
         .unwrap();
-    let events: Vec<serde_json::Value> = store
+    store
         .events_after(&run.uid, 0, 1000)
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == EventKind::UserMessage)
         .map(|event| {
             let mut value = serde_json::to_value(event).unwrap();
-            // The scan's clock read, the one field that is not the recording's.
-            value["ts"] = serde_json::json!("2026-10-06T20:30:00.000Z");
+            value["ts"] = serde_json::json!(ts);
             value
         })
-        .collect();
-    serde_json::Value::Array(events)
+        .collect()
 }

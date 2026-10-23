@@ -131,57 +131,6 @@ pub mod terminal_close {
     pub const SESSION_EXITED: &str = "session_exited";
 }
 
-/// What a client can understand, carried on `hello` and on `register_push`.
-///
-/// The one fact it holds today is which agents the client can render and drive.
-/// A client that sends none — or a daemon reading a frame that predates this
-/// field — is **Claude-only**: [`ClientFeatures::supports`] reads an empty set as
-/// the floor and requires every other agent to be named, which is the honest,
-/// fail-closed reading. It is a struct rather than a bare `Vec` so a later feature
-/// is one additive field here, not a second parallel list on two messages.
-///
-/// **Wire-legal and inert on both messages today: the daemon accepts an
-/// advertisement and stores nothing**, so what a client says here scopes nothing —
-/// not a name resolution, not a push. See [`RegisterPush::features`] for why the
-/// write side was deleted rather than kept working. The predicate below is live all
-/// the same, because push eligibility already asks it — of the *device row*, which
-/// is `NULL` on every device.
-///
-/// [`RegisterPush::features`]: ClientMessage::RegisterPush::features
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientFeatures {
-    /// Agents this client can observe and act on. Absent/empty ⇒ Claude-only.
-    /// An unrecognised agent name round-trips as
-    /// [`crate::agent::AgentKind::Unsupported`] and grants nothing.
-    #[serde(default)]
-    pub agents: Vec<crate::agent::AgentKind>,
-}
-
-impl ClientFeatures {
-    /// True when the client advertised it can handle this agent. Claude-only is
-    /// the floor, so Claude is supported by a client that named it *or* that
-    /// named nothing at all (the legacy shape); every other agent must be
-    /// explicitly advertised.
-    ///
-    /// **An unrecognised agent grants nothing, and that has to be said rather
-    /// than left to the set.** `Vec::contains` compares
-    /// [`crate::agent::AgentKind::Unsupported`] by its preserved name, so a
-    /// client that advertised `["gemini"]` matched a doorbell *for* `gemini` and
-    /// authorized it — a build that cannot name the agent vouching that a phone
-    /// can render it. Both sides of that comparison are values this build does
-    /// not understand, and agreeing about a name is not the same as being able
-    /// to act on it.
-    pub fn supports(&self, agent: &crate::agent::AgentKind) -> bool {
-        if matches!(agent, crate::agent::AgentKind::Unsupported(_)) {
-            return false;
-        }
-        if agent.is_claude() && self.agents.is_empty() {
-            return true;
-        }
-        self.agents.contains(agent)
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -206,19 +155,6 @@ pub enum ClientMessage {
         client_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_name: Option<String>,
-        /// What this client can understand (its agent set today). Absent from a
-        /// client predating the agent seam, which is Claude-only.
-        ///
-        /// **Wire-legal and inert today, on the same terms as
-        /// [`ClientMessage::RegisterPush::features`]: the daemon reads it off the
-        /// wire and drops it.** It scopes no request on this connection — the
-        /// daemon holds no connection-scoped feature state at all — because a
-        /// scoping path with no input is machinery rather than a feature, and no
-        /// shipping client encodes this field. It rides `hello` because it is a
-        /// property of the whole connection rather than of one request, which is
-        /// where connection scoping, once built, will want it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        features: Option<ClientFeatures>,
     },
     Sessions,
     /// `session_id` is a **session reference**: either a `session_uid` (exact,
@@ -379,22 +315,6 @@ pub enum ClientMessage {
         /// pair the relay has no binding for.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         relay_credential: Option<crate::secret::Redacted>,
-        /// What this device can be notified about (its agent set).
-        ///
-        /// **Wire-legal and inert today: the daemon accepts this field and stores
-        /// nothing.** The write side was deleted rather than kept working, because
-        /// nothing that ships can fill the field — no client encodes it — and a
-        /// write path with no input is machinery, not a feature. So every device
-        /// row reads `NULL`, which is the Claude floor, and a device hears about a
-        /// non-Claude agent only once both a phone that advertises and the
-        /// persistence that records it exist.
-        ///
-        /// It rides `register_push` rather than `hello` because push eligibility is
-        /// a property of the *device*, projected per device at dequeue time, not of
-        /// the live connection — which is what the read side already assumes and
-        /// what the write side will land against.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        features: Option<ClientFeatures>,
     },
 
     /// Open a live terminal on the session named by `session_uid`. `cols`/
@@ -915,8 +835,7 @@ pub struct Capabilities {
     #[serde(default)]
     pub codex_compose: bool,
     /// The agents this daemon can actually host, named honestly. A client scopes
-    /// what it offers to this set and intersects it with its own
-    /// [`ClientFeatures`]. Empty — from any daemon predating the agent seam — is
+    /// what it offers to this set. Empty — from any daemon predating the agent seam — is
     /// read as `["claude"]`: Claude is the floor, and this list only ever *adds*
     /// to it. **Omitted entirely while it would only name Claude** — an empty
     /// list is skipped on the wire, so a daemon with nothing to add beyond the
@@ -1551,15 +1470,25 @@ mod tests {
             pairing_code: None,
             client_id: None,
             client_name: Some("iPhone".into()),
-            features: None,
         };
         let s = serde_json::to_string(&msg).unwrap();
         assert!(s.contains("\"type\":\"hello\""));
         assert!(!s.contains("client_id"));
         assert!(!s.contains("pairing_code"));
-        // A hello that names no features is Claude-only, and omits the field.
-        assert!(!s.contains("features"));
         let _: ClientMessage = serde_json::from_str(&s).unwrap();
+        // A key this build does not name is ignored rather than refused: a hello
+        // still carrying the `features` list minor 15 defined decodes as the
+        // same hello.
+        let with_features = s.replacen('{', r#"{"features":{"agents":["codex"]},"#, 1);
+        match serde_json::from_str::<ClientMessage>(&with_features).unwrap() {
+            ClientMessage::Hello {
+                token, client_name, ..
+            } => {
+                assert_eq!(token.as_deref(), Some("t"));
+                assert_eq!(client_name.as_deref(), Some("iPhone"));
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
     }
 
     #[test]
@@ -1938,13 +1867,29 @@ mod tests {
             other => panic!("wrong message: {other:?}"),
         }
 
+        // A registration still carrying the `features` list minor 15 defined is
+        // the same registration: the key is ignored rather than refused.
+        let advertising: ClientMessage = serde_json::from_str(
+            r#"{"type":"register_push","token":"aabb","environment":"production",
+                "features":{"agents":["claude","codex"]}}"#,
+        )
+        .unwrap();
+        match advertising {
+            ClientMessage::RegisterPush {
+                token, environment, ..
+            } => {
+                assert_eq!(token, "aabb");
+                assert_eq!(environment.as_deref(), Some("production"));
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
+
         // And a minor-14 registration is exactly the same document plus one
         // optional key, so an older daemon ignores it rather than failing.
         let carried = serde_json::to_value(ClientMessage::RegisterPush {
             token: "aabb".into(),
             environment: Some("production".into()),
             relay_credential: Some("opaque".into()),
-            features: None,
         })
         .unwrap();
         assert_eq!(carried["type"], "register_push");
@@ -1968,7 +1913,6 @@ mod tests {
             token: "aabb".into(),
             environment: Some("production".into()),
             relay_credential: None,
-            features: None,
         })
         .unwrap();
         assert!(direct_registration.get("relay_credential").is_none());
@@ -2320,66 +2264,6 @@ mod tests {
     }
 
     #[test]
-    fn client_features_absent_is_claude_only() {
-        // A hello/register_push that names no features is the legacy shape:
-        // Claude-only, and Claude is supported by the empty set.
-        let empty = ClientFeatures::default();
-        assert!(empty.supports(&crate::agent::AgentKind::Claude));
-        assert!(!empty.supports(&crate::agent::AgentKind::Codex));
-        // Named agents: Claude must still be listed to be a member of a
-        // non-empty set, but the empty-set case is the only Claude-implicit one.
-        let codex_only = ClientFeatures {
-            agents: vec![crate::agent::AgentKind::Codex],
-        };
-        assert!(!codex_only.supports(&crate::agent::AgentKind::Claude));
-        assert!(codex_only.supports(&crate::agent::AgentKind::Codex));
-        // An unknown agent name is preserved through decode and grants nothing —
-        // not even to itself. Round-tripping the name honestly is a storage
-        // property; authorizing on it would be this build vouching that a phone
-        // can render an agent neither side can name.
-        let json = r#"{"agents":["codex","gemini"]}"#;
-        let decoded: ClientFeatures = serde_json::from_str(json).unwrap();
-        assert!(decoded.supports(&crate::agent::AgentKind::Codex));
-        assert!(!decoded.supports(&crate::agent::AgentKind::Claude));
-        assert!(decoded
-            .agents
-            .contains(&crate::agent::AgentKind::Unsupported("gemini".into())));
-    }
-
-    /// **A device that advertised an unknown agent is not authorized for it.**
-    ///
-    /// The hole this pins was reachable the moment anything writes a feature set:
-    /// `Vec::contains` matches `Unsupported("gemini")` against `Unsupported(
-    /// "gemini")`, so the one set that could *possibly* claim the agent — the one
-    /// that names it — was the one set that authorized it, in direct contradiction
-    /// of the "grants nothing" contract two lines above it.
-    ///
-    /// **Mutation:** drop the `Unsupported` arm from `ClientFeatures::supports`
-    /// and the first assertion fails.
-    #[test]
-    fn an_advertised_unknown_agent_authorizes_nothing() {
-        let gemini = crate::agent::AgentKind::from_str_lossy("gemini");
-        assert_eq!(
-            gemini,
-            crate::agent::AgentKind::Unsupported("gemini".into())
-        );
-        // The device named the very agent being asked about, and it still grants
-        // nothing: this build cannot drive `gemini`, so it cannot vouch for a
-        // phone's ability to render one.
-        let advertised = ClientFeatures {
-            agents: vec![gemini.clone()],
-        };
-        assert!(!advertised.supports(&gemini));
-        // And naming an unknown agent does not buy the floor either: a non-empty
-        // set grants exactly what it names, and it named nothing this build knows.
-        assert!(!advertised.supports(&crate::agent::AgentKind::Claude));
-        assert!(!advertised.supports(&crate::agent::AgentKind::Codex));
-        // The empty set is still the legacy Claude floor, and an unknown agent
-        // gets nothing from it.
-        assert!(!ClientFeatures::default().supports(&gemini));
-    }
-
-    #[test]
     fn capabilities_supported_agents_defaults_empty_for_an_older_daemon() {
         // An ack from a daemon predating the seam omits the list; it decodes as
         // empty, which a client reads as Claude-only.
@@ -2572,69 +2456,6 @@ mod tests {
         };
         let s = serde_json::to_string(&result).unwrap();
         assert!(s.contains(r#""status":"rejected""#), "{s}");
-    }
-
-    /// **The wire matrix, at the type level**: a connection's
-    /// advertised-agent set scopes what may be delivered to it, and the daemon's
-    /// own `supported_agents` is intersected with it. A client that predates the
-    /// seam (no features) is Claude-only, so a Codex session's records are never
-    /// eligible for it; a Codex-aware client is. The per-connection *enforcement*
-    /// of this scoping is not built yet; this pins the primitive it will use.
-    #[test]
-    fn the_advertised_agent_set_scopes_what_a_connection_may_receive() {
-        use crate::agent::AgentKind;
-        // The effective set a connection may receive = the agents the daemon
-        // supports ∩ the agents the client advertised.
-        fn deliverable(daemon: &[AgentKind], client: &ClientFeatures, agent: &AgentKind) -> bool {
-            daemon.contains(agent) && client.supports(agent)
-        }
-        let daemon_supports = [AgentKind::Claude]; // A daemon that runs Claude only.
-
-        // An old reader (no features ⇒ Claude-only): Claude records deliver,
-        // Codex records never do.
-        let old_reader = ClientFeatures::default();
-        assert!(deliverable(
-            &daemon_supports,
-            &old_reader,
-            &AgentKind::Claude
-        ));
-        assert!(!deliverable(
-            &daemon_supports,
-            &old_reader,
-            &AgentKind::Codex
-        ));
-
-        // A Codex-aware reader: Codex would be deliverable *once the daemon also
-        // supports it* — but not while the daemon is Claude-only, so the daemon's
-        // honesty is the backstop even for a client that asks for more.
-        let codex_reader = ClientFeatures {
-            agents: vec![AgentKind::Claude, AgentKind::Codex],
-        };
-        assert!(deliverable(
-            &daemon_supports,
-            &codex_reader,
-            &AgentKind::Claude
-        ));
-        assert!(
-            !deliverable(&daemon_supports, &codex_reader, &AgentKind::Codex),
-            "a daemon must not deliver an agent it does not support, even when asked"
-        );
-        assert!(deliverable(
-            &[AgentKind::Claude, AgentKind::Codex],
-            &codex_reader,
-            &AgentKind::Codex
-        ));
-
-        // An unknown advertised agent grants nothing actionable and is never
-        // Claude.
-        let unknown_reader = ClientFeatures {
-            agents: vec![AgentKind::Unsupported("gemini".into())],
-        };
-        assert!(!deliverable(
-            &daemon_supports,
-            &unknown_reader,
-            &AgentKind::Claude
-        ));
     }
 
     #[test]

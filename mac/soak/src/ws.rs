@@ -97,7 +97,6 @@ impl Phone {
                 pairing_code,
                 client_id: None,
                 client_name: Some(client_name.into()),
-                features: None,
             })
             .await?;
         match phone.next_message(Duration::from_secs(10)).await? {

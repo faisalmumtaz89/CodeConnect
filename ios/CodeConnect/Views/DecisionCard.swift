@@ -239,7 +239,7 @@ struct DecisionCardView: View {
     /// Claude's `AskUserQuestion`, on a card whose structured `tool_input`
     /// reproduces the hashed text — the questions drawn are then provably the
     /// ones the daemon sent. Anything less falls back to the approval layout,
-    /// read-only (`answerSurface`), showing the daemon's exact text.
+    /// read-only (`answerSurface`), showing the hashed text through `displaySafe`.
     static func questionCard(card: ApprovalCard, agent: AgentKind?) -> QuestionCard? {
         guard agent == .claude, card.verification.hashMatchesDisplayText,
             card.verification.renderMatchesDisplayText
@@ -283,7 +283,7 @@ struct DecisionCardView: View {
                 // which must stay reachable however far the reader scrolls. This
                 // footer has no controls: it is one sentence saying there is
                 // nothing to tap. Pinned, it bought nothing and cost twice —
-                // measured at AX5 on a 6.9" phone, it covered the EXACT COMMAND
+                // measured at AX5 on a 6.9" phone, it covered the COMMAND
                 // block and still clipped its own last word off the bottom of
                 // the screen.
                 //
@@ -422,7 +422,7 @@ struct DecisionCardView: View {
             .accessibilityLabel(label.spoken)
             .padding(.top, 6)
 
-            if let cwd = model.shownSummary(for: approval.sessionKey)?.cwd {
+            if let cwd = model.shownSummary(for: approval.sessionKey)?.shownCwd {
                 Text(cwd)
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.disabled)
@@ -503,7 +503,7 @@ struct DecisionCardView: View {
     /// What the block beneath the header actually holds.
     ///
     /// A Codex `file change` card's principal argument is a **path**, and this
-    /// header read `EXACT COMMAND` over it — a noun for a thing that is not
+    /// header read `COMMAND` over it — a noun for a thing that is not
     /// there, on the card whose whole job is to say precisely what will happen.
     /// Caught by looking at `codex-card-filechange-wide--L.png`.
     ///
@@ -512,7 +512,7 @@ struct DecisionCardView: View {
     /// measured a block that sometimes does not exist is a gate that sometimes
     /// does not exist.
     private var commandHeader: String {
-        !changes.isEmpty || changesOmitted != nil ? "First file changed" : "Exact command"
+        !changes.isEmpty || changesOmitted != nil ? "First file changed" : "Command"
     }
 
     /// The tool's own description, unless it is the command again in sentence case.
@@ -943,7 +943,7 @@ struct DecisionCardView: View {
             if isClaudeCard {
                 CCDisclosure("Full tool input") {
                     VStack(alignment: .leading, spacing: CC.space.sm) {
-                        CCMonoBlock(approval.card.toolInput.prettyJSONString)
+                        CCMonoBlock(approval.card.shownToolInput)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("request_id     \(approval.card.requestID)")
                             Text("payload_hash   \(approval.card.payloadHash)")
@@ -1470,7 +1470,7 @@ struct DecisionCardView: View {
     ///
     /// **Short at accessibility sizes, and it never says "above".** It read
     /// *"Answer by choosing one of Codex's options above."* and cost three
-    /// lines at AX5 — a quarter of the screen, drawn over the exact command,
+    /// lines at AX5 — a quarter of the screen, drawn over the command,
     /// which is the same failure the subordinate controls were relocated out of
     /// this bar to avoid. And "above" was false as printed: at AX5 the option
     /// rows are far below the fold, so the one word telling the reader where to
@@ -1534,6 +1534,8 @@ struct DecisionCardView: View {
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(
+                        "Still waiting on the Mac, \(Format.spokenDuration(elapsed)).")
             }
             if elapsed >= 20 {
                 CCButton("Check link", variant: .ghost, size: .sm) {
@@ -1879,7 +1881,7 @@ struct DecisionCardView: View {
 /// viewport — and the geometry test lives here too, so it can be tested without
 /// a rule.
 struct ReadGate: Equatable {
-    /// The bottom edge of the block carrying the exact command has been inside
+    /// The bottom edge of the block carrying the command has been inside
     /// the visible region at least once.
     var hasSeenCommand = false
     /// …and so has the bottom edge of the risk class and its provenance.
@@ -1952,7 +1954,7 @@ struct ReadGate: Equatable {
 /// decision, not part of the view's identity; only the decision is state.
 @MainActor
 final class ReadGateProbe {
-    /// The bottom edge of the block carrying the exact command, in screen
+    /// The bottom edge of the block carrying the command, in screen
     /// coordinates.
     ///
     /// **`nil` means "not measured yet", stated as `nil`.** A sentinel —
@@ -2037,7 +2039,7 @@ private struct DiffWidthKey: PreferenceKey {
     }
 }
 
-/// The bottom edge of the block carrying the exact command.
+/// The bottom edge of the block carrying the command.
 private struct CommandBottomKey: ReadGateEdgeKey {}
 
 /// The bottom edge of the risk class and its provenance.

@@ -53,7 +53,7 @@ final class AgeTickTests: XCTestCase {
     /// The same, for `CCWaitClock`: its text and its accessibility label.
     private func clockPair(since: Date, now: Date) -> String {
         CCWaitClock.clock(since: since, now: now)
-            + " / " + Format.spokenAge(now.timeIntervalSince(since))
+            + " / " + Format.spokenDuration(now.timeIntervalSince(since))
     }
 
     /// **The promise `nextChange` makes**, asserted against the formatter that

@@ -109,6 +109,9 @@ enum NoticeSeverity: Sendable, Hashable {
 enum NoticeKind: Sendable, Hashable {
     /// A `Stop` hook: the turn finished, the session is still alive.
     case turnComplete
+    /// The person stopped the turn at the Mac. A boundary, like `turnComplete`:
+    /// after an Esc, Claude writes no other end.
+    case turnInterrupted
     case sessionEnded
     case agentWaiting
     /// Claude Code's routine `idle_prompt`: a minute after a finished turn, it
@@ -131,12 +134,23 @@ enum NoticeKind: Sendable, Hashable {
     case other
 }
 
+/// One notice, as the timeline draws it. Its title and detail are often
+/// someone else's words — a notification's message, a background task's
+/// summary, an error, a command's output — so both are held `displaySafe`.
 struct NoticeItem: Sendable, Hashable {
     var kind: NoticeKind
     var symbol: String
     var title: String
     var detail: String?
     var severity: NoticeSeverity
+
+    init(kind: NoticeKind, symbol: String, title: String, detail: String?, severity: NoticeSeverity) {
+        self.kind = kind
+        self.symbol = symbol
+        self.title = title.displaySafe
+        self.detail = detail?.displaySafe
+        self.severity = severity
+    }
 }
 
 struct TimelineItem: Sendable, Hashable, Identifiable {
@@ -173,6 +187,18 @@ struct TimelineItem: Sendable, Hashable, Identifiable {
 ///   * an event log is append-only, so the builder is a pure function of the
 ///     events — no incremental state to get out of sync.
 enum TimelineBuilder {
+    /// The seq of the newest prompt handed to the agent (`Event.startsTurn`),
+    /// drawn or not, or 0 when there is none. A prompt Claude Code annulled is
+    /// none: resuming a session whose last prompt went unanswered, it writes
+    /// its placeholder reply, and that prompt will never be answered.
+    static func lastPromptSeq(_ events: [Event]) -> UInt64 {
+        for event in events.reversed() {
+            if event.isClaudePlaceholderReply { return 0 }
+            if event.startsTurn { return event.seq }
+        }
+        return 0
+    }
+
     static func build(_ events: [Event]) -> [TimelineItem] {
         guard !events.isEmpty else { return [] }
 
@@ -250,6 +276,11 @@ enum TimelineBuilder {
         /// `attached` is the supervisor registering at spawn, which says
         /// nothing to the reader; after it, `attached` is the recovery.
         var linkWasDown = false
+        /// Whether the run has ended. Its supervisor's link coming and going
+        /// around the end — it lets go of the daemon to say the run is over —
+        /// is the ending itself, which the end's own row already says; until a
+        /// new start, the link says nothing about anything still running.
+        var runEnded = false
         /// Events that observe the session and say nothing about its turns.
         let observations: [EventKind] = [.linkState, .error, .notification]
         /// The session's own start is the top of the timeline and draws no
@@ -329,6 +360,17 @@ enum TimelineBuilder {
                                             severity: .info))))
                         }
                     }
+                } else if event.isClaudeInterrupt {
+                    // The Mac's own row for it, in the Mac's words.
+                    items.append(
+                        event.item(
+                            .notice(
+                                NoticeItem(
+                                    kind: .turnInterrupted,
+                                    symbol: "stop.circle",
+                                    title: "Interrupted · What should Claude do instead?",
+                                    detail: nil,
+                                    severity: .info))))
                 } else if let notification = event.taskNotification {
                     // The Mac's one row: `⏺ <summary> · <time>`, its dot
                     // coloured by the task's status. A report with no summary
@@ -349,6 +391,9 @@ enum TimelineBuilder {
                 }
 
             case .agentMessage:
+                // Claude's resume placeholder is not a reply: no row, and so
+                // no activity on the fleet.
+                if event.isClaudePlaceholderReply { break }
                 if let text = event.agentText {
                     items.append(
                         event.item(.agentMessage(text, isInterrupted: event.isInterruptedItem)))
@@ -456,10 +501,18 @@ enum TimelineBuilder {
                 if notice.kind == .agentIdle, event.seq < lastUserMessageSeq { break }
                 items.append(event.item(.notice(notice)))
 
-            case .sessionEnd, .turnComplete:
+            case .sessionEnd:
+                while case .notice(let notice)? = items.last?.content, notice.kind == .link {
+                    items.removeLast()
+                }
+                runEnded = true
+                items.append(event.item(.notice(endNotice(for: event))))
+
+            case .turnComplete:
                 items.append(event.item(.notice(endNotice(for: event))))
 
             case .sessionStart:
+                runEnded = false
                 if atSessionTop { break }
                 guard let title = startTitle(source: event.payload["source"]?.stringValue)
                 else { break }
@@ -483,7 +536,7 @@ enum TimelineBuilder {
                                 severity: .info))))
 
             case .linkState:
-                guard let fact = event.linkStateFact else { break }
+                guard !runEnded, let fact = event.linkStateFact else { break }
                 let wasDown = linkWasDown
                 linkWasDown = fact.link != "attached"
                 if fact.link == "attached", !wasDown { break }

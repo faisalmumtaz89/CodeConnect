@@ -256,4 +256,22 @@ mod tests {
         assert!(String::from_utf8_lossy(&failed.stderr).contains("the session was not started"));
         std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
+
+    /// A `TERM` CodeConnect names for the pane wins over the one tmux gave it.
+    #[test]
+    fn a_term_codeconnect_names_wins_over_the_panes() {
+        let dir = scratch();
+        let own = [("TERM".to_string(), "tmux-256color".to_string())];
+        let file = write(&dir, vec![pair("TERM", b"caller")], &own).unwrap();
+        let output = std::process::Command::new(built_binary())
+            .args([OsStr::new(SUBCOMMAND), file.as_os_str()])
+            .args(["/usr/bin/printenv", "TERM"])
+            .env_clear()
+            .envs([("TERM", "screen-256color")])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert_eq!(output.stdout, b"tmux-256color\n");
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
 }

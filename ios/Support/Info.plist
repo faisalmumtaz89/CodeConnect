@@ -65,7 +65,7 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>CodeConnect uses the camera once, to read the pairing code your Mac prints when you run `codeconnect pair`. Nothing is recorded or sent anywhere.</string>
+	<string>CodeConnect uses the camera once, to read the pairing code your Mac prints when you run “codeconnect pair”. Nothing is recorded or sent anywhere.</string>
 	<!-- Deep-link target: `codeconnect://deck` and
 	     `codeconnect://session/<id>`. A URL can name a particular run or card; a
 	     tapped notification cannot, and does not try — it carries no identifier
@@ -98,7 +98,7 @@
 	     SFSpeechRecognizer, pinned to on-device wherever the locale supports
 	     it. The strings promise only what the code enforces. -->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>CodeConnect listens only while you dictate a message in the compose bar, to transcribe it on this phone. Nothing is recorded or kept.</string>
+	<string>CodeConnect listens only while you dictate a message in the compose bar, to turn it into text. Nothing is recorded or kept.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Apple's speech recognizer turns your dictation into text for the compose bar, on-device wherever your language supports it.</string>
 </dict>

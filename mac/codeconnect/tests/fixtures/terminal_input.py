@@ -167,9 +167,12 @@ def check(root):
 
         received = root / "received"
         go = root / "go"
+        # Stamped with a run's uid, as every session CodeConnect starts is.
         tmux_run("-f", "/dev/null", "new-session", "-d", "-s", "cc-1", "-x", "80", "-y", "24",
+                 "-e", "CODECONNECT_SESSION_UID=01JQXV9K7B8N4M2P6R3T5W9YQD",
                  sys.executable, str(recorder), str(received), str(go), PANE_QUERIES.hex())
-        tmux_run("new-session", "-d", "-s", "cc-12", "sleep", "60")
+        tmux_run("new-session", "-d", "-s", "cc-12", "-e", "CODECONNECT_SESSION_UID=01JQXV9K7B8N4M2P6R3T5W9YQE",
+                 "sleep", "60")
         tmux_run("set-option", "-g", "prefix", "C-b")
         tmux_run("set-option", "-g", "prefix2", "C-a")
 

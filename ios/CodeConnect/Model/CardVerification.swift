@@ -2,7 +2,9 @@ import CryptoKit
 import Foundation
 
 extension ApprovalCard {
-    /// Whether the text on screen is provably the text the daemon hashed.
+    /// Whether what the card shows is provably what the daemon hashed. The bytes
+    /// are checked; the screen draws some of them as U+FFFD (`displaySafe`), so
+    /// the card claims the hash and never "the exact text".
     ///
     /// Two independent checks, because they fail for different reasons:
     ///   * `hashMatchesDisplayText` — SHA-256 of `display_text` against
@@ -11,20 +13,16 @@ extension ApprovalCard {
     ///   * `renderMatchesDisplayText` — our own `"{tool}\n{input}"` rendering
     ///     against `display_text`. Proves the *structured* fields being shown
     ///     are the hashed ones; if it fails we fall back to showing
-    ///     `display_text` verbatim rather than a prettier version we cannot
+    ///     `display_text` itself rather than a prettier version we cannot
     ///     vouch for.
     struct Verification: Sendable, Hashable {
         var hashMatchesDisplayText: Bool
         var renderMatchesDisplayText: Bool
 
         var summary: String {
-            if !hashMatchesDisplayText {
-                return "This card's text does not match its hash."
-            }
-            if !renderMatchesDisplayText {
-                return "Verified against the hash. Showing the daemon's exact text."
-            }
-            return "Verified - this is the exact text the daemon hashed."
+            hashMatchesDisplayText
+                ? "Verified against the daemon's hash."
+                : "This card's text does not match its hash."
         }
     }
 
@@ -66,9 +64,10 @@ extension ApprovalCard {
 
     /// The single line that identifies what will run.
     ///
-    /// Falls back to the exact hashed text whenever the structured parse cannot
-    /// be vouched for — **for Claude**, whose `display_text` is the tool's own
-    /// arguments and is what its reader is checking.
+    /// Falls back to the hashed text, `displaySafe`, whenever the
+    /// structured parse cannot be vouched for — **for Claude**, whose
+    /// `display_text` is the tool's own arguments and is what its reader is
+    /// checking.
     ///
     /// For Codex, and for a card whose agent nobody knows, that fallback was a
     /// raw-JSON hole: `display_text` there is literally `"{tool}\n{input}"`, so
@@ -79,7 +78,12 @@ extension ApprovalCard {
     func primaryText(verification: Verification, agent: AgentKind?) -> String {
         guard verification.renderMatchesDisplayText,
             let argument = ToolSummary.principalArgument(tool: toolName, input: toolInput)
-        else { return agent == .claude ? displayText : Self.unverifiableCodexLine }
+        else { return agent == .claude ? displayText.displaySafe : Self.unverifiableCodexLine }
         return argument
+    }
+
+    /// The card's "Full tool input": every field the tool was called with.
+    var shownToolInput: String {
+        toolInput.prettyJSONString
     }
 }

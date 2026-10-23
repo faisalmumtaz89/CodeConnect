@@ -80,20 +80,24 @@ enum CodexCard {
     /// synthesise one, shorten one, or infer one from a label.
     struct Option: Sendable, Hashable, Identifiable {
         let id: String
+        /// What the card draws and speaks for it, `displaySafe`. Never sent:
+        /// the answer is `id`.
         let label: String
     }
 
-    /// One file the card proposes to change.
+    /// One file the card proposes to change, as the card draws it: every
+    /// string `displaySafe`.
     struct Change: Sendable, Hashable, Identifiable {
+        /// Its place in the card's list. Not its path: two paths can draw
+        /// alike, and a list keyed by what it draws would show one of them.
+        let id: Int
         let path: String
         /// `add` / `update` / `delete` / `rename`, as the app-server named it.
         let kind: String
         /// Where a rename would move it, when the kind is a rename.
         let movePath: String?
-        /// The unified diff for this file, exactly as captured.
+        /// The unified diff for this file, as captured.
         let diff: String
-
-        var id: String { path }
     }
 
     /// The files a card could not carry, because the patch exceeded the 32-file
@@ -113,7 +117,7 @@ enum CodexCard {
             guard let id = row["id"]?.stringValue, !id.isEmpty else { return nil }
             // A label the daemon did not supply is not invented: the id is
             // opaque but at least it is the daemon's own word.
-            return Option(id: id, label: row["label"]?.stringValue ?? id)
+            return Option(id: id, label: (row["label"]?.stringValue ?? id).displaySafe)
         }
     }
 
@@ -121,26 +125,27 @@ enum CodexCard {
     /// absent on every measured file-change card.
     static func reason(in toolInput: JSONValue?) -> String? {
         guard let reason = toolInput?["reason"]?.stringValue, !reason.isEmpty else { return nil }
-        return reason
+        return reason.displaySafe
     }
 
     /// The working directory a command would run in.
     static func cwd(in toolInput: JSONValue?) -> String? {
         guard let cwd = toolInput?["cwd"]?.stringValue, !cwd.isEmpty else { return nil }
-        return cwd
+        return cwd.displaySafe
     }
 
     /// The inline patch. Up to 32 files, 16 KiB per diff, 128 KiB shared — the
     /// Mac's own ceilings, so a card is bounded by construction.
     static func changes(in toolInput: JSONValue?) -> [Change] {
         guard let rows = toolInput?["changes"]?.arrayValue else { return [] }
-        return rows.compactMap { row in
+        return rows.enumerated().compactMap { index, row in
             guard let path = row["path"]?.stringValue else { return nil }
             return Change(
-                path: path,
-                kind: row["kind"]?["type"]?.stringValue ?? "update",
-                movePath: row["kind"]?["move_path"]?.stringValue,
-                diff: row["diff"]?.stringValue ?? "")
+                id: index,
+                path: path.displaySafe,
+                kind: (row["kind"]?["type"]?.stringValue ?? "update").displaySafe,
+                movePath: row["kind"]?["move_path"]?.stringValue?.displaySafe,
+                diff: (row["diff"]?.stringValue ?? "").displaySafe)
         }
     }
 
