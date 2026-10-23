@@ -27,6 +27,7 @@ const SHIP_SOURCE_PATHS: &[&str] = &[
     "mac/ccd",
     "mac/cc-hook",
     "mac/push-core",
+    "mac/tmux/SOURCES",
 ];
 
 /// Git's stdout when it ran and exited zero; `None` for every other outcome —
@@ -93,6 +94,7 @@ fn main() {
         "../ccd",
         "../cc-hook",
         "../push-core",
+        "../tmux/SOURCES",
     ] {
         println!(
             "cargo:rerun-if-changed={}",

@@ -70,7 +70,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         is now *refused* rather than warned about and admitted.
 ///       - a new `error.code`, `message_too_large`, for a reply that would not
 ///         fit one WebSocket frame.
-///       - an `event` whose payload carries `codeconnect_truncated: true` in
+///       - an `event` whose payload carries `_codeconnect_truncated: true` in
 ///         place of an oversized one. Same envelope, same `seq`, so a client
 ///         that does not know the key still advances its watermark correctly.
 ///       - two new [`event::EventKind::Error`] payload shapes from the
@@ -305,7 +305,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         it already holds, so a stale supervisor frame cannot overwrite newer
 ///         adapter state.
 ///       - [`ws::Capabilities::supported_agents`] (the daemon's honest list —
-///         `["claude"]` until Codex actuation ships), [`ws::ClientFeatures`] on
+///         `["claude"]` until Codex actuation ships), a `features` agent list on
 ///         the [`ws::ClientMessage::Hello`] and [`ws::ClientMessage::RegisterPush`]
 ///         frames (a client that advertises no agents is Claude-only), and a
 ///         per-session [`event::SessionSummary::agent`] fact. A per-session fact
@@ -322,14 +322,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         server_request_id, generation)`, opaque to the phone's request-id
 ///         correlation.
 ///
-///     [`ws::ClientFeatures`] stays wire-legal on `hello` and `register_push`
-///     and is **ignored**: no shipping client encodes it, so the daemon stores
-///     nothing and every device sits at the Claude-only floor. The read that
-///     authorizes a push is nonetheless already fail-closed — a stored set not
-///     confirmed under the running daemon's epoch authorizes nothing rather than
-///     falling back to the floor — which is what keeps a Codex doorbell from
-///     reaching a phone that cannot render one. The write arrives with the phone
-///     work that can advertise it.
+///     That `features` list is **no longer a field**: no shipping client ever
+///     encoded it, and every iPhone build since 1.1.0 renders and answers a Codex
+///     run, so a push is no longer scoped by agent and the daemon has nothing to
+///     read it for. Both messages decode with or without the key — an unknown key
+///     is ignored, not refused — so a client that still sends it is unaffected.
 ///
 ///     [`ipc::RegisterSession::exit_replay`] rides here too, and it is the one
 ///     addition that is not about agents at all: it marks the registration a

@@ -70,6 +70,12 @@ pub fn hook_binary() -> Result<PathBuf> {
     )
 }
 
+/// A run's own directory: its settings, its caller environment, and the copy of
+/// what it printed before its terminal attached.
+pub fn session_dir(session_id: &str, session_uid: &str) -> PathBuf {
+    protocol::sessions_dir().join(format!("{session_id}-{session_uid}"))
+}
+
 /// Write the session's settings file and return where it landed.
 ///
 /// The file lives under the session's *uid*, not its tmux name. `cc-1` is
@@ -81,7 +87,7 @@ pub fn write_for_session(
     config: &Config,
 ) -> Result<SettingsPlan> {
     let hook_bin = hook_binary()?;
-    let dir = protocol::sessions_dir().join(format!("{session_id}-{session_uid}"));
+    let dir = session_dir(session_id, session_uid);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join("settings.json");
 
@@ -195,7 +201,7 @@ fn observe_command(
 /// Single-quote for `/bin/sh`. Claude runs hook commands through a shell, and
 /// the paths involved are user-controlled (`$HOME`, a cargo target directory),
 /// so quoting is not optional.
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 

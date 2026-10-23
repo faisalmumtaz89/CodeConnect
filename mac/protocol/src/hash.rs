@@ -1,9 +1,10 @@
 //! Payload hashing for the stale-approval race, and file hashing for executable
 //! identity.
 //!
-//! `payload_hash` is a hash of the *exact text the phone displayed*. The daemon
-//! recomputes it from its own record and rejects a mismatch, so an approval
-//! tapped against a stale card can never be applied to a different command.
+//! `payload_hash` is a hash of the card text the phone checks before drawing
+//! it. The daemon recomputes it from its own record and rejects a mismatch, so
+//! an approval tapped against a stale card can never be applied to a different
+//! command.
 //!
 //! [`sha256_stream_head`] and [`sha256_file`] serve the other kind of identity:
 //! *which bytes are about to run*. A pathname is not an executable — it is a name

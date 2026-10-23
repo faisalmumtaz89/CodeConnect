@@ -42,7 +42,9 @@ pub fn command(args: &[String]) -> Result<()> {
         .map(|(head, tail)| (head.as_str(), tail))
         .unwrap_or(("list", &[]));
     match sub {
-        "list" | "ls" => list(),
+        "list" | "ls" => {
+            crate::no_arguments(rest, "codeconnect sessions [list]").and_then(|()| list())
+        }
         "prune" => prune(rest),
         other => {
             bail!("unknown subcommand {other:?}; usage: codeconnect sessions [prune [--dry-run]]")
@@ -82,7 +84,9 @@ fn prune(args: &[String]) -> Result<()> {
         match arg.as_str() {
             "--dry-run" | "-n" => dry_run = true,
             other => {
-                bail!("unknown option {other:?}; usage: codeconnect sessions prune [--dry-run]")
+                bail!(
+                    "unexpected argument {other:?}; usage: codeconnect sessions prune [--dry-run]"
+                )
             }
         }
     }

@@ -687,8 +687,12 @@ fn is_main(entry: &serde_json::Value, subtype: &str) -> bool {
 /// Claude writes one when a user turn finishes. A turn its Stop hooks ended
 /// already has its end, the `stop_hook_summary`. A turn a tool ended (an MCP
 /// result's `claude/endTurn`, a `/loop` wakeup) runs the Stop hook but writes
-/// no summary, so this is its end. A turn that failed on an API error ran no
-/// Stop hook and has none. Claude's own chain (`parentUuid`) is walked back
+/// no summary, so this is its end. A turn an API error ended runs Claude's
+/// `StopFailure` hooks instead of Stop and writes no summary, so this is its
+/// end too: the Mac draws its "✻ … done" line from it, after the error (356
+/// of the 357 interactive turns an API error ended in real transcripts have
+/// one). An API error the turn carries on past (the stream cut mid-reply) is a
+/// leaf no `turn_duration` chains to (7 of 7). Claude's own chain (`parentUuid`) is walked back
 /// from the `turn_duration` to the turn's last assistant entry: a summary on
 /// the way means the turn is already over, and only a main-conversation
 /// assistant entry proves a turn this ends. Ancestry that cannot be followed
@@ -723,10 +727,7 @@ fn ends_its_turn(
             return Ok(false);
         }
         if entry.get("type").and_then(|v| v.as_str()) == Some("assistant") {
-            return Ok(
-                entry.get("isSidechain").and_then(|v| v.as_bool()) != Some(true)
-                    && entry.get("isApiErrorMessage").and_then(|v| v.as_bool()) != Some(true),
-            );
+            return Ok(entry.get("isSidechain").and_then(|v| v.as_bool()) != Some(true));
         }
         parent = entry.get("parentUuid").cloned();
     }
@@ -1165,8 +1166,9 @@ mod tests {
     }
 
     /// A `turn_duration` ends a turn only when Claude's chain leads back to a
-    /// main-conversation assistant entry that is not an API error, with no
-    /// summary on the way. Ancestry that cannot be followed proves nothing.
+    /// main-conversation assistant entry, an API error included, with no
+    /// summary on the way. Ancestry that cannot be followed proves nothing. An
+    /// API error the turn carries on past is a leaf of the chain, never an end.
     #[test]
     fn a_turn_duration_ends_a_turn_only_when_its_chain_proves_it() {
         let duration = |parent: Option<&str>| {
@@ -1200,7 +1202,29 @@ mod tests {
                     r#"{"type":"assistant","uuid":"a","isApiErrorMessage":true}"#.into(),
                     duration(Some("a")),
                 ],
-                false,
+                true,
+            ),
+            (
+                "API error, then a notice",
+                vec![
+                    r#"{"type":"assistant","uuid":"a","isApiErrorMessage":true}"#.into(),
+                    r#"{"type":"system","subtype":"informational","uuid":"n","parentUuid":"a"}"#
+                        .into(),
+                    duration(Some("n")),
+                ],
+                true,
+            ),
+            (
+                "mid-turn error is a leaf",
+                vec![
+                    main.into(),
+                    r#"{"type":"assistant","uuid":"e","parentUuid":"a","isApiErrorMessage":true}"#
+                        .into(),
+                    r#"{"type":"user","uuid":"u","parentUuid":"a","toolUseResult":{}}"#.into(),
+                    r#"{"type":"assistant","uuid":"r","parentUuid":"u"}"#.into(),
+                    duration(Some("r")),
+                ],
+                true,
             ),
             (
                 "summary",
@@ -1262,6 +1286,13 @@ mod tests {
                 .unwrap()
                 .kind;
             assert_eq!(*kind == EventKind::TurnComplete, ends, "{name}: {kind:?}");
+            assert!(
+                !scan.events.iter().any(|event| {
+                    event.source_event_id.as_deref() == Some("e")
+                        && event.kind == EventKind::TurnComplete
+                }),
+                "{name}: the error is filed as an end"
+            );
             let _ = std::fs::remove_file(&db);
             let _ = std::fs::remove_file(&jsonl);
         }

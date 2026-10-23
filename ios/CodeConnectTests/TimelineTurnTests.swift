@@ -240,6 +240,38 @@ final class TimelineTurnTests: XCTestCase {
         XCTAssertEqual(shape(items), ["notice:Link detached", "notice:Link attached"])
     }
 
+    /// A run that ends normally, in the events ccd records for it: the supervisor
+    /// lets go of its link, reconnects to report the end, and lets go again. That
+    /// is the ending, which its own row says; no link row stands beside it.
+    func testANormalEndReadsAsTheEndAndNotAsALinkFault() {
+        let items = TimelineBuilder.build([
+            event(1, "link_state", #"{"link":"attached","reason":"supervisor registered"}"#, source: "daemon"),
+            user(2),
+            event(3, "link_state", #"{"link":"detached","reason":"supervisor disconnected"}"#, source: "daemon"),
+            event(4, "link_state", #"{"link":"attached","reason":"supervisor registered"}"#, source: "daemon"),
+            event(5, "session_end", #"{"exit_code":null}"#, source: "daemon"),
+            event(6, "link_state", #"{"link":"detached","reason":"supervisor disconnected"}"#, source: "daemon"),
+        ])
+        XCTAssertFalse(shape(items).contains { $0.hasPrefix("notice:Link") }, "\(shape(items))")
+        guard case .notice(let last)? = items.last?.content else {
+            return XCTFail("the end is the last thing said: \(shape(items))")
+        }
+        XCTAssertEqual(last.kind, .sessionEnded)
+    }
+
+    /// A link that dropped while the run went on is still news, and so is a new
+    /// run's link: only the ending's own comings and goings are folded into it.
+    func testALinkDropThatIsNotTheEndingStillSaysSo() {
+        let items = TimelineBuilder.build([
+            event(1, "link_state", #"{"link":"detached","reason":"supervisor disconnected"}"#, source: "daemon"),
+            user(2),
+            event(3, "session_end", #"{"exit_code":null}"#, source: "daemon"),
+            event(4, "session_start", #"{"hook_event_name":"SessionStart","source":"resume"}"#),
+            event(5, "link_state", #"{"link":"detached","reason":"supervisor disconnected"}"#, source: "daemon"),
+        ])
+        XCTAssertEqual(shape(items).filter { $0.hasPrefix("notice:Link") }, ["notice:Link detached", "notice:Link detached"])
+    }
+
     // MARK: What the session's status says
 
     private func summary() -> SessionSummary {

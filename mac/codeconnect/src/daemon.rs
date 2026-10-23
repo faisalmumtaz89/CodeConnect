@@ -160,7 +160,8 @@ pub fn request_within(frame: &ClientFrame, timeout: Duration) -> Result<DaemonFr
     let socket = protocol::socket_path();
     let mut stream = UnixStream::connect(&socket).with_context(|| {
         format!(
-            "cannot reach ccd at {}; is the daemon running?",
+            "cannot reach the CodeConnect daemon at {}: start it with \
+             `codeconnect daemon install`, or check it with `codeconnect daemon status`",
             socket.display()
         )
     })?;

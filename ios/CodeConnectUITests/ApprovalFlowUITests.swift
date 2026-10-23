@@ -83,7 +83,7 @@ final class ApprovalFlowUITests: XCTestCase {
         attachScreenshot(app, name: "decision-card")
 
         // The card must say, in so many words, that the text is the hashed text.
-        let verified = app.staticTexts["Verified - this is the exact text the daemon hashed."]
+        let verified = app.staticTexts["Verified against the daemon's hash."]
         XCTAssertTrue(
             verified.waitForExistence(timeout: 5),
             "payload_hash verification must pass for a card straight off the wire")

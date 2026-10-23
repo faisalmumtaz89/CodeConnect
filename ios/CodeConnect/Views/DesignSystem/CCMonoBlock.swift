@@ -5,11 +5,11 @@ import UIKit
 //  CCMonoBlock — verbatim text with a copy affordance.
 //
 //  **This component may not hide a character.** It is the surface the product's
-//  whole premise rests on — "you see the exact text before you answer" — so
+//  whole premise rests on — "you see what will run before you answer" — so
 //  there is no horizontal scroll, no alpha gradient, and nothing runs under the
 //  copy button. A fade mid-token (`…Feature.swi[ft]`) is precisely where a
 //  hostile suffix hides, and softening the language here, under a label reading
-//  EXACT COMMAND, would soften it in the one place it has to be hardest.
+//  COMMAND, would soften it in the one place it has to be hardest.
 //
 //  Long text takes the diff grid's treatment instead: wrap at the measured
 //  column and mark the break with a `↳`. The wrap is arithmetic, not a guess —
@@ -40,9 +40,10 @@ enum CCMonoTruncation: Hashable {
 
 /// Commands, paths, diffs, snapshots, tool output.
 ///
-/// Never re-wrapped and never prettified: what is shown has to be exactly what
-/// will run. Long content wraps at the measured column with a `↳` continuation
-/// glyph; it never fades, never ellipsises and never runs under the copy button.
+/// Never re-wrapped and never prettified: what is shown has to be what will
+/// run, a character that hides or reorders text drawn as U+FFFD (`displaySafe`).
+/// Long content wraps at the measured column with a `↳` continuation glyph; it
+/// never fades, never ellipsises and never runs under the copy button.
 struct CCMonoBlock: View {
     let text: String
     /// Collapses the block to this many *rendered* lines, with a disclosure
@@ -339,7 +340,7 @@ struct CCMonoBlock: View {
     ///  * **Free-standing on a page** (`columnInset == 0` — the decision card,
     ///    the comment sheet) — nothing has stepped out yet, so the block finds
     ///    the content column itself, exactly as `CCSectionHeader` does, and hangs
-    ///    back from there. The `EXACT COMMAND` header and the command underneath
+    ///    back from there. The `COMMAND` header and the command underneath
     ///    it end up on one edge.
     ///  * **Inside a centred container** (`CCEmptyState`, a centred card) — no
     ///    gutter exists, so nothing moves: a 12pt step on one side of a centred
@@ -508,7 +509,15 @@ struct CCMonoBlock: View {
             return [Run(id: 0, text: text, isContinuation: false)]
         }
         var out: [Run] = []
-        for line in text.components(separatedBy: "\n") {
+        // A run per line the screen draws: every break `Text` draws ends one —
+        // `\r\n` and a lone `\r` among them, as `firstLine` cuts — and a
+        // vertical tab, which `Text` draws through, does not. Split on `\n`
+        // alone, a `\r\n` line kept its `\r`, and `Text` drew it as a second,
+        // empty line under every line of Windows-style output.
+        let lines = text.split(omittingEmptySubsequences: false) {
+            $0.isNewline && $0 != "\u{0B}"
+        }
+        for line in lines.map(String.init) {
             if wrapsAsProse {
                 // Prose wears the `↳` only where the break fell *inside* a
                 // token. A break at a space needs no mark — that is what a

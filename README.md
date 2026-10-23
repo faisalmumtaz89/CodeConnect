@@ -11,18 +11,18 @@
 
 </div>
 
-Your agents keep working while you walk away. CodeConnect puts every session on your Mac in your hand: steer an agent mid-run, answer the prompt it's blocked on, review its diff, or take over its terminal outright — without ever pretending to know something it doesn't.
+Your agents keep working while you walk away. CodeConnect puts every session you start through it in your hand: steer an agent mid-run, answer the prompt it's blocked on, review its diff, or take over its terminal outright — without ever pretending to know something it doesn't.
 
 ```
 $ codeconnect claude                 # your normal Claude Code session, now observable
 $ codeconnect codex                  # the same, for OpenAI's Codex CLI
 ```
 
-That's the whole setup. The agent itself behaves exactly as it did before, and the session also appears on your phone.
+Once CodeConnect is set up ([Getting started](#getting-started)), you start agents this way instead of `claude` and `codex`. The agent itself works as it did before, and the session also appears on your phone.
 
 ## What it does
 
-- **A fleet view.** Every agent, what it's asking for, and how long it's been waiting.
+- **A fleet view.** Every agent you started through CodeConnect, what it's asking for, and how long it's been waiting.
 - **Approvals with the actual command.** Risk-tiered — a read is one tap, a `git push --force` needs a deliberate hold and Face ID. The command is never truncated or faded, because a hidden suffix is where a dangerous argument hides.
 - **Two agents, one fleet.** Claude Code and OpenAI's Codex CLI both run under `codeconnect`, and a Codex session is drivable from the phone: answer an approval with Codex's own options, stop a running turn, or say something — starting a turn when the session is idle, joining the one already running when it is busy. See [`docs/codex.md`](docs/codex.md).
 - **Nothing decides without you.** A permission prompt or a question waits for you, at the Mac or on the phone. If the daemon can't be reached, the prompt falls back to your keyboard rather than being silently answered.
@@ -38,7 +38,7 @@ That's the whole setup. The agent itself behaves exactly as it did before, and t
   - *Re-attaching* in a new tab (`codeconnect attach`) repaints the session from tmux's record of it — the history and screen with their colours, the cursor, and the modes tmux tracks. Two modes tmux does not track are not restored: kitty keyboard flags and focus reporting. An agent that turned them on when it started (Codex and Claude Code push kitty flags) gets your terminal's default key encoding and no focus events in a re-attached tab.
   - *Terminal queries* are answered by tmux where tmux answers them (device attributes, cursor position, version), so an agent sees tmux there rather than your terminal; its default colours are your terminal's, or black if your terminal does not report them. tmux's device-attributes answer arrives before your terminal's answer to kitty's keyboard query, the order agents read as "no kitty keyboard support".
   - *Two tabs on one session* share one size: tmux sizes the session for the tab used most recently, so a differently sized second tab shows it drawn for the other one.
-- **The app is not out yet.** It launches on the App Store soon. The iOS source is public to be read and audited — see the license. The Mac side updates itself from signed universal release binaries, so once installed it needs no toolchain; the first install today is `./install.sh`, which builds from source and needs Rust.
+- **iPhone and Mac only.** The phone side is an iPhone app, [CodeConnect Remote on the App Store](https://apps.apple.com/app/codeconnect-remote/id6797021894); the Mac side runs on macOS 13 or later. The iOS source is public to be read and audited — see the license.
 - **It assumes one Mac, one tailnet, one person.** That is the shape it is used in daily; anything else is unexplored.
 
 ## How it works
@@ -52,7 +52,7 @@ iPhone (SwiftUI)  ──wss:// tailnet (ws:// fallback)──▶  ccd (Rust daem
 ```
 
 - **`ccd`** — event-sourced daemon. SQLite WAL log with a per-session monotonic sequence, so a reconnect replays gap-free or says it couldn't. Never the parent of an agent: `kill -9 ccd` loses nothing.
-- **`codeconnect`** — launches an agent inside a private tmux server. For Claude Code it wires the hooks; for Codex, which has none, it puts a broker in front of Codex's own JSON-RPC app server. The agent behaves unchanged, and your terminal shows its output as it does run directly.
+- **`codeconnect`** — launches an agent inside a private tmux server. For Claude Code it wires the hooks; for Codex, which has none, it puts a broker in front of Codex's own JSON-RPC app server. The agent itself is unmodified, and your terminal shows its output as it does run directly.
 - **`cc-hook`** — tiny binary the hooks call. Fails safe: if the daemon is unreachable, the decision goes back to the local keyboard.
 - **The phone** — a client of the event log, not a source of truth.
 
@@ -62,28 +62,37 @@ Your **answer** to a Claude card goes back through the hook Claude holds for tha
 
 ## Getting started
 
+You need an iPhone on iOS 17 or later, and a Mac on macOS 13 or later (Apple silicon or Intel) with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in Terminal. Codex has to be the one OpenAI's install script puts in place (`curl -fsSL https://chatgpt.com/codex/install.sh | sh`): the npm package's `codex` is a script wrapper, which CodeConnect will not run. By default your iPhone reaches your Mac over [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet; another private network works too, with a setting on the Mac (`ws_bind` — see the [configuration reference](mac/README.md#configuration--codeconnectconfigjson)).
+
+1. Install the app on your iPhone: [CodeConnect Remote on the App Store](https://apps.apple.com/app/codeconnect-remote/id6797021894).
+2. On your Mac:
+
 ```sh
-curl -fsSL https://codeconnect.sh | sh
-export PATH="$HOME/.codeconnect/bin:$PATH"
+curl -fsSL https://codeconnect.sh | sh   # then open a new terminal
 
 codeconnect daemon install     # run ccd under launchd (restarts on crash)
-codeconnect pair               # QR code to pair the phone
-codeconnect claude             # start a session in the current directory
+codeconnect pair               # QR code to scan with the app
+codeconnect claude             # from your project's folder: start a session there
 codeconnect codex              # the same, for Codex
 ```
 
 When the session ends, `codeconnect claude` and `codeconnect codex` exit with status 0,
 whatever status the agent itself exited with; a script that needs that status should
-run `claude` or `codex` directly.
+run `claude` or `codex` directly. With no terminal to show a session in — a script, a
+pipe, `ssh` without `-t` — `codeconnect claude` hosts nothing and runs the Claude Code it
+would have hosted directly, so its output and status are Claude Code's.
 
 The installer downloads the latest release, verifies its Developer ID
-signature before installing anything, and never uses sudo, edits your shell
-configuration, or enables a service. Prefer to read it first? It is plain
-text at [codeconnect.sh](https://codeconnect.sh). Building from source
-instead is `cd mac && ./install.sh` from a clone — the same script
-contributors use.
+signature before installing anything, and installs it with CodeConnect's own
+tmux, so a Mac needs neither Homebrew nor tmux. It asks once before adding
+`~/.codeconnect/bin` to your `PATH` — one marked block in your shell's startup
+file, which you can delete to undo — and never uses sudo or enables a service.
+Prefer to read it first? It is plain text at
+[codeconnect.sh](https://codeconnect.sh). Building from source instead is
+`cd mac && ./install.sh` from a clone — the same script contributors use; a
+source build runs on the Mac's own tmux.
 
-The iPhone app is an Xcode project in `ios/`. Both sides need to be on the same [Tailscale](https://tailscale.com) tailnet.
+The iPhone app's source is the Xcode project in `ios/`.
 
 Without a Mac there is nothing to pair with, so the app also opens a **sample fleet**
 from its pairing screen — recorded frames replayed through the real decoders, labelled
@@ -91,9 +100,9 @@ wherever they are on screen, and connected to nothing. It takes an explicit tap,
 creates no pairing and opens no socket, and nothing in it reports a link: a release
 build still has no way to be *paired* except by a person with a Mac.
 
-**Updating the Mac:** `codeconnect update` — it downloads the latest published release, checks that it is signed by CodeConnect, and replaces all three binaries in one step, restarting a running daemon itself; sessions survive the restart. It needs no toolchain: nothing is compiled, and the machine does not need a checkout. Contributors build their own with `cd mac && ./install.sh`, which is the same script it has always been. The app tolerates an older daemon indefinitely: newer features hide or say what to update, per surface. Every binary knows the exact commit it was built from — `codeconnect --version` shows it — and `codeconnect claude` says so at launch when a newer release exists.
+**Updating the Mac:** `codeconnect update` — it downloads the latest published release, checks that it is signed by CodeConnect, and replaces all three binaries and CodeConnect's tmux in one step, restarting a running daemon itself; sessions survive the restart. It needs no toolchain: nothing is compiled, and the machine does not need a checkout. Contributors build their own with `cd mac && ./install.sh`. The app tolerates an older daemon indefinitely: newer features hide or say what to update, per surface. Every binary knows the exact commit it was built from — `codeconnect --version` shows it — and `codeconnect claude` says so at launch when a newer release exists.
 
-**Update-check requests that leave the tailnet:** by default, after `codeconnect claude` starts a session, CodeConnect makes a background request to GitHub's public Releases API when its 24-hour update cache is stale. `codeconnect update`, when you run it, asks the same API and then downloads that release's files from GitHub. GitHub receives your IP address and ordinary HTTP request metadata; CodeConnect sends no session, prompt, file, or project data. Set `"update_check": false` in `~/.codeconnect/config.json` to disable the background check; `codeconnect update` is only ever a thing you type. For the separate Apple and push-relay connections used by notifications and App Attest, see the privacy policy's complete network inventory.
+**Update-check requests that leave the tailnet:** by default, after `codeconnect claude` starts a session, CodeConnect makes a background request to GitHub's public Releases API when its 24-hour update cache is stale. `codeconnect update`, when you run it, asks the same API and then downloads that release's files from GitHub. GitHub receives your IP address and ordinary HTTP request metadata; CodeConnect sends no session, prompt, file, or project data. Set `"update_check": false` in `~/.codeconnect/config.json` to disable the background check; `codeconnect update` is only ever a thing you type. One more request is made without being typed, and that setting does not stop it, because sessions run on CodeConnect's own tmux even on a Mac that has another: when a release's binaries are installed without CodeConnect's tmux beside them — by an updater from before tmux shipped — the next `codeconnect claude` or `codeconnect codex` fetches that same release's tmux from GitHub, the same way, until it is installed. For the separate Apple and push-relay connections used by notifications and App Attest, see the privacy policy's complete network inventory.
 
 **Requirements to build from source** — not needed to install a release: Rust stable (1.85+) and **Xcode 26 or newer**. The app deploys to iOS 17, but one navigation-chrome call is guarded with `if #available(iOS 26, *)`, and `#available` is a runtime check, so the symbol still has to exist in the SDK to compile.
 
@@ -133,7 +142,7 @@ The interface is dark mode only, in a Vercel/Geist register. Two principles do m
 
 ## Status
 
-Personal tool, working daily. Claude Code and OpenAI's Codex CLI are both fully supported — a Codex session is hosted through a broker in front of Codex's app server, and the phone can answer its approvals, stop a turn and say something. Other CLIs (Grok, Kimi) are not supported. Mac updates arrive as signed release binaries. **The iPhone app launches on the App Store soon.**
+Personal tool, working daily. Claude Code and OpenAI's Codex CLI are both fully supported — a Codex session is hosted through a broker in front of Codex's app server, and the phone can answer its approvals, stop a turn and say something. Other CLIs (Grok, Kimi) are not supported. Mac updates arrive as signed release binaries. The iPhone app is [on the App Store](https://apps.apple.com/app/codeconnect-remote/id6797021894).
 
 ## License
 
@@ -155,7 +164,3 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md). The house rules there are short and ea
 ## Security
 
 CodeConnect can write keystrokes into your terminal and open a live shell on a paired device. [`SECURITY.md`](SECURITY.md) sets out the trust boundaries, what it deliberately does not protect against, and how to report a vulnerability privately.
-
-## Licence
-
-MIT — see [`LICENSE`](LICENSE).

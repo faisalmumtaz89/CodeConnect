@@ -7,10 +7,12 @@ import Foundation
 /// whose content is XML-ish markup, not prose: a boilerplate caveat block, a
 /// `<command-name>` invocation, and a `<local-command-stdout>` result wrapped
 /// in raw ANSI styling. Measured across 481 real invocations in the owner's
-/// transcripts; exactly these three shapes occur, nothing else. Rendered
-/// literally they read as markup soup under a "YOU" label — so the timeline
-/// parses them into what they are: the command you ran, and what Claude Code
-/// said back.
+/// transcripts; exactly these three shapes occur, nothing else. A skill or
+/// custom command is recorded with its `<command-message>` line first and
+/// its `<command-name>` second (2.1.308), and Claude Code reads a line
+/// opening with either tag as a command. Rendered literally they read as
+/// markup soup under a "YOU" label — so the timeline parses them into what
+/// they are: the command you ran, and what Claude Code said back.
 enum LocalCommandLine: Equatable {
     /// `/model sonnet` — the command as the user issued it.
     case invocation(command: String, args: String)
@@ -33,7 +35,7 @@ enum LocalCommandLine: Equatable {
             let clean = stripANSI(inner).trimmingCharacters(in: .whitespacesAndNewlines)
             return .output(clean)
         }
-        if trimmed.hasPrefix("<command-name>") {
+        if trimmed.hasPrefix("<command-name>") || trimmed.hasPrefix("<command-message>") {
             let command = innerText(of: "command-name", in: trimmed)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let args = innerText(of: "command-args", in: trimmed)

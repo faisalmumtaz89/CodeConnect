@@ -431,7 +431,8 @@ final class DaemonConnection {
             // swapped once would turn a recoverable setup into a dead end.
             if dialIsForPairing, ledger.attempts >= Self.pairingAttemptLimit {
                 phase = .failed(
-                    reason: lastErrorMessage ?? ConnectionError.timedOut.localizedDescription)
+                    reason: Self.pairingUnreachable(
+                        host: endpoint.host, port: endpoint.port, detail: lastErrorMessage))
                 return
             }
 
@@ -474,6 +475,16 @@ final class DaemonConnection {
     /// reader is told while the code they are holding is still the one that
     /// failed.
     static let pairingAttemptLimit = 4
+
+    /// What a pairing that never reached the Mac says: where it looked, what the
+    /// system reported, and the one check on the Mac that tells the causes
+    /// apart — no daemon running, a different address, or a network between
+    /// that does not carry this phone to it.
+    static func pairingUnreachable(host: String, port: Int, detail: String?) -> String {
+        let said = detail.map { " (\($0.hasSuffix(".") ? String($0.dropLast()) : $0))" } ?? ""
+        return
+            "Could not reach the Mac at \(host):\(port)\(said). On the Mac, `codeconnect daemon status` shows whether the daemon is running and the address it listens on; this iPhone has to be able to reach that address, over Tailscale by default."
+    }
 
     /// Which scheme this attempt should use.
     ///

@@ -62,13 +62,50 @@ pub enum SessionPresence {
     Unknown(String),
 }
 
+/// The pinned sources CodeConnect's own tmux, `cc-tmux`, is built from.
+const BUNDLE_SOURCES: &str = include_str!("../../tmux/SOURCES");
+
+/// What `cc-tmux -V` prints: `tmux` and the bundle revision named in
+/// `mac/tmux/SOURCES`, which the build script stamps into the binary. Read
+/// from the file the build reads, so the tmux a release ships and the tmux
+/// its `codeconnect` expects cannot disagree.
+pub fn bundled_version() -> String {
+    let bundle = BUNDLE_SOURCES
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some("BUNDLE")).then(|| fields.next())?
+        })
+        .expect("mac/tmux/SOURCES names a BUNDLE");
+    format!("tmux {bundle}")
+}
+
+/// The file name of CodeConnect's own tmux, installed beside its binaries.
+pub const BUNDLED_TMUX: &str = "cc-tmux";
+
+/// The tmux every CodeConnect process runs: `$CODECONNECT_TMUX` when set, then
+/// the `cc-tmux` installed beside the running binary, then a system tmux.
+/// Located from the binary rather than from PATH, because launchd starts the
+/// daemon with no shell PATH and a terminal may not have ours.
 pub fn tmux_bin() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("CODECONNECT_TMUX") {
-        let path = PathBuf::from(explicit);
-        if path.is_file() {
-            return Some(path);
-        }
+    let exe = std::env::current_exe().ok();
+    tmux_bin_for(std::env::var_os("CODECONNECT_TMUX"), exe.as_deref())
+}
+
+fn tmux_bin_for(explicit: Option<std::ffi::OsString>, exe: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = explicit.map(PathBuf::from).filter(|path| path.is_file()) {
+        return Some(path);
     }
+    // Through any symlink to the binary itself: `cc-tmux` sits beside the
+    // real file, not beside a link someone put on their PATH.
+    exe.and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| Some(exe.parent()?.join(BUNDLED_TMUX)))
+        .filter(|path| path.is_file())
+        .or_else(system_tmux)
+}
+
+/// A tmux installed by the system or a package manager.
+fn system_tmux() -> Option<PathBuf> {
     TMUX_CANDIDATES
         .iter()
         .map(PathBuf::from)
@@ -2051,6 +2088,68 @@ mod tests {
     /// every forgery fixture in this module — the identity a crafted stamp
     /// tries to bind to somebody else's session.
     const VICTIM_UID: &str = "01JQXV9K7B8N4M2P6R3T5W9YQD";
+
+    #[test]
+    fn the_bundled_version_is_the_pinned_tmux_and_a_bundle_revision() {
+        // The build script stamps BUNDLE over tmux's own version, so a BUNDLE
+        // left behind when the tmux line moves would ship one release's tmux
+        // under another's name.
+        let upstream = BUNDLE_SOURCES
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                (fields.next() == Some("tmux")).then(|| fields.next())?
+            })
+            .expect("mac/tmux/SOURCES pins tmux");
+        let revision = bundled_version()
+            .strip_prefix(&format!("tmux {upstream}-cc"))
+            .map(str::to_owned)
+            .unwrap_or_default();
+        assert!(
+            !revision.is_empty() && revision.bytes().all(|b| b.is_ascii_digit()),
+            "{:?} is not `tmux {upstream}-cc<N>`",
+            bundled_version()
+        );
+    }
+
+    #[test]
+    fn the_bundled_tmux_beside_the_binary_comes_after_the_override_and_before_the_system() {
+        let dir = std::env::temp_dir().join(format!("cc-tmux-lookup-{}", std::process::id()));
+        let bin = dir.join("bin");
+        let linked = dir.join("linked");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        let exe = bin.join("codeconnect");
+        let bundled = bin.join(BUNDLED_TMUX);
+        let explicit = dir.join("explicit-tmux");
+        for file in [&exe, &bundled, &explicit] {
+            std::fs::write(file, "").unwrap();
+        }
+        std::os::unix::fs::symlink(&exe, linked.join("codeconnect")).unwrap();
+        let bundled = bundled.canonicalize().unwrap();
+
+        // Beside the binary, and beside the binary a symlink points at.
+        assert_eq!(tmux_bin_for(None, Some(&exe)), Some(bundled.clone()));
+        assert_eq!(
+            tmux_bin_for(None, Some(&linked.join("codeconnect"))),
+            Some(bundled.clone())
+        );
+        // The override wins, and an override naming nothing is passed over.
+        assert_eq!(
+            tmux_bin_for(Some(explicit.clone().into()), Some(&exe)),
+            Some(explicit)
+        );
+        assert_eq!(
+            tmux_bin_for(Some(dir.join("missing").into()), Some(&exe)),
+            Some(bundled.clone())
+        );
+        // A binary with no `cc-tmux` beside it falls back to the system's.
+        std::fs::remove_file(&bundled).unwrap();
+        assert_eq!(tmux_bin_for(None, Some(&exe)), system_tmux());
+        assert_eq!(tmux_bin_for(None, None), system_tmux());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn tmux_saying_there_is_no_such_session_is_the_only_thing_read_as_gone() {

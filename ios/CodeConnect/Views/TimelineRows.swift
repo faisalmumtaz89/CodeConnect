@@ -395,9 +395,10 @@ struct ToolRow: View {
     @State private var didAutoExpand: Bool
 
     @Environment(\.dynamicTypeSize) private var typeSize
-    /// The shared width every tool label on this screen is drawn into, so the
-    /// commands beside them share one left edge. See `CCToolColumn`.
-    @Environment(\.ccToolColumn) private var toolColumn
+    /// Every tool label's width on this screen, from which this row's label
+    /// takes its column, so the commands beside them share one left edge. See
+    /// `CCToolColumn`.
+    @Environment(\.ccToolLabelWidths) private var toolLabelWidths
     @Environment(\.tailWatch) private var tailWatch
 
     init(tool: ToolItem) {
@@ -467,16 +468,20 @@ struct ToolRow: View {
                     // frame from the glyph and a column of tool rows has to line
                     // up whatever symbols it happens to hold.
                     .ccGutterMark()
-                HStack(spacing: CCToolColumn.argumentGap) {
+                // The glyph above is already pinned to the gutter so a column of
+                // tool rows lines up; this is the same argument applied to the
+                // name, so the commands beside them line up too. See
+                // `CCToolColumn`.
+                let pair =
+                    typeSize.isAccessibilitySize
+                    ? AnyLayout(HStackLayout(spacing: CCToolColumn.argumentGap))
+                    : AnyLayout(CCToolPairLayout(labels: toolLabelWidths))
+                pair {
                     Text(tool.name)
                         .ccType(CC.type.callout)
                         .foregroundStyle(CC.text.primary)
                         .lineLimit(1)
-                        // The glyph above is already pinned to the gutter so a
-                        // column of tool rows lines up; this is the same argument
-                        // applied to the name, so the commands beside them line up
-                        // too. See `CCToolColumn`.
-                        .ccToolLabelColumn(toolColumn, disabled: typeSize.isAccessibilitySize)
+                        .ccToolLabelColumn(disabled: typeSize.isAccessibilitySize)
                     if let argument = tool.argument {
                         Text(argument.firstLine)
                             .ccType(CC.type.monoSmall)
@@ -575,7 +580,7 @@ struct ApprovalRow: View {
     let onOpen: () -> Void
     @Environment(\.dynamicTypeSize) private var typeSize
     /// See `CCToolColumn` — one left edge for every command on this screen.
-    @Environment(\.ccToolColumn) private var toolColumn
+    @Environment(\.ccToolLabelWidths) private var toolLabelWidths
 
     /// Mirrors `CCStatusDot`'s own ramp and ceiling, so the gutter the dot hangs
     /// in is always exactly the dot plus one 8pt gap.
@@ -674,15 +679,15 @@ struct ApprovalRow: View {
         // Adaptive, like the fleet row's activity line: at AX5 a `callout` tool
         // name and a command cannot share 340pt, and side by side the command
         // wrapped into a column half the card wide.
-        CCAdaptiveStack(
-            horizontalSpacing: CCToolColumn.argumentGap, verticalSpacing: CC.space.xxs,
-            verticalAlignment: .firstTextBaseline
-        ) {
+        let layout =
+            typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: CC.space.xxs))
+            : AnyLayout(CCToolPairLayout(labels: toolLabelWidths, alignment: .firstTextBaseline))
+        return layout {
             Text(approval.card.toolName)
                 .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.primary)
-                .ccToolLabelColumn(toolColumn, disabled: typeSize.isAccessibilitySize)
-                .layoutPriority(1)
+                .ccToolLabelColumn(disabled: typeSize.isAccessibilitySize)
             if let argument = ToolSummary.principalArgument(
                 tool: approval.card.toolName, input: approval.card.toolInput)
             {
@@ -693,7 +698,6 @@ struct ApprovalRow: View {
                 // fact — on the row whose whole job is to say what is waiting.
                 CCMonoBlock(inline: argument.firstLine)
             }
-            CCAdaptiveSpacer(minLength: 0)
         }
     }
 
@@ -796,23 +800,45 @@ struct ApprovalRow: View {
     /// The spoken label for a row carrying a recorded outcome. An unconfirmed
     /// outcome is announced as such — never "Resolved approval", which would
     /// speak a confirmation VoiceOver users cannot see is false.
-    static func resolvedAccessibilityLabel(for outcome: AnswerOutcome, toolName: String) -> String {
+    static func resolvedAccessibilityLabel(for outcome: AnswerOutcome, call: String) -> String {
         let lead =
             outcome.wasSentToClaude
             ? "Approval" : outcome.indeterminate ? "Unconfirmed approval" : "Resolved approval"
-        return "\(lead). \(resolutionText(for: outcome)). \(toolName)."
+        return "\(lead). \(resolutionText(for: outcome)). \(call)."
     }
 
-    private var accessibilityLabel: String {
+    /// The call as `summaryLine` draws it — the tool, then the first line of
+    /// its argument — read back as two clauses, as the fleet row's
+    /// `spokenActivity` reads them. The row combines its children under one
+    /// label, so VoiceOver hears this and never the drawn command: built from
+    /// the tool name alone it said `Bash` where the fleet row and the Deck said
+    /// `git push --force origin main`.
+    ///
+    /// A first line with nothing on it — a command of spaces, or one that opens
+    /// with a line break — is spoken as no argument at all, rather than as an
+    /// empty clause (`Bash, , waiting`).
+    private var spokenCall: String {
+        let tool = approval.card.toolName
+        guard
+            let argument = ToolSummary.principalArgument(
+                tool: tool, input: approval.card.toolInput)?.firstLine,
+            !argument.isEmpty
+        else { return tool }
+        return "\(tool), \(argument)"
+    }
+
+    /// What VoiceOver says on the row: the row is one combined element with
+    /// this label, never the tool name and command drawn inside it.
+    var accessibilityLabel: String {
         if let outcome = approval.outcome {
-            return Self.resolvedAccessibilityLabel(for: outcome, toolName: approval.card.toolName)
+            return Self.resolvedAccessibilityLabel(for: outcome, call: spokenCall)
         }
         if let resolution = approval.codexResolution {
             let banner = CodexProse.resolution(resolution)
-            return "\(banner.oneLine) \(approval.card.toolName)."
+            return "\(banner.oneLine) \(spokenCall)."
         }
         return
-            "Pending approval, risk \(risk.label), \(approval.card.toolName), waiting \(Format.spokenAge(now.timeIntervalSince(approval.requestedAt)))"
+            "Pending approval, risk \(risk.label), \(spokenCall), waiting \(Format.spokenDuration(now.timeIntervalSince(approval.requestedAt)))"
     }
 }
 
@@ -941,7 +967,7 @@ struct QuestionRow: View {
     private var accessibilityLabel: String {
         let state =
             status.summary(of: questions)
-            ?? "waiting \(Format.spokenAge(now.timeIntervalSince(approval.requestedAt)))"
+            ?? "waiting \(Format.spokenDuration(now.timeIntervalSince(approval.requestedAt)))"
         return "\(title) from Claude. \(questions.questions[0].text). \(state)."
     }
 }

@@ -319,10 +319,15 @@ enum FleetStatusRule {
         if summary.lifecycle == .exited {
             return endedAbnormally(shown) ? .failed : .ended
         }
+        // A prompt can start a turn and draw nothing — a scheduled prompt,
+        // another session's message — so the last row alone would still say
+        // the previous turn was the latest thing that happened.
+        let prompt = shown?.lastPromptSeq ?? 0
         guard let shown, let last = lastSubstantiveItem(in: shown.timeline) else {
-            return summary.lifecycle == .live ? .idle : .ended
+            guard summary.lifecycle == .live else { return .ended }
+            return prompt > 0 ? .running : .idle
         }
-        if isTurnBoundary(last) {
+        if isTurnBoundary(last), prompt < last.seq {
             // **The boundary's own seq, not the tail of the stream.** `lastSeq` is
             // the highest seq of any raw event, including `usage`, `reasoning` and
             // link chatter that produce no timeline item at all. Compared against
@@ -339,8 +344,18 @@ enum FleetStatusRule {
     /// working, so a `link_state` arriving after a finished turn must not make
     /// the session look busy again. Also what a chat's window must hold before
     /// it stops paging back (`SessionState.needsEarlierPage`).
+    ///
+    /// A built-in slash command's row sits with them. `/model` runs in Claude
+    /// Code itself: after a finished turn the Mac shows its one-line answer and
+    /// an empty prompt, and Claude never replies (2.1.308, recorded). Counted
+    /// as activity, the row made the session read Running until the next
+    /// prompt — 210 times in 17 of the owner's transcripts, after `/login`
+    /// and `/model` above all, and no reply followed any of them. A command
+    /// that does ask the model starts its turn by `Event.startsTurn`, not by
+    /// its row.
     static func lastSubstantiveItem(in timeline: [TimelineItem]) -> TimelineItem? {
         timeline.last { item in
+            if case .userMessage(_, isCommand: true) = item.content { return false }
             guard case .notice(let notice) = item.content else { return true }
             switch notice.kind {
             // `.failure` sits with `.link` rather than with the agent's own events:
@@ -352,7 +367,8 @@ enum FleetStatusRule {
             // that has already ended, and counted as activity it turned every
             // finished session back to Running a minute later.
             case .link, .sessionStart, .other, .failure, .agentIdle: return false
-            case .turnComplete, .sessionEnded, .agentWaiting, .agentFinished, .taskReport:
+            case .turnComplete, .turnInterrupted, .sessionEnded, .agentWaiting, .agentFinished,
+                .taskReport:
                 return true
             }
         }
@@ -361,7 +377,7 @@ enum FleetStatusRule {
     private static func isTurnBoundary(_ item: TimelineItem) -> Bool {
         guard case .notice(let notice) = item.content else { return false }
         switch notice.kind {
-        case .turnComplete, .sessionEnded, .agentFinished: return true
+        case .turnComplete, .turnInterrupted, .sessionEnded, .agentFinished: return true
         default: return false
         }
     }
@@ -401,6 +417,11 @@ enum FleetStatusRule {
     static func capability(summary: SessionSummary, capabilities: Capabilities?) -> CapabilityBadge {
         guard let capabilities else {
             return .unknown(reason: "Not connected. The daemon has not told us what it can do.")
+        }
+        // Before any link reason: an ended run has no supervisor because it has
+        // ended, and nothing can answer it anywhere, the Mac included.
+        if summary.lifecycle == .exited {
+            return .observe(reason: "This session has ended.")
         }
         guard capabilities.canApproveReliably else {
             return .observe(reason: "The daemon does not guarantee an answer will reach the agent.")
@@ -513,7 +534,9 @@ struct LinkHealth: Sendable, Equatable {
         if case .hostUnresolvable(let host) = failure {
             return "`\(host)` is not resolving. Retrying automatically."
         }
-        return "\(reason). Retrying automatically."
+        // The system's own messages already end in a full stop.
+        let sentence = reason.hasSuffix(".") ? String(reason.dropLast()) : reason
+        return "\(sentence). Retrying automatically."
     }
 
     static func evaluate(
@@ -606,15 +629,23 @@ enum Format {
         return "\(ms / 60000)m \((ms % 60000) / 1000)s"
     }
 
-    /// VoiceOver reads "14s" as "fourteen ess"; spell it out for the label.
+    /// When something happened, out loud: "1 minute ago".
     static func spokenAge(_ interval: TimeInterval) -> String {
+        "\(spokenDuration(interval)) ago"
+    }
+
+    /// How long something has lasted, out loud: "1 minute". For a wait, which
+    /// is still going — "waiting 1 minute ago" is not a sentence.
+    ///
+    /// VoiceOver reads "14s" as "fourteen ess"; spell it out for the label.
+    static func spokenDuration(_ interval: TimeInterval) -> String {
         let seconds = Int(max(0, interval))
-        if seconds < 60 { return "\(seconds) second\(seconds == 1 ? "" : "s") ago" }
+        if seconds < 60 { return "\(seconds) second\(seconds == 1 ? "" : "s")" }
         if seconds < 3600 {
             let minutes = seconds / 60
-            return "\(minutes) minute\(minutes == 1 ? "" : "s") ago"
+            return "\(minutes) minute\(minutes == 1 ? "" : "s")"
         }
         let hours = seconds / 3600
-        return "\(hours) hour\(hours == 1 ? "" : "s") ago"
+        return "\(hours) hour\(hours == 1 ? "" : "s")"
     }
 }

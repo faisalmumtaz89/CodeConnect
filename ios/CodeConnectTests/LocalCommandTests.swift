@@ -154,4 +154,47 @@ final class LocalCommandTests: XCTestCase {
         XCTAssertEqual(prose, "and a real message")
         XCTAssertFalse(proseIsCommand, "ordinary prose stays prose")
     }
+
+    // MARK: Skills
+
+    /// A skill or custom command, as Claude Code 2.1.308 writes one: its
+    /// message line first, then its name and, when it was given any, its
+    /// arguments, one tag a line. Read from the 2.1.308 binary's own writer,
+    /// which joins `<command-message>{name}`, `<command-name>/{name}` and
+    /// `<command-args>{args}` with `\n` and leaves the last out when there
+    /// are none.
+    private let skillInvocation =
+        "<command-message>simplify</command-message>\n<command-name>/simplify</command-name>\n"
+        + "<command-args>focus on the parser</command-args>"
+
+    func testASkillRecordedMessageFirstParsesAsItsInvocation() {
+        XCTAssertEqual(
+            LocalCommandLine.parse(skillInvocation),
+            .invocation(command: "/simplify", args: "focus on the parser"))
+        XCTAssertEqual(
+            LocalCommandLine.parse(
+                "<command-message>simplify</command-message>\n<command-name>/simplify</command-name>"),
+            .invocation(command: "/simplify", args: ""))
+    }
+
+    /// Drawn under YOU as the command that was typed, in command type, and
+    /// never as the markup that records it.
+    func testASkillInvocationIsDrawnAsItsCommand() throws {
+        let items = TimelineBuilder.build([try userEvent(seq: 1, content: skillInvocation)])
+        guard case .userMessage(let text, let isCommand)? = items.first?.content else {
+            return XCTFail("\(items)")
+        }
+        XCTAssertEqual(text, "/simplify focus on the parser")
+        XCTAssertTrue(isCommand)
+    }
+
+    /// A message tag with no command named after it is not an invocation, and
+    /// prose that mentions the tag stays prose.
+    func testAMessageTagWithoutACommandNameStaysProse() {
+        XCTAssertNil(LocalCommandLine.parse("<command-message>simplify</command-message>"))
+        XCTAssertNil(
+            LocalCommandLine.parse(
+                "Claude Code writes <command-message>simplify</command-message> before "
+                    + "<command-name>/simplify</command-name>"))
+    }
 }

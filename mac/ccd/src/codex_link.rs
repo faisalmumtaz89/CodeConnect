@@ -15971,12 +15971,6 @@ mod tests {
             crate::apns::PushKind::Completed,
             "the doorbell says a turn finished and nothing else: {watched:?}"
         );
-        assert_eq!(
-            watched.agent,
-            protocol::agent::AgentKind::Codex,
-            "it must carry the agent it is about, or the fan-out cannot tell which \
-             phones can open it: {watched:?}"
-        );
 
         let (events, _, _, _, _, recovered) = drive_watching_presence(
             ResumeAnswer::PopulatedNoReplay,
@@ -18647,41 +18641,12 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["card"]["request_id"], json!(row.request_id));
 
-        // **The doorbell is the ringing run's own agent.** `describing` keeps
-        // it, `blocked_runs` counts only cards of it, and `recipients`
-        // authorizes against it — one agent through all three.
+        // **The doorbell is about this run, and counts its card.**
         tokio::time::sleep(Duration::from_millis(700)).await;
         let hint = push.last().expect("an approval doorbell");
         assert_eq!(hint.kind, crate::apns::PushKind::Approval);
-        assert_eq!(hint.agent, protocol::agent::AgentKind::Codex);
+        assert_eq!(hint.session_uid, session.uid);
         assert_eq!(hint.blocked_sessions, 1);
-    }
-
-    /// **And that doorbell reaches no device, which is the honest state of this
-    /// build rather than an oversight.**
-    ///
-    /// `push_queue::recipients` narrows by what a device advertised, and nothing
-    /// writes the `devices.features` column yet — so every row decodes as the
-    /// Claude floor and a Codex-agent push is filtered out at delivery. The card
-    /// is real, durable and rebindable; what it is not yet is deliverable. That
-    /// is the failure direction the agent-scoped doorbell was built for: silence
-    /// to a phone that could not render it, never a Codex decision offered to
-    /// one that cannot.
-    #[test]
-    fn a_codex_doorbell_is_authorized_to_no_device_this_build_can_produce() {
-        let codex = protocol::agent::AgentKind::Codex;
-        assert!(
-            !crate::store::DeviceFeatures::default().supports(&codex),
-            "the NULL features row every real device has is the Claude floor"
-        );
-        assert!(
-            !crate::store::DeviceFeatures::Unconfirmable.supports(&codex),
-            "and a set this run cannot vouch for is not an advertisement"
-        );
-        assert!(
-            crate::store::DeviceFeatures::default().supports(&protocol::agent::AgentKind::Claude),
-            "the floor is Claude, or this assertion would pass for the wrong reason"
-        );
     }
 
     /// **An approval for a thread this link is not visiting is filtered like any

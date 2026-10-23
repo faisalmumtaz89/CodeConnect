@@ -30,7 +30,7 @@
 //! Anything a client names is resolved through [`Daemon::resolve`] first, which
 //! is the single place that decides what a bare `cc-1` refers to.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -182,6 +182,21 @@ pub struct Daemon {
     /// What may ring a phone — see [`crate::push_gate`]. Its own locks, held
     /// for map lookups only; never across an await.
     pub push_gate: Arc<crate::push_gate::PushGate>,
+    /// **Doorbells reach the senders in the order they were counted.** Held from
+    /// a doorbell's count of waiting decisions through its hand-off to the
+    /// sender, whose registry read and enqueue are synchronous. A device's queue
+    /// keeps the doorbell that arrives last, and every doorbell shares one
+    /// collapse slot on the phone, so arrival order has to be count order: a
+    /// count taken before a decision was raised, posted after the doorbell that
+    /// counted it, would tell the phone nothing waits.
+    ///
+    /// **The cost is head-of-line.** A send that is slow — a registry read
+    /// stalled on the database — delays every doorbell behind it by as long.
+    /// Measured on a debug build over a real store through the relay sender, a
+    /// hold is a median 20 µs with one device and 576 µs with fifty, against a
+    /// 400 ms dispatch grace. What a doorbell checked before the wait is checked
+    /// again after it.
+    ring_order: tokio::sync::Mutex<()>,
     pub endpoint: Endpoint,
     /// The listener's actual bind address, told to the daemon by `main` once
     /// the socket exists. A `OnceLock` rather than a constructor parameter so
@@ -191,6 +206,11 @@ pub struct Daemon {
     /// (path, sha256) of the executable this process is running, captured by
     /// `main` at startup for the staleness line in `daemon status`.
     pub exe_identity: std::sync::OnceLock<(String, String)>,
+    /// Why no phone can reach this daemon, when its listener refuses every
+    /// connection: told by `main` from the advice it logs at startup, so
+    /// `codeconnect pair` is refused with that reason instead of being handed a
+    /// code no phone could use.
+    pub listener_refusal: std::sync::OnceLock<String>,
     /// When this process started, and which launchd job it belongs to. Captured
     /// once at construction: `XPC_SERVICE_NAME` is set by launchd at exec, and
     /// reading it later would be reading whatever the environment has become.
@@ -1628,10 +1648,9 @@ struct PendingApproval {
     project_label: String,
     /// Which agent this card belongs to.
     ///
-    /// **Captured with the card, for the same reason the label is.** It decides
-    /// which doorbells may count this card ([`blocked_runs`]) and therefore
-    /// which devices that doorbell is authorized to — a question that must be
-    /// answered from the same locked snapshot as the count, not by a database
+    /// **Captured with the card, for the same reason the label is.** The
+    /// Claude-only paths — the pane reader, the local resolver, the sweeps —
+    /// ask it from the same locked snapshot they act on, not from a database
     /// read taken after the lock was released.
     agent: protocol::agent::AgentKind,
     /// Asked by a background agent rather than the main conversation.
@@ -1765,14 +1784,46 @@ fn confirm_view_for(text: &str, complete_native_confirmation: bool) -> Option<St
     confirmation_needle(text)
 }
 
-/// How to find the card a decision push is about when its grace expires.
-///
-/// Two ways because the two hooks know different things: the request that filed
-/// the card knows its own id, and a `permission_prompt` knows only the prompt.
+/// The card a decision push is about, by its request id: the request that filed
+/// it knows its own, and a `permission_prompt` is matched to one through its
+/// prompt before it is admitted.
 #[derive(Debug, Clone)]
-enum CardKey {
-    Request(String),
-    Prompt(String),
+struct CardKey(String);
+
+/// Whether Claude Code handed this transcript line to the agent as a prompt,
+/// by its own stamp: `promptSource` is on exactly the lines it submits — typed,
+/// queued, an accepted suggestion, an SDK prompt, and `"system"` for a
+/// background report, a scheduled prompt, another session's message or the
+/// continuation after a usage limit (census of the owner's transcripts,
+/// 2.1.195–2.1.304, with a recorded 2.1.305 scheduled prompt in
+/// `fixtures/transcript/scheduled-prompt-2.1.305.jsonl`). Or by `turnOrigin`
+/// alone: a built-in command that asks the model (`/plan`, `/goal`, 2.1.308)
+/// stamps only that, and so does an automatic compaction summary written
+/// inside a running turn (194 of the 204 such lines in the owner's
+/// transcripts, 2.1.278–2.1.303) — the run has moved on either way. The same
+/// rule as the phone's `Event.startsTurn`. Not a line recorded without being
+/// handed over (`queueTranscriptOnly`), and not a background agent's own line
+/// (`isSidechain`), which is not a turn of the run, as with the tailer's turn
+/// ends.
+fn delivers_prompt(pending: &PendingEvent) -> bool {
+    let line = &pending.payload;
+    pending.kind == EventKind::UserMessage
+        && line["queueTranscriptOnly"] != true
+        && line["isSidechain"] != true
+        && (line["promptSource"]
+            .as_str()
+            .is_some_and(|source| !source.is_empty())
+            || line["turnOrigin"].is_string())
+}
+
+/// Whether this card's dialog is drawn on the run's pane while it waits: every
+/// card not held for the phone, and a main-conversation approval held for it,
+/// which Claude draws at the same time. Not a held question, whose hook says
+/// when it ends, nor a held background agent's card, which Claude draws only
+/// once its hook returns.
+fn dialog_on_the_pane(entry: &PendingApproval) -> bool {
+    entry.card.question_hold != Some(QuestionHold::Held)
+        || (!entry.fork && entry.question.is_none())
 }
 
 /// Whether the card a decision push announces is still there to be answered.
@@ -1781,36 +1832,34 @@ enum CardKey {
 /// can be answered at the keyboard, or resolved by the tool simply running, and any of those can happen inside the dispatch grace — or, after a
 /// restart, in the instant between reading the card and taking the gate. Ringing
 /// then would send someone to a decision list with nothing in it.
+///
+/// A card whose call has run is answered, though its entry stays until it is
+/// retired: a question answered at the Mac is marked by its `PostToolUse` and
+/// left in place (`note_question_ran`), so a ring held while its owner sat at
+/// the Mac would otherwise announce a question they had already answered.
 fn card_is_open(inner: &Inner, session_uid: &str, key: &CardKey) -> bool {
-    inner.pending.iter().any(|((uid, request_id), entry)| {
-        uid == session_uid
-            && match key {
-                CardKey::Request(id) => request_id == id,
-                CardKey::Prompt(prompt) => entry.card.prompt_id.as_deref() == Some(prompt.as_str()),
-            }
-    })
+    the_card(inner, session_uid, key).is_some_and(|entry| !entry.tool_ran)
 }
 
-/// Which runs **of one agent** are holding a decision, and what each is called.
+fn the_card<'a>(inner: &'a Inner, session_uid: &str, key: &CardKey) -> Option<&'a PendingApproval> {
+    inner.pending.get(&(session_uid.to_string(), key.0.clone()))
+}
+
+/// Which runs are holding a decision, and what each is called.
 ///
 /// **Runs, not cards.** One run can hold several decisions at once — background
 /// agents each ask their own — and the alert says "agents", so counting cards
 /// would make the sentence say something untrue about the fleet.
 ///
-/// **And one agent, not the fleet.** The count this produces is the number the
-/// doorbell says out loud *and* the deck the doorbell is authorized as (see
-/// [`crate::apns::PushHint::describing`]). Counting both agents would make those
-/// two disagree the moment a Codex card exists: a Claude doorbell would say "3
-/// agents need you" while naming a deck a Claude-only phone cannot open, and a
-/// Codex doorbell would be inflated by cards its audience will never see. The
-/// filter is what lets `describing` keep the ringing run's own agent instead of
-/// re-describing the alert as somebody else's.
-fn blocked_runs(inner: &Inner, agent: &protocol::agent::AgentKind) -> Vec<(String, String)> {
+/// **Every agent's runs, whichever agent rang.** A phone keeps one CodeConnect
+/// notification — every doorbell shares one collapse id, and a device's queue
+/// replaces a waiting doorbell with the newer one — and its badge is this
+/// count. A count of the ringing agent's runs alone let a finished Codex turn
+/// replace "2 agents need you" with "Finished a turn" and a badge of 0 while
+/// Claude decisions waited, and the same the other way round.
+fn blocked_runs(inner: &Inner) -> Vec<(String, String)> {
     let mut by_run: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for pending in inner.pending.values() {
-        if &pending.agent != agent {
-            continue;
-        }
         by_run.insert(&pending.session.uid, &pending.project_label);
     }
     by_run
@@ -1838,80 +1887,6 @@ fn snapshot_command(text: &str) -> bool {
     rest[name.len()..].trim().is_empty() && matches!(name.as_str(), "status" | "usage" | "cost")
 }
 
-/// This daemon run's **feature epoch** — a value unique to the process, so a
-/// stored device feature set authorizes a push only when it was confirmed during
-/// this run. A restarted daemon is a new process with a new epoch, so a set left
-/// by an earlier one is [`crate::store::DeviceFeatures::Unconfirmable`] and that
-/// device hears nothing until it re-advertises: an old daemon that only bumped
-/// `last_seen_at` across a rollback cannot leave Codex eligibility standing.
-///
-/// **Nothing in production writes a feature set**, so today every row's column is
-/// `NULL` — the Claude floor — and this value is only ever compared against, never
-/// stamped on anything. It is minted anyway, and at startup, because it is the
-/// authorization epoch [`crate::store::Store::push_targets`] reads against, and
-/// because a write, once one lands, must find a value that already exists rather
-/// than mint one on a push path.
-///
-/// **Uniqueness is structural, not circumstantial.** This value is what
-/// [`crate::store::Store::push_targets`] compares a stored set against, so a
-/// repeat would silently re-authorize another process's advertisement. Process id
-/// and start time alone cannot promise that — pids are reused and a clock can
-/// move backwards — so the identity comes from a uid's ten random bytes, with the
-/// pid and the timestamp kept in front of it for a human reading the column.
-///
-/// # No entropy, no daemon
-///
-/// The earlier form fell back to `pid-millis-no-entropy`, which is **fail-open**
-/// at the exact point that decides authorization: two runs that shared a pid and a
-/// millisecond would share an epoch, and the second would inherit the first's
-/// confirmed advertisements without a phone saying anything. So the fallback is
-/// gone and the failure is loud.
-///
-/// Panicking is the honest answer rather than a harsh one. Every other production
-/// caller of [`protocol::uid::new`] already propagates its failure — a session uid,
-/// a device token, a pairing code — so a machine whose `getrandom` is failing
-/// cannot register a session or pair a phone either. This one call site was alone
-/// in swallowing it, and it was the one call site where swallowing it made a
-/// security claim the daemon could not keep.
-///
-/// **It lands at startup, not at a push, and the wiring is the whole point.**
-/// [`Daemon::recover`] evaluates it before any socket is open. Left to the push
-/// path — which is where every other caller is, and where the only production one
-/// still is — the first evaluation happens inside a task
-/// [`Daemon::dispatch_push`] spawned, and tokio absorbs a panic in a spawned task:
-/// the daemon would go on serving, silently unable to authorize a push, instead of
-/// refusing to come up.
-pub fn feature_epoch() -> &'static str {
-    FEATURE_EPOCH.get_or_init(|| epoch_from(protocol::uid::new()))
-}
-
-/// The cell [`feature_epoch`] fills, hoisted out of the function body.
-///
-/// Not for a second reader — [`feature_epoch`] is the only way to *get* the value.
-/// It is out here so a test can ask **whether the epoch has been minted yet
-/// without minting it**, which is the entire question when what is under test is
-/// where the minting happens: a check written through `feature_epoch()` mints it
-/// on the spot and then reports, truthfully and uselessly, that it is minted.
-static FEATURE_EPOCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-/// The epoch, from an entropy source that may have failed.
-///
-/// Taken apart from [`feature_epoch`] so the refusal is assertable: nothing in a
-/// test can make `getrandom` fail, and "what this daemon does when it cannot mint
-/// an identity" is exactly the rule worth pinning rather than assuming.
-fn epoch_from(nonce: std::io::Result<String>) -> String {
-    let nonce = nonce.expect(
-        "this daemon cannot mint a feature epoch without kernel entropy, and without \
-         one it cannot say which device advertisements belong to this run — refusing \
-         to start rather than authorizing pushes on a value another run could repeat",
-    );
-    format!(
-        "{}-{}-{nonce}",
-        std::process::id(),
-        protocol::time::now_unix_ms()
-    )
-}
-
 impl Daemon {
     pub fn new(
         config: Config,
@@ -1931,9 +1906,11 @@ impl Daemon {
             revocations_tx,
             push,
             push_gate: Arc::new(crate::push_gate::PushGate::new()),
+            ring_order: tokio::sync::Mutex::new(()),
             endpoint,
             bind_ip: std::sync::OnceLock::new(),
             exe_identity: std::sync::OnceLock::new(),
+            listener_refusal: std::sync::OnceLock::new(),
             started_at: protocol::time::now_rfc3339(),
             launchd_label: launchd_label(),
             inner: Arc::new(Mutex::new(Inner::default())),
@@ -2060,38 +2037,6 @@ impl Daemon {
     ///    recorded as a terminal *indeterminate* result, and never retried.
     pub async fn recover(&self) {
         let now = protocol::time::now_rfc3339();
-
-        // **The feature epoch is minted here, and this is the only reason it is
-        // evaluated at startup at all.** Nothing in production writes a device
-        // feature set, so it stamps nothing; it is the value
-        // [`crate::store::Store::push_targets`] compares every stored set against,
-        // and minting it needs kernel entropy that [`epoch_from`] refuses to fake.
-        // Every other caller is on the push path, and a push runs in a task
-        // `dispatch_push` spawned — where tokio absorbs the panic and a daemon that
-        // cannot authorize anything keeps serving as though it could. Asked here it
-        // is a startup failure, which is the honest one.
-        //
-        // **No sweep, and the absence is deliberate.** A startup step used to clear
-        // every set not stamped with this run's epoch. The read refuses those rows
-        // on its own — another process's stamp is
-        // [`crate::store::DeviceFeatures::Unconfirmable`] — so the sweep never made
-        // a device less eligible; and once the read learned to tell an unconfirmable
-        // set from a `NULL` one, the sweep could only make a device MORE eligible,
-        // because clearing writes the empty legacy set, which is the Claude floor.
-        //
-        // **A statement of its own, and not an argument to the line below.**
-        // `log_info!` formats its arguments only when INFO is enabled, so a mint
-        // written inside one is a mint an operator turns off: under
-        // `CODECONNECT_LOG=warn` the first `feature_epoch()` call goes back to
-        // being the one inside a task `dispatch_push` spawned, where tokio absorbs
-        // the panic — which is the whole of what asking here was for. Measured, not
-        // supposed: the wiring test's child runs at `warn` for exactly this reason.
-        let epoch = feature_epoch();
-        crate::log_info!(
-            "recovery: this run authorizes device feature sets under epoch {epoch}; \
-             nothing records one, so every device is at the Claude floor \
-             until a phone re-advertises to a daemon that records it"
-        );
 
         match self.db.unresolved_answer_claims().await {
             Ok(claims) if !claims.is_empty() => {
@@ -2852,6 +2797,13 @@ impl Daemon {
             .filter(|pending| pending.kind == EventKind::ToolResult)
             .flat_map(|pending| ended_calls(&pending.payload))
             .collect();
+        // Likewise which lines hand over a prompt: before truncation can
+        // replace a long one.
+        let prompts: HashSet<String> = pendings
+            .iter()
+            .filter(|pending| delivers_prompt(pending))
+            .filter_map(|pending| pending.source_event_id.clone())
+            .collect();
         for pending in &mut pendings {
             self.truncate_payload(pending);
         }
@@ -2889,6 +2841,25 @@ impl Daemon {
             inner
                 .last_seen_ms
                 .insert(session_uid.to_string(), protocol::time::now_unix_ms());
+        }
+        // **A prompt filed for the first time is the run moving** — the only
+        // word of a prompt typed at the Mac, since no hook fires for one. Only
+        // a line this scan newly filed counts: a transcript read again (a
+        // cursor that fails its check rescans from zero) files nothing new and
+        // says nothing new. A conversation this run has not read before, resumed
+        // inside it, is read into the run's log from its start, and its prompts
+        // count on purpose: the conversation changed. A new prompt read later than the end of the
+        // turn it began ends that turn's own ring, which needs the tailer's lag
+        // to outlast the turn: at most 32.4 ms measured with fsevents, and the
+        // polling floor is `tail_poll_ms` (250 ms by default, at most 10 s),
+        // against a shortest recorded first turn of 1.375 s (151 of them).
+        if events.iter().any(|event| {
+            event
+                .source_event_id
+                .as_ref()
+                .is_some_and(|id| prompts.contains(id))
+        }) {
+            self.push_gate.note_progress(session_uid);
         }
         for (tool_use_id, rejected) in ended {
             self.call_ended(session_uid, &tool_use_id, rejected).await;
@@ -2948,6 +2919,25 @@ impl Daemon {
     /// any other byte, and a tool response is exactly the kind of payload that
     /// carries multi-byte text — a path with an accent, a diff with an emoji —
     /// so the naive cut was a panic waiting for the right file name.
+    ///
+    /// **The limit holds for the replacement as written.** The preview is JSON
+    /// inside JSON, so every quote and backslash in it is escaped again: cut at
+    /// the limit's byte count, a backslash-heavy payload's replacement was
+    /// 1,048,622 bytes against the default 524,288.
+    ///
+    /// **A user line keeps everything but its attachments.** Replaced whole, a
+    /// typed prompt with a large pasted image lost `promptSource`, `origin`,
+    /// `uuid` and its words, so the phone drew no row for it and read the
+    /// session as done while Claude worked on it — 6 such prompts in a real
+    /// history, the largest line 817,592 bytes. Any user line over the limit
+    /// whose content is blocks — measured, a typed prompt or an `isMeta` line;
+    /// transcript-only, task and compaction lines are plain text — keeps its fields
+    /// and its text, every other block cut to its `type`, with the same two
+    /// markers. If that still does not fit, or the
+    /// content is a bare string, it is replaced like any payload. A tool's
+    /// result is still replaced: the phone says its output was too large, where
+    /// a result cut to its blocks' names would read as a tool that printed
+    /// nothing.
     fn truncate_payload(&self, pending: &mut PendingEvent) {
         let encoded = pending.payload.to_string();
         // Measured before the cut, not after: the whole point of recording it is
@@ -2956,15 +2946,49 @@ impl Daemon {
         if original_bytes <= self.config.max_payload_bytes {
             return;
         }
-        let mut end = self.config.max_payload_bytes;
-        while end > 0 && !encoded.is_char_boundary(end) {
+        if pending.kind == EventKind::UserMessage {
+            if let Some(mut prompt) = Self::without_attachments(&pending.payload) {
+                prompt["_codeconnect_truncated"] = serde_json::json!(true);
+                prompt["_original_bytes"] = serde_json::json!(original_bytes);
+                if prompt.to_string().len() <= self.config.max_payload_bytes {
+                    pending.payload = prompt;
+                    return;
+                }
+            }
+        }
+        let replacement = |preview: &str| {
+            serde_json::json!({
+                "_codeconnect_truncated": true,
+                "_original_bytes": original_bytes,
+                "_preview": preview,
+            })
+        };
+        // `encoded` is JSON, which holds no raw control character: written again
+        // inside the replacement, a quote or a backslash takes two bytes and
+        // anything else its own, so half the room always fits.
+        let mut end = (self.config.max_payload_bytes - replacement("").to_string().len()) / 2;
+        while !encoded.is_char_boundary(end) {
             end -= 1;
         }
-        pending.payload = serde_json::json!({
-            "_codeconnect_truncated": true,
-            "_original_bytes": original_bytes,
-            "_preview": &encoded[..end],
-        });
+        pending.payload = replacement(&encoded[..end]);
+    }
+
+    /// A user line with its content blocks other than text cut to their `type`,
+    /// or `None` for a line whose content is not blocks. Every such block in a
+    /// real history (34 of 34) is a pasted image, `{type, source}`, and its
+    /// `source` is the image.
+    fn without_attachments(line: &serde_json::Value) -> Option<serde_json::Value> {
+        let mut prompt = line.clone();
+        let blocks = prompt
+            .get_mut("message")?
+            .get_mut("content")?
+            .as_array_mut()?;
+        for block in blocks.iter_mut().filter_map(|block| block.as_object_mut()) {
+            if block.get("type").and_then(|kind| kind.as_str()) != Some("text") {
+                block.retain(|key, _| key == "type");
+            }
+        }
+        Some(prompt)
     }
 
     /// The hook path. Returns what cc-hook should print.
@@ -3220,8 +3244,11 @@ impl Daemon {
                     && !ANSWERED_ONLY_AT_THE_MAC.contains(&tool_name.as_str())
             };
         // A background agent's card is held only while nobody is at the Mac,
-        // because holding it hides its dialog there.
-        let hold = if !holdable || (fork && crate::presence::at_the_mac()) {
+        // because holding it hides its dialog there. An idle time that cannot
+        // be read counts as someone there.
+        let hold = if !holdable
+            || (fork && crate::presence::at_the_mac(crate::presence::QUESTION_IDLE).unwrap_or(true))
+        {
             QuestionHold::AtMac
         } else {
             QuestionHold::Held
@@ -3414,15 +3441,12 @@ impl Daemon {
             ));
         }
 
-        // One ring per decision. Keyed by the prompt, which the
-        // `permission_prompt` notification that follows this hook shares — so
-        // the twin finds the key and stays silent, and a *replayed* request
-        // (dedup above) never gets this far. Devices that receive the card on
-        // a live socket are excluded at dispatch.
-        let prompt_key = input
-            .prompt_id
-            .clone()
-            .unwrap_or_else(|| request_id.clone());
+        // One ring per decision, keyed by its card — not by the prompt, which
+        // Claude Code (2.1.308, recorded) shares between every call of a turn.
+        // The `permission_prompt` notification that follows this hook finds
+        // this card open under its prompt and stays silent, and a *replayed*
+        // request (dedup above) never gets this far. Devices that receive the
+        // card on a live socket are excluded at dispatch.
         // **A decision supersedes a notice about it.** A `permission_prompt`
         // can arrive first and ring as "waiting for your input"; when the card
         // itself lands moments later, that earlier ring is describing the same
@@ -3431,7 +3455,10 @@ impl Daemon {
         // one. Without that, both survive, and APNs stores exactly one per
         // device without saying which, so the reader could be left holding the
         // wrong one.
-        if let Some(ticket) = self.push_gate.admit_decision(&session.uid, &prompt_key) {
+        if let Some(ticket) =
+            self.push_gate
+                .admit_decision(&session.uid, &request_id, input.prompt_id.as_deref())
+        {
             self.dispatch_push(
                 session.uid.clone(),
                 approval_event.seq,
@@ -3454,17 +3481,12 @@ impl Daemon {
                     // ringing, not the moment of admission.
                     blocked_sessions: 0,
                     session_uid: session.uid.clone(),
-                    // A `PermissionRequest` is a Claude hook. Codex approval
-                    // cards arrive through the app-server's request families,
-                    // and compose their own hint in
-                    // [`Daemon::raise_codex_approval`].
-                    agent: protocol::agent::AgentKind::Claude,
                 },
                 ticket,
                 // A pending decision outlives other tools' progress; only the
                 // session's death, or the card being answered, cancels it.
                 false,
-                Some(CardKey::Request(request_id.clone())),
+                Some(CardKey(request_id.clone())),
             );
         }
 
@@ -3495,7 +3517,7 @@ impl Daemon {
     async fn someone_returns(&self, id: &ApprovalId) {
         loop {
             tokio::time::sleep(crate::presence::POLL).await;
-            if !crate::presence::at_the_mac() {
+            if !crate::presence::at_the_mac(crate::presence::QUESTION_IDLE).unwrap_or(true) {
                 continue;
             }
             // Kept until the hold is recorded, so the hook's own channel stays
@@ -3771,16 +3793,35 @@ impl Daemon {
     /// acknowledgements — a protocol change deliberately not taken for a
     /// doorbell whose whole content is four words and a count.
     ///
+    /// # Held while someone is at the Mac
+    ///
+    /// The phone is for when the owner is away. After the grace, a ring on a Mac
+    /// that has had keyboard or mouse input within [`crate::presence::RING_IDLE`]
+    /// waits, reading the idle time every [`crate::presence::POLL`], and rings the
+    /// first time the Mac has been left that long. While it waits it asks once a
+    /// second whether it still matters — the ticket, the card, both in memory —
+    /// and ends if not; before it goes it asks everything, the database and
+    /// the screen under a decision's dialog included ([`Daemon::answered_at_the_mac`],
+    /// with presence asked again after that read), so what rings is still true
+    /// when it rings. The hold lives in this task alone, as the gate lives in
+    /// memory alone: a daemon restart drops a held ring.
+    ///
+    /// The cadence is measured, not guessed: process CPU, release build, someone
+    /// at the Mac, three 5 s windows. Re-checking everything each poll cost 1.1–1.7
+    /// % of a core for 10 held rings and 15.7–18.5 % for 100; reading only the
+    /// idle time each poll costs 0.06 % and 0.15–0.30 %, plus the HID read itself,
+    /// 10.5 µs (20,000 reads): about 0.01 % of a core per held ring.
+    ///
     /// # The grace is also a best-effort CANCELLATION window, and it is not
     /// coordinated with anything
     ///
-    /// A cancel that arrives after `GRACE` has elapsed does not stop the push: the
-    /// task has already woken, taken its exclusion snapshot and sent. Nothing waits
-    /// for a cancel that might be in flight, and nothing is going to — the failure
-    /// direction is one stale doorbell, and the coordination that would close it
-    /// (making the dispatcher wait on a signal from a control link that may not
-    /// exist) trades a bounded, occasional annoyance for a completion that can be
-    /// held up indefinitely.
+    /// A cancel that arrives after `GRACE` has elapsed, with nobody at the Mac,
+    /// does not stop the push: the task has already woken, taken its exclusion
+    /// snapshot and sent. Nothing waits for a cancel that might be in flight, and
+    /// nothing is going to — the failure direction is one stale doorbell, and the
+    /// coordination that would close it (making the dispatcher wait on a signal
+    /// from a control link that may not exist) trades a bounded, occasional
+    /// annoyance for a completion that can be held up indefinitely.
     ///
     /// The two things that could plausibly land late were **measured** rather than
     /// argued about, on this machine, against the fixture workload:
@@ -3821,8 +3862,14 @@ impl Daemon {
     /// measured at, and both scale with the answer rather than with anything this
     /// daemon controls — which is the same honest bound the recovery writes have, and
     /// has the same honest remedy if an answer ever arrives large enough to matter.
+    ///
+    /// **A decision answered at the Mac whose command still runs is counted.**
+    /// Claude Code keeps that approval's hook alive until the call's result, so
+    /// its card stays open, and another run's doorbell counts it as waiting until
+    /// then. Accepted: it errs toward telling, as holding rather than dropping a
+    /// ring for an owner who came back does.
     fn dispatch_push(
-        &self,
+        self: &Arc<Self>,
         session_uid: String,
         trigger_seq: u64,
         hint: PushHint,
@@ -3831,95 +3878,160 @@ impl Daemon {
         needs_card: Option<CardKey>,
     ) {
         const GRACE: Duration = Duration::from_millis(400);
+        const LOOK: Duration = Duration::from_secs(1);
         let gate = Arc::clone(&self.push_gate);
         let sender = Arc::clone(&self.push);
         let inner = Arc::clone(&self.inner);
         let db = self.db.clone();
+        let daemon = Arc::clone(self);
         tokio::spawn(async move {
             tokio::time::sleep(GRACE).await;
-            // **The run still has to exist.** The ticket catches a session
-            // evicted *after* this push was admitted, but not one evicted
-            // just before: a hook already past `ensure_session` goes on to
-            // admit, and mints its ticket against the epoch the eviction had
-            // already bumped. Asked here, the question has one answer for
-            // both — a doorbell for a run nobody can open is never rung.
-            //
-            // A database that will not answer is not an answer: the push goes
-            // out, because staying silent about a real decision is the worse
-            // of the two mistakes.
-            match db.get_session(session_uid.clone()).await {
-                Ok(None) => {
-                    crate::log_debug!(
-                        "push for {} dropped: the run was removed before the doorbell rang",
-                        session_uid
-                    );
-                    return;
+            let mut looked: Option<tokio::time::Instant> = None;
+            loop {
+                // **The phone is for when the owner is away.** Someone who has
+                // used the Mac within `RING_IDLE` is there to see it, so the ring
+                // waits for them to leave, reading only the HID idle time each
+                // poll. Whether it still matters — the ticket, the card — is
+                // asked once a `LOOK`, so a ring that stopped mattering ends
+                // within one, and everything is asked again before it goes. An
+                // idle time that cannot be read rings, as it did before this
+                // check existed: a read that fails for good must not silence
+                // every notification for good.
+                if crate::presence::at_the_mac(crate::presence::RING_IDLE).unwrap_or(false) {
+                    if looked.is_none_or(|at| at.elapsed() >= LOOK) {
+                        if looked.is_none() {
+                            crate::log_debug!(
+                                "push for {} held: someone is at the Mac",
+                                session_uid
+                            );
+                        }
+                        let stands = gate
+                            .exclusions_if_valid(&session_uid, ticket, heed_progress, trigger_seq)
+                            .is_some()
+                            && match &needs_card {
+                                Some(key) => card_is_open(&*inner.lock().await, &session_uid, key),
+                                None => true,
+                            };
+                        if !stands {
+                            crate::log_debug!(
+                                "push for {} dropped: it stopped mattering while it was held",
+                                session_uid
+                            );
+                            return;
+                        }
+                        looked = Some(tokio::time::Instant::now());
+                    }
+                    tokio::time::sleep(crate::presence::POLL).await;
+                    continue;
                 }
-                Err(err) => crate::log_warn!(
-                    "push for {session_uid}: could not confirm the run still exists: {err:#}"
-                ),
-                Ok(Some(_)) => {}
-            }
-            let Some(excluded) =
-                gate.exclusions_if_valid(&session_uid, ticket, heed_progress, trigger_seq)
-            else {
-                crate::log_debug!(
-                    "push for {} dropped: superseded during its dispatch grace",
-                    session_uid
-                );
-                return;
-            };
-            let blocked: Vec<(String, String)> = {
-                let held = inner.lock().await;
-                if let Some(key) = needs_card {
-                    if !card_is_open(&held, &session_uid, &key) {
+                // What the screen says about a decision's dialog, read now. The
+                // read can take a sweep period, so the owner back by then holds
+                // the ring again.
+                if let Some(key) = &needs_card {
+                    if daemon.answered_at_the_mac(&session_uid, key).await {
                         crate::log_debug!(
-                            "push for {} dropped: its card was answered before the doorbell rang",
+                            "push for {} dropped: its card was answered at the Mac",
                             session_uid
                         );
                         return;
                     }
+                    if crate::presence::at_the_mac(crate::presence::RING_IDLE).unwrap_or(false) {
+                        continue;
+                    }
                 }
-                // The ringing run's own agent, which is also the agent
-                // `describing` will keep and `recipients` will authorize
-                // against. One agent through all three, so the sentence, the
-                // count and the audience cannot disagree.
-                blocked_runs(&held, &hint.agent)
-            };
-            // The subject's name comes out of the same snapshot as the count —
-            // see `PushHint::describing` and `PendingApproval::project_label`.
-            let named = match blocked.as_slice() {
-                [(_, label)] => Some(label.clone()),
-                _ => None,
-            };
-            let described = hint.describing(blocked.len(), named);
-            // **The exclusion list is one thing: who already knows.** It carries
-            // the devices whose live socket wrote this event to them during the
-            // grace, and nothing else — a doorbell must not ring a phone that is
-            // already looking at the fact.
-            //
-            // **Per-device authorization is not here, and deliberately not.** Which
-            // agents a device can render is decided inside `send`, in `recipients`,
-            // from the same row read that produces the token — one read, so a
-            // registration cannot be assembled from two. Expressing it here as a
-            // second exclusion list would be a copy of that decision taken a
-            // database read earlier, and the two senders would each need their own.
-            //
-            // **The subject is the one `describing` settled on**, not the one that
-            // rang: a doorbell re-described to speak for the fleet's decisions is
-            // authorized as that deck, so the audience can never be narrowed to
-            // devices that cannot render what the alert actually says.
-            sender.send(&described, &excluded);
+                // **The run still has to exist.** The ticket catches a session
+                // evicted *after* this push was admitted, but not one evicted
+                // just before: a hook already past `ensure_session` goes on to
+                // admit, and mints its ticket against the epoch the eviction had
+                // already bumped. Asked here, the question has one answer for
+                // both — a doorbell for a run nobody can open is never rung.
+                //
+                // A database that will not answer is not an answer: the push goes
+                // out, because staying silent about a real decision is the worse
+                // of the two mistakes.
+                //
+                // And for a quiet state, still be running: a run that has ended
+                // waits for nobody, whatever a notification that reached the
+                // daemon around its end says.
+                match db.get_session(session_uid.clone()).await {
+                    Ok(None) => {
+                        crate::log_debug!(
+                            "push for {} dropped: the run was removed before the doorbell rang",
+                            session_uid
+                        );
+                        return;
+                    }
+                    Ok(Some(row)) if heed_progress && row.lifecycle == Lifecycle::Exited => {
+                        crate::log_debug!(
+                            "push for {} dropped: the run ended before the doorbell rang",
+                            session_uid
+                        );
+                        return;
+                    }
+                    Err(err) => crate::log_warn!(
+                        "push for {session_uid}: could not confirm the run still exists: {err:#}"
+                    ),
+                    Ok(Some(_)) => {}
+                }
+                // Count and hand-off as one ordered step: see `Daemon::ring_order`.
+                let _in_count_order = daemon.ring_order.lock().await;
+                // **Asked after the wait for the ordering step**, which can be as
+                // long as another doorbell's send: the owner may be back, and the
+                // run may have moved on or reached the phone over its socket.
+                if crate::presence::at_the_mac(crate::presence::RING_IDLE).unwrap_or(false) {
+                    continue;
+                }
+                let Some(excluded) =
+                    gate.exclusions_if_valid(&session_uid, ticket, heed_progress, trigger_seq)
+                else {
+                    crate::log_debug!(
+                        "push for {} dropped: superseded before it rang",
+                        session_uid
+                    );
+                    return;
+                };
+                let blocked: Vec<(String, String)> = {
+                    let held = inner.lock().await;
+                    if let Some(key) = &needs_card {
+                        if !card_is_open(&held, &session_uid, key) {
+                            crate::log_debug!(
+                                "push for {} dropped: its card was answered before the doorbell rang",
+                                session_uid
+                            );
+                            return;
+                        }
+                    }
+                    blocked_runs(&held)
+                };
+                // The subject's name comes out of the same snapshot as the count —
+                // see `PushHint::describing` and `PendingApproval::project_label`.
+                let named = match blocked.as_slice() {
+                    [(_, label)] => Some(label.clone()),
+                    _ => None,
+                };
+                let described = hint.describing(blocked.len(), named);
+                // **The exclusion list is one thing: who already knows.** It carries
+                // the devices whose live socket wrote this event to them during the
+                // grace, and nothing else — a doorbell must not ring a phone that is
+                // already looking at the fact.
+                sender.send(&described, &excluded);
+                return;
+            }
         });
     }
 
-    async fn maybe_push(&self, session: &SessionKey, input: &HookInput, trigger: &Event) {
+    async fn maybe_push(
+        self: &Arc<Self>,
+        session: &SessionKey,
+        input: &HookInput,
+        trigger: &Event,
+    ) {
         let kind = input.notification_type.as_deref().unwrap_or("");
         // Two gates before any ring — see `crate::push_gate`. The ambient
         // classes collapse Claude's repeating "still waiting" hooks into one
         // ring per state change; `permission_prompt` is the notification twin
-        // of a `PermissionRequest` that already rang, keyed by the prompt it
-        // shares with it.
+        // of a `PermissionRequest` that already rang, matched to the card it
+        // is about through the prompt it shares with it.
         // **Admission and copy in one match.** An unadmitted kind never reaches
         // a sentence, so a `_ =>` arm on the copy side would be a body no
         // notification could ever carry — a fifth string that reads like a
@@ -3928,15 +4040,15 @@ impl Daemon {
             "agent_needs_input" => self
                 .push_gate
                 .admit_ambient(&session.uid, crate::push_gate::Ambient::Waiting)
-                .map(|t| (t, crate::apns::PushKind::NeedsInput)),
+                .map(|t| (t, crate::apns::PushKind::NeedsInput, None)),
             "idle_prompt" => self
                 .push_gate
                 .admit_ambient(&session.uid, crate::push_gate::Ambient::Waiting)
-                .map(|t| (t, crate::apns::PushKind::Idle)),
+                .map(|t| (t, crate::apns::PushKind::Idle, None)),
             "agent_completed" => self
                 .push_gate
                 .admit_ambient(&session.uid, crate::push_gate::Ambient::Done)
-                .map(|t| (t, crate::apns::PushKind::Completed)),
+                .map(|t| (t, crate::apns::PushKind::Completed, None)),
             "permission_prompt" => {
                 // **Which gate depends on whether there is a card**, and the
                 // question and the answer are one operation — see
@@ -3944,21 +4056,22 @@ impl Daemon {
                 // `PermissionRequest` for the same prompt can each conclude the
                 // other has not happened yet and both ring.
                 //
-                // Whether a card exists is the daemon's own state, so it is
-                // resolved before the gate is entered; the gate is what decides
-                // and records, under one guard, in one step.
-                let has_card = match input.prompt_id.as_deref() {
-                    Some(prompt) => self.has_pending_card(&session.uid, prompt).await,
-                    None => false,
+                // Which cards are open under its prompt is the daemon's own
+                // state, so it is read before the gate is entered; the gate is
+                // what decides and records, under one guard, in one step.
+                let cards = match input.prompt_id.as_deref() {
+                    Some(prompt) => self.open_cards_of_prompt(&session.uid, prompt).await,
+                    None => Vec::new(),
                 };
                 self.push_gate
-                    .admit_notice(&session.uid, input.prompt_id.as_deref(), has_card)
-                    .map(|(ticket, notice)| {
-                        let kind = match notice {
-                            crate::push_gate::Notice::Decision => crate::apns::PushKind::Approval,
-                            crate::push_gate::Notice::Waiting => crate::apns::PushKind::NeedsInput,
-                        };
-                        (ticket, kind)
+                    .admit_notice(&session.uid, input.prompt_id.as_deref(), &cards)
+                    .map(|(ticket, notice)| match notice {
+                        crate::push_gate::Notice::Decision(card) => {
+                            (ticket, crate::apns::PushKind::Approval, Some(CardKey(card)))
+                        }
+                        crate::push_gate::Notice::Waiting => {
+                            (ticket, crate::apns::PushKind::NeedsInput, None)
+                        }
                     })
             }
             _ => None,
@@ -3966,7 +4079,7 @@ impl Daemon {
         // The ticket is minted inside the admission's own critical section:
         // progress landing anywhere after it — even before the dispatch task
         // spawns — reads as a moved epoch and kills the push.
-        let Some((ticket, push_kind)) = admitted else {
+        let Some((ticket, push_kind, card)) = admitted else {
             return;
         };
         // **The doorbell carries no agent text.** `input.message` is the
@@ -3990,10 +4103,6 @@ impl Daemon {
                 // fleet as it is when the doorbell actually goes.
                 blocked_sessions: 0,
                 session_uid: session.uid.clone(),
-                // The hook path is Claude's, and only Claude's: Codex carries no
-                // hooks at all (`turn/completed` is its completion signal), so a
-                // frame reaching here is a Claude run by construction.
-                agent: protocol::agent::AgentKind::Claude,
             },
             ticket,
             // **A decision outlives other tools' progress wherever it was
@@ -4007,10 +4116,7 @@ impl Daemon {
             push_kind != crate::apns::PushKind::Approval,
             // A notice that turned out to be a decision announces a specific
             // card, and has to still mean it when it rings.
-            match push_kind {
-                crate::apns::PushKind::Approval => input.prompt_id.clone().map(CardKey::Prompt),
-                _ => None,
-            },
+            card,
         );
     }
 
@@ -4101,9 +4207,8 @@ impl Daemon {
     ///   * the card goes to `codex_pending_approvals`, because a rolled-back
     ///     v0.6.0 daemon enumerates and deletes rows in the shared table without
     ///     ever walking a session row (see `Store::create_schema`);
-    ///   * `agent` is Codex on the card and on the hint, so `blocked_runs`
-    ///     counts it only for a Codex doorbell and `push_queue::recipients`
-    ///     authorizes it only to devices that advertise Codex;
+    ///   * `agent` is Codex on the card, so the Claude-only paths — the pane
+    ///     reader, the local resolver, the sweeps — leave it alone;
     ///   * there is no responder and no prompt fingerprint. Nothing is blocked
     ///     on this daemon's answer — the human at the TUI is being asked — and
     ///     there is no pane this daemon can type into, which is why
@@ -4124,7 +4229,7 @@ impl Daemon {
     /// approval this daemon cannot mirror honestly is one the operator is still
     /// being asked at the keyboard.
     pub(crate) async fn raise_codex_approval(
-        &self,
+        self: &Arc<Self>,
         session: &SessionKey,
         card: ApprovalCard,
         thread_id: &str,
@@ -4145,7 +4250,7 @@ impl Daemon {
         // **The aggregate bound, checked on the serialised card against the
         // limit that would destroy it.**
         //
-        // [`Daemon::truncate_payload`] does not *trim* an oversized payload, it
+        // [`Daemon::truncate_payload`] does not *trim* an oversized card, it
         // REPLACES it with a preview object — and a phone handed that decodes no
         // card at all. `codex_approval`'s per-field bounds keep this rare, and
         // they cannot make it impossible: nothing on the wire bounds a path, an
@@ -4368,7 +4473,10 @@ impl Daemon {
         // The doorbell hangs off the FILED event, and only a first sighting
         // files one. A re-delivery after a reconnect is not a second question.
         if let Some(event) = approval_event {
-            if let Some(ticket) = self.push_gate.admit_decision(&session.uid, &request_id) {
+            if let Some(ticket) = self
+                .push_gate
+                .admit_decision(&session.uid, &request_id, None)
+            {
                 self.dispatch_push(
                     session.uid.clone(),
                     event.seq,
@@ -4377,15 +4485,10 @@ impl Daemon {
                         kind: crate::apns::PushKind::Approval,
                         blocked_sessions: 0,
                         session_uid: session.uid.clone(),
-                        // The ringing run's own agent, which is what
-                        // `describing` keeps and `recipients` authorizes
-                        // against. A Codex decision offered to a phone that
-                        // cannot render one is the failure this narrows away.
-                        agent: protocol::agent::AgentKind::Codex,
                     },
                     ticket,
                     false,
-                    Some(CardKey::Request(request_id.clone())),
+                    Some(CardKey(request_id.clone())),
                 );
             }
         }
@@ -4668,7 +4771,11 @@ impl Daemon {
     /// contract is therefore *one ring per turn the reader could act on
     /// separately*, and a turn superseded before its doorbell left the building is
     /// not one of those.
-    pub(crate) async fn push_codex_turn_complete(&self, session: &SessionKey, trigger: &Event) {
+    pub(crate) async fn push_codex_turn_complete(
+        self: &Arc<Self>,
+        session: &SessionKey,
+        trigger: &Event,
+    ) {
         // **The movement and the news are one transition** — see
         // `PushGate::admit_turn_end`. Recorded apart, an unrelated progress landing
         // between them folds into this ticket and the push it should have cancelled
@@ -4687,9 +4794,6 @@ impl Daemon {
                 // Overwritten at ring time by `describing`.
                 blocked_sessions: 0,
                 session_uid: session.uid.clone(),
-                // What makes this push reach only the phones that can open a Codex
-                // run — see `crate::push_queue::recipients`.
-                agent: protocol::agent::AgentKind::Codex,
             },
             ticket,
             // A quiet-state push: progress landing during the grace means the run
@@ -4721,17 +4825,23 @@ impl Daemon {
         }
     }
 
-    /// Whether *this prompt* has a card the decision list could show.
-    ///
-    /// Per prompt, not per session: a run can hold an open card for one prompt
-    /// while a notice arrives for a newer one that has no card yet, and
-    /// answering "yes, there is a card" for that would send a reader to the
-    /// wrong decision.
-    async fn has_pending_card(&self, session_uid: &str, prompt_id: &str) -> bool {
+    /// The cards still open under one prompt — a notice that names only the
+    /// prompt is about one of them. Claude Code (2.1.308, recorded) asks every
+    /// call of a turn under the turn's `prompt_id`, one after another.
+    async fn open_cards_of_prompt(&self, session_uid: &str, prompt_id: &str) -> Vec<String> {
         let inner = self.inner.lock().await;
-        inner.pending.iter().any(|((uid, _), entry)| {
-            uid == session_uid && entry.card.prompt_id.as_deref() == Some(prompt_id)
-        })
+        let mut cards: Vec<String> = inner
+            .pending
+            .iter()
+            .filter(|((uid, _), entry)| {
+                uid == session_uid
+                    && !entry.tool_ran
+                    && entry.card.prompt_id.as_deref() == Some(prompt_id)
+            })
+            .map(|((_, request_id), _)| request_id.clone())
+            .collect();
+        cards.sort();
+        cards
     }
 
     /// What the fleet would call this run, from the cwd the daemon has
@@ -9155,11 +9265,9 @@ impl Daemon {
     /// [`protocol::event::SessionSummary::codex_link`]; the verbs arrive against
     /// an addressing layer that already exists and is already tested.
     ///
-    /// **Test-visible only**, and on the same footing
-    /// [`crate::store::Store::set_device_features`] is: kept because the read beside
-    /// it is already real and already asserted. The alternative is to invent a
-    /// phone-facing command that nothing on the wire asks for, which would be
-    /// speculative.
+    /// **Test-visible only**: kept because the read beside it is already real and
+    /// already asserted. The alternative is to invent a phone-facing command that
+    /// nothing on the wire asks for, which would be speculative.
     ///
     /// # The row and the addressee are two reads, made coherent by the REGISTRATION GATE
     ///
@@ -10056,22 +10164,8 @@ impl Daemon {
                 // gone", and must not be treated as it.
                 continue;
             };
-            // Positive evidence, not merely absence. "The permission prompt is
-            // gone" is also true when the operator switched tmux windows, when
-            // the pane is mid-redraw, or when a long tool is still running —
-            // and resolving on any of those would clear a card the human has
-            // not answered, which is the one failure this must not have.
-            // "The prompt is gone *and* the composer is accepting input again"
-            // only happens after the prompt was actually dismissed.
-            let prompt_visible = self
-                .with_needle_overrides(PromptPresence::PermissionPrompt)
-                .find_match(&pane, None)
-                .is_some();
-            let composer_ready = self
-                .with_needle_overrides(PromptPresence::InputBox)
-                .find_match(&pane, None)
-                .is_some();
-            let answered_locally = !prompt_visible && composer_ready;
+            // Positive evidence only — see `read_screen`.
+            let answered_locally = self.read_screen(&pane) == Some(true);
 
             let resolved: Vec<String> = {
                 let mut inner = self.inner.lock().await;
@@ -10110,6 +10204,53 @@ impl Daemon {
                 .await;
             }
         }
+    }
+
+    /// What a pane says about a permission dialog: `Some(false)` it is on the
+    /// screen, `Some(true)` it is gone and the composer is back — answered —
+    /// and `None` neither, which says nothing either way.
+    ///
+    /// Positive evidence, not merely absence. "The permission prompt is gone"
+    /// is also true when the operator switched tmux windows, when the pane is
+    /// mid-redraw, or when a long tool is still running — and resolving on any
+    /// of those would clear a card the human has not answered, which is the one
+    /// failure this must not have. "The prompt is gone *and* the composer is
+    /// accepting input again" only happens after the prompt was dismissed.
+    fn read_screen(&self, pane: &str) -> Option<bool> {
+        if self
+            .with_needle_overrides(PromptPresence::PermissionPrompt)
+            .find_match(pane, None)
+            .is_some()
+        {
+            return Some(false);
+        }
+        self.with_needle_overrides(PromptPresence::InputBox)
+            .find_match(pane, None)
+            .map(|_| true)
+    }
+
+    /// Whether the Mac answered this card, by its run's screen, read once when
+    /// its doorbell would ring. Claude Code 2.1.308, recorded, leaves the
+    /// `PermissionRequest` hook running after "Yes" at the Mac and writes
+    /// nothing until the call's result, minutes later for a long command: the
+    /// screen is the only word of the answer until then. Read when the ring
+    /// would go, never earlier — a dialog read as answered (another pane looked
+    /// at, a transient) and then back on the screen is still a decision. The
+    /// read is allowed one sweep period; a screen showing neither the dialog
+    /// nor the composer (the detailed transcript view), or none in that time,
+    /// is no answer, and the doorbell rings — unsure, the owner hears about it.
+    async fn answered_at_the_mac(&self, session_uid: &str, key: &CardKey) -> bool {
+        let on_the_pane = the_card(&*self.inner.lock().await, session_uid, key)
+            .is_some_and(|entry| entry.agent.is_claude() && dialog_on_the_pane(entry));
+        if !on_the_pane {
+            return false;
+        }
+        let sweep = Duration::from_millis(self.config.local_resolve_poll_ms);
+        let Ok(Ok(pane)) = tokio::time::timeout(sweep, self.capture_visible(session_uid)).await
+        else {
+            return false;
+        };
+        self.read_screen(&pane) == Some(true)
     }
 
     /// Retire an approval that the phone did not answer.
@@ -10235,14 +10376,6 @@ impl Daemon {
     /// transaction: a rotation that landed the new token beside the old bearer
     /// would present the relay a pair it has no binding for, and every push
     /// would be refused as a credential failure that no repair could fix.
-    ///
-    /// **A registration carries no feature set.** `register_push` once wrote the
-    /// device's advertised agents in this same statement; nothing on the wire can
-    /// send that field, so the write was machinery for an input no client produces
-    /// and it is gone. `devices.features` stays `NULL` for every row, which is the
-    /// Claude floor, and the read
-    /// ([`crate::store::Store::push_targets`]) keeps every fail-closed branch it
-    /// had. The write belongs here once a phone exercises it.
     pub async fn register_push(
         &self,
         device_id: &str,
@@ -14120,7 +14253,7 @@ mod tests {
     /// command reports its result only to the agent's own transcript.
     #[tokio::test]
     async fn a_phone_answer_is_recorded_as_sent_to_claude() {
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let cases = [
             ("toolu_main_allow", None, AnswerDecision::Allow),
             ("toolu_main_deny", None, AnswerDecision::Deny),
@@ -14247,7 +14380,11 @@ mod tests {
     /// The Mac rejected the call while its hook was still held. The rejection in
     /// the transcript lets the hook go and closes the card as answered at the
     /// Mac, so a later phone tap applies nothing. Claude normally ends the hook
-    /// itself; this is what holds when it does not.
+    /// itself after an Escape (measured on 2.1.290); this is what holds when it
+    /// does not. A Mac "Yes" does not end it at all on 2.1.308 (0 of 28 recorded
+    /// Bash approvals: each hook stayed open until the session ended or the
+    /// recording hook's own 600 s timeout), so the call's result is what closes
+    /// that card too.
     #[tokio::test]
     async fn a_rejection_in_the_transcript_ends_a_held_approval() {
         let daemon = test_daemon();
@@ -14376,7 +14513,7 @@ mod tests {
     /// the one handed over, and the card is not released to the Mac.
     #[tokio::test]
     async fn someone_returning_leaves_a_claimed_phone_answer_its_hook() {
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let daemon = test_daemon();
         // Its own run: the latch is armed per run, and no other test may reach it.
         let uid = &protocol::uid::new().unwrap();
@@ -14495,7 +14632,7 @@ mod tests {
     /// typed into the dialog the Mac is showing.
     #[tokio::test]
     async fn two_background_agents_queued_calls_are_each_answered_through_their_own_hook() {
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let daemon = test_daemon();
         let uid = TEST_UID;
         let supervisor = attach(
@@ -14633,7 +14770,7 @@ mod tests {
         let at_mac = raise_held(&daemon, uid, "touch a.txt", "toolu_present", Some("agentA")).await;
         assert_eq!(returned(at_mac).await.decision, Decision::Ask);
 
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let held = raise_held(&daemon, uid, "touch b.txt", "toolu_away", Some("agentB")).await;
         tokio::time::sleep(crate::presence::POLL * 3).await;
         assert!(!held.is_finished(), "held while nobody is back");
@@ -15715,6 +15852,14 @@ mod tests {
     /// The same, over a store that already exists — so a test can express "ccd
     /// was killed and came back" and watch what the new one rings about.
     fn capture_daemon_on(store: Arc<Store>) -> (Arc<Daemon>, Arc<CaptureSender>) {
+        capture_daemon_configured(store, Config::default())
+    }
+
+    /// The same, with a configuration of the test's own.
+    fn capture_daemon_configured(
+        store: Arc<Store>,
+        config: Config,
+    ) -> (Arc<Daemon>, Arc<CaptureSender>) {
         let capture = Arc::new(CaptureSender(
             std::sync::Mutex::new(Vec::new()),
             std::sync::Mutex::new(Vec::new()),
@@ -15722,7 +15867,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         Box::leak(Box::new(rx));
         let daemon = Daemon::new(
-            Config::default(),
+            config,
             store,
             Arc::clone(&capture) as Arc<dyn crate::apns::PushSender>,
             Endpoint {
@@ -15807,35 +15952,28 @@ mod tests {
 
         let wait = || quiet_hook("agent_needs_input", "waiting");
         let done = || quiet_hook("agent_completed", "all done");
+        // The *first* wait never rings: the tool call lands inside its
+        // dispatch grace, and a push whose wait ended before it left the
+        // building is exactly the stale ring the ticket check exists to drop.
+        // Each later state is let ring before the next arrives: a run's newer
+        // quiet state retires an older one still in its grace.
         daemon.handle_hook(wait()).await; // gated — then superseded below
         daemon.handle_hook(wait()).await; // latched: same wait again
         tool_call(&daemon, "cc-1", TEST_UID, "toolu_p1").await; // progress
         daemon.handle_hook(wait()).await; // rings: waiting again after movement
+        rung_after(&capture, 1).await;
         daemon.handle_hook(done()).await; // rings: state changed class
+        rung_after(&capture, 2).await;
         daemon.handle_hook(done()).await; // latched: same completion again
         daemon.handle_hook(wait()).await; // rings: changed class back
 
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        // Dispatch grace makes near-simultaneous rings race each other to the
-        // sender, so assert the multiset of bodies, not their order.
-        //
-        // The *first* wait never rings: the tool call lands inside its
-        // dispatch grace, and a push whose wait ended before it left the
-        // building is exactly the stale ring the ticket check exists to drop.
-        let mut bodies: Vec<String> = capture
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(hint, _)| hint.kind.sentence().to_string())
-            .collect();
-        bodies.sort();
+        use crate::apns::PushKind;
         assert_eq!(
-            bodies,
+            rung_after(&capture, 3).await,
             vec![
-                "Finished a turn".to_string(),
-                "Waiting for your input".to_string(),
-                "Waiting for your input".to_string(),
+                PushKind::NeedsInput,
+                PushKind::Completed,
+                PushKind::NeedsInput
             ],
             "a superseded wait stays silent; every surviving change rings once"
         );
@@ -15845,16 +15983,6 @@ mod tests {
     /// second decision while its first is claimed — is not reachable through
     /// the hooks.
     fn pending_card(uid: &str, label: &str) -> PendingApproval {
-        pending_card_for(uid, label, protocol::agent::AgentKind::Claude)
-    }
-
-    /// The same, for a named agent — the agent-scoped count is what makes the
-    /// distinction observable.
-    fn pending_card_for(
-        uid: &str,
-        label: &str,
-        agent: protocol::agent::AgentKind,
-    ) -> PendingApproval {
         PendingApproval {
             card: serde_json::from_value(json!({
                 "request_id": "r", "payload_hash": "h", "tool_name": "Bash",
@@ -15863,7 +15991,7 @@ mod tests {
             .unwrap(),
             session: SessionKey::new(uid, "cc-1"),
             project_label: label.into(),
-            agent,
+            agent: protocol::agent::AgentKind::Claude,
             created_ms: 0,
             raise: 0,
             responder: None,
@@ -15894,7 +16022,7 @@ mod tests {
             pending_card("other-run", "Ledger"),
         );
 
-        let mut blocked = blocked_runs(&inner, &protocol::agent::AgentKind::Claude);
+        let mut blocked = blocked_runs(&inner);
         blocked.sort();
         assert_eq!(
             blocked,
@@ -15904,44 +16032,7 @@ mod tests {
             ],
             "two cards on one run are one agent, named once"
         );
-        assert!(blocked_runs(&Inner::default(), &protocol::agent::AgentKind::Claude).is_empty());
-    }
-
-    /// **A Codex card does not inflate a Claude doorbell, and vice versa.**
-    ///
-    /// The count a doorbell says out loud is also the deck it is authorized as
-    /// (`PushHint::describing` keeps the ringing run's agent, and
-    /// `push_queue::recipients` narrows by it). Counting the other agent's
-    /// cards would make a Claude alert say "2 agents need you" while naming a
-    /// deck half of which a Claude-only phone cannot open — the exact
-    /// misauthorization the hardcoded-Claude line used to cause in reverse.
-    ///
-    /// **Mutation:** drop the `agent` filter from `blocked_runs` and both
-    /// counts become 2.
-    #[test]
-    fn a_card_is_counted_only_by_a_doorbell_of_its_own_agent() {
-        let mut inner = Inner::default();
-        inner.pending.insert(
-            ("claude-run".to_string(), "r-1".to_string()),
-            pending_card_for("claude-run", "Aion", protocol::agent::AgentKind::Claude),
-        );
-        inner.pending.insert(
-            ("codex-run".to_string(), "r-2".to_string()),
-            pending_card_for("codex-run", "Ledger", protocol::agent::AgentKind::Codex),
-        );
-
-        let claude = blocked_runs(&inner, &protocol::agent::AgentKind::Claude);
-        assert_eq!(
-            claude,
-            vec![("claude-run".to_string(), "Aion".to_string())],
-            "a Codex card must not be counted by a Claude doorbell"
-        );
-        let codex = blocked_runs(&inner, &protocol::agent::AgentKind::Codex);
-        assert_eq!(
-            codex,
-            vec![("codex-run".to_string(), "Ledger".to_string())],
-            "a Claude card must not be counted by a Codex doorbell"
-        );
+        assert!(blocked_runs(&Inner::default()).is_empty());
     }
 
     /// **A run that moves takes its open cards with it.**
@@ -16238,7 +16329,10 @@ mod tests {
         let (daemon, capture) = capture_daemon_on(store);
         daemon.recover().await;
         assert!(
-            daemon.has_pending_card(TEST_UID, "p-open").await,
+            !daemon
+                .open_cards_of_prompt(TEST_UID, "p-open")
+                .await
+                .is_empty(),
             "the run-up: the restarted daemon holds the card"
         );
 
@@ -16503,7 +16597,6 @@ mod tests {
             kind: crate::apns::PushKind::NeedsInput,
             blocked_sessions: 1,
             session_uid: uid.into(),
-            agent: protocol::agent::AgentKind::Claude,
         };
 
         // Nothing has ever filed a row under this uid, which is the state a
@@ -16637,9 +16730,1431 @@ mod tests {
             "only the decision that is still open rings: {rung}"
         );
         assert!(
-            daemon.has_pending_card(TEST_UID, "p-second").await,
+            !daemon
+                .open_cards_of_prompt(TEST_UID, "p-second")
+                .await
+                .is_empty(),
             "and it is the one still open"
         );
+    }
+
+    // ------------------------------- rings wait while someone is at the Mac
+
+    /// The owner's two minutes, written out rather than read from `presence`, so
+    /// a changed constant fails these tests instead of moving them with it.
+    const AWAY: Duration = Duration::from_secs(120);
+
+    /// Every path that rings a phone, each raised on its own daemon so no latch
+    /// or grace couples one to another.
+    #[derive(Debug, Clone, Copy)]
+    enum Ring {
+        ClaudeQuiet(&'static str),
+        ClaudeApproval,
+        ClaudeQuestion,
+        CodexApproval,
+        CodexCompleted,
+    }
+
+    /// Raise `ring` the way its agent does. A held question is returned so its
+    /// hook, and so its card, stays open while the test watches.
+    async fn raise_ring(daemon: &Arc<Daemon>, ring: Ring) -> Option<HeldQuestion> {
+        match ring {
+            Ring::ClaudeQuiet(kind) => {
+                daemon.handle_hook(quiet_hook(kind, "waiting")).await;
+                None
+            }
+            Ring::ClaudeApproval => {
+                raise_prompt(daemon, TEST_UID, "p-1", "echo one").await;
+                None
+            }
+            Ring::ClaudeQuestion => Some(raise_question(daemon, TEST_UID, None, true).await),
+            Ring::CodexApproval => {
+                register_codex_session(daemon, TEST_UID, "cc-1").await;
+                assert!(
+                    daemon
+                        .raise_codex_approval(
+                            &SessionKey::new(TEST_UID, "cc-1"),
+                            codex_command_card("rq-away"),
+                            "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                            "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                            "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+                            "commandExecution",
+                        )
+                        .await,
+                    "the card is filed"
+                );
+                None
+            }
+            Ring::CodexCompleted => {
+                let (uid, _presence) = codex_run_with_link(
+                    daemon,
+                    None,
+                    crate::codex_link::CodexAddressee::Offline { thread_id: None },
+                )
+                .await;
+                let session = SessionKey::new(&uid, "cc-9");
+                let done = codex_turn_terminal(daemon, &session, "th:turn:1").await;
+                daemon.push_codex_turn_complete(&session, &done).await;
+                None
+            }
+        }
+    }
+
+    fn rung(capture: &CaptureSender) -> Vec<crate::apns::PushKind> {
+        capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(hint, _)| hint.kind)
+            .collect()
+    }
+
+    /// What has rung once `count` rings are in, waiting at most a few seconds.
+    /// A ring goes when the release pass gets to it, which a busy daemon
+    /// delays, so a test waits for it rather than for a fixed time; then a
+    /// little longer, so a ring that should not follow has had its chance.
+    async fn rung_after(capture: &CaptureSender, count: usize) -> Vec<crate::apns::PushKind> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while rung(capture).len() < count && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(crate::presence::POLL * 3).await;
+        rung(capture)
+    }
+
+    /// **The phone rings only once the owner has left the Mac.** Every ring, on
+    /// both agents, raised while someone is at the Mac waits — no ring after its
+    /// dispatch grace — and rings once, as what it is, as soon as the Mac has
+    /// had no keyboard or mouse input for two minutes.
+    #[tokio::test]
+    async fn every_ring_waits_while_someone_is_at_the_mac_and_rings_once_they_have_left() {
+        use crate::apns::PushKind;
+        for (ring, kind) in [
+            (Ring::ClaudeQuiet("agent_completed"), PushKind::Completed),
+            (Ring::ClaudeQuiet("idle_prompt"), PushKind::Idle),
+            (Ring::ClaudeQuiet("agent_needs_input"), PushKind::NeedsInput),
+            (Ring::ClaudeQuiet("permission_prompt"), PushKind::NeedsInput),
+            (Ring::ClaudeApproval, PushKind::Approval),
+            (Ring::ClaudeQuestion, PushKind::Question),
+            (Ring::CodexApproval, PushKind::Approval),
+            (Ring::CodexCompleted, PushKind::Completed),
+        ] {
+            let (daemon, capture) = capture_daemon();
+            crate::presence::set_idle(Some(Duration::ZERO));
+            let _open = raise_ring(&daemon, ring).await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            assert_eq!(rung(&capture), vec![], "{ring:?} rang at the Mac");
+
+            crate::presence::set_idle(Some(AWAY));
+            assert_eq!(
+                rung_after(&capture, 1).await,
+                vec![kind],
+                "{ring:?} once the Mac was left"
+            );
+        }
+    }
+
+    /// The newest doorbell a capture daemon handed its sender.
+    fn newest_doorbell(capture: &CaptureSender) -> crate::apns::PushHint {
+        capture
+            .0
+            .lock()
+            .unwrap()
+            .last()
+            .map(|(hint, _)| hint.clone())
+            .expect("a doorbell rang")
+    }
+
+    /// A Codex run other than [`TEST_UID`], so a Claude run can sit beside it.
+    const MIXED_CODEX_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+
+    /// File one Codex approval card on [`MIXED_CODEX_UID`].
+    async fn raise_mixed_codex_card(daemon: &Arc<Daemon>) {
+        register_codex_session(daemon, MIXED_CODEX_UID, "cc-2").await;
+        assert!(
+            daemon
+                .raise_codex_approval(
+                    &SessionKey::new(MIXED_CODEX_UID, "cc-2"),
+                    codex_command_card("rq-mixed"),
+                    "01a06db1-1f8e-7db2-8fd5-10f13af55d1b",
+                    "01a06db1-2223-7ed0-8be5-1d7e3ccdeaee",
+                    "exec-d2700ed3-c69d-4915-a620-36c001e7f577",
+                    "commandExecution",
+                )
+                .await,
+            "the card is filed"
+        );
+    }
+
+    /// **The phone's one notification says what the whole fleet needs, whichever
+    /// agent rang last.**
+    ///
+    /// Every doorbell shares one collapse id, a device's queue replaces a waiting
+    /// doorbell with the newer one, and the badge is the count the doorbell
+    /// carries (`aps.badge` direct, `blocked_count` through the relay). So the
+    /// newest doorbell is the phone's whole picture. A Codex turn that finishes
+    /// while a Claude decision waits must still say a decision waits, with the
+    /// fleet's count; and with one decision of each agent waiting, the count is
+    /// two.
+    ///
+    /// **Mutation:** count only the ringing agent's cards in the dispatch and
+    /// the finished Codex turn reads `Completed` with a count of 0.
+    #[tokio::test]
+    async fn a_finished_codex_turn_does_not_replace_a_waiting_claude_decision() {
+        use crate::apns::PushKind;
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(AWAY));
+        raise_ring(&daemon, Ring::ClaudeApproval).await;
+        assert_eq!(rung_after(&capture, 1).await, vec![PushKind::Approval]);
+
+        raise_ring(&daemon, Ring::CodexCompleted).await;
+        assert_eq!(
+            rung_after(&capture, 2).await.len(),
+            2,
+            "the Codex turn end rang"
+        );
+        let after_codex_turn = newest_doorbell(&capture);
+        assert_eq!(
+            (after_codex_turn.kind, after_codex_turn.blocked_sessions),
+            (PushKind::Approval, 1),
+            "a finished Codex turn must not replace the waiting Claude decision with \
+             a finished turn and a badge of 0: {after_codex_turn:?}"
+        );
+        assert_eq!(
+            crate::apns::alert(&after_codex_turn).1,
+            PushKind::Approval.sentence()
+        );
+
+        raise_mixed_codex_card(&daemon).await;
+        assert_eq!(
+            rung_after(&capture, 3).await.len(),
+            3,
+            "the Codex approval rang"
+        );
+        let both_waiting = newest_doorbell(&capture);
+        assert_eq!(
+            (both_waiting.kind, both_waiting.blocked_sessions),
+            (PushKind::Approval, 2),
+            "one Claude and one Codex decision are two agents waiting: {both_waiting:?}"
+        );
+        assert_eq!(crate::apns::alert(&both_waiting).1, "2 agents need you");
+    }
+
+    /// A [`CaptureSender`] whose FIRST send stands still until the test lets it
+    /// go — the shape of a sender's synchronous registry read stalling between a
+    /// dispatch's count and its enqueue.
+    struct StallingSender {
+        capture: CaptureSender,
+        entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+    impl crate::apns::PushSender for StallingSender {
+        fn send(&self, hint: &crate::apns::PushHint, excluded: &[String]) {
+            // Taken in a statement of its own: an `if let` would hold this lock
+            // through the stall and queue every other send behind it.
+            let first = self.entered.lock().unwrap().take();
+            if let Some(entered) = first {
+                let _ = entered.send(());
+                let release = self.release.lock().unwrap().take().expect("one stall");
+                // Off the runtime's books while it stands still, so the other
+                // dispatches go on running beside it as they would in production.
+                tokio::task::block_in_place(|| {
+                    let _ = release.recv_timeout(Duration::from_secs(10));
+                });
+            }
+            self.capture.send(hint, excluded);
+        }
+        fn retire(&self, device_id: &str) {
+            self.capture.retire(device_id);
+        }
+    }
+
+    /// **What a doorbell checked before waiting its turn is checked again after.**
+    ///
+    /// A doorbell waits for the ordering step behind any send still in it (held
+    /// here directly, as a stalled send holds it). In that wait the run can move
+    /// on — a new tool, a new prompt — and the owner can come back to the Mac.
+    /// The first makes it a doorbell about the past, dropped; the second holds it
+    /// until the owner leaves again.
+    ///
+    /// **Mutation:** check the ticket and the owner's presence only before the
+    /// wait, and both legs ring the moment the ordering step is free.
+    #[tokio::test]
+    async fn a_doorbell_that_waited_its_turn_is_checked_again() {
+        use crate::apns::PushKind;
+
+        // The run moves on while its doorbell waits: dropped.
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(AWAY));
+        let stalled = daemon.ring_order.lock().await;
+        daemon
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        daemon
+            .handle_hook(post(
+                TEST_UID,
+                json!({
+                    "hook_event_name": "PreToolUse", "cwd": "/tmp", "tool_name": "Read",
+                    "tool_input": { "file_path": "/tmp/x" },
+                }),
+                false,
+            ))
+            .await;
+        drop(stalled);
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        assert_eq!(rung(&capture), vec![], "the run moved on while it waited");
+
+        // The owner comes back while it waits: held, then rung once they leave.
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(AWAY));
+        let stalled = daemon.ring_order.lock().await;
+        daemon
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        crate::presence::set_idle(Some(Duration::ZERO));
+        drop(stalled);
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        assert_eq!(rung(&capture), vec![], "the owner is back: it holds");
+        crate::presence::set_idle(Some(AWAY));
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![PushKind::Completed],
+            "and it rings once they have left again"
+        );
+    }
+
+    /// **A doorbell counted earlier is never posted after one counted later.**
+    ///
+    /// Every doorbell shares one collapse slot and a device's queue keeps the one
+    /// that arrives last, so arrival order has to be the order the counts were
+    /// taken in. Here a finished turn is counted (0 decisions) and its sender then
+    /// stalls before enqueueing; meanwhile another run raises a decision, counted
+    /// as 1. Released, the stale "finished, 0" must not end up as the phone's
+    /// newest notification.
+    ///
+    /// **Mutation:** take the ordering lock out of the dispatch and the stalled
+    /// `Completed, 0` lands last.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_earlier_count_never_lands_after_a_later_one() {
+        use crate::apns::PushKind;
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let sender = Arc::new(StallingSender {
+            capture: CaptureSender(
+                std::sync::Mutex::new(Vec::new()),
+                std::sync::Mutex::new(Vec::new()),
+            ),
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            release: std::sync::Mutex::new(Some(release_rx)),
+        });
+        let (tx, rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(rx));
+        let daemon = Daemon::new(
+            Config::default(),
+            shared_store(),
+            Arc::clone(&sender) as Arc<dyn crate::apns::PushSender>,
+            Endpoint {
+                host: "test.ts.net".into(),
+                port: 8787,
+                tls: false,
+            },
+            tx,
+        );
+        crate::presence::set_idle(Some(AWAY));
+
+        // Run A's turn ends with nothing waiting; its send stalls after the count.
+        daemon
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .expect("run A's doorbell reached its sender");
+
+        // Run B raises a decision while A is stalled, and has every chance to ring.
+        raise_mixed_codex_card(&daemon).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        release_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while sender.capture.0.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let rung: Vec<(PushKind, usize)> = sender
+            .capture
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(hint, _)| (hint.kind, hint.blocked_sessions))
+            .collect();
+        assert_eq!(
+            rung.last(),
+            Some(&(PushKind::Approval, 1)),
+            "the newest doorbell must say the decision waits, with a badge of 1: {rung:?}"
+        );
+    }
+
+    /// **And the reverse: a Claude turn that finishes while a Codex decision
+    /// waits still says a decision waits.**
+    ///
+    /// **Mutation:** count only the ringing agent's cards in the dispatch and
+    /// the finished Claude turn reads `Completed` with a count of 0.
+    #[tokio::test]
+    async fn a_finished_claude_turn_does_not_replace_a_waiting_codex_decision() {
+        use crate::apns::PushKind;
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(AWAY));
+        raise_mixed_codex_card(&daemon).await;
+        assert_eq!(rung_after(&capture, 1).await, vec![PushKind::Approval]);
+
+        daemon
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        assert_eq!(
+            rung_after(&capture, 2).await.len(),
+            2,
+            "the Claude turn end rang"
+        );
+        let after_claude_turn = newest_doorbell(&capture);
+        assert_eq!(
+            (after_claude_turn.kind, after_claude_turn.blocked_sessions),
+            (PushKind::Approval, 1),
+            "a finished Claude turn must not replace the waiting Codex decision: \
+             {after_claude_turn:?}"
+        );
+        assert_eq!(
+            crate::apns::alert(&after_claude_turn).1,
+            PushKind::Approval.sentence()
+        );
+    }
+
+    /// **A direction override in a run's directory reaches the alert title as a
+    /// replacement character.** The title of a direct APNs alert is the run's
+    /// project label, drawn by the lock screen as it arrives.
+    #[tokio::test]
+    async fn a_direction_override_in_a_cwd_reaches_the_alert_title_replaced() {
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(AWAY));
+        let mut hook = quiet_hook("agent_completed", "done");
+        hook.payload["cwd"] = json!("/work/abc\u{202E}gpj.exe");
+        daemon.handle_hook(hook).await;
+        assert_eq!(rung_after(&capture, 1).await.len(), 1, "the turn end rang");
+        let title = crate::apns::alert(&newest_doorbell(&capture)).0;
+        assert_eq!(title, "abc\u{FFFD}gpj.exe");
+    }
+
+    /// **Two minutes without input, and not a moment less.**
+    #[tokio::test]
+    async fn a_ring_waits_for_two_full_minutes_without_input() {
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(AWAY - Duration::from_millis(1)));
+        daemon
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(rung(&capture), vec![], "a breath short of two minutes");
+
+        crate::presence::set_idle(Some(AWAY));
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![crate::apns::PushKind::Completed]
+        );
+    }
+
+    /// **Who already knows is read when the held ring goes, not when it was
+    /// raised.** A phone whose live socket received the fact while the owner sat
+    /// at the Mac has seen it, and is not rung about it on their way out.
+    #[tokio::test]
+    async fn a_phone_that_saw_the_fact_while_its_ring_was_held_is_not_rung() {
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        daemon
+            .handle_hook(quiet_hook("agent_needs_input", "waiting"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        daemon
+            .push_gate
+            .note_delivered("watching-phone", TEST_UID, 1_000);
+
+        crate::presence::set_idle(Some(AWAY));
+        rung_after(&capture, 1).await;
+        let rings = capture.0.lock().unwrap();
+        assert_eq!(rings.len(), 1, "{rings:?}");
+        assert_eq!(rings[0].1, vec!["watching-phone".to_string()]);
+    }
+
+    /// **A held ring rings only if it still matters when the owner leaves.**
+    /// The run moving on (a tool, the turn ending, a new Codex turn), the
+    /// decision being answered at the Mac, or the run being deleted while the
+    /// owner sat there each mean there is nothing left to tell the phone.
+    #[tokio::test]
+    async fn a_held_ring_that_stopped_mattering_never_rings() {
+        async fn leave_and_listen(capture: &CaptureSender, case: &str) {
+            crate::presence::set_idle(Some(AWAY));
+            tokio::time::sleep(crate::presence::POLL * 5).await;
+            assert_eq!(rung(capture), vec![], "{case}");
+        }
+
+        for moved in ["PreToolUse", "Stop"] {
+            let (daemon, capture) = capture_daemon();
+            crate::presence::set_idle(Some(Duration::ZERO));
+            daemon
+                .handle_hook(quiet_hook("agent_completed", "done"))
+                .await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            daemon
+                .handle_hook(HookPost {
+                    session_id: "cc-1".into(),
+                    session_uid: Some(TEST_UID.into()),
+                    event: moved.into(),
+                    payload: json!({
+                        "hook_event_name": moved,
+                        "tool_name": "Read",
+                        "tool_input": { "file_path": "/tmp/x" },
+                        "cwd": "/tmp",
+                    }),
+                    wait: false,
+                    holds_questions: false,
+                    holds_approvals: false,
+                })
+                .await;
+            leave_and_listen(&capture, moved).await;
+        }
+
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        let (uid, _presence) = codex_run_with_link(
+            &daemon,
+            None,
+            crate::codex_link::CodexAddressee::Offline { thread_id: None },
+        )
+        .await;
+        let session = SessionKey::new(&uid, "cc-9");
+        let done = codex_turn_terminal(&daemon, &session, "th:turn:1").await;
+        daemon.push_codex_turn_complete(&session, &done).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        daemon.note_codex_turn_running(&uid);
+        leave_and_listen(&capture, "a new Codex turn started").await;
+
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        let hook = json!({
+            "hook_event_name": "PreToolUse", "cwd": "/tmp", "prompt_id": "p-held",
+            "tool_name": "Bash", "tool_input": {"command": "echo one"}, "tool_use_id": "toolu_held",
+        });
+        daemon
+            .handle_hook(post(TEST_UID, hook.clone(), false))
+            .await;
+        let mut request = hook;
+        request["hook_event_name"] = json!("PermissionRequest");
+        request.as_object_mut().unwrap().remove("tool_use_id");
+        let _held = {
+            let daemon = Arc::clone(&daemon);
+            let request = post(TEST_UID, request, true);
+            tokio::spawn(async move { daemon.handle_hook(request).await })
+        };
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !daemon
+                .open_cards_of_prompt(TEST_UID, "p-held")
+                .await
+                .is_empty(),
+            "the premise: an open decision"
+        );
+        transcript_result(&daemon, TEST_UID, "toolu_held", false).await;
+        leave_and_listen(&capture, "the decision was answered at the Mac").await;
+
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        let _asked = raise_question(&daemon, TEST_UID, None, true).await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        question_ran(&daemon, TEST_UID, question_input()).await;
+        leave_and_listen(&capture, "the question was answered at the Mac").await;
+
+        for kind in ["idle_prompt", "agent_completed"] {
+            let (daemon, capture) = capture_daemon();
+            crate::presence::set_idle(Some(Duration::ZERO));
+            daemon.handle_hook(quiet_hook(kind, "waiting")).await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            assert!(
+                daemon
+                    .mark_exited(
+                        &test_key(),
+                        Some(0),
+                        Some("test"),
+                        observed_now(&daemon, TEST_UID).await
+                    )
+                    .await,
+                "the premise: the run ended"
+            );
+            leave_and_listen(&capture, &format!("{kind}: the run ended")).await;
+        }
+
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        daemon
+            .handle_hook(HookPost {
+                session_id: "claude:push-away".into(),
+                session_uid: None,
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "agent_needs_input",
+                    "message": "waiting",
+                    "cwd": "/tmp",
+                }),
+                wait: false,
+                holds_questions: false,
+                holds_approvals: false,
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let row = daemon
+            .store
+            .find_session("claude:push-away")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            daemon.delete_exited_session(&row.session_uid).await,
+            Ok(protocol::ws::DeleteSessionResult::Deleted { .. })
+        ));
+        leave_and_listen(&capture, "the run was deleted").await;
+    }
+
+    /// **A background question keeps its ten seconds; its ring takes two
+    /// minutes.** One idle reading, two thresholds: thirty seconds without
+    /// input hides the question from the Mac for the phone, exactly as before,
+    /// and its ring still waits until the Mac has been left for two minutes.
+    #[tokio::test]
+    async fn a_background_question_keeps_its_ten_seconds_while_its_ring_waits_two_minutes() {
+        let (daemon, capture) = capture_daemon();
+        let request_id = "toolu_fork_question";
+        let id = (TEST_UID.to_string(), request_id.to_string());
+        crate::presence::set_idle(Some(Duration::from_secs(30)));
+
+        let request: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/claude/askuq-fork-permissionrequest-2.1.286.json"
+        ))
+        .unwrap();
+        let mut before = request.clone();
+        before["hook_event_name"] = json!("PreToolUse");
+        before["tool_use_id"] = json!(request_id);
+        daemon.handle_hook(post(TEST_UID, before, false)).await;
+        let (_end_hook, ended) = oneshot::channel::<()>();
+        let _hook = {
+            let daemon = Arc::clone(&daemon);
+            tokio::spawn(async move {
+                let mut gone = Box::pin(async move {
+                    let _ = ended.await;
+                });
+                daemon
+                    .handle_hook_held(post(TEST_UID, request, true), &mut gone)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let hold = |daemon: &Daemon| {
+            daemon
+                .inner
+                .try_lock()
+                .unwrap()
+                .pending
+                .get(&id)
+                .and_then(|entry| entry.card.question_hold)
+        };
+        assert_eq!(
+            hold(&daemon),
+            Some(QuestionHold::Held),
+            "hidden from the Mac"
+        );
+        assert_eq!(rung(&capture), vec![], "and its ring waits");
+
+        crate::presence::set_idle(Some(AWAY));
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![crate::apns::PushKind::Question]
+        );
+        assert_eq!(hold(&daemon), Some(QuestionHold::Held));
+    }
+
+    /// **An approval answered at the Mac does not ring while its call runs.**
+    ///
+    /// Claude Code 2.1.308, recorded: after "Yes" at the Mac the
+    /// `PermissionRequest` hook is left running (it was still alive 42 s later,
+    /// after the turn had ended) and nothing reaches the transcript until the
+    /// call's result, 25 s later for a 25 s command. What does change at once
+    /// is the screen: the dialog leaves the pane and the composer comes back.
+    /// The screen, read when the ring would go, is what ends it. A dialog still
+    /// on the pane is still a decision, and rings.
+    #[tokio::test]
+    async fn an_approval_answered_at_the_mac_does_not_ring_while_its_call_runs() {
+        for answered in [true, false] {
+            let (daemon, capture) = capture_daemon_configured(
+                shared_store(),
+                Config {
+                    local_resolve_grace_ms: 1,
+                    ..Config::default()
+                },
+            );
+            let supervisor = attach(
+                &daemon,
+                "cc-1",
+                TEST_UID,
+                &permission_pane("cargo build --release"),
+                "",
+            )
+            .await;
+            crate::presence::set_idle(Some(Duration::ZERO));
+            let hook = |event: &str| {
+                json!({
+                    "hook_event_name": event, "cwd": "/tmp", "prompt_id": "p-long",
+                    "tool_name": "Bash", "tool_input": {"command": "cargo build --release"},
+                })
+            };
+            let mut before = hook("PreToolUse");
+            before["tool_use_id"] = json!("toolu_long");
+            daemon.handle_hook(post(TEST_UID, before, false)).await;
+            let (_end_hook, ended) = oneshot::channel::<()>();
+            let _held = {
+                let daemon = Arc::clone(&daemon);
+                let request = post(TEST_UID, hook("PermissionRequest"), true);
+                tokio::spawn(async move {
+                    let mut gone = Box::pin(async move {
+                        let _ = ended.await;
+                    });
+                    daemon.handle_hook_held(request, &mut gone).await
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            assert!(
+                !daemon
+                    .open_cards_of_prompt(TEST_UID, "p-long")
+                    .await
+                    .is_empty(),
+                "the premise: a held decision"
+            );
+            if answered {
+                *supervisor.visible.lock().unwrap() = COMPOSER_PANE.to_string();
+            }
+            for _ in 0..LOCAL_RESOLVE_MISSES {
+                daemon.sweep_local_resolutions().await;
+            }
+            assert!(
+                !daemon
+                    .open_cards_of_prompt(TEST_UID, "p-long")
+                    .await
+                    .is_empty(),
+                "the card itself waits for the call's result"
+            );
+            crate::presence::set_idle(Some(AWAY));
+            let expected = if answered {
+                vec![]
+            } else {
+                vec![crate::apns::PushKind::Approval]
+            };
+            assert_eq!(
+                rung_after(&capture, expected.len().max(1)).await,
+                expected,
+                "answered at the Mac: {answered}"
+            );
+        }
+    }
+
+    /// Claude Code's detailed transcript view (ctrl+o) over a call running after
+    /// "Yes" at the Mac, the shape recorded on 2.1.308: neither a dialog nor a
+    /// composer, so the screen says nothing either way.
+    const TRANSCRIPT_VIEW_PANE: &str = "\u{276f} LONGRUN go\n  Bash(python3 -c 'import time; time.sleep(40)')\n  \u{23bf}  Running\u{2026} (4s)\n\u{2500}\u{2500}\u{2500}\u{2500}\n  Showing detailed transcript \u{b7} ctrl+o to toggle \u{b7} \u{2191}\u{2193} scroll\n";
+
+    /// A held main-conversation approval whose pane shows `screens` in turn, one
+    /// sweep each with the owner at the Mac; then the owner leaves. What rang.
+    async fn ring_after_screens(screens: &[&str]) -> Vec<crate::apns::PushKind> {
+        let (daemon, capture) = capture_daemon_configured(
+            shared_store(),
+            Config {
+                local_resolve_grace_ms: 1,
+                ..Config::default()
+            },
+        );
+        let supervisor = attach(&daemon, "cc-1", TEST_UID, screens[0], "").await;
+        crate::presence::set_idle(Some(Duration::ZERO));
+        let hook = |event: &str| {
+            json!({
+                "hook_event_name": event, "cwd": "/tmp", "prompt_id": "p-long",
+                "tool_name": "Bash", "tool_input": {"command": "cargo build --release"},
+            })
+        };
+        let mut before = hook("PreToolUse");
+        before["tool_use_id"] = json!("toolu_long");
+        daemon.handle_hook(post(TEST_UID, before, false)).await;
+        let (_end_hook, ended) = oneshot::channel::<()>();
+        let _held = {
+            let daemon = Arc::clone(&daemon);
+            let request = post(TEST_UID, hook("PermissionRequest"), true);
+            tokio::spawn(async move {
+                let mut gone = Box::pin(async move {
+                    let _ = ended.await;
+                });
+                daemon.handle_hook_held(request, &mut gone).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !daemon
+                .open_cards_of_prompt(TEST_UID, "p-long")
+                .await
+                .is_empty(),
+            "the premise: a held decision"
+        );
+        for screen in screens {
+            *supervisor.visible.lock().unwrap() = screen.to_string();
+            daemon.sweep_local_resolutions().await;
+            tokio::time::sleep(Duration::from_millis(1_100)).await;
+        }
+        assert!(
+            !daemon
+                .open_cards_of_prompt(TEST_UID, "p-long")
+                .await
+                .is_empty(),
+            "the card itself waits for the call's result"
+        );
+        crate::presence::set_idle(Some(AWAY));
+        rung_after(&capture, 1).await
+    }
+
+    /// **What the screen says is read when the ring would go, not when it was
+    /// first seen.** The dialog read as answered — the owner looking at another
+    /// pane with a composer, or any transient — and then back on the screen is
+    /// a decision still waiting, and it rings.
+    #[tokio::test]
+    async fn a_dialog_read_as_answered_and_then_back_still_rings() {
+        let dialog = permission_pane("cargo build --release");
+        assert_eq!(
+            ring_after_screens(&[&dialog, COMPOSER_PANE, COMPOSER_PANE, &dialog, &dialog]).await,
+            vec![crate::apns::PushKind::Approval]
+        );
+    }
+
+    /// **A run's newer quiet state retires its older one.** Finished, then
+    /// waiting again with nothing between that the daemon saw (a turn begun and
+    /// interrupted at the Mac): the owner, away, hears what the run is doing
+    /// now, not what it did before.
+    #[tokio::test]
+    async fn a_runs_newer_quiet_state_retires_its_older_one() {
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        daemon
+            .handle_hook(quiet_hook("agent_completed", "done"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        daemon
+            .handle_hook(quiet_hook("idle_prompt", "waiting"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        crate::presence::set_idle(Some(AWAY));
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![crate::apns::PushKind::Idle]
+        );
+    }
+
+    /// One main-conversation Bash approval held the way cc-hook holds one, under
+    /// the prompt id Claude Code gives every call of one turn (2.1.308,
+    /// recorded: all of a turn's calls carry the turn's `prompt_id`).
+    async fn held_call_of_turn(
+        daemon: &Arc<Daemon>,
+        tool_use_id: &str,
+        command: &str,
+    ) -> oneshot::Sender<()> {
+        let hook = |event: &str| {
+            json!({
+                "hook_event_name": event, "cwd": "/tmp", "prompt_id": "turn-1",
+                "tool_name": "Bash", "tool_input": {"command": command},
+            })
+        };
+        let mut before = hook("PreToolUse");
+        before["tool_use_id"] = json!(tool_use_id);
+        daemon.handle_hook(post(TEST_UID, before, false)).await;
+        let (end_hook, ended) = oneshot::channel::<()>();
+        let daemon = Arc::clone(daemon);
+        let request = post(TEST_UID, hook("PermissionRequest"), true);
+        tokio::spawn(async move {
+            let mut gone = Box::pin(async move {
+                let _ = ended.await;
+            });
+            daemon.handle_hook_held(request, &mut gone).await
+        });
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        end_hook
+    }
+
+    /// **Every approval of a turn rings once.** Claude Code 2.1.308 asks a
+    /// turn's second approval only after its first call has run, under the same
+    /// `prompt_id`: it is a decision of its own. Answered at the Mac, the first
+    /// does not ring; the second, left waiting, does — once, its
+    /// `permission_prompt` twin silent. With nobody at the Mac, each rings as it
+    /// is asked.
+    #[tokio::test]
+    async fn every_approval_of_a_turn_rings_once() {
+        for (idle, first_rings, twin) in [
+            (Some(Duration::ZERO), 0, false),
+            (Some(Duration::ZERO), 0, true),
+            (None, 1, false),
+            (None, 1, true),
+        ] {
+            let (daemon, capture) = capture_daemon();
+            crate::presence::set_idle(idle);
+            let _first = held_call_of_turn(&daemon, "toolu_first", "sleep 30").await;
+            transcript_result(&daemon, TEST_UID, "toolu_first", false).await;
+            assert_eq!(
+                rung_after(&capture, first_rings).await.len(),
+                first_rings,
+                "idle {idle:?}: the first"
+            );
+            let _second = held_call_of_turn(&daemon, "toolu_second", "sleep 31").await;
+            if twin {
+                daemon
+                    .handle_hook(HookPost {
+                        session_id: "cc-1".into(),
+                        session_uid: Some(TEST_UID.into()),
+                        event: "Notification".into(),
+                        payload: json!({
+                            "hook_event_name": "Notification",
+                            "notification_type": "permission_prompt",
+                            "message": "Claude needs your permission to use Bash",
+                            "prompt_id": "turn-1",
+                            "cwd": "/tmp",
+                        }),
+                        wait: false,
+                        holds_questions: false,
+                        holds_approvals: false,
+                    })
+                    .await;
+            }
+            crate::presence::set_idle(Some(AWAY));
+            let kinds = rung_after(&capture, first_rings + 1).await;
+            assert_eq!(
+                kinds.len(),
+                first_rings + 1,
+                "idle {idle:?}, twin {twin}: {kinds:?}"
+            );
+            assert!(
+                kinds.iter().all(|k| *k == crate::apns::PushKind::Approval),
+                "{kinds:?}"
+            );
+        }
+    }
+
+    /// **A turn begun by a line stamped only `turnOrigin` ends the ring before
+    /// it.** The phone's rule, the same: `promptSource` or `turnOrigin` on a line
+    /// that was not only recorded. Claude Code writes such a line for `/plan` and
+    /// `/goal` (2.1.308) and for an automatic compaction summary inside a running
+    /// turn (204 in the owner's transcripts, 2.1.278–2.1.303); either way the run
+    /// has moved on from the finished turn being held.
+    #[tokio::test]
+    async fn a_turn_stamped_only_with_its_origin_ends_the_ring_before_it() {
+        for line in [
+            json!({
+                "type": "user", "uuid": "plan-line", "isSidechain": false,
+                "message": {"role": "user", "content": "<local-command-stdout>Enabled plan mode</local-command-stdout>"},
+                "turnOrigin": "human", "turnPosition": {"promptIndex": 2, "turnIndex": 2},
+            }),
+            json!({
+                "type": "user", "uuid": "compact-line", "isSidechain": false,
+                "isCompactSummary": true,
+                "message": {"role": "user", "content": "This session is being continued from a previous conversation."},
+                "turnOrigin": "task_notification",
+            }),
+        ] {
+            let (daemon, capture) = capture_daemon();
+            crate::presence::set_idle(Some(Duration::ZERO));
+            daemon
+                .handle_hook(quiet_hook("agent_completed", "done"))
+                .await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            transcript_line(&daemon, &line).await;
+            crate::presence::set_idle(Some(AWAY));
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            assert_eq!(rung(&capture), vec![], "{}", line["uuid"]);
+        }
+    }
+
+    /// **What the screen shows when the ring would go decides, and only the
+    /// composer back says answered.** The dialog rings; the detailed transcript
+    /// view (ctrl+o), which shows neither, rings; a pane that cannot be read
+    /// rings — unsure, the owner hears about it.
+    #[tokio::test]
+    async fn only_the_composer_back_on_the_screen_keeps_a_decision_from_ringing() {
+        let dialog = permission_pane("cargo build --release");
+        for (at_release, rings) in [
+            (Some(dialog.as_str()), true),
+            (Some(COMPOSER_PANE), false),
+            (Some(TRANSCRIPT_VIEW_PANE), true),
+            (None, true),
+        ] {
+            let (daemon, capture) = capture_daemon_configured(
+                shared_store(),
+                Config {
+                    local_resolve_poll_ms: 100,
+                    ..Config::default()
+                },
+            );
+            let supervisor = attach(&daemon, "cc-1", TEST_UID, &dialog, "").await;
+            crate::presence::set_idle(Some(Duration::ZERO));
+            let _held = held_call_of_turn(&daemon, "toolu_stale", "cargo build --release").await;
+            match at_release {
+                Some(screen) => *supervisor.visible.lock().unwrap() = screen.to_string(),
+                // The run goes on; its pane can no longer be read.
+                None => {
+                    daemon.inner.lock().await.supervisors.remove(TEST_UID);
+                }
+            }
+            crate::presence::set_idle(Some(AWAY));
+            let expected = if rings {
+                vec![crate::apns::PushKind::Approval]
+            } else {
+                vec![]
+            };
+            assert_eq!(rung_after(&capture, 1).await, expected, "{at_release:?}");
+        }
+    }
+
+    /// A supervisor that serves `screen` to every capture until `stall` is set,
+    /// and from then on answers none: a supervisor or tmux server that has
+    /// stopped responding.
+    async fn stalling_supervisor(
+        daemon: &Arc<Daemon>,
+        name: &str,
+        uid: &str,
+        screen: String,
+        stall: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Registration {
+        let (tx, mut rx) = mpsc::channel::<DaemonFrame>(64);
+        let inflight: Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<SupervisorResult>>>> =
+            Default::default();
+        {
+            let inflight = Arc::clone(&inflight);
+            tokio::spawn(async move {
+                while let Some(frame) = rx.recv().await {
+                    let DaemonFrame::SupervisorRequest { id, request } = frame else {
+                        continue;
+                    };
+                    if stall.load(std::sync::atomic::Ordering::SeqCst) {
+                        continue;
+                    }
+                    let result = match request {
+                        SupervisorRequest::Capture { .. } => SupervisorResult::Snapshot {
+                            text: screen.clone(),
+                        },
+                        _ => SupervisorResult::Pong,
+                    };
+                    if let Some(reply) = inflight.lock().unwrap().remove(&id) {
+                        let _ = reply.send(result);
+                    }
+                }
+            });
+        }
+        daemon
+            .register_supervisor(
+                RegisterSession {
+                    session_id: name.to_string(),
+                    session_uid: Some(uid.to_string()),
+                    tmux_session: name.to_string(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                    cwd: "/tmp".to_string(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Claude,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                    codex_generation: None,
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                inflight,
+            )
+            .await
+            .expect("registration")
+    }
+
+    /// A main-conversation approval held for the phone in the run `name`.
+    async fn held_approval_in(daemon: &Arc<Daemon>, name: &str, uid: &str, call: &str) {
+        let hook = |event: &str| {
+            json!({
+                "hook_event_name": event, "cwd": "/tmp", "prompt_id": format!("turn-{name}"),
+                "tool_name": "Bash", "tool_input": {"command": format!("run {call}")},
+            })
+        };
+        let mut before = hook("PreToolUse");
+        before["tool_use_id"] = json!(call);
+        let mut pre = post(uid, before, false);
+        pre.session_id = name.into();
+        daemon.handle_hook(pre).await;
+        let mut request = post(uid, hook("PermissionRequest"), true);
+        request.session_id = name.into();
+        let held = Arc::clone(daemon);
+        tokio::spawn(async move { held.handle_hook(request).await });
+        for _ in 0..100 {
+            if daemon
+                .inner
+                .lock()
+                .await
+                .pending
+                .contains_key(&(uid.to_string(), call.to_string()))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// **The owner coming back while a ring reads the screen keeps it waiting.**
+    /// The read can take a whole sweep period; presence, the ticket and who has
+    /// seen the event are asked again after it, and the owner at the Mac means
+    /// the ring holds — it rings when they leave again.
+    #[tokio::test]
+    async fn the_owner_coming_back_during_the_screen_read_keeps_the_ring_waiting() {
+        let (daemon, capture) = capture_daemon_configured(
+            shared_store(),
+            Config {
+                local_resolve_poll_ms: 300,
+                ..Config::default()
+            },
+        );
+        let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _supervisor = stalling_supervisor(
+            &daemon,
+            "cc-1",
+            TEST_UID,
+            permission_pane("run toolu_back"),
+            Arc::clone(&stall),
+        )
+        .await;
+        crate::presence::set_idle(Some(Duration::ZERO));
+        held_approval_in(&daemon, "cc-1", TEST_UID, "toolu_back").await;
+        stall.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        crate::presence::set_idle(Some(AWAY));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        crate::presence::set_idle(Some(Duration::ZERO));
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        assert_eq!(rung(&capture), vec![], "rang at the Mac");
+        crate::presence::set_idle(Some(AWAY));
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![crate::apns::PushKind::Approval]
+        );
+    }
+
+    /// **Screens that will not answer do not hold the fleet behind them.**
+    /// Each stalled read is allowed one sweep period, and each ring reads its
+    /// own: five stalled runs do not hold a healthy run's ring, and each of
+    /// them rings once its read has run out.
+    #[tokio::test]
+    async fn stalled_screen_reads_do_not_queue_behind_one_another() {
+        let period = Duration::from_millis(500);
+        let (daemon, capture) = capture_daemon_configured(
+            shared_store(),
+            Config {
+                local_resolve_poll_ms: period.as_millis() as u64,
+                ..Config::default()
+            },
+        );
+        crate::presence::set_idle(Some(Duration::ZERO));
+        let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut supervisors = Vec::new();
+        for i in 0..5 {
+            let uid = protocol::uid::new().unwrap();
+            let name = format!("st-{i}");
+            let call = format!("toolu_st_{i}");
+            supervisors.push(
+                stalling_supervisor(
+                    &daemon,
+                    &name,
+                    &uid,
+                    permission_pane(&format!("run {call}")),
+                    Arc::clone(&stall),
+                )
+                .await,
+            );
+            held_approval_in(&daemon, &name, &uid, &call).await;
+        }
+        let healthy = protocol::uid::new().unwrap();
+        daemon
+            .handle_hook(HookPost {
+                session_id: "healthy".into(),
+                session_uid: Some(healthy.clone()),
+                event: "Notification".into(),
+                payload: json!({
+                    "hook_event_name": "Notification",
+                    "notification_type": "idle_prompt",
+                    "message": "waiting",
+                    "cwd": "/tmp",
+                }),
+                wait: false,
+                holds_questions: false,
+                holds_approvals: false,
+            })
+            .await;
+        stall.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(period * 2 + Duration::from_millis(600)).await;
+        let left = std::time::Instant::now();
+        crate::presence::set_idle(Some(AWAY));
+        let mut healthy_at = None;
+        while left.elapsed() < period * 8 {
+            if capture
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(hint, _)| hint.session_uid == healthy)
+            {
+                healthy_at = Some(left.elapsed());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let healthy_at = healthy_at.expect("the healthy run rang");
+        assert!(
+            healthy_at < period * 2,
+            "behind five stalled reads of {period:?} each: {healthy_at:?}"
+        );
+        assert_eq!(
+            rung_after(&capture, 6).await.len(),
+            6,
+            "every held ring went"
+        );
+    }
+
+    /// **A ring a prompt ended lets the next wait ring.** The prompt moved the
+    /// run as a tool or a turn's end would, so the latch reopens with it: the
+    /// turn it began can end without a `Stop` (interrupted at the Mac), and
+    /// Claude's next `idle_prompt` is news again.
+    #[tokio::test]
+    async fn a_ring_a_prompt_ended_lets_the_next_wait_ring() {
+        let (daemon, capture) = capture_daemon();
+        crate::presence::set_idle(Some(Duration::ZERO));
+        daemon
+            .handle_hook(quiet_hook("idle_prompt", "waiting"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        transcript_line(&daemon, &restamped_prompt(false, "next")).await;
+        daemon
+            .handle_hook(quiet_hook("idle_prompt", "waiting"))
+            .await;
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        crate::presence::set_idle(Some(AWAY));
+        assert_eq!(
+            rung_after(&capture, 1).await,
+            vec![crate::apns::PushKind::Idle]
+        );
+    }
+
+    /// **A run's end does not reopen its latch.** A hook posted just before
+    /// the exit can land just after it, and what it says the run already said:
+    /// it is not said twice.
+    #[tokio::test]
+    async fn a_notification_repeated_after_its_run_ended_does_not_ring_again() {
+        for (first, late) in [
+            ("agent_completed", "agent_completed"),
+            ("idle_prompt", "idle_prompt"),
+        ] {
+            let (daemon, capture) = capture_daemon();
+            daemon.handle_hook(quiet_hook(first, "x")).await;
+            assert_eq!(
+                rung_after(&capture, 1).await.len(),
+                1,
+                "the premise: {first} rang"
+            );
+            assert!(
+                daemon
+                    .mark_exited(
+                        &test_key(),
+                        Some(0),
+                        Some("test"),
+                        observed_now(&daemon, TEST_UID).await
+                    )
+                    .await
+            );
+            daemon.handle_hook(quiet_hook(late, "x")).await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            assert_eq!(
+                rung(&capture).len(),
+                1,
+                "{first} then {late} after the exit"
+            );
+        }
+    }
+
+    /// A user line from Claude Code 2.1.305's own transcript (the typed prompt,
+    /// or the scheduled prompt that fired with nothing typed), restamped now.
+    fn restamped_prompt(scheduled: bool, uuid: &str) -> serde_json::Value {
+        let line = include_str!("../../../fixtures/transcript/scheduled-prompt-2.1.305.jsonl")
+            .lines()
+            .nth(if scheduled { 32 } else { 36 })
+            .unwrap();
+        let mut line: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            line["promptSource"],
+            if scheduled { "system" } else { "typed" }
+        );
+        line["uuid"] = json!(uuid);
+        line["timestamp"] = json!(protocol::time::now_rfc3339());
+        line
+    }
+
+    /// One transcript line, read the way the tailer reads it.
+    async fn transcript_line(daemon: &Arc<Daemon>, line: &serde_json::Value) {
+        let path = std::env::temp_dir().join(format!(
+            "ccd-line-{}-{}.jsonl",
+            std::process::id(),
+            line["uuid"].as_str().unwrap()
+        ));
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let run = SessionKey::new(TEST_UID, "cc-1");
+        let scan = crate::tailer::scan_file(&daemon.store, &run, path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        daemon
+            .ingest_scan(TEST_UID, scan.events, scan.cursor)
+            .await
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// **A prompt handed to Claude ends the held ring before it.** Claude
+    /// tells no hook when a prompt is typed at the Mac, but writes it to its
+    /// transcript stamped `promptSource`; a scheduled prompt that fires with
+    /// nothing typed is stamped `"system"`. Either starts a turn, so "Finished
+    /// a turn" is no longer the run's state and the held ring never rings.
+    #[tokio::test]
+    async fn a_prompt_handed_to_claude_ends_the_held_ring_before_it() {
+        for scheduled in [false, true] {
+            let (daemon, capture) = capture_daemon();
+            crate::presence::set_idle(Some(Duration::ZERO));
+            daemon
+                .handle_hook(quiet_hook("agent_completed", "done"))
+                .await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            transcript_line(&daemon, &restamped_prompt(scheduled, "next-prompt")).await;
+            crate::presence::set_idle(Some(AWAY));
+            tokio::time::sleep(crate::presence::POLL * 5).await;
+            assert_eq!(rung(&capture), vec![], "scheduled: {scheduled}");
+        }
+    }
+
+    /// **Only a prompt filed for the first time moves the run.** A transcript
+    /// read again — a cursor that fails its check rescans from zero — files
+    /// nothing new, and its prompts say nothing new: a held ring still rings,
+    /// and a wait that rang does not ring again. A prompt not filed before ends
+    /// the held ring and reopens the latch.
+    #[tokio::test]
+    async fn only_a_newly_filed_prompt_moves_the_run() {
+        use crate::apns::PushKind;
+        for again in [true, false] {
+            let prompt = restamped_prompt(false, "filed-once");
+            let next = if again {
+                prompt.clone()
+            } else {
+                restamped_prompt(false, "filed-now")
+            };
+
+            let (daemon, capture) = capture_daemon();
+            crate::presence::set_idle(Some(Duration::ZERO));
+            tool_call(&daemon, "cc-1", TEST_UID, "toolu_first").await;
+            transcript_line(&daemon, &prompt).await;
+            daemon
+                .handle_hook(quiet_hook("agent_completed", "done"))
+                .await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            transcript_line(&daemon, &next).await;
+            crate::presence::set_idle(Some(AWAY));
+            let held = if again {
+                vec![PushKind::Completed]
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                rung_after(&capture, 1).await,
+                held,
+                "held, read again: {again}"
+            );
+
+            let (daemon, capture) = capture_daemon();
+            crate::presence::set_idle(Some(AWAY));
+            tool_call(&daemon, "cc-1", TEST_UID, "toolu_first").await;
+            transcript_line(&daemon, &prompt).await;
+            daemon
+                .handle_hook(quiet_hook("idle_prompt", "waiting"))
+                .await;
+            assert_eq!(
+                rung_after(&capture, 1).await,
+                vec![PushKind::Idle],
+                "the premise"
+            );
+            transcript_line(&daemon, &next).await;
+            daemon
+                .handle_hook(quiet_hook("idle_prompt", "waiting"))
+                .await;
+            // Past the dispatch grace, so a ring that should not come has had
+            // its chance.
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let rang = if again { 1 } else { 2 };
+            assert_eq!(
+                rung_after(&capture, rang).await.len(),
+                rang,
+                "rang, read again: {again}"
+            );
+        }
+    }
+
+    /// **Only a prompt handed to the run ends its ring.** Not a line Claude
+    /// recorded without handing it over (`queueTranscriptOnly`), a user line it
+    /// never submitted as a prompt (no `promptSource`, no `turnOrigin`), or a
+    /// background agent's own line (`isSidechain`).
+    #[tokio::test]
+    async fn only_a_prompt_handed_to_the_run_ends_its_ring() {
+        let not_handed = {
+            let mut line = restamped_prompt(false, "not-handed");
+            line["queueTranscriptOnly"] = json!(true);
+            line
+        };
+        let unstamped = {
+            let mut line = restamped_prompt(false, "unstamped");
+            line.as_object_mut().unwrap().remove("promptSource");
+            line.as_object_mut().unwrap().remove("turnOrigin");
+            line
+        };
+        let sidechain = {
+            let mut line = restamped_prompt(false, "sidechain");
+            line["isSidechain"] = json!(true);
+            line
+        };
+        for (case, line) in [
+            ("not handed over", not_handed),
+            ("not a prompt", unstamped),
+            ("a background agent's", sidechain),
+        ] {
+            let (daemon, capture) = capture_daemon();
+            crate::presence::set_idle(Some(Duration::ZERO));
+            daemon
+                .handle_hook(quiet_hook("agent_completed", "done"))
+                .await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            transcript_line(&daemon, &line).await;
+            crate::presence::set_idle(Some(AWAY));
+            assert_eq!(
+                rung_after(&capture, 1).await,
+                vec![crate::apns::PushKind::Completed],
+                "{case}"
+            );
+        }
     }
 
     /// The per-device floor: a second test inside the window is refused with
@@ -20227,11 +21742,7 @@ mod tests {
             let rings = capture.0.lock().unwrap();
             assert_eq!(rings.len(), 1, "one finished turn, one ring: {rings:?}");
             assert_eq!(rings[0].0.kind, crate::apns::PushKind::Completed);
-            assert_eq!(
-                rings[0].0.agent,
-                protocol::agent::AgentKind::Codex,
-                "the fan-out cannot narrow to Codex-capable phones without this"
-            );
+            assert_eq!(rings[0].0.session_uid, uid, "about the run that finished");
         }
 
         // **The second turn is second news.** Claude's `agent_completed` re-fires on
@@ -21456,173 +22967,6 @@ mod tests {
             inner.codex_links.is_empty(),
             "the winner's own transaction retired the incumbent's link — a Claude \
              registration reclaims the slot and leaves it empty"
-        );
-    }
-
-    /// **This run's epoch cannot be another run's by accident.**
-    ///
-    /// It is what `push_targets` compares a stored feature set against, so a repeat
-    /// silently re-authorizes an advertisement made to a different process. A pid
-    /// and a millisecond cannot promise that — pids are reused and clocks move — so
-    /// the identity is a uid's ten random bytes, and the legible pair is only a
-    /// prefix for whoever reads the column.
-    #[test]
-    fn the_feature_epoch_carries_an_identity_and_not_just_a_timestamp() {
-        let epoch = feature_epoch();
-        assert_eq!(epoch, feature_epoch(), "one value for the life of the run");
-        let nonce = epoch
-            .rsplit('-')
-            .next()
-            .expect("the epoch is a hyphenated triple");
-        assert!(
-            protocol::uid::is_well_formed(nonce),
-            "the epoch's last field must be a minted identity, not a derived number: \
-             {epoch}"
-        );
-        assert!(
-            epoch.starts_with(&format!("{}-", std::process::id())),
-            "and the pid stays in front of it, for a human reading the column: {epoch}"
-        );
-    }
-
-    /// **The nonce in the epoch is the nonce that was handed in**.
-    ///
-    /// The sibling above, the refusal below and the startup-wiring test after it are
-    /// three assertions about the same value and none of them looks at where it came
-    /// from: the first checks a shape, the second what happens when entropy fails,
-    /// the third which function evaluates it. A fixed well-formed uid written into
-    /// [`epoch_from`] satisfies all three at once — the last field is still a
-    /// well-formed uid, `Err` still panics, `recover` still mints — while handing
-    /// every run of every daemon on every machine the same epoch. That is the exact
-    /// failure the whole design exists to prevent: `push_targets` compares a stored
-    /// feature set against this string, so two runs that share it re-authorize each
-    /// other's advertisements, and the tests would have said nothing.
-    ///
-    /// So the nonce is *controlled* here rather than observed. [`epoch_from`] taking
-    /// its entropy as an argument is what makes that possible, and is the same reason
-    /// the refusal below is assertable: nothing in a test can steer `getrandom`, but
-    /// everything can steer a parameter.
-    ///
-    /// **Mutation:** replace the parameter's value with a fixed well-formed uid
-    /// inside `epoch_from` and this fails on the tail comparison, with the constant
-    /// on the left and the nonce this test minted on the right; the three sibling
-    /// epoch tests stay green throughout, which is the masking being demonstrated
-    /// rather than asserted.
-    #[test]
-    fn the_epoch_is_built_from_the_entropy_it_was_handed() {
-        let nonce = protocol::uid::new().expect("a test machine has entropy");
-        let epoch = epoch_from(Ok(nonce.clone()));
-        let (_, tail) = epoch
-            .rsplit_once('-')
-            .expect("the epoch is a hyphenated triple");
-        assert_eq!(
-            tail, nonce,
-            "the epoch must carry the identity it was given; a constant here would \
-             pass every other assertion in this file and still give two runs one epoch"
-        );
-    }
-
-    /// **A daemon that cannot mint an identity does not invent one.**
-    ///
-    /// The epoch used to fall back to `pid-millis-no-entropy`, which is fail-open
-    /// at the exact comparison that authorizes a push: two runs sharing a pid and a
-    /// millisecond would share it, and the second would inherit the first's
-    /// confirmed advertisements. `Daemon::recover` mints the epoch before any
-    /// socket opens, so this refusal is a startup failure and not a push-time one.
-    ///
-    /// **Mutation:** put the `unwrap_or_else(|_| "no-entropy".into())` back and
-    /// this test fails.
-    #[test]
-    #[should_panic(expected = "kernel entropy")]
-    fn a_daemon_that_cannot_mint_an_identity_refuses_to_make_an_epoch() {
-        epoch_from(Err(std::io::Error::other("getrandom refused")));
-    }
-
-    /// **Startup is where the epoch is minted, and that is the wiring under test.**
-    ///
-    /// `epoch_from(Err(..))` above pins what the refusal *is*; it says nothing about
-    /// *where* it happens, and where is the whole of the fix. Minting it costs
-    /// kernel entropy, so the call can panic — and every other caller of
-    /// [`feature_epoch`] is on the push path, reached from a task
-    /// [`Daemon::dispatch_push`] spawned, where tokio absorbs the panic. A daemon
-    /// wired that way starts, serves for hours, and dies invisibly the first time a
-    /// doorbell tries to work out who may hear it. Asked in
-    /// [`Daemon::recover`] it is a process that refuses to come up.
-    ///
-    /// Read through [`FEATURE_EPOCH`] rather than through `feature_epoch()`,
-    /// because the question is whether the cell was *already* full: a check written
-    /// through the accessor fills it and then reports that it is full.
-    ///
-    /// **Why a child process.** The cell is process-wide and fills exactly once, so
-    /// in a full parallel suite any earlier test that reaches `feature_epoch()` has
-    /// already filled it — and this assertion then passes on that test's mint rather
-    /// than on `recover`'s. Removing the mint from `recover` altogether stayed green
-    /// that way, which is to say the test could not fail for the reason it exists.
-    /// A documented "run it alone" is not a fix: it is an instruction nothing
-    /// enforces, and CI runs plain `cargo test --workspace`.
-    ///
-    /// So the child is this same binary running this same test with the sentinel
-    /// set, in a process where nothing else has run. It asserts the emptiness FIRST
-    /// — that premise is what makes the mint observable — and the parent counts the
-    /// harness line, because the child is selected by a path spelled as a string and
-    /// a rename would leave it running no test and exiting zero.
-    ///
-    /// **Mutation:** drop the `feature_epoch()` call from `recover` and this fails.
-    #[tokio::test]
-    async fn recovery_is_where_the_feature_epoch_is_minted() {
-        const CHILD: &str = "CCD_FEATURE_EPOCH_MINT_CHILD";
-
-        if std::env::var_os(CHILD).is_some() {
-            // The level the parent set, applied — and the point of setting it.
-            crate::log::init_from_env();
-            assert!(
-                FEATURE_EPOCH.get().is_none(),
-                "the premise this test rests on: in a process where nothing else has \
-                 run, the cell is still empty when recovery begins — otherwise the \
-                 assertion below would pass on somebody else's mint"
-            );
-            let daemon = test_daemon();
-            daemon.recover().await;
-            let minted = FEATURE_EPOCH.get().expect(
-                "recovery must evaluate the feature epoch: it is the last moment a \
-                 daemon that cannot mint one can refuse to start, instead of failing \
-                 inside a spawned push task tokio will swallow",
-            );
-            assert_eq!(
-                minted.as_str(),
-                feature_epoch(),
-                "and the accessor hands back the value startup already settled on, \
-                 rather than minting a second one"
-            );
-            return;
-        }
-
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "state::tests::recovery_is_where_the_feature_epoch_is_minted",
-                "--exact",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            // **And at a level that does not print the line the mint used to hide
-            // in.** `log_info!` evaluates its arguments only when INFO is enabled,
-            // so a mint written inside one is a mint an operator can turn off:
-            // `CODECONNECT_LOG=warn` would put the first `feature_epoch()` call
-            // back inside a spawned push task, where tokio swallows the refusal —
-            // the exact wiring this test exists to pin. Measured: with the call
-            // inside the log line, this child fails.
-            .env("CODECONNECT_LOG", "warn")
-            .output()
-            .unwrap();
-        let told = String::from_utf8_lossy(&child.stderr).into_owned();
-        let harness = String::from_utf8_lossy(&child.stdout).into_owned();
-        assert!(
-            child.status.success(),
-            "startup is not where the feature epoch is minted: {told}"
-        );
-        assert!(
-            harness.contains("test result: ok. 1 passed"),
-            "the child ran no test: the path in `args` no longer names this one. {harness}"
         );
     }
 
@@ -22977,12 +24321,9 @@ mod tests {
             original,
             "the recorded original size must be the size before the cut"
         );
-        let preview = pending.payload["_preview"].as_str().unwrap();
-        assert!(preview.len() <= 4096);
-        assert!(
-            preview.len() > 4096 - 4,
-            "the cut must land on the nearest boundary, not far short of it"
-        );
+        let written = pending.payload.to_string().len();
+        assert!(written <= 4096, "the replacement is {written} bytes");
+        assert!(written > 4096 / 2, "the preview keeps half the room");
         // It survives the round trip an event has to make.
         let encoded = serde_json::to_string(&pending.payload).unwrap();
         let _: serde_json::Value = serde_json::from_str(&encoded).unwrap();
@@ -23000,6 +24341,286 @@ mod tests {
         let before = pending.payload.clone();
         daemon.truncate_payload(&mut pending);
         assert_eq!(pending.payload, before);
+    }
+
+    /// Two typed prompts with a pasted image each, recorded from Claude Code
+    /// 2.1.308 (`fixtures/transcript/big-image-prompt-2.1.308.jsonl`), with
+    /// images small enough to commit: against a 4 KiB limit the first line fits
+    /// and the second does not, as the recorded 368,774- and 677,762-byte lines
+    /// stood against the default 512 KiB.
+    const BIG_IMAGE_PROMPTS: &str =
+        include_str!("../../../fixtures/transcript/big-image-prompt-2.1.308.jsonl");
+    const FITTING_PROMPT: &str = "b845702c-3e73-4e8d-b734-3349f64dddf8";
+    const OVERSIZED_PROMPT: &str = "761181c6-1c42-4173-bf8b-8e4f89bd553f";
+
+    fn recorded_prompt(uuid: &str) -> serde_json::Value {
+        BIG_IMAGE_PROMPTS
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|line| line["uuid"] == uuid)
+            .unwrap()
+    }
+
+    /// The preview object, within the limit once written and over half of it:
+    /// the preview takes half the room, and written again inside the
+    /// replacement it at most doubles.
+    fn is_replaced(payload: &serde_json::Value, original_bytes: usize, limit: usize) -> bool {
+        let keys: Vec<&String> = payload.as_object().unwrap().keys().collect();
+        let written = payload.to_string().len();
+        keys == ["_codeconnect_truncated", "_original_bytes", "_preview"]
+            && payload["_codeconnect_truncated"] == true
+            && payload["_original_bytes"] == original_bytes
+            && written <= limit
+            && written > limit / 2
+    }
+
+    /// **A replaced payload fits the limit once written.** The preview is the
+    /// payload's own JSON, escaped again inside the replacement: a backslash or
+    /// a quote costs two bytes there, so a control character, `\u0001` in the
+    /// payload, costs seven. Cut at the limit's byte count instead, a
+    /// backslash-heavy payload was a 1,048,622-byte replacement against the
+    /// default 524,288, past the 1 MiB a phone takes in one frame.
+    ///
+    /// **Mutation:** cut the preview at `max_payload_bytes` again and every
+    /// case is over the limit.
+    #[tokio::test]
+    async fn a_replaced_payload_fits_the_limit_once_written() {
+        for limit in [4096, Config::default().max_payload_bytes] {
+            let daemon = daemon_with(Config {
+                max_payload_bytes: limit,
+                ..Config::default()
+            });
+            for text in [
+                "\\".repeat(limit),
+                "\"".repeat(limit),
+                "é".repeat(limit),
+                "\u{1}".repeat(limit),
+            ] {
+                let payload = json!({ "stdout": text });
+                let encoded = payload.to_string();
+                let mut pending =
+                    PendingEvent::new(&test_key(), EventKind::ToolResult, payload, Source::Hook);
+                daemon.truncate_payload(&mut pending);
+                assert!(
+                    is_replaced(&pending.payload, encoded.len(), limit),
+                    "{} bytes against {limit}",
+                    pending.payload.to_string().len()
+                );
+                assert!(encoded.starts_with(pending.payload["_preview"].as_str().unwrap()));
+            }
+        }
+    }
+
+    /// **A typed prompt over the limit keeps everything but its image.**
+    ///
+    /// Replaced whole, the prompt lost `promptSource`, `origin`, `uuid` and its
+    /// words: the phone drew no YOU row for it and read the session as done
+    /// while Claude worked on it — 6 typed prompts with images in a real
+    /// history. The image is reduced to the block that names it, and the
+    /// markers say the line was cut and from what size.
+    ///
+    /// **Mutation:** take the prompt arm out of `truncate_payload` and the
+    /// payload comes back as the preview object.
+    #[tokio::test]
+    async fn a_typed_prompt_over_the_limit_keeps_its_fields_and_words_and_loses_its_image() {
+        let daemon = daemon_with(Config {
+            max_payload_bytes: 4096,
+            ..Config::default()
+        });
+        let line = recorded_prompt(OVERSIZED_PROMPT);
+        let original = line.to_string().len();
+        assert!(original > 4096);
+        let mut pending = PendingEvent::new(
+            &test_key(),
+            EventKind::UserMessage,
+            line.clone(),
+            Source::Transcript,
+        );
+
+        daemon.truncate_payload(&mut pending);
+
+        let mut expected = line.clone();
+        expected["message"]["content"][1] = json!({"type": "image"});
+        expected["_codeconnect_truncated"] = json!(true);
+        expected["_original_bytes"] = json!(original);
+        assert_eq!(pending.payload, expected);
+        assert_eq!(pending.payload["promptSource"], "typed");
+        assert_eq!(
+            pending.payload["message"]["content"][0]["text"],
+            "[Image #2] SLOW and this bigger one"
+        );
+        assert!(pending.payload.to_string().len() <= 4096);
+
+        // The prompt whose image fits keeps it.
+        let line = recorded_prompt(FITTING_PROMPT);
+        assert!(line.to_string().len() <= 4096);
+        let mut pending = PendingEvent::new(
+            &test_key(),
+            EventKind::UserMessage,
+            line.clone(),
+            Source::Transcript,
+        );
+        daemon.truncate_payload(&mut pending);
+        assert_eq!(pending.payload, line);
+    }
+
+    /// **A prompt that does not fit even without its images is replaced, as any
+    /// payload is** — whether its words are too long, or it is the bare string a
+    /// prompt with nothing attached is recorded as. Cut, the words would be a
+    /// different prompt on the phone.
+    ///
+    /// **Mutation:** drop the size check on the reduced prompt and the long one
+    /// is filed over the limit.
+    #[tokio::test]
+    async fn a_prompt_too_large_without_its_images_is_replaced_like_any_payload() {
+        let daemon = daemon_with(Config {
+            max_payload_bytes: 4096,
+            ..Config::default()
+        });
+        let mut long_words = recorded_prompt(OVERSIZED_PROMPT);
+        long_words["message"]["content"][0]["text"] = json!("é".repeat(4096));
+        let mut bare = recorded_prompt(FITTING_PROMPT);
+        bare["message"]["content"] = json!("é".repeat(4096));
+        for line in [long_words, bare] {
+            let original = line.to_string().len();
+            let mut pending = PendingEvent::new(
+                &test_key(),
+                EventKind::UserMessage,
+                line,
+                Source::Transcript,
+            );
+            daemon.truncate_payload(&mut pending);
+            assert!(
+                is_replaced(&pending.payload, original, 4096),
+                "{}",
+                pending.payload
+            );
+        }
+    }
+
+    /// **Only a prompt is kept.** A tool's result over the limit is still
+    /// replaced: the phone draws it as "(output too large; the daemon truncated
+    /// it)" (`Timeline.swift`), where a result reduced to the blocks that name
+    /// it would draw as a tool that printed nothing. Claude's own lines are
+    /// replaced as before, a `Write` of a large file among them. Hook and Codex
+    /// cards are bounded where they are built; see the card-limit tests.
+    ///
+    /// **Mutation:** keep a line of any kind and both are filed reduced.
+    #[tokio::test]
+    async fn a_tool_result_or_a_reply_over_the_limit_is_still_replaced() {
+        let daemon = daemon_with(Config {
+            max_payload_bytes: 4096,
+            ..Config::default()
+        });
+        let image = recorded_prompt(OVERSIZED_PROMPT)["message"]["content"][1].clone();
+        // `Read` of an image: Claude records the picture twice, in the result
+        // and in `toolUseResult`.
+        let result = json!({
+            "type": "user", "uuid": "u-read",
+            "message": {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_read", "content": [image.clone()],
+            }]},
+            "toolUseResult": {"type": "image", "file": {
+                "base64": image["source"]["data"], "type": "image/jpeg",
+            }},
+        });
+        let reply = json!({
+            "type": "assistant", "uuid": "a-write",
+            "message": {"role": "assistant", "content": [{
+                "type": "tool_use", "id": "toolu_write", "name": "Write",
+                "input": {"file_path": "/scratch/work/big.txt", "content": "x".repeat(8192)},
+            }]},
+        });
+        for (kind, line) in [
+            (EventKind::ToolResult, result),
+            (EventKind::AgentMessage, reply),
+        ] {
+            let original = line.to_string().len();
+            let mut pending = PendingEvent::new(&test_key(), kind, line, Source::Transcript);
+            daemon.truncate_payload(&mut pending);
+            assert!(
+                is_replaced(&pending.payload, original, 4096),
+                "{}",
+                pending.payload
+            );
+        }
+    }
+
+    /// **The pasted-image prompts, as this build emits them.** Every event of
+    /// the recording, through the production tailer and [`Daemon::ingest_scan`]
+    /// with `max_payload_bytes` at 4096, serialised as a phone is sent it. Only
+    /// the scan's clock read (`ts`) is normalised. The phone's tests read the
+    /// copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_big_image_prompt_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str =
+            include_str!("../../../fixtures/claude/transcript-big-image-prompt-wire.json");
+        let derived = derived_big_image_prompt_wire().await;
+        let prompt = derived
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["payload"]["uuid"] == OVERSIZED_PROMPT)
+            .expect("the oversized prompt is sent with its uuid");
+        assert_eq!(prompt["payload"]["promptSource"], "typed");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived, committed,
+            "the committed big-image-prompt wire no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_big_image_prompt_wire_fixture, then copy it over its copy under \
+             ios/ (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/transcript-big-image-prompt-wire.json` with what
+    /// this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_big_image_prompt_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_big_image_prompt_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/transcript-big-image-prompt-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    async fn derived_big_image_prompt_wire() -> serde_json::Value {
+        let daemon = daemon_with(Config {
+            max_payload_bytes: 4096,
+            ..Config::default()
+        });
+        seed_session(&daemon, TEST_UID, "cc-1", Lifecycle::Live);
+        let run = SessionKey::new(TEST_UID, "cc-1");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/transcript/big-image-prompt-2.1.308.jsonl"
+        );
+        let scan = crate::tailer::scan_file(&daemon.store, &run, path)
+            .unwrap()
+            .unwrap();
+        daemon
+            .ingest_scan(TEST_UID, scan.events, scan.cursor)
+            .await
+            .unwrap();
+        let events: Vec<serde_json::Value> = daemon
+            .store
+            .events_after(TEST_UID, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .map(|event| {
+                let mut value = serde_json::to_value(event).unwrap();
+                // The scan's clock read, the one field that is not the recording's.
+                value["ts"] = json!("2026-10-22T13:36:40.000Z");
+                value
+            })
+            .collect();
+        serde_json::Value::Array(events)
     }
 
     // ========================================================== send_text
@@ -24368,19 +25989,16 @@ mod tests {
         // The dispatch grace: a doorbell describes the world at the moment it
         // rings, not the moment it was admitted, so it is read after that window.
         tokio::time::sleep(Duration::from_millis(700)).await;
-        let rings: Vec<(crate::apns::PushKind, protocol::agent::AgentKind)> = capture
+        let rings: Vec<(crate::apns::PushKind, String)> = capture
             .0
             .lock()
             .unwrap()
             .iter()
-            .map(|(hint, _)| (hint.kind, hint.agent.clone()))
+            .map(|(hint, _)| (hint.kind, hint.session_uid.clone()))
             .collect();
         assert_eq!(
             rings,
-            vec![(
-                crate::apns::PushKind::Approval,
-                protocol::agent::AgentKind::Codex
-            )],
+            vec![(crate::apns::PushKind::Approval, uid.to_string())],
             "one approval, one doorbell, about the run that raised it"
         );
     }
@@ -28889,7 +30507,10 @@ mod tests {
         // And the doorbell was never admitted: the gate's key for this request is
         // still free, which it would not be if a push had been dispatched.
         assert!(
-            daemon.push_gate.admit_decision(uid, "derived-1").is_some(),
+            daemon
+                .push_gate
+                .admit_decision(uid, "derived-1", None)
+                .is_some(),
             "a refused card must not have rung"
         );
     }
@@ -29068,7 +30689,7 @@ mod tests {
     /// **A worst-case card survives the daemon's own truncation, intact.**
     ///
     /// This is the assertion the per-field bounds were believed to buy and did
-    /// not. `Daemon::truncate_payload` does not trim an oversized payload — it
+    /// not. `Daemon::truncate_payload` does not trim an oversized card — it
     /// REPLACES it with `{_codeconnect_truncated, _original_bytes, _preview}`,
     /// and a phone handed that decodes no card, so both buttons are gone. The
     /// old ceilings multiplied out to 512 KiB of diffs *before* counting that
@@ -29541,7 +31162,7 @@ mod tests {
     /// agent's hook only.
     #[tokio::test]
     async fn identical_questions_from_two_background_agents_each_get_their_own_card() {
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let daemon = test_daemon();
         let uid = TEST_UID;
         let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
@@ -29626,7 +31247,7 @@ mod tests {
     /// still the current one, and its card stays live.
     #[tokio::test]
     async fn a_held_background_question_leaves_the_prompt_on_screen_live() {
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let daemon = test_daemon();
         let uid = TEST_UID;
         let bash = raise_prompt(&daemon, uid, "p-bash", "touch ran.txt").await;
@@ -29679,7 +31300,7 @@ mod tests {
     /// question under the default limit is held.
     #[tokio::test]
     async fn a_question_too_large_for_its_card_goes_to_the_mac() {
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let uid = TEST_UID;
         for (limit, expected) in [
             (1024, QuestionHold::AtMac),
@@ -30851,7 +32472,7 @@ mod tests {
     /// screen when the card arrived, and the phone's answer to it lands.
     #[tokio::test]
     async fn a_held_question_does_not_bring_its_run_into_the_pane_sweep() {
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let daemon = test_daemon();
         let uid = TEST_UID;
         let pane = attach(&daemon, "cc-1", uid, &permission_pane("rm stale.txt"), "").await;
@@ -30884,7 +32505,7 @@ mod tests {
     /// held.
     #[tokio::test]
     async fn a_held_question_is_not_swept_with_an_older_card_beside_it() {
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let daemon = daemon_with(Config {
             local_resolve_grace_ms: 1_000,
             ..Config::default()
@@ -30997,7 +32618,7 @@ mod tests {
         };
 
         for idle in [
-            Some(crate::presence::IDLE_THRESHOLD - Duration::from_millis(10)),
+            Some(crate::presence::QUESTION_IDLE - Duration::from_millis(10)),
             None,
         ] {
             crate::presence::set_idle(idle);
@@ -31011,7 +32632,7 @@ mod tests {
             assert_eq!(hold(&daemon), Some(QuestionHold::AtMac), "{idle:?}");
         }
 
-        crate::presence::set_idle(Some(crate::presence::IDLE_THRESHOLD));
+        crate::presence::set_idle(Some(crate::presence::QUESTION_IDLE));
         let daemon = test_daemon();
         let raised = raise(Arc::clone(&daemon)).await;
         assert_eq!(hold(&daemon), Some(QuestionHold::Held));
@@ -31390,6 +33011,148 @@ mod tests {
             "hold_ended": event(&ended, EventKind::Other("question_hold".into())),
             "at_mac_request": event(&at_mac, EventKind::ApprovalRequest),
             "answered_at_mac": event(&at_mac, EventKind::ApprovalResolved),
+        });
+        fn normalise(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, slot) in map.iter_mut() {
+                        if matches!(key.as_str(), "ts" | "resolved_at") {
+                            let was = slot.as_str().unwrap_or_default();
+                            assert!(
+                                was.len() == 24 && was.ends_with('Z'),
+                                "{key} was expected to be a clock read, and is {slot}"
+                            );
+                            *slot = json!("2026-10-03T00:00:00.000Z");
+                        } else {
+                            normalise(slot);
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(normalise),
+                _ => {}
+            }
+        }
+        normalise(&mut out);
+        out
+    }
+
+    /// **Questions whose text would draw as something else, as this build
+    /// emits them.** `fixtures/claude/askuq-rlo-inputs.json` holds two
+    /// `AskUserQuestion` inputs, sent through the 2.1.286 hooks in place of
+    /// theirs: `everywhere` carries U+202E in its question, header, label,
+    /// description and a 2,101-unit preview, and is refused — sent to the
+    /// phone all the same, to be answered at the Mac; `unchecked` carries it
+    /// only in its headers, descriptions and long preview, which the daemon
+    /// does not check, over two questions, and is held — then answered from the
+    /// phone with each question's first option. Only clock reads are normalised. The phone's display
+    /// tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_rlo_question_cards_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/question-cards-rlo-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_rlo_question_cards().await,
+            committed,
+            "the committed RLO question cards no longer match what this build emits. \
+             Regenerate them with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_rlo_question_cards_fixture, then copy it over its copy under \
+             ios/ (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/question-cards-rlo-wire.json` with what this
+    /// build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_rlo_question_cards_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_rlo_question_cards().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/question-cards-rlo-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    async fn derived_rlo_question_cards() -> serde_json::Value {
+        const INPUTS: &str = include_str!("../../../fixtures/claude/askuq-rlo-inputs.json");
+        let inputs: serde_json::Value = serde_json::from_str(INPUTS).unwrap();
+        let uid = TEST_UID;
+        let event = |daemon: &Daemon, kind: EventKind| {
+            let mut events = approval_events(daemon, uid, kind.clone());
+            assert_eq!(events.len(), 1, "one {kind:?}");
+            serde_json::to_value(events.remove(0)).unwrap()
+        };
+        let raise = |input: serde_json::Value| async move {
+            let daemon = test_daemon();
+            let supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;
+            let mut pre = question_hook("PreToolUse");
+            pre["tool_input"] = input.clone();
+            daemon.handle_hook(post(uid, pre, false)).await;
+            let mut request = question_hook("PermissionRequest");
+            request["tool_input"] = input;
+            let request = post(uid, request, true);
+            let hook = {
+                let daemon = Arc::clone(&daemon);
+                tokio::spawn(async move {
+                    let mut gone = Box::pin(std::future::pending::<()>());
+                    daemon.handle_hook_held(request, &mut gone).await
+                })
+            };
+            for _ in 0..200 {
+                if !approval_events(&daemon, uid, EventKind::ApprovalRequest).is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            (daemon, supervisor, hook)
+        };
+
+        // Refused, and sent to be answered at the Mac.
+        let (everywhere, _supervisor, hook) = raise(inputs["everywhere"].clone()).await;
+        let refused = event(&everywhere, EventKind::ApprovalRequest);
+        hook.abort();
+
+        // Held, and answered from the phone with its first option.
+        let input = inputs["unchecked"].clone();
+        let hash = protocol::hash::approval_payload_hash("AskUserQuestion", &input);
+        let (unchecked, _supervisor, hook) = raise(input).await;
+        let held = event(&unchecked, EventKind::ApprovalRequest);
+        let answering = {
+            let daemon = Arc::clone(&unchecked);
+            tokio::spawn(async move {
+                daemon
+                    .answer(
+                        QUESTION_ID,
+                        &hash,
+                        AnswerDecision::Answers {
+                            answers: vec![
+                                protocol::ws::QuestionAnswer {
+                                    selected: vec![0],
+                                    ..Default::default()
+                                };
+                                2
+                            ],
+                        },
+                        Some("cc-1"),
+                    )
+                    .await
+            })
+        };
+        let sent = returned(hook).await.updated_input.unwrap();
+        question_ran(&unchecked, uid, sent).await;
+        assert!(matches!(
+            answering.await.unwrap(),
+            AnswerResult::Applied { .. }
+        ));
+
+        let mut out = json!({
+            "everywhere": refused,
+            "unchecked": held,
+            "unchecked_answered": event(&unchecked, EventKind::ApprovalResolved),
         });
         fn normalise(value: &mut serde_json::Value) {
             match value {

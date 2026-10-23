@@ -231,6 +231,32 @@ jobs:
             fi
           done
 
+      # Into the runner's temp directory, so the tree stays exactly the pinned
+      # commit. The script itself refuses a binary that reports anything but
+      # its bundle, links a library outside the system, or targets another
+      # macOS minimum.
+      - name: Build tmux
+        run: mac/tmux/build.sh "$RUNNER_TEMP/tmux"
+
+      # The tmux this slice's `codeconnect` will require, asked of that
+      # `codeconnect`: the one comparison that holds whatever SOURCES says.
+      - name: Check the tmux slice is the one codeconnect requires
+        run: |
+          expected="$("mac/target/${{ matrix.target }}/release/codeconnect" --tmux-version)"
+          said="$("$RUNNER_TEMP/tmux/cc-tmux-${{ matrix.arch }}" -V)"
+          if [ "$said" != "$expected" ]; then
+            echo "::error::cc-tmux reports '$said', codeconnect requires '$expected'"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tmux-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/tmux/cc-tmux-${{ matrix.arch }}
+            ${{ runner.temp }}/tmux/THIRD_PARTY_NOTICES
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v4
         with:
           name: slice-${{ matrix.arch }}
@@ -293,6 +319,24 @@ jobs:
           # The licence travels with the binaries because the licence says it
           # must: a binaries-only archive is a distribution without its notice.
           cp LICENSE "$DIR/LICENSE"
+          # tmux goes into the same directory so it is signed, notarized and
+          # verified with the others; it is packaged into an archive of its
+          # own, and the core archive names its members one by one.
+          lipo -create -output "$DIR/cc-tmux" \
+            slices/tmux-arm64/cc-tmux-arm64 slices/tmux-x86_64/cc-tmux-x86_64
+          chmod 0755 "$DIR/cc-tmux"
+          archs="$(lipo -archs "$DIR/cc-tmux")"
+          case "$archs" in
+            *arm64*x86_64*|*x86_64*arm64*) ;;
+            *) echo "::error::cc-tmux is not universal: $archs"; exit 1 ;;
+          esac
+          # Both builds read the same pinned sources, so their notices match;
+          # a difference means the two slices were not built from one bundle.
+          if ! cmp -s slices/tmux-arm64/THIRD_PARTY_NOTICES slices/tmux-x86_64/THIRD_PARTY_NOTICES; then
+            echo "::error::the two tmux slices carry different notices"
+            exit 1
+          fi
+          cp slices/tmux-arm64/THIRD_PARTY_NOTICES "$DIR/THIRD_PARTY_NOTICES"
 
       - name: Import the signing certificate
         env:
@@ -347,7 +391,7 @@ jobs:
             security find-identity -p codesigning || true
             exit 1
           fi
-          for binary in codeconnect ccd cc-hook; do
+          for binary in codeconnect ccd cc-hook cc-tmux; do
             codesign --force --options runtime --timestamp \
               --sign "$identity" "$DIR/$binary"
           done
@@ -403,7 +447,7 @@ jobs:
             and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
             and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
             and certificate leaf[subject.OU] = \"$TEAM_ID\""
-          for binary in codeconnect ccd cc-hook; do
+          for binary in codeconnect ccd cc-hook cc-tmux; do
             path="$DIR/$binary"
             codesign --verify --strict --all-architectures -R="$req" "$path"
             # Captured, then searched — not piped into `grep -q`. `grep -q`
@@ -433,6 +477,12 @@ jobs:
               exit 1
             fi
           done
+          expected="$("$DIR/codeconnect" --tmux-version)"
+          said="$("$DIR/cc-tmux" -V)"
+          if [ "$said" != "$expected" ]; then
+            echo "::error::cc-tmux reports '$said', codeconnect requires '$expected'"
+            exit 1
+          fi
 
       - name: Package
         id: package
@@ -448,7 +498,17 @@ jobs:
           COPYFILE_DISABLE=1 tar -czf "$archive" \
             "$DIR/codeconnect" "$DIR/ccd" "$DIR/cc-hook" "$DIR/LICENSE"
           shasum -a 256 "$archive" > "$archive.sha256"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          # tmux in an archive of its own: every released updater takes the
+          # core archive by its exact name and must keep finding exactly the
+          # four members it allows there.
+          tmux_archive="codeconnect-$VERSION-tmux-macos-universal.tar.gz"
+          COPYFILE_DISABLE=1 tar -czf "$tmux_archive" \
+            "$DIR/cc-tmux" "$DIR/THIRD_PARTY_NOTICES"
+          shasum -a 256 "$tmux_archive" > "$tmux_archive.sha256"
+          {
+            echo "archive=$archive"
+            echo "tmux_archive=$tmux_archive"
+          } >> "$GITHUB_OUTPUT"
 
       # A draft is invisible to the get-release-by-tag endpoint, so the draft
       # is found in the authenticated listing — which does include drafts —
@@ -524,12 +584,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ steps.draft.outputs.id }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
+          TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
         run: |
           # By id, to this draft and no other. A rerun may find its own
           # earlier upload under the same name; that asset is deleted first,
           # because two assets cannot share a name and the bytes being
           # attached are the ones this run verified.
-          for file in "$ARCHIVE" "$ARCHIVE.sha256"; do
+          for file in "$ARCHIVE" "$ARCHIVE.sha256" "$TMUX_ARCHIVE" "$TMUX_ARCHIVE.sha256"; do
             existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
               --jq ".assets[] | select(.name == \"$file\") | .id")"
             for asset in $existing; do
@@ -544,17 +605,24 @@ jobs:
           done
           # Read back what the draft now holds; these exact asset ids are what
           # the verification step downloads and what publication rechecks.
-          archive_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            --jq ".assets[] | select(.name == \"$ARCHIVE\") | .id")"
-          checksum_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            --jq ".assets[] | select(.name == \"$ARCHIVE.sha256\") | .id")"
-          if [ -z "$archive_id" ] || [ -z "$checksum_id" ]; then
+          asset_id() {
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              --jq ".assets[] | select(.name == \"$1\") | .id"
+          }
+          archive_id="$(asset_id "$ARCHIVE")"
+          checksum_id="$(asset_id "$ARCHIVE.sha256")"
+          tmux_archive_id="$(asset_id "$TMUX_ARCHIVE")"
+          tmux_checksum_id="$(asset_id "$TMUX_ARCHIVE.sha256")"
+          if [ -z "$archive_id" ] || [ -z "$checksum_id" ] \
+              || [ -z "$tmux_archive_id" ] || [ -z "$tmux_checksum_id" ]; then
             echo "::error::the uploaded assets did not appear on draft $RELEASE_ID"
             exit 1
           fi
           {
             echo "archive_id=$archive_id"
             echo "checksum_id=$checksum_id"
+            echo "tmux_archive_id=$tmux_archive_id"
+            echo "tmux_checksum_id=$tmux_checksum_id"
           } >> "$GITHUB_OUTPUT"
 
       # Downloaded back from the draft rather than checked in place: this is
@@ -566,35 +634,60 @@ jobs:
           ARCHIVE: ${{ steps.package.outputs.archive }}
           ARCHIVE_ID: ${{ steps.assets.outputs.archive_id }}
           CHECKSUM_ID: ${{ steps.assets.outputs.checksum_id }}
+          TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
+          TMUX_ARCHIVE_ID: ${{ steps.assets.outputs.tmux_archive_id }}
+          TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
           DIR: ${{ needs.pin.outputs.dir }}
         run: |
           mkdir -p roundtrip && cd roundtrip
           # By asset id, with the octet-stream accept header — the only form
           # in which a draft's assets can be fetched at all.
-          gh api -H "Accept: application/octet-stream" \
-            "repos/$GITHUB_REPOSITORY/releases/assets/$ARCHIVE_ID" > "$ARCHIVE"
-          gh api -H "Accept: application/octet-stream" \
-            "repos/$GITHUB_REPOSITORY/releases/assets/$CHECKSUM_ID" > "$ARCHIVE.sha256"
-          shasum -a 256 -c "$ARCHIVE.sha256"
-          # The rule the updater applies, applied here: exactly these four
+          fetch() {
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$1" > "$2"
+          }
+          # The rule the updater applies, applied here: exactly these
           # members, nothing else, no directory entry. Extracting and hoping
           # would not have caught a directory member the product refuses.
-          expected="$(printf '%s\n' \
-            "$DIR/codeconnect" "$DIR/ccd" "$DIR/cc-hook" "$DIR/LICENSE" | sort)"
-          actual="$(tar -tzf "$ARCHIVE" | sort)"
-          if [ "$expected" != "$actual" ]; then
-            echo "::error::the archive does not hold exactly the four expected members"
-            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
-            exit 1
-          fi
+          holds_exactly() {
+            local archive="$1" expected actual
+            shift
+            expected="$(printf '%s\n' "$@" | sort)"
+            actual="$(tar -tzf "$archive" | sort)"
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::$archive does not hold exactly the expected members"
+              diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+              exit 1
+            fi
+          }
+          fetch "$ARCHIVE_ID" "$ARCHIVE"
+          fetch "$CHECKSUM_ID" "$ARCHIVE.sha256"
+          fetch "$TMUX_ARCHIVE_ID" "$TMUX_ARCHIVE"
+          fetch "$TMUX_CHECKSUM_ID" "$TMUX_ARCHIVE.sha256"
+          shasum -a 256 -c "$ARCHIVE.sha256"
+          shasum -a 256 -c "$TMUX_ARCHIVE.sha256"
+          holds_exactly "$ARCHIVE" \
+            "$DIR/codeconnect" "$DIR/ccd" "$DIR/cc-hook" "$DIR/LICENSE"
+          holds_exactly "$TMUX_ARCHIVE" "$DIR/cc-tmux" "$DIR/THIRD_PARTY_NOTICES"
           tar -xzf "$ARCHIVE"
+          tar -xzf "$TMUX_ARCHIVE"
           req="anchor apple generic \
             and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
             and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
             and certificate leaf[subject.OU] = \"$TEAM_ID\""
-          for binary in codeconnect ccd cc-hook; do
+          for binary in codeconnect ccd cc-hook cc-tmux; do
             codesign --verify --strict --all-architectures -R="$req" "$DIR/$binary"
           done
+          # The pair a user receives agrees: the downloaded tmux is the one
+          # the downloaded codeconnect requires. Asked as assignments, so a
+          # binary that does not run fails the step rather than answering
+          # with the same empty string as its partner.
+          expected="$("$DIR/codeconnect" --tmux-version)"
+          said="$("$DIR/cc-tmux" -V)"
+          if [ -z "$expected" ] || [ "$said" != "$expected" ]; then
+            echo "::error::the released cc-tmux reports '$said', the released codeconnect requires '$expected'"
+            exit 1
+          fi
 
       - name: Publish
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
@@ -603,14 +696,17 @@ jobs:
           RELEASE_ID: ${{ steps.draft.outputs.id }}
           ARCHIVE_ID: ${{ steps.assets.outputs.archive_id }}
           CHECKSUM_ID: ${{ steps.assets.outputs.checksum_id }}
+          TMUX_ARCHIVE_ID: ${{ steps.assets.outputs.tmux_archive_id }}
+          TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
+          TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
           TAG: ${{ needs.pin.outputs.tag }}
           SHA: ${{ needs.pin.outputs.sha }}
           VERSION: ${{ needs.pin.outputs.version }}
         run: |
           # Publication is a PATCH on the id this run adopted, made only after
           # re-reading what that id holds *now*: still a draft, still this
-          # tag, and exactly the two assets the verification step downloaded —
+          # tag, and exactly the four assets the verification step downloaded —
           # by id, name, and state, because an id survives a rename and the
           # updater selects by name — not whatever a concurrent writer left.
           state="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
@@ -624,9 +720,12 @@ jobs:
           fi
           held="$(jq -r '[.assets[] | {id, name, state}] | sort_by(.id) | tojson' <<<"$state")"
           expected="$(jq -n --argjson aid "$ARCHIVE_ID" --argjson cid "$CHECKSUM_ID" \
-            --arg archive "$ARCHIVE" \
+            --argjson taid "$TMUX_ARCHIVE_ID" --argjson tcid "$TMUX_CHECKSUM_ID" \
+            --arg archive "$ARCHIVE" --arg tmux "$TMUX_ARCHIVE" \
             '[{id: $aid, name: $archive, state: "uploaded"},
-              {id: $cid, name: ($archive + ".sha256"), state: "uploaded"}] | sort_by(.id) | tojson')"
+              {id: $cid, name: ($archive + ".sha256"), state: "uploaded"},
+              {id: $taid, name: $tmux, state: "uploaded"},
+              {id: $tcid, name: ($tmux + ".sha256"), state: "uploaded"}] | sort_by(.id) | tojson')"
           if [ "$held" != "$(jq -r . <<<"$expected")" ]; then
             echo "::error::draft $RELEASE_ID does not hold exactly the verified assets; refusing"
             echo "held:     $held"
@@ -678,4 +777,4 @@ jobs:
           TAG: ${{ needs.pin.outputs.tag }}
         run: |
           echo "$TAG is a verified draft. To publish it:"
-          echo "  gh workflow run release.yml -f tag=$TAG -f publish=true"
+          echo "  gh workflow run release.yml --ref $TAG -f tag=$TAG -f publish=true"

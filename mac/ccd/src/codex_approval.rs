@@ -206,11 +206,13 @@ pub(crate) fn observe_only_reason(method: &str) -> &'static str {
 ///
 /// A card is something a person reads on a phone, and the event it rides in is
 /// capped at `max_payload_bytes` (512 KiB by default) by
-/// `Daemon::truncate_payload`, which does not trim the card — it replaces the
-/// whole payload with a preview object, and the phone then has no card to
-/// decode at all. Cutting here instead keeps the card a card, and the cut is
-/// made **before** the hash so the text on the phone is still provably the text
-/// that was hashed.
+/// `Daemon::truncate_payload`, which keeps part of a user line whose content
+/// is blocks — measured, a typed prompt or an `isMeta` line; transcript-only,
+/// task and compaction lines are plain text — and of nothing else: it does not trim the card, it
+/// replaces the whole payload with a preview object, and the phone then has no
+/// card to decode at all. Cutting here instead keeps the card a card, and the
+/// cut is made **before** the hash so the text on the phone is still provably
+/// the text that was hashed.
 const MAX_COMMAND_BYTES: usize = 8 * 1024;
 /// The same ceiling for one file's diff.
 const MAX_DIFF_BYTES: usize = 16 * 1024;
@@ -1920,7 +1922,7 @@ mod tests {
 
     /// **A card is bounded before it is hashed, so it stays a card.**
     ///
-    /// `Daemon::truncate_payload` does not trim an oversized payload, it
+    /// `Daemon::truncate_payload` does not trim an oversized card, it
     /// replaces it — the phone then decodes no card at all. Cutting the two
     /// unbounded fields here, ahead of the hash, keeps the text on the phone
     /// provably the text that was hashed. The cut lands on a character
@@ -2632,6 +2634,67 @@ mod tests {
              Regenerate it: cargo test -p ccd --bin ccd -- --ignored --nocapture \
              regenerate_the_approval_card_fixture > fixtures/codex/approval-card-0.153.json"
         );
+    }
+
+    /// **Cards whose text would draw as something else, as this build emits
+    /// them.** `fixtures/codex/approval-rlo-inputs.json` holds three requests
+    /// with U+202E in every agent-written field: a command whose
+    /// "don't ask again" grant prints a wrapper script, one whose grant prints
+    /// tokens, and a file change — joined to its `item/started` — with a
+    /// rename and a diff. Each goes through [`Approval::read`] and
+    /// [`Approval::card`] as a live request does, and the cards are compared
+    /// with `fixtures/codex/codex-cards-rlo-wire.json`, which the phone's
+    /// display tests read from the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[test]
+    fn the_rlo_cards_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/codex/codex-cards-rlo-wire.json");
+        let committed: Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_rlo_cards(),
+            committed,
+            "the committed RLO cards no longer match what this build emits. Regenerate them \
+             with cargo test -p ccd --bin ccd -- --ignored regenerate_the_rlo_cards_fixture, \
+             then copy it over its copy under ios/ (fixtures/check-duplicated-fixtures.sh \
+             names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/codex/codex-cards-rlo-wire.json` with what this build
+    /// emits.
+    #[test]
+    #[ignore = "generator, not a gate"]
+    fn regenerate_the_rlo_cards_fixture() {
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/codex/codex-cards-rlo-wire.json"
+            ),
+            serde_json::to_string_pretty(&derived_rlo_cards()).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+
+    fn derived_rlo_cards() -> Value {
+        const INPUTS: &str = include_str!("../../../fixtures/codex/approval-rlo-inputs.json");
+        const UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPCX";
+        let inputs: Value = serde_json::from_str(INPUTS).unwrap();
+        let mut out = serde_json::Map::new();
+        for (name, family) in [
+            ("command_wrapped", Family::Command),
+            ("command_tokens", Family::Command),
+            ("file_change", Family::FileChange),
+        ] {
+            let input = &inputs[name];
+            let approval = Approval::read(family, &input["params"], input.get("started"))
+                .unwrap_or_else(|refusal| panic!("{name} reads as an approval: {refusal:?}"));
+            let id = approval.request_id(UID, 1).unwrap();
+            out.insert(
+                name.into(),
+                serde_json::to_value(approval.card(id, 1)).unwrap(),
+            );
+        }
+        Value::Object(out)
     }
 
     /// **The live 0.153 capture, replayed through this parser.**

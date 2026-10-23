@@ -101,7 +101,7 @@ final class AlignmentAuditUITests: XCTestCase {
             fixture: "deck", size: .medium, deeplink: "codeconnect://deck/toolu_fixture_medium")
         sleep(3)
         assertLabelSharesBodyEdge(
-            app, label: "Exact command", body: "Classified at the Mac", size: .medium)
+            app, label: "Command", body: "Classified at the Mac", size: .medium)
         assertLabelSharesBodyEdge(
             app, label: "If you deny", body: "Classified at the Mac", size: .medium)
     }
@@ -111,7 +111,7 @@ final class AlignmentAuditUITests: XCTestCase {
             fixture: "deck", size: .ax5, deeplink: "codeconnect://deck/toolu_fixture_medium")
         sleep(3)
         assertLabelSharesBodyEdge(
-            app, label: "Exact command", body: "Classified at the Mac", size: .ax5)
+            app, label: "Command", body: "Classified at the Mac", size: .ax5)
     }
 
     // MARK: Fleet — the band header against the screen's own text
@@ -183,7 +183,7 @@ final class AlignmentAuditUITests: XCTestCase {
             let app = launch(
                 fixture: "deck", size: size, deeplink: "codeconnect://deck/toolu_fixture_medium")
             sleep(3)
-            for label in ["Exact command", "If you deny"] {
+            for label in ["Command", "If you deny"] {
                 assertLabelSharesBodyEdge(
                     app, label: label, body: "Classified at the Mac", size: size)
             }

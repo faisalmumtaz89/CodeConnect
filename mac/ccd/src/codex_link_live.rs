@@ -181,17 +181,6 @@ const POPULATED_RESUME_FIXTURE: &str =
 
 // ---------------------------------------------------------------- scaffolding
 
-fn tmux_bin() -> Option<PathBuf> {
-    [
-        "/opt/homebrew/bin/tmux",
-        "/usr/local/bin/tmux",
-        "/usr/bin/tmux",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|p| p.exists())
-}
-
 fn nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -419,7 +408,7 @@ fn live_gate() -> Option<PathBuf> {
         ),
     };
     assert!(
-        tmux_bin().is_some(),
+        protocol::tmux::tmux_bin().is_some(),
         "CC_CODEX_LIVE=1 was set but no tmux was found."
     );
     eprintln!(
@@ -1109,7 +1098,7 @@ impl LiveSandbox {
             base,
             home,
             codex_home,
-            tmux: tmux_bin().expect("tmux checked by the gate"),
+            tmux: protocol::tmux::tmux_bin().expect("tmux checked by the gate"),
             uid,
             nonce,
             run_dir,
@@ -1806,21 +1795,12 @@ fn observed(methods: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
 ///
 /// **Where that evidence stops, said out loud.** It records the hint at the
 /// `PushSender` seam — *before* either real sender reads a device row — so it
-/// proves the trigger and the subject, and nothing about delivery. Two further
-/// things stood between this and a phone that buzzes, and **one of the two has
-/// since been removed.** The daemon no longer refuses a Codex registration:
-/// [`crate::state::Daemon::supported_agents`] admits Codex, so a real coordinator
-/// can register a real run and this daemon will host it. What remains is the
-/// device side, and it is deliberate state of the build rather than a gap here —
-/// no device can be Codex-eligible yet, because the shipping iOS client
-/// advertises a feature set on neither `hello` nor `register_push` and nothing in
-/// this build writes the column at all, so every stored device decodes as the
-/// Claude-only floor and [`crate::push_queue::recipients`] narrows a Codex
-/// doorbell to nobody. That narrowing is the read side standing on its own, which
-/// is precisely why the write side was deleted rather than repaired. Claim 7b is
-/// therefore still the staged half — the doorbell rings, correctly addressed —
-/// and the delivery half arrives with the phone work that can render what it
-/// opens onto.
+/// proves the trigger and the subject, and nothing about delivery. Past that
+/// seam, [`crate::state::Daemon::supported_agents`] admits Codex, so a real coordinator
+/// can register a real run and this daemon will host it, and a Codex doorbell
+/// reaches every registered phone exactly as a Claude one does (asserted against
+/// the real senders in `apns_sender` and `relay_sender`). Claim 7b is the trigger
+/// half — the doorbell rings, about the right run.
 fn live_daemon(
     session: &SessionKey,
 ) -> (
@@ -4079,12 +4059,6 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
         "the doorbell says a turn finished and carries nothing the agent wrote: {rang:?}"
     );
     assert_eq!(
-        rang.agent,
-        protocol::agent::AgentKind::Codex,
-        "without the agent the fan-out cannot narrow to phones that can open a Codex \
-         run, and every Claude-only device would be rung: {rang:?}"
-    );
-    assert_eq!(
         rang.session_uid, session.uid,
         "the doorbell must be about this run: {rang:?}"
     );
@@ -4101,11 +4075,10 @@ async fn the_control_link_observes_a_real_codex_session_and_reattaches_by_resume
          reads, and anything weaker would resolve a request to nowhere"
     );
     println!(
-        "CLAIM 7b PASS — the live turn rang a content-free {:?} doorbell for agent \
-         {}, and the link publishes Subscribed{{{thread_id}}} — the addressee an \
-         inbound request resolves to.",
-        rang.kind,
-        rang.agent.as_str()
+        "CLAIM 7b PASS — the live turn rang a content-free {:?} doorbell for this run, \
+         and the link publishes Subscribed{{{thread_id}}} — the addressee an inbound \
+         request resolves to.",
+        rang.kind
     );
 
     // --- 12. CLAIM 8: two turns, re-described, and every fact still ONE ------------

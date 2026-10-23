@@ -69,8 +69,12 @@ extension RunLabel {
         // project for any run, so every row reads `Unknown project` and the
         // list stops being a list. A start time is not a name, so offering one
         // here invents nothing that could be mistaken for one.
+        //
+        // **Grouped by what is drawn, so `displaySafe` first.** Two labels that
+        // differ only by a character the screen draws as U+FFFD draw alike,
+        // and in one group they are told apart by when they started.
         let grouped = Dictionary(grouping: summaries) { summary in
-            summary.projectLabel.isEmpty ? unknown.project : summary.projectLabel
+            summary.projectLabel.isEmpty ? unknown.project : summary.projectLabel.displaySafe
         }
         for (project, group) in grouped {
             let plain = RunLabel(project: project, qualifier: nil)
@@ -101,4 +105,10 @@ extension RunLabel {
         guard Set(rendered.values).count == group.count else { return nil }
         return rendered
     }
+}
+
+extension SessionSummary {
+    /// The run's working directory as the screen draws it. `cwd` keeps the
+    /// daemon's bytes, for copying.
+    var shownCwd: String { cwd.displaySafe }
 }

@@ -17,7 +17,11 @@ mod codex_custodian;
 mod codex_host;
 mod codex_launch;
 mod daemon;
+mod early_output;
 mod exec_gate;
+/// Test-only: a forked child that holds a lock it inherited until released.
+#[cfg(test)]
+mod forked_holder;
 /// Test-only: the fence that proves the suite does not write into the operator's
 /// own `~/.codeconnect`. See the module's own docs for what it watches.
 #[cfg(test)]
@@ -76,9 +80,9 @@ fn main() -> Result<()> {
         "claude" => start_claude(rest),
         "codex" => codex::start(rest),
         "attach" => attach(rest),
-        "ls" | "list" => list(),
+        "ls" | "list" => no_arguments(rest, "codeconnect ls").and_then(|()| list()),
         "sessions" => sessions::command(rest),
-        "token" => token(),
+        "token" => token(rest),
         "pair" => pair::pair(rest),
         "devices" => pair::devices(rest),
         "revoke" => pair::revoke(rest),
@@ -115,12 +119,25 @@ fn main() -> Result<()> {
         // Hidden: the detached update checker `codeconnect claude` spawns.
         // Not in --help on purpose — it is machinery, not a command.
         "__update-check" => update_check::run_checker(),
-        "update" => update_check::run_update(),
+        "update" => {
+            no_arguments(rest, "codeconnect update").and_then(|()| update_check::run_update())
+        }
+        // Hidden: run by the website installer as the `codeconnect` it just
+        // downloaded and verified, to install that release with its tmux the
+        // way `update` does. Machinery, never typed by a human.
+        "install-staged" => update_check::run_install_staged(rest),
         "--version" | "version" => {
             println!(
                 "{}",
                 protocol::build_identity::version_line("codeconnect", env!("CARGO_PKG_VERSION"))
             );
+            Ok(())
+        }
+        // Hidden: the `cc-tmux -V` line this build requires. Read by the
+        // release workflow and by an updater checking a downloaded release
+        // before installing it. Machinery, never typed by a human.
+        "--tmux-version" => {
+            println!("{}", protocol::tmux::bundled_version());
             Ok(())
         }
         "help" | "--help" | "-h" => {
@@ -157,7 +174,7 @@ fn usage() {
 /// guard has to reach it rather than the author having to remember.
 fn usage_text() -> &'static str {
     "\
-cc — CodeConnect shim
+codeconnect — host coding agents your iPhone can see and answer
 
   codeconnect claude [args…]      run claude in the private tmux server, attached here
   codeconnect codex [args…]       run codex in the private tmux server, attached here
@@ -498,7 +515,19 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     let cwd = std::env::current_dir().context("reading the current directory")?;
     let cwd = cwd.to_string_lossy().to_string();
 
-    let session_id = tmux::next_session_name()?;
+    // A session is shown in a terminal. With none to show it in — a script, a pipe,
+    // `ssh` without `-t` — there is nothing to host into, and the agent runs as it
+    // would run directly, rather than as a session nothing can show.
+    if !crate::attach::Terminal::available() {
+        use std::os::unix::process::CommandExt;
+        let err = Command::new(&binary).args(passthrough).exec();
+        return Err(err).with_context(|| format!("running {}", binary.display()));
+    }
+    update_check::ensure_tmux()?;
+    // Held from here, before the name claim, so a Ctrl+Z cannot stop this launch
+    // while it holds the claim every other launch is waiting on.
+    let _held = crate::attach::hold_signal_keys();
+    let (session_id, name_claim) = tmux::claim_session_name()?;
     // Minted here, once, before anything else knows the session exists. The
     // tmux name is reused as soon as this session exits; this is not, and it is
     // what the event log, the tail cursor and the answers ledger are keyed by.
@@ -512,8 +541,10 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
         other => bail!("{} sessions cannot be launched yet", other.as_str()),
     };
 
-    let _held = crate::attach::hold_signal_keys();
-    tmux::new_session(
+    // What the agent prints before the attach paints it, kept in case it ends
+    // first — see [`early_output`].
+    let early = early_output::EarlyOutput::create(&plan.session_dir)?;
+    let launched = tmux::new_session(
         &session_id,
         &cwd,
         &plan.env,
@@ -522,10 +553,12 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
         tmux::terminal_size(),
         config.tmux_status,
         config.tmux_history_limit,
+        Some(&early.pipe_command()?),
     )
     .with_context(|| format!("creating tmux session {session_id}"))?;
+    drop(name_claim);
 
-    spawn_supervisor(&session_id, &session_uid, &cwd, &plan.binary)?;
+    spawn_supervisor(&session_id, &session_uid, &cwd, &plan.binary, &launched)?;
 
     // After the session and supervisor exist, before the attach:
     // the hold below delays only the *display*, never the session it is
@@ -576,7 +609,7 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     // command whose whole promise is that the session is unchanged.
     // `codeconnect --help` carries `attach`, which is where a durable answer
     // belongs.
-    tmux::attach(&session_id)
+    tmux::attach_launched(&launched, early)
 }
 
 /// The "your phone cannot reach this Mac" note, or `None` while it can —
@@ -755,7 +788,7 @@ fn phone_reachability_note(
             );
             let remedy = match signal {
                 TailscaleSignal::NotInstalled => format!(
-                    "Set up Tailscale \u{2014} CodeConnect reaches phones only over your\n\
+                    "Set up Tailscale \u{2014} by default CodeConnect reaches phones over your\n\
                  tailnet \u{2014} then restart the daemon:\n\n\
                  {}\n\
                  {}",
@@ -849,6 +882,7 @@ fn spawn_supervisor(
     session_uid: &str,
     cwd: &str,
     claude_bin: &std::path::Path,
+    launched: &tmux::Launched,
 ) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
@@ -876,6 +910,21 @@ fn spawn_supervisor(
         .arg(cwd)
         .arg("--claude-bin")
         .arg(claude_bin)
+        .arg("--tmux-session-id")
+        .arg(&launched.pin.session_id)
+        .arg("--server-pid")
+        .arg(launched.pin.server_pid.to_string())
+        .arg("--server-start-time")
+        .arg(launched.pin.server_start_time.to_string())
+        .arg("--session-created")
+        .arg(launched.pin.session_created.to_string());
+    match launched.pin.server_birth {
+        Some(birth) => command
+            .arg("--server-birth")
+            .arg(format!("{}.{}", birth.start_sec, birth.start_usec)),
+        None => command.arg("--server-exited"),
+    };
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
@@ -893,6 +942,12 @@ fn supervise(args: &[String]) -> Result<()> {
     let mut tmux_session = None;
     let mut cwd = None;
     let mut claude_bin = None;
+    let mut tmux_session_id = None;
+    let mut server_pid = None;
+    let mut server_start_time = None;
+    let mut session_created = None;
+    let mut server_birth = None;
+    let mut server_exited = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -901,6 +956,20 @@ fn supervise(args: &[String]) -> Result<()> {
             "--tmux-session" => tmux_session = it.next().cloned(),
             "--cwd" => cwd = it.next().cloned(),
             "--claude-bin" => claude_bin = it.next().cloned(),
+            "--tmux-session-id" => tmux_session_id = it.next().cloned(),
+            "--server-pid" => server_pid = it.next().and_then(|v| v.parse().ok()),
+            "--server-start-time" => server_start_time = it.next().and_then(|v| v.parse().ok()),
+            "--session-created" => session_created = it.next().and_then(|v| v.parse().ok()),
+            "--server-birth" => {
+                server_birth = it.next().and_then(|v| {
+                    let (sec, usec) = v.split_once('.')?;
+                    Some(protocol::proc_identity::BirthIdentity {
+                        start_sec: sec.parse().ok()?,
+                        start_usec: usec.parse().ok()?,
+                    })
+                })
+            }
+            "--server-exited" => server_exited = true,
             _ => {}
         }
     }
@@ -911,13 +980,30 @@ fn supervise(args: &[String]) -> Result<()> {
     // name instead, which is right, whereas a bad uid would mint a second identity
     // for a session that has one.
     let session_uid = session_uid.filter(|uid| protocol::uid::is_well_formed(uid));
-    // The server this session is on, pinned as the supervisor starts. A session
-    // cannot outlive the process hosting it, so that server proven dead — by pid and
-    // birth, never by socket silence — ends this session even on the fleet-wide
-    // server. Unresolvable, the probe is exactly as it was.
-    let server_a = session_uid.as_deref().and_then(|uid| {
-        protocol::tmux::resolve_owned_session(protocol::TMUX_SOCKET_NAME, uid).ok()
-    });
+    // The server this session is on, as the launcher read it from the server that
+    // created it. A session cannot outlive the process hosting it, so that server
+    // proven dead — by pid and birth, never by socket silence — ends this session
+    // even on the fleet-wide server.
+    let server_a = match &session_uid {
+        Some(uid) => {
+            if server_birth.is_none() && !server_exited {
+                bail!("--server-birth or --server-exited is required");
+            }
+            Some(protocol::tmux::OwnedSession {
+                socket: protocol::TMUX_SOCKET_NAME.to_string(),
+                session_id: tmux_session_id.context("--tmux-session-id is required")?,
+                uid: uid.clone(),
+                server_pid: server_pid.context("--server-pid is required")?,
+                server_start_time: server_start_time.context("--server-start-time is required")?,
+                session_created: session_created.context("--session-created is required")?,
+                server_birth,
+            })
+        }
+        None => None,
+    };
+    // That server had already exited when the launcher looked, taking this
+    // session, its last, with it.
+    let ended_unwatched = server_a.is_some() && server_exited;
 
     supervisor::run(
         supervisor::SupervisorArgs {
@@ -935,6 +1021,7 @@ fn supervise(args: &[String]) -> Result<()> {
             claude_bin,
             codex: None,
             server_a,
+            ended_unwatched,
         },
         &Config::load(),
     )
@@ -950,6 +1037,7 @@ fn attach(args: &[String]) -> Result<()> {
             _ => bail!("which session? {}", sessions.join(", ")),
         }
     };
+    no_arguments(&args[1..], "codeconnect attach [session]")?;
     if !tmux::has_session(name)? {
         bail!("no session named {name}; `codeconnect ls` shows what is running");
     }
@@ -994,7 +1082,19 @@ fn daemon_sessions() -> Result<Vec<protocol::event::SessionSummary>> {
     }
 }
 
-fn token() -> Result<()> {
+/// Refuse what follows a command that takes nothing more. An argument it does not
+/// know — a `--help` it does not have, a `--dry-run` it does not offer — is never
+/// read as a go-ahead: the command it rides on may install, update, revoke, or
+/// print a credential.
+pub(crate) fn no_arguments(args: &[String], usage: &str) -> Result<()> {
+    if let Some(first) = args.first() {
+        bail!("unexpected argument {first:?}; usage: {usage}");
+    }
+    Ok(())
+}
+
+fn token(args: &[String]) -> Result<()> {
+    no_arguments(args, "codeconnect token")?;
     let path = protocol::token_path();
     let token = std::fs::read_to_string(&path)
         .with_context(|| format!("reading {}; is ccd running?", path.display()))?;
@@ -1035,7 +1135,10 @@ fn resolve_claude_bin(config: &Config) -> Result<PathBuf> {
         }
         return Ok(candidate);
     }
-    bail!("could not find the claude binary; set claude_bin in ~/.codeconnect/config.json")
+    bail!(
+        "could not find the claude binary: install Claude Code, or set claude_bin in \
+         ~/.codeconnect/config.json"
+    )
 }
 
 fn is_same_file(candidate: &std::path::Path, current: Option<&std::path::Path>) -> bool {
@@ -1268,7 +1371,7 @@ mod tests {
         // `pair` is still an error naming the usage, never a QR code.
         let err = pair::pair(&argv(&["--nope"])).expect_err("an unknown option must not pair");
         assert!(
-            err.to_string().contains("unknown option"),
+            err.to_string().contains("unexpected argument"),
             "the pre-existing refusal has to survive the diversion: {err}"
         );
     }
@@ -1725,8 +1828,10 @@ mod tests {
         "supervise",
         "__update-check",
         "update",
+        "install-staged",
         "--version",
         "version",
+        "--tmux-version",
         "help",
         "--help",
         "-h",

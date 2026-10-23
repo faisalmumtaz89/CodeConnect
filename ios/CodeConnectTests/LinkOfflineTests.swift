@@ -68,6 +68,16 @@ final class LinkOfflineTests: XCTestCase {
         XCTAssertNil(health.cause)
     }
 
+    /// The system's own messages end in a full stop, as URLSession's
+    /// "Could not connect to the server." does; the sentence after it must not
+    /// double it.
+    func testASystemMessageEndingInAFullStopIsNotDoubled() {
+        let health = LinkHealth.evaluate(
+            phase: waiting, lastContactAt: nil,
+            dialFailure: .other(message: "Could not connect to the server."))
+        XCTAssertEqual(health.detail, "Could not connect to the server. Retrying automatically.")
+    }
+
     func testARedialKeepsTheFailureOnScreenInsteadOfBlanking() {
         // The flicker: every retry entered .connecting, which used to evaluate
         // as a fresh "Opening the connection" and drop the banner for the

@@ -3,6 +3,119 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect brings its own tmux
+
+- A new Mac needs neither Homebrew nor tmux: CodeConnect installs its own tmux, built from
+  pinned sources and signed like the rest of it.
+- The installer asks once, on the terminal, before adding `~/.codeconnect/bin` to your
+  `PATH`. It adds one marked block to your shell's startup file — delete the block to undo
+  it — and remembers a no. `--path-yes` and `--path-no` answer without asking.
+- `codeconnect update` installs CodeConnect's tmux with each release and repairs it if it is
+  missing. A Mac updated by an older version gets it the first time a session starts.
+- Sessions already running keep the tmux they started with until they end.
+- What a first run can trip over now says what to do: with no daemon running, commands name
+  `codeconnect daemon install`; a Mac without Claude Code, or with only npm's `codex` wrapper,
+  is told how to install the one CodeConnect runs.
+- `codeconnect claude` no longer loses what an agent printed when it ends before the
+  terminal shows it — `--version`, `--help`, a mistyped flag, a startup error, or one that
+  finishes during the "phone cannot reach this Mac" note — whether or not other sessions are
+  running. Its output is shown, and the command exits 0 instead of "no session named cc-1".
+- `codeconnect claude` with no terminal to show a session in — from a script, through a pipe, or
+  over `ssh` without `-t` — runs the Claude Code it would have hosted directly, with Claude Code's
+  own output and exit status, instead of starting a session it cannot show and leaving the agent
+  running behind an error.
+- The commands in `codeconnect --help` no longer act on an argument they do not take. `codeconnect daemon uninstall --help`
+  uninstalled the daemon, `update --help` updated, `revoke <device> --dry-run` revoked and
+  `token --help` printed the token; now each names what it takes and does nothing.
+- On the phone, a session that ends normally reads "Session ended": no "Link detached" rows around
+  the end, and no banner saying it can only be answered at the Mac.
+- A session that ends just as its supervisor reconnects to the daemon is reported as ended, instead
+  of staying live on the phone until the daemon next restarts.
+- On the phone, a Claude turn stopped at the Mac — Esc, or No at a tool's prompt — ends there: it
+  reads as the Mac's "Interrupted · What should Claude do instead?" row and the session as done,
+  instead of Running until the next prompt.
+- On the phone, a Claude session working on a prompt that draws no row of its own — a scheduled
+  prompt, another session's message — reads Running from the moment it is handed over, not Done
+  until Claude's first reply.
+- On the phone, a Claude session where `/model` or `/login` was typed after a turn ended reads
+  Done, as the Mac does, instead of Running until the next prompt; `/plan` and `/goal` with a
+  request, which Claude answers, read Running.
+- On the phone, a tool with a long name — an MCP server's `mcp__server__tool` — no longer blanks
+  the command beside every other tool on the fleet and in the chat: its own name is shortened in
+  the middle, and every row keeps room for its command.
+- On the phone, a Claude turn that ends on an API error — a rate limit, an overloaded or failing
+  server, an expired login — ends there, where the Mac draws its "done" line under the error, and
+  the session reads as done instead of Running until the next prompt.
+- On the phone, a prompt typed with pasted images that take it over 512 KiB shows under YOU, and
+  the session reads Running while Claude works on it, instead of no row and Done. The phone is
+  sent the prompt without its images; that holds while what is left fits in 512 KiB and the
+  whole prompt, images included, is under 4 MiB.
+- On the phone, VoiceOver reads an approval in the chat as the tool and the first line of its
+  command — "Bash, git push --force origin main" — waiting or answered, instead of the tool name
+  alone. A command whose lines end Windows-style (`\r\n`), or in another line break, is cut at its
+  first line in the chat's approval and tool rows, the Deck bar and the fleet's line for a tool
+  call, as one with ordinary line ends always was.
+- On the phone, an agent's words on a decision draw a right-to-left override, the other bidi embeddings
+  and isolates, the Arabic letter mark and NUL as �, as Claude Code's own screen does: the command,
+  description and full input of an approval and of its tool row, a Codex card's reason, files, diff,
+  working directory and "don't ask again" options, every string of a question, notices, the Mac's
+  screen, and the project and folder a run is in, on the cards, the fleet and the Deck. An override
+  made `git push origin <U+202E>niam ecrof--` read
+  `git push origin --force main` under "Verified" on the fleet, the Deck, the chat and the decision
+  card. What is sent, verified and answered is unchanged; the card says it is verified against the
+  daemon's hash, and its command is headed Command.
+- On the phone, the fleet's line for a run waiting on an approval shows and speaks the first line of its
+  command, as the chat and the Deck bar do; VoiceOver used to read every line of it.
+- On the phone, a skill or custom slash command shows under YOU as the command — `/simplify` and its
+  arguments — instead of the markup Claude Code records it in, and the session reads Running while
+  Claude works on it.
+- On the phone, VoiceOver says how long something has waited as "waiting 1 minute", on the fleet, in the
+  chat, on the Deck bar and on the wait clock, instead of "waiting 1 minute ago" or "waiting 1m"; an
+  answer the Mac has not confirmed is "still waiting on the Mac, 4 seconds".
+- On the phone, output whose lines end Windows-style (`\r\n`) no longer draws a blank line under every line.
+- Two `codeconnect claude` started in the same instant — tabs a terminal restores together — both
+  start, as `cc-1` and `cc-2`; one used to fail with "duplicate session".
+- `codeconnect claude` and `codeconnect attach` never show, or type into, a session another
+  terminal started in its place: when the session they meant has ended, a new one that tmux
+  gave the same ids is left alone.
+- A session that ends at once — the only one running — no longer leaves its background
+  supervisor behind, logging every two seconds; and one still finishing after an uninstall
+  no longer recreates `~/.codeconnect`.
+- `codeconnect pair` makes no code a phone could never use: on an address where the daemon
+  refuses every connection (a local network with neither a certificate nor
+  `ws_allow_plaintext`) it says so and how to fix it, and on a Mac with neither Tailscale nor
+  `ws_bind` it names both.
+- `codeconnect daemon install`, `daemon restart` and `pair` say when `~/.codeconnect/config.json`
+  cannot be read — a stray comma, say — and that the daemon is using its defaults, rather than
+  leaving that to the daemon's log. A misspelled setting, or a `ws_bind` written with a port, is
+  named the same way instead of being silently ignored. So is an `apns` block, which no setting
+  ever read: a file holding one with `null` or an unexpected value in it used to fall back to
+  every default, and now the rest of its settings apply.
+- The phone rings only when you are away from the Mac. A notification — Claude or Codex, a
+  finished turn, a wait, an approval or a question — waits while you are using the Mac, and
+  rings once the Mac has had no keyboard or mouse input for two minutes, if it still matters
+  then: nothing rings for a decision you answered, a run that moved on — a new prompt or a newer
+  finished or waiting state included — or ended, or one you removed. A decision answered at the
+  Mac does not ring when its screen, read as it would ring, shows the dialog gone and the input
+  box back. Every approval rings on its own: the second and later approvals
+  of one turn used to ring nothing. A background agent's question is still kept off the Mac for the
+  phone after ten seconds without input; its notification, like every other, waits for two
+  minutes.
+- Codex approvals and finished Codex turns ring your phone. They used to ring no phone at all:
+  the Mac sent a Codex notification only to a phone that had said it could show Codex, and no
+  iPhone build ever said so. Every iPhone build since 1.1.0 shows Codex, so the Mac now rings
+  every paired phone for Codex exactly as for Claude. A notification counts every decision waiting,
+  Claude's and Codex's together, and the Mac sends a phone its notifications in the order they were
+  counted, so a finished turn no longer replaces one that says a decision waits while that decision
+  still waits. The one exception: a phone that pairs again while a notification is still on its way
+  to it can receive that older one last.
+- A project folder whose name holds a character that changes text direction (U+202E and its
+  kin) appears in a notification's title with that character shown as a replacement mark, so the
+  name cannot be drawn reordered.
+- A tool call too large to send to the phone in one piece now shows there as too large; the
+  stand-in the Mac sent named its marker in a spelling the phone does not read, so it drew as an
+  empty tool row. A reply or a tool result that large still shows nothing on the phone.
+
 ## A plainer message box, and Claude's notes to itself stay its own
 
 - The message box says "Ask anything", in a quieter grey, and the suggestion chips under it

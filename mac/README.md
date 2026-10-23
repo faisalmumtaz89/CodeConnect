@@ -14,6 +14,9 @@ harness that is not shipped.
 
 ## Run it
 
+This builds from source. To install the signed release instead, follow
+[Getting started](../README.md#getting-started) in the top-level README.
+
 ```sh
 ./install.sh                      # build + install to ~/.codeconnect/bin
 export PATH="$HOME/.codeconnect/bin:$PATH"
@@ -22,12 +25,18 @@ codeconnect daemon install                 # run ccd under launchd, restart it o
 codeconnect claude                         # in any project directory
 ```
 
+A source build runs on the Mac's own tmux (`brew install tmux`); only a release
+installs CodeConnect's, `cc-tmux`, beside the binaries. Every CodeConnect process
+uses `$CODECONNECT_TMUX` when set, then a `cc-tmux` beside its own binary, then a
+system tmux.
+
 `codeconnect claude` passes every argument through to the real `claude`, so
 `codeconnect claude --permission-mode default --resume` works exactly as expected.
 
 Claude and Codex sessions get the environment of the shell that launched them — API
 keys, a virtualenv or direnv `PATH` — not the one the tmux server was started with.
-`TERM` is tmux's for Codex and the calling terminal's for Claude, and the variables
+`TERM` is `tmux-256color` for Codex where macOS describes it (`screen-256color` on macOS
+13) and the calling terminal's for Claude, and the variables
 CodeConnect sets for the session, such as `CODECONNECT_SESSION_UID`, keep CodeConnect's
 values. The values travel in a `0600` file in the session's private directory, never on
 a command line (Claude's `TERM` aside), and the pane deletes the file as it starts. The
@@ -47,6 +56,13 @@ XTGETTCAP — is your terminal's to answer. An attach paints the pane's history 
 screen from `capture-pane`, restores the cursor, the pane title and the modes tmux
 tracks, and never replays earlier output. It also sets `scroll-on-clear off` on the
 pane, so a screen the agent clears is not kept in the history a later attach paints.
+
+The one replay: `codeconnect claude` keeps a private copy of what the agent prints until
+its own attach has painted the pane, so an agent that ends first — `--version`, a
+mistyped flag, a startup error, or one that finishes during the note shown when no phone
+can reach the Mac — is not lost. The copy is written to the terminal as the agent drew
+it, less every question it asked the terminal (whose asker is gone, and whose answer would
+reach your shell), and the command exits 0 as it always does.
 
 Ctrl+Z stops the agent as it does run directly. The agent runs as a job of the pane's
 own process (`codeconnect internal-job` for Claude, the host for Codex), so its stop is
@@ -140,6 +156,13 @@ again. That is deliberate: the name is what a human types into `codeconnect atta
 `session_uid` is a [ULID](https://github.com/ulid/spec) minted once at spawn and
 never reused. It is what the event log, the tail cursors and the answers ledger
 are keyed by.
+
+tmux's own ids — `$0`, `%0` — are reused as well: once a server exits with its last
+session, the next server hands them out again. So `codeconnect claude` and
+`codeconnect attach` pin what they attach to — its server's pid and start time, the
+session's creation time and `session_uid` — and tmux checks the pin and attaches on
+one connection. A session that has gone is never swapped for one another terminal
+started under the same ids.
 
 The tmux name used to do both jobs, and a new `cc-1` inherited the dead one's
 log and continued its `seq`. Two things were wrong with that:
@@ -933,11 +956,14 @@ means an incompatible peer cannot use the handshake to probe credentials.
   `stop_hook_summary` line after the reply, and that line is the end. Every user
   turn that finishes also gets a `turn_duration` line. It is the end when a tool
   ended the turn (an MCP result's `claude/endTurn`, a `/loop` wakeup), which runs
-  the Stop hook but writes no summary. Walking Claude's `parentUuid` chain back
-  from it tells the cases apart: a summary before the turn's last assistant entry
-  means the turn already has its end, and a last assistant entry that is an API
-  error means the turn ran no Stop hook and gets none. Only a main-conversation
-  assistant entry proves an end; a chain that cannot be followed (an unknown or
+  the Stop hook but writes no summary, and when an API error ended it: Claude
+  runs its `StopFailure` hooks instead of Stop, writes no summary, and the Mac
+  draws its "✻ … done" line from the `turn_duration` after the error. An error
+  Claude carries on past (the stream cut mid-reply) is a leaf of the chain that
+  no `turn_duration` reaches, so it ends nothing. Walking Claude's `parentUuid`
+  chain back from the `turn_duration` tells the cases apart: a summary before
+  the turn's last assistant entry means the turn already has its end. Only a
+  main-conversation assistant entry proves an end; a chain that cannot be followed (an unknown or
   missing parent, a loop, more than 64 entries) proves none. So a resumed transcript's
   history gets its ends too. A run whose transcript has never existed (Claude's
   session persistence turned off) has its ends filed from the Stop hook instead;
@@ -956,7 +982,18 @@ means an incompatible peer cannot use the handshake to probe credentials.
   Escape while the Stop hooks run leaves the turn without an end; a resumed run
   whose transcript exists but is no longer written gets none; and when Claude
   holds back the `turn_duration` while in-process teammates run, two turns that
-  tools ended in that time share one end. Within the second after a `/clear`:
+  tools ended in that time share one end. A turn an API error ended with no
+  `turn_duration` after it gets no end (seen once, Claude Code 2.1.276's
+  "Prompt is too long"), nor does one in a run whose transcript has never
+  existed, since `StopFailure` is not installed. A session already reading
+  Running after an API error when ccd is updated stays Running until the next
+  prompt: an older ccd filed that `turn_duration` as a plain line, and the log
+  keeps the kind a fact was first filed with, even on a rescan. Claude
+  Code 2.1.235 and 2.1.245 re-ran a turn after "Login expired" and `/login`
+  with no prompt line, so that work reads as Done. Esc while Claude retries a
+  failed request writes nothing at all — no error line, no interrupt marker, no
+  `turn_duration`, no hook (2.1.305, recorded) — so that turn reads Running
+  until the next prompt. Within the second after a `/clear`:
   another transcript move skips the transcript in between; a move back to the
   old transcript leaves the run following the abandoned one until it moves
   again; restarting ccd, or the session ending with more than 4 MiB of the old
@@ -1065,6 +1102,9 @@ the next start takes the home straight away and removes the stale socket.
 ## Configuration — `~/.codeconnect/config.json`
 
 Every field is optional. The defaults are what the daemon is validated against.
+A key CodeConnect has no setting for — a misspelled one, say — or a `ws_bind`
+that is not an IP address is ignored, and every command that reads the file says so — as it does for a file
+that is not valid JSON, whose every setting falls back to its default.
 
 | Key | Default | Meaning |
 |---|---|---|

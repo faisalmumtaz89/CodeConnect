@@ -28,7 +28,7 @@ pub struct Asset {
     pub size: u64,
 }
 
-/// The two files a release must carry to be installable.
+/// One archive and the checksum file that vouches for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseAssets {
     pub archive: Asset,
@@ -52,27 +52,64 @@ pub const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
-/// What the archive is called for a given version.
-pub fn archive_name(version: &str) -> String {
-    format!("codeconnect-{version}-macos-universal.tar.gz")
+/// The two archives a release carries.
+///
+/// **tmux has an archive of its own.** Every released updater takes the core
+/// archive by its exact name and refuses one holding anything beyond its four
+/// files, so tmux beside them would make the release uninstallable for every
+/// machine that has not updated yet. A second name is one they never ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Archive {
+    /// The three binaries and their licence.
+    Core,
+    /// CodeConnect's own tmux and the notices of what it is built from.
+    Tmux,
 }
 
-/// What the checksum file is called for a given version.
-pub fn checksum_name(version: &str) -> String {
-    format!("{}.sha256", archive_name(version))
+impl Archive {
+    /// What the archive is called for a given version.
+    pub fn name(self, version: &str) -> String {
+        match self {
+            Archive::Core => format!("codeconnect-{version}-macos-universal.tar.gz"),
+            Archive::Tmux => format!("codeconnect-{version}-tmux-macos-universal.tar.gz"),
+        }
+    }
+
+    /// What its checksum file is called for a given version.
+    pub fn checksum_name(self, version: &str) -> String {
+        format!("{}.sha256", self.name(version))
+    }
+
+    /// The files it installs into `bin`, and the only files it may hold.
+    pub fn files(self) -> &'static [&'static str] {
+        match self {
+            // The licence travels with the binaries because the licence says
+            // it must: a binaries-only archive is a distribution without its
+            // notice. The same holds for tmux and what it is built from.
+            Archive::Core => &["codeconnect", "ccd", "cc-hook", "LICENSE"],
+            Archive::Tmux => &[TMUX_BINARY, "THIRD_PARTY_NOTICES"],
+        }
+    }
 }
 
 /// The binaries a release installs, in the order a reader would name them.
 pub const SHIPPED_BINARIES: [&str; 3] = ["codeconnect", "ccd", "cc-hook"];
 
-/// Pick this version's two assets out of a release, or say what is missing.
+/// CodeConnect's own tmux, as it is named in `bin`.
+pub const TMUX_BINARY: &str = protocol::tmux::BUNDLED_TMUX;
+
+/// Pick one archive and its checksum out of a release, or say what is missing.
 ///
 /// **Exactly the expected names, from the release's own asset list.** The
 /// alternative — building a `releases/latest/download/…` URL — resolves at
 /// download time rather than at selection time, so the bytes fetched could
 /// belong to a release published between the two steps. Reading the URL out of
 /// the same response that named the version binds them together.
-pub fn select_assets(body: &[u8], version: &str) -> Result<ReleaseAssets, String> {
+pub fn select_assets(
+    body: &[u8],
+    version: &str,
+    archive: Archive,
+) -> Result<ReleaseAssets, String> {
     #[derive(serde::Deserialize)]
     struct Release {
         assets: Vec<ReleaseAsset>,
@@ -107,15 +144,18 @@ pub fn select_assets(body: &[u8], version: &str) -> Result<ReleaseAssets, String
         })
     };
 
-    let archive = wanted(&archive_name(version))?;
-    if archive.size > MAX_ARCHIVE_BYTES {
+    let asset = wanted(&archive.name(version))?;
+    if asset.size > MAX_ARCHIVE_BYTES {
         return Err(format!(
             "{} is {} bytes, past the {MAX_ARCHIVE_BYTES}-byte ceiling",
-            archive.name, archive.size
+            asset.name, asset.size
         ));
     }
-    let checksum = wanted(&checksum_name(version))?;
-    Ok(ReleaseAssets { archive, checksum })
+    let checksum = wanted(&archive.checksum_name(version))?;
+    Ok(ReleaseAssets {
+        archive: asset,
+        checksum,
+    })
 }
 
 /// Read the one digest a `shasum -a 256` file carries, for the file we asked
@@ -169,16 +209,12 @@ pub struct Member {
 }
 
 /// Every path an installable archive is allowed to contain.
-pub fn expected_members(version: &str) -> Vec<String> {
-    let root = format!("codeconnect-{version}");
-    let mut names: Vec<String> = SHIPPED_BINARIES
+pub fn expected_members(version: &str, archive: Archive) -> Vec<String> {
+    archive
+        .files()
         .iter()
-        .map(|binary| format!("{root}/{binary}"))
-        .collect();
-    // The licence travels with the binaries because the licence says it must:
-    // a binaries-only archive is a distribution without its notice.
-    names.push(format!("{root}/LICENSE"));
-    names
+        .map(|file| format!("codeconnect-{version}/{file}"))
+        .collect()
 }
 
 /// Whether an archive contains exactly what a release is allowed to contain.
@@ -186,8 +222,8 @@ pub fn expected_members(version: &str) -> Vec<String> {
 /// **Judged whole, before extraction.** An implementation that validated each
 /// entry as it wrote it would already have written the entries before the one
 /// that fails — and the last entry is where anything hostile would be put.
-pub fn validate_members(members: &[Member], version: &str) -> Result<(), String> {
-    let expected = expected_members(version);
+pub fn validate_members(members: &[Member], version: &str, archive: Archive) -> Result<(), String> {
+    let expected = expected_members(version, archive);
     let root = format!("codeconnect-{version}/");
 
     for member in members {
@@ -271,12 +307,12 @@ mod tests {
     fn both(version: &str) -> Vec<u8> {
         listing(&[
             (
-                &archive_name(version),
+                &Archive::Core.name(version),
                 "https://example.invalid/a.tar.gz",
                 4096,
             ),
             (
-                &checksum_name(version),
+                &Archive::Core.checksum_name(version),
                 "https://example.invalid/a.sha256",
                 90,
             ),
@@ -285,7 +321,8 @@ mod tests {
 
     #[test]
     fn a_release_carrying_both_assets_yields_their_urls() {
-        let picked = select_assets(&both("1.2.3"), "1.2.3").expect("both are present");
+        let picked =
+            select_assets(&both("1.2.3"), "1.2.3", Archive::Core).expect("both are present");
         assert_eq!(
             picked.archive.name,
             "codeconnect-1.2.3-macos-universal.tar.gz"
@@ -301,7 +338,7 @@ mod tests {
     /// different version's request.
     #[test]
     fn assets_for_another_version_do_not_satisfy_this_one() {
-        let err = select_assets(&both("1.2.3"), "1.2.4").unwrap_err();
+        let err = select_assets(&both("1.2.3"), "1.2.4", Archive::Core).unwrap_err();
         assert!(
             err.contains("codeconnect-1.2.4-macos-universal.tar.gz"),
             "{err}"
@@ -311,11 +348,11 @@ mod tests {
     #[test]
     fn a_release_missing_the_checksum_is_refused_by_name() {
         let only_archive = listing(&[(
-            &archive_name("1.2.3"),
+            &Archive::Core.name("1.2.3"),
             "https://example.invalid/a.tar.gz",
             4096,
         )]);
-        let err = select_assets(&only_archive, "1.2.3").unwrap_err();
+        let err = select_assets(&only_archive, "1.2.3", Archive::Core).unwrap_err();
         assert!(err.contains(".sha256"), "{err}");
     }
 
@@ -324,11 +361,23 @@ mod tests {
     #[test]
     fn a_duplicated_asset_name_is_refused() {
         let doubled = listing(&[
-            (&archive_name("1.2.3"), "https://example.invalid/a", 10),
-            (&archive_name("1.2.3"), "https://example.invalid/b", 10),
-            (&checksum_name("1.2.3"), "https://example.invalid/c", 90),
+            (
+                &Archive::Core.name("1.2.3"),
+                "https://example.invalid/a",
+                10,
+            ),
+            (
+                &Archive::Core.name("1.2.3"),
+                "https://example.invalid/b",
+                10,
+            ),
+            (
+                &Archive::Core.checksum_name("1.2.3"),
+                "https://example.invalid/c",
+                90,
+            ),
         ]);
-        assert!(select_assets(&doubled, "1.2.3")
+        assert!(select_assets(&doubled, "1.2.3", Archive::Core)
             .unwrap_err()
             .contains("more than one"));
     }
@@ -337,13 +386,17 @@ mod tests {
     fn a_plaintext_download_url_is_refused() {
         let insecure = listing(&[
             (
-                &archive_name("1.2.3"),
+                &Archive::Core.name("1.2.3"),
                 "http://example.invalid/a.tar.gz",
                 10,
             ),
-            (&checksum_name("1.2.3"), "https://example.invalid/c", 90),
+            (
+                &Archive::Core.checksum_name("1.2.3"),
+                "https://example.invalid/c",
+                90,
+            ),
         ]);
-        assert!(select_assets(&insecure, "1.2.3")
+        assert!(select_assets(&insecure, "1.2.3", Archive::Core)
             .unwrap_err()
             .contains("https"));
     }
@@ -352,13 +405,17 @@ mod tests {
     fn an_archive_past_the_ceiling_is_refused_before_it_is_fetched() {
         let huge = listing(&[
             (
-                &archive_name("1.2.3"),
+                &Archive::Core.name("1.2.3"),
                 "https://example.invalid/a.tar.gz",
                 MAX_ARCHIVE_BYTES + 1,
             ),
-            (&checksum_name("1.2.3"), "https://example.invalid/c", 90),
+            (
+                &Archive::Core.checksum_name("1.2.3"),
+                "https://example.invalid/c",
+                90,
+            ),
         ]);
-        assert!(select_assets(&huge, "1.2.3")
+        assert!(select_assets(&huge, "1.2.3", Archive::Core)
             .unwrap_err()
             .contains("ceiling"));
     }
@@ -420,7 +477,7 @@ mod tests {
     // -------------------------------------------------------------- archive
 
     fn good(version: &str) -> Vec<Member> {
-        expected_members(version)
+        expected_members(version, Archive::Core)
             .into_iter()
             .map(|path| Member {
                 path,
@@ -432,7 +489,7 @@ mod tests {
 
     #[test]
     fn an_archive_holding_exactly_the_expected_files_is_accepted() {
-        assert!(validate_members(&good("1.2.3"), "1.2.3").is_ok());
+        assert!(validate_members(&good("1.2.3"), "1.2.3", Archive::Core).is_ok());
     }
 
     /// The licence ships with the binaries because the licence requires it.
@@ -440,7 +497,7 @@ mod tests {
     fn an_archive_without_the_licence_is_refused() {
         let mut members = good("1.2.3");
         members.retain(|m| !m.path.ends_with("/LICENSE"));
-        assert!(validate_members(&members, "1.2.3")
+        assert!(validate_members(&members, "1.2.3", Archive::Core)
             .unwrap_err()
             .contains("LICENSE"));
     }
@@ -451,7 +508,7 @@ mod tests {
             let mut members = good("1.2.3");
             members.retain(|m| !m.path.ends_with(&format!("/{binary}")));
             assert!(
-                validate_members(&members, "1.2.3").is_err(),
+                validate_members(&members, "1.2.3", Archive::Core).is_err(),
                 "accepted an archive with no {binary}"
             );
         }
@@ -474,7 +531,7 @@ mod tests {
                 size: 1,
             });
             assert!(
-                validate_members(&members, "1.2.3").is_err(),
+                validate_members(&members, "1.2.3", Archive::Core).is_err(),
                 "accepted {path}"
             );
         }
@@ -484,7 +541,7 @@ mod tests {
     fn anything_that_is_not_a_plain_file_is_refused() {
         let mut members = good("1.2.3");
         members[0].is_regular_file = false;
-        assert!(validate_members(&members, "1.2.3")
+        assert!(validate_members(&members, "1.2.3", Archive::Core)
             .unwrap_err()
             .contains("not a regular file"));
     }
@@ -495,7 +552,7 @@ mod tests {
     fn an_archive_that_expands_past_the_ceiling_is_refused() {
         let mut members = good("1.2.3");
         members[0].size = MAX_MEMBER_BYTES + 1;
-        assert!(validate_members(&members, "1.2.3")
+        assert!(validate_members(&members, "1.2.3", Archive::Core)
             .unwrap_err()
             .contains("per-file ceiling"));
 
@@ -503,7 +560,7 @@ mod tests {
         for member in members.iter_mut() {
             member.size = MAX_TOTAL_BYTES / 3;
         }
-        assert!(validate_members(&members, "1.2.3")
+        assert!(validate_members(&members, "1.2.3", Archive::Core)
             .unwrap_err()
             .contains("past the"));
     }
@@ -516,7 +573,7 @@ mod tests {
             is_regular_file: true,
             size: 12,
         });
-        assert!(validate_members(&members, "1.2.3")
+        assert!(validate_members(&members, "1.2.3", Archive::Core)
             .unwrap_err()
             .contains("unexpected"));
     }
@@ -527,7 +584,7 @@ mod tests {
     fn a_duplicated_member_is_refused() {
         let mut members = good("1.2.3");
         members.push(members[0].clone());
-        assert!(validate_members(&members, "1.2.3")
+        assert!(validate_members(&members, "1.2.3", Archive::Core)
             .unwrap_err()
             .contains("more than once"));
     }
@@ -540,6 +597,103 @@ mod tests {
             is_regular_file: true,
             size: 1,
         });
-        assert!(validate_members(&members, "1.2.3").is_err());
+        assert!(validate_members(&members, "1.2.3", Archive::Core).is_err());
+    }
+
+    // ----------------------------------------------------------------- tmux
+
+    /// The names the release workflow publishes, spelled out rather than
+    /// derived: these are the strings both sides must agree on.
+    #[test]
+    fn the_archives_are_named_as_the_release_publishes_them() {
+        assert_eq!(
+            Archive::Core.name("1.2.3"),
+            "codeconnect-1.2.3-macos-universal.tar.gz"
+        );
+        assert_eq!(
+            Archive::Tmux.name("1.2.3"),
+            "codeconnect-1.2.3-tmux-macos-universal.tar.gz"
+        );
+        assert_eq!(
+            Archive::Tmux.checksum_name("1.2.3"),
+            "codeconnect-1.2.3-tmux-macos-universal.tar.gz.sha256"
+        );
+    }
+
+    /// Each archive is picked by its own name from a release carrying both,
+    /// whichever order the release lists them in.
+    #[test]
+    fn a_release_carrying_both_archives_yields_each_by_name() {
+        let release = listing(&[
+            (
+                &Archive::Tmux.checksum_name("1.2.3"),
+                "https://example.invalid/t.sha256",
+                90,
+            ),
+            (
+                &Archive::Core.name("1.2.3"),
+                "https://example.invalid/c.tar.gz",
+                4096,
+            ),
+            (
+                &Archive::Tmux.name("1.2.3"),
+                "https://example.invalid/t.tar.gz",
+                4096,
+            ),
+            (
+                &Archive::Core.checksum_name("1.2.3"),
+                "https://example.invalid/c.sha256",
+                90,
+            ),
+        ]);
+        let core = select_assets(&release, "1.2.3", Archive::Core).unwrap();
+        assert_eq!(core.archive.url, "https://example.invalid/c.tar.gz");
+        assert_eq!(core.checksum.url, "https://example.invalid/c.sha256");
+        let tmux = select_assets(&release, "1.2.3", Archive::Tmux).unwrap();
+        assert_eq!(tmux.archive.url, "https://example.invalid/t.tar.gz");
+        assert_eq!(tmux.checksum.url, "https://example.invalid/t.sha256");
+    }
+
+    #[test]
+    fn a_release_without_the_tmux_archive_says_so_by_name() {
+        let err = select_assets(&both("1.2.3"), "1.2.3", Archive::Tmux).unwrap_err();
+        assert!(
+            err.contains("codeconnect-1.2.3-tmux-macos-universal.tar.gz"),
+            "{err}"
+        );
+    }
+
+    fn tmux_members(paths: &[&str]) -> Vec<Member> {
+        paths
+            .iter()
+            .map(|path| Member {
+                path: path.to_string(),
+                is_regular_file: true,
+                size: 1024,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_tmux_archive_holds_exactly_tmux_and_its_notices() {
+        let exact = [
+            "codeconnect-1.2.3/cc-tmux",
+            "codeconnect-1.2.3/THIRD_PARTY_NOTICES",
+        ];
+        assert!(validate_members(&tmux_members(&exact), "1.2.3", Archive::Tmux).is_ok());
+        // Without its notices, with a core binary riding along, or as the
+        // core archive: each is an archive this was not asked to install.
+        assert!(
+            validate_members(&tmux_members(&exact[..1]), "1.2.3", Archive::Tmux)
+                .unwrap_err()
+                .contains("THIRD_PARTY_NOTICES")
+        );
+        let with_core = [exact[0], exact[1], "codeconnect-1.2.3/ccd"];
+        assert!(
+            validate_members(&tmux_members(&with_core), "1.2.3", Archive::Tmux)
+                .unwrap_err()
+                .contains("unexpected")
+        );
+        assert!(validate_members(&tmux_members(&exact), "1.2.3", Archive::Core).is_err());
     }
 }

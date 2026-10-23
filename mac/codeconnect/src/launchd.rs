@@ -46,9 +46,14 @@ const THROTTLE_INTERVAL_SECS: u32 = 5;
 pub fn command(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("install") => install(&args[1..]),
-        Some("uninstall") => uninstall(),
-        Some("status") => status(),
-        Some("restart") => restart(),
+        Some("uninstall") => crate::no_arguments(&args[1..], "codeconnect daemon uninstall")
+            .and_then(|()| uninstall()),
+        Some("status") => {
+            crate::no_arguments(&args[1..], "codeconnect daemon status").and_then(|()| status())
+        }
+        Some("restart") => {
+            crate::no_arguments(&args[1..], "codeconnect daemon restart").and_then(|()| restart())
+        }
         Some(other) => {
             usage();
             bail!("unknown daemon command {other:?}")
@@ -81,7 +86,19 @@ stopping anything; to pick up new binaries without rewriting the plist, use
 // ------------------------------------------------------------------ commands
 
 fn install(args: &[String]) -> Result<()> {
-    let takeover = !args.iter().any(|arg| arg == "--no-takeover");
+    let mut takeover = true;
+    for arg in args {
+        match arg.as_str() {
+            "--no-takeover" => takeover = false,
+            other => bail!(
+                "unexpected argument {other:?}; usage: codeconnect daemon install [--no-takeover]"
+            ),
+        }
+    }
+    // The daemon reads this file as it starts and falls back to its defaults when
+    // the file is invalid; the file is named here, to the person who just edited
+    // it, not only in the daemon's log.
+    protocol::config::Config::load();
     let ccd = resolve_ccd()?;
     let uid = user_id()?;
     let plist = plist_path();
@@ -232,6 +249,10 @@ fn uninstall() -> Result<()> {
 }
 
 fn restart() -> Result<()> {
+    // The daemon reads this file as it starts and falls back to its defaults when
+    // the file is invalid; the file is named here, to the person who just edited
+    // it, not only in the daemon's log.
+    protocol::config::Config::load();
     let uid = user_id()?;
     if !plist_path().exists() {
         bail!(

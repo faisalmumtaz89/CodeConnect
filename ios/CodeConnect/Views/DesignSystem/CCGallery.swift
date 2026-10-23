@@ -658,7 +658,7 @@ import SwiftUI
                             // announced on every row whether or not the badge is
                             // drawn.
                             accessibilityLabelText:
-                                "codeconnect, Claude Code session, Blocked, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes ago, control",
+                                "codeconnect, Claude Code session, Blocked, risk HIGH, Destructive, credentialed, or publishes something., Bash, git push --force origin main, waiting 4 minutes, control",
                             action: { lastAction = "fleet row" }
                         ) {
                             // **No dot, and no column.** A blocked row draws
@@ -858,7 +858,7 @@ import SwiftUI
                     }
 
                     CCCard {
-                        CCSectionHeader("Exact command")
+                        CCSectionHeader("Command")
                     } content: {
                         VStack(alignment: .leading, spacing: CC.space.xs) {
                             CCMonoBlock("rm -rf node_modules && npm install")

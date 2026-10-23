@@ -46,6 +46,11 @@ use protocol::config::Config;
 /// `CODECONNECT_CLAUDE_BIN`.
 const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
 
+/// What a Mac with no codex to run is told, by a launch and by help alike.
+const NO_CODEX: &str = "could not find the codex binary: install Codex with OpenAI's install \
+     script (curl -fsSL https://chatgpt.com/codex/install.sh | sh), or set codex_bin in \
+     ~/.codeconnect/config.json";
+
 /// A resolved `codex` executable: a pathname **and the identity of the bytes
 /// behind it**.
 ///
@@ -288,10 +293,10 @@ fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Re
     let cwd = folder.to_string_lossy().to_string();
 
     // The same namespace `codeconnect claude` draws from, on the same tmux server:
-    // one `cc-N` sequence across both agents, so `ls` and `attach` see one fleet and
-    // two sessions can never collide on a name. (The coordinator would default to a
-    // fixed `cc-codex`, which is fine for a harness and wrong for a machine that
-    // runs more than one.)
+    // one `cc-N` sequence across both agents, so `ls` and `attach` see one fleet. (The
+    // coordinator would default to a fixed `cc-codex`, which is fine for a harness
+    // and wrong for a machine that runs more than one.)
+    crate::update_check::ensure_tmux()?;
     let session_name = crate::tmux::next_session_name()?;
     // Minted here, once, before anything else knows the session exists — the same
     // rule and the same minter as the Claude path. The tmux name is reused as soon
@@ -680,12 +685,12 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
     match rejected {
         Some((path, why)) => bail!(
             "the codex at {} cannot be used: {why}; \
-             CodeConnect supports the standalone native codex \
-             (e.g. ~/.local/bin/codex → …/standalone/releases/…/bin/codex)",
+             CodeConnect runs the native codex that OpenAI's install script puts in place: \
+             curl -fsSL https://chatgpt.com/codex/install.sh | sh",
             path.display()
         ),
         None => {
-            bail!("could not find the codex binary; set codex_bin in ~/.codeconnect/config.json")
+            bail!(NO_CODEX)
         }
     }
 }
@@ -1729,9 +1734,10 @@ fn first_codex(candidates: Vec<PathBuf>) -> Result<PathBuf> {
         .filter(|canonical| Some(canonical) != current.as_ref())
         .collect();
     let native = existing.iter().find(|path| starts_with_native_magic(path));
-    native.or(existing.first()).cloned().ok_or_else(|| {
-        anyhow!("could not find the codex binary; set codex_bin in ~/.codeconnect/config.json")
-    })
+    native
+        .or(existing.first())
+        .cloned()
+        .ok_or_else(|| anyhow!(NO_CODEX))
 }
 
 /// Whether the file's first four bytes are a Mach-O magic number ([`is_native_magic`]).

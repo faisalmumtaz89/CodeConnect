@@ -423,6 +423,16 @@ async fn read_loop(
                 } else {
                     ttl_secs
                 };
+                // Before anything is minted: a code for a listener that refuses
+                // every phone is a code that can never work.
+                if let Some(refusal) = daemon.listener_refusal.get() {
+                    let _ = tx
+                        .send(DaemonFrame::Error {
+                            message: format!("no phone can pair with this daemon. {refusal}"),
+                        })
+                        .await;
+                    continue;
+                }
                 let frame = match daemon.create_pairing(ttl).await {
                     Ok((code, expires_at)) => DaemonFrame::Pairing {
                         code,
@@ -670,6 +680,31 @@ mod tests {
         assert!(
             message.contains("does not change agents"),
             "the refusal must say why, over the wire: {message}"
+        );
+    }
+
+    /// A daemon whose listener refuses every connection makes no pairing code:
+    /// the operator is told why, at the one moment they are asking for
+    /// something to hand to a phone, rather than given a code no phone can use.
+    #[tokio::test]
+    async fn a_daemon_no_phone_can_reach_makes_no_pairing_code() {
+        let (daemon, socket) = served_daemon().await;
+        assert!(
+            matches!(
+                exchange(&socket, r#"{"type":"create_pairing","ttl_secs":300}"#).await,
+                DaemonFrame::Pairing { .. }
+            ),
+            "a reachable daemon makes a code"
+        );
+        daemon
+            .listener_refusal
+            .set("ws 192.168.1.20:8787 will REFUSE EVERY CONNECTION: the reason".into())
+            .unwrap();
+        let message =
+            error_message(exchange(&socket, r#"{"type":"create_pairing","ttl_secs":300}"#).await);
+        assert!(
+            message.contains("REFUSE EVERY CONNECTION: the reason"),
+            "{message}"
         );
     }
 

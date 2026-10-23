@@ -1252,13 +1252,13 @@ struct SessionDetailView: View {
                             horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs
                         ) {
                             CCTag(agent: summary.agent)
-                            Text(summary.cwd)
+                            Text(summary.shownCwd)
                                 .ccType(CC.type.monoSmall)
                                 .foregroundStyle(CC.text.tertiary)
                                 .lineLimit(1)
                                 .truncationMode(.head)
                                 .onLongPressGesture { CCPasteboard.copy(summary.cwd) }
-                                .accessibilityLabel("Working directory, \(summary.cwd)")
+                                .accessibilityLabel("Working directory, \(summary.shownCwd)")
                         }
                     }
                     // **An ended run is not a dead end.** Claude Code keeps its own
@@ -1694,9 +1694,9 @@ private struct SessionTimeline: View {
     var composerFocused: FocusState<Bool>.Binding
 
     @Environment(AppModel.self) private var model
-    /// The widest tool label in this timeline, so every command beside one
+    /// Every tool label's width in this timeline, so every command beside one
     /// starts on the same edge. See `CCToolColumn`.
-    @State private var toolColumn: CGFloat = 0
+    @State private var toolLabelWidths: Set<CGFloat> = []
     @State private var pageAnchor = PageAnchor()
 
     /// What is on screen for this run, read here so a publication re-runs this
@@ -1848,7 +1848,7 @@ private struct SessionTimeline: View {
             // Rows that open more of themselves on a tap say so first, as a
             // message's "Show more" does through `onExpand`.
             .environment(\.tailWatch, tailWatch)
-            .ccCollectsToolColumn(into: $toolColumn)
+            .ccCollectsToolColumn(into: $toolLabelWidths)
             .background(CC.color.bg)
             .onChange(of: TimelineEnd(state.timeline, drawnThrough: state.drawnThrough)) { old, new in
                 // A catch-up that landed has set the count once already.
@@ -1918,13 +1918,14 @@ private struct SessionTimeline: View {
 
     static let tailAnchor = "codeconnect.tail"
 
-    /// A turn boundary is a user message, a `turnComplete` or a `sessionEnded`.
+    /// A turn boundary is a user message, a `turnComplete`, an interrupt or a
+    /// `sessionEnded`.
     private func topSpacing(at index: Int, in items: [TimelineItem]) -> CGFloat {
         guard index > 0 else { return CC.space.xs }
         if case .userMessage = items[index].content { return CC.space.lg }
         if case .notice(let notice) = items[index - 1].content {
             switch notice.kind {
-            case .turnComplete, .sessionEnded: return CC.space.lg
+            case .turnComplete, .turnInterrupted, .sessionEnded: return CC.space.lg
             default: break
             }
         }

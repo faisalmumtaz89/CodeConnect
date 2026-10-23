@@ -243,8 +243,11 @@ the Mac, in the log.
 
 ## When Codex updates
 
-CodeConnect runs whichever Codex you installed. It pins no version and checks no schema:
-the launcher reads `codex --version` and refuses only a binary that cannot say what it is.
+CodeConnect runs whichever version of the native Codex you installed — the one OpenAI's
+install script puts in place; the npm package's `codex` is a script wrapper, which it refuses
+because the file it would run could change under it. Beyond that it pins no version and
+checks no schema: the launcher reads `codex --version` and refuses a binary that cannot say
+what it is.
 
 What protects the phone does not depend on the Codex version. The broker admits only a
 fixed set of phone messages, each in a fixed shape, and refuses everything else — so a

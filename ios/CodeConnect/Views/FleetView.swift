@@ -53,10 +53,10 @@ private struct PendingRemoval {
 struct FleetView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dynamicTypeSize) private var typeSize
-    /// The widest tool label on screen, so every command beside one starts on
-    /// the same edge. Settles on the first pass and then stops changing, so it
-    /// costs one extra layout and nothing after that.
-    @State private var toolColumn: CGFloat = 0
+    /// Every tool label's width on screen, so every command beside one starts
+    /// on the same edge. Settles on the first pass and then stops changing, so
+    /// it costs one extra layout and nothing after that.
+    @State private var toolLabelWidths: Set<CGFloat> = []
     @State private var path: [SessionRoute] = []
     @State private var showSettings = false
     /// The one-open-swipe-row rules. Rows observe it; this view only calls
@@ -204,7 +204,7 @@ struct FleetView: View {
             )
             .background(CC.color.bg)
             .scrollIndicators(.hidden)
-            .ccCollectsToolColumn(into: $toolColumn)
+            .ccCollectsToolColumn(into: $toolLabelWidths)
             .refreshable { model.refreshFleet() }
             // Opaque `bg` *and* a hard scroll edge, welded together in the kit
             // because either one alone is a different wrong bar.
@@ -889,7 +889,7 @@ struct FleetView: View {
             activity: FleetActivity(
                 tool: tool,
                 argument: ToolSummary.principalArgument(
-                    tool: tool, input: front.card.toolInput)),
+                    tool: tool, input: front.card.toolInput)?.firstLine),
             risk: front.assessment(profile: model.daemonProfile).effective,
             truncation: .head)
     }
@@ -925,11 +925,17 @@ struct FleetView: View {
         CCEmptyState(
             glyph: "terminal",
             title: "No agents running",
-            message: "Start one on the Mac:"
+            message: "Start one from your project's folder on the Mac:"
         ) {
             CCMonoBlock("codeconnect claude")
                 .frame(maxWidth: 280)
                 .padding(.top, CC.space.xxs)
+            CCProse(
+                "For Codex: `codeconnect codex`.", style: CC.type.footnote,
+                color: CC.text.tertiary
+            )
+            .multilineTextAlignment(.center)
+            .padding(.top, CC.space.xs)
         }
         .padding(.horizontal, CC.space.md)
         .padding(.top, CC.space.xxl)
@@ -1599,9 +1605,10 @@ struct FleetRowView: View {
     let action: () -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
-    /// The shared width every tool label is drawn into, so the commands beside
-    /// them share one left edge. Zero until the first pass has measured.
-    @Environment(\.ccToolColumn) private var toolColumn
+    /// Every tool label's width on screen, from which this row's label takes
+    /// its column, so the commands beside them share one left edge. Empty until
+    /// the first pass has measured.
+    @Environment(\.ccToolLabelWidths) private var toolLabelWidths
 
     /// **This row's own clock, ticking at the rate this row can actually show.**
     ///
@@ -1823,23 +1830,20 @@ struct FleetRowView: View {
         // command started in the middle of the row and wrapped into a three-line
         // column about half the width of the card — `/Users/` / `dev/app/` /
         // `…re.swift`, which is a path nobody can read. Stacked, it gets the
-        // whole measure.
-        CCAdaptiveStack(
-            horizontalSpacing: CCToolColumn.argumentGap, verticalSpacing: 2,
-            verticalAlignment: .firstTextBaseline
-        ) {
+        // whole measure. Side by side, the tool column — see `CCToolColumn`.
+        let layout =
+            typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+            : AnyLayout(CCToolPairLayout(labels: toolLabelWidths, alignment: .firstTextBaseline))
+        return layout {
             Text(card.tool)
                 .ccType(CC.type.footnote)
                 .foregroundStyle(tone)
                 .lineLimit(1)
-                // One left edge for every command in the list — see
-                // `CCToolColumn`. Off at accessibility sizes, where these stack.
-                .ccToolLabelColumn(toolColumn, disabled: typeSize.isAccessibilitySize)
-                .layoutPriority(1)
+                .ccToolLabelColumn(disabled: typeSize.isAccessibilitySize)
             if let argument = card.argument {
                 CCMonoBlock(inline: argument, truncation: truncation)
             }
-            CCAdaptiveSpacer(minLength: 0)
         }
     }
 
@@ -1951,7 +1955,7 @@ struct FleetRowView: View {
         if row.blockedCount > 1 { parts.append("\(row.blockedCount) pending decisions") }
         parts.append(spokenActivity)
         if isBlockedOrFailed {
-            parts.append("waiting \(Format.spokenAge(now.timeIntervalSince(waitingSince)))")
+            parts.append("waiting \(Format.spokenDuration(now.timeIntervalSince(waitingSince)))")
         } else if let last = row.lastEventAt {
             parts.append("last activity \(Format.spokenAge(now.timeIntervalSince(last)))")
         }
@@ -1967,10 +1971,12 @@ struct FleetRowView: View {
     ///
     /// The flat sentence where the row draws one, and the split read back as two
     /// clauses where it draws two — a screen reader has no faces to tell prose
-    /// from code with, so the comma is what does the work.
+    /// from code with, so the comma is what does the work. An argument whose
+    /// first line is blank is no argument, not an empty clause (`Bash, ,`).
     private var spokenActivity: String {
         guard let activity else { return row.subtitle }
-        return [activity.tool, activity.argument].compactMap { $0 }.joined(separator: ", ")
+        return [activity.tool, activity.argument].compactMap { $0 }.filter { !$0.isEmpty }
+            .joined(separator: ", ")
     }
 }
 

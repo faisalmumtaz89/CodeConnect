@@ -88,9 +88,11 @@ Each block starts from the repository root.
 4. **Tag. The push builds and verifies a draft — it never publishes.**
 
    Pushing the tag starts `.github/workflows/release.yml`, which pins the
-   tag to one commit, builds both architectures from that commit, signs and
-   notarizes them, attaches the archive to a **draft**, downloads those
-   exact assets back and re-verifies them — and stops there. A draft is
+   tag to one commit, builds both architectures from that commit — the
+   binaries, and CodeConnect's own tmux from the pinned sources in
+   `mac/tmux/SOURCES` — signs and notarizes them, attaches the two archives
+   (binaries, and tmux beside them) to a **draft**, downloads those exact
+   assets back and re-verifies them — and stops there. A draft is
    visible only to people who can see the repository's drafts, so nothing a
    user can reach has changed yet. Do not create the release yourself: a
    version that is not strictly newer than the current `releases/latest` is
@@ -114,10 +116,12 @@ Each block starts from the repository root.
    rechecking that the draft is still a draft with exactly the verified
    assets, that the version is still newer than the published latest, and
    that the tag still names the pinned commit, flips it live. This is the
-   moment `codeconnect update` on every machine can see it.
+   moment `codeconnect update` on every machine can see it. `--ref` runs the
+   workflow as it is at the tag; without it, `main`'s copy runs, and an older
+   workflow checks an older set of assets.
 
    ```sh
-   gh workflow run release.yml -f tag=vX.Y.Z -f publish=true
+   gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z -f publish=true
    gh run watch
    ```
 

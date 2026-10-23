@@ -576,7 +576,22 @@ fn liveness_is_gone(l: Liveness) -> bool {
 /// An held exclusive `flock` on the session's `launch.lock`. Dropping it
 /// releases the lock. All CAS transitions run inside one of these.
 pub struct LaunchLock {
-    _file: std::fs::File,
+    file: std::fs::File,
+}
+
+/// **Not redundant with the `close` that follows it.** Closing frees the lock
+/// only when the last reference to the open file description goes, and a fork
+/// duplicates that reference into the child until it execs or exits — a host's
+/// codex parked in its `pre_exec` fence holds it for as long as the fence does.
+/// An unlock through any duplicate releases the lock for all of them (`flock(2)`),
+/// so dropping is the release rather than a request for one. Dying by a route
+/// that runs no destructor still releases at the last close, unchanged.
+impl Drop for LaunchLock {
+    fn drop(&mut self) {
+        // Nowhere for a failure to go, and nothing to do about one: the close
+        // immediately after is the same release this pre-empts.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 /// fsync a directory so its own entries are durable. Propagates the error.
@@ -716,7 +731,7 @@ impl LaunchLock {
             return Err(std::io::Error::last_os_error())
                 .context("flock(LOCK_EX) on the launch lock");
         }
-        Ok(LaunchLock { _file: file })
+        Ok(LaunchLock { file })
     }
 
     /// Acquire the lock within a **bounded deadline**, never blocking indefinitely: a
@@ -754,7 +769,7 @@ impl LaunchLock {
             .open(dir.join(LOCK_FILE))?;
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc == 0 {
-            return Ok(Some(LaunchLock { _file: file }));
+            return Ok(Some(LaunchLock { file }));
         }
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
@@ -2966,7 +2981,7 @@ fn sweep_records(deadline: std::time::Instant, on_action: &mut dyn FnMut(SweepAc
 /// custodian writing one transition — so waiting is nearly always cheaper than coming
 /// back, and a single non-blocking try declined to look at a record for the length of
 /// one file write. Clamped by what is left of the pass's deadline, whichever is less.
-const SWEEP_LAUNCH_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const SWEEP_LAUNCH_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// **What is left of a pass's budget, and never a negative** — a deadline already
 /// past is nothing left, which makes the launch-lock wait a single non-blocking try
@@ -3492,6 +3507,32 @@ mod tests {
         assert!(
             LaunchLock::try_acquire("u8").unwrap().is_some(),
             "releasing lets the next holder in"
+        );
+    }
+
+    /// **A lock a forked child inherited is still released by the drop.**
+    ///
+    /// `flock` belongs to the open file description, and a fork duplicates the
+    /// descriptor into the child: closing the parent's copy releases nothing while
+    /// the child still has one. A child between `fork` and `exec` — a host's codex
+    /// parked in its `pre_exec` fence, any sibling test's spawn — then holds the
+    /// launch lock past its owner's drop. The child here holds its copy on purpose
+    /// until the parent has tried again (see [`crate::forked_holder`]).
+    ///
+    /// **Mutation:** delete `LaunchLock`'s `Drop` and the second holder is refused.
+    #[test]
+    fn a_lock_a_forked_child_inherited_is_still_released_by_the_drop() {
+        let held = LaunchLock::acquire("forked").unwrap();
+        let child = crate::forked_holder::Release::new().fork_holder();
+        drop(held);
+        let next = LaunchLock::try_acquire("forked").unwrap();
+        assert!(
+            child.release(std::time::Duration::from_secs(5)),
+            "the child left when released"
+        );
+        assert!(
+            next.is_some(),
+            "a descriptor a child still holds must not keep the launch lock past the drop"
         );
     }
 

@@ -49,8 +49,19 @@ pub fn project_label(cwd: &str) -> String {
     // U+2029 are line and paragraph separators and are *not* control
     // characters, so they would pass a control-only filter and still break the
     // line wherever the platform honours them.
+    //
+    // **And nothing that reorders one is drawn as itself.** The label is the
+    // direct APNs alert title, which the phone draws as it arrives: U+202E in
+    // `abc\u{202E}gpj.exe` draws `abcexe.jpg`. The eleven characters the phone's
+    // own `displaySafe` maps — NUL, the Arabic letter mark, the embeddings and
+    // overrides, the isolates — are mapped to U+FFFD here too, before the
+    // control filter, so NUL is shown as the phone shows it rather than dropped.
     let cleaned: String = last
         .chars()
+        .map(|c| match c {
+            '\u{0}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => '\u{FFFD}',
+            c => c,
+        })
         .filter(|c| !c.is_control() && *c != '\u{2028}' && *c != '\u{2029}')
         .collect();
     let cleaned = cleaned.trim();
@@ -69,6 +80,34 @@ pub fn project_label(cwd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A direction override cannot reorder a label.** U+202E in a directory
+    /// name draws `abc\u{202E}gpj.exe` as `abcexe.jpg`, and the label becomes the
+    /// direct APNs alert title, which the phone cannot correct. Each of the
+    /// eleven characters the phone's `displaySafe` maps is mapped here too, to
+    /// the same U+FFFD.
+    ///
+    /// **Mutation:** drop the mapping and U+202E reaches the label.
+    #[test]
+    fn a_direction_control_in_a_directory_name_is_shown_as_a_replacement_character() {
+        assert_eq!(
+            project_label("/work/abc\u{202E}gpj.exe"),
+            "abc\u{FFFD}gpj.exe"
+        );
+        for c in [
+            '\u{0}', '\u{061C}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ]
+        .into_iter()
+        .chain('\u{202A}'..='\u{202E}')
+        {
+            assert_eq!(
+                project_label(&format!("/work/a{c}b")),
+                "a\u{FFFD}b",
+                "U+{:04X}",
+                c as u32
+            );
+        }
+    }
 
     #[test]
     fn the_label_is_the_last_component_of_the_working_directory() {

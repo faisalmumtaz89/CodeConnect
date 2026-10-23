@@ -872,6 +872,12 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// answers false for the static bootstrap token. False means the Terminal
     /// tab must say what to fix rather than offer a session it cannot open.
     var servesTerminal: Bool { advertises(["terminal_pty"]) }
+    /// The daemon said no for *this* connection, rather than not saying at all
+    /// as a daemon from before the terminal does. To a paired phone that no
+    /// means the connection is not private — neither TLS, nor the daemon's
+    /// tailnet address, nor loopback — since pairing is the only other thing
+    /// the daemon gates the terminal on.
+    var withholdsTerminal: Bool { advertised["terminal_pty"]?.boolValue == false }
     /// The daemon accepts `delete_session`. Absent before minor 7, and unknown is
     /// false, so an older Mac simply does not offer the swipe rather than offering
     /// one that silently does nothing.

@@ -128,6 +128,7 @@ async fn main() -> Result<()> {
     // connects.
     if let Some(advice) = plaintext_refusal_advice(&daemon.config, &plan, certificate) {
         crate::log_error!("{advice}");
+        let _ = daemon.listener_refusal.set(advice);
     }
     report_log_integrity(&store);
     // Before anything is served: a grant an earlier release left behind outlives
@@ -777,12 +778,6 @@ enum PlaintextOptIn {
 /// and not a tailnet address becomes TLS-only unless `ws_allow_plaintext` says
 /// the network it is on is acceptable.
 async fn resolve_bind(config: &Config) -> BindPlan {
-    if let Some(explicit) = &config.ws_bind {
-        if explicit_bind_ip(config).is_none() {
-            crate::log_warn!("ws_bind {explicit:?} is not an IP address; ignoring it");
-        }
-    }
-
     let tailnet = if needs_tailnet_probe(config) {
         tailnet_addresses().await
     } else {
@@ -1256,7 +1251,7 @@ fn plaintext_refusal_advice(config: &Config, plan: &BindPlan, certificate: bool)
     Some(format!(
         "ws {bind} will REFUSE EVERY CONNECTION: plaintext is not private on this address and \
          no certificate is available, so no phone can reach this daemon. {certificate}, \
-         {way_through}."
+         {way_through}; then run `codeconnect daemon restart`."
     ))
 }
 
@@ -2374,13 +2369,19 @@ mod tests {
     fn an_address_that_is_genuinely_not_on_the_tailnet_is_still_told_to_move() {
         // The other half of the distinction: the probe answered, and this
         // address is not among what it said. That is a fact, not an uncertainty,
-        // and a restart would change nothing about it.
+        // and a restart alone would change nothing about it: the restart is named
+        // only as what puts a changed configuration into effect.
         let config = config_with(Some("203.0.113.7"));
         let plan = plan_bind(&config, &tailnet(), false);
         assert!(plan.tailnet_confirmed);
         let advice = plaintext_refusal_advice(&config, &plan, false).expect("must be advised");
         assert!(advice.contains("LAN address"), "{advice}");
-        assert!(!advice.contains("daemon restart"), "{advice}");
+        assert!(!advice.contains("could not confirm"), "{advice}");
+        assert!(!advice.contains("Tailscale up"), "{advice}");
+        assert!(
+            advice.ends_with("; then run `codeconnect daemon restart`."),
+            "{advice}"
+        );
 
         // The trap in the distinction: the wildcard is nobody's tailnet address
         // whatever the probe did or did not say, so an empty tailnet must not
@@ -2390,7 +2391,7 @@ mod tests {
         assert!(!plan.tailnet_confirmed);
         let advice = plaintext_refusal_advice(&config, &plan, false).expect("must be advised");
         assert!(advice.contains("LAN address"), "{advice}");
-        assert!(!advice.contains("daemon restart"), "{advice}");
+        assert!(!advice.contains("could not confirm"), "{advice}");
 
         // And the same for the LAN bind the plaintext opt-in exists for:
         // Tailscale hands out no RFC1918 address, so an empty probe leaves that
@@ -2399,7 +2400,7 @@ mod tests {
         let plan = plan_bind(&config, &[], false);
         let advice = plaintext_refusal_advice(&config, &plan, false).expect("must be advised");
         assert!(advice.contains("ws_allow_plaintext"), "{advice}");
-        assert!(!advice.contains("daemon restart"), "{advice}");
+        assert!(!advice.contains("could not confirm"), "{advice}");
     }
 
     #[test]

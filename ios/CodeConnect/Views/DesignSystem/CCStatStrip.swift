@@ -185,7 +185,7 @@ struct CCWaitClock: View {
         .lineLimit(1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            "\(prefix ?? "waiting") \(Format.spokenAge(now.timeIntervalSince(since)))")
+            "\(prefix ?? "waiting") \(Format.spokenDuration(now.timeIntervalSince(since)))")
     }
 
     /// `12s` · `4m12s` · `2h04m` · `3d02h`. Two units, never three: the third is
