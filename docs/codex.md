@@ -243,8 +243,8 @@ the Mac, in the log.
 
 ## When Codex updates
 
-CodeConnect runs whichever version of the native Codex you installed — the one OpenAI's
-install script puts in place; the npm package's `codex` is a script wrapper, which it refuses
+CodeConnect runs whichever version of the native Codex you installed — from OpenAI's installer or
+Homebrew's cask; the npm package's `codex` is a script wrapper, which it refuses
 because the file it would run could change under it. Beyond that it pins no version and
 checks no schema: the launcher reads `codex --version` and refuses a binary that cannot say
 what it is.

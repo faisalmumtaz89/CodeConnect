@@ -138,6 +138,29 @@ impl Pane {
     fn touch(&self, name: &str) {
         std::fs::write(self.dir.join(name), "").unwrap();
     }
+
+    /// Where the job and `agent` are, the pane's terminal modes and what it shows: what
+    /// a failed wait needs to say.
+    fn report(&self, agent: i32) -> String {
+        let job = self.ask("#{pane_pid}");
+        let modes = Command::new("/bin/stty")
+            .args(["-f", &self.ask("#{pane_tty}")])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default();
+        let screen = self
+            .command()
+            .args(["capture-pane", "-p", "-t", "j:"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default();
+        format!(
+            "\nstopped flag: {:?}\njob {job}: {:?}\nagent {agent}: {:?}\nterminal: {modes:?}\nscreen: {screen:?}",
+            self.stopped_flag(),
+            ps(&job, "stat=,wchan=,tpgid="),
+            ps(&agent.to_string(), "stat=,wchan=,pgid="),
+        )
+    }
 }
 
 impl Drop for Pane {
@@ -166,19 +189,33 @@ impl Viewer {
 }
 
 fn state(pid: i32) -> String {
+    ps(&pid.to_string(), "stat=")
+}
+
+fn wait_for(what: &str, done: impl FnMut() -> bool) {
+    wait_or_report(what, done, String::new);
+}
+
+/// [`wait_for`], and on a timeout say what `report` sees then.
+fn wait_or_report(what: &str, mut done: impl FnMut() -> bool, report: impl Fn() -> String) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}{}",
+            report()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `ps` columns for `pid`, empty once it is gone.
+fn ps(pid: &str, columns: &str) -> String {
     let out = Command::new("/bin/ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .args(["-o", columns, "-p", pid])
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 /// Stop once `DIR/go` exists, then say so and stay.
@@ -345,7 +382,11 @@ fn a_reader_stopped_by_the_terminal_reads_on_after_it_is_continued() {
     wait_for("the reader to continue", || pane.stopped_flag().is_empty());
     keys("61");
     keys("0d");
-    wait_for("the reader to read", || pane.file("read") == "a\n");
+    wait_or_report(
+        "the reader to read",
+        || pane.file("read") == "a\n",
+        || format!("\nread: {:?}{}", pane.file("read"), pane.report(agent)),
+    );
     viewer.leave();
 }
 

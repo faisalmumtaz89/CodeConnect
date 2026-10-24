@@ -537,7 +537,9 @@ pub fn hold_for_reading(
 /// the attach that follows the hold reads the same terminal in raw mode, and a
 /// reader still parked on it would take the terminal's answers and the user's
 /// keys. A terminal in canonical mode is readable only once a whole line or EOF
-/// is there, so readiness is the Return; the line is consumed with it.
+/// is there, so readiness is the Return. Only a lone Return — the answer to
+/// "Press Return to continue now" — or EOF is taken: a typed line is the user's
+/// input to the agent, and stays for the attach to pass on.
 pub fn returned_within(fd: std::os::fd::RawFd, wait: std::time::Duration) -> bool {
     let mut poll = libc::pollfd {
         fd,
@@ -548,8 +550,12 @@ pub fn returned_within(fd: std::os::fd::RawFd, wait: std::time::Duration) -> boo
     if unsafe { libc::poll(&mut poll, 1, millis) } <= 0 {
         return false;
     }
-    let mut line = [0u8; 1024];
-    unsafe { libc::read(fd, line.as_mut_ptr().cast(), line.len()) };
+    let mut pending: libc::c_int = 0;
+    unsafe { libc::ioctl(fd, libc::FIONREAD, &mut pending) };
+    if pending <= 1 {
+        let mut byte = [0u8; 1];
+        unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) };
+    }
     true
 }
 
@@ -1767,6 +1773,56 @@ mod tests {
         let mut after = Vec::new();
         read.read_to_end(&mut after).unwrap();
         assert_eq!(after, b"typed after the hold");
+    }
+
+    /// What is typed during the hold belongs to the session: a lone Return answers
+    /// "Press Return to continue now" and is taken, but a typed line ends the hold
+    /// and stays in the terminal for the attach to pass on, as the agent run
+    /// directly would have read it.
+    #[test]
+    fn a_line_typed_during_the_hold_ends_it_and_stays_for_the_session() {
+        let (mut main, mut side) = (-1, -1);
+        let opened = unsafe {
+            libc::openpty(
+                &mut main,
+                &mut side,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "openpty");
+        let type_in = |bytes: &[u8]| {
+            let written = unsafe { libc::write(main, bytes.as_ptr().cast(), bytes.len()) };
+            assert_eq!(written, bytes.len() as isize);
+        };
+        let waiting = || {
+            let mut pending: libc::c_int = 0;
+            assert_eq!(
+                unsafe { libc::ioctl(side, libc::FIONREAD, &mut pending) },
+                0
+            );
+            pending
+        };
+
+        type_in(b"\r");
+        assert!(returned_within(side, std::time::Duration::from_secs(5)));
+        assert_eq!(waiting(), 0, "the lone Return is the hold's, and taken");
+
+        type_in(b"hello\r");
+        assert!(returned_within(side, std::time::Duration::from_secs(5)));
+        assert_eq!(waiting(), 6, "the typed line is left");
+        let mut line = [0u8; 16];
+        let read = unsafe { libc::read(side, line.as_mut_ptr().cast(), line.len()) };
+        assert_eq!(
+            &line[..read.max(0) as usize],
+            b"hello\n",
+            "the typed line is left"
+        );
+        unsafe {
+            libc::close(main);
+            libc::close(side);
+        }
     }
 
     /// `daemon status` renders for stdout's own signals and never counts

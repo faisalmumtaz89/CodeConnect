@@ -460,7 +460,7 @@ struct FleetView: View {
     /// `FleetCount`.
     private func headline(_ screen: FleetScreen) -> String {
         guard !screen.rows.isEmpty else {
-            return screen.hasLiveFleet ? "No agents registered" : "Nothing has arrived yet"
+            return screen.hasLiveFleet ? "Nothing needs you" : "Nothing has arrived yet"
         }
         if screen.decisions > 0 { return FleetCount.needsYou(screen.decisions) }
         // Nothing is held, but something broke, and that is still the first
@@ -1010,9 +1010,9 @@ struct FleetView: View {
     /// Handed to the bar separately from the place, because the two were one
     /// string and the string was middle-truncated — see `subtitleLine`.
     private func command(for approval: ApprovalItem) -> String {
-        ToolSummary.principalArgument(
+        let line = ToolSummary.principalArgument(
             tool: approval.card.toolName, input: approval.card.toolInput)?.firstLine
-            ?? approval.card.toolName
+        return line.flatMap { $0.isEmpty ? nil : $0 } ?? approval.card.toolName
     }
 
     /// Dismisses everything Fleet itself can present.
@@ -1964,7 +1964,7 @@ struct FleetRowView: View {
         if row.capability.isSettled {
             parts.append(row.capability.canAct ? "control" : "observe only")
         }
-        return parts.joined(separator: ", ")
+        return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 
     /// What the row's second line says, out loud.

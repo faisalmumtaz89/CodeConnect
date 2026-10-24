@@ -677,8 +677,8 @@ struct BindPlan {
     opt_in: PlaintextOptIn,
     /// Whether this node's own tailnet addresses are known.
     ///
-    /// False means the probe came back with nothing — `tailscale ip` did not
-    /// answer in time, or Tailscale is not running — and *not* that this node
+    /// False means the probe came back with nothing — Tailscale not found, not
+    /// up, or slower than the probe budget — and *not* that this node
     /// has no tailnet. The difference is the whole of what a refused operator
     /// is told: an address missing from a tailnet the daemon can see is
     /// genuinely not on it, while an address it could never check may be
@@ -1138,11 +1138,12 @@ fn refused_opt_in_message(plan: &BindPlan) -> String {
     }
     if !plan.tailnet_confirmed {
         return format!(
-            "ws_allow_plaintext is set but is not honoured on {bind}: `tailscale ip` did not \
-             answer inside the {}s probe budget, so this daemon could not confirm whether {ip} \
-             is one of its own tailnet addresses, and it does not vouch for an address it could \
-             not check. If it is your tailnet address, bring Tailscale up and restart — \
-             plaintext is private there, with or without this key.",
+            "ws_allow_plaintext is set but is not honoured on {bind}: this daemon found no \
+             tailnet address of its own at startup (Tailscale not found, not up, or slower than \
+             {}s to answer), so it could not confirm whether {ip} is one of them, and it \
+             does not vouch for an address it could not check. If it is your tailnet address, \
+             bring Tailscale up and restart — plaintext is private there, with or without this \
+             key.",
             TAILSCALE_PROBE_TIMEOUT.as_secs()
         );
     }
@@ -1199,14 +1200,18 @@ fn plaintext_refusal_advice(config: &Config, plan: &BindPlan, certificate: bool)
     // same tailnet got the accurate answer from this same function.
     if !plan.tailnet_confirmed && !ip.is_unspecified() && !never_a_tailnet_address(ip) {
         return Some(format!(
-            "ws {bind} will REFUSE EVERY CONNECTION: `tailscale ip` did not answer inside the \
-             {}s probe budget at startup, so this daemon could not confirm whether {ip} is one \
-             of its own tailnet addresses — and plaintext is admitted only on an address it can \
-             vouch for. If {ip} is your tailnet address, bring Tailscale up and run `codeconnect \
-             daemon restart` (`codeconnect daemon status` shows what it is bound to). If it is \
-             not, obtain a certificate (`tailscale cert`, which needs HTTPS Certificates enabled \
-             for this tailnet).",
+            "ws {bind} will REFUSE EVERY CONNECTION: this daemon found no tailnet address of its \
+             own at startup (Tailscale not found, not up, or slower than {}s to answer), so it \
+             could not confirm whether {ip} is one of them — and plaintext is admitted only on \
+             an address it can vouch for. If {ip} is your tailnet address, bring Tailscale up \
+             and run `codeconnect daemon restart` (`codeconnect daemon status` shows what it is \
+             bound to). If it is not, obtain a certificate for a name that resolves to {ip}, \
+             with at least {refresh} days of validity left, set \"tls_hostname\" to that name, \
+             put its certificate and key in {tls} as <name>.crt and <name>.key, and run \
+             `codeconnect daemon restart`.",
             TAILSCALE_PROBE_TIMEOUT.as_secs(),
+            refresh = config.cert_refresh_days,
+            tls = protocol::tls_dir().display(),
         ));
     }
 
@@ -1240,11 +1245,12 @@ fn plaintext_refusal_advice(config: &Config, plan: &BindPlan, certificate: bool)
             .to_string()
     } else {
         format!(
-            "Obtain a certificate for a name that resolves to {ip}, set \"tls_hostname\" to that \
-             name and put its certificate and key in {tls} as <name>.crt and <name>.key \
-             (`tailscale cert` issues only for this node's MagicDNS name, which resolves to the \
-             tailnet interface rather than to {ip}, and this daemon will not advertise a name it \
-             can see resolves somewhere other than {ip})",
+            "Obtain a certificate for a name that resolves to {ip}, with at least {refresh} days \
+             of validity left, set \"tls_hostname\" to that name and put its certificate and key \
+             in {tls} as <name>.crt and <name>.key (`tailscale cert` issues only for this node's \
+             MagicDNS name, which resolves to the tailnet interface rather than to {ip}, and this \
+             daemon will not advertise a name it can see resolves somewhere other than {ip})",
+            refresh = config.cert_refresh_days,
             tls = protocol::tls_dir().display()
         )
     };
@@ -1386,8 +1392,8 @@ const TAILNET_REPORT_REPEAT_PROBES: u32 = 60;
 fn report_tailnet_change(found: Option<IpAddr>) {
     match found {
         Some(ip) => crate::log_warn!(
-            "tailnet address {ip} is up now, and this daemon bound loopback at startup because \
-             `tailscale ip` did not answer in time, so no phone can reach it. Restarting ccd \
+            "tailnet address {ip} is up now, and this daemon bound loopback because it found \
+             no tailnet IPv4 address at startup, so no phone can reach it. Restarting ccd \
              probes again, and a start that finds {ip} binds it and advertises it — with a \
              certificate if one can be had, and plaintext over WireGuard if not. A start that \
              does not find it in time is on loopback and watching again. Nothing here will do \
@@ -1445,8 +1451,8 @@ async fn watch_tailnet_with<Probe, Fut, Report>(
                 // over. What it must not read as is an arrival: this process
                 // ends here, and the address is the next one's to win.
                 crate::log_warn!(
-                    "tailnet address {ip} is up now, and this daemon bound loopback at startup \
-                     because `tailscale ip` did not answer in time. Exiting so launchd starts a \
+                    "tailnet address {ip} is up now, and this daemon bound loopback because it \
+                     found no tailnet IPv4 address at startup. Exiting so launchd starts a \
                      fresh ccd, which probes for itself: a start that finds {ip} binds it and \
                      advertises it — with a certificate if one can be had, and plaintext over \
                      WireGuard if not. A start that does not is on loopback and watching again."
@@ -1793,10 +1799,11 @@ where
             "not advertising {hostname}: {reason}. The QR carries {ip} instead, which is where \
              this daemon listens, and no certificate is obtained for a name that would send a \
              phone elsewhere. For wss:// on this bind, set \"tls_hostname\" to a name that \
-             resolves to {ip} and put that name's certificate and key in {tls} as <name>.crt \
-             and <name>.key — `tailscale cert` issues only for this node's MagicDNS name, which \
-             is not a name that reaches {ip}.",
+             resolves to {ip} and put that name's certificate and key, with at least {refresh} \
+             days of validity left, in {tls} as <name>.crt and <name>.key — `tailscale cert` \
+             issues only for this node's MagicDNS name, which is not a name that reaches {ip}.",
             ip = bind.ip(),
+            refresh = config.cert_refresh_days,
             tls = protocol::tls_dir().display()
         );
         return (None, fallback);
@@ -2212,6 +2219,10 @@ mod tests {
         assert!(advice.contains("REFUSE EVERY CONNECTION"), "{advice}");
         assert!(advice.contains("tailscale cert"), "{advice}");
         assert!(advice.contains("ws_allow_plaintext"), "{advice}");
+        let refresh = format!("at least {} days", config.cert_refresh_days);
+        for step in ["\"tls_hostname\"", "<name>.crt", &refresh] {
+            assert!(advice.contains(step), "{step}: {advice}");
+        }
 
         // With a certificate the listener serves, and there is nothing to say.
         assert_eq!(plaintext_refusal_advice(&config, &plan, true), None);
@@ -2344,6 +2355,26 @@ mod tests {
         // And it agrees with the line that follows it.
         let advice = plaintext_refusal_advice(&config, &plan, false).expect("must be advised");
         assert!(!advice.contains("public"), "{advice}");
+        // An empty tailnet list is Tailscale absent, down or slow, and nothing
+        // here knows which: neither line may say the probe timed out, and the
+        // way through for an address that is not Tailscale's is not `tailscale cert`.
+        for said in [&refusal, &advice] {
+            assert!(!said.contains("did not answer"), "{said}");
+        }
+        assert!(!advice.contains("tailscale cert"), "{advice}");
+        // What it offers instead is complete: the name, where its files go,
+        // and the restart that picks them up.
+        let tls = protocol::tls_dir().display().to_string();
+        let refresh = format!("at least {} days", config.cert_refresh_days);
+        for step in [
+            "\"tls_hostname\"",
+            &tls,
+            "<name>.crt",
+            &refresh,
+            "daemon restart`.",
+        ] {
+            assert!(advice.contains(step), "{step}: {advice}");
+        }
 
         // Confirmed, and genuinely absent from it: an established fact, and the
         // plain wording stays.

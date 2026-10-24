@@ -2778,7 +2778,7 @@ impl Store {
         conn.execute(
             "INSERT INTO devices(device_id, name, token_hash, created_at,
                                  last_seen_at, revoked_at)
-             VALUES(?1, ?2, ?3, ?4, NULL, NULL)",
+             VALUES(?1, ?2, ?3, ?4, ?4, NULL)",
             params![device_id, name, token_hash, created_at],
         )?;
         Ok(())

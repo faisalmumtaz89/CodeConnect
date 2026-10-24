@@ -584,7 +584,8 @@ turn the loopback listener off.
 ## Pairing
 
 `codeconnect pair` asks the daemon for a single-use 8-character code (5-minute TTL,
-stored hashed) and prints it as a QR alongside the JSON the app decodes:
+stored hashed) and prints it as a QR the app decodes, beside the address and code the app's
+manual field takes. The QR holds:
 
 ```json
 {"v":1,"host":"<magicdns-name>","port":8787,"code":"ABCD2345"}
@@ -1118,6 +1119,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
 | `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
 | `claude_bin` | auto | Explicit path to the real `claude`. |
+| `codex_bin` | auto | Explicit path to the native `codex`. A script wrapper, such as npm's, is skipped, and with no native `codex` found the launch refuses. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |
 | `ws_allow_plaintext` | `false` | Serve `ws://` on a `ws_bind` whose privacy only you can vouch for. Honoured on a local-network address; refused on `0.0.0.0`, `::` and public addresses. `tls_required` wins over it. See [TLS](#tls). |

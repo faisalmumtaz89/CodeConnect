@@ -869,15 +869,16 @@ struct TerminalTabView: View {
         // Shell-equivalent authority is never granted to the bootstrap token,
         // so the daemon says per connection whether it will open one at all.
         guard model.connection.capabilities?.servesTerminal == true else {
-            // A paired phone refused anyway is on a connection nothing
-            // encrypts: pairing again would change nothing, so it is not offered.
+            // A paired phone refused anyway is on a connection the daemon
+            // cannot vouch for as private: pairing again would change nothing, so it
+            // is not offered.
             if model.connection.helloAck?.deviceID != nil,
                 model.connection.capabilities?.withholdsTerminal == true
             {
                 return .blocked(
                     Blocked(
                         reason:
-                            "The Mac opens a terminal only over an encrypted connection, and nothing encrypts this one. It opens over Tailscale, or once the Mac has a certificate."
+                            "The Mac opens the live terminal over Tailscale, not over this connection."
                     ))
             }
             return .blocked(

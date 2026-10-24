@@ -128,6 +128,18 @@ final class WaitingLabelTests: XCTestCase {
         XCTAssertTrue(found.contains("work · git status · waiting 1 minute"), "\(found)")
     }
 
+    /// A tool call whose argument starts with a blank line is spoken as the
+    /// tool alone, as the fleet row speaks it, rather than as an empty clause.
+    func testAToolCallWithABlankFirstLineSpeaksNoEmptyClause() throws {
+        let found = try spoken(
+            ToolRow(
+                tool: ToolItem(
+                    toolUseID: nil, name: "Bash", argument: "\ngit push --force origin main", status: .succeeded,
+                    durationMS: nil, input: nil, output: nil, isTruncated: false)))
+        let row = try XCTUnwrap(found.first { $0.hasPrefix("Bash tool call") }, "\(found)")
+        XCTAssertFalse(row.components(separatedBy: ", ").contains(""), row)
+    }
+
     /// The design gallery's blocked fleet row is the shipped label, so it says
     /// what the shipped row says.
     func testTheGallerysBlockedRowSpeaksTheShippedWait() throws {
