@@ -935,7 +935,10 @@ fn send_text(
     let matched = match authorise(&pane, require, expect, target.is_composer, keyboard) {
         Ok(matched) => matched,
         Err(reason) => {
-            log_line(args, &format!("refused: {reason}"));
+            log_line(
+                args,
+                &format!("refused: {reason} (looked for {})", require.requirement()),
+            );
             return SupervisorResult::Refused { reason };
         }
     };
@@ -1546,10 +1549,11 @@ fn authorise(
     keyboard: tmux::Keyboard,
 ) -> std::result::Result<String, String> {
     let Some(matched) = require.find_match(pane, None) else {
-        return Err(format!(
-            "expected prompt not on screen (looked for {}); nothing was typed",
-            require.requirement()
-        ));
+        return Err(if targets_composer {
+            "the message box is not on screen at the Mac".into()
+        } else {
+            "that prompt is not on screen at the Mac".into()
+        });
     };
     // Only the composer. A permission prompt is a view too — it hides the
     // cursor exactly as the others do — and answering one is the whole point
@@ -1563,8 +1567,8 @@ fn authorise(
             tmux::Keyboard::Program => {}
             tmux::Keyboard::View => {
                 return Err(
-                    "a view on the Mac has the keyboard; the composer is drawn but takes \
-                     no keys, so nothing was typed"
+                    "a menu or view at the Mac has the keyboard, so the message box takes \
+                     no keys"
                         .into(),
                 );
             }
@@ -1581,9 +1585,8 @@ fn authorise(
             // `q` leaves one mode per press, so a stack takes one each.
             tmux::Keyboard::Scrollback(_) => {
                 return Err(
-                    "tmux has the keyboard on the Mac: the pane is in one of tmux's own \
-                     modes, so the composer takes none — press q there until it clears — \
-                     and nothing was typed"
+                    "tmux has the keyboard at the Mac: the session is in one of tmux's own \
+                     modes, so the message box takes no keys — press q there until it clears"
                         .into(),
                 );
             }
@@ -1592,9 +1595,7 @@ fn authorise(
     if let Some(expect) = expect {
         if !expect.still_on_screen(pane) {
             return Err(
-                "the prompt on screen is not the one this answer was created for; \
-                        nothing was typed"
-                    .into(),
+                "the prompt on screen at the Mac has changed since this answer was made".into(),
             );
         }
     }
@@ -4050,7 +4051,6 @@ means the full history gets re-read on your next message.
             let refused = send_through_the_interlock(&tui, "SWALLOWED")
                 .expect_err("a mode that is not a scroll position must refuse");
             assert!(refused.contains("tmux has the keyboard"), "{refused}");
-            assert!(refused.contains("nothing was typed"), "{refused}");
             assert_eq!(tui.mode(), name, "{command} must still be up");
             assert_eq!(tui.modes(), "1", "{command} must still be up");
             let during = tui.pane();
@@ -4071,7 +4071,7 @@ means the full history gets re-read on your next message.
         assert_eq!(tui.keyboard(), Keyboard::Scrollback(TmuxMode::Other));
         let refused = send_through_the_interlock(&tui, "SWALLOWED")
             .expect_err("a copy-mode with something under it must refuse");
-        assert!(refused.contains("nothing was typed"), "{refused}");
+        assert!(refused.contains("tmux has the keyboard"), "{refused}");
         assert_eq!(
             tui.modes(),
             "2",
@@ -4119,10 +4119,9 @@ means the full history gets re-read on your next message.
         let refused =
             send_through_the_interlock(&tui, "SWALLOWED").expect_err("no composer, no keystroke");
         assert!(
-            refused.contains("expected prompt not on screen"),
+            refused.contains("the message box is not on screen at the Mac"),
             "the composer's own refusal, reached without touching the pane: {refused}"
         );
-        assert!(refused.contains("nothing was typed"), "{refused}");
         assert_eq!(tui.modes(), "1", "the scroll position was not taken");
         let after = tui.pane();
         assert!(
@@ -4418,7 +4417,7 @@ means the full history gets re-read on your next message.
             Keyboard::View,
         )
         .expect_err("a different prompt must not be typed into");
-        assert!(refused.contains("not the one"), "{refused}");
+        assert!(refused.contains("has changed since"), "{refused}");
     }
 
     #[test]
@@ -4523,7 +4522,6 @@ means the full history gets re-read on your next message.
                 refused.contains("tmux has the keyboard"),
                 "{mode:?}: {refused}"
             );
-            assert!(refused.contains("nothing was typed"), "{mode:?}: {refused}");
         }
     }
 

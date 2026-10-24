@@ -180,7 +180,7 @@ struct PairingView: View {
                     index: 2,
                     title: "Make sure your iPhone can reach your Mac",
                     message:
-                        "By default they connect over Tailscale, with both signed in to the same tailnet; another private network works with a setting on the Mac. The connection never goes through a server of ours.")
+                        "By default they connect over Tailscale, with both signed in to the same tailnet; your local network works with a setting on the Mac (codeconnect.sh/support), but without Tailscale's encryption or the live terminal. The connection never goes through a server of ours.")
                 CCHairline()
                 CCStepRow(
                     index: 3, title: "Start CodeConnect on the Mac",
@@ -609,8 +609,8 @@ struct PairingView: View {
     /// What protects a connection, said only as far as the daemon has vouched
     /// for it. A paired phone is offered the terminal exactly when its
     /// connection is private — TLS, the daemon's tailnet address or loopback —
-    /// so that one answer separates "WireGuard carries it" from "nothing
-    /// does"; with no paired answer the footnote claims neither.
+    /// so that one answer separates "WireGuard carries it" from "CodeConnect
+    /// does not encrypt it"; with no paired answer the footnote claims neither.
     static func transportFootnote(
         encrypted: Bool, paired: Bool, capabilities: Capabilities?
     ) -> String {
@@ -622,7 +622,7 @@ struct PairingView: View {
                 return "Plain ws:// on a private path: inside the tailnet, WireGuard carries the encryption. The app moves to wss:// as soon as the daemon offers a certificate."
             }
             if capabilities.withholdsTerminal {
-                return "Plain ws:// that nothing encrypts: the Mac allows it on this network (`ws_allow_plaintext`). The live terminal is not offered over it."
+                return "Plain ws://, not encrypted by CodeConnect: the Mac allows it on this network (`ws_allow_plaintext`). The live terminal is not offered over it."
             }
         }
         return "Plain ws://: private only where a VPN such as Tailscale carries it. The app moves to wss:// as soon as the daemon offers a certificate."

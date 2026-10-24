@@ -34,7 +34,7 @@ final class DecisionTextSourceTests: XCTestCase {
                 "tool: tool, input: front.card.toolInput)?.firstLine),",
             ]),
             ("FleetView.swift", [
-                "ToolSummary.principalArgument(",
+                "let line = ToolSummary.principalArgument(",
                 "tool: approval.card.toolName, input: approval.card.toolInput)?.firstLine",
             ]),
             ("TimelineRows.swift", [

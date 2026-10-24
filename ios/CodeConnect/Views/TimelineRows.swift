@@ -552,7 +552,7 @@ struct ToolRow: View {
         if let argument = tool.argument { parts.append(argument.firstLine) }
         parts.append(tool.status.label)
         if let duration = tool.durationMS { parts.append("took \(Format.duration(ms: duration))") }
-        return parts.joined(separator: ", ")
+        return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 }
 

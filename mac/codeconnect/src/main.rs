@@ -176,24 +176,25 @@ fn usage_text() -> &'static str {
     "\
 codeconnect — host coding agents your iPhone can see and answer
 
-  codeconnect claude [args…]      run claude in the private tmux server, attached here
-  codeconnect codex [args…]       run codex in the private tmux server, attached here
+  codeconnect claude [args…]      start Claude Code here, as a session your phone sees
+  codeconnect codex [args…]       start Codex here, as a session your phone sees
   codeconnect attach <name>       re-attach a session (e.g. after closing the tab)
-  codeconnect ls                  list what tmux is running (works with ccd down)
-  codeconnect sessions            list what the event log knows, with lifecycle
-  codeconnect sessions prune      remove ended sessions and their events (--dry-run first)
+  codeconnect ls                  list running sessions (works with the daemon down)
+  codeconnect sessions            list every session the daemon knows, live or ended
+  codeconnect sessions prune      remove ended sessions and their history (--dry-run first)
 
-  codeconnect update              install the latest release (daemon restarts)
+  codeconnect update              install the latest release (the daemon restarts)
+  codeconnect --version           print the installed version
 
-  codeconnect daemon install      install and start the ccd LaunchAgent
-  codeconnect daemon status       plist, launchd job and live daemon
-  codeconnect daemon restart      restart the managed daemon
-  codeconnect daemon uninstall    stop it and remove the LaunchAgent
+  codeconnect daemon install      install the daemon and start it, now and at login
+  codeconnect daemon status       show whether the daemon is installed and running
+  codeconnect daemon restart      restart the daemon
+  codeconnect daemon uninstall    stop the daemon and remove it from login
 
   codeconnect pair                show a QR code that pairs a phone (single use, 5 min)
   codeconnect devices             list paired devices
   codeconnect revoke <device>     revoke a device's token
-  codeconnect token               print the static fallback token
+  codeconnect token               print the Mac's permanent token (instead of a pairing code)
 "
 }
 
@@ -774,7 +775,7 @@ fn phone_reachability_note(
     // what the app's amber means — and bold alone on an isolated command.
     let heading = "Phone unreachable";
     let assurance = "This session is unaffected \u{2014} it is already running and recording.\n\
-                     The phone catches up when the tailnet is back.";
+                     The phone catches up as soon as it can reach this Mac.";
 
     let (explanation, remedy) =
         if let Some(problem) = protocol::pairing::unreachable_host(endpoint_host) {

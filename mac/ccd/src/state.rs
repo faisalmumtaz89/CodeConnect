@@ -12542,6 +12542,18 @@ mod tests {
 
     // ------------------------------------------------------------ pairing
 
+    /// A phone that has just paired has been seen: it stays on the connection it
+    /// paired over, so without this `codeconnect devices` says "never" for a
+    /// phone that is connected right now.
+    #[tokio::test]
+    async fn a_phone_is_seen_when_it_pairs() {
+        let daemon = test_daemon();
+        let device_id = paired_device(&daemon).await;
+        let devices = daemon.list_devices().await.unwrap();
+        let device = devices.iter().find(|d| d.device_id == device_id).unwrap();
+        assert_eq!(device.last_seen_at.as_ref(), Some(&device.created_at));
+    }
+
     #[tokio::test]
     async fn a_pairing_code_buys_exactly_one_device_token() {
         let daemon = test_daemon();

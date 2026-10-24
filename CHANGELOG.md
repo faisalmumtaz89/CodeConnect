@@ -3,6 +3,38 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A cleaner first run
+
+- A Mac with no Codex is told both ways to install the native Codex that CodeConnect runs:
+  OpenAI's installer, from its GitHub releases, or Homebrew; one with only npm's `codex` is told the
+  installer. The command it used to print returns 404.
+- The website, README, support page and the app say what a local network gives up:
+  Tailscale's encryption and the live terminal. The "Phone unreachable" note no longer waits for a
+  tailnet to come "back" on a Mac that never had one.
+- What you type during the 10-second note before a session opens reaches the agent: a line typed
+  and sent with Return used to be swallowed by the note, which only meant to skip it. A Return on its
+  own still skips the note.
+- `codeconnect devices` shows a phone as seen from the moment it pairs; one still on the connection it
+  paired over used to read "never".
+- The installer gives the PATH line once, does not call an existing install an error (it exits 0), and
+  after a reinstall no longer tells you to install a daemon you have; `codeconnect update` and the
+  installer say once that the daemon restarted. Output that is not a terminal carries no colour codes.
+- `codeconnect pair` shows the two things the app's manual form asks for, address and code, under the
+  form's own label; the raw JSON line, the scheme and the timestamp a second expiry repeated are gone.
+- When the phone's message cannot be typed at the Mac, the reason is said plainly — "the message box is
+  not on screen at the Mac", "a menu or view at the Mac has the keyboard" — instead of naming the
+  composer's prompt row and its box rule.
+- On the phone, VoiceOver no longer reads an empty clause on a fleet row with nothing to show yet
+  ("Idle, , …").
+- On the phone, an empty fleet says "No agents running" once; the header no longer adds "No agents
+  registered" above it.
+- `codeconnect --help` says what each command does in plain words and lists `--version`; it no longer
+  names tmux servers, the event log, plists or LaunchAgents.
+- On a private network that uses Tailscale's address range (NetBird and others), the daemon no longer
+  says `tailscale ip` timed out when Tailscale is simply not found or not up, and no longer offers
+  `tailscale cert` for an address that is not Tailscale's: it says where a certificate of your own
+  goes and how long it must still be valid.
+
 ## CodeConnect brings its own tmux
 
 - A new Mac needs neither Homebrew nor tmux: CodeConnect installs its own tmux, built from

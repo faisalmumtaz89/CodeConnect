@@ -24,7 +24,8 @@ final class FleetApprovalLineTests: XCTestCase {
     /// `command`, with the text and hash the daemon computes for it — or, not
     /// `blocked`, a prompt typed into it at the same moment instead.
     private func model(
-        command: String = "git status\r\ngit push --force origin main", blocked: Bool = true
+        command: String = "git status\r\ngit push --force origin main", blocked: Bool = true,
+        acted: Bool = true
     ) throws -> AppModel {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("fleet-line-\(UUID().uuidString)")
@@ -64,6 +65,7 @@ final class FleetApprovalLineTests: XCTestCase {
                         ])
                     ]),
                 ])))
+        if !acted { return model }
         if !blocked {
             request["kind"] = .string("user_message")
             request["source"] = .string("transcript")
@@ -121,10 +123,12 @@ final class FleetApprovalLineTests: XCTestCase {
 
     /// What VoiceOver says on the run's row, drawn on an iPhone 17 Pro's
     /// screen.
-    private func spokenRow(command: String = "ls", blocked: Bool = true) async throws -> String {
+    private func spokenRow(
+        command: String = "ls", blocked: Bool = true, acted: Bool = true
+    ) async throws -> String {
         try setAccessibility(true)
         defer { try? setAccessibility(false) }
-        let model = try model(command: command, blocked: blocked)
+        let model = try model(command: command, blocked: blocked, acted: acted)
         if blocked {
             _ = try await blockedRow(model)
         } else {
@@ -154,12 +158,79 @@ final class FleetApprovalLineTests: XCTestCase {
         XCTAssertTrue(row.contains(", Bash, waiting "), row.debugDescription)
     }
 
+    /// The Deck bar names the tool when the command's first line is blank,
+    /// rather than drawing and speaking an empty command (`work ·  · waiting`).
+    func testTheDeckBarNamesTheToolForABlankFirstLine() async throws {
+        try setAccessibility(true)
+        defer { try? setAccessibility(false) }
+        let model = try model(command: "\ngit push --force origin main")
+        _ = try await blockedRow(model)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
+        window.rootViewController = UIHostingController(rootView: FleetView().environment(model))
+        window.isHidden = false
+        window.rootViewController?.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(2))
+        let preview = try XCTUnwrap(
+            values(in: window).first { $0.hasPrefix("work · ") }, "no Deck bar")
+        window.isHidden = true
+        XCTAssertTrue(preview.hasPrefix("work · Bash · waiting "), preview)
+    }
+
+    private func values(in object: NSObject) -> [String] {
+        if object.accessibilityElementsHidden { return [] }
+        if object.isAccessibilityElement { return [object.accessibilityValue ?? ""] }
+        let count = object.accessibilityElementCount()
+        let children: [NSObject]
+        if let elements = object.accessibilityElements as? [NSObject], !elements.isEmpty {
+            children = elements
+        } else if count > 0, count != NSNotFound {
+            children = (0..<count).compactMap { object.accessibilityElement(at: $0) as? NSObject }
+        } else if let view = object as? UIView {
+            children = view.subviews.filter { !$0.isHidden }
+        } else {
+            children = []
+        }
+        return children.flatMap { values(in: $0) }
+    }
+
+    /// A live fleet with no runs says so once: the header does not name the
+    /// same empty state in other words ("No agents registered") above it.
+    func testAnEmptyLiveFleetSaysItOnce() async throws {
+        try setAccessibility(true)
+        defer { try? setAccessibility(false) }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fleet-empty-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(cache: EventCache(root: root))
+        model.connection.simulateConnectedForTesting()
+        addTeardownBlock { @MainActor in model.scenePhaseChanged(to: .background) }
+        model.connection.injectForTesting(
+            try frame(.object(["type": .string("sessions"), "sessions": .array([])])))
+        try await Task.sleep(for: .milliseconds(500))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
+        window.rootViewController = UIHostingController(rootView: FleetView().environment(model))
+        window.isHidden = false
+        window.rootViewController?.view.layoutIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(2))
+        let spoken = labels(in: window).joined(separator: " | ")
+        window.isHidden = true
+        XCTAssertTrue(spoken.contains("No agents running"), spoken)
+        XCTAssertFalse(spoken.contains("No agents registered"), spoken)
+    }
+
     /// How long the run has waited is a duration — "waiting 370 hours" — and
     /// never an age.
     func testTheBlockedRowSpeaksHowLongItHasWaited() async throws {
         let row = try await spokenRow()
         XCTAssertNotNil(row.range(of: #", waiting \d+ hours(,|$)"#, options: .regularExpression), row)
         XCTAssertFalse(row.contains(" ago"), row)
+    }
+
+    /// A run with nothing to show yet speaks no empty clause where its
+    /// activity would be (`Idle, , control`).
+    func testARowWithNoActivitySpeaksNoEmptyClause() async throws {
+        let row = try await spokenRow(blocked: false, acted: false)
+        XCTAssertFalse(row.components(separatedBy: ", ").contains(""), row.debugDescription)
     }
 
     /// When a run that is not waiting last did something is an age.

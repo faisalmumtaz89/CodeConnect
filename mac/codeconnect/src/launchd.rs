@@ -52,7 +52,11 @@ pub fn command(args: &[String]) -> Result<()> {
             crate::no_arguments(&args[1..], "codeconnect daemon status").and_then(|()| status())
         }
         Some("restart") => {
-            crate::no_arguments(&args[1..], "codeconnect daemon restart").and_then(|()| restart())
+            crate::no_arguments(&args[1..], "codeconnect daemon restart").and_then(|()| {
+                let info = restart()?;
+                println!("ccd restarted: pid {}, version {}", info.pid, info.version);
+                Ok(())
+            })
         }
         Some(other) => {
             usage();
@@ -248,7 +252,7 @@ fn uninstall() -> Result<()> {
     Ok(())
 }
 
-fn restart() -> Result<()> {
+fn restart() -> Result<DaemonInfo> {
     // The daemon reads this file as it starts and falls back to its defaults when
     // the file is invalid; the file is named here, to the person who just edited
     // it, not only in the daemon's log.
@@ -269,10 +273,7 @@ fn restart() -> Result<()> {
         );
     }
     match wait_for_daemon(READY_TIMEOUT) {
-        Some(info) => {
-            println!("ccd restarted: pid {}, version {}", info.pid, info.version);
-            Ok(())
-        }
+        Some(info) => Ok(info),
         None => bail!(
             "kickstart returned but ccd did not answer within {}s; check {}",
             READY_TIMEOUT.as_secs(),

@@ -5,8 +5,8 @@ CodeConnect lets you monitor and control the coding agents running on your own c
 ## Requirements
 
 - iPhone running iOS 17 or later.
-- A Mac running macOS 13 or later — Apple silicon or Intel; the released binaries are universal — with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in Terminal. Codex has to be the one OpenAI's install script puts in place (`curl -fsSL https://chatgpt.com/codex/install.sh | sh`): the npm package's `codex` is a script wrapper, which CodeConnect will not run.
-- A way for your iPhone to reach your Mac. By default that is [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet. Another private network works too, with a setting on the Mac — see "Is Tailscale required?" below.
+- A Mac running macOS 13 or later — Apple silicon or Intel; the released binaries are universal — with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in Terminal. Codex has to be the native one, from OpenAI's installer (`curl -fsSL https://github.com/openai/codex/releases/latest/download/install.sh | sh`) or Homebrew (`brew install --cask codex`): the npm package's `codex` is a script wrapper, which CodeConnect will not run.
+- A way for your iPhone to reach your Mac. By default that is [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet. Your local network works too, with a setting on the Mac, but without Tailscale's encryption or the live terminal — see "Is Tailscale required?" below.
 
 ## Installing
 
@@ -41,8 +41,8 @@ Your phone now shows every session started this way. When an agent asks for perm
 - **Approval prompt not appearing on the phone** — approvals only surface for sessions started through the wrapper (e.g. `codeconnect claude`), not for agents launched directly.
 - **`codeconnect claude` says tmux is not found** — CodeConnect's own tmux is missing, which happens only on a Mac first set up by an older release, and the session could not fetch it (usually no network). Run `codeconnect update` to install it, then rerun.
 - **`codeconnect pair` says a paired phone could never reach the daemon** — the daemon found neither a Tailscale address nor a `ws_bind` when it started, so it is listening only on this Mac (often Tailscale was not up yet at login). Bring Tailscale up, or set `ws_bind` as below, then run `codeconnect daemon restart` and `codeconnect pair` again.
-- **`codeconnect pair` says no phone can pair with this daemon** — it is bound to an address where it will refuse every connection: a local network with neither a certificate nor `ws_allow_plaintext`. The message names both ways through; after either, run `codeconnect daemon restart`.
-- **Pairing QR won't scan** — the pairing code is single-use and expires five minutes after it is printed; run `codeconnect pair` again for a fresh one. Without a camera, tap "Enter the address and code instead" and type the host and code it prints.
+- **`codeconnect pair` says no phone can pair with this daemon** — the daemon refuses every connection on the address it is bound to. The message says why and what to change; then run `codeconnect daemon restart`.
+- **Pairing QR won't scan** — the pairing code is single-use and expires five minutes after it is printed; run `codeconnect pair` again for a fresh one. Without a camera, tap "Enter the address and code instead" and type the address and code it prints.
 - **Notifications not arriving** — they start at your own daemon (sent to Apple directly, or through CodeConnect's push relay), so it must be running, and the app must be allowed notifications in iOS Settings.
 - **The live terminal says it was superseded** — opening the terminal on a session that already has one open takes it over; the one that was open is told so. Expected behavior, not a fault.
 - **`codeconnect update` says another update or installation is already running** — an update, the installer, or a first session fetching CodeConnect's tmux holds the same lock, and two can't run at once; rerun after a moment.
@@ -54,16 +54,18 @@ Your phone now shows every session started this way. When an agent asks for perm
 No. Sessions travel directly from your Mac to your phone and never touch a CodeConnect server. The one exception is the push notification: it passes through Apple, and — unless your daemon holds its own Apple push key — through CodeConnect's push relay first, which receives only a fixed handful of content-free fields. Both shapes are described exactly in the [privacy policy](https://codeconnect.sh/privacy).
 
 **Is Tailscale required?**
-No, but it is the default: out of the box the daemon listens on your Mac's Tailscale address, so with both devices on the same tailnet there is nothing to configure. On another private network you operate:
+No, but it is the default: out of the box the daemon listens on your Mac's Tailscale address, so with both devices on the same tailnet there is nothing to configure. On your local network:
 
-1. Find the Mac's address on that network — for Wi-Fi, usually `ipconfig getifaddr en0`.
-2. Put it in `~/.codeconnect/config.json` as `ws_bind`. An address on a local network also needs a certificate, or `ws_allow_plaintext` if you accept that traffic crossing it unencrypted — then the live terminal stays off, because it is only offered over an encrypted connection:
+1. Find the Mac's address on that network — for Wi-Fi, `ipconfig getifaddr en0` (`en1` on a Mac with an Ethernet port).
+2. Put it in `~/.codeconnect/config.json` as `ws_bind`, with `ws_allow_plaintext`: CodeConnect then encrypts nothing on that connection, and the live terminal stays off.
 
    ```
    { "ws_bind": "192.168.1.20", "ws_allow_plaintext": true }
    ```
 
 3. Run `codeconnect daemon restart`, then `codeconnect pair`.
+
+For encryption and the live terminal, use Tailscale.
 
 Every key is described in the [configuration reference](https://github.com/faisalmumtaz89/CodeConnect/blob/main/mac/README.md#configuration--codeconnectconfigjson).
 

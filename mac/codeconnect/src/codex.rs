@@ -47,9 +47,9 @@ use protocol::config::Config;
 const CODEX_BIN_ENV: &str = "CODECONNECT_CODEX_BIN";
 
 /// What a Mac with no codex to run is told, by a launch and by help alike.
-const NO_CODEX: &str = "could not find the codex binary: install Codex with OpenAI's install \
-     script (curl -fsSL https://chatgpt.com/codex/install.sh | sh), or set codex_bin in \
-     ~/.codeconnect/config.json";
+const NO_CODEX: &str = "could not find the codex binary: install the native Codex with OpenAI's \
+     installer (curl -fsSL https://github.com/openai/codex/releases/latest/download/install.sh | sh) \
+     or Homebrew (brew install --cask codex), or set codex_bin in ~/.codeconnect/config.json";
 
 /// A resolved `codex` executable: a pathname **and the identity of the bytes
 /// behind it**.
@@ -685,8 +685,8 @@ fn resolve_codex_bin(config: &Config) -> Result<ResolvedCodex> {
     match rejected {
         Some((path, why)) => bail!(
             "the codex at {} cannot be used: {why}; \
-             CodeConnect runs the native codex that OpenAI's install script puts in place: \
-             curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+             install the native codex with OpenAI's installer \
+             (curl -fsSL https://github.com/openai/codex/releases/latest/download/install.sh | sh)",
             path.display()
         ),
         None => {

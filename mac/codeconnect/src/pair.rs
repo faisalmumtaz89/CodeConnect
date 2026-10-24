@@ -43,7 +43,6 @@ pub fn pair(args: &[String]) -> Result<()> {
     })?;
     let DaemonFrame::Pairing {
         code,
-        expires_at,
         host,
         port,
         tls,
@@ -89,16 +88,8 @@ pub fn pair(args: &[String]) -> Result<()> {
     println!();
     println!("  scan with the CodeConnect app, or enter it by hand:");
     println!();
+    println!("    address   {}", typed_address(&host, port));
     println!("    code      {}", format_for_display(&code));
-    println!("    host      {host}");
-    println!("    port      {port}");
-    println!(
-        "    scheme    {}",
-        if tls { "wss (TLS)" } else { "ws (no TLS)" }
-    );
-    println!("    expires   {expires_at}");
-    println!();
-    println!("  {json}");
     println!();
 
     let advisory = transport_advisory(tls, &host);
@@ -115,6 +106,21 @@ pub fn pair(args: &[String]) -> Result<()> {
     );
     println!();
     Ok(())
+}
+
+/// The port the app's manual field assumes when the address leaves it out.
+const APP_DEFAULT_PORT: u16 = 8787;
+
+/// The address as the app's manual field takes it: the port only when it is not
+/// the one the app assumes, and an IPv6 literal bracketed so its port reads.
+fn typed_address(host: &str, port: u16) -> String {
+    if port == APP_DEFAULT_PORT {
+        host.to_string()
+    } else if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 pub fn devices(args: &[String]) -> Result<()> {
@@ -233,12 +239,12 @@ fn transport_advisory(tls: bool, host: &str) -> &'static [&'static str] {
             "  note: this daemon is not serving TLS, so the app will connect over",
             "        ws://. CodeConnect encrypts nothing on that connection: the",
             "        pairing code, the token it returns and every message after",
-            "        them are exactly as private as the path to the host above.",
+            "        them are exactly as private as the path to the address above.",
         ];
     }
     if host.parse::<std::net::IpAddr>().is_ok() {
         return &[
-            "  warning: TLS is on but the host above is an IP address. The",
+            "  warning: TLS is on but the address above is an IP address. The",
             "           certificate is issued for a MagicDNS name and will not",
             "           validate against an IP.",
         ];
@@ -281,6 +287,20 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `pair` prints for the app's Address field is what that field
+    /// parses back (ios Store/Pairing.swift `DaemonEndpoint.parse`).
+    #[test]
+    fn the_typed_address_is_what_the_apps_field_takes() {
+        assert_eq!(typed_address("192.168.1.20", 8787), "192.168.1.20");
+        assert_eq!(
+            typed_address("mac.tail1234.ts.net", 8787),
+            "mac.tail1234.ts.net"
+        );
+        assert_eq!(typed_address("192.168.1.20", 9000), "192.168.1.20:9000");
+        assert_eq!(typed_address("fd7a:115c::1", 8787), "fd7a:115c::1");
+        assert_eq!(typed_address("fd7a:115c::1", 9000), "[fd7a:115c::1]:9000");
+    }
 
     #[test]
     fn listing_devices_refuses_a_revoke_that_would_silently_do_nothing() {

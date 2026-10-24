@@ -244,7 +244,7 @@ final class LiveDaemonUITests: XCTestCase {
 ///
 /// Run it with a *fresh* code — they are single-use and expire in five minutes:
 ///
-///   CODE=$(codeconnect pair | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+///   CODE=$(codeconnect pair | awk '$1 == "code" {print $2}')
 ///   xcodebuild test … TEST_RUNNER_CC_PAIR_CODE=$CODE TEST_RUNNER_CC_PAIR_HOST=<host>
 final class PairingLiveUITests: XCTestCase {
     override func setUp() { continueAfterFailure = false }

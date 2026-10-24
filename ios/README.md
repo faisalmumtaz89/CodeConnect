@@ -110,7 +110,7 @@ TEST_RUNNER_CC_HOST=100.x.y.z TEST_RUNNER_CC_TOKEN="$(codeconnect token)" \
 xcodebuild test … -only-testing:CodeConnectUITests/LiveDaemonUITests
 
 # Pairing needs a fresh code — they are single-use and expire in five minutes.
-CODE=$(codeconnect pair | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+CODE=$(codeconnect pair | awk '$1 == "code" {print $2}')
 TEST_RUNNER_CC_PAIR_CODE=$CODE TEST_RUNNER_CC_PAIR_HOST=100.x.y.z \
 xcodebuild test … -only-testing:CodeConnectUITests/PairingLiveUITests
 ```

@@ -65,14 +65,14 @@ final class PairingFailureTests: XCTestCase {
         XCTAssertTrue(tailnet.contains("WireGuard"), tailnet)
         let lan = PairingView.transportFootnote(
             encrypted: false, paired: true, capabilities: withheld)
-        XCTAssertTrue(lan.contains("nothing encrypts"), lan)
+        XCTAssertTrue(lan.contains("not encrypted by CodeConnect"), lan)
         XCTAssertFalse(lan.contains("WireGuard"), lan)
         for unknown in [
             PairingView.transportFootnote(encrypted: false, paired: false, capabilities: withheld),
             PairingView.transportFootnote(encrypted: false, paired: true, capabilities: silent),
         ] {
             XCTAssertFalse(unknown.contains("WireGuard carries"), unknown)
-            XCTAssertFalse(unknown.contains("nothing encrypts"), unknown)
+            XCTAssertFalse(unknown.contains("not encrypted by CodeConnect"), unknown)
         }
         XCTAssertFalse(
             PairingView.transportFootnote(encrypted: true, paired: true, capabilities: offered)
