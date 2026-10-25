@@ -843,7 +843,6 @@ fn install_staged_at(
     with_work_dir(root, |work| {
         install_set(from, &tmux, version, work, &root.join("bin"), root, deps)
     })?;
-    println!("codeconnect {version} installed.");
     Ok(())
 }
 

@@ -16,7 +16,7 @@ curl -fsSL https://codeconnect.sh | sh
 
 The installer downloads the latest release, verifies its Developer ID signature before installing anything, and installs to `~/.codeconnect/bin`. It installs CodeConnect's own tmux with it, so tmux needs no separate install. It never uses sudo, asks once before adding `~/.codeconnect/bin` to your `PATH` — as one marked block in your shell's startup file, which you can delete to undo — and never enables a service. Open a new terminal, then:
 
-1. `codeconnect daemon install` — runs the daemon under launchd, restarting on crash.
+1. `codeconnect daemon install` — starts the daemon now and at login, restarting it on crash.
 2. `codeconnect pair` — shows a QR code; scan it with the CodeConnect Remote app.
 3. `codeconnect claude` — run from your project's folder, it starts Claude Code there through CodeConnect. For Codex: `codeconnect codex`.
 
@@ -40,7 +40,7 @@ Your phone now shows every session started this way. When an agent asks for perm
 - **Phone shows "Offline", "link stale" or no sessions** — confirm the Mac and phone can reach each other (Tailscale, or your own private network, connected on both), and that the daemon is running: `codeconnect daemon status`.
 - **Approval prompt not appearing on the phone** — approvals only surface for sessions started through the wrapper (e.g. `codeconnect claude`), not for agents launched directly.
 - **`codeconnect claude` says tmux is not found** — CodeConnect's own tmux is missing, which happens only on a Mac first set up by an older release, and the session could not fetch it (usually no network). Run `codeconnect update` to install it, then rerun.
-- **`codeconnect pair` says a paired phone could never reach the daemon** — the daemon found neither a Tailscale address nor a `ws_bind` when it started, so it is listening only on this Mac (often Tailscale was not up yet at login). Bring Tailscale up, or set `ws_bind` as below, then run `codeconnect daemon restart` and `codeconnect pair` again.
+- **`codeconnect pair` says a paired phone could never reach the daemon** — the message says why. Most often the daemon found no Tailscale address and no `ws_bind` is set: Tailscale is not set up or not connected on this Mac. Set up or connect Tailscale, or set `ws_bind` as below, then run `codeconnect daemon restart` and `codeconnect pair` again.
 - **`codeconnect pair` says no phone can pair with this daemon** — the daemon refuses every connection on the address it is bound to. The message says why and what to change; then run `codeconnect daemon restart`.
 - **Pairing QR won't scan** — the pairing code is single-use and expires five minutes after it is printed; run `codeconnect pair` again for a fresh one. Without a camera, tap "Enter the address and code instead" and type the address and code it prints.
 - **Notifications not arriving** — they start at your own daemon (sent to Apple directly, or through CodeConnect's push relay), so it must be running, and the app must be allowed notifications in iOS Settings.

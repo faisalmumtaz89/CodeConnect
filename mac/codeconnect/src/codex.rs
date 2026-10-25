@@ -292,6 +292,19 @@ fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Re
     // to avoid.
     let cwd = folder.to_string_lossy().to_string();
 
+    // The session is shown by attaching this terminal to it, which needs a
+    // terminal to read keys from and draw on. Native codex refuses a keyboard or a
+    // screen that is not one, in that order and in these words; so does this,
+    // before a name, a uid or a coordinator exists to be left behind.
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        bail!("stdin is not a terminal");
+    }
+    if !std::io::stdout().is_terminal() {
+        bail!("stdout is not a terminal");
+    }
+    let terminal_size = crate::tmux::terminal_size().context("reading the terminal size")?;
+
     // The same namespace `codeconnect claude` draws from, on the same tmux server:
     // one `cc-N` sequence across both agents, so `ls` and `attach` see one fleet. (The
     // coordinator would default to a fixed `cc-codex`, which is fine for a harness
@@ -304,7 +317,6 @@ fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Re
     // launch record are keyed by.
     let session_uid = protocol::uid::new().context("minting a session uid")?;
 
-    let terminal_size = crate::tmux::terminal_size();
     let charter = coordinator_charter(&CharterInputs {
         uid: &session_uid,
         launch_nonce: &crate::codex_launch::mint_nonce(),
@@ -314,43 +326,12 @@ fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Re
         codex: resolved,
         codex_home: &codex_home(),
         tui_args: passthrough,
-        terminal_size,
+        terminal_size: Some(terminal_size),
     });
     let _held = crate::attach::hold_signal_keys();
     spawn_coordinator(&session_name, &session_uid, &charter)?;
 
-    if terminal_size.is_some() {
-        return wait_with_terminal(&session_uid, LAUNCH_PATIENCE, RECORD_POLL);
-    }
-
-    match crate::codex_coordinator::wait_on_record(&session_uid, LAUNCH_PATIENCE, RECORD_POLL) {
-        // The record is `Ready` and proven durable. The coordinator has become the
-        // session's supervisor, the pane is real, and the session is on the shared
-        // tmux server under `session_name` — so this is the Claude path's own last
-        // line, reached the same way and printing the same nothing.
-        crate::codex_coordinator::LaunchWait::Ready => crate::tmux::attach(&session_name),
-        // **The record's reason, verbatim.** It is already sanitized to one printable
-        // bounded line by `wait_on_record`, and it is the only account of the failure
-        // that survives the runtime dir being swept — so it is reported as the record
-        // holds it rather than wrapped in a second story about it.
-        // Codex quit while the launch was starting is the user leaving, as native
-        // codex's picker lets them: nothing to report.
-        crate::codex_coordinator::LaunchWait::Failed(_) if quit_while_starting(&session_uid) => {
-            Ok(())
-        }
-        crate::codex_coordinator::LaunchWait::Failed(reason) => bail!("{reason}"),
-        // Not a verdict. The launcher's patience ran out; the coordinator and the
-        // custodian still own the outcome and will still drive the record to a
-        // terminal state. Say exactly that, and say where the answer will be.
-        crate::codex_coordinator::LaunchWait::TimedOut => bail!(
-            "the codex launch did not reach a terminal state within {}s. It has not been \
-             cancelled — the coordinator and its custodian still own it — but this command \
-             has stopped waiting. The outcome is recorded at {}; `codeconnect ls` shows the \
-             session if it came up.",
-            LAUNCH_PATIENCE.as_secs(),
-            crate::codex_launch::session_dir(&session_uid).display()
-        ),
-    }
+    wait_with_terminal(&session_uid, LAUNCH_PATIENCE, RECORD_POLL)
 }
 
 /// Whether this launch ended because it was quit while it was starting — Ctrl+C in
@@ -2016,7 +1997,9 @@ mod tests {
         (argv, real)
     }
 
-    /// The charter [`launch`] builds for this session folder and TUI argv.
+    /// The charter [`launch`] builds for this session folder and TUI argv, with
+    /// no terminal size (the launcher always passes one; the charter's field is
+    /// optional, and this pins its shape without one).
     fn charter_for(folder: &Path, tui_args: &[String]) -> (Vec<String>, PathBuf) {
         let real = std::env::current_exe().expect("this test binary is a real file");
         let resolved = ResolvedCodex {

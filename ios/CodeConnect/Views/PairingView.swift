@@ -180,7 +180,7 @@ struct PairingView: View {
                     index: 2,
                     title: "Make sure your iPhone can reach your Mac",
                     message:
-                        "By default they connect over Tailscale, with both signed in to the same tailnet; your local network works with a setting on the Mac (codeconnect.sh/support), but without Tailscale's encryption or the live terminal. The connection never goes through a server of ours.")
+                        "By default they connect over Tailscale, with both signed in to the same tailnet; your local network works with a setting on the Mac ([codeconnect.sh/support](https://codeconnect.sh/support)), but without Tailscale's encryption or the live terminal. The connection never goes through a server of ours.")
                 CCHairline()
                 CCStepRow(
                     index: 3, title: "Start CodeConnect on the Mac",

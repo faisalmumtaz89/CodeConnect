@@ -1404,8 +1404,12 @@ kill -0 $NEWPID 2>/dev/null || { echo "FAIL: the new daemon did not come up for 
 # The count is what ties the line to the launcher: this daemon is fresh, this arm
 # runs one command against it, and `daemon_accepting` only connects — so exactly
 # one negotiation reached it, and it was the launcher's.
-CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" TMUX_TMPDIR="$GTMUX" \
-  timeout 150 "$NEWCC" codex > "$H/preflight-new.log" 2>&1 || true
+# Under `script`, so the launch has the terminal it shows a session in: a
+# launcher whose keyboard or screen is not a terminal refuses before it starts,
+# as native codex does. stdin is held open so the pty does not reach EOF while
+# the launch is still being decided.
+sleep 150 | CODECONNECT_HOME="$H" CODECONNECT_CODEX_BIN="$STUB/codex" TMUX_TMPDIR="$GTMUX" \
+  timeout 150 script -q /dev/null "$NEWCC" codex > "$H/preflight-new.log" 2>&1 || true
 # The daemon writes its line once the answer is ON the connection's write queue
 # (written before the enqueue and with the result discarded, this line would be
 # an affirmative that a DROPPED answer could still produce). The enqueue and the

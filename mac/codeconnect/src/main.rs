@@ -572,7 +572,7 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     {
         use std::io::IsTerminal;
         let style = update_check::style_for_stream(std::io::stderr().is_terminal());
-        let reachability = phone_unreachable_note(style);
+        let reachability = phone_unreachable_note(crate::pair::configured_ws_bind(&config), style);
         // One update slot: the release advisory, behind the `update_check`
         // switch. `codeconnect update` is what resolves it.
         let update = config
@@ -613,17 +613,23 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     tmux::attach_launched(&launched, early)
 }
 
-/// The "your phone cannot reach this Mac" note, or `None` while it can —
-/// the same fact the app shows as its "Connect Tailscale" banner, told in
-/// the same words at the other keyboard. Printed by `start_claude` in the
+/// The "your phone cannot reach this Mac" note, or `None` while nothing here
+/// says it cannot — for a daemon address, the same fact the app shows as its
+/// "Connect Tailscale" banner, told in the same words at the other keyboard;
+/// for a missing daemon, that the session is out of the phone's sight until
+/// one runs. Printed by `start_agent` in the
 /// shared pre-attach advisory slot (one 10-second countdown however many
 /// notes apply).
 ///
-/// Three states earn it, distinguished because their fixes differ:
+/// Four states earn it, distinguished because their fixes differ:
 ///
-///   * the daemon is bound to an address no phone could ever reach (it
-///     started before the tailnet was up) — connect Tailscale, then restart
-///     the daemon so it can re-resolve;
+///   * no daemon is running and launchd does not hold the job (never installed,
+///     uninstalled, or unloaded) — install it;
+///   * the daemon is bound to an address no phone could ever reach — with no
+///     `ws_bind`, Tailscale is not set up or not connected (connect it, then
+///     restart the daemon so it can re-resolve); with a `ws_bind` naming that
+///     address, the setting is what to change; with one naming another
+///     address, it is a `ws_bind` the daemon has not applied (restart);
 ///   * the daemon is bound to a tailnet address but Tailscale's backend is
 ///     stopped (toggled off after the daemon started) — connect Tailscale
 ///     and nothing else. The standing bind revives with the tunnel: measured
@@ -635,25 +641,86 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
 /// "Tailscale is off" is a categorical claim, and an error is not evidence.
 ///
 /// The session itself is untouched: it is already running when this prints,
-/// everything is recorded, and the hold delays only the attach. A warning
+/// and the hold delays only the attach. A warning
 /// with no pause is a warning nobody has ever seen — the attach paints the
 /// session over the terminal's rows microseconds later.
-fn phone_unreachable_note(style: update_check::Style) -> Option<String> {
-    // No daemon, no claim: a daemon that is not running is a different
-    // conversation, and its absence already has its own surfaces. The
-    // timeout is advisory-sized — this check must never make a healthy
+fn phone_unreachable_note(
+    ws_bind: Option<std::net::IpAddr>,
+    style: update_check::Style,
+) -> Option<String> {
+    // The timeout is advisory-sized — this check must never make a healthy
     // start wait behind a wedged daemon.
-    let Ok(protocol::ipc::DaemonFrame::Daemon(info)) = daemon::request_within(
+    let info = match daemon::request_within(
         &protocol::ipc::ClientFrame::DaemonInfo,
         std::time::Duration::from_millis(400),
-    ) else {
-        return None;
+    ) {
+        Ok(protocol::ipc::DaemonFrame::Daemon(info)) => info,
+        Err(err) if no_daemon_and_no_job(&err, crate::launchd::job_is_loaded) => {
+            return Some(daemon_down_note(style));
+        }
+        _ => return None,
     };
     let signal = match protocol::pairing::tailscale_bin() {
         None => TailscaleSignal::NotInstalled,
         Some(bin) => probe_tailscale(&bin),
     };
-    phone_reachability_note(&info.endpoint_host, info.bind_ip.as_deref(), signal, style)
+    // A daemon too old to report its bind is judged by the host it advertises,
+    // which is the bind address whenever that address is unreachable.
+    let bound = info
+        .bind_ip
+        .as_deref()
+        .and_then(crate::pair::host_address)
+        .or_else(|| crate::pair::host_address(&info.endpoint_host));
+    let cause = crate::pair::bind_cause(bound, ws_bind);
+    phone_reachability_note(
+        &info.endpoint_host,
+        info.bind_ip.as_deref(),
+        signal,
+        style,
+        cause,
+    )
+}
+
+/// Whether a failed daemon request means there is no daemon and none coming:
+/// nothing is listening on the socket, and launchd is not holding the job.
+///
+/// A job launchd holds is a daemon it starts — at login, after a crash, after
+/// the daemon ends itself to move off loopback, between throttled restarts —
+/// and in each of those the socket is missing or refusing for a moment, while
+/// `launchctl` reports a job that has not run yet exactly as one that stopped
+/// cleanly. Saying it is down there would send somebody to fix a daemon already
+/// on its way, so a held job is silence, including the rare one stopped by hand
+/// or crashing on every start. Over ssh the login session's jobs are invisible
+/// until that session exists — the first seconds after a reboot, or with nobody
+/// logged in at the screen, where no LaunchAgent can run — and the note then
+/// shows. launchd is asked only once the socket has said
+/// nothing is there; any other failure (a reply that never came, an answer that
+/// did not decode) is not evidence of anything, so it stays silent.
+fn no_daemon_and_no_job(err: &anyhow::Error, job_held: impl FnOnce() -> bool) -> bool {
+    err.downcast_ref::<std::io::Error>().is_some_and(|io| {
+        matches!(
+            io.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        )
+    }) && !job_held()
+}
+
+/// The note for a launch with no daemon to tell: the session runs, but the
+/// phone cannot see it until a daemon does. A session launched while the daemon
+/// is down registers when it comes up, so the remedy is the one command that
+/// brings it up from any state — and what the phone then shows still depends on
+/// the phone reaching this Mac, so that is all the assurance promises.
+fn daemon_down_note(style: update_check::Style) -> String {
+    phone_note(
+        "The daemon is not running, so your phone cannot see this session.",
+        &format!(
+            "Start it:\n\n{}",
+            emphasized("codeconnect daemon install", style)
+        ),
+        "This session is unaffected \u{2014} it is already running.\n\
+         Once the daemon runs, the phone catches up as soon as it can reach this Mac.",
+        style,
+    )
 }
 
 /// What this Mac's Tailscale is doing right now, as far as an advisory may
@@ -767,13 +834,13 @@ fn phone_reachability_note(
     bind_ip: Option<&str>,
     signal: TailscaleSignal,
     style: update_check::Style,
+    cause: crate::pair::BindCause,
 ) -> Option<String> {
     // Shared grammar with the update advisory: a heading, the state's own
     // explanation, a blank line, the state's own remedy (its command or URL
     // isolated on its own line), a blank line, the assurance. Bold yellow on
     // the heading — this one *is* a current impairment, which is exactly
     // what the app's amber means — and bold alone on an isolated command.
-    let heading = "Phone unreachable";
     let assurance = "This session is unaffected \u{2014} it is already running and recording.\n\
                      The phone catches up as soon as it can reach this Mac.";
 
@@ -787,8 +854,22 @@ fn phone_reachability_note(
              {endpoint_host}\n\n\
              It {problem}."
             );
-            let remedy = match signal {
-                TailscaleSignal::NotInstalled => format!(
+            let remedy = match (cause, signal) {
+                // A bind `ws_bind` chose is `ws_bind`'s to fix: Tailscale has no
+                // part in it, and no restart moves an explicit address.
+                (crate::pair::BindCause::Named, _) => format!(
+                    "Set `ws_bind` in ~/.codeconnect/config.json to this Mac's address on a\n\
+                 network your phone is on, or remove it to use Tailscale, then:\n\n\
+                 {}",
+                    emphasized("codeconnect daemon restart", style)
+                ),
+                (crate::pair::BindCause::Pending(bind), _) => format!(
+                    "The daemon has not applied the `ws_bind` in ~/.codeconnect/config.json:\n\n\
+                 {bind}\n\n\
+                 {}",
+                    emphasized("codeconnect daemon restart", style)
+                ),
+                (_, TailscaleSignal::NotInstalled) => format!(
                     "Set up Tailscale \u{2014} by default CodeConnect reaches phones over your\n\
                  tailnet \u{2014} then restart the daemon:\n\n\
                  {}\n\
@@ -823,16 +904,27 @@ fn phone_reachability_note(
         } else {
             return None;
         };
+    Some(phone_note(&explanation, &remedy, assurance, style))
+}
 
+/// The "Phone unreachable" advisory around one state's explanation, remedy and
+/// assurance, styled for the stream it is written to.
+fn phone_note(
+    explanation: &str,
+    remedy: &str,
+    assurance: &str,
+    style: update_check::Style,
+) -> String {
+    let heading = "Phone unreachable";
     let heading = match style {
         update_check::Style::Styled => format!("\u{1b}[1;33m{heading}\u{1b}[0m"),
         update_check::Style::PlainUnicode | update_check::Style::Ascii => heading.to_string(),
     };
     let text = format!("{heading}\n{explanation}\n\n{remedy}\n\n{assurance}");
-    Some(match style {
+    match style {
         update_check::Style::Ascii => asciify(&text),
         _ => text,
-    })
+    }
 }
 
 /// The advisory group as one write: a leading blank line, the advisories —
@@ -1097,8 +1189,16 @@ pub(crate) fn no_arguments(args: &[String], usage: &str) -> Result<()> {
 fn token(args: &[String]) -> Result<()> {
     no_arguments(args, "codeconnect token")?;
     let path = protocol::token_path();
-    let token = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}; is ccd running?", path.display()))?;
+    let token = match std::fs::read_to_string(&path) {
+        Ok(token) => token,
+        // The daemon writes it the first time it starts; until then there is
+        // nothing to read and one thing to do.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => bail!(
+            "there is no token yet: the daemon writes it when it first starts. Start it with \
+             `codeconnect daemon install`"
+        ),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+    };
     println!("{}", token.trim());
     Ok(())
 }
@@ -1137,7 +1237,8 @@ fn resolve_claude_bin(config: &Config) -> Result<PathBuf> {
         return Ok(candidate);
     }
     bail!(
-        "could not find the claude binary: install Claude Code, or set claude_bin in \
+        "could not find the claude binary: install Claude Code \
+         (https://code.claude.com/docs/en/setup), or set claude_bin in \
          ~/.codeconnect/config.json"
     )
 }
@@ -1554,9 +1655,44 @@ mod tests {
         use update_check::Style;
         use TailscaleSignal::*;
         let all = [
-            phone_reachability_note("127.0.0.1", Some("127.0.0.1"), Up, Style::Ascii),
-            phone_reachability_note("127.0.0.1", Some("127.0.0.1"), NotInstalled, Style::Ascii),
-            phone_reachability_note("mac.tailnet.ts.net", Some("100.64.0.7"), Down, Style::Ascii),
+            phone_reachability_note(
+                "127.0.0.1",
+                Some("127.0.0.1"),
+                Up,
+                Style::Ascii,
+                crate::pair::BindCause::Tailnet,
+            ),
+            phone_reachability_note(
+                "127.0.0.1",
+                Some("127.0.0.1"),
+                NotInstalled,
+                Style::Ascii,
+                crate::pair::BindCause::Tailnet,
+            ),
+            phone_reachability_note(
+                "mac.tailnet.ts.net",
+                Some("100.64.0.7"),
+                Down,
+                Style::Ascii,
+                crate::pair::BindCause::Tailnet,
+            ),
+            Some(daemon_down_note(Style::Ascii)),
+            phone_reachability_note(
+                "127.0.0.1",
+                Some("127.0.0.1"),
+                Up,
+                Style::Ascii,
+                crate::pair::BindCause::Named,
+            ),
+            phone_reachability_note(
+                "127.0.0.1",
+                Some("127.0.0.1"),
+                Up,
+                Style::Ascii,
+                crate::pair::BindCause::Pending(
+                    "fd12:3456:789a:bcde:f012:3456:789a:bcde".parse().unwrap(),
+                ),
+            ),
         ];
         for note in all.into_iter().flatten() {
             assert!(note.is_ascii(), "non-ascii survived: {note}");
@@ -1566,6 +1702,56 @@ mod tests {
                 assert_eq!(line, line.trim_end(), "trailing space: {line:?}");
             }
         }
+    }
+
+    /// A launch with no daemon installed is told so, and told the one command
+    /// that brings one up — under the same heading as every other reason the
+    /// phone cannot see the session.
+    #[test]
+    fn a_launch_with_no_daemon_names_daemon_install() {
+        use update_check::Style;
+        let note = daemon_down_note(Style::PlainUnicode);
+        let mut lines = note.lines();
+        assert_eq!(lines.next(), Some("Phone unreachable"));
+        assert_eq!(
+            lines.next(),
+            Some("The daemon is not running, so your phone cannot see this session.")
+        );
+        assert!(
+            note.contains("\n\ncodeconnect daemon install\n\n"),
+            "{note}"
+        );
+        assert!(note.contains("already running"), "{note}");
+        let styled = daemon_down_note(Style::Styled);
+        assert!(styled.starts_with("\u{1b}[1;33mPhone unreachable\u{1b}[0m\n"));
+        assert!(styled.contains("\u{1b}[1mcodeconnect daemon install\u{1b}[0m"));
+    }
+
+    /// Only nothing listening, with no launchd job held, is no daemon. A held job
+    /// is a daemon launchd starts, and a request that failed any other way proves
+    /// nothing — launchd is not even asked then.
+    #[test]
+    fn only_an_absent_socket_with_no_launchd_job_is_no_daemon() {
+        use anyhow::Context;
+        // Built the way `daemon::request_within` builds its connect error.
+        let failed = |kind: std::io::ErrorKind| {
+            Err::<(), _>(std::io::Error::from(kind))
+                .with_context(|| "cannot reach the CodeConnect daemon".to_string())
+                .unwrap_err()
+        };
+        use std::io::ErrorKind::*;
+        assert!(no_daemon_and_no_job(&failed(NotFound), || false));
+        assert!(no_daemon_and_no_job(&failed(ConnectionRefused), || false));
+        assert!(!no_daemon_and_no_job(&failed(NotFound), || true));
+        assert!(!no_daemon_and_no_job(&failed(ConnectionRefused), || true));
+        let unasked = || panic!("launchd asked about a failure that proves nothing");
+        for kind in [WouldBlock, TimedOut, BrokenPipe, PermissionDenied] {
+            assert!(!no_daemon_and_no_job(&failed(kind), unasked), "{kind:?}");
+        }
+        assert!(!no_daemon_and_no_job(
+            &anyhow::anyhow!("ccd closed the connection"),
+            unasked
+        ));
     }
 
     /// The toggled-off state's ASCII grammar: a heading, the explanation, the
@@ -1585,6 +1771,7 @@ mod tests {
             Some("100.64.0.7"),
             TailscaleSignal::Down,
             update_check::Style::Ascii,
+            crate::pair::BindCause::Tailnet,
         )
         .unwrap();
         let mut lines = note.lines();
@@ -1635,8 +1822,14 @@ mod tests {
         // A tailnet bind behind a hostname: the advice is owed, and the host
         // is no help in working that out.
         assert!(
-            phone_reachability_note("mac.tailnet.ts.net", Some("100.64.0.7"), Down, Style::Ascii)
-                .is_some(),
+            phone_reachability_note(
+                "mac.tailnet.ts.net",
+                Some("100.64.0.7"),
+                Down,
+                Style::Ascii,
+                crate::pair::BindCause::Tailnet
+            )
+            .is_some(),
             "a daemon on a tailnet address revives with the tunnel however it \
              happens to be advertised"
         );
@@ -1647,7 +1840,8 @@ mod tests {
                 "mac.tailnet.ts.net",
                 Some("192.168.1.10"),
                 Down,
-                Style::Ascii
+                Style::Ascii,
+                crate::pair::BindCause::Tailnet
             ),
             None,
             "advice that only a tailnet bind can keep must not follow a name"
@@ -1655,7 +1849,13 @@ mod tests {
         // And a daemon too old to report its bind gets silence: an absent
         // bind is not evidence of a tailnet one.
         assert_eq!(
-            phone_reachability_note("mac.tailnet.ts.net", None, Down, Style::Ascii),
+            phone_reachability_note(
+                "mac.tailnet.ts.net",
+                None,
+                Down,
+                Style::Ascii,
+                crate::pair::BindCause::Tailnet
+            ),
             None,
             "an unreported bind is not a tailnet bind"
         );
@@ -1663,7 +1863,14 @@ mod tests {
         // an advertised address no phone can reach is unreachable whatever the
         // socket is bound to.
         assert!(
-            phone_reachability_note("127.0.0.1", Some("100.64.0.7"), Down, Style::Ascii).is_some(),
+            phone_reachability_note(
+                "127.0.0.1",
+                Some("100.64.0.7"),
+                Down,
+                Style::Ascii,
+                crate::pair::BindCause::Tailnet
+            )
+            .is_some(),
             "a loopback advertisement is unreachable on its own terms"
         );
     }
@@ -1674,10 +1881,47 @@ mod tests {
     /// names *its* fix, because they differ.
     #[test]
     fn the_phone_reachability_note_matches_the_apps_vocabulary() {
+        // An unreachable bind that `ws_bind` chose is `ws_bind`'s to fix, never
+        // Tailscale's — whatever Tailscale is doing.
+        use crate::pair::BindCause;
+        for signal in [TailscaleSignal::Up, TailscaleSignal::NotInstalled] {
+            let named = phone_reachability_note(
+                "127.0.0.1",
+                Some("127.0.0.1"),
+                signal,
+                update_check::Style::Ascii,
+                BindCause::Named,
+            )
+            .expect("an explicit loopback warns");
+            assert!(named.contains("Set `ws_bind`"), "{named}");
+            assert!(!named.contains("Tailscale ("), "{named}");
+            assert!(!named.contains("Set up Tailscale"), "{named}");
+            let pending = phone_reachability_note(
+                "127.0.0.1",
+                Some("127.0.0.1"),
+                signal,
+                update_check::Style::Ascii,
+                BindCause::Pending("192.168.1.20".parse().unwrap()),
+            )
+            .expect("an unapplied ws_bind warns");
+            assert!(pending.contains("\n\n192.168.1.20\n\n"), "{pending}");
+            assert!(
+                pending.contains("has not applied the `ws_bind`"),
+                "{pending}"
+            );
+            assert!(pending.contains("codeconnect daemon restart"), "{pending}");
+        }
+
         use update_check::Style;
         use TailscaleSignal::*;
         let note = |host: &str, bind: Option<&str>, signal| {
-            phone_reachability_note(host, bind, signal, Style::Ascii)
+            phone_reachability_note(
+                host,
+                bind,
+                signal,
+                Style::Ascii,
+                crate::pair::BindCause::Tailnet,
+            )
         };
 
         // Bound wrong (daemon started before the tailnet): restart required.
@@ -1719,6 +1963,7 @@ mod tests {
             Some("100.64.0.7"),
             Down,
             Style::Styled,
+            crate::pair::BindCause::Tailnet,
         )
         .unwrap();
         assert!(styled.starts_with("\u{1b}[1;33mPhone unreachable\u{1b}[0m\n"));
