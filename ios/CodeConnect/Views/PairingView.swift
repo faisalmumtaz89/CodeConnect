@@ -148,11 +148,13 @@ struct PairingView: View {
 
         CCSectionHeader("To get started")
 
-        // **Five steps, because five things are genuinely required**, and the
-        // screen once named only two of them. Each step left out was a reader
-        // told to run a command that could not work yet: `codeconnect pair`
-        // with no daemon to answer it, or a pairing that showed nothing because
-        // no session had been started through CodeConnect.
+        // **Four steps, in the order they can work**, and the screen once named
+        // only two of them. Each step left out was a reader told to run a
+        // command that could not work yet: the installer's pairing code with no
+        // network between the two devices, or a pairing that showed nothing
+        // because no session had been started through CodeConnect. The
+        // installer asks to start the daemon and shows the code itself, so the
+        // network comes first.
         //
         // They are *instructions*, not verified state: no tick marks, and nothing
         // here claims to know anything about the reader's Mac. The app cannot see
@@ -160,6 +162,15 @@ struct PairingView: View {
         // to draw.
         CCCard(padding: 0) {
             VStack(spacing: 0) {
+                // Tailscale is the default, never a requirement: another
+                // private network works with `ws_bind` on the Mac, and an app
+                // may not demand another app (App Review 4.2.3).
+                CCStepRow(
+                    index: 1,
+                    title: "Make sure your iPhone can reach your Mac",
+                    message:
+                        "By default they connect over Tailscale, with both signed in to the same tailnet; your local network works with a setting on the Mac ([codeconnect.sh/support](https://codeconnect.sh/support)), but without Tailscale's encryption or the live terminal. The connection never goes through a server of ours.")
+                CCHairline()
                 // The command is the only thing on this screen a reader cannot
                 // get anywhere else, and it is given exactly as it must be
                 // typed — monospaced, complete, copyable — the same affordance
@@ -167,35 +178,22 @@ struct PairingView: View {
                 // installs the latest signed release; there is no repository to
                 // find first.
                 CCStepRow(
-                    index: 1,
+                    index: 2,
                     title: "Install CodeConnect on your Mac",
                     message:
-                        "Run this in Terminal, then open a new Terminal window. It installs the signed release and enables nothing for you. Your Mac also needs Claude Code or Codex.",
+                        "Run this in Terminal and answer yes to its questions: it installs the signed release, starts CodeConnect and shows a code to scan here. Your Mac also needs Claude Code or Codex.",
                     command: "curl -fsSL https://codeconnect.sh | sh")
                 CCHairline()
-                // Tailscale is the default, never a requirement: another
-                // private network works with `ws_bind` on the Mac, and an app
-                // may not demand another app (App Review 4.2.3).
                 CCStepRow(
-                    index: 2,
-                    title: "Make sure your iPhone can reach your Mac",
-                    message:
-                        "By default they connect over Tailscale, with both signed in to the same tailnet; your local network works with a setting on the Mac ([codeconnect.sh/support](https://codeconnect.sh/support)), but without Tailscale's encryption or the live terminal. The connection never goes through a server of ours.")
-                CCHairline()
-                CCStepRow(
-                    index: 3, title: "Start CodeConnect on the Mac",
-                    command: "codeconnect daemon install")
-                CCHairline()
-                CCStepRow(
-                    index: 4,
+                    index: 3,
                     title: "Pair this iPhone",
-                    message: "Run this at the Mac, then scan the code it prints.",
+                    message: "Scan the code the installer shows. For a new one, run this at the Mac.",
                     command: "codeconnect pair")
                 CCHairline()
                 CCStepRow(
-                    index: 5,
+                    index: 4,
                     title: "Start your agent through CodeConnect",
-                    message: "Run it from your project's folder; sessions you start this way appear here. For Codex: `codeconnect codex`.",
+                    message: "Run it in a new Terminal window, from your project's folder; sessions you start this way appear here. For Codex: `codeconnect codex`.",
                     command: "codeconnect claude")
             }
         }

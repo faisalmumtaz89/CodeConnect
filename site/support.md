@@ -14,11 +14,13 @@ CodeConnect lets you monitor and control the coding agents running on your own c
 curl -fsSL https://codeconnect.sh | sh
 ```
 
-The installer downloads the latest release, verifies its Developer ID signature before installing anything, and installs to `~/.codeconnect/bin`. It installs CodeConnect's own tmux with it, so tmux needs no separate install. It never uses sudo, asks once before adding `~/.codeconnect/bin` to your `PATH` — as one marked block in your shell's startup file, which you can delete to undo — and never enables a service. Open a new terminal, then:
+The installer downloads the latest release, verifies its Developer ID signature before installing anything, and installs to `~/.codeconnect/bin`. It installs CodeConnect's own tmux with it, so tmux needs no separate install. It never uses sudo, and asks before each step of the setup — Return means yes:
 
-1. `codeconnect daemon install` — starts the daemon now and at login, restarting it on crash.
-2. `codeconnect pair` — shows a QR code; scan it with the CodeConnect Remote app.
-3. `codeconnect claude` — run from your project's folder, it starts Claude Code there through CodeConnect. For Codex: `codeconnect codex`.
+1. Adding `~/.codeconnect/bin` to your `PATH`, as one marked block in your shell's startup file, which you can delete to undo.
+2. Starting the daemon now and at login, restarting it on crash (`codeconnect daemon install`).
+3. Pairing your iPhone: it shows a QR code to scan with the CodeConnect Remote app (`codeconnect pair` makes a new one).
+
+Stopped partway, the same command picks up where it left off, asking only for what is still missing. Then, in a new terminal in your project's folder, `codeconnect claude` starts Claude Code there through CodeConnect. For Codex: `codeconnect codex`.
 
 Your phone now shows every session started this way. When an agent asks for permission, the prompt appears on your phone; answering it there has the same effect as answering at the Mac.
 
