@@ -68,13 +68,15 @@ You need an iPhone on iOS 17 or later, and a Mac on macOS 13 or later (Apple sil
 2. On your Mac:
 
 ```sh
-curl -fsSL https://codeconnect.sh | sh   # then open a new terminal
+curl -fsSL https://codeconnect.sh | sh   # asks to start the daemon and shows a code to scan
 
-codeconnect daemon install     # start the daemon now and at login (restarts on crash)
-codeconnect pair               # QR code to scan with the app
-codeconnect claude             # from your project's folder: start a session there
+codeconnect claude             # in a new terminal, from your project's folder
 codeconnect codex              # the same, for Codex
 ```
+
+The installer asks before each step — adding CodeConnect to your `PATH`, starting the daemon
+(`codeconnect daemon install`), and pairing (`codeconnect pair`) — and run again, asks only for
+what is still missing.
 
 When the session ends, `codeconnect claude` and `codeconnect codex` exit with status 0,
 whatever status the agent itself exited with; a script that needs that status should
@@ -86,7 +88,7 @@ The installer downloads the latest release, verifies its Developer ID
 signature before installing anything, and installs it with CodeConnect's own
 tmux, so a Mac needs neither Homebrew nor tmux. It asks once before adding
 `~/.codeconnect/bin` to your `PATH` — one marked block in your shell's startup
-file, which you can delete to undo — and never uses sudo or enables a service.
+file, which you can delete to undo — never uses sudo, and enables nothing without asking.
 Prefer to read it first? It is plain text at
 [codeconnect.sh](https://codeconnect.sh). Building from source instead is
 `cd mac && ./install.sh` from a clone — the same script contributors use; a

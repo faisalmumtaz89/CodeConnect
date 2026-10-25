@@ -3,6 +3,15 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Set up in one command
+
+- The installer asks to start the daemon and to pair your iPhone, after the PATH question (Return means
+  yes), and ends with the one step left: `codeconnect claude` in a new terminal in your project. Run again,
+  it downloads nothing and asks only for what is still missing, so stopping at any question and running
+  the same command picks up there.
+- On the phone, the setup steps follow the installer: install and answer its questions, scan the code it
+  shows, start your agent.
+
 ## The Mac says when the phone cannot see a session
 
 - `codeconnect claude` on a Mac with no daemon installed (never installed, uninstalled, or unloaded) says
