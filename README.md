@@ -70,7 +70,7 @@ You need an iPhone on iOS 17 or later, and a Mac on macOS 13 or later (Apple sil
 ```sh
 curl -fsSL https://codeconnect.sh | sh   # then open a new terminal
 
-codeconnect daemon install     # run ccd under launchd (restarts on crash)
+codeconnect daemon install     # start the daemon now and at login (restarts on crash)
 codeconnect pair               # QR code to scan with the app
 codeconnect claude             # from your project's folder: start a session there
 codeconnect codex              # the same, for Codex

@@ -3,6 +3,27 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## The Mac says when the phone cannot see a session
+
+- `codeconnect claude` on a Mac with no daemon installed (never installed, uninstalled, or unloaded) says
+  the phone cannot see the session and names `codeconnect daemon install`, instead of opening with no
+  word. An installed daemon that is starting or restarting in your login session gets no note.
+- A `ws_bind` on your local network without `ws_allow_plaintext` is told the setting first — the step the
+  support page gives — and the certificate as the encrypted alternative.
+- `codeconnect pair` on a daemon no phone can reach says Tailscale is not set up or not connected, instead of
+  blaming a late start at login (a daemon run by launchd moves to a tailnet address by itself once one
+  appears); a `ws_bind` that names the unreachable address, or one not applied yet, is told so instead.
+  The "Phone unreachable" note before a session opens gives the same answer.
+- Plainer words in small places: `codeconnect revoke` with no device shows `codeconnect revoke`, not `cc`;
+  `codeconnect token` before the daemon has ever run says to start it; a Mac with no Claude Code is given
+  the setup link; `daemon install` is described as starting the daemon now and at login; the installer
+  says once that CodeConnect is installed and that its Developer ID signature was verified.
+- On the phone, the pairing steps link codeconnect.sh/support.
+- `codeconnect codex` whose keyboard or screen is not a terminal (`< /dev/null`, `> file`, `ssh` without
+  `-t`) refuses in native `codex`'s words — "stdin is not a terminal" or "stdout is not a terminal" — before
+  starting anything. It used to start a session it could not show, then fail or hang writing the screen
+  into the file.
+
 ## A cleaner first run
 
 - A Mac with no Codex is told both ways to install the native Codex that CodeConnect runs:

@@ -21,7 +21,7 @@ This builds from source. To install the signed release instead, follow
 ./install.sh                      # build + install to ~/.codeconnect/bin
 export PATH="$HOME/.codeconnect/bin:$PATH"
 
-codeconnect daemon install                 # run ccd under launchd, restart it on crash
+codeconnect daemon install                 # start the daemon now and at login, restart it on crash
 codeconnect claude                         # in any project directory
 ```
 
@@ -84,8 +84,10 @@ first asks tmux whether the pane really is stopped.
 codeconnect codex                 # in any project directory
 ```
 
-When launched from a terminal, a new Codex session uses its measured columns and
-rows before the TUI starts, including when the tmux server is already running.
+A new Codex session uses the launching terminal's measured columns and rows before
+the TUI starts, including when the tmux server is already running. Its keyboard and
+screen must both be terminals: as native `codex` does, `codeconnect codex` refuses with
+"stdin is not a terminal" or "stdout is not a terminal" before it starts anything.
 
 Codex has no hooks, so a Codex session is hosted differently: the launcher puts a broker
 in front of Codex's own JSON-RPC app server, and the broker is what makes a phone answer
@@ -601,8 +603,9 @@ credential.
 
 `ccd` resolves its address **once, at startup**, and every code minted afterwards
 carries whatever it resolved. launchd starts the daemon at login and does not wait
-for the Tailscale tunnel, so losing that race leaves the daemon bound to loopback —
-and it used to print a perfectly scannable QR containing `127.0.0.1`, exit 0, and
+for the Tailscale tunnel, so losing that race leaves the daemon bound to loopback
+until its watcher sees a tailnet address and restarts it onto one, a minute or so
+later — and with no Tailscale at all it stays there. It used to print a perfectly scannable QR containing `127.0.0.1`, exit 0, and
 add a note saying Tailscale encrypts the link. It does not; there is no tailnet link
 in that state. Every visible sign was success and only the code was dead.
 
@@ -620,8 +623,10 @@ Two checks now make that state impossible to hand to a phone:
   than an address that is visibly local: the address is visibly wrong, and the
   name is not.
 * `codeconnect pair` refuses to print a code whose host is loopback, link-local or
-  unspecified, and names the recovery: bring Tailscale up, then
-  `codeconnect daemon restart`.
+  unspecified, and names the recovery for what chose that bind: with no `ws_bind`,
+  set up or connect Tailscale (or set `ws_bind`); with a `ws_bind` naming that
+  address, change it; with one naming another address, it is not applied yet —
+  then `codeconnect daemon restart`. The launch note reads the bind the same way.
 
 The phone applies the same rule to a scanned code, offline, before it dials — see
 `PairingQRPayload.unreachableHost`. Both sides reject only what is *definitionally*

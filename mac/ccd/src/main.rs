@@ -1215,16 +1215,6 @@ fn plaintext_refusal_advice(config: &Config, plan: &BindPlan, certificate: bool)
         ));
     }
 
-    let way_through = if is_local_network(ip) {
-        format!(
-            "or, if you trust that network, set \"ws_allow_plaintext\": true in {}",
-            protocol::config_path().display()
-        )
-    } else {
-        "or bind this Mac's own LAN address instead: plaintext is never opted into on a \
-         wildcard or a public address"
-            .to_string()
-    };
     // The certificate route carries a condition on any address whose names the
     // daemon has to check: it declines to advertise a name it can see points
     // somewhere it does not listen, so a certificate obtained for a name that
@@ -1254,10 +1244,28 @@ fn plaintext_refusal_advice(config: &Config, plan: &BindPlan, certificate: bool)
             tls = protocol::tls_dir().display()
         )
     };
+    // On a local network the setting comes first: it is the one step the support
+    // page gives, and an operator who wrote `ws_bind` from it and missed the key
+    // reads this to find what is missing. The certificate stays as the encrypted
+    // alternative. Anywhere else there is no setting to offer.
+    let remedies = if is_local_network(ip) {
+        format!(
+            "If you trust this network, set \"ws_allow_plaintext\": true in {} and run \
+             `codeconnect daemon restart`. For an encrypted connection instead, {}, and run \
+             `codeconnect daemon restart`.",
+            protocol::config_path().display(),
+            certificate.replacen("Obtain", "obtain", 1)
+        )
+    } else {
+        format!(
+            "{certificate}, or bind this Mac's own LAN address instead: plaintext is never \
+             opted into on a wildcard or a public address; then run `codeconnect daemon \
+             restart`."
+        )
+    };
     Some(format!(
         "ws {bind} will REFUSE EVERY CONNECTION: plaintext is not private on this address and \
-         no certificate is available, so no phone can reach this daemon. {certificate}, \
-         {way_through}; then run `codeconnect daemon restart`."
+         no certificate is available, so no phone can reach this daemon. {remedies}"
     ))
 }
 
@@ -2223,6 +2231,22 @@ mod tests {
         for step in ["\"tls_hostname\"", "<name>.crt", &refresh] {
             assert!(advice.contains(step), "{step}: {advice}");
         }
+        // The setting the support page gives comes first, complete with the
+        // restart that applies it, and only then the certificate.
+        let setting = advice
+            .find("ws_allow_plaintext")
+            .expect("the setting is offered");
+        let restart = advice
+            .find("daemon restart`")
+            .expect("the restart is named");
+        let cert = advice
+            .find("a certificate")
+            .expect("the certificate is offered");
+        assert!(restart > setting && restart < cert, "{advice}");
+        assert!(
+            advice.ends_with(", and run `codeconnect daemon restart`."),
+            "{advice}"
+        );
 
         // With a certificate the listener serves, and there is nothing to say.
         assert_eq!(plaintext_refusal_advice(&config, &plan, true), None);

@@ -175,7 +175,8 @@ struct CCStepRow<Accessory: View, Detail: View>: View {
             .ccColumnInset(bodyColumn)
     }
 
-    /// Step prose, with backticked fragments set in monospace.
+    /// Step prose, with backticked fragments set in monospace and Markdown links
+    /// tappable.
     ///
     /// The daemon's own copy writes commands backticked and this screen renders
     /// it **verbatim** — but verbatim means the *words*, not the

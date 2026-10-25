@@ -54,7 +54,10 @@ pub fn command(args: &[String]) -> Result<()> {
         Some("restart") => {
             crate::no_arguments(&args[1..], "codeconnect daemon restart").and_then(|()| {
                 let info = restart()?;
-                println!("ccd restarted: pid {}, version {}", info.pid, info.version);
+                println!(
+                    "the daemon restarted (pid {}, version {})",
+                    info.pid, info.version
+                );
                 Ok(())
             })
         }
@@ -178,8 +181,8 @@ fn install(args: &[String]) -> Result<()> {
     match wait_for_daemon(READY_TIMEOUT) {
         Some(info) => {
             println!(
-                "ccd is running under launchd: pid {}, version {}, protocol {}.{}",
-                info.pid, info.version, info.protocol_version, info.protocol_minor
+                "the daemon is running (pid {}, version {}) and starts again at login",
+                info.pid, info.version
             );
             if !info.is_launchd_managed() {
                 println!(

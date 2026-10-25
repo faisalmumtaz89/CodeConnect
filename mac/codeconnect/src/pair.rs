@@ -16,6 +16,7 @@
 //! boundary cannot be scanned at all.
 
 use std::io::IsTerminal;
+use std::net::IpAddr;
 
 use anyhow::{bail, Result};
 use protocol::ipc::{ClientFrame, DaemonFrame};
@@ -35,7 +36,7 @@ pub fn pair(args: &[String]) -> Result<()> {
     crate::no_arguments(args, "codeconnect pair")?;
     // Where the daemon listens comes from this file; one it could not read is
     // why it found no `ws_bind`.
-    protocol::config::Config::load();
+    let config = protocol::config::Config::load();
 
     let reply = daemon::request(&ClientFrame::CreatePairing {
         ttl_secs: PAIRING_TTL_SECS,
@@ -65,19 +66,8 @@ pub fn pair(args: &[String]) -> Result<()> {
     // a human is asking for something to hand to a phone, and it is the last point
     // at which refusing costs nothing.
     if let Some(problem) = unreachable_host(&host) {
-        bail!(
-            "this daemon is listening on {host}, which {problem}, so a paired \
-             phone could never reach it.\n\n  \
-             `ccd` picks its address once, when it starts: this Mac's Tailscale \
-             address, or the one `ws_bind` names in ~/.codeconnect/config.json. It \
-             found neither — usually because Tailscale was not up yet when launchd \
-             started it at login, or is not set up on this Mac.\n\n  \
-             Bring Tailscale up, or set `ws_bind` (https://codeconnect.sh/support \
-             explains both), then:\n\n      \
-             codeconnect daemon restart\n      \
-             codeconnect pair\n\n  \
-             `codeconnect daemon status` shows the address it is currently bound to."
-        );
+        let cause = bind_cause(host_address(&host), configured_ws_bind(&config));
+        bail!("{}", unreachable_bind_message(&host, problem, cause));
     }
 
     let payload = QrPayload::new(&host, port, &code);
@@ -110,6 +100,75 @@ pub fn pair(args: &[String]) -> Result<()> {
 
 /// The port the app's manual field assumes when the address leaves it out.
 const APP_DEFAULT_PORT: u16 = 8787;
+
+/// What chose an unreachable bind, read from the config as it is now.
+///
+/// With no `ws_bind` the daemon takes this Mac's tailnet address. Run by launchd
+/// it also watches for one and restarts itself onto it a minute or so after it
+/// appears, so a bind still unreachable when somebody asks means Tailscale is
+/// not set up or not connected here — not that it was late at login. A valid
+/// `ws_bind` the daemon cannot bind stops it rather than falling back, so a
+/// `ws_bind` other than the bound address is one it has not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindCause {
+    /// No `ws_bind`: the tailnet was the daemon's to find.
+    Tailnet,
+    /// `ws_bind` names the bound address itself.
+    Named,
+    /// `ws_bind` names another address, not applied yet.
+    Pending(IpAddr),
+}
+
+pub(crate) fn bind_cause(bound: Option<IpAddr>, ws_bind: Option<IpAddr>) -> BindCause {
+    match ws_bind {
+        None => BindCause::Tailnet,
+        Some(bind) if bound == Some(bind) => BindCause::Named,
+        Some(bind) => BindCause::Pending(bind),
+    }
+}
+
+/// `ws_bind` as the daemon would take it: an address, or none.
+pub(crate) fn configured_ws_bind(config: &protocol::config::Config) -> Option<IpAddr> {
+    config.ws_bind.as_deref().and_then(|bind| bind.parse().ok())
+}
+
+/// An address the daemon reported, bare or bracketed; `None` for a name.
+pub(crate) fn host_address(host: &str) -> Option<IpAddr> {
+    host.strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse()
+        .ok()
+}
+
+/// Why a code for this bind would be dead, and the way out.
+fn unreachable_bind_message(host: &str, problem: &str, cause: BindCause) -> String {
+    let why = match cause {
+        BindCause::Tailnet => "With no `ws_bind` in ~/.codeconnect/config.json it uses this \
+                               Mac's Tailscale address, and it found none: Tailscale is not \
+                               set up or not connected on this Mac.\n\n  \
+                               Set up or connect Tailscale, or set `ws_bind` \
+                               (https://codeconnect.sh/support explains both), then:"
+            .to_string(),
+        BindCause::Named => "`ws_bind` in ~/.codeconnect/config.json names this address. Set \
+                             it to this Mac's address on a network your phone is on, or remove \
+                             it to use Tailscale (https://codeconnect.sh/support explains both), \
+                             then:"
+            .to_string(),
+        BindCause::Pending(bind) => format!(
+            "`ws_bind` in ~/.codeconnect/config.json names {bind}, which the daemon has \
+             not applied yet:"
+        ),
+    };
+    format!(
+        "this daemon is listening on {host}, which {problem}, so a paired \
+         phone could never reach it.\n\n  \
+         {why}\n\n      \
+         codeconnect daemon restart\n      \
+         codeconnect pair\n\n  \
+         `codeconnect daemon status` shows the address it is currently bound to."
+    )
+}
 
 /// The address as the app's manual field takes it: the port only when it is not
 /// the one the app assumes, and an IPv6 literal bracketed so its port reads.
@@ -178,7 +237,7 @@ pub fn revoke(args: &[String]) -> Result<()> {
         .first()
         .filter(|device| !device.is_empty() && !device.starts_with('-'))
     else {
-        bail!("usage: cc revoke <device>   (`codeconnect devices` lists them)");
+        bail!("usage: codeconnect revoke <device>   (`codeconnect devices` lists them)");
     };
     crate::no_arguments(&args[1..], "codeconnect revoke <device>")?;
     let reply = daemon::request(&ClientFrame::RevokeDevice {
@@ -287,6 +346,60 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A revoke with no device names the command as it is typed.
+    #[test]
+    fn revoke_without_a_device_shows_the_codeconnect_usage() {
+        for args in [vec![], vec!["--help".to_string()]] {
+            let usage = revoke(&args).unwrap_err().to_string();
+            assert!(
+                usage.starts_with("usage: codeconnect revoke <device>"),
+                "{usage}"
+            );
+        }
+    }
+
+    /// An unreachable bind is explained by what the config says now: no
+    /// `ws_bind` is Tailscale's to explain, a `ws_bind` naming this address is the
+    /// setting to change, and any other `ws_bind` is one not applied yet. Each
+    /// ends in the restart that applies the fix.
+    #[test]
+    fn an_unreachable_bind_is_explained_by_the_config_that_chose_it() {
+        let loopback = "is a loopback address";
+        let cause =
+            |host: &str, ws_bind: &str| bind_cause(host_address(host), ws_bind.parse().ok());
+        let tailnet = unreachable_bind_message("127.0.0.1", loopback, cause("127.0.0.1", ""));
+        assert!(
+            tailnet.contains("Tailscale is not set up or not connected"),
+            "{tailnet}"
+        );
+        assert!(
+            tailnet.contains("https://codeconnect.sh/support"),
+            "{tailnet}"
+        );
+        assert!(!tailnet.contains("not up yet"), "{tailnet}");
+        assert!(!tailnet.contains("`ccd`"), "{tailnet}");
+
+        let named = unreachable_bind_message("::1", loopback, cause("::1", "::1"));
+        assert_eq!(cause("[::1]", "::1"), BindCause::Named);
+        assert!(named.contains("names this address"), "{named}");
+        assert!(!named.contains("Tailscale is not set up"), "{named}");
+
+        let pending =
+            unreachable_bind_message("127.0.0.1", loopback, cause("127.0.0.1", "192.168.1.20"));
+        assert!(
+            pending.contains("names 192.168.1.20, which the daemon has not applied yet"),
+            "{pending}"
+        );
+        assert!(!pending.contains("Tailscale is not set up"), "{pending}");
+
+        for message in [&tailnet, &named, &pending] {
+            assert!(
+                message.contains("codeconnect daemon restart\n      codeconnect pair"),
+                "{message}"
+            );
+        }
+    }
 
     /// What `pair` prints for the app's Address field is what that field
     /// parses back (ios Store/Pairing.swift `DaemonEndpoint.parse`).
