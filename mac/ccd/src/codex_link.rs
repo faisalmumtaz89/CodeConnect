@@ -55,8 +55,9 @@
 //!   * **Reconnect: send `thread/resume`, and accept exactly two answers.** The measured
 //!     `no rollout found` error for the thread that was asked about (retry with backoff;
 //!     the only answer a thread that has not yet run a turn can give), or a
-//!     **populated result this build can read whole** — about that same thread, with
-//!     every turn in one of the two states this wire was measured to report.
+//!     **populated result this build can read** — about that same thread, with every
+//!     turn finished (completed, stopped or failed) or still running; an item it cannot
+//!     read costs that item.
 //!     Everything else is reported with a STOP-AND-AMEND log and reconnected.
 //!   * **An announcement redirects the target. It does not discharge the attach.** The
 //!     thread a `thread/started` names is this session's, so it becomes what every
@@ -87,11 +88,13 @@
 //!      keeps everything this link watched happen to it.
 //!
 //! The rules in 3 and 4 are not taste. A `thread/resume` answer reports the **real** ids
-//! for a turn that has finished — measured byte-identical to the live wire's, and stable
-//! across repeated resumes — and **placeholder** ids (`item-1`, `item-2`) for a turn
-//! that is still running, measured on the same turn resumed twice.
-//! [`CodexAdapter::plan_resume_seed`] is where those
-//! measurements are written down and where every uncaptured shape is refused.
+//! for a completed turn's items — measured byte-identical to the live wire's, and stable
+//! across repeated resumes — and **placeholder** ids (`item-1`, `item-2`) for the
+//! message items of a turn that is still running, measured on the same turn resumed
+//! twice. A stopped turn read through the live session's app-server before a later turn
+//! has run, and every message of a thread codex 0.146.0 wrote, carry placeholders too.
+//! [`CodexAdapter::plan_resume_seed`] is where those measurements are written down, where
+//! an answer it cannot trust is refused, and where an item it cannot read is skipped.
 //!
 //! One measured fact is worth keeping in view: `thread/read` can overtake
 //! `thread/resume` on the same connection, so anything depending on the attach is sound
@@ -1041,10 +1044,11 @@ pub(crate) fn stop_and_amend_report(
         "codex link for {session}: STOP-AND-AMEND — thread/resume for \
          {requested_thread} answered with something this build cannot read. Two \
          answers are accepted: the not-ready error a thread with no rollout gives, \
-         and a populated result about that same thread whose every turn is one of \
-         the two states this wire was measured to report (finished, or still \
-         running). This was neither — an unmeasured turn state, a partial item \
-         list, another thread, or a shape nobody has captured — and reading past it \
+         and a populated result about that same thread whose every turn is finished \
+         (completed, stopped or failed) or still running, each in a shape this build \
+         has measured. This was neither — a turn status outside codex's schema, a \
+         turn's own fields of a type nobody has seen, a partial item list, another \
+         thread, or a shape nobody has captured — and reading past it \
          would be guessing, which is the one thing this link will not do. \
          Reconnecting. The answer, described rather than quoted: {shape}.{repeats}"
     )
@@ -1089,8 +1093,9 @@ pub(crate) fn kept_leg_amend_report(
          {requested_thread}, on a connection already subscribed to that thread, was \
          answered with something this build cannot read. Two answers are accepted: the \
          not-ready error a thread with no rollout gives, and a populated result about \
-         that same thread whose every turn is one of the two states this wire was \
-         measured to report (finished, or still running). This was neither, and reading \
+         that same thread whose every turn is finished (completed, stopped or failed) or \
+         still running, each in a shape this build has measured. This was neither, and \
+         reading \
          past it would be guessing, which is the one thing this link will not do. \
          **The subscription is KEPT and this connection is NOT reconnecting** — an \
          earlier answer proved this link can read this thread, and this reply is \
@@ -1137,8 +1142,9 @@ pub(crate) fn retrying_amend_report(
          chasing a turn/start this link itself wrote and has not yet seen land, was \
          answered with something this build cannot read. Two answers are accepted: the \
          not-ready error a thread with no rollout gives, and a populated result about that \
-         same thread whose every turn is one of the two states this wire was measured to \
-         report (finished, or still running). This was neither, and reading past it would \
+         same thread whose every turn is finished (completed, stopped or failed) or still \
+         running, each in a shape this build has measured. This was neither, and reading \
+         past it would \
          be guessing, which is the one thing this link will not do. **The connection is \
          KEPT and this link is NOT reconnecting** — it wrote the start itself, so it knows \
          the thread is real and a turn is beginning on it, and an unreadable reply is \
@@ -1187,7 +1193,7 @@ enum Attach {
         next_delay: Duration,
     },
     /// **Attached.** A `thread/resume` was answered with a populated result this build
-    /// read whole, its facts were recorded, and this connection is now **subscribed**
+    /// can read, its facts were recorded, and this connection is now **subscribed**
     /// to the thread — so `turn/*` and `item/*` frames flow to it. A resting state
     /// like [`Attach::Unbound`], and for the same reason: there is nothing left to ask
     /// for.
@@ -4316,7 +4322,7 @@ async fn serve_connection(
                     // honest response. A FOLLOW-UP is the opposite situation. The link
                     // asked because it owed itself one more question about a turn it
                     // joined mid-flight; the subscription it is asking from was granted
-                    // by an answer it *did* read whole, and this reply is evidence about
+                    // by an answer it *did* read, and this reply is evidence about
                     // the reply.
                     //
                     // Ending the leg here is what makes an unreadable answer
@@ -4326,11 +4332,11 @@ async fn serve_connection(
                     // after a tool-bearing turn — **70 epochs over 18 minutes,
                     // 10:04-10:22Z**, ending only when the session did, with the phone
                     // showing "lost its link" and offering neither Stop nor compose for
-                    // the whole of it. The tool
-                    // guard that produced *that* verdict has since been narrowed
-                    // ([`CodexAdapter::plan_resume_seed`]), which makes this path rarer
-                    // and therefore more important to get right rather than less: it is
-                    // now the only way a follow-up reaches a refusal at all.
+                    // the whole of it. That answer is readable
+                    // ([`CodexAdapter::plan_resume_seed`] reads a tool-bearing turn,
+                    // running or finished), so this path is rare, which makes it more
+                    // important to get right rather than less: it is the only way a
+                    // follow-up reaches a refusal at all.
                     //
                     // [`Connection::recover_from`] has always had this disposition for
                     // the on-demand recovery — "recording nothing", debts settled, link
@@ -5344,9 +5350,9 @@ impl Connection<'_> {
     /// 1. The measured not-ready error, for the thread we asked about — a thread that
     ///    has not yet run a turn has no rollout, and this is the only answer it
     ///    can give. Retried with backoff.
-    /// 2. A **populated result this build can read whole**: it is about the thread we
-    ///    asked about, its `turns[]` is readable, and every turn in it is one of the
-    ///    two states measured on this wire. Accepted — which reconciles it and
+    /// 2. A **populated result this build can read**: it is about the thread we
+    ///    asked about, its `turns[]` is readable, and every turn in it is finished
+    ///    (completed, stopped or failed) or still running. Accepted — which reconciles it and
     ///    **subscribes this connection** (see [`Connection::attach_from_seed`]).
     ///
     /// Everything else — a success of an unmeasured shape, an answer about another
@@ -5522,7 +5528,7 @@ impl Connection<'_> {
     /// already switched away from, asked purely so the items that finished before the link
     /// subscribed are not lost with it.
     ///
-    /// The same acceptance rule applies — an answer this build cannot read whole is
+    /// The same acceptance rule applies — an answer this build cannot read is
     /// refused, not guessed at — and a refusal costs only the recovery, never the
     /// connection: the link is attached to a different thread and healthy.
     ///
@@ -8396,10 +8402,15 @@ impl Connection<'_> {
     /// more `thread/resume` recovers whatever completed before this link subscribed.
     ///
     /// Only a **completed** terminal triggers it, and that is a deliberate narrowing. An
-    /// `interrupted` or `failed` turn is a state no resume answer has ever been captured
-    /// reporting, so [`CodexAdapter::plan_resume_seed`] refuses it — asking again would
-    /// buy nothing and would turn an ordinary interrupt into a refuse-and-reconnect loop.
-    /// The debt on such a turn stays unpaid and visible rather than chased.
+    /// `interrupted` turn is read by [`CodexAdapter::plan_resume_seed`], but until a later
+    /// turn has run the live answer names its prompt by a placeholder and may show an
+    /// in-flight command `inProgress` (measured on codex 0.164.0, about two seconds after
+    /// Esc), both of which the reader skips, so a follow-up asked at this moment would
+    /// recover at most part of what it owes and settle the debt for good. A `failed`
+    /// turn's answer has been measured only on a bare app-server, never at this moment
+    /// through the TUI's, so it is not asked either. The debt on such a turn is never paid:
+    /// what that turn did before this link subscribed stays unrecovered, as the Codex
+    /// guide's limits say.
     fn note_terminal(&mut self, pending: &protocol::event::PendingEvent) {
         if pending.kind != protocol::event::EventKind::TurnComplete {
             return;
@@ -10157,7 +10168,7 @@ mod tests {
         /// the **placeholder ids** a running turn is measured to report (`item-1`, …).
         /// Accepted, and it must contribute no item fact whatsoever.
         PopulatedInProgress,
-        /// A turn state this wire has never reported. Refused.
+        /// A turn status outside codex's schema. Refused.
         UnmeasuredTurnStatus,
         /// A turn whose `itemsView` says its item list is partial. Refused.
         PartialItemsView,
@@ -10186,9 +10197,9 @@ mod tests {
         ///
         /// The same arc — attach mid-turn, the turn terminalizes, the link asks once
         /// more — and this time the answer really is unreadable: the turn comes back
-        /// `interrupted`, a state no answer has been measured reporting. Narrowing the
-        /// tool guard does not make this case go away, it makes it the *only* remaining
-        /// one, so the disposition matters more rather than less.
+        /// `interrupted`, a state no answer has been measured reporting. Reading
+        /// tool-bearing turns does not make this case go away, it makes it the *only*
+        /// remaining one, so the disposition matters more rather than less.
         ///
         /// The link is ALREADY ATTACHED and subscribed. Nothing about an unreadable
         /// recovery answer is evidence about the subscription it already proved, and
@@ -11431,7 +11442,7 @@ mod tests {
                                 lifecycle_answer_in_progress(id, &asked_about)
                             } else {
                                 lifecycle_answer(id, &asked_about, |result| {
-                                    result["thread"]["turns"][0]["status"] = json!("interrupted");
+                                    result["thread"]["turns"][0]["status"] = json!("cancelled");
                                 })
                             }
                         }
@@ -12181,7 +12192,7 @@ mod tests {
                             tokio::time::sleep(Duration::from_millis(80)).await;
                             resumes_answered += 1;
                             lifecycle_answer(id, &asked_about, |result| {
-                                result["thread"]["turns"][0]["status"] = json!("interrupted");
+                                result["thread"]["turns"][0]["status"] = json!("cancelled");
                             })
                         }
                         // The switch, then B is refused for ever; A stays answerable.
@@ -12346,7 +12357,7 @@ mod tests {
                         }
                         ResumeAnswer::UnmeasuredTurnStatus => {
                             lifecycle_answer(id, &asked_about, |result| {
-                                result["thread"]["turns"][0]["status"] = json!("interrupted");
+                                result["thread"]["turns"][0]["status"] = json!("cancelled");
                             })
                         }
                         ResumeAnswer::PartialItemsView => {
@@ -14011,7 +14022,7 @@ mod tests {
     /// ones — an empty `turns[]`, a `turns[]` in the wrong place, no turns array, a
     /// policy refusal, another thread, two disagreeing identities — would be caught by
     /// almost any reader. The other four are the **real captured answer with exactly
-    /// one measured particular changed**: a turn state this wire has never reported, an
+    /// one measured particular changed**: a turn status outside codex's schema, an
     /// item list the answer itself flags as partial, an item missing a routing
     /// identity. A rule that had quietly widened would take all four while still
     /// rejecting the shapeless ones, and the suite would look green.
@@ -15808,7 +15819,7 @@ mod tests {
 
     /// **AN UNREADABLE RE-ASK COSTS THE RECOVERY, NEVER THE CONNECTION.**
     ///
-    /// Narrowing the tool guard does not retire the STOP-AND-AMEND path, it makes this
+    /// Reading tool-bearing turns does not retire the STOP-AND-AMEND path, it makes this
     /// the only way to reach it from a follow-up — so the disposition matters more
     /// rather than less. The turn comes back `interrupted`, a state no answer has ever
     /// been measured reporting, and it is genuinely unreadable.

@@ -1,0 +1,236 @@
+{
+ "live": [
+  {
+   "emittedAtMs": 1792962048073,
+   "method": "turn/started",
+   "params": {
+    "threadId": "01a174dd-90cf-7132-b0a2-8ec9a5d06b85",
+    "turn": {
+     "completedAt": null,
+     "durationMs": null,
+     "error": null,
+     "id": "01a174dd-b03b-7732-928f-57553570018b",
+     "items": [],
+     "itemsView": "notLoaded",
+     "rootTurnId": "01a174dd-b03b-7732-928f-57553570018b",
+     "startedAt": 1792962048,
+     "status": "inProgress"
+    }
+   }
+  },
+  {
+   "emittedAtMs": 1792962048133,
+   "method": "item/started",
+   "params": {
+    "item": {
+     "clientId": "ec1ef1cc-c8ef-43b4-893d-32f875bd8c73",
+     "content": [
+      {
+       "text": "Write out the integers from 1 to 4000, one per line, in order, with no commentary and no code. Do not use any tool.",
+       "text_elements": [],
+       "type": "text"
+      }
+     ],
+     "id": "01a174dd-b084-7a91-8175-ddff153f5790",
+     "type": "userMessage"
+    },
+    "startedAtMs": 1792962048133,
+    "threadId": "01a174dd-90cf-7132-b0a2-8ec9a5d06b85",
+    "turnId": "01a174dd-b03b-7732-928f-57553570018b"
+   }
+  },
+  {
+   "emittedAtMs": 1792962048134,
+   "method": "item/completed",
+   "params": {
+    "completedAtMs": 1792962048133,
+    "item": {
+     "clientId": "ec1ef1cc-c8ef-43b4-893d-32f875bd8c73",
+     "content": [
+      {
+       "text": "Write out the integers from 1 to 4000, one per line, in order, with no commentary and no code. Do not use any tool.",
+       "text_elements": [],
+       "type": "text"
+      }
+     ],
+     "id": "01a174dd-b084-7a91-8175-ddff153f5790",
+     "type": "userMessage"
+    },
+    "threadId": "01a174dd-90cf-7132-b0a2-8ec9a5d06b85",
+    "turnId": "01a174dd-b03b-7732-928f-57553570018b"
+   }
+  },
+  {
+   "emittedAtMs": 1792962050278,
+   "method": "item/started",
+   "params": {
+    "item": {
+     "delivery": null,
+     "id": "msg_0b44e012207a96eb016ade6e022f188191bfbe4dad6f1bb99a",
+     "memoryCitation": null,
+     "phase": "final_answer",
+     "questions": null,
+     "text": "",
+     "type": "agentMessage"
+    },
+    "startedAtMs": 1792962050277,
+    "threadId": "01a174dd-90cf-7132-b0a2-8ec9a5d06b85",
+    "turnId": "01a174dd-b03b-7732-928f-57553570018b"
+   }
+  },
+  {
+   "emittedAtMs": 1792962050627,
+   "method": "turn/completed",
+   "params": {
+    "threadId": "01a174dd-90cf-7132-b0a2-8ec9a5d06b85",
+    "turn": {
+     "completedAt": 1792962050,
+     "durationMs": 2557,
+     "error": null,
+     "id": "01a174dd-b03b-7732-928f-57553570018b",
+     "items": [],
+     "itemsView": "notLoaded",
+     "rootTurnId": "01a174dd-b03b-7732-928f-57553570018b",
+     "startedAt": 1792962048,
+     "status": "interrupted"
+    }
+   }
+  }
+ ],
+ "answer": {
+  "id": 101,
+  "result": {
+   "activePermissionProfile": null,
+   "approvalPolicy": "on-request",
+   "approvalsReviewer": "user",
+   "collaborationMode": {
+    "mode": "default",
+    "settings": {
+     "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions.\n\nUse the `request_user_input` tool only for optional questions where the answer would materially improve the quality of the work.\n\nIf `request_user_input` returns no answers, continue with best judgment instead of asking again or treating the turn as blocked.\n\nNever use the `request_user_input` tool for permission requests or permission-related escalations.\n\nIf explicit user input is required for another reason before progress can safely continue, do not use the `request_user_input` tool. Ask the user directly with one concise plain-text question instead. Never write a multiple choice question as a textual assistant message.\n",
+     "model": "gpt-6.1-sol",
+     "reasoning_effort": null
+    }
+   },
+   "cwd": "/work/proj",
+   "disabledPluginIds": [],
+   "initialTurnsPage": null,
+   "instructionSources": [],
+   "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a174dd-90cf-7132-b0a2-8ec9a5d06b85\",\"rolloutOrdinal\":24,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}",
+   "model": "gpt-6.1-sol",
+   "modelProvider": "openai",
+   "multiAgentMode": "explicitRequestOnly",
+   "reasoningEffort": null,
+   "runtimeWorkspaceRoots": [
+    "/work/proj"
+   ],
+   "sandbox": {
+    "networkAccess": false,
+    "type": "readOnly"
+   },
+   "serviceTier": "default",
+   "thread": {
+    "agentNickname": null,
+    "agentRole": null,
+    "canAcceptDirectInput": true,
+    "cliVersion": "0.164.0",
+    "createdAt": 1792962040,
+    "cwd": "/work/proj",
+    "daybreakEnabled": null,
+    "environments": [
+     {
+      "cwd": "/work/proj",
+      "environmentId": "local",
+      "runtimeWorkspaceRoots": [
+       "/work/proj"
+      ]
+     }
+    ],
+    "ephemeral": false,
+    "extra": null,
+    "forkedFromId": null,
+    "gitInfo": null,
+    "historyMode": "paginated",
+    "id": "01a174dd-90cf-7132-b0a2-8ec9a5d06b85",
+    "model": "gpt-6.1-sol",
+    "modelProvider": "openai",
+    "name": "Reply amber",
+    "originator": "codex-tui",
+    "parentThreadId": null,
+    "path": "/Users/u/.codex/sessions/2026/10/26/rollout-2026-10-26T00-00-40-01a174dd-90cf-7132-b0a2-8ec9a5d06b85.jsonl",
+    "preview": "Reply with the single word amber and nothing else.",
+    "projectId": null,
+    "reasoningEffort": null,
+    "recencyAt": 1792962048,
+    "section": null,
+    "sectionEnteredAt": null,
+    "sessionId": "01a174dd-90cf-7132-b0a2-8ec9a5d06b85",
+    "source": "vscode",
+    "status": {
+     "type": "idle"
+    },
+    "threadSource": "user",
+    "turns": [
+     {
+      "completedAt": 1792962047,
+      "durationMs": 6812,
+      "error": null,
+      "id": "01a174dd-938a-7c01-9ddb-123be4aad2f8",
+      "items": [
+       {
+        "clientId": "b7550ddf-e637-4cac-9af7-62948c078416",
+        "content": [
+         {
+          "text": "Reply with the single word amber and nothing else.",
+          "text_elements": [],
+          "type": "text"
+         }
+        ],
+        "id": "01a174dd-9c2b-7e51-b392-4c987e9665f0",
+        "type": "userMessage"
+       },
+       {
+        "delivery": null,
+        "id": "msg_0b44e012207a96eb016ade6dfcb1448191a8944b33bc08e510",
+        "memoryCitation": null,
+        "phase": "final_answer",
+        "questions": null,
+        "text": "amber",
+        "type": "agentMessage"
+       }
+      ],
+      "itemsView": "full",
+      "rootTurnId": "01a174dd-938a-7c01-9ddb-123be4aad2f8",
+      "startedAt": 1792962040,
+      "status": "completed"
+     },
+     {
+      "completedAt": 1792962050,
+      "durationMs": 2557,
+      "error": null,
+      "id": "01a174dd-b03b-7732-928f-57553570018b",
+      "items": [
+       {
+        "clientId": "ec1ef1cc-c8ef-43b4-893d-32f875bd8c73",
+        "content": [
+         {
+          "text": "Write out the integers from 1 to 4000, one per line, in order, with no commentary and no code. Do not use any tool.",
+          "text_elements": [],
+          "type": "text"
+         }
+        ],
+        "id": "item-1",
+        "type": "userMessage"
+       }
+      ],
+      "itemsView": "full",
+      "rootTurnId": "01a174dd-b03b-7732-928f-57553570018b",
+      "startedAt": 1792962048,
+      "status": "interrupted"
+     }
+    ],
+    "updatedAt": 1792962050
+   },
+   "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a174dd-90cf-7132-b0a2-8ec9a5d06b85\",\"rolloutOrdinal\":19,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}"
+  }
+ }
+}

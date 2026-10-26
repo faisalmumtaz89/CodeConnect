@@ -134,6 +134,71 @@ final class ApprovalFlowUITests: XCTestCase {
             "the resolution must be daemon-confirmed, not assumed")
     }
 
+    /// A Codex approval answered from the phone: Codex's own first option, chosen by
+    /// a real tap, and the card settled only by the daemon's `answer_result`. Needs a
+    /// Codex command approval pending on the daemon and nobody answering it at the
+    /// Mac, since a keyboard answer settles the card too; no pending decision skips.
+    func testAnswerCodexApproval() throws {
+        let app = try launchApp()
+        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
+
+        let review = deckBar(app)
+        try XCTSkipUnless(
+            review.waitForExistence(timeout: 45), "no decision is pending on the daemon")
+        review.tap()
+        XCTAssertTrue(app.navigationBars["Needs you"].waitForExistence(timeout: 15))
+
+        let proceed = app.buttons["Option 1: Yes, proceed"]
+        try XCTSkipUnless(
+            proceed.waitForExistence(timeout: 5), "the pending decision is not a Codex approval")
+        XCTAssertTrue(
+            app.staticTexts.matching(
+                NSPredicate(format: "label BEGINSWITH 'Verified against the daemon'")
+            ).firstMatch.exists,
+            "payload_hash verification must pass for a card straight off the wire")
+        // "N decisions need you": an answered card leaves the stack, so N falls. A
+        // decision arriving meanwhile raises it, which says nothing about this answer.
+        let counter = app.descendants(matching: .any)["deck-count"].firstMatch
+        func pending() -> Int? {
+            counter.exists ? Int(counter.label.prefix(while: \.isNumber)) : nil
+        }
+        let countBefore = pending()
+
+        // The read gate covers Codex's options as it covers Claude's Allow: scroll
+        // the command on screen the way a person would.
+        for _ in 0..<10 where !proceed.isEnabled {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+                .press(
+                    forDuration: 0.05,
+                    thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)))
+        }
+        XCTAssertTrue(
+            proceed.isEnabled,
+            "a live link, an attached session and a command that has been on screen must "
+                + "enable the choice")
+        proceed.tap()
+
+        // The same settled states as a Claude answer, each reached only after
+        // `answer_result`: the Deck advances a settled card off the stack.
+        let confirmed = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS 'confirmed by the daemon'")
+        ).firstMatch
+        let cleared = app.staticTexts["Fleet clear"]
+        let answeredOff = { () -> Bool in
+            guard let before = countBefore, let now = pending() else { return false }
+            return now < before
+        }
+        let settled = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                confirmed.exists || cleared.exists || answeredOff()
+            }, object: nil)
+        wait(for: [settled], timeout: 30)
+        attachScreenshot(app, name: "codex-choice")
+        XCTAssertTrue(
+            confirmed.exists || cleared.exists || answeredOff(),
+            "the choice must be daemon-confirmed, not assumed")
+    }
+
     /// The ledger guarantee, seen from the phone: answering a request that was
     /// already resolved elsewhere returns the *original* outcome instead of
     /// applying anything a second time.

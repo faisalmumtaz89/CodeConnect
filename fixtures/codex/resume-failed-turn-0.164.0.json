@@ -1,0 +1,138 @@
+{
+ "live": [
+  {
+   "method": "turn/completed",
+   "params": {
+    "threadId": "01a174c2-84a7-7783-b508-41199c0216bb",
+    "turn": {
+     "id": "01a174c2-84bc-7500-b0b9-fc9941973e9b",
+     "rootTurnId": "01a174c2-84bc-7500-b0b9-fc9941973e9b",
+     "items": [],
+     "itemsView": "notLoaded",
+     "status": "failed",
+     "error": {
+      "message": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'no-such-model-cc-probe' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}",
+      "codexErrorInfo": "other",
+      "additionalDetails": null,
+      "misalignment": null
+     },
+     "startedAt": 1792960267,
+     "completedAt": 1792960270,
+     "durationMs": 3521
+    }
+   },
+   "emittedAtMs": 1792960270978
+  }
+ ],
+ "answer": {
+  "id": 4,
+  "result": {
+   "thread": {
+    "id": "01a174c2-84a7-7783-b508-41199c0216bb",
+    "environments": [
+     {
+      "environmentId": "local",
+      "cwd": "/work/proj",
+      "runtimeWorkspaceRoots": [
+       "/work/proj"
+      ]
+     }
+    ],
+    "extra": null,
+    "sessionId": "01a174c2-84a7-7783-b508-41199c0216bb",
+    "forkedFromId": null,
+    "parentThreadId": null,
+    "preview": "Say hi.",
+    "ephemeral": false,
+    "section": null,
+    "sectionEnteredAt": null,
+    "projectId": null,
+    "historyMode": "paginated",
+    "modelProvider": "openai",
+    "model": "no-such-model-cc-probe",
+    "reasoningEffort": null,
+    "createdAt": 1792960267,
+    "updatedAt": 1792960270,
+    "recencyAt": 1792960267,
+    "status": {
+     "type": "systemError"
+    },
+    "path": "/Users/u/.codex/sessions/2026/10/25/rollout-2026-10-25T23-31-07-01a174c2-84a7-7783-b508-41199c0216bb.jsonl",
+    "cwd": "/work/proj",
+    "cliVersion": "0.164.0",
+    "originator": "probe",
+    "source": "vscode",
+    "canAcceptDirectInput": true,
+    "threadSource": null,
+    "agentNickname": null,
+    "agentRole": null,
+    "gitInfo": null,
+    "name": null,
+    "daybreakEnabled": null,
+    "turns": [
+     {
+      "id": "01a174c2-84bc-7500-b0b9-fc9941973e9b",
+      "rootTurnId": "01a174c2-84bc-7500-b0b9-fc9941973e9b",
+      "items": [
+       {
+        "type": "userMessage",
+        "id": "01a174c2-8de1-7ec0-ad43-338ae5fe7c97",
+        "clientId": null,
+        "content": [
+         {
+          "type": "text",
+          "text": "Say hi.",
+          "text_elements": []
+         }
+        ]
+       }
+      ],
+      "itemsView": "full",
+      "status": "failed",
+      "error": {
+       "message": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'no-such-model-cc-probe' model is not supported when using Codex with a ChatGPT account.\",\"code\":\"model_not_found\"}}",
+       "codexErrorInfo": "other",
+       "additionalDetails": null,
+       "misalignment": null
+      },
+      "startedAt": 1792960267,
+      "completedAt": 1792960270,
+      "durationMs": 3521
+     }
+    ]
+   },
+   "model": "no-such-model-cc-probe",
+   "modelProvider": "openai",
+   "serviceTier": null,
+   "disabledPluginIds": [],
+   "cwd": "/work/proj",
+   "runtimeWorkspaceRoots": [
+    "/work/proj"
+   ],
+   "instructionSources": [],
+   "approvalPolicy": "on-request",
+   "approvalsReviewer": "user",
+   "sandbox": {
+    "type": "readOnly",
+    "networkAccess": false
+   },
+   "activePermissionProfile": {
+    "id": ":read-only",
+    "extends": null
+   },
+   "reasoningEffort": null,
+   "collaborationMode": {
+    "mode": "default",
+    "settings": {
+     "model": "no-such-model-cc-probe",
+     "reasoning_effort": null,
+     "developer_instructions": null
+    }
+   },
+   "multiAgentMode": "explicitRequestOnly",
+   "initialTurnsPage": null,
+   "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a174c2-84a7-7783-b508-41199c0216bb\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+   "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a174c2-84a7-7783-b508-41199c0216bb\",\"rolloutOrdinal\":8,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+  }
+ }
+}

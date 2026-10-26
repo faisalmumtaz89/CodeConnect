@@ -1,0 +1,249 @@
+{
+ "id": 2,
+ "result": {
+  "thread": {
+   "id": "01a174ca-a21b-7d92-ae02-806abe140c42",
+   "environments": [
+    {
+     "environmentId": "local",
+     "cwd": "/work/proj",
+     "runtimeWorkspaceRoots": [
+      "/work/proj"
+     ]
+    }
+   ],
+   "extra": null,
+   "sessionId": "01a174ca-a21b-7d92-ae02-806abe140c42",
+   "forkedFromId": null,
+   "parentThreadId": null,
+   "preview": "Search the web for the current stable Rust version and tell me the number. Use web search, not a shell command.",
+   "ephemeral": false,
+   "section": null,
+   "sectionEnteredAt": null,
+   "projectId": null,
+   "historyMode": "paginated",
+   "modelProvider": "openai",
+   "model": "gpt-6.1-sol",
+   "reasoningEffort": "high",
+   "createdAt": 1792960799,
+   "updatedAt": 1792960974,
+   "recencyAt": 1792960973,
+   "status": {
+    "type": "idle"
+   },
+   "path": "/Users/u/.codex/sessions/2026/10/25/rollout-2026-10-25T23-39-59-01a174ca-a21b-7d92-ae02-806abe140c42.jsonl",
+   "cwd": "/work/proj",
+   "cliVersion": "0.164.0",
+   "originator": "codex-tui",
+   "source": "vscode",
+   "canAcceptDirectInput": true,
+   "threadSource": "user",
+   "agentNickname": null,
+   "agentRole": null,
+   "gitInfo": {
+    "sha": "0000000000000000000000000000000000000000",
+    "branch": "main",
+    "originUrl": null
+   },
+   "name": null,
+   "daybreakEnabled": null,
+   "turns": [
+    {
+     "id": "01a174ca-a7f7-7312-8dec-60605cdb77f0",
+     "rootTurnId": "01a174ca-a7f7-7312-8dec-60605cdb77f0",
+     "items": [
+      {
+       "type": "userMessage",
+       "id": "01a174ca-acb2-7992-93f9-589ae81ad372",
+       "clientId": "93aaf4ec-bf58-4b5e-8265-c5eab9e90930",
+       "content": [
+        {
+         "type": "text",
+         "text": "Search the web for the current stable Rust version and tell me the number. Use web search, not a shell command.",
+         "text_elements": []
+        }
+       ]
+      },
+      {
+       "type": "agentMessage",
+       "id": "msg_081371016fff5088016ade6924f94c819185484735fc06a3ac",
+       "text": "I’ll check the current stable Rust release on the web.",
+       "phase": "commentary",
+       "memoryCitation": null,
+       "delivery": null,
+       "questions": null
+      },
+      {
+       "type": "webSearch",
+       "id": "exec-9a9181ed-bade-45a3-aee9-37fc44b0b214",
+       "query": "current stable Rust version site:rust-lang.org",
+       "action": {
+        "type": "search",
+        "query": "current stable Rust version site:rust-lang.org",
+        "queries": null
+       },
+       "results": [
+        {
+         "type": "text_result",
+         "domain": "forge.rust-lang.org",
+         "ref_id": "turn0search0",
+         "snippet": "# Rust Forge ... ### Current Release VersionsChannel | Version | Will be stable on | Will branch from main on",
+         "title": "Overview - Rust Forge",
+         "url": "https://forge.rust-lang.org/"
+        },
+        {
+         "type": "text_result",
+         "domain": "forge.rust-lang.org",
+         "ref_id": "turn0search1",
+         "snippet": "# Rust Forge ... ### Current Release VersionsChannel | Version | Will be stable on | Will branch from main on",
+         "title": "Overview - Rust Forge",
+         "url": "https://forge.rust-lang.org/index.html"
+        },
+        {
+         "type": "text_result",
+         "domain": "blog.rust-lang.org",
+         "ref_id": "turn0search2",
+         "snippet": "The Rust team is happy to announce a new version of Rust, 1.99.0. ... `$ rustup update stable`",
+         "title": "Announcing Rust 1.99.0 | Rust Blog",
+         "url": "https://blog.rust-lang.org/2026/10/01/Rust-1.99.0/"
+        },
+        {
+         "type": "text_result",
+         "domain": "blog.rust-lang.org",
+         "ref_id": "turn0search3",
+         "snippet": "The Rust team is happy to announce a new version of Rust, 1.98.0. ... `$ rustup update stable`",
+         "title": "Announcing Rust 1.98.0 | Rust Blog",
+         "url": "https://blog.rust-lang.org/2026/08/20/Rust-1.98.0/"
+        },
+        {
+         "type": "text_result",
+         "domain": "doc.rust-lang.org",
+         "ref_id": "turn0search4",
+         "snippet": "# Rust Release Notes ... 1. `unknown_diagnostic_attributes`: unknown to the current compiler ... * Fix errors in `std::fs::rename` on Windows 10, version 1607. ... *",
+         "title": "Rust Release Notes",
+         "url": "https://doc.rust-lang.org/stable/releases.html"
+        },
+        {
+         "type": "text_result",
+         "domain": "doc.rust-lang.org",
+         "ref_id": "turn0search5",
+         "snippet": "1. `unknown_diagnostic_attributes`: unknown to the current compiler ... * The 2024 Edition is now stable. ... * Always display stability version even if it’s the",
+         "title": "Rust Release Notes",
+         "url": "https://doc.rust-lang.org/releases.html"
+        },
+        {
+         "type": "text_result",
+         "domain": "blog.rust-lang.org",
+         "ref_id": "turn0search6",
+         "snippet": "If you have a previous version of Rust installed via rustup, getting Rust 1.99.1 is as easy as: `rustup update stable`",
+         "title": "Announcing Rust 1.99.1 | Rust Blog",
+         "url": "https://blog.rust-lang.org/2026/10/15/Rust-1.99.1/"
+        },
+        {
+         "type": "text_result",
+         "domain": "blog.rust-lang.org",
+         "ref_id": "turn0search7",
+         "snippet": "If you have a previous version of Rust installed via rustup, getting Rust 1.98.1 is as easy as: `rustup update stable`",
+         "title": "Announcing Rust 1.98.1 | Rust Blog",
+         "url": "https://blog.rust-lang.org/releases/1.98.1/"
+        },
+        {
+         "type": "text_result",
+         "domain": "rust-lang.org",
+         "ref_id": "turn0search8",
+         "snippet": "Version 1.99.1 ... Rust helps you maintain your app with confidence and distribute it with ease.",
+         "title": "Rust Programming Language",
+         "url": "https://rust-lang.org/"
+        },
+        {
+         "type": "text_result",
+         "domain": "blog.rust-lang.org",
+         "ref_id": "turn0search9",
+         "snippet": "This is a subset of the main Rust blog listing only official release announcement posts.",
+         "title": "The Rust Release Announcements",
+         "url": "https://blog.rust-lang.org/releases/"
+        },
+        {
+         "type": "text_result",
+         "domain": "blog.rust-lang.org",
+         "ref_id": "turn0search10",
+         "snippet": "The Rust team is happy to announce a new version of Rust, 1.97.0. ... `$ rustup update stable`",
+         "title": "Announcing Rust 1.97.0 | Rust Blog",
+         "url": "https://blog.rust-lang.org/2026/07/09/Rust-1.97.0/"
+        },
+        {
+         "type": "text_result",
+         "domain": "blog.rust-lang.org",
+         "ref_id": "turn0search11",
+         "snippet": "The Rust team is happy to announce a new version of Rust, 1.96.0. ... `$ rustup update stable`",
+         "title": "Announcing Rust 1.96.0 | Rust Blog",
+         "url": "https://blog.rust-lang.org/2026/05/28/Rust-1.96.0/"
+        },
+        {
+         "type": "text_result",
+         "domain": "foundation.rust-lang.org",
+         "ref_id": "turn0search12",
+         "snippet": "Since the first stable release of the Rust programming language in 2015, the Rust ecosystem has",
+         "title": "Security Initiative Report",
+         "url": "https://foundation.rust-lang.org/static/publications/security-initiative-report-february-2024.pdf"
+        },
+        {
+         "type": "text_result",
+         "domain": "foundation.rust-lang.org",
+         "ref_id": "turn0search13",
+         "snippet": "Since the first stable release of the Rust programming language in 2015, the Rust ecosystem has",
+         "title": "December 2022 - July 2023",
+         "url": "https://foundation.rust-lang.org/static/publications/security-initiative-report-july-2023.pdf"
+        }
+       ]
+      },
+      {
+       "type": "agentMessage",
+       "id": "msg_081371016fff5088016ade692baec48191889c55a477a18202",
+       "text": "The current stable Rust version is **1.99.1**, per the [official Rust website](https://rust-lang.org/).",
+       "phase": "final_answer",
+       "memoryCitation": null,
+       "delivery": null,
+       "questions": null
+      }
+     ],
+     "itemsView": "full",
+     "status": "completed",
+     "error": null,
+     "startedAt": 1792960800,
+     "completedAt": 1792960812,
+     "durationMs": 11269
+    }
+   ]
+  },
+  "model": "gpt-6.1-sol",
+  "modelProvider": "openai",
+  "serviceTier": "default",
+  "disabledPluginIds": [],
+  "cwd": "/work/proj",
+  "runtimeWorkspaceRoots": [
+   "/work/proj"
+  ],
+  "instructionSources": [],
+  "approvalPolicy": "on-request",
+  "approvalsReviewer": "user",
+  "sandbox": {
+   "type": "readOnly",
+   "networkAccess": false
+  },
+  "activePermissionProfile": null,
+  "reasoningEffort": "high",
+  "collaborationMode": {
+   "mode": "default",
+   "settings": {
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "high",
+    "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions.\n\nUse the `request_user_input` tool only for optional questions where the answer would materially improve the quality of the work.\n\nIf `request_user_input` returns no answers, continue with best judgment instead of asking again or treating the turn as blocked.\n\nNever use the `request_user_input` tool for permission requests or permission-related escalations.\n\nIf explicit user input is required for another reason before progress can safely continue, do not use the `request_user_input` tool. Ask the user directly with one concise plain-text question instead. Never write a multiple choice question as a textual assistant message.\n"
+   }
+  },
+  "multiAgentMode": "explicitRequestOnly",
+  "initialTurnsPage": null,
+  "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a174ca-a21b-7d92-ae02-806abe140c42\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+  "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a174ca-a21b-7d92-ae02-806abe140c42\",\"rolloutOrdinal\":20,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+ }
+}

@@ -1,0 +1,164 @@
+{
+ "id": 4,
+ "result": {
+  "thread": {
+   "id": "01a173f9-60ce-7a10-95c0-a130eb1d6ce2",
+   "environments": [
+    {
+     "environmentId": "local",
+     "cwd": "/work/proj",
+     "runtimeWorkspaceRoots": [
+      "/work/proj"
+     ]
+    }
+   ],
+   "extra": null,
+   "sessionId": "01a173f9-60ce-7a10-95c0-a130eb1d6ce2",
+   "forkedFromId": null,
+   "parentThreadId": null,
+   "preview": "Run this shell command and show me its first line of output: curl -sI https://example.org",
+   "ephemeral": false,
+   "section": null,
+   "sectionEnteredAt": null,
+   "projectId": null,
+   "historyMode": "paginated",
+   "modelProvider": "openai",
+   "model": "gpt-6.1-sol",
+   "reasoningEffort": "high",
+   "createdAt": 1792947085,
+   "updatedAt": 1792947095,
+   "recencyAt": 1792947085,
+   "status": {
+    "type": "idle"
+   },
+   "path": "/Users/u/.codex/sessions/2026/10/25/rollout-2026-10-25T19-51-25-01a173f9-60ce-7a10-95c0-a130eb1d6ce2.jsonl",
+   "cwd": "/work/proj",
+   "cliVersion": "0.164.0",
+   "originator": "capture",
+   "source": "vscode",
+   "canAcceptDirectInput": true,
+   "threadSource": null,
+   "agentNickname": null,
+   "agentRole": null,
+   "gitInfo": null,
+   "name": null,
+   "daybreakEnabled": null,
+   "turns": [
+    {
+     "id": "01a173f9-610c-70a2-aeaf-2982c3b13dbd",
+     "rootTurnId": "01a173f9-610c-70a2-aeaf-2982c3b13dbd",
+     "items": [
+      {
+       "type": "userMessage",
+       "id": "01a173f9-6d1e-7d90-9463-9e55a68e9c9e",
+       "clientId": null,
+       "content": [
+        {
+         "type": "text",
+         "text": "Run this shell command and show me its first line of output: curl -sI https://example.org",
+         "text_elements": []
+        }
+       ]
+      },
+      {
+       "type": "agentMessage",
+       "id": "msg_045f9ffc446b680c016ade33928c748191a4687e4677b600bb",
+       "text": "I\u2019ll run the command and show its first output line.",
+       "phase": "commentary",
+       "memoryCitation": null,
+       "delivery": null,
+       "questions": null
+      },
+      {
+       "type": "commandExecution",
+       "id": "exec-5d5ab1cc-cb77-4864-a865-51029b0372d2",
+       "pluginId": null,
+       "scriptPath": null,
+       "command": "/bin/zsh -lc 'curl -sI https://example.org'",
+       "cwd": "/work/proj",
+       "processId": "69986",
+       "source": "unifiedExecStartup",
+       "status": "failed",
+       "commandActions": [
+        {
+         "type": "unknown",
+         "command": "curl -sI https://example.org"
+        }
+       ],
+       "aggregatedOutput": null,
+       "exitCode": 6,
+       "durationMs": 0
+      },
+      {
+       "type": "commandExecution",
+       "id": "exec-105a6912-b8e4-4c38-bbad-9d0ddefb451d",
+       "pluginId": null,
+       "scriptPath": null,
+       "command": "/bin/zsh -lc 'curl -sI https://example.org'",
+       "cwd": "/work/proj",
+       "processId": "48017",
+       "source": "unifiedExecStartup",
+       "status": "completed",
+       "commandActions": [
+        {
+         "type": "unknown",
+         "command": "curl -sI https://example.org"
+        }
+       ],
+       "aggregatedOutput": "HTTP/2 200 \r\ndate: Sun, 25 Oct 2026 16:51:33 GMT\r\ncontent-type: text/html; charset=utf-8\r\nserver: cloudflare\r\nlast-modified: Sat, 24 Oct 2026 20:05:47 GMT\r\nallow: GET, HEAD\r\naccept-ranges: bytes\r\nage: 4969\r\ncache-control: max-age=14400\r\ncf-cache-status: HIT\r\ncf-ray: 0000000000000000-XXX\r\nalt-svc: h3=\":443\"; ma=86400\r\n\r\n",
+       "exitCode": 0,
+       "durationMs": 298
+      },
+      {
+       "type": "agentMessage",
+       "id": "msg_045f9ffc446b680c016ade339713588191b06057232ca21050",
+       "text": "```text\nHTTP/2 200\n```",
+       "phase": "final_answer",
+       "memoryCitation": null,
+       "delivery": null,
+       "questions": null
+      }
+     ],
+     "itemsView": "full",
+     "status": "completed",
+     "error": null,
+     "startedAt": 1792947085,
+     "completedAt": 1792947095,
+     "durationMs": 9541
+    }
+   ]
+  },
+  "model": "gpt-6.1-sol",
+  "modelProvider": "openai",
+  "serviceTier": "default",
+  "disabledPluginIds": [],
+  "cwd": "/work/proj",
+  "runtimeWorkspaceRoots": [
+   "/work/proj"
+  ],
+  "instructionSources": [],
+  "approvalPolicy": "on-request",
+  "approvalsReviewer": "user",
+  "sandbox": {
+   "type": "workspaceWrite",
+   "writableRoots": [],
+   "networkAccess": false,
+   "excludeTmpdirEnvVar": false,
+   "excludeSlashTmp": false
+  },
+  "activePermissionProfile": null,
+  "reasoningEffort": "high",
+  "collaborationMode": {
+   "mode": "default",
+   "settings": {
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "high",
+    "developer_instructions": null
+   }
+  },
+  "multiAgentMode": "explicitRequestOnly",
+  "initialTurnsPage": null,
+  "turnsBackwardsCursor": "{\"requestedThreadId\":\"01a173f9-60ce-7a10-95c0-a130eb1d6ce2\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+  "itemsBackwardsCursor": "{\"requestedThreadId\":\"01a173f9-60ce-7a10-95c0-a130eb1d6ce2\",\"rolloutOrdinal\":25,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+ }
+}
