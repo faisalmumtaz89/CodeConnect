@@ -3,6 +3,17 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A Codex turn reads in order after a restart
+
+- When the daemon restarts or updates while a Codex turn runs, what it recovers from Codex's history
+  afterwards — the prompt, a command that ran while it was down — appears on the phone inside its turn,
+  where it happened, instead of below the turn's "Turn complete". The session reads Done when the turn has
+  finished, instead of Running with the old prompt as its latest line. Needs both this Mac release and the
+  matching iPhone app; either one alone keeps the old order.
+- When a Codex turn stops or fails around a daemon restart, update or reconnect, its prompt and what it did
+  before the daemon attached reach the phone once the next turn completes. They used to stay missing:
+  Codex names a stopped turn's prompt only by a placeholder until a later turn has run.
+
 ## Codex sessions stay on the phone after a restart
 
 - A Codex session whose history holds a stopped turn, a failed turn, a web search, an MCP or sub-agent

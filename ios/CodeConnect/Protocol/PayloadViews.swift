@@ -141,6 +141,14 @@ extension Event {
         return payload["request_id"]?.stringValue
     }
 
+    /// The `source_event_id` of the fact a Codex item belongs immediately before,
+    /// when the Mac read it back from the thread's history after later facts of its
+    /// turn were filed (protocol `BELONGS_BEFORE`). Nil for an item filed in place.
+    var codexBelongsBefore: String? {
+        guard source == .codex else { return nil }
+        return payload["belongs_before"]?.stringValue
+    }
+
     /// The daemon's risk block, wherever it put it.
     ///
     /// `protocol/src/ws.rs` puts it inside `card`, which `ApprovalCard` already

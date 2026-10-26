@@ -11886,6 +11886,220 @@ async fn stop_after_a_reconnect_mid_turn(doing: MidTurn) {
     teardown(sub, coord, &marker);
 }
 
+/// **A stopped turn's prompt the link never saw reaches the phone once the next turn
+/// completes.**
+///
+/// The turn is typed while the wire is down, so its prompt finishes before any
+/// connection of the daemon's is subscribed; the link comes back mid-turn and the phone
+/// stops it. Until a later turn has run, Codex's answer names that prompt by a
+/// placeholder id, which [`CodexAdapter::plan_resume_seed`] skips. The next completed
+/// turn is the first moment an answer can name it, and this gate asserts it is asked
+/// then.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_stopped_turn_s_missed_prompt_is_recovered_by_the_next_turn() {
+    recover_a_stopped_turn_s_missed_prompt(StopThen::RunTheNextTurn).await;
+}
+
+/// **The same, when the link reconnects between the stop and the next turn.** The
+/// connection that attached across the turn is gone, so only the answer the new one
+/// reads can say that the stopped turn still has items it could not name.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_stopped_turn_s_missed_prompt_is_recovered_across_a_reconnect() {
+    recover_a_stopped_turn_s_missed_prompt(StopThen::ReconnectAndRunTheNextTurn).await;
+}
+
+/// What happens between the phone's stop and the turn that recovers what it missed.
+#[derive(PartialEq)]
+enum StopThen {
+    RunTheNextTurn,
+    ReconnectAndRunTheNextTurn,
+}
+
+async fn recover_a_stopped_turn_s_missed_prompt(then: StopThen) {
+    let Some(codex) = live_gate() else { return };
+    let sb = LiveSandbox::new("stopnext");
+    let coord = sb.spawn_coordinator(&codex);
+    wait_for_the_broker_and_the_tui(&sb).await;
+    wait_for_a_composer(&sb).await;
+    run_the_warm_up_turn(&sb).await;
+
+    let session = SessionKey::new(&sb.uid, "cc-1");
+    let (daemon, _db, _push) = live_daemon(&session);
+    let gate = GatedCcdLeg::in_front_of(&sb).await;
+    let _registration = register_the_run_on(&daemon, &session, gate.path()).await;
+    let subscribed = |daemon: &Arc<crate::state::Daemon>| {
+        let daemon = Arc::clone(daemon);
+        async move {
+            daemon
+                .resolve_codex_inbound("cc-1")
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|(_, a)| a.is_subscribed())
+        }
+    };
+    assert!(
+        wait_for_async(Duration::from_secs(120), || subscribed(&daemon)).await,
+        "the link never subscribed"
+    );
+    let (sub, _thread) = subscribed_tap(&sb, "ccd-observer").await;
+    let mut phone = PhoneOverTheWire::connect(&daemon).await;
+
+    // ---- a turn begins while the wire is down, and the phone stops it ---------
+    gate.sever();
+    assert!(
+        wait_for_async(Duration::from_secs(30), || {
+            let up = subscribed(&daemon);
+            async move { !up.await }
+        })
+        .await,
+        "the daemon went on reporting an addressee it had lost"
+    );
+    let stopped_turn = a_long_tool_free_turn(&sb, &sub).await;
+    gate.restore();
+    assert!(
+        wait_for_async(Duration::from_secs(120), || subscribed(&daemon)).await,
+        "the link never came back after the wire returned"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !turn_has_ended(&sub, &stopped_turn),
+        "the turn finished before the link was back, so it was never attached across"
+    );
+    let stopped = phone
+        .interrupt(
+            "cc-1",
+            "stop-missed",
+            &stopped_turn,
+            Duration::from_secs(60),
+        )
+        .await;
+    assert_eq!(
+        stopped,
+        protocol::ws::InterruptResult::Aborted {
+            turn_id: stopped_turn.clone()
+        }
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || turn_has_ended(
+            &sub,
+            &stopped_turn
+        ))
+        .await,
+        "the stopped turn never reported its terminal"
+    );
+    if then == StopThen::ReconnectAndRunTheNextTurn {
+        // Ten seconds after the stop, not at once. On codex 0.164.0 a turn submitted after
+        // a reconnect that followed a stop has gone unanswered in several runs, with and
+        // without the follow-up this gate is about; Codex also leaves this harness's
+        // warm-up turn unanswered at times with no daemon attached, so whether the
+        // reconnect causes it is not settled. The wait keeps fewer of those runs here.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        gate.sever();
+        assert!(
+            wait_for_async(Duration::from_secs(30), || {
+                let up = subscribed(&daemon);
+                async move { !up.await }
+            })
+            .await,
+            "the daemon went on reporting an addressee it had lost"
+        );
+        gate.restore();
+        assert!(
+            wait_for_async(Duration::from_secs(120), || subscribed(&daemon)).await,
+            "the link never came back after the wire returned"
+        );
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+
+    let prompts_of = |turn: &str| {
+        daemon
+            .store
+            .events_after(&session.uid, 0, 10_000)
+            .expect("read the event log")
+            .into_iter()
+            .filter(|e| {
+                e.kind == protocol::event::EventKind::UserMessage
+                    && e.turn_id.as_deref() == Some(turn)
+            })
+            .map(|e| e.payload["text"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+    };
+    print_events(&daemon, &session.uid, "after the stop");
+    assert!(
+        prompts_of(&stopped_turn).is_empty(),
+        "the stopped turn's prompt was already recorded, so this measured nothing"
+    );
+
+    // ---- the next turn completes ---------------------------------------------
+    let completed_before = sub
+        .seen()
+        .iter()
+        .filter(|f| f["method"] == "turn/completed")
+        .count();
+    assert!(
+        sb.submit_until(
+            "Reply with the single word cobalt and nothing else.",
+            Duration::from_secs(180),
+            || sub
+                .seen()
+                .iter()
+                .filter(|f| f["method"] == "turn/completed")
+                .count()
+                > completed_before,
+        )
+        .await,
+        "the next turn never completed. pane:\n{}",
+        sb.capture_pane()
+    );
+    let recovered = wait_until(Duration::from_secs(30), || {
+        !prompts_of(&stopped_turn).is_empty()
+    })
+    .await;
+    print_events(&daemon, &session.uid, "after the next turn");
+    assert!(
+        recovered,
+        "the stopped turn's prompt never reached the event log"
+    );
+    let prompts = prompts_of(&stopped_turn);
+    assert_eq!(prompts.len(), 1, "recorded once: {prompts:?}");
+    assert!(
+        prompts[0].contains("integers from 1 to 900"),
+        "the recovered prompt is the one typed: {prompts:?}"
+    );
+    // Filed after the next turn, so it names where it belongs: a fact of its own turn
+    // that was filed before it.
+    let events = daemon
+        .store
+        .events_after(&session.uid, 0, 10_000)
+        .expect("read the event log");
+    let prompt = events
+        .iter()
+        .find(|e| {
+            e.kind == protocol::event::EventKind::UserMessage
+                && e.turn_id.as_deref() == Some(stopped_turn.as_str())
+        })
+        .expect("checked above");
+    let anchor = prompt.payload[protocol::event::BELONGS_BEFORE]
+        .as_str()
+        .and_then(|anchor| {
+            events
+                .iter()
+                .find(|e| e.source_event_id.as_deref() == Some(anchor))
+        })
+        .unwrap_or_else(|| panic!("the recovered prompt names no filed place: {prompt:?}"));
+    assert!(
+        anchor.seq < prompt.seq && anchor.turn_id == prompt.turn_id,
+        "it belongs before an earlier fact of its own turn: {anchor:?}"
+    );
+    println!("GATE PASS — a stopped turn's missed prompt is recovered by the next turn");
+
+    gate.close();
+    teardown(sub, coord, "");
+}
+
 /// **The first turn after `/new` is stoppable, though its `turn/started` never
 /// reaches this link.**
 ///

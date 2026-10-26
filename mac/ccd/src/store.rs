@@ -1506,6 +1506,26 @@ impl Store {
         Ok(filed)
     }
 
+    /// The `source_event_id` of every Codex fact filed for this run: the dedup keys
+    /// a fact read from a `thread/resume` answer would collide with.
+    pub fn codex_source_event_ids(
+        &self,
+        session_uid: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT source_event_id FROM events
+              WHERE session_uid = ?1 AND source = ?2 AND source_event_id IS NOT NULL",
+        )?;
+        let ids = stmt
+            .query_map(
+                params![session_uid, protocol::event::Source::Codex.as_str()],
+                |row| row.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
     /// The sequence number of the event a hook filed under `source_event_id`
     /// in this run, read on the dedup index.
     pub fn hook_event_seq(&self, session_uid: &str, source_event_id: &str) -> Result<Option<u64>> {

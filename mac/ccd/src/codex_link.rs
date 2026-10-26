@@ -234,8 +234,9 @@ const ADOPTION_RETRIES: u32 = 5;
 /// # What produces one, and why the count is not always one
 ///
 /// Exactly one thing does: [`apply_held_candidate`] retiring a thread that still owes a
-/// turn debt — a `/new` switch away from a thread this link attached to MID-TURN before
-/// its follow-up resume could land. So the number owed is the number of such switches
+/// turn debt — a `/new` switch away from a thread this link attached to mid-turn, or
+/// found with a stopped turn its answer could not name, before its follow-up resume could
+/// land. So the number owed is the number of such switches
 /// that have happened without an intervening payment, and payments are made one per pass
 /// through `Attach::Attached`.
 ///
@@ -3745,7 +3746,7 @@ async fn serve_connection(
                 // log dedups every fact the second answer re-describes.
                 crate::log_info!(
                     "codex link for {}: asking once more about {thread}, which this link \
-                     attached to mid-turn and then switched away from — its \
+                     switched away from while it owed a turn there a follow-up — its \
                      pre-subscription items are reachable from nowhere else",
                     session.name
                 );
@@ -4842,10 +4843,16 @@ impl RunningTurn {
 enum TurnDebt {
     /// Attached across while it was running; its terminal has not been seen yet.
     AwaitingTerminal,
+    /// It stopped or failed before a later turn settled the ids of its items — its own
+    /// terminal said so, or the answer that described it. The next completed turn on its
+    /// thread is the first moment an answer can name them.
+    AwaitingLaterTurn,
     /// Its terminal has been seen. A follow-up is owed and has **not** been launched.
     Owed,
-    /// A follow-up has been launched for it. **Terminal state** — one per turn, ever,
-    /// which is what makes the follow-up a settlement rather than a loop.
+    /// A follow-up has been launched for it, or an answer recovered it. Final, except
+    /// that an answer still naming a stopped turn's items by placeholders returns it to
+    /// [`TurnDebt::AwaitingLaterTurn`] — and only a turn completing after it makes that
+    /// owed again, so the follow-up stays a settlement rather than a loop.
     Settled,
 }
 
@@ -5543,7 +5550,7 @@ impl Connection<'_> {
     ///   build does not read. Asking the same app-server the same question again would
     ///   get the same reply, so the gap is legible and permanent rather than pending.
     ///
-    /// `false` is the case worth carrying, and there are two of them:
+    /// `false` is the case worth carrying, and there are three of them:
     ///
     /// * the answer was READABLE and the write failed. The facts exist, this link
     ///   had them in its hands, and the log does not hold them — so the debt is
@@ -5563,11 +5570,16 @@ impl Connection<'_> {
     ///   switch to B carrying A's debt, and recover A while its turn is still going.
     ///   A's terminal is then filtered — the link is on B — so nothing later on this
     ///   connection settles it, and a debt discharged here loses A's
-    ///   pre-subscription items for good.
+    ///   pre-subscription items for good;
+    /// * the answer names a stopped turn's items by placeholders: no later turn has run
+    ///   on the thread yet, so they are owed until one has.
     ///
-    /// The debts of the thread are settled either way, on every path above. They
-    /// bound how many times THIS connection asks — one ask per turn — and the
-    /// obligation that outlives the connection is the carried slot, not these. A
+    /// The debts of the thread are settled on every path above but two: a turn the
+    /// answer reports still running keeps waiting for its own terminal, and a stopped
+    /// turn it names by placeholders waits for a later turn — unless one has already
+    /// completed while this ask was out, which leaves it owed. They bound how many times
+    /// THIS connection asks, and the obligation that outlives the connection is the
+    /// carried slot, not these. A
     /// carried slot that stays set is re-armed by the next connection to adopt a
     /// thread, which is what makes "ask again later" a bounded retry rather than a
     /// loop.
@@ -5600,8 +5612,21 @@ impl Connection<'_> {
         };
         // Read before the events are taken out, because it is a property of the
         // answer rather than of what the answer happened to contain.
-        let still_running = seed.running_turn_ids().len();
-        let events = seed.take_events();
+        let running = seed.running_turn_ids().to_vec();
+        let still_running = running.len();
+        let unsettled = seed.unsettled_turn_id().map(str::to_string);
+        let mut events = seed.take_events();
+        // Placed before anything is written: an item filed without its place keeps that
+        // key for good, so a failed read files nothing and leaves the obligation owed.
+        if let Err(err) = self.place_read_back_items(&mut events, thread).await {
+            crate::log_warn!(
+                "codex link for {}: the recovery answer for {thread} was not recorded — \
+                 {err:#}; the obligation stays owed so a later connection asks again",
+                self.session.name
+            );
+            self.settle_debts_on(thread);
+            return false;
+        }
         let described = events.len();
         let mut wrote_them_all = true;
         for pending in events {
@@ -5619,7 +5644,24 @@ impl Connection<'_> {
                 wrote_them_all = false;
             }
         }
-        self.settle_debts_on(thread);
+        // Settled is what this answer recovered: every debt on the thread but a turn it
+        // reports still running, which keeps waiting for its own terminal, and a stopped
+        // turn it still names by placeholders, which waits for a later turn on its thread
+        // as it would on an attach.
+        for ((owed_thread, turn), debt) in self.debts.iter_mut() {
+            if owed_thread == thread && !running.contains(turn) {
+                *debt = match debt {
+                    TurnDebt::Owed if unsettled.as_ref() == Some(turn) => TurnDebt::Owed,
+                    _ if unsettled.as_ref() == Some(turn) => TurnDebt::AwaitingLaterTurn,
+                    _ => TurnDebt::Settled,
+                };
+            }
+        }
+        if let Some(turn) = &unsettled {
+            self.debts
+                .entry((thread.to_string(), turn.clone()))
+                .or_insert(TurnDebt::AwaitingLaterTurn);
+        }
         if !wrote_them_all {
             crate::log_warn!(
                 "codex link for {}: the recovery answer for {thread} described {described} \
@@ -5643,6 +5685,15 @@ impl Connection<'_> {
             );
             return false;
         }
+        if let Some(turn) = unsettled {
+            crate::log_info!(
+                "codex link for {}: the recovery answer for {thread} filed {described} \
+                 fact(s) and names items of stopped turn {turn} by placeholder ids — they \
+                 are still owed, and only an answer read after a later turn can name them",
+                self.session.name
+            );
+            return false;
+        }
         crate::log_info!(
             "codex link for {}: recovered {described} fact(s) from {thread} on demand; the \
              link remains on its current thread",
@@ -5651,10 +5702,10 @@ impl Connection<'_> {
         true
     }
 
-    /// One ask per turn, on the thread that was asked about. Called on every exit from
-    /// [`Connection::recover_from`] including a failed write: what these bound is how
-    /// often THIS connection asks, and re-asking a thread whose answer was in hand would
-    /// be the loop the debts exist to prevent.
+    /// One ask per turn, on the thread that was asked about. Called on the exits from
+    /// [`Connection::recover_from`] that file nothing from the answer: what these bound
+    /// is how often THIS connection asks, and re-asking a thread whose answer was in hand
+    /// would be the loop the debts exist to prevent.
     fn settle_debts_on(&mut self, thread: &str) {
         for ((t, _), debt) in self.debts.iter_mut() {
             if t == thread {
@@ -5840,7 +5891,8 @@ impl Connection<'_> {
                 ),
             }
         }
-        let events = seed.take_events();
+        let mut events = seed.take_events();
+        self.place_read_back_items(&mut events, thread).await?;
         let recorded = events.len();
         for pending in events {
             self.daemon.ingest(pending).await.with_context(|| {
@@ -5868,8 +5920,10 @@ impl Connection<'_> {
             carried.fallback = None;
         }
         // A turn that was running when this answer described it owes items this link can
-        // never be sent: they finished before it subscribed. Remember it until its
-        // terminal is observed, then ask once more.
+        // never be sent: they finished before it subscribed. Remember it until its own
+        // terminal is observed. A last turn that had stopped or failed with items still
+        // under placeholder ids owes them too; remember it until a later turn on this
+        // thread completes. Then ask once more.
         //
         // **The vacancy still governs the DEBT, and only the debt.** A turn whose
         // terminal this link has already seen — or already asked about — keeps the state
@@ -5884,6 +5938,17 @@ impl Connection<'_> {
                 .entry((thread.to_string(), turn.clone()))
                 .or_insert(TurnDebt::AwaitingTerminal);
         }
+        // A turn this link last saw running that the answer now reports stopped: its own
+        // terminal went by unseen, so it waits for a later turn like any other.
+        if let Some(turn) = seed.unsettled_turn_id() {
+            let debt = self
+                .debts
+                .entry((thread.to_string(), turn.to_string()))
+                .or_insert(TurnDebt::AwaitingLaterTurn);
+            if *debt == TurnDebt::AwaitingTerminal {
+                *debt = TurnDebt::AwaitingLaterTurn;
+            }
+        }
         self.seed_running_turn(&seed, thread).await;
         crate::log_info!(
             "codex link for {}: attached to thread {thread} by resume. The answer \
@@ -5892,6 +5957,60 @@ impl Connection<'_> {
              path. This connection is subscribed.",
             self.session.name
         );
+        Ok(())
+    }
+
+    /// **Name where each item this answer recovers belongs, when a later fact of its turn
+    /// is already filed.**
+    ///
+    /// The answer lists a turn's items in the order they happened, and the log is
+    /// append-only: an item that finished while this daemon was not subscribed reaches
+    /// the log only now, after the facts its turn filed live since — and after the
+    /// turn's end, when this is the follow-up. Walking each turn backwards, an item not
+    /// yet filed takes [`protocol::event::BELONGS_BEFORE`] naming the first filed fact
+    /// of the nearest later item of its turn that is filed — a tool's call, filed when
+    /// it started, rather than its result — or the turn's end; one with no such fact is
+    /// in order as filed and takes nothing.
+    async fn place_read_back_items(
+        &self,
+        events: &mut [protocol::event::PendingEvent],
+        thread: &str,
+    ) -> Result<()> {
+        let filed = self
+            .daemon
+            .db
+            .codex_source_event_ids(self.session.uid.clone())
+            .await
+            .context(
+                "reading which facts of this run are filed, to place what the answer recovers",
+            )?;
+        let mut next_filed: std::collections::HashMap<String, String> = Default::default();
+        for pending in events.iter_mut().rev() {
+            let (Some(turn), Some(sid)) =
+                (pending.turn_id.clone(), pending.source_event_id.clone())
+            else {
+                continue;
+            };
+            let filed_in_place = filed.contains(&sid);
+            if !filed_in_place && pending.item_id.is_some() {
+                if let (Some(anchor), Some(payload)) =
+                    (next_filed.get(&turn), pending.payload.as_object_mut())
+                {
+                    payload.insert(protocol::event::BELONGS_BEFORE.to_string(), json!(anchor));
+                }
+            }
+            // This item's first filed fact: a tool's call, filed when it started, whether
+            // or not its result was; otherwise the fact itself, when filed.
+            let call = pending
+                .item_id
+                .as_deref()
+                .filter(|_| pending.kind == protocol::event::EventKind::ToolResult)
+                .map(|item| crate::codex_adapter::tool_call_source_event_id(thread, item))
+                .filter(|call| filed.contains(call));
+            if let Some(first) = call.or(filed_in_place.then_some(sid)) {
+                next_filed.insert(turn, first);
+            }
+        }
         Ok(())
     }
 
@@ -8375,6 +8494,9 @@ impl Connection<'_> {
             // act on: the frame has been consumed, and a doorbell for a fact the log does
             // not hold would announce something no reader can open.
             let filed = self.record(pending).await.ok().flatten();
+            if let Some(event) = &filed {
+                self.note_later_turn(event);
+            }
             // **The doorbell hangs off the FILED event, and only here.**
             //
             // `record` answers `None` for a fact the log already held, so a turn
@@ -8395,27 +8517,24 @@ impl Connection<'_> {
         }
     }
 
-    /// **Does this fact settle a turn this link attached across?**
+    /// **Does this fact settle the turns this link owes a follow-up?**
     ///
-    /// If so, the debt described on [`Connection::awaiting_terminal`] can now be paid:
-    /// the turn is finished, so an answer about it will carry its real item ids, and one
-    /// more `thread/resume` recovers whatever completed before this link subscribed.
+    /// A **completed** terminal settles its own turn's [`TurnDebt::AwaitingTerminal`]: the
+    /// turn is finished, so an answer about it carries its real item ids, and one more
+    /// `thread/resume` recovers whatever finished before this link subscribed. The
+    /// [`TurnDebt::AwaitingLaterTurn`] debts on its thread are settled by
+    /// [`Connection::note_later_turn`], once the terminal is filed (measured on codex
+    /// 0.164.0: the prompt of a turn stopped with Esc carries its live id once a later
+    /// turn has run; a failed turn's prompt carried its live id right after the failure,
+    /// measured on a bare app-server).
     ///
-    /// Only a **completed** terminal triggers it, and that is a deliberate narrowing. An
-    /// `interrupted` turn is read by [`CodexAdapter::plan_resume_seed`], but until a later
-    /// turn has run the live answer names its prompt by a placeholder and may show an
-    /// in-flight command `inProgress` (measured on codex 0.164.0, about two seconds after
-    /// Esc), both of which the reader skips, so a follow-up asked at this moment would
-    /// recover at most part of what it owes and settle the debt for good. A `failed`
-    /// turn's answer has been measured only on a bare app-server, never at this moment
-    /// through the TUI's, so it is not asked either. The debt on such a turn is never paid:
-    /// what that turn did before this link subscribed stays unrecovered, as the Codex
-    /// guide's limits say.
+    /// A stopped or failed terminal moves its own turn to `AwaitingLaterTurn` instead.
+    /// Read at that moment through the TUI's app-server, the answer names the stopped
+    /// turn's prompt by a placeholder and may show an in-flight command `inProgress`
+    /// (about two seconds after Esc), both of which the reader skips, so a follow-up then
+    /// would recover at most part of what it owes and settle the debt for good.
     fn note_terminal(&mut self, pending: &protocol::event::PendingEvent) {
         if pending.kind != protocol::event::EventKind::TurnComplete {
-            return;
-        }
-        if pending.payload.get("status").and_then(Value::as_str) != Some("completed") {
             return;
         }
         let Some(turn) = pending.turn_id.as_deref() else {
@@ -8428,6 +8547,13 @@ impl Connection<'_> {
         let Some(thread) = self.bound().map(str::to_string) else {
             return;
         };
+        let key = (thread.clone(), turn.to_string());
+        if pending.payload.get("status").and_then(Value::as_str) != Some("completed") {
+            if self.debts.get(&key) == Some(&TurnDebt::AwaitingTerminal) {
+                self.debts.insert(key, TurnDebt::AwaitingLaterTurn);
+            }
+            return;
+        }
         // **The second observation that ends [`CodexAddressee::StartInFlight`].** The turn
         // a phone started from the spent proof has finished, so there is nothing left for
         // a second compose to collide with and no reason to keep refusing one.
@@ -8440,7 +8566,6 @@ impl Connection<'_> {
         if self.start_in_flight_target() == Some(thread.as_str()) {
             self.start_in_flight = None;
         }
-        let key = (thread.clone(), turn.to_string());
         // Only a turn still awaiting its terminal transitions. A turn already owed has
         // nothing to add; one already settled has had its ask, and a replayed terminal
         // for it must not buy another.
@@ -8457,13 +8582,43 @@ impl Connection<'_> {
         }
     }
 
+    /// **A completed turn this log did not hold settles the stopped turns before it.**
+    ///
+    /// Asked of the FILED terminal, so a terminal the wire replays after a resume — one
+    /// already in the log, of a turn that may be older than the stopped one — settles
+    /// nothing: only a turn that ran after the stop settles its ids.
+    fn note_later_turn(&mut self, filed: &protocol::event::Event) {
+        if filed.kind != protocol::event::EventKind::TurnComplete
+            || filed.payload.get("status").and_then(Value::as_str) != Some("completed")
+        {
+            return;
+        }
+        let (Some(thread), Some(turn)) =
+            (self.bound().map(str::to_string), filed.turn_id.as_deref())
+        else {
+            return;
+        };
+        for ((owed_thread, owed_turn), debt) in self.debts.iter_mut() {
+            if *owed_thread == thread && *debt == TurnDebt::AwaitingLaterTurn {
+                // Owed, NOT settled, for the same reason as above.
+                *debt = TurnDebt::Owed;
+                crate::log_info!(
+                    "codex link for {}: turn {turn} completed after turn {owed_turn} stopped \
+                     with items Codex named only by placeholders — asking once more so they \
+                     are recovered",
+                    self.session.name
+                );
+            }
+        }
+    }
+
     /// Is a follow-up owed? **Peeked, never consumed** — see [`Connection::owed`]. The
     /// debt is cleared by [`Connection::launch_follow_up`], and only once the request
     /// that pays it is actually on the wire.
     /// **Does this link owe `thread` a pre-subscription recovery?**
     ///
-    /// True when a turn on that thread was seeded while RUNNING and its follow-up resume
-    /// has not been launched. Those items — the ones that finished before this link
+    /// True when a turn on that thread was seeded while running, or stopped before its
+    /// items could be named, and its follow-up resume has not been launched. Those items — the ones that finished before this link
     /// subscribed — are reachable from nowhere else: no live frame carries them, and once
     /// the link switches away nothing will ever ask about that thread again. The obligation
     /// therefore has to outlive the switch.
@@ -13620,6 +13775,23 @@ mod tests {
             ids.contains(&format!("{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}")),
             "the premise is that A's recovery was answered and consumed; without A's \
              withheld item this test is exercising the timeout arm again: {ids:?}"
+        );
+        // And it names where it belongs: A's later facts were filed live before the
+        // recovery read it back, B's in between, so in arrival order it sits after both.
+        let filed = |sid: &str| {
+            events
+                .iter()
+                .find(|e| e.source_event_id.as_deref() == Some(sid))
+                .unwrap_or_else(|| panic!("{sid} is filed: {ids:?}"))
+        };
+        let prompt = filed(&format!("{LIFECYCLE_THREAD}:item:{LIFECYCLE_USER_ITEM}"));
+        let anchor = prompt.payload[protocol::event::BELONGS_BEFORE]
+            .as_str()
+            .unwrap_or_else(|| panic!("A's read-back prompt names no place: {prompt:?}"));
+        let anchor = filed(anchor);
+        assert!(
+            anchor.seq < prompt.seq && anchor.turn_id == prompt.turn_id,
+            "it names an earlier fact of its own turn: {anchor:?} for {prompt:?}"
         );
         assert_eq!(
             connections, 1,
@@ -25341,6 +25513,24 @@ mod tests {
     );
     const REGENERATE_PHONE_TURN_STREAM: &str =
         "cargo test -p ccd --bin ccd -- --ignored regenerate_the_phone_turn_stream_fixture";
+    const RECOVERED_TURN_CAPTURE: &str =
+        include_str!("../../../fixtures/codex/resume-follow-up-turn-0.164.0.json");
+    const PHONE_RECOVERED_TURN: &str =
+        include_str!("../../../fixtures/codex/phone-recovered-turn-0.164.0.json");
+    const PHONE_RECOVERED_TURN_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/codex/phone-recovered-turn-0.164.0.json"
+    );
+    /// The runs of `fixtures/codex/phone-recovered-turn-0.164.0.json`, in the order they are
+    /// driven.
+    const RECOVERED_TURN_RUNS: [&str; 4] = [
+        "attachedAfterThePrompt",
+        "attachedMidTurn",
+        "reconnectedMidTurn",
+        "reconnectedDuringTheCommand",
+    ];
+    const REGENERATE_PHONE_RECOVERED_TURN: &str =
+        "cargo test -p ccd --bin ccd -- --ignored regenerate_the_phone_recovered_turn_fixture";
 
     /// The lines of one capture, parsed. Each line is a `{conn, dir, frame}`
     /// wrapper around the frame the wire actually carried.
@@ -25563,33 +25753,571 @@ mod tests {
             );
         }
         let mut out = json!({ "frames": frames });
-
-        // **Only the clock reads are replaced, and that is checked rather than
-        // assumed** — the same rule, and the same assertion, `minor_19_wire_rows`
-        // normalises the minor-19 fixture under.
-        fn normalise(value: &mut Value, at: &str) {
-            match value {
-                Value::Object(map) => {
-                    for (key, slot) in map.iter_mut() {
-                        if matches!(key.as_str(), "ts" | "created_at" | "updated_at") {
-                            let was = slot.as_str().unwrap_or_default();
-                            assert!(
-                                was.len() == 24 && was.ends_with('Z'),
-                                "{key} was expected to be an RFC3339 clock read, and is {slot}"
-                            );
-                            *slot = json!(at);
-                        } else {
-                            normalise(slot, at);
-                        }
-                    }
-                }
-                Value::Array(items) => items.iter_mut().for_each(|item| normalise(item, at)),
-                _ => {}
-            }
-        }
-        normalise(&mut out, PHONE_TURN_AT);
+        normalise_clock(&mut out, PHONE_TURN_AT);
         drop(db);
         out
+    }
+
+    /// **Only the clock reads are replaced, and that is checked rather than
+    /// assumed** — the same rule, and the same assertion, `minor_19_wire_rows`
+    /// normalises the minor-19 fixture under.
+    fn normalise_clock(value: &mut Value, at: &str) {
+        match value {
+            Value::Object(map) => {
+                for (key, slot) in map.iter_mut() {
+                    if matches!(key.as_str(), "ts" | "created_at" | "updated_at") {
+                        let was = slot.as_str().unwrap_or_default();
+                        assert!(
+                            was.len() == 24 && was.ends_with('Z'),
+                            "{key} was expected to be an RFC3339 clock read, and is {slot}"
+                        );
+                        *slot = json!(at);
+                    } else {
+                        normalise_clock(slot, at);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| normalise_clock(item, at)),
+            _ => {}
+        }
+    }
+
+    /// The events of one run of a phone-wire fixture, as the phone decodes them.
+    fn fixture_events(run: &Value) -> Vec<protocol::event::Event> {
+        run["frames"]
+            .as_array()
+            .expect("a run is a list of frames")
+            .iter()
+            .map(|frame| {
+                serde_json::from_value(frame["event"].clone()).expect("an Event the phone decodes")
+            })
+            .collect()
+    }
+
+    /// One connection of the recovered-turn drive: an answer to attach from, the frames
+    /// it is then handed, and the follow-up answer it asks for, if it lives that long.
+    async fn recovered_turn_connection(
+        daemon: &Arc<Daemon>,
+        session: &SessionKey,
+        thread: &str,
+        attach: &Value,
+        frames: &[Value],
+        follow_up: Option<&Value>,
+    ) {
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(daemon, session, &mut adapter, &mut amend, thread, 1);
+        let seed = conn
+            .adapter
+            .plan_resume_seed(&attach["result"], thread)
+            .expect("the answer is read");
+        conn.attach_from_seed(seed, thread)
+            .await
+            .expect("the attach files what it read");
+        for frame in frames {
+            conn.observe_notification(frame).await;
+        }
+        if let Some(answer) = follow_up {
+            assert!(
+                conn.follow_up_owed(),
+                "the premise: the turn the link attached across has completed, so the \
+                 follow-up is owed"
+            );
+            let seed = conn
+                .adapter
+                .plan_resume_seed(&answer["result"], thread)
+                .expect("the follow-up answer is read");
+            conn.attach_from_seed(seed, thread)
+                .await
+                .expect("the follow-up files what it read");
+        }
+    }
+
+    /// **What a phone is sent for a turn the link attached to while it ran**, in the four
+    /// ways that happens.
+    ///
+    /// Every input is `fixtures/codex/resume-follow-up-turn-0.164.0.json`, one real
+    /// session on codex 0.164.0: four `thread/resume` answers (before the turn; just
+    /// after its prompt; mid-turn, once its command had run; after it completed) and the
+    /// frames a subscribed connection was handed between them. They go through
+    /// [`Connection::attach_from_seed`] and [`Connection::observe_notification`], the two
+    /// places the live link files what it reads, and the events are read back out of the
+    /// store and wrapped as `ws_server` wraps them.
+    ///
+    ///   * `attachedAfterThePrompt` — the daemon's first connection attaches once the
+    ///     prompt has finished and before the command starts: the command is filed live,
+    ///     and the prompt is read back after the turn's end.
+    ///   * `attachedMidTurn` — it attaches once the command has run: the prompt and the
+    ///     command are read back after the turn's end.
+    ///   * `reconnectedMidTurn` — a connection attached before the turn files the prompt
+    ///     live and is gone once it has; the next attaches mid-turn, so only the command
+    ///     is read back, after the reply that followed it.
+    ///   * `reconnectedDuringTheCommand` — a connection attached after the prompt files
+    ///     the command's call live and is gone before its result; the next attaches
+    ///     mid-turn, so the prompt and the command's result are read back after the
+    ///     turn's end.
+    async fn phone_recovered_turn() -> Value {
+        let capture: Value =
+            serde_json::from_str(RECOVERED_TURN_CAPTURE).expect("the capture is JSON");
+        let thread = capture["answerAfter"]["result"]["thread"]["id"]
+            .as_str()
+            .expect("the answer names its thread")
+            .to_string();
+        let live = |part: &str| -> Vec<Value> {
+            capture["live"][part]
+                .as_array()
+                .unwrap_or_else(|| panic!("the capture's {part} frames"))
+                .clone()
+        };
+        let until_the_prompt = live("untilThePromptAnswer");
+        let until_mid_turn = live("untilTheMidTurnAnswer");
+        let after = live("afterTheMidTurnAnswer");
+        let after_the_prompt: Vec<Value> = until_mid_turn.iter().chain(&after).cloned().collect();
+        let call_filed = until_mid_turn
+            .iter()
+            .position(|frame| {
+                frame["method"] == json!("item/started")
+                    && frame["params"]["item"]["type"] == json!("commandExecution")
+            })
+            .expect("the command started before the mid-turn answer");
+        let session = SessionKey {
+            uid: PHONE_TURN_UID.into(),
+            name: "cc-1".into(),
+        };
+
+        let mut runs = serde_json::Map::new();
+        for run in RECOVERED_TURN_RUNS {
+            let (daemon, db) = linked_daemon(&session);
+            let (attach, frames) = match run {
+                "attachedAfterThePrompt" => (&capture["answerAfterThePrompt"], &after_the_prompt),
+                "attachedMidTurn" => (&capture["answerMidTurn"], &after),
+                "reconnectedDuringTheCommand" => {
+                    recovered_turn_connection(
+                        &daemon,
+                        &session,
+                        &thread,
+                        &capture["answerAfterThePrompt"],
+                        &until_mid_turn[..=call_filed],
+                        None,
+                    )
+                    .await;
+                    (&capture["answerMidTurn"], &after)
+                }
+                _ => {
+                    recovered_turn_connection(
+                        &daemon,
+                        &session,
+                        &thread,
+                        &capture["answerBeforeTheTurn"],
+                        &until_the_prompt,
+                        None,
+                    )
+                    .await;
+                    (&capture["answerMidTurn"], &after)
+                }
+            };
+            recovered_turn_connection(
+                &daemon,
+                &session,
+                &thread,
+                attach,
+                frames,
+                Some(&capture["answerAfter"]),
+            )
+            .await;
+            let frames: Vec<Value> = daemon
+                .store
+                .events_after(&session.uid, 0, 10_000)
+                .expect("the event log reads")
+                .into_iter()
+                .map(|event| {
+                    serde_json::to_value(protocol::ws::ServerMessage::Event { event })
+                        .expect("the frame serialises")
+                })
+                .collect();
+            runs.insert(run.to_string(), json!({ "frames": frames }));
+            drop(db);
+        }
+        let mut out = Value::Object(runs);
+        normalise_clock(&mut out, PHONE_TURN_AT);
+        out
+    }
+
+    /// **Each item read back after a later fact of its turn names the first filed fact of
+    /// the nearest later item, and the file is what this build emits.**
+    ///
+    /// The first half is the contract the phone draws from (`CodexTurnTimelineTests`),
+    /// asserted on the committed bytes against the capture's own item order; the second
+    /// re-derives the whole file and requires it byte-identical.
+    #[tokio::test]
+    async fn the_phone_recovered_turn_fixture_is_what_this_build_emits() {
+        let committed: Value =
+            serde_json::from_str(PHONE_RECOVERED_TURN).expect("the fixture must be JSON");
+        let capture: Value =
+            serde_json::from_str(RECOVERED_TURN_CAPTURE).expect("the capture is JSON");
+        // Each turn in the order it happened: its items as the final answer lists them,
+        // each as the facts it files in order (a command its call, then its result), then
+        // its end.
+        let mut history: Vec<(String, Vec<Vec<String>>)> = Vec::new();
+        let thread = capture["answerAfter"]["result"]["thread"]["id"]
+            .as_str()
+            .expect("the answer names its thread");
+        for turn in capture["answerAfter"]["result"]["thread"]["turns"]
+            .as_array()
+            .expect("the answer's turns")
+        {
+            let id = turn["id"].as_str().expect("a turn id");
+            let mut order: Vec<Vec<String>> = turn["items"]
+                .as_array()
+                .expect("the turn's items")
+                .iter()
+                .map(|item| {
+                    let item_id = item["id"].as_str().expect("an item id");
+                    if item["type"] == json!("commandExecution") {
+                        vec![
+                            format!("{thread}:pre:{item_id}"),
+                            format!("{thread}:post:{item_id}"),
+                        ]
+                    } else {
+                        vec![format!("{thread}:item:{item_id}")]
+                    }
+                })
+                .collect();
+            order.push(vec![crate::codex_adapter::turn_terminal_source_event_id(
+                thread, id,
+            )]);
+            history.push((id.to_string(), order));
+        }
+
+        let mut read_back = 0;
+        for run in RECOVERED_TURN_RUNS {
+            let events = fixture_events(&committed[run]);
+            let seq_of = |sid: &str| {
+                events
+                    .iter()
+                    .find(|e| e.source_event_id.as_deref() == Some(sid))
+                    .map(|e| e.seq)
+            };
+            for (turn, order) in &history {
+                for (at, facts) in order.iter().enumerate() {
+                    for sid in facts {
+                        let Some(event) = events
+                            .iter()
+                            .find(|e| e.source_event_id.as_deref() == Some(sid.as_str()))
+                        else {
+                            continue;
+                        };
+                        // The first fact of the nearest later item filed before this one.
+                        let expected = order[at + 1..].iter().find_map(|later| {
+                            later
+                                .iter()
+                                .find(|fact| seq_of(fact).is_some_and(|seq| seq < event.seq))
+                        });
+                        let named = event.payload[protocol::event::BELONGS_BEFORE].as_str();
+                        assert_eq!(
+                            named,
+                            expected.map(String::as_str),
+                            "{run}: {sid} of turn {turn} (seq {}) names the wrong place",
+                            event.seq
+                        );
+                        read_back += usize::from(named.is_some());
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            read_back, 6,
+            "the premise: the prompt read back after the command was filed live; the \
+             prompt and the command read back together; the command alone; the prompt \
+             and the result of a command whose call was filed live"
+        );
+
+        let derived = phone_recovered_turn().await;
+        assert_eq!(
+            derived, committed,
+            "the committed recovered-turn stream no longer matches what this build emits. \
+             Regenerate it: {REGENERATE_PHONE_RECOVERED_TURN}"
+        );
+        assert_eq!(
+            PHONE_RECOVERED_TURN,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&derived).expect("the fixture serialises")
+            ),
+            "the committed bytes are not this build's rendering of them. Regenerate it: \
+             {REGENERATE_PHONE_RECOVERED_TURN}"
+        );
+    }
+
+    /// **A turn stopped before its items could be named is followed up once a turn on its
+    /// thread completes — never at its own stop.**
+    ///
+    /// Two ways in, both from real codex 0.164.0 answers: the link reads a last turn that
+    /// had stopped with its prompt under a placeholder (`resume-interrupted-turn`), or it
+    /// attaches to a running turn (`resume-follow-up-turn`, mid-turn) that is then
+    /// stopped. Either way the stop owes nothing yet — read then, the answer still names
+    /// the prompt by a placeholder — and the next completed turn on the thread makes the
+    /// follow-up owed.
+    #[tokio::test]
+    async fn a_stopped_turn_is_followed_up_when_a_later_turn_completes() {
+        let session = SessionKey {
+            uid: PHONE_TURN_UID.into(),
+            name: "cc-1".into(),
+        };
+        let stopped: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/codex/resume-interrupted-turn-0.164.0.json"
+        ))
+        .expect("the capture is JSON");
+        let running: Value =
+            serde_json::from_str(RECOVERED_TURN_CAPTURE).expect("the capture is JSON");
+        for (answer, stop_frame) in [
+            (
+                &stopped["answer"],
+                stopped["live"]
+                    .as_array()
+                    .expect("live frames")
+                    .iter()
+                    .rfind(|frame| frame["method"] == json!("turn/completed"))
+                    .expect("the stop")
+                    .clone(),
+            ),
+            (&running["answerMidTurn"], {
+                let mut stop = running["live"]["afterTheMidTurnAnswer"]
+                    .as_array()
+                    .expect("live frames")
+                    .iter()
+                    .find(|frame| frame["method"] == json!("turn/completed"))
+                    .expect("the end")
+                    .clone();
+                stop["params"]["turn"]["status"] = json!("interrupted");
+                stop
+            }),
+        ] {
+            let thread = answer["result"]["thread"]["id"]
+                .as_str()
+                .expect("a thread")
+                .to_string();
+            let (daemon, _db) = linked_daemon(&session);
+            let mut adapter = CodexAdapter::new(session.clone());
+            let mut amend = AmendThrottle::default();
+            let mut conn = visiting(&daemon, &session, &mut adapter, &mut amend, &thread, 1);
+            let seed = conn
+                .adapter
+                .plan_resume_seed(&answer["result"], &thread)
+                .expect("the answer is read");
+            conn.attach_from_seed(seed, &thread)
+                .await
+                .expect("the attach files what it read");
+            conn.observe_notification(&stop_frame).await;
+            assert!(
+                !conn.follow_up_owed(),
+                "a stop owes nothing yet: read now, the prompt is still a placeholder"
+            );
+            let next: Value = serde_json::from_str(&turn_terminal(&thread, "turn-after-the-stop"))
+                .expect("a frame");
+            conn.observe_notification(&next).await;
+            assert!(
+                conn.follow_up_owed(),
+                "the next completed turn settles the stopped turn's ids, so the follow-up \
+                 is owed"
+            );
+        }
+    }
+
+    /// **Only a turn that ran after the stop settles it.** Two ways the stopped turn's
+    /// debt could be spent while its prompt is still a placeholder, both refused: the
+    /// wire replaying an earlier turn's terminal after the resume, and an on-demand
+    /// recovery of the thread (after a `/new` away) reading the same unsettled answer.
+    #[tokio::test]
+    async fn a_stopped_turn_waits_for_a_turn_that_ran_after_it() {
+        let session = SessionKey {
+            uid: PHONE_TURN_UID.into(),
+            name: "cc-1".into(),
+        };
+        let stopped: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/codex/resume-interrupted-turn-0.164.0.json"
+        ))
+        .expect("the capture is JSON");
+        let answer = &stopped["answer"];
+        let thread = answer["result"]["thread"]["id"]
+            .as_str()
+            .expect("a thread")
+            .to_string();
+        let earlier = answer["result"]["thread"]["turns"][0]["id"]
+            .as_str()
+            .expect("the turn before the stop")
+            .to_string();
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(&daemon, &session, &mut adapter, &mut amend, &thread, 1);
+        let seed = conn
+            .adapter
+            .plan_resume_seed(&answer["result"], &thread)
+            .expect("the answer is read");
+        conn.attach_from_seed(seed, &thread)
+            .await
+            .expect("the attach files what it read");
+
+        let replayed: Value =
+            serde_json::from_str(&turn_terminal(&thread, &earlier)).expect("a frame");
+        conn.observe_notification(&replayed).await;
+        assert!(
+            !conn.follow_up_owed(),
+            "a replayed terminal of the turn before the stop settles nothing"
+        );
+
+        assert!(
+            !conn.recover_from(answer, &thread).await,
+            "a recovery that read the prompt as a placeholder recovered nothing, so the \
+             obligation stays"
+        );
+        let next: Value =
+            serde_json::from_str(&turn_terminal(&thread, "turn-after-the-stop")).expect("a frame");
+        conn.observe_notification(&next).await;
+        assert!(
+            conn.follow_up_owed(),
+            "the turn that ran after the stop settles it, recovery or not"
+        );
+    }
+
+    /// **A recovery settles what it recovered, and nothing it could not.** A carried
+    /// recovery of the thread the link is on, answered while a turn there runs, leaves that
+    /// turn waiting for its own terminal: the answer named none of its items.
+    #[tokio::test]
+    async fn a_recovery_leaves_a_running_turn_s_debt_in_place() {
+        let session = SessionKey {
+            uid: PHONE_TURN_UID.into(),
+            name: "cc-1".into(),
+        };
+        let capture: Value =
+            serde_json::from_str(RECOVERED_TURN_CAPTURE).expect("the capture is JSON");
+        let mid_turn = &capture["answerMidTurn"];
+        let thread = mid_turn["result"]["thread"]["id"]
+            .as_str()
+            .expect("a thread")
+            .to_string();
+        let (daemon, _db) = linked_daemon(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = visiting(&daemon, &session, &mut adapter, &mut amend, &thread, 1);
+        let seed = conn
+            .adapter
+            .plan_resume_seed(&mid_turn["result"], &thread)
+            .expect("the answer is read");
+        conn.attach_from_seed(seed, &thread)
+            .await
+            .expect("the attach files what it read");
+        assert!(
+            !conn.recover_from(mid_turn, &thread).await,
+            "a running turn's items are still owed"
+        );
+        for frame in capture["live"]["afterTheMidTurnAnswer"]
+            .as_array()
+            .expect("the frames after it")
+        {
+            conn.observe_notification(frame).await;
+        }
+        assert!(
+            conn.follow_up_owed(),
+            "the turn's own completion still buys its follow-up"
+        );
+    }
+
+    /// **An answer read before a later turn completed cannot undo what that turn settled,
+    /// and one that shows a stop the link missed starts the wait for a later turn.**
+    #[tokio::test]
+    async fn a_stopped_turn_s_debt_follows_the_newest_fact() {
+        let session = SessionKey {
+            uid: PHONE_TURN_UID.into(),
+            name: "cc-1".into(),
+        };
+        let stopped: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/codex/resume-interrupted-turn-0.164.0.json"
+        ))
+        .expect("the capture is JSON");
+        let answer = &stopped["answer"];
+        let thread = answer["result"]["thread"]["id"]
+            .as_str()
+            .expect("a thread")
+            .to_string();
+        let attach = |conn: &mut Connection<'_>, answer: &Value| {
+            let seed = conn
+                .adapter
+                .plan_resume_seed(&answer["result"], &thread)
+                .expect("the answer is read");
+            (seed, thread.clone())
+        };
+        let next = |turn: &str| -> Value {
+            serde_json::from_str(&turn_terminal(&thread, turn)).expect("a frame")
+        };
+
+        // A recovery answer read before the later turn completed, arriving after it.
+        {
+            let (daemon, _db) = linked_daemon(&session);
+            let mut adapter = CodexAdapter::new(session.clone());
+            let mut amend = AmendThrottle::default();
+            let mut conn = visiting(&daemon, &session, &mut adapter, &mut amend, &thread, 1);
+            let (seed, thread) = attach(&mut conn, answer);
+            conn.attach_from_seed(seed, &thread)
+                .await
+                .expect("attached");
+            conn.observe_notification(&next("turn-after-the-stop"))
+                .await;
+            assert!(
+                conn.follow_up_owed(),
+                "the later turn settled the stopped one"
+            );
+            assert!(!conn.recover_from(answer, &thread).await);
+            assert!(
+                conn.follow_up_owed(),
+                "the stale answer still names the prompt by a placeholder, but the turn \
+                 that settles it has already completed: the follow-up stays owed"
+            );
+        }
+
+        // The link last saw the turn running; a later answer shows it stopped.
+        {
+            let mut running = answer.clone();
+            let last = running["result"]["thread"]["turns"]
+                .as_array_mut()
+                .and_then(|turns| turns.last_mut())
+                .expect("a last turn");
+            last["status"] = json!("inProgress");
+            last["completedAt"] = Value::Null;
+            last["durationMs"] = Value::Null;
+            let (daemon, _db) = linked_daemon(&session);
+            let mut adapter = CodexAdapter::new(session.clone());
+            let mut amend = AmendThrottle::default();
+            let mut conn = visiting(&daemon, &session, &mut adapter, &mut amend, &thread, 1);
+            let (seed, thread) = attach(&mut conn, &running);
+            conn.attach_from_seed(seed, &thread)
+                .await
+                .expect("attached");
+            let (seed, thread) = attach(&mut conn, answer);
+            conn.attach_from_seed(seed, &thread)
+                .await
+                .expect("attached again");
+            conn.observe_notification(&next("turn-after-the-stop"))
+                .await;
+            assert!(
+                conn.follow_up_owed(),
+                "a stop the link never saw still waits for, and is settled by, a later turn"
+            );
+        }
+    }
+
+    /// Rewrite `fixtures/codex/phone-recovered-turn-0.164.0.json` from this build.
+    /// Run with `cargo test -p ccd --bin ccd -- --ignored regenerate_the_phone_recovered_turn_fixture`.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_phone_recovered_turn_fixture() {
+        let rendered = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&phone_recovered_turn().await).expect("it serialises")
+        );
+        std::fs::write(PHONE_RECOVERED_TURN_PATH, rendered).expect("the fixture is writable");
+        println!("wrote {PHONE_RECOVERED_TURN_PATH}");
     }
 
     /// **What a subscribed phone is actually sent for a Codex turn.**

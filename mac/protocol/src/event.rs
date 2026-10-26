@@ -199,6 +199,17 @@ impl Event {
     }
 }
 
+/// **The payload key that places a Codex item read back after its turn moved on.**
+///
+/// The daemon reads a Codex thread's history (`thread/resume`) to recover the items
+/// it missed — those that finished while it was not subscribed. The log is
+/// append-only, so such an item is filed after facts that happened later in its
+/// turn. On that item, this key names the `source_event_id` of the fact it belongs
+/// immediately before: the next fact of the same turn, in the history's own order,
+/// that was already filed. A client draws the item there; an item without it is in
+/// order already.
+pub const BELONGS_BEFORE: &str = "belongs_before";
+
 /// A fact ready for ingest, before the daemon has assigned a `seq`.
 ///
 /// Constructed against a [`SessionKey`] rather than a bare string so no ingest

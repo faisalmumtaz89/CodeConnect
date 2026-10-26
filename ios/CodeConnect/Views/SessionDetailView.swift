@@ -1962,10 +1962,11 @@ private struct SessionTimeline: View {
 }
 
 /// Where a timeline ends: how many rows it has and the last event it was
-/// drawn from. "N new" counts the rows drawn from events after that one — a
-/// timeline's rows are in event order — so an earlier page drawn above adds
-/// nothing: not where the old last row folded into a call the page brought,
-/// nor where it gives a later event the context that shows it.
+/// drawn from. "N new" counts the rows drawn from events after that one at the
+/// tail — a timeline's rows are in event order, except a Codex item the Mac read
+/// back, which is drawn above inside its turn and is not new at the tail — so an
+/// earlier page drawn above adds nothing: not where the old last row folded into a
+/// call the page brought, nor where it gives a later event the context that shows it.
 struct TimelineEnd: Equatable {
     let count: Int
     let drawnThrough: UInt64
