@@ -2956,12 +2956,22 @@ impl Daemon {
                 }
             }
         }
+        // Where a Codex item read back late belongs is the daemon's own placement,
+        // not the item's content, so it survives the cut.
+        let belongs_before = pending
+            .payload
+            .get(protocol::event::BELONGS_BEFORE)
+            .cloned();
         let replacement = |preview: &str| {
-            serde_json::json!({
+            let mut payload = serde_json::json!({
                 "_codeconnect_truncated": true,
                 "_original_bytes": original_bytes,
                 "_preview": preview,
-            })
+            });
+            if let Some(anchor) = &belongs_before {
+                payload[protocol::event::BELONGS_BEFORE] = anchor.clone();
+            }
+            payload
         };
         // `encoded` is JSON, which holds no raw control character: written again
         // inside the replacement, a quote or a backslash takes two bytes and
@@ -24339,6 +24349,34 @@ mod tests {
         // It survives the round trip an event has to make.
         let encoded = serde_json::to_string(&pending.payload).unwrap();
         let _: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    }
+
+    /// **A Codex item read back late keeps its place when its payload is cut.** Where it
+    /// belongs is the daemon's own placement, not the item's content; dropped with the
+    /// content, a long command read back after its turn's end was drawn under the end.
+    #[tokio::test]
+    async fn a_cut_payload_keeps_where_a_read_back_item_belongs() {
+        let daemon = daemon_with(Config {
+            max_payload_bytes: 4096,
+            ..Config::default()
+        });
+        let anchor = "01a1777e-f38f:item:msg_0de00084643b";
+        let mut pending = PendingEvent::new(
+            &test_key(),
+            EventKind::ToolResult,
+            json!({
+                "aggregated_output": "x".repeat(8192),
+                protocol::event::BELONGS_BEFORE: anchor,
+            }),
+            Source::Codex,
+        );
+
+        daemon.truncate_payload(&mut pending);
+
+        assert_eq!(pending.payload["_codeconnect_truncated"], true);
+        assert_eq!(pending.payload[protocol::event::BELONGS_BEFORE], anchor);
+        let written = pending.payload.to_string().len();
+        assert!(written <= 4096, "the replacement is {written} bytes");
     }
 
     #[tokio::test]

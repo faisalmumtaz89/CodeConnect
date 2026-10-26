@@ -558,7 +558,14 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     What changed for every client, including older ones: nothing. The new
 ///     summary fields are omitted when empty and a client that never sends
 ///     `history` never receives `history_end`.
-pub const PROTOCOL_MINOR: u32 = 23;
+///   * `24` — **Where a Codex item read back from history belongs.**
+///
+///     A Codex item the daemon recovers from a thread's history after later facts
+///     of its turn were filed carries [`event::BELONGS_BEFORE`] in its payload: the
+///     `source_event_id` of the fact it belongs immediately before. A client draws
+///     it there. Additive, and a client written against minor 23 needs none of it:
+///     without it such an item is drawn where it was filed, as before.
+pub const PROTOCOL_MINOR: u32 = 24;
 
 #[cfg(test)]
 mod ledger_tests {

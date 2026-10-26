@@ -1,0 +1,814 @@
+{
+  "attachedAfterThePrompt": {
+    "frames": [
+      {
+        "event": {
+          "kind": "session_start",
+          "payload": {
+            "cli_version": "0.164.0",
+            "cwd": "/work/proj",
+            "rollout_path": "/Users/u/.codex/sessions/2026/10/26/rollout-2026-10-26T12-16-08-01a1777e-e972-76c2-935f-10e66361111d.jsonl",
+            "thread_id": "01a1777e-e972-76c2-935f-10e66361111d"
+          },
+          "seq": 1,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:thread_started",
+          "ts": "2026-09-07T00:00:00.000Z"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1777e-f38f-7d12-98eb-ab4ef797b491",
+          "kind": "user_message",
+          "payload": {
+            "interrupted": false,
+            "text": "Reply with the single word amber and nothing else."
+          },
+          "seq": 2,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-f38f-7d12-98eb-ab4ef797b491",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "amber"
+          },
+          "seq": 3,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1793006173,
+            "duration_ms": 5010,
+            "error": null,
+            "started_at": 1793006168,
+            "status": "completed"
+          },
+          "seq": 4,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-e98c-7b63-b1c7-cde2b878973e",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "kind": "tool_call",
+          "payload": {
+            "command": "/bin/zsh -lc 'sleep 5 && echo ready'",
+            "command_actions": [
+              {
+                "command": "sleep 5 && echo ready",
+                "type": "unknown"
+              }
+            ],
+            "cwd": "/work/proj",
+            "tool": "command_execution"
+          },
+          "seq": 5,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:pre:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "kind": "tool_result",
+          "payload": {
+            "aggregated_output": "ready\n",
+            "command": "/bin/zsh -lc 'sleep 5 && echo ready'",
+            "duration_ms": 4877,
+            "exit_code": 0,
+            "interrupted": false,
+            "status": "completed",
+            "tool": "command_execution"
+          },
+          "seq": 6,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:post:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n48\n49\n50\n51\n52\n53\n54\n55\n56\n57\n58\n59\n60\n61\n62\n63\n64\n65\n66\n67\n68\n69\n70\n71\n72\n73\n74\n75\n76\n77\n78\n79\n80\n81\n82\n83\n84\n85\n86\n87\n88\n89\n90\n91\n92\n93\n94\n95\n96\n97\n98\n99\n100\n101\n102\n103\n104\n105\n106\n107\n108\n109\n110\n111\n112\n113\n114\n115\n116\n117\n118\n119\n120\n121\n122\n123\n124\n125\n126\n127\n128\n129\n130\n131\n132\n133\n134\n135\n136\n137\n138\n139\n140\n141\n142\n143\n144\n145\n146\n147\n148\n149\n150"
+          },
+          "seq": 7,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "usage",
+          "payload": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 14336,
+              "inputTokens": 14529,
+              "outputTokens": 303,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 14832
+            },
+            "modelContextWindow": 475000,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 38400,
+              "inputTokens": 43418,
+              "outputTokens": 346,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 43764
+            }
+          },
+          "seq": 8,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:usage:01a1777e-ffc4-7202-9065-0a760f49ed10",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1793006190,
+            "duration_ms": 16074,
+            "error": null,
+            "started_at": 1793006174,
+            "status": "completed"
+          },
+          "seq": 9,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-ffc4-7202-9065-0a760f49ed10",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "kind": "user_message",
+          "payload": {
+            "belongs_before": "01a1777e-e972-76c2-935f-10e66361111d:pre:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+            "interrupted": false,
+            "text": "Run the shell command `sleep 5 && echo ready`, then write out the integers from 1 to 150, one per line, with no commentary."
+          },
+          "seq": 10,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      }
+    ]
+  },
+  "attachedMidTurn": {
+    "frames": [
+      {
+        "event": {
+          "kind": "session_start",
+          "payload": {
+            "cli_version": "0.164.0",
+            "cwd": "/work/proj",
+            "rollout_path": "/Users/u/.codex/sessions/2026/10/26/rollout-2026-10-26T12-16-08-01a1777e-e972-76c2-935f-10e66361111d.jsonl",
+            "thread_id": "01a1777e-e972-76c2-935f-10e66361111d"
+          },
+          "seq": 1,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:thread_started",
+          "ts": "2026-09-07T00:00:00.000Z"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1777e-f38f-7d12-98eb-ab4ef797b491",
+          "kind": "user_message",
+          "payload": {
+            "interrupted": false,
+            "text": "Reply with the single word amber and nothing else."
+          },
+          "seq": 2,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-f38f-7d12-98eb-ab4ef797b491",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "amber"
+          },
+          "seq": 3,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1793006173,
+            "duration_ms": 5010,
+            "error": null,
+            "started_at": 1793006168,
+            "status": "completed"
+          },
+          "seq": 4,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-e98c-7b63-b1c7-cde2b878973e",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n48\n49\n50\n51\n52\n53\n54\n55\n56\n57\n58\n59\n60\n61\n62\n63\n64\n65\n66\n67\n68\n69\n70\n71\n72\n73\n74\n75\n76\n77\n78\n79\n80\n81\n82\n83\n84\n85\n86\n87\n88\n89\n90\n91\n92\n93\n94\n95\n96\n97\n98\n99\n100\n101\n102\n103\n104\n105\n106\n107\n108\n109\n110\n111\n112\n113\n114\n115\n116\n117\n118\n119\n120\n121\n122\n123\n124\n125\n126\n127\n128\n129\n130\n131\n132\n133\n134\n135\n136\n137\n138\n139\n140\n141\n142\n143\n144\n145\n146\n147\n148\n149\n150"
+          },
+          "seq": 5,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "usage",
+          "payload": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 14336,
+              "inputTokens": 14529,
+              "outputTokens": 303,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 14832
+            },
+            "modelContextWindow": 475000,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 38400,
+              "inputTokens": 43418,
+              "outputTokens": 346,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 43764
+            }
+          },
+          "seq": 6,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:usage:01a1777e-ffc4-7202-9065-0a760f49ed10",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1793006190,
+            "duration_ms": 16074,
+            "error": null,
+            "started_at": 1793006174,
+            "status": "completed"
+          },
+          "seq": 7,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-ffc4-7202-9065-0a760f49ed10",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "kind": "user_message",
+          "payload": {
+            "belongs_before": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+            "interrupted": false,
+            "text": "Run the shell command `sleep 5 && echo ready`, then write out the integers from 1 to 150, one per line, with no commentary."
+          },
+          "seq": 8,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "kind": "tool_result",
+          "payload": {
+            "aggregated_output": "ready\n",
+            "belongs_before": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+            "command": "/bin/zsh -lc 'sleep 5 && echo ready'",
+            "duration_ms": 4877,
+            "exit_code": 0,
+            "interrupted": false,
+            "status": "completed",
+            "tool": "command_execution"
+          },
+          "seq": 9,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:post:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      }
+    ]
+  },
+  "reconnectedDuringTheCommand": {
+    "frames": [
+      {
+        "event": {
+          "kind": "session_start",
+          "payload": {
+            "cli_version": "0.164.0",
+            "cwd": "/work/proj",
+            "rollout_path": "/Users/u/.codex/sessions/2026/10/26/rollout-2026-10-26T12-16-08-01a1777e-e972-76c2-935f-10e66361111d.jsonl",
+            "thread_id": "01a1777e-e972-76c2-935f-10e66361111d"
+          },
+          "seq": 1,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:thread_started",
+          "ts": "2026-09-07T00:00:00.000Z"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1777e-f38f-7d12-98eb-ab4ef797b491",
+          "kind": "user_message",
+          "payload": {
+            "interrupted": false,
+            "text": "Reply with the single word amber and nothing else."
+          },
+          "seq": 2,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-f38f-7d12-98eb-ab4ef797b491",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "amber"
+          },
+          "seq": 3,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1793006173,
+            "duration_ms": 5010,
+            "error": null,
+            "started_at": 1793006168,
+            "status": "completed"
+          },
+          "seq": 4,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-e98c-7b63-b1c7-cde2b878973e",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "kind": "tool_call",
+          "payload": {
+            "command": "/bin/zsh -lc 'sleep 5 && echo ready'",
+            "command_actions": [
+              {
+                "command": "sleep 5 && echo ready",
+                "type": "unknown"
+              }
+            ],
+            "cwd": "/work/proj",
+            "tool": "command_execution"
+          },
+          "seq": 5,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:pre:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n48\n49\n50\n51\n52\n53\n54\n55\n56\n57\n58\n59\n60\n61\n62\n63\n64\n65\n66\n67\n68\n69\n70\n71\n72\n73\n74\n75\n76\n77\n78\n79\n80\n81\n82\n83\n84\n85\n86\n87\n88\n89\n90\n91\n92\n93\n94\n95\n96\n97\n98\n99\n100\n101\n102\n103\n104\n105\n106\n107\n108\n109\n110\n111\n112\n113\n114\n115\n116\n117\n118\n119\n120\n121\n122\n123\n124\n125\n126\n127\n128\n129\n130\n131\n132\n133\n134\n135\n136\n137\n138\n139\n140\n141\n142\n143\n144\n145\n146\n147\n148\n149\n150"
+          },
+          "seq": 6,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "usage",
+          "payload": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 14336,
+              "inputTokens": 14529,
+              "outputTokens": 303,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 14832
+            },
+            "modelContextWindow": 475000,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 38400,
+              "inputTokens": 43418,
+              "outputTokens": 346,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 43764
+            }
+          },
+          "seq": 7,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:usage:01a1777e-ffc4-7202-9065-0a760f49ed10",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1793006190,
+            "duration_ms": 16074,
+            "error": null,
+            "started_at": 1793006174,
+            "status": "completed"
+          },
+          "seq": 8,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-ffc4-7202-9065-0a760f49ed10",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "kind": "user_message",
+          "payload": {
+            "belongs_before": "01a1777e-e972-76c2-935f-10e66361111d:pre:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+            "interrupted": false,
+            "text": "Run the shell command `sleep 5 && echo ready`, then write out the integers from 1 to 150, one per line, with no commentary."
+          },
+          "seq": 9,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "kind": "tool_result",
+          "payload": {
+            "aggregated_output": "ready\n",
+            "belongs_before": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+            "command": "/bin/zsh -lc 'sleep 5 && echo ready'",
+            "duration_ms": 4877,
+            "exit_code": 0,
+            "interrupted": false,
+            "status": "completed",
+            "tool": "command_execution"
+          },
+          "seq": 10,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:post:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      }
+    ]
+  },
+  "reconnectedMidTurn": {
+    "frames": [
+      {
+        "event": {
+          "kind": "session_start",
+          "payload": {
+            "cli_version": "0.164.0",
+            "cwd": "/work/proj",
+            "rollout_path": "/Users/u/.codex/sessions/2026/10/26/rollout-2026-10-26T12-16-08-01a1777e-e972-76c2-935f-10e66361111d.jsonl",
+            "thread_id": "01a1777e-e972-76c2-935f-10e66361111d"
+          },
+          "seq": 1,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:thread_started",
+          "ts": "2026-09-07T00:00:00.000Z"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1777e-f38f-7d12-98eb-ab4ef797b491",
+          "kind": "user_message",
+          "payload": {
+            "interrupted": false,
+            "text": "Reply with the single word amber and nothing else."
+          },
+          "seq": 2,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-f38f-7d12-98eb-ab4ef797b491",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "amber"
+          },
+          "seq": 3,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a5d41e881919b5af027a01b1016",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1793006173,
+            "duration_ms": 5010,
+            "error": null,
+            "started_at": 1793006168,
+            "status": "completed"
+          },
+          "seq": 4,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-e98c-7b63-b1c7-cde2b878973e",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-e98c-7b63-b1c7-cde2b878973e"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "kind": "user_message",
+          "payload": {
+            "interrupted": false,
+            "text": "Run the shell command `sleep 5 && echo ready`, then write out the integers from 1 to 150, one per line, with no commentary."
+          },
+          "seq": 5,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:01a1777e-ffcf-7371-aec2-384ecb0df347",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+          "kind": "agent_message",
+          "payload": {
+            "interrupted": false,
+            "text": "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n48\n49\n50\n51\n52\n53\n54\n55\n56\n57\n58\n59\n60\n61\n62\n63\n64\n65\n66\n67\n68\n69\n70\n71\n72\n73\n74\n75\n76\n77\n78\n79\n80\n81\n82\n83\n84\n85\n86\n87\n88\n89\n90\n91\n92\n93\n94\n95\n96\n97\n98\n99\n100\n101\n102\n103\n104\n105\n106\n107\n108\n109\n110\n111\n112\n113\n114\n115\n116\n117\n118\n119\n120\n121\n122\n123\n124\n125\n126\n127\n128\n129\n130\n131\n132\n133\n134\n135\n136\n137\n138\n139\n140\n141\n142\n143\n144\n145\n146\n147\n148\n149\n150"
+          },
+          "seq": 6,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "usage",
+          "payload": {
+            "last": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 14336,
+              "inputTokens": 14529,
+              "outputTokens": 303,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 14832
+            },
+            "modelContextWindow": 475000,
+            "total": {
+              "cacheWriteInputTokens": 0,
+              "cachedInputTokens": 38400,
+              "inputTokens": 43418,
+              "outputTokens": 346,
+              "reasoningOutputTokens": 0,
+              "totalTokens": 43764
+            }
+          },
+          "seq": 7,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:usage:01a1777e-ffc4-7202-9065-0a760f49ed10",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "kind": "turn_complete",
+          "payload": {
+            "completed_at": 1793006190,
+            "duration_ms": 16074,
+            "error": null,
+            "started_at": 1793006174,
+            "status": "completed"
+          },
+          "seq": 8,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:turn:01a1777e-ffc4-7202-9065-0a760f49ed10",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      },
+      {
+        "event": {
+          "item_id": "exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "kind": "tool_result",
+          "payload": {
+            "aggregated_output": "ready\n",
+            "belongs_before": "01a1777e-e972-76c2-935f-10e66361111d:item:msg_0de00084643b8f59016adf1a6b08cc81919ef69f054594f3aa",
+            "command": "/bin/zsh -lc 'sleep 5 && echo ready'",
+            "duration_ms": 4877,
+            "exit_code": 0,
+            "interrupted": false,
+            "status": "completed",
+            "tool": "command_execution"
+          },
+          "seq": 9,
+          "session_id": "cc-1",
+          "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+          "source": "codex",
+          "source_event_id": "01a1777e-e972-76c2-935f-10e66361111d:post:exec-cd7ad853-21c1-4f98-afe3-97e12b44f012",
+          "ts": "2026-09-07T00:00:00.000Z",
+          "turn_id": "01a1777e-ffc4-7202-9065-0a760f49ed10"
+        },
+        "type": "event"
+      }
+    ]
+  }
+}

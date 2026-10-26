@@ -404,6 +404,10 @@ pub struct ResumeSeed {
     /// these keeps the state this adapter observed live — the answer confirms the
     /// item's turn is alive, and confirms nothing else about it.
     running_turns: Vec<String>,
+    /// The answer's last turn, when it stopped or failed and still named items by
+    /// placeholder ids — a turn read through the live TUI's app-server before a later
+    /// turn has run. Its ids settle once a later turn runs (measured on codex 0.164.0).
+    unsettled_turn: Option<String>,
     /// The `(thread, turn)` usage totals held for turns the answer reports finished.
     /// They are **dropped** by the rebuild, never emitted — see the note on discarding
     /// a held usage total in [`CodexAdapter::plan_resume_seed`]: a total held for a turn
@@ -446,6 +450,13 @@ impl ResumeSeed {
     /// [`crate::codex_link`]'s follow-up attach.
     pub fn running_turn_ids(&self) -> &[String] {
         &self.running_turns
+    }
+
+    /// **The stopped or failed turn whose items this answer could not name yet**, if
+    /// the answer's last turn is one. Its debt is paid by the next turn on the thread that
+    /// completes after it: see [`crate::codex_link`]'s follow-up attach.
+    pub fn unsettled_turn_id(&self) -> Option<&str> {
+        self.unsettled_turn.as_deref()
     }
 }
 
@@ -687,6 +698,7 @@ impl CodexAdapter {
 
         let mut events = Vec::new();
         let mut running_turns = Vec::new();
+        let mut unsettled_turn = None;
         let mut discarded_usage = Vec::new();
         let mut terminal_turns = 0;
         // The finished-turn items this build does not read, counted by why and by type.
@@ -752,6 +764,8 @@ impl CodexAdapter {
             // follow-up resume when it finishes, as for any turn the link attached to
             // while it ran.
 
+            // Overwritten by every turn, so after the loop it describes the last one.
+            unsettled_turn = None;
             match status {
                 // Alive: the answer confirms the turn is running and nothing more.
                 // Its items are never read.
@@ -809,6 +823,9 @@ impl CodexAdapter {
                         };
                         if let Some(reason) = unread {
                             *skipped.entry((reason, item_type.to_string())).or_default() += 1;
+                            if status != RESUME_TURN_COMPLETED && is_placeholder_item_id(item_id) {
+                                unsettled_turn = Some(turn_id.to_string());
+                            }
                             continue;
                         }
                         // Only the ids that BECOME facts are checked for uniqueness: two
@@ -883,6 +900,7 @@ impl CodexAdapter {
             described_turns: turns.len(),
             terminal_turns,
             running_turns,
+            unsettled_turn,
             discarded_usage,
         })
     }
@@ -1015,7 +1033,7 @@ impl CodexAdapter {
             "commandExecution" | "fileChange" => {
                 vec![self
                     .event(EventKind::ToolCall, tool_call_payload(item))
-                    .with_source_event_id(sid(tid, &format!("pre:{item_id}")))
+                    .with_source_event_id(tool_call_source_event_id(tid, item_id))
                     .with_turn_id(Some(turn.to_string()))
                     .with_item_id(Some(item_id.to_string()))]
             }
@@ -1363,6 +1381,13 @@ fn sid(thread_id: &str, suffix: &str) -> String {
 /// sites must build the same string or the ask is about a fact nothing files.
 pub fn turn_terminal_source_event_id(thread_id: &str, turn_id: &str) -> String {
     sid(thread_id, &format!("turn:{turn_id}"))
+}
+
+/// **The identity of a tool item's call**, filed when the item starts. Named for the
+/// same reason as [`turn_terminal_source_event_id`]: `Connection::attach_from_seed`
+/// asks whether it was filed.
+pub fn tool_call_source_event_id(thread_id: &str, item_id: &str) -> String {
+    sid(thread_id, &format!("pre:{item_id}"))
 }
 
 /// Payload for a commandExecution/fileChange ToolCall from its started snapshot.
@@ -2868,6 +2893,78 @@ mod tests {
             );
         }
         assert_eq!(of_kind(&seeded, &EventKind::UserMessage).len(), 1);
+    }
+
+    /// **A stopped or failed last turn whose items are still under placeholder ids is
+    /// owed a follow-up; nothing else is.** Each answer is a real codex 0.164.0 capture:
+    /// through the live TUI's app-server, except the failed turn's, from a bare one.
+    #[test]
+    fn a_stopped_last_turn_under_placeholders_is_reported_unsettled() {
+        let unsettled = |answer: &Value| {
+            let result = &answer["result"];
+            CodexAdapter::new(key())
+                .plan_resume_seed(result, result["thread"]["id"].as_str().expect("a thread"))
+                .expect("a captured answer this build reads")
+                .unsettled_turn_id()
+                .map(str::to_string)
+        };
+        let last_turn = |answer: &Value| {
+            answer["result"]["thread"]["turns"]
+                .as_array()
+                .and_then(|turns| turns.last())
+                .and_then(|turn| turn["id"].as_str())
+                .map(str::to_string)
+        };
+
+        let stopped_mid_reply = captured(include_str!(
+            "../../../fixtures/codex/resume-interrupted-turn-0.164.0.json"
+        ));
+        assert_eq!(
+            unsettled(&stopped_mid_reply["answer"]),
+            last_turn(&stopped_mid_reply["answer"]),
+            "stopped mid-reply, its prompt under `item-1`"
+        );
+        let stopped_command = captured(include_str!(
+            "../../../fixtures/codex/resume-interrupted-command-0.164.0.json"
+        ));
+        assert_eq!(
+            unsettled(&stopped_command["answerRightAfter"]),
+            last_turn(&stopped_command["answerRightAfter"]),
+            "stopped while a command ran: an earlier stopped turn with real ids is not it"
+        );
+        assert_eq!(
+            unsettled(&stopped_command["answerAfterTheCommandEnded"]),
+            None,
+            "a later turn has run and the stopped turn's ids have settled"
+        );
+        let failed = captured(include_str!(
+            "../../../fixtures/codex/resume-failed-turn-0.164.0.json"
+        ));
+        assert_eq!(
+            unsettled(&failed["answer"]),
+            None,
+            "a failed turn whose prompt carries its real id"
+        );
+        let follow_up = captured(include_str!(
+            "../../../fixtures/codex/resume-follow-up-turn-0.164.0.json"
+        ));
+        assert_eq!(
+            unsettled(&follow_up["answerMidTurn"]),
+            None,
+            "a running last turn is owed as running, not as unsettled"
+        );
+        // A completed turn whose ids never settle — the shape of a codex 0.146.0 thread —
+        // is not owed: no later turn names them.
+        let mut completed = stopped_mid_reply["answer"].clone();
+        let turn = completed["result"]["thread"]["turns"]
+            .as_array_mut()
+            .and_then(|turns| turns.last_mut())
+            .expect("a last turn");
+        turn["status"] = json!("completed");
+        turn["error"] = Value::Null;
+        turn["completedAt"] = json!(1_792_962_000);
+        turn["durationMs"] = json!(1000);
+        assert_eq!(unsettled(&completed), None);
     }
 
     /// **A stop the link missed is applied as finished, not as running.** One adapter

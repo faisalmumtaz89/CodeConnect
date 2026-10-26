@@ -199,8 +199,52 @@ enum TimelineBuilder {
         return 0
     }
 
+    /// **The events in the order they happened.** The log is append-only, so a Codex
+    /// item the Mac read back from the thread's history is filed after facts that came
+    /// later in its turn, and names the one it belongs before (`codexBelongsBefore`).
+    /// It is placed immediately before that fact — and so moves with it when that fact
+    /// was read back too. One whose fact is not among `events` belongs to an older page
+    /// not loaded yet, and is left out until that page is. Everything else keeps its
+    /// seq order.
+    static func inHistoryOrder(_ events: [Event]) -> [Event] {
+        var seqByID: [String: UInt64] = [:]
+        for event in events where event.source == .codex {
+            if let id = event.sourceEventID { seqByID[id] = event.seq }
+        }
+        var readBack: [String: [Event]] = [:]
+        var filedInPlace: [Event] = []
+        var placed = false
+        for event in events {
+            guard let anchor = event.codexBelongsBefore else {
+                filedInPlace.append(event)
+                continue
+            }
+            placed = true
+            switch seqByID[anchor] {
+            // An earlier seq, so each move goes back in the log and none can loop.
+            case let at? where at < event.seq: readBack[anchor, default: []].append(event)
+            case nil: break
+            case _?: filedInPlace.append(event)
+            }
+        }
+        guard placed else { return events }
+        var ordered: [Event] = []
+        ordered.reserveCapacity(events.count)
+        func place(_ event: Event) {
+            if event.source == .codex, let id = event.sourceEventID,
+                let before = readBack.removeValue(forKey: id)
+            {
+                before.forEach(place)
+            }
+            ordered.append(event)
+        }
+        filedInPlace.forEach(place)
+        return ordered
+    }
+
     static func build(_ events: [Event]) -> [TimelineItem] {
         guard !events.isEmpty else { return [] }
+        let events = inHistoryOrder(events)
 
         var resultsByToolUse: [String: ToolOutcome] = [:]
         var outcomesByRequest: [String: AnswerOutcome] = [:]

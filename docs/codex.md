@@ -194,15 +194,23 @@ leaves out:
 - a prompt with an image attached, its text included;
 - every message of a thread started on codex 0.146.0, which Codex names only by
   placeholders;
-- in a running session, a stopped turn's prompt read before a later turn has run, and a
-  command still running when its turn was stopped, until its shell has ended;
-- the partial reply of a stopped turn, which is in no history at all;
-- what a turn did before the daemon attached to it, when that turn was then stopped or
-  failed — until the daemon next reads the history, at a restart or a reconnect.
+- in a running session, a stopped turn's prompt, and what a turn did before the daemon
+  attached to it when that turn then stopped or failed, until the next turn on its thread
+  completes — Codex names a stopped turn's prompt only by a placeholder until then;
+- a command still running when its turn was stopped, which Codex's history shows without
+  an outcome until its shell has ended — read before then, it stays missing until the
+  daemon next reads the history, at a restart or a reconnect;
+- the partial reply of a stopped turn, which is in no history at all.
 
 What the daemon recorded live stays recorded. A command that outlives a Stop the daemon saw
 keeps the stop as its result; when the daemon missed the stop, the outcome the history
 reports is recorded.
+
+What the daemon reads back arrives after what it recorded live — after the turn has ended,
+when the daemon attached to that turn while it ran, and after the next turn, for a turn that
+was stopped or failed. The phone draws it inside its turn, where
+it happened, with the time the Mac read it — in a long turn, once you scroll up to that part
+of it; an iPhone app older than this daemon draws it where it arrived.
 
 **4. Stop ends the turn, not the shell it started.** Measured on 0.153.4: an interrupted
 turn ends, and a command the agent had already launched runs to completion in its own

@@ -630,6 +630,15 @@ impl Db {
             .await
     }
 
+    /// See [`crate::store::Store::codex_source_event_ids`].
+    pub async fn codex_source_event_ids(
+        &self,
+        session_uid: String,
+    ) -> Result<std::collections::HashSet<String>> {
+        self.run(move |store| store.codex_source_event_ids(&session_uid))
+            .await
+    }
+
     pub async fn revoke_device(&self, device_id: String, at: String) -> Result<bool> {
         self.run(move |store| store.revoke_device(&device_id, &at))
             .await
