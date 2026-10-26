@@ -3,6 +3,21 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Codex sessions stay on the phone after a restart
+
+- A Codex session whose history holds a stopped turn, a failed turn, a web search, an MCP or sub-agent
+  call, a context compaction or an image keeps its phone link when the daemon reads that history: after
+  a restart or an update, on a new session it attaches to late, and on a thread you resume or fork. The
+  daemon used to refuse what Codex told it about such a history and reconnected every 15 seconds for the
+  rest of the session, with no approvals, Stop or messages from the phone. What the daemon reads back from
+  Codex's history has gaps, listed in the Codex guide under what your phone cannot do.
+- A Codex command approval reaches the phone when the daemon attaches to a turn that has already run a
+  command: after the daemon restarts (an update, a crash) while the approval waits, or on a new session
+  that sat idle before its first request. The daemon used to refuse what Codex told it about such a turn
+  and reconnected every 15 seconds until the turn ended at the Mac, so the approval never left the Mac.
+- Stop works on a turn that was running a command when the Mac's link to Codex reconnected. The Codex
+  guide's limit on it is gone.
+
 ## Set up in one command
 
 - The installer asks to start the daemon and to pair your iPhone, after the PATH question (Return means

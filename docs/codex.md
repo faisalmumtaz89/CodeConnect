@@ -169,26 +169,47 @@ happens depends on whether the session is busy:
 
 ## What your phone cannot do
 
-Four limits are measured, not guessed. None of them has a workaround from the phone.
+Five limits are measured, not guessed. None of them has a workaround from the phone.
 
-**1. Stop can go quiet after a reconnect, on turns that are doing work.** If the Mac's link
-to a Codex session drops while a turn is running a command or editing a file, the
-reconnect cannot safely work out which turn is running, so Stop for that turn is refused
-until it ends on its own or a new turn starts. Until then, stop it at the Mac. This is
-deliberate: the alternative is aiming a stop at a turn that may already be over.
-
-**2. An answer given at the Mac keyboard does not say what was chosen.** Codex's "this was
+**1. An answer given at the Mac keyboard does not say what was chosen.** Codex's "this was
 resolved" message carries only *which* request was answered — never the decision, and it
 looks the same however it was settled. So the phone can tell you an approval was answered
 at the Mac, but not which button was pressed. Answers from the phone keep their decision,
 because the Mac composes that record itself as it forwards the answer.
 
-**3. Stop ends the turn, not the shell it started.** Measured on 0.153.4: an interrupted
+**2. A file-change approval already waiting when the daemon restarts is answered at the
+Mac.** Codex sends what a file change will write only when the edit starts, and a
+connection opened after that never sees it, so it raises no card for the request. Measured
+on 0.164.0: the card the phone already holds stays on screen, and choosing an option is
+refused with "this connection holds no live request id for that card, so nothing was sent;
+answer at the Mac". A command approval is not affected — Codex sends it again to the new
+connection, and the phone can answer it.
+
+**3. History read back from Codex can have gaps.** When the daemon was not watching a Codex
+session — across a restart or an update, on a new session it attaches to late, or on an
+earlier thread you resume or fork — it reads what happened from Codex's own history.
+Measured on 0.164.0, across every Codex session on one Mac and on live sessions, that read
+leaves out:
+
+- a prompt with an image attached, its text included;
+- every message of a thread started on codex 0.146.0, which Codex names only by
+  placeholders;
+- in a running session, a stopped turn's prompt read before a later turn has run, and a
+  command still running when its turn was stopped, until its shell has ended;
+- the partial reply of a stopped turn, which is in no history at all;
+- what a turn did before the daemon attached to it, when that turn was then stopped or
+  failed — until the daemon next reads the history, at a restart or a reconnect.
+
+What the daemon recorded live stays recorded. A command that outlives a Stop the daemon saw
+keeps the stop as its result; when the daemon missed the stop, the outcome the history
+reports is recorded.
+
+**4. Stop ends the turn, not the shell it started.** Measured on 0.153.4: an interrupted
 turn ends, and a command the agent had already launched runs to completion in its own
 shell — in the recorded case, about forty-five seconds later. Stop is not a kill switch
 for work already in flight.
 
-**4. Two sessions started in the same millisecond can sort the wrong way round.** Session
+**5. Two sessions started in the same millisecond can sort the wrong way round.** Session
 ids are ordered within one process, so a session that replaces another always sorts after
 it. But two `codeconnect` launches are two processes, and two ids minted in the same
 millisecond by different processes separate only on random bits. The odds are about one in
@@ -396,7 +417,6 @@ disconnected. It is a fact about the **link**, not about whether the session is 
 | `npm`/installer cannot update `codex` — `Operation not permitted` | CodeConnect 0.7.0 or 0.8.0 left `codex` locked. See [the identity check](#the-identity-check-on-the-codex-binary) for the one command that unlocks it. |
 | No Stop button on a Codex session | Daemon below 1.17, or the link is not `subscribed`. |
 | No composer on a Codex session | Daemon below 1.18. |
-| Stop refused right after the Mac reconnected | Limit 1 above — the turn is doing tool work. Stop it at the Mac. |
 
 ## See also
 

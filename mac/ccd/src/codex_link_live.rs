@@ -76,7 +76,7 @@
 //! nothing had measured the answer's completeness, its keying, or its id stability.
 //! Those measurements now exist, they are written down on
 //! [`crate::codex_adapter::CodexAdapter::plan_resume_seed`], and one of them changed the
-//! design: a **running** turn's `items[]` carry placeholder ids (`item-1`, `item-2`)
+//! design: a **running** turn's message items carry placeholder ids (`item-1`, `item-2`)
 //! while the live wire emits the real ones, so a resume answer may be read for a turn
 //! that has **finished** and may only be read for liveness otherwise. Claims 6b, 7 and 8
 //! are what the old loop became.
@@ -106,11 +106,13 @@
 //! app-server offers no lever to produce either on demand without also destroying what
 //! is under test.
 //!
-//! **An interrupted turn is not exercised here or anywhere.** No resume answer has ever
-//! been captured describing one, so [`crate::codex_adapter::CodexAdapter::plan_resume_seed`]
-//! refuses any turn state other than the two measured, and an operator who interrupts a
-//! turn gets a loud STOP-AND-AMEND rather than a guess. That refusal is the designed
-//! re-grounding trigger for whatever change captures it.
+//! **A resume answer describing a stopped or failed turn is asserted on by fixtures, not
+//! here.** `a_daemon_killed_after_writing_an_interrupt_records_unknown_and_never_sends_again`
+//! reattaches across a stopped turn without asserting on the answer; the answers themselves
+//! are captured fixtures (`fixtures/codex/resume-interrupted-*-0.164.0.json`,
+//! `fixtures/codex/resume-failed-turn-0.164.0.json`), read by
+//! [`crate::codex_adapter::CodexAdapter::plan_resume_seed`]'s tests against the live frames
+//! recorded beside them.
 //!
 //! **The `run` loop's own reconnect** — EOF, backoff, re-handshake and the retryable
 //! not-ready attach — is proven deterministically in
@@ -8890,12 +8892,10 @@ async fn a_replacement_registration_waits_for_an_answer_already_on_the_wire() {
     // the session's thread and announce on its connection — the proof the session moved
     // to a live observer rather than being left registered and unobserved.
     //
-    // It is deliberately NOT asserted to be *subscribed*: the answer this gate leaves
-    // outstanding sits in the thread's newest turn, and a link that resumes onto a thread
-    // whose latest turn is an unresolved approval STOP-AND-AMENDs rather than read a state
-    // it was never measured against — which is the link being careful, not the handover
-    // being unhealthy. A subscribe waits on the approval resolving; a bound, announced
-    // replacement is the health the handover itself owes.
+    // It is deliberately NOT asserted to be *subscribed*: a bound, announced replacement
+    // is the health the handover itself owes, and the subscription that follows depends
+    // on the resume answer for the thread's newest turn, which the approval this gate
+    // leaves outstanding keeps running — the link's business, not the handover's.
     let mut repl_log: Vec<String> = Vec::new();
     let replacement_bound = wait_until(Duration::from_secs(90), || {
         repl_log.extend(crate::log::capture::drain());
@@ -11538,36 +11538,11 @@ async fn measure_what_codex_itself_says_about_an_interrupt() {
 // link, a real WebSocket through production `ws_server`, and a real turn that is
 // really running when the frame arrives.
 
-/// Drive a turn that will still be running when an interrupt reaches it, and return
-/// its id.
-///
-/// The command is approved at the keyboard first, so the only live thing on the
-/// thread is the exec: an interrupt landing on a turn that is also showing a prompt
-/// is a different scenario, measured separately.
 /// **A long turn that calls no tool**, and the turn id it started.
 ///
-/// The reconnect gates need this and cannot use [`a_turn_that_is_still_running`], and
-/// the reason is a measured refusal rather than a preference. A `thread/resume` answer
-/// that describes a `commandExecution` or a `fileChange` **inside a turn that is still
-/// running** is refused by [`CodexAdapter::plan_resume_seed`]: a running turn reports
-/// placeholder item ids, so a tool fact minted from one would take a dedup key the live
-/// wire never produces and hold it first-wins. So a link that drops while a shell
-/// command is running cannot resubscribe at all until that turn is over, and never
-/// reaches the point where a running turn could be seeded. That refusal is deliberate
-/// and is not this gate's to relax; what it means for the stop control is recorded
-/// rather than worked around.
-///
-/// **A FINISHED tool-bearing turn is a different matter and is now read**, which is why
-/// this note is narrower than it was. It used to say any tool-bearing answer was refused
-/// outright, and that refusal cost a production session on 2026-09-08 — a link that
-/// attached mid-turn re-asked when the turn ended, could not read the reply describing
-/// the completed `commandExecution`, and reconnected into it 70 times over 18 minutes
-/// (10:04-10:22Z). The guard now
-/// names the two things that were ever unsafe (an unfinished turn, an undecided item);
-/// see the tool guard in `plan_resume_seed` and
-/// `fixtures/codex/resume-after-tool-turn-0.153.4.jsonl`. The helper below is unaffected:
-/// what it needs is a turn still RUNNING at the moment the link drops, and that is
-/// exactly the case that stays refused.
+/// A turn with no tool item in it keeps a tool's own lifecycle out of what a reconnect
+/// gate measures, the stop control; the same gate on a turn running a command is
+/// `a_turn_running_a_command_is_stoppable_once_the_link_is_back`.
 ///
 /// So the turn here is pure generation: no approval, no tool item, and long enough to
 /// outlive a sever-and-restore.
@@ -11610,6 +11585,12 @@ fn turn_has_ended(sub: &WireTap, turn_id: &str) -> bool {
     })
 }
 
+/// Drive a turn that will still be running when an interrupt reaches it, and return
+/// its id.
+///
+/// The command is approved at the keyboard first, so the only live thing on the
+/// thread is the exec: an interrupt landing on a turn that is also showing a prompt
+/// is a different scenario, measured separately.
 async fn a_turn_that_is_still_running(sb: &LiveSandbox, sub: &WireTap, marker: &str) -> String {
     let before = sub
         .seen()
@@ -11758,6 +11739,26 @@ fn interrupt_ledger(daemon: &Arc<crate::state::Daemon>, uid: &str) -> Vec<(Strin
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
 async fn a_turn_that_began_while_the_link_was_down_is_stoppable_once_it_is_back() {
+    stop_after_a_reconnect_mid_turn(MidTurn::Generating).await;
+}
+
+/// **The same, on a turn that is running a shell command.** The resume answer for such
+/// a turn holds its `commandExecution` (`fixtures/codex/resume-running-tool-turn-0.164.0.json`),
+/// and [`CodexAdapter::plan_resume_seed`] reads a running turn for its id whatever its
+/// items, so Stop reaches it too.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a real codex + tmux; run with CC_CODEX_LIVE=1 -- --ignored"]
+async fn a_turn_running_a_command_is_stoppable_once_the_link_is_back() {
+    stop_after_a_reconnect_mid_turn(MidTurn::RunningACommand).await;
+}
+
+/// What the turn the reconnect gates stop is doing when the wire goes.
+enum MidTurn {
+    Generating,
+    RunningACommand,
+}
+
+async fn stop_after_a_reconnect_mid_turn(doing: MidTurn) {
     let Some(codex) = live_gate() else { return };
     let sb = LiveSandbox::new("midturn");
     let coord = sb.spawn_coordinator(&codex);
@@ -11801,7 +11802,17 @@ async fn a_turn_that_began_while_the_link_was_down_is_stoppable_once_it_is_back(
     // connection that reads this turn's terminal is a NEW one, which watched no
     // `turn/started` for it, because the running turn dies with the connection that
     // learned it.
-    let turn_id = a_long_tool_free_turn(&sb, &sub).await;
+    // Under the sandbox's own base, not bare `/tmp`, so teardown finds the approved
+    // command's shell. See [`retire_sandbox_base`].
+    let marker = sb
+        .base
+        .join(format!("cc-4a-midturn.{}.txt", nanos()))
+        .to_string_lossy()
+        .into_owned();
+    let turn_id = match doing {
+        MidTurn::Generating => a_long_tool_free_turn(&sb, &sub).await,
+        MidTurn::RunningACommand => a_turn_that_is_still_running(&sb, &sub, &marker).await,
+    };
     gate.sever();
     assert!(
         wait_for_async(Duration::from_secs(30), || {
@@ -11872,7 +11883,7 @@ async fn a_turn_that_began_while_the_link_was_down_is_stoppable_once_it_is_back(
     println!("GATE PASS — a turn a reconnected link never watched begin is stoppable");
 
     gate.close();
-    teardown(sub, coord, "/tmp/cc-4a-midturn-unused");
+    teardown(sub, coord, &marker);
 }
 
 /// **The first turn after `/new` is stoppable, though its `turn/started` never
@@ -13345,8 +13356,8 @@ async fn a_turn_start_from_a_bound_but_unresumed_leg() {
 ///      that refusal was the STOP-AND-AMEND verdict, which ENDS the leg — so the first
 ///      turn that ran a command put the link into a reconnect loop that ran 70 epochs
 ///      over 18 minutes (2026-09-08, 10:04-10:22Z) and left the session silent.
-///      `codex_adapter` now refuses only an unfinished turn or a tool item with no
-///      terminal `status`.
+///      `codex_adapter` reads it, reads a running turn for its id alone, and refuses a
+///      finished turn's tool item with no terminal `status`.
 ///
 /// The two are one story and this is where it is told once: the phone starts the turn
 /// that creates the rollout, the link attaches to it, the next turn runs a real command
