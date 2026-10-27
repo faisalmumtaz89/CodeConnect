@@ -3,6 +3,15 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Codex and Claude Code run however you installed them
+
+- `codeconnect codex` runs Codex installed with npm, bun, pnpm or mise. It used to refuse anything but
+  OpenAI's installer or Homebrew's cask, saying the `codex` was "a wrapper, not a native executable",
+  while typing `codex` worked.
+- `codeconnect claude` and `codeconnect codex` run the `claude` and `codex` your shell runs: the first on
+  your `PATH`. With two installs, they used to prefer a few fixed folders, such as `~/.local/bin`, over
+  your `PATH`, and could start a different version from the one you use.
+
 ## A Codex turn reads in order after a restart
 
 - When the daemon restarts or updates while a Codex turn runs, what it recovers from Codex's history

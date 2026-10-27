@@ -120,6 +120,37 @@ pub fn search_path(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Every program named `name` a shell's `PATH` lookup would try, in its order: an
+/// executable file in each `PATH` directory, a relative directory (an empty entry
+/// included) taken against the current directory, as the shell takes it.
+pub fn path_hits(name: &str) -> Vec<PathBuf> {
+    match std::env::var_os("PATH") {
+        Some(path) => hits_on(&path, std::env::current_dir().ok().as_deref(), name),
+        None => Vec::new(),
+    }
+}
+
+/// [`path_hits`] over a given `PATH` value and current directory.
+fn hits_on(path: &std::ffi::OsStr, cwd: Option<&Path>, name: &str) -> Vec<PathBuf> {
+    std::env::split_paths(path)
+        .filter_map(|dir| match dir.is_absolute() {
+            true => Some(dir),
+            false => Some(cwd?.join(dir)),
+        })
+        .map(|dir| dir.join(name))
+        .filter(|candidate| is_executable_file(candidate))
+        .collect()
+}
+
+/// Whether `path` reaches a regular file someone may execute — what a shell's lookup
+/// requires of a `PATH` hit.
+pub fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 /// Exact session target. tmux prefix-matches names unless they are anchored
 /// with `=`; without this, `cc-1` would happily attach to `cc-12`.
 ///
@@ -2110,6 +2141,46 @@ mod tests {
             "{:?} is not `tmux {upstream}-cc<N>`",
             bundled_version()
         );
+    }
+
+    /// What a shell's lookup would try, in its order: an executable file in each
+    /// directory, a relative directory (an empty entry included) taken against the
+    /// current directory, and nothing a shell would pass over.
+    #[test]
+    fn path_hits_are_the_programs_a_shell_would_try_in_its_order() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cc-path-hits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let make = |sub: &str, mode: u32| {
+            let path = dir.join(sub).join("agent");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let first = make("first", 0o755);
+        make("unrunnable", 0o644);
+        std::fs::create_dir_all(dir.join("dir-named/agent")).unwrap();
+        let relative = make("cwd/rel", 0o700);
+        let in_cwd = make("cwd", 0o755);
+        let path = std::env::join_paths([
+            dir.join("first"),
+            dir.join("unrunnable"),
+            dir.join("dir-named"),
+            dir.join("missing"),
+            PathBuf::from("rel"),
+            PathBuf::new(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            hits_on(&path, Some(&dir.join("cwd")), "agent"),
+            vec![first.clone(), relative, in_cwd]
+        );
+        // With no current directory, the relative entries cannot be taken.
+        assert_eq!(hits_on(&path, None, "agent"), vec![first]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

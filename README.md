@@ -62,7 +62,7 @@ Your **answer** to a Claude card goes back through the hook Claude holds for tha
 
 ## Getting started
 
-You need an iPhone on iOS 17 or later, and a Mac on macOS 13 or later (Apple silicon or Intel) with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in Terminal. Codex has to be the native one, from OpenAI's installer (`curl -fsSL https://github.com/openai/codex/releases/latest/download/install.sh | sh`) or Homebrew (`brew install --cask codex`): the npm package's `codex` is a script wrapper, which CodeConnect will not run. By default your iPhone reaches your Mac over [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet; your local network works too, with a setting on the Mac (see [Is Tailscale required?](https://codeconnect.sh/support)), but without Tailscale's encryption or the live terminal.
+You need an iPhone on iOS 17 or later, and a Mac on macOS 13 or later (Apple silicon or Intel) with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in Terminal. However you installed them — their own installers, Homebrew, npm, bun, pnpm or mise — CodeConnect runs the `claude` and `codex` your shell runs. By default your iPhone reaches your Mac over [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet; your local network works too, with a setting on the Mac (see [Is Tailscale required?](https://codeconnect.sh/support)), but without Tailscale's encryption or the live terminal.
 
 1. Install the app on your iPhone: [CodeConnect Remote on the App Store](https://apps.apple.com/app/codeconnect-remote/id6797021894).
 2. On your Mac:

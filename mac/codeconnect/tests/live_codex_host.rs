@@ -42,15 +42,13 @@
 //! who explicitly demanded a live run must never be handed a vacuous green. The
 //! same rule extends to the gate's own premise — [`live_gate`] additionally checks
 //! the resolved binary before any of it runs, because validating the host against a
-//! wrapper or a different codex is a vacuous green of a subtler kind: it reports
-//! coverage that executed, against the wrong thing.
+//! binary that is not a working codex is a vacuous green of a subtler kind: it
+//! reports coverage that executed, against the wrong thing.
 //!
 //! What that premise check actually establishes, stated at its real strength: the
-//! resolved file **is a native Mach-O executable** (a filesystem fact) and it **reports**
-//! a version (its own claim about itself). It is not a proof that the binary is
-//! genuinely upstream codex — nothing short of a signature check would be, and a binary
-//! that lies about `--version` would pass. Both are still worth having, because the
-//! failure they actually catch is the common one: an `npm` shim or shell wrapper on PATH.
+//! resolved file **reports** a version (its own claim about itself). It is not a proof
+//! that the binary is genuinely upstream codex — nothing short of a signature check
+//! would be, and a binary that lies about `--version` would pass.
 //!
 //! The version is **recorded, never gated**: CodeConnect hosts whichever codex the
 //! developer installed, so a version literal here would refuse every weekly codex release
@@ -193,8 +191,8 @@ fn is_executable_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the NATIVE codex binary: prefer `~/.local/bin/codex` (the standalone
-/// native build), fall back to `which codex`. `None` (never a panic) if none is a
+/// Resolve the codex binary: prefer `~/.local/bin/codex` (OpenAI's installer), fall
+/// back to `which codex`. `None` (never a panic) if none is a
 /// valid executable file — the caller decides whether that is a skip or a failure.
 fn resolve_codex() -> Option<PathBuf> {
     if let Ok(home) = std::env::var("HOME") {
@@ -217,48 +215,20 @@ fn resolve_codex() -> Option<PathBuf> {
 
 // ------------------------------------------------- validating the gate's premise
 //
-// This harness's whole claim is "the host works against a REAL codex 0.147". That
-// claim rests on the binary this file resolves actually being one — and
-// `resolve_codex` above evidences neither half of it: `~/.local/bin/codex` is a
-// symlink chain the user controls, and `which codex` finds whatever is first on
-// PATH, which on a dev machine is quite often an `npm` shim or a shell wrapper.
-// A live run against the wrong thing does not fail; it validates the host against
-// a binary CodeConnect would never launch, and reports it as green. So
-// the premise is checked here, and a mismatch FAILS the run with a message that
-// names what was found.
+// This harness's whole claim is "the host works against a REAL codex". That claim
+// rests on the binary this file resolves actually being one — and `resolve_codex`
+// above does not evidence it: `which codex` finds whatever is first on PATH. A live
+// run against something that cannot even state a version does not fail; it reports
+// a green it did not earn. So the premise is checked here, and a mismatch FAILS the
+// run with a message that names what was found.
 //
 // The check is deliberately described at its real strength throughout: it
-// establishes that the file IS a native executable and that it REPORTS a version.
-// "Is genuinely the codex it claims to be" is a stronger claim than either, and is not
-// asserted anywhere below.
+// establishes that the file REPORTS a version. "Is genuinely the codex it claims to
+// be" is a stronger claim, and is not asserted anywhere below.
 
 /// Bounded budget for `codex --version`. A binary that does not answer promptly is
-/// not the standalone native CLI, and the gate must not hang on it.
+/// not a working codex, and the gate must not hang on it.
 const VERSION_PROBE_BUDGET: Duration = Duration::from_secs(20);
-
-/// Whether the file at `path` is a native Mach-O executable (thin or universal),
-/// rather than a `#!`-script or a `.js` wrapper. **Mirrors
-/// `codex::is_native_executable`** — the same first-four-bytes magic check the
-/// launcher applies — so this gate cannot validate the host against a binary
-/// `codeconnect codex` would itself refuse. (A `#!`-script starts `0x23 0x21`,
-/// which is in none of these magics.)
-fn is_native_executable(path: &Path) -> bool {
-    use std::io::Read;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut magic = [0u8; 4];
-    if file.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    matches!(
-        u32::from_be_bytes(magic),
-        // Mach-O 32/64-bit, big- and little-endian (arm64 native is 0xCFFAEDFE).
-        0xFEED_FACE | 0xFEED_FACF | 0xCEFA_EDFE | 0xCFFA_EDFE
-        // Universal ("fat") binaries, 32- and 64-bit.
-        | 0xCAFE_BABE | 0xBEBA_FECA | 0xCAFE_BABF | 0xBFBA_FECA
-    )
-}
 
 /// Pull the version out of `codex --version` output, in the same strict shape
 /// `codex::parse_codex_version` accepts: exactly one non-empty line, either
@@ -535,8 +505,8 @@ fn codex_version_bounded(bin: &Path, budget: Duration) -> Result<String, String>
             Ok(Ok(bytes)) => Ok(bytes),
             Ok(Err(why)) => Err(format!("`{} --version` on {which}: {why}", bin.display())),
             Err(_) => Err(format!(
-                "`{} --version` did not close its {which} within {budget:?}; the standalone \
-                 native codex answers and exits immediately, so this is not it (either it \
+                "`{} --version` did not close its {which} within {budget:?}; codex \
+                 answers and exits immediately, so this is not it (either it \
                  never answered, or something it forked inherited the pipe)",
                 bin.display()
             )),
@@ -752,9 +722,8 @@ fn is_alive(pid: i32) -> bool {
 /// the host against the wrong binary, is worse than no gate at all, because it
 /// reports coverage that never executed or that proved something else.
 ///
-/// The two premises it establishes, at their real strength: the resolved file is a
-/// **native** Mach-O executable, and it **reports** a version when asked. Neither is a
-/// proof that the binary is genuinely upstream codex.
+/// The premise it establishes, at its real strength: the resolved file **reports** a
+/// version when asked. That is not a proof that the binary is genuinely upstream codex.
 fn live_gate() -> Option<PathBuf> {
     if std::env::var("CC_CODEX_LIVE").as_deref() != Ok("1") {
         eprintln!("SKIP live_codex_host: set CC_CODEX_LIVE=1 to run the live host test");
@@ -768,19 +737,7 @@ fn live_gate() -> Option<PathBuf> {
         )
     };
 
-    // Premise 1: it is the standalone NATIVE executable, not a wrapper. A `#!`
-    // script or a `.js` shim would spawn some other codex, so nothing this gate
-    // then observes would be evidence about the binary it claims to test.
-    assert!(
-        is_native_executable(&codex),
-        "CC_CODEX_LIVE=1 resolved {} but it is not a native executable (a `#!`-script \
-         or `.js` wrapper). CodeConnect supports the standalone native codex only, and \
-         a live gate that validated the host through a wrapper would be proving \
-         something about a binary nobody can name — failing instead of passing vacuously.",
-        codex.display()
-    );
-
-    // Premise 2: it REPORTS a version — a self-report, taken at that strength and no
+    // The premise: it REPORTS a version — a self-report, taken at that strength and no
     // higher, and recorded rather than gated.
     let version = match codex_version_bounded(&codex, VERSION_PROBE_BUDGET) {
         Ok(v) => v,
@@ -791,7 +748,7 @@ fn live_gate() -> Option<PathBuf> {
         ),
     };
     eprintln!(
-        "live gate premise verified: {} is a native executable reporting codex {version}",
+        "live gate premise verified: {} reports codex {version}",
         codex.display()
     );
     Some(codex)

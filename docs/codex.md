@@ -107,9 +107,7 @@ what was refused and why:
 `help` as the first word (`codeconnect codex help resume`), are Codex's own: they run
 `codex` with your arguments in your terminal, before anything else is checked (so
 `--help resume` shows help, as in Codex), and start no session. The `codex` run is the
-one a launch would use — the first native Codex binary CodeConnect finds — or, when
-there is only a script wrapper such as the npm shim, that wrapper. Use
-`codeconnect --help` for the launcher's own commands.
+one a launch would use. Use `codeconnect --help` for the launcher's own commands.
 
 ## What your phone can do
 
@@ -272,11 +270,10 @@ the Mac, in the log.
 
 ## When Codex updates
 
-CodeConnect runs whichever version of the native Codex you installed — from OpenAI's installer or
-Homebrew's cask; the npm package's `codex` is a script wrapper, which it refuses
-because the file it would run could change under it. Beyond that it pins no version and
-checks no schema: the launcher reads `codex --version` and refuses a binary that cannot say
-what it is.
+CodeConnect runs the `codex` your shell runs: the first one on your `PATH` (or `codex_bin`
+in `~/.codeconnect/config.json`), however it was installed — OpenAI's installer, Homebrew,
+npm, bun, pnpm or mise. It pins no version and checks no schema: the launcher reads
+`codex --version` and refuses a binary that cannot say what it is.
 
 What protects the phone does not depend on the Codex version. The broker admits only a
 fixed set of phone messages, each in a fixed shape, and refuses everything else — so a
@@ -298,7 +295,9 @@ before each time it runs it — for `--version`, for the app server and for the 
 UI. If `codex` is updated while a launch is starting, the check sees different bytes and
 the launch stops and says so; run `codeconnect codex` again once the update has finished.
 An update that lands after the last check and before that program starts is not caught:
-macOS cannot run a program from the file that was checked.
+macOS cannot run a program from the file that was checked. When `codex` is a package
+manager's launcher (npm's, bun's or pnpm's script, or mise's link), the launcher is
+what is checked; the Codex program it starts is not.
 It is a guard against a benign update landing mid-launch, not against a hostile process,
 and it never changes the file.
 
