@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Codex says goodbye as it does run directly again
+
+- Quitting `codeconnect codex` ends with what `codex` prints run directly — its token usage and
+  `To continue this session, run: codex resume <id>` — again. With Codex 0.164 it showed Codex's own
+  "Disconnected from this task" text instead, with a reconnect command for a socket that closes with the
+  session: Codex now prints that command on a line of its own, and CodeConnect only looked for the older
+  one-line form.
+
 ## Codex and Claude Code run however you installed them
 
 - `codeconnect codex` runs Codex installed with npm, bun, pnpm or mise. It used to refuse anything but
