@@ -59,7 +59,7 @@ or `Session ID: <id>` before it is. The hosted Codex UI is a client of the sessi
 server and says goodbye as one, with a reconnect command for a socket that closes with
 the session, so CodeConnect replaces that goodbye with the direct one. A Codex that
 runs on its background server (the default from 0.157) says `Disconnected from this
-task.` and `Reconnect: codex resume <id>` instead; a hosted session is not on that
+task.` and how to reconnect with `codex resume <id>` instead; a hosted session is not on that
 server, so it keeps the direct goodbye, as Codex does when it runs without one. A Ctrl+C
 pressed while Codex is already quitting can stop it before it says goodbye; the screen
 then keeps what Codex drew.

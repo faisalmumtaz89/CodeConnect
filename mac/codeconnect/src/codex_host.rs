@@ -2324,7 +2324,7 @@ struct Goodbye {
 /// Replace the TUI's remote-client goodbye with the one codex prints run directly.
 ///
 /// As a `--remote` client codex ends with "Disconnected from this task", a
-/// `Reconnect:` command for this session's socket and a way to stop its turn, none of
+/// reconnect command for this session's socket and a way to stop its turn, none of
 /// which outlive the session. Run directly, with its thread started as the host's
 /// always is, it prints its token usage and then how to resume the session once it
 /// has a saved rollout, or its id. The pane's rows are the terminal's
@@ -2377,9 +2377,12 @@ fn parse_goodbye(joined: &str, tui_sock: &Path) -> Option<Goodbye> {
         .iter()
         .rposition(|line| line.starts_with(REMOTE_GOODBYE))?;
     let tail = &lines[start..];
-    let reconnect = tail.iter().find(|line| line.starts_with("Reconnect:"))?;
+    // The reconnect command, whatever codex labels it: `Reconnect: codex …` on one
+    // line (0.155.1), or `To reconnect, run:` with the command on the next (0.164.0).
     let own = format!("unix://{} resume ", tui_sock.display());
-    let (_, after) = reconnect.split_once(&own)?;
+    let after = tail
+        .iter()
+        .find_map(|line| line.split_once(&own).map(|(_, after)| after))?;
     let thread_id = after.split_whitespace().next()?;
     if !thread_id
         .chars()
@@ -4676,6 +4679,30 @@ mod tests {
             Some(Goodbye {
                 thread_id: THREAD.to_string(),
                 token_usage: None,
+            })
+        );
+    }
+
+    /// The goodbye codex 0.164.0 prints as a `--remote` client, as a joined capture
+    /// showed it on a real hosted session: the reconnect command on its own line.
+    #[test]
+    fn the_goodbye_codex_0_164_prints_is_read_too() {
+        let own = Path::new(TUI_SOCK);
+        let printed = format!(
+            "Disconnected from this task. Any running work continues.\n\
+             To reconnect, run:\n\
+             \x20 codex --remote unix://{TUI_SOCK} resume {THREAD}\n\
+             Stop the current turn: run codex --remote unix://{TUI_SOCK} agents, select \
+             this task, and press x.\n\
+             Token usage so far: total=2,584 input=2,579 (+ 12,032 cached) output=5\n"
+        );
+        assert_eq!(
+            parse_goodbye(&printed, own),
+            Some(Goodbye {
+                thread_id: THREAD.to_string(),
+                token_usage: Some(
+                    "Token usage: total=2,584 input=2,579 (+ 12,032 cached) output=5".to_string()
+                ),
             })
         );
     }
