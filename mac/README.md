@@ -1265,6 +1265,10 @@ cargo test                        # the workspace suite, including fixture repla
 soak/run.sh                       # the live gauntlet, against a real session
 ```
 
+On Linux, run the suite with `TMPDIR` set to a folder you own: the tests make
+their temporary folder owner-only, as macOS's per-user one already is, and the
+shared `/tmp` is not yours to change.
+
 The daemon's own tests drive a **fake supervisor** over a screen the test
 controls: before typing it checks for the prompt with the same `protocol::ipc`
 prompt-presence function the real supervisor calls, so the interlock is

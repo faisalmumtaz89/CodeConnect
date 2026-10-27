@@ -224,7 +224,7 @@ fn wait_for_foreground() {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        unsafe { libc::kill(libc::getpid(), libc::SIGTTOU) };
+        unsafe { libc::raise(libc::SIGTTOU) };
     }
 }
 
@@ -869,7 +869,11 @@ impl View {
     /// agent if it is still stopped, or paint the pane afresh if it is not.
     fn suspend(&mut self) -> Result<()> {
         leave();
-        unsafe { libc::kill(libc::getpid(), libc::SIGTSTP) };
+        // `raise`, not `kill(getpid())`: this runs on the viewer's own thread, and only
+        // a signal to the calling thread is sure to stop the process before the call
+        // returns. Linux may hand a process-wide one to another thread, and this
+        // thread would run on and take the terminal back from the shell.
+        unsafe { libc::raise(libc::SIGTSTP) };
         wait_for_foreground();
         raw()?;
         self.terminal.ask()?;

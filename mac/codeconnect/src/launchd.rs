@@ -868,6 +868,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_plist_parses_as_a_property_list() {
         // The failure this catches is silent: launchd rejects a malformed plist

@@ -489,7 +489,7 @@ impl Drop for Host {
 fn tagged_pids_best_effort(tag: &str) -> Vec<i32> {
     let me = std::process::id() as i32;
     let Ok(out) = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
     else {
         return Vec::new();
@@ -515,7 +515,7 @@ fn tagged_pids_best_effort(tag: &str) -> Vec<i32> {
 fn processes_matching(needle: &str) -> Vec<(i32, String)> {
     let me = std::process::id() as i32;
     let out = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
         .expect("run /bin/ps to scan the process table — a scan that cannot run must FAIL the test, never silently report 'nothing found'");
     assert!(
@@ -561,7 +561,7 @@ fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
 /// assertion failing, not as this line.
 fn sigkill(pid: i32) {
     let _ = Command::new("/bin/kill")
-        .args(["-KILL", &pid.to_string()])
+        .args(["-KILL", "--", &pid.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();

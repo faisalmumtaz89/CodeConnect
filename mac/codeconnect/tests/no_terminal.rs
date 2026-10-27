@@ -37,7 +37,7 @@ fn pty() -> (OwnedFd, OwnedFd) {
             &mut secondary,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            std::ptr::addr_of_mut!(size),
         )
     };
     assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());

@@ -159,23 +159,44 @@ fn render_server_conf(history_limit: u32) -> String {
     )
 }
 
-/// Where macOS keeps the terminal descriptions every program reads.
-const SYSTEM_TERMINFO: &str = "/usr/share/terminfo";
+/// Where macOS keeps the terminal descriptions every program reads, and where
+/// `tmux-256color` sits among them: macOS names each folder by the hex code of
+/// the first letter.
+#[cfg(target_os = "macos")]
+const SYSTEM_TERMINFO: &[&str] = &["/usr/share/terminfo"];
+#[cfg(target_os = "macos")]
+const TMUX_256COLOR: &str = "74/tmux-256color";
+
+/// On Linux, every directory CodeConnect's tmux searches; distributions name
+/// each folder by the first letter itself.
+#[cfg(target_os = "linux")]
+const SYSTEM_TERMINFO: &[&str] = &[
+    "/etc/terminfo",
+    "/lib/terminfo",
+    "/usr/share/terminfo",
+    "/usr/lib/terminfo",
+];
+#[cfg(target_os = "linux")]
+const TMUX_256COLOR: &str = "t/tmux-256color";
 
 /// The `TERM` a Codex pane is given, whichever tmux started the server and
 /// with whatever options: `tmux-256color` where the system describes it
-/// (macOS 14 and later), so Codex gets italics and tmux's own features;
-/// `screen-256color` where it does not (macOS 13), because programs there could
-/// not look the other one up. tmux fixes its own default when it is built, and
+/// (macOS 14 and later, and the usual Linux distributions), so Codex gets
+/// italics and tmux's own features; `screen-256color` where it does not
+/// (macOS 13, a minimal Alpine), because programs there could not look the
+/// other one up. tmux fixes its own default when it is built, and
 /// one build of CodeConnect's tmux serves both; this is what Homebrew's tmux,
 /// built separately for each macOS, has always chosen. (A Claude pane is given
 /// the calling terminal's `TERM` instead; see [`crate::caller_env`].)
 pub fn pane_terminal() -> &'static str {
-    default_terminal(std::path::Path::new(SYSTEM_TERMINFO))
+    default_terminal(SYSTEM_TERMINFO.iter().map(std::path::Path::new))
 }
 
-fn default_terminal(terminfo: &std::path::Path) -> &'static str {
-    if terminfo.join("74").join("tmux-256color").is_file() {
+fn default_terminal<'a>(terminfo: impl IntoIterator<Item = &'a std::path::Path>) -> &'static str {
+    if terminfo
+        .into_iter()
+        .any(|dir| dir.join(TMUX_256COLOR).is_file())
+    {
         "tmux-256color"
     } else {
         "screen-256color"
@@ -626,15 +647,16 @@ fn server_is_proven_dead(server_a: &protocol::tmux::OwnedSession) -> bool {
     }) == protocol::proc_identity::Liveness::Gone
 }
 
-/// This binary, which the pane runs first to take on the caller's environment.
+/// This binary, which the pane runs first to take on the caller's environment,
+/// and which keeps the pane's early output ([`crate::early_output`]).
 /// Under a test binary, the `codeconnect` cargo builds beside it.
 #[cfg(not(test))]
-fn pane_exe() -> Result<PathBuf> {
+pub(crate) fn pane_exe() -> Result<PathBuf> {
     std::env::current_exe().context("locating the codeconnect binary")
 }
 
 #[cfg(test)]
-fn pane_exe() -> Result<PathBuf> {
+pub(crate) fn pane_exe() -> Result<PathBuf> {
     Ok(crate::caller_env::built_binary())
 }
 
@@ -1481,10 +1503,11 @@ mod tests {
     #[test]
     fn panes_get_tmux_256color_only_where_the_system_describes_it() {
         let dir = std::env::temp_dir().join(format!("cc-terminfo-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("74")).unwrap();
-        assert_eq!(default_terminal(&dir), "screen-256color");
-        std::fs::write(dir.join("74").join("tmux-256color"), b"").unwrap();
-        assert_eq!(default_terminal(&dir), "tmux-256color");
+        let entry = dir.join(TMUX_256COLOR);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        assert_eq!(default_terminal([dir.as_path()]), "screen-256color");
+        std::fs::write(&entry, b"").unwrap();
+        assert_eq!(default_terminal([dir.as_path()]), "tmux-256color");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

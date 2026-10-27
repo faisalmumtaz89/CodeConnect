@@ -3305,8 +3305,9 @@ mod tests {
         }
     }
 
-    const FAKE_TUI: &str = r#"#!/bin/sh
+    const FAKE_TUI: &str = r#"#!/bin/bash
 # A composer that a "/dialog" line replaces with a view, restored by Escape.
+# bash rather than sh for `printf "\x.."`, which dash, Debian's sh, lacks.
 # The composer is drawn in the box Claude draws one in — rule, prompt row,
 # rule, footer — because that box is what the presence check reads.
 # `stty raw` so Escape arrives as a byte we can read.

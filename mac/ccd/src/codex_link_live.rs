@@ -351,7 +351,7 @@ fn codex_version_bounded(bin: &Path, budget: Duration) -> Result<String, String>
     });
     let answer = rx.recv_timeout(budget);
     let _ = Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{}", child.id())])
+        .args(["-KILL", "--", &format!("-{}", child.id())])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -403,7 +403,7 @@ fn live_gate() -> Option<PathBuf> {
 fn tagged_processes(tag: &str) -> Vec<(i32, String)> {
     let me = std::process::id() as i32;
     let Ok(out) = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
     else {
         return Vec::new();

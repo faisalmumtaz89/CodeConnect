@@ -157,23 +157,28 @@ pub fn list_members(archive: &Path) -> Result<Vec<crate::update_release::Member>
     }
     let listing = String::from_utf8_lossy(&output.stdout);
     let mut members = Vec::new();
+    // `tar -tv` on macOS prints: mode links owner group size month day time
+    // name. GNU tar prints: mode owner/group size date time name.
+    // Measured against the system tar rather than assumed — reading the
+    // wrong column silently reports every member as zero bytes, which
+    // makes a size bound that looks present do nothing at all.
+    #[cfg(target_os = "macos")]
+    let (size_field, name_field) = (4, 8);
+    #[cfg(target_os = "linux")]
+    let (size_field, name_field) = (2, 5);
     for line in listing.lines().filter(|line| !line.trim().is_empty()) {
-        // `tar -tv` prints: mode links owner group size month day time name.
-        // Measured against the system tar rather than assumed — reading the
-        // wrong column silently reports every member as zero bytes, which
-        // makes a size bound that looks present do nothing at all.
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 9 {
+        if fields.len() <= name_field {
             anyhow::bail!("the archive listing has a line this cannot read: {line}");
         }
-        let size = fields[4]
+        let size = fields[size_field]
             .parse::<u64>()
             .map_err(|_| anyhow::anyhow!("the archive listing has no size for: {line}"))?;
-        // Everything from the ninth field on, so a name containing spaces is
+        // Everything from the name field on, so a name containing spaces is
         // carried whole rather than truncated into a different name. A link
         // prints `name -> target` and is refused by type before its path is
         // ever used.
-        let name = fields[8..].join(" ");
+        let name = fields[name_field..].join(" ");
         members.push(crate::update_release::Member {
             path: name.trim_end_matches('/').to_string(),
             is_regular_file: fields[0].starts_with('-'),
@@ -433,6 +438,7 @@ pub fn exchange(staged: &Path, live: &Path) -> io::Result<()> {
     let live_c = std::ffi::CString::new(live.as_os_str().as_bytes())?;
     // SAFETY: both pointers are NUL-terminated strings that outlive the call,
     // and `AT_FDCWD` makes the absolute paths absolute.
+    #[cfg(target_os = "macos")]
     let rc = unsafe {
         libc::renameatx_np(
             libc::AT_FDCWD,
@@ -442,6 +448,20 @@ pub fn exchange(staged: &Path, live: &Path) -> io::Result<()> {
             libc::RENAME_SWAP,
         )
     };
+    // SAFETY: as above. `RENAME_EXCHANGE` is Linux's `RENAME_SWAP`. The system
+    // call itself, because the musl the static build links has no `renameat2`
+    // wrapper.
+    #[cfg(target_os = "linux")]
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            staged_c.as_ptr(),
+            libc::AT_FDCWD,
+            live_c.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
     if rc == 0 {
         return Ok(());
     }
@@ -449,8 +469,12 @@ pub fn exchange(staged: &Path, live: &Path) -> io::Result<()> {
     // A filesystem that cannot exchange atomically cannot install atomically.
     // Falling back to three renames would silently give up the one property
     // this module exists to provide, so it refuses instead — having changed
-    // nothing.
-    if err.raw_os_error() == Some(libc::ENOTSUP) {
+    // nothing. Linux says so with `EINVAL`.
+    #[cfg(target_os = "macos")]
+    let cannot_exchange = libc::ENOTSUP;
+    #[cfg(target_os = "linux")]
+    let cannot_exchange = libc::EINVAL;
+    if err.raw_os_error() == Some(cannot_exchange) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
@@ -625,6 +649,7 @@ mod tests {
     /// The requirement is not a string this code merely stores: `codesign` has
     /// to accept it as a requirement, and a typo would otherwise only surface
     /// on a user's machine at the moment an update was refused.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_pinned_requirement_is_one_codesign_understands() {
         use std::io::Write;
@@ -812,6 +837,7 @@ mod tests {
     /// does not belong in a repository. The release workflow runs this exact
     /// requirement against the real signed binaries, which is where that half
     /// is proven.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_signature_that_is_not_developer_id_is_refused() {
         let root = scratch("signature");
@@ -944,6 +970,7 @@ mod tests {
 
     /// The parser against a file nobody in this test wrote: the test binary
     /// itself, which `rustc` produced for this machine and is therefore thin.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_real_compiled_binary_is_read_as_the_single_architecture_it_is() {
         let me = std::env::current_exe().expect("a test binary has a path");

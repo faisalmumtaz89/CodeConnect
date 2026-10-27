@@ -475,6 +475,9 @@ impl Drop for LineCap {
 #[cfg(test)]
 static TEST_DEADLINE_ARMED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
+#[cfg(test)]
+static TEST_DEADLINE_ARM_TIMES: Mutex<Vec<std::time::Instant>> = Mutex::new(Vec::new());
+
 /// How many stall deadlines have expired since a test last zeroed this.
 ///
 /// A test that means to drive the peer *without* ever expiring a deadline has to
@@ -702,9 +705,14 @@ fn note_published(_generation: u64) {}
 
 #[cfg(test)]
 fn note_deadline_armed() {
+    let now = std::time::Instant::now();
     *TEST_DEADLINE_ARMED
         .lock()
-        .unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
+        .unwrap_or_else(|p| p.into_inner()) = Some(now);
+    TEST_DEADLINE_ARM_TIMES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(now);
 }
 
 #[cfg(not(test))]
@@ -3467,9 +3475,10 @@ pub(crate) mod tests {
         };
         entries
             .filter_map(|entry| entry.ok())
+            // Through the entry: on Linux each `/dev/fd` entry is a symlink to
+            // what the descriptor holds.
             .filter(|entry| {
-                entry
-                    .metadata()
+                std::fs::metadata(entry.path())
                     .map(|meta| meta.file_type().is_fifo())
                     .unwrap_or(false)
             })
@@ -3556,6 +3565,10 @@ pub(crate) mod tests {
         *TEST_DEADLINE_ARMED
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = None;
+        TEST_DEADLINE_ARM_TIMES
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
         let sem = Arc::new(Semaphore::new(credit));
         let (tx, rx) = output_channel(4);
         let (acks_tx, mut acks_rx) = mpsc::unbounded_channel::<u32>();
@@ -5530,9 +5543,19 @@ pub(crate) mod tests {
         // permit, not the whole deadline after the first.
         let armed = deadline_armed().expect("the reader armed a stall deadline");
         let took = armed.elapsed();
+        let arms: Vec<std::time::Duration> = {
+            let times = TEST_DEADLINE_ARM_TIMES
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            times.iter().map(|t| t.duration_since(times[0])).collect()
+        };
         assert!(
             took >= stall,
-            "the close waited the chunk's absolute deadline, took {took:?}"
+            "the close waited the chunk's absolute deadline, took {took:?}; DIAG arms since first {arms:?}, \
+             expiries {}, delivered {delivered}, close {:?}",
+            TEST_DEADLINE_EXPIRIES.load(Relaxed),
+            handle.close_cause().reason
         );
         assert_eq!(
             handle.close_reason(),

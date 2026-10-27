@@ -62,6 +62,114 @@ jobs:
         working-directory: mac
         run: cargo test --workspace
 
+  linux:
+    name: Rust on Linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+          - runner: ubuntu-latest
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup component add clippy
+
+      # The same pinned tmux a Linux release ships. build.sh builds it static
+      # against musl, so it runs on Alpine, pinned by digest for both
+      # architectures, and the binary it writes runs on this runner as is.
+      - name: Cache the pinned tmux
+        id: tmux-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tmux
+          key: ${{ runner.os }}-${{ runner.arch }}-tmux-${{ hashFiles('mac/tmux/**') }}
+
+      - name: Build the pinned tmux
+        if: steps.tmux-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/tmux"
+          docker run --rm -v "$PWD/mac/tmux:/build:ro" -v "$RUNNER_TEMP/tmux:/out" \
+            alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f \
+            sh -c 'apk add --no-cache bash build-base curl pkgconf linux-headers bison && bash /build/build.sh /out'
+
+      - name: Use the pinned tmux
+        run: echo "CODECONNECT_TMUX=$RUNNER_TEMP/tmux/cc-tmux-${{ matrix.arch }}" >> "$GITHUB_ENV"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mac/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('mac/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: Clippy
+        working-directory: mac
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The tests keep their stores under the temporary directory and make its
+      # folder owner-only, as macOS's per-user TMPDIR already is. Linux's /tmp is
+      # shared and not the runner's to change, so they get a folder of its own.
+      - name: Test
+        if: matrix.arch != 'x86_64'
+        working-directory: mac
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: cargo test --workspace
+
+      # DIAGNOSTIC ONLY (branch ci-linux-diag, never merged): the four tests
+      # that flaked on x86_64, 40 times each, with the protocol and ccd test
+      # binaries looping beside them as the suite's load.
+      - name: Loop the x86_64 flakes
+        if: matrix.arch == 'x86_64'
+        working-directory: mac
+        env:
+          TMPDIR: ${{ runner.temp }}
+          CARGO_TERM_COLOR: never
+        run: |
+          cargo test -p protocol --lib -p ccd --bin ccd --no-run 2>&1 | tee "$RUNNER_TEMP/build.txt"
+          P="$(sed -n 's/.*Executable unittests src\/lib.rs (\(.*\/protocol-[^)]*\)).*/\1/p' "$RUNNER_TEMP/build.txt")"
+          C="$(sed -n 's/.*Executable unittests src\/main.rs (\(.*\/ccd-[^)]*\)).*/\1/p' "$RUNNER_TEMP/build.txt")"
+          echo "protocol=$P ccd=$C"
+          if [ -z "$P" ] || [ -z "$C" ]; then
+            echo "::error::a test binary path was not found in the build output"
+            exit 1
+          fi
+          ( while :; do "$P" -q >/dev/null 2>&1; done ) &
+          ( while :; do "$C" -q >/dev/null 2>&1; done ) &
+          total=0
+          while read -r bin name; do
+            f=0
+            for i in $(seq 1 40); do
+              if ! "$bin" -q --exact "$name" > "$RUNNER_TEMP/out.txt" 2>&1; then
+                f=$((f+1)); echo "::group::$name failure $f (run $i)"; cat "$RUNNER_TEMP/out.txt"; echo "::endgroup::"
+              fi
+            done
+            echo "$name: $f failures in 40"; total=$((total+f))
+          done <<EOF
+          $P tmux::tests::a_server_restart_inside_the_window_is_refused_by_the_epoch_pin
+          $P tmux::tests::a_restart_in_the_inner_window_is_never_reported_as_a_false_killed
+          $P tmux::tests::a_restart_in_the_outer_window_is_refused_by_the_pre_kill_recheck
+          $C terminal::tests::an_output_stall_closes_as_slow_consumer_and_reaps
+          EOF
+          jobs -p | xargs -r kill || true
+          [ "$total" -eq 0 ]
+
+  # The release's Linux build and packaging, run on every change; see
+  # linux-build.yml.
+  linux-release-build:
+    name: Linux release build
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      ref: ${{ github.sha }}
+
   msrv:
     name: Rust MSRV floor
     runs-on: macos-15

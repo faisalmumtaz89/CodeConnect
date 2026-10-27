@@ -18032,11 +18032,17 @@ mod tests {
     }
 
     /// One transcript line, read the way the tailer reads it.
+    ///
+    /// A path of its own for every write: a file written where one was just
+    /// removed can get its inode back (ext4 does), and the cursor would then
+    /// verify against it instead of rescanning from zero.
     async fn transcript_line(daemon: &Arc<Daemon>, line: &serde_json::Value) {
+        static WRITTEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "ccd-line-{}-{}.jsonl",
+            "ccd-line-{}-{}-{}.jsonl",
             std::process::id(),
-            line["uuid"].as_str().unwrap()
+            line["uuid"].as_str().unwrap(),
+            WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::write(&path, format!("{line}\n")).unwrap();
         let run = SessionKey::new(TEST_UID, "cc-1");

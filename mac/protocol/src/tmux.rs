@@ -3775,7 +3775,7 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
                 .unwrap()
         };
         let start = |name: &str, uid: &str| {
-            assert!(tmux(&[
+            let out = tmux(&[
                 "new-session",
                 "-d",
                 "-s",
@@ -3786,9 +3786,12 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
                 "/bin/sh",
                 "-c",
                 "while :; do sleep 1; done",
-            ])
-            .status
-            .success());
+            ]);
+            assert!(
+                out.status.success(),
+                "DIAG new-session failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         let uid = crate::uid::new().unwrap();
         start("cc-1", &uid);
@@ -4330,7 +4333,7 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
     // --- shared helpers for the window tests ---
 
     fn start_session(bin: &std::path::Path, sock: &str, name: &str, uid: &str) {
-        assert!(std::process::Command::new(bin)
+        let out = std::process::Command::new(bin)
             .args(["-S", sock, "-f", "/dev/null"])
             .args([
                 "new-session",
@@ -4345,9 +4348,13 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
                 "while :; do sleep 1; done",
             ])
             .stdin(Stdio::null())
-            .status()
-            .unwrap()
-            .success());
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "DIAG new-session failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     fn kill_server(bin: &std::path::Path, sock: &str) {

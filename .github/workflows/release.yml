@@ -1,4 +1,6 @@
-# Builds, signs, notarizes and verifies the Mac binaries for a release.
+# Builds, signs, notarizes and verifies the Mac binaries for a release. The
+# Linux archives are built by linux-build.yml, which this calls; they are not
+# attached to the release.
 #
 # **Every run proves a draft end to end; publication is a separate, explicit
 # act.** `codeconnect update` installs whatever `releases/latest` points at, so
@@ -267,6 +269,13 @@ jobs:
             mac/target/${{ matrix.target }}/release/ccd
             mac/target/${{ matrix.target }}/release/cc-hook
           if-no-files-found: error
+
+  linux:
+    name: Linux
+    needs: pin
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      ref: ${{ needs.pin.outputs.sha }}
 
   publish:
     name: Sign, notarize, verify${{ (github.event_name == 'workflow_dispatch' && inputs.publish) && ', publish' || '' }}

@@ -60,6 +60,13 @@ fn main() -> Result<()> {
     {
         return job::run(&raw[1..]);
     }
+    // Hidden: the copy of an agent's early output `pipe-pane` runs. Machinery.
+    if raw
+        .first()
+        .is_some_and(|command| command == early_output::SUBCOMMAND)
+    {
+        return early_output::run();
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = args
         .split_first()
