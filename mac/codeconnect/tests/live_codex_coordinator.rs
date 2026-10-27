@@ -55,7 +55,7 @@
 //! `cargo test` must never run it. Two independent guards: `#[ignore]`, and
 //! `CC_CODEX_LIVE=1`. With the flag SET, a missing `codex` is a **failure**, not a
 //! skip — an operator who demanded a live run must never be handed a vacuous
-//! green — and so is a `codex` that is not a native executable.
+//! green — and so is a `codex` that cannot say what version it is.
 //!
 //! Run it deliberately:
 //! ```text
@@ -95,7 +95,7 @@ fn codex_sha256(path: &Path) -> String {
 static SANDBOX_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// Bounded budget for `codex --version`. A binary that does not answer promptly
-/// is not the standalone native CLI, and the gate must not hang on it.
+/// is not a working codex, and the gate must not hang on it.
 const VERSION_PROBE_BUDGET: Duration = Duration::from_secs(20);
 
 /// The most a `--version` probe may hand back. The answer is one short line, so
@@ -121,8 +121,8 @@ fn is_executable_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the NATIVE codex binary: prefer `~/.local/bin/codex` (the standalone
-/// native build), fall back to `which codex`. Mirrors `live_codex_host.rs`.
+/// Resolve the codex binary: prefer `~/.local/bin/codex` (OpenAI's installer), fall
+/// back to `which codex`. Mirrors `live_codex_host.rs`.
 fn resolve_codex() -> Option<PathBuf> {
     if let Ok(home) = std::env::var("HOME") {
         let native = PathBuf::from(home).join(".local/bin/codex");
@@ -136,33 +136,6 @@ fn resolve_codex() -> Option<PathBuf> {
     }
     let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
     is_executable_file(&path).then_some(path)
-}
-
-/// Whether the file at `path` is a native Mach-O executable (thin or universal)
-/// rather than a `#!`-script or a `.js` wrapper. Mirrors
-/// `codex::is_native_executable` — the same first-four-bytes magic check the
-/// launcher applies — so this gate cannot validate against a binary
-/// `codeconnect codex` would itself refuse.
-fn is_native_executable(path: &Path) -> bool {
-    use std::io::Read;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut magic = [0u8; 4];
-    if file.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    matches!(
-        u32::from_be_bytes(magic),
-        0xFEED_FACE
-            | 0xFEED_FACF
-            | 0xCEFA_EDFE
-            | 0xCFFA_EDFE
-            | 0xCAFE_BABE
-            | 0xBEBA_FECA
-            | 0xCAFE_BABF
-            | 0xBFBA_FECA
-    )
 }
 
 /// Pull the version out of `codex --version`, in the same strict shape
@@ -255,12 +228,6 @@ fn live_gate() -> Option<PathBuf> {
              run must FAIL rather than pass vacuously."
         )
     };
-    assert!(
-        is_native_executable(&codex),
-        "CC_CODEX_LIVE=1 resolved {} but it is not a native executable (a `#!`-script or \
-         `.js` wrapper). CodeConnect supports the standalone native codex only.",
-        codex.display()
-    );
     let version = match codex_version_bounded(&codex, VERSION_PROBE_BUDGET) {
         Ok(v) => v,
         Err(why) => panic!(
@@ -275,7 +242,7 @@ fn live_gate() -> Option<PathBuf> {
          tmux pane, so there is nothing to test without one."
     );
     eprintln!(
-        "live gate premise verified: {} is a native executable reporting codex {version}",
+        "live gate premise verified: {} reports codex {version}",
         codex.display()
     );
     Some(codex)
@@ -2447,13 +2414,14 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
 /// property is the same for both: a launch refused a directory it did not create
 /// dies without a session, without a supervisor, and without leaving cleanup owed.
 ///
-/// **Two failure sentences, because there are genuinely two orderings.** A refused
-/// host dies within milliseconds of its pane's `execve`, and its session dies with
-/// it, while its coordinator is still finishing the bookkeeping that follows
+/// **Three failure sentences, because there are genuinely three orderings.** A
+/// refused host dies within milliseconds of its pane's `execve`, and its session dies
+/// with it, while its coordinator is still finishing the bookkeeping that follows
 /// `new-session` (resolve the session, clear `remain-on-exit`, record that it
 /// held). Whether the coordinator notices the loss during that bookkeeping or
-/// later in the bring-up wait is a race between two processes on one machine, and
-/// the answer is a property of the machine rather than of the code under test.
+/// later in the bring-up wait — and there, by the dead host or by the gone pane — is
+/// a race between processes on one machine, and the answer is a property of the
+/// machine rather than of the code under test.
 ///
 /// **Both were measured.** The simultaneous loser came out as the first shape in
 /// every run whose reason was captured — its coordinator is doing the same
@@ -2472,12 +2440,16 @@ fn the_codex_command_launches_a_real_session_end_to_end() {
 /// codex that would not start, a charter the host rejected — fails this gate
 /// loudly instead of passing as "well, it failed".
 fn assert_refused_without_adopting(sb: &LiveSandbox, who: &str, coord: &mut Child) -> String {
-    const REFUSAL_SHAPES: [&str; 2] = [
+    const REFUSAL_SHAPES: [&str; 3] = [
         // The post-`new-session` bookkeeping found the session already gone —
         // every captured run of the simultaneous pair.
         "the created tmux session could not be made safe",
         // The bring-up wait saw the pane gone — observed on the late contender.
         "the host died before it was up",
+        // The bring-up wait proved the host gone before the pane — observed on the
+        // simultaneous loser when codex is npm's launcher. The claim check below is
+        // what tells this refusal apart from a host that died later.
+        "the codex host exited before the launch was ready",
     ];
     let run_dir = sb.run_dir.clone();
     assert!(

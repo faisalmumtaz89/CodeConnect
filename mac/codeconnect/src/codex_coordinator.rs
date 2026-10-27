@@ -846,7 +846,7 @@ pub struct RealCoordinatorDeps {
     /// The resolved, identity-pinned `codex` executable the host execs for BOTH the
     /// app-server and the TUI. The coordinator does not re-resolve it: resolution
     /// and the identity pin are the launcher's (`codex::start`), and passing the
-    /// single canonicalised path through is what keeps the recorded, checked and
+    /// single resolved path through is what keeps the recorded, checked and
     /// executed binaries the same file.
     pub codex: String,
     /// The SHA-256 of that executable as the launcher inspected it (the
@@ -856,8 +856,7 @@ pub struct RealCoordinatorDeps {
     /// **Carried, never computed here.** A path is not a file, so a digest is only
     /// worth anything if it comes from the process that did the inspecting: hashing
     /// `codex` in this process would pin whatever is at that name now and would say
-    /// nothing about the bytes that passed the native-executable check and reported
-    /// `--version`. The coordinator is the courier for the same reason it is the
+    /// nothing about the bytes that were inspected and reported `--version`. The coordinator is the courier for the same reason it is the
     /// courier for `launch_cwd` — the authority upstream resolved it once, and a
     /// second, later derivation is a second answer that can disagree.
     ///

@@ -1123,8 +1123,8 @@ that is not valid JSON, whose every setting falls back to its default.
 | `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |
 | `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
 | `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
-| `claude_bin` | auto | Explicit path to the real `claude`. |
-| `codex_bin` | auto | Explicit path to the native `codex`. A script wrapper, such as npm's, is skipped, and with no native `codex` found the launch refuses. |
+| `claude_bin` | auto | Explicit path to the `claude` to run. Unset, it is `CODECONNECT_CLAUDE_BIN` if set, then the first `claude` on `PATH` as your shell finds it, then `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `claude` is an alias, set this to what it runs. |
+| `codex_bin` | auto | Explicit path to the `codex` to run. Unset, it is `CODECONNECT_CODEX_BIN` if set, then the first `codex` on `PATH` as your shell finds it, however it was installed, then `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`. A shell alias is not seen: if `codex` is an alias, set this to what it runs. |
 | `tls` | `true` | Find a certificate for the QR host — cached, dropped in `~/.codeconnect/tls/` by hand, or from `tailscale cert` — and serve `wss://`. Falls back to `ws://` rather than refusing to start. |
 | `tls_required` | `false` | Refuse plaintext. Turn on once every client speaks `wss://`; both share one port until then. |
 | `ws_allow_plaintext` | `false` | Serve `ws://` on a `ws_bind` whose privacy only you can vouch for. Honoured on a local-network address; refused on `0.0.0.0`, `::` and public addresses. `tls_required` wins over it. See [TLS](#tls). |

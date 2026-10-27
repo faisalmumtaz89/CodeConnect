@@ -11113,8 +11113,8 @@ fn state_dir_owner() -> Option<u32> {
 ///
 /// `CODECONNECT_LAUNCHER_BIN` was `is_file()` and nothing else, and what it selects
 /// is executed every five minutes by a launchd job holding the APNs signing key and
-/// this Mac's tailnet identity. Its sibling `CODECONNECT_CODEX_BIN` is canonicalised,
-/// read exactly once, checked for a Mach-O header and pinned by SHA-256 — see
+/// this Mac's tailnet identity. Its sibling `CODECONNECT_CODEX_BIN` is read exactly
+/// once and pinned by SHA-256 — see
 /// `resolve_codex_bin` in `mac/codeconnect/src/codex.rs`, where that discipline is
 /// written down — because the file an environment variable names is the file that
 /// ends up running.

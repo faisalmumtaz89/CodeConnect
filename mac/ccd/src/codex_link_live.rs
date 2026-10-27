@@ -299,28 +299,6 @@ fn build_launcher() {
     );
 }
 
-fn is_native_executable(path: &Path) -> bool {
-    use std::io::Read;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut magic = [0u8; 4];
-    if file.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    matches!(
-        u32::from_be_bytes(magic),
-        0xFEED_FACE
-            | 0xFEED_FACF
-            | 0xCEFA_EDFE
-            | 0xCFFA_EDFE
-            | 0xCAFE_BABE
-            | 0xBEBA_FECA
-            | 0xCAFE_BABF
-            | 0xBFBA_FECA
-    )
-}
-
 fn parse_codex_version(text: &str) -> Option<String> {
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
     let line = lines.next()?;
@@ -397,11 +375,6 @@ fn live_gate() -> Option<PathBuf> {
              run must FAIL rather than pass vacuously."
         )
     };
-    assert!(
-        is_native_executable(&codex),
-        "CC_CODEX_LIVE=1 resolved {} but it is not a native executable.",
-        codex.display()
-    );
     let version = match codex_version_bounded(&codex, VERSION_PROBE_BUDGET) {
         Ok(v) => v,
         Err(why) => panic!(

@@ -509,7 +509,7 @@ fn resolve_ccd() -> Result<PathBuf> {
             continue;
         }
         let absolute = candidate.canonicalize().unwrap_or(candidate);
-        if !is_executable(&absolute) {
+        if !protocol::tmux::is_executable_file(&absolute) {
             continue;
         }
         return Ok(absolute);
@@ -519,13 +519,6 @@ fn resolve_ccd() -> Result<PathBuf> {
          and next to this binary)",
         protocol::root_dir().join("bin").display()
     )
-}
-
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
 }
 
 /// The `PATH` launchd will hand the daemon.

@@ -5,7 +5,7 @@ CodeConnect lets you monitor and control the coding agents running on your own c
 ## Requirements
 
 - iPhone running iOS 17 or later.
-- A Mac running macOS 13 or later — Apple silicon or Intel; the released binaries are universal — with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in Terminal. Codex has to be the native one, from OpenAI's installer (`curl -fsSL https://github.com/openai/codex/releases/latest/download/install.sh | sh`) or Homebrew (`brew install --cask codex`): the npm package's `codex` is a script wrapper, which CodeConnect will not run.
+- A Mac running macOS 13 or later — Apple silicon or Intel; the released binaries are universal — with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in Terminal. However you installed them — their own installers, Homebrew, npm, bun, pnpm or mise — CodeConnect runs the `claude` and `codex` your shell runs.
 - A way for your iPhone to reach your Mac. By default that is [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet. Your local network works too, with a setting on the Mac, but without Tailscale's encryption or the live terminal — see "Is Tailscale required?" below.
 
 ## Installing

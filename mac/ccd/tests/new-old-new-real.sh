@@ -1244,8 +1244,7 @@ echo "      connection at a time through the whole reconnect backoff, and none l
 #
 # **Why a stub codex, and what it does not stand in for.** The launcher resolves
 # its binary and reads its version before it asks the daemon anything, so reaching the
-# preflight at all needs *a* codex on the path — and a native one: a `#!` script
-# is refused as a wrapper by design. It stands in for the binary, never for the
+# preflight at all needs *a* codex on the path. It stands in for the binary, never for the
 # daemon: both daemons below are real, and the answers they give are their own.
 # `cc` is present by construction — cargo linked the binaries this harness is
 # running a few hundred lines above.

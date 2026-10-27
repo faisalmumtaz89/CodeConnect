@@ -2828,13 +2828,25 @@ impl Session {
     }
 }
 
-/// SIGKILL a child and reap it with a bounded poll — never an unbounded `wait`
-/// that could wedge teardown. Returns whether the reap was **proven**: a
-/// `start_kill` error, a timeout, or a `wait` error all report `false` so the
-/// caller can say so rather than assume success.
+/// SIGKILL a child's process group and reap the child with a bounded poll — never an
+/// unbounded `wait` that could wedge teardown. Returns whether the reap was
+/// **proven**: a `start_kill` error, a timeout, or a `wait` error all report `false`
+/// so the caller can say so rather than assume success.
+///
+/// The group, not only the pid: both children lead a group of their own, and a
+/// `codex` that is a package manager's launcher runs Codex itself as a child in that
+/// group, which a signal to the launcher's pid alone leaves running. The child is not
+/// yet reaped when its group is signalled, so its pid — and with it the group id —
+/// cannot have been reused.
 async fn kill_and_reap(child: &mut Child, budget: Duration) -> bool {
+    let leader = child.id();
     if child.start_kill().is_err() {
         return false;
+    }
+    if let Some(pid) = leader {
+        // SAFETY: plain FFI with no pointers. A group with nobody left in it answers
+        // ESRCH, which leaves nothing to do.
+        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
     }
     matches!(tokio::time::timeout(budget, child.wait()).await, Ok(Ok(_)))
 }
