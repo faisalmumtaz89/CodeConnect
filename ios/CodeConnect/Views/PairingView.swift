@@ -16,7 +16,11 @@ import UIKit
 struct PairingView: View {
     var isOnboarding = false
 
+    /// The machine paired most recently (`Machines.current`), or the one model
+    /// with nothing paired. A pairing goes through `Machines`, which adds a
+    /// machine rather than repointing this one.
     @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
@@ -61,7 +65,7 @@ struct PairingView: View {
     private var onboarding: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                if model.isPairing {
+                if machines.isPairing {
                     pairingProgress
                         .transition(.opacity)
                 } else {
@@ -72,7 +76,7 @@ struct PairingView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, CC.space.md)
             .padding(.vertical, CC.space.xxl)
-            .ccAnimation(CC.motion.medium, value: model.isPairing)
+            .ccAnimation(CC.motion.medium, value: machines.isPairing)
         }
         .background(CC.color.bg)
         // No navigation bar draws behind the status bar here, so scrolled text
@@ -206,7 +210,7 @@ struct PairingView: View {
             CCBanner("Could not read that code", message: scanError, tone: .warning)
                 .padding(.bottom, CC.space.md)
         }
-        if let error = model.pairingError {
+        if let error = machines.pairingError {
             CCBanner("Pairing failed", message: error, tone: .danger)
                 .padding(.bottom, CC.space.md)
         }
@@ -268,7 +272,7 @@ struct PairingView: View {
         VStack(alignment: .leading, spacing: CC.space.md) {
             // A failed exchange is over: a spinner and a running clock beside
             // its reason would say it is still going.
-            if let error = model.pairingError {
+            if let error = machines.pairingError {
                 CCBanner("Pairing failed", message: error, tone: .danger)
             } else {
                 CCProgressRing(.lg)
@@ -295,9 +299,9 @@ struct PairingView: View {
             // a bare centred label, indistinguishable from the body copy above
             // it.
             CCButton(
-                model.pairingError == nil ? "Cancel pairing" : "Back", variant: .ghost, size: .md
+                machines.pairingError == nil ? "Cancel pairing" : "Back", variant: .ghost, size: .md
             ) {
-                model.cancelPairing()
+                machines.cancelPairing()
                 pairingStartedAt = nil
             }
         }
@@ -383,7 +387,7 @@ struct PairingView: View {
 
             CCButton(
                 "Save and connect", variant: .primary, size: .lg, fullWidth: true,
-                isLoading: model.isPairing,
+                isLoading: machines.isPairing,
                 disabledReason: manualEntryBlockedReason
             ) {
                 save()
@@ -481,8 +485,9 @@ struct PairingView: View {
                     // reports on a connection, and there is none to report on.
                     // The row still states what is true — not paired, no link.
                     CCRow(
-                        model.pairing.endpoint?.host ?? "Not paired",
-                        meta: model.pairing.endpoint?.displayAddress,
+                        model.machineName ?? "Not paired",
+                        subtitle: model.machineSystem,
+                        meta: model.endpoint?.displayAddress,
                         action: model.sampleFleetActive ? nil : { showLinkHealth = true }
                     ) {
                         CCStatusDot(
@@ -547,7 +552,7 @@ struct PairingView: View {
             notes.append(
                 "The daemon holds a certificate but this connection is not using it.")
         }
-        if let reason = model.pairing.tlsUnavailableReason {
+        if let reason = model.tlsUnavailableReason {
             notes.append(reason)
         }
         return notes
@@ -714,7 +719,7 @@ struct PairingView: View {
             "Unpair and erase cache?", isPresented: $confirmingUnpair, titleVisibility: .visible
         ) {
             Button("Unpair", role: .destructive) {
-                model.unpair()
+                machines.unpair(model)
                 dismiss()
             }
             Button("Cancel", role: .cancel) {}
@@ -738,7 +743,7 @@ struct PairingView: View {
     // MARK: - Actions
 
     private func prefill() {
-        guard let endpoint = model.pairing.endpoint else { return }
+        guard let endpoint = model.endpoint else { return }
         address = endpoint.displayAddress
         token = endpoint.token ?? ""
     }
@@ -748,7 +753,7 @@ struct PairingView: View {
         case .success(let parsed):
             scanError = nil
             pairingStartedAt = Date()
-            model.pair(withQR: parsed)
+            machines.pair(withQR: parsed)
         case .failure(let failure):
             scanError = failure.localizedDescription
         }
@@ -767,13 +772,13 @@ struct PairingView: View {
         validationError = nil
         switch credential {
         case .token:
-            model.pair(with: endpoint)
+            machines.pair(with: endpoint)
             if !isOnboarding { showManualEntry = false }
         case .pairingCode(let code):
             // A typed code is the same one-shot exchange the QR performs; it
             // must not be stored, so it goes through the pairing path.
             pairingStartedAt = Date()
-            model.pair(
+            machines.pair(
                 withQR: PairingQRPayload(host: endpoint.host, port: endpoint.port, code: code))
             if !isOnboarding { showManualEntry = false }
         }

@@ -61,7 +61,7 @@ final class HookOnlyApprovalTests: XCTestCase {
             .noneAnswerable)
         XCTAssertTrue(
             DecisionCardView.claudeUnanswerableReason(
-                isQuestion: false, hookOnlyApprovals: false, hold: .held
+                isQuestion: false, hookOnlyApprovals: false, linkReason: nil, hold: .held
             ).contains("too old"))
         for decision in [AnswerDecision.allow, .deny, .option(index: 1), .text("no")] {
             XCTAssertNotNil(
@@ -78,6 +78,22 @@ final class HookOnlyApprovalTests: XCTestCase {
             "a Codex card is answered by its own options")
     }
 
+    /// A Mac whose link is down has said nothing about itself: its card gives
+    /// the link's reason, never that the Mac is too old.
+    func testAnApprovalFromAMacThatIsNotConnectedSaysTheLinkNotTheVersion() {
+        let model = AppModel(pairing: PairingStore(ephemeral: true), cache: EventCache())
+        model.connection.setPhaseForTesting(.waiting(until: Date(), reason: "down"))
+        let link = model.actionsBlockedReason
+
+        let reason = DecisionCardView.claudeUnanswerableReason(
+            isQuestion: false, hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
+            linkReason: link, hold: .held)
+
+        XCTAssertNotNil(link)
+        XCTAssertEqual(reason, link)
+        XCTAssertFalse(reason.contains("too old"))
+    }
+
     /// A background agent's approval asked while someone is at the Mac is shown
     /// there, and so is one whose hook ended: neither is answerable here.
     func testAnApprovalAtTheMacOrWhoseHoldEndedIsReadOnly() throws {
@@ -89,7 +105,7 @@ final class HookOnlyApprovalTests: XCTestCase {
             .noneAnswerable)
         XCTAssertEqual(
             DecisionCardView.claudeUnanswerableReason(
-                isQuestion: false, hookOnlyApprovals: true, hold: .atMac),
+                isQuestion: false, hookOnlyApprovals: true, linkReason: nil, hold: .atMac),
             "Claude is asking this at the Mac, so answer it there.")
 
         let ended = try XCTUnwrap(try event("hold_ended").questionHoldChange)

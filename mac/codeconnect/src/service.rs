@@ -1,4 +1,5 @@
-//! `codeconnect daemon install | uninstall | status | restart` — the LaunchAgent.
+//! `codeconnect daemon install | uninstall | status | restart` — the LaunchAgent
+//! on macOS, a systemd user unit on Linux.
 //!
 //! ## Why launchd at all
 //!
@@ -24,6 +25,16 @@
 //!    writing to an unlinked inode, so the daemon truncates in place instead
 //!    (see `ccd::logrotate`) and the paths are shared through `protocol` so the
 //!    plist and the rotator can never point at different files.
+//!
+//! ## Linux
+//!
+//! The same commands manage a systemd user unit, `com.codeconnect.ccd.service`,
+//! which does what the LaunchAgent does: it restarts ccd after a crash and not
+//! after a clean exit, gives it an absolute program and `PATH`, and appends to the
+//! same two log files. Stopping it ends ccd alone (`KillMode=process`), as
+//! launchd ends only the job's own process group, so the helpers ccd starts to
+//! outlive it are left running. The unit sets `CODECONNECT_SERVICE` to the label,
+//! which is how ccd knows this unit runs it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -32,6 +43,41 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use protocol::ipc::{ClientFrame, DaemonFrame, DaemonInfo};
+
+/// What the daemon's definition is called, and the kind of thing that runs it,
+/// in the words the operator sees.
+#[cfg(target_os = "macos")]
+const SERVICE: &str = "LaunchAgent";
+#[cfg(target_os = "macos")]
+const JOB: &str = "launchd job";
+#[cfg(target_os = "macos")]
+const DEFINITION: &str = "plist";
+#[cfg(target_os = "macos")]
+const UNLOAD: &str = "`launchctl bootout`";
+#[cfg(target_os = "macos")]
+const AGAIN: &str = "at login";
+#[cfg(target_os = "macos")]
+const KICKED: &str = "kickstart returned";
+#[cfg(target_os = "macos")]
+const DEFINITION_ROW: &str = "plist    ";
+#[cfg(target_os = "macos")]
+const MANAGER_ROW: &str = "launchd  ";
+#[cfg(target_os = "linux")]
+const SERVICE: &str = "systemd user unit";
+#[cfg(target_os = "linux")]
+const JOB: &str = "systemd unit";
+#[cfg(target_os = "linux")]
+const DEFINITION: &str = "unit";
+#[cfg(target_os = "linux")]
+const UNLOAD: &str = "`systemctl --user disable --now`";
+#[cfg(target_os = "linux")]
+const AGAIN: &str = "at boot";
+#[cfg(target_os = "linux")]
+const KICKED: &str = "the restart returned";
+#[cfg(target_os = "linux")]
+const DEFINITION_ROW: &str = "unit     ";
+#[cfg(target_os = "linux")]
+const MANAGER_ROW: &str = "systemd  ";
 
 /// How long to wait for the daemon to answer its socket after a bootstrap or a
 /// takeover. Generous: a cold start opens SQLite and may shell out to
@@ -72,6 +118,7 @@ pub fn command(args: &[String]) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn usage() {
     eprintln!(
         "\
@@ -86,6 +133,25 @@ Installing stops whatever ccd is running — its own job included, because the
 plist cannot be replaced under a live one. Sessions survive it: they live in
 tmux and their supervisors reconnect. `--no-takeover` refuses instead of
 stopping anything; to pick up new binaries without rewriting the plist, use
+`codeconnect daemon restart`."
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn usage() {
+    eprintln!(
+        "\
+codeconnect daemon — the ccd systemd user unit
+
+  codeconnect daemon install [--no-takeover]   write the unit and start it
+  codeconnect daemon status                    unit, its state and live daemon
+  codeconnect daemon restart                   restart the managed daemon
+  codeconnect daemon uninstall                 stop it and remove the unit
+
+Installing stops whatever ccd is running — its own unit's included, so the new
+definition is the one that runs. Sessions survive it: they live in tmux and
+their supervisors reconnect. `--no-takeover` refuses instead of stopping
+anything; to pick up new binaries without rewriting the unit, use
 `codeconnect daemon restart`."
     );
 }
@@ -106,9 +172,12 @@ fn install(args: &[String]) -> Result<()> {
     // the file is invalid; the file is named here, to the person who just edited
     // it, not only in the daemon's log.
     protocol::config::Config::load();
+    // Asked before anything is stopped or written, so a machine with nothing to
+    // run the unit is told so and left exactly as it was.
+    #[cfg(target_os = "linux")]
+    systemd_ready("Start the daemon yourself instead; nothing restarts it if it stops:")?;
     let ccd = resolve_ccd()?;
-    let uid = user_id()?;
-    let plist = plist_path();
+    let definition = definition_path();
 
     // Deal with whatever is already running *before* writing anything, so a
     // refusal leaves the machine exactly as it was.
@@ -118,22 +187,31 @@ fn install(args: &[String]) -> Result<()> {
     // the plist cannot be replaced under a live job — so exempting "our own"
     // daemon would make the flag mean something other than what it says on the
     // single most common invocation of the command.
-    if let Some(info) = daemon_info() {
+    let running = daemon_info().map(|info| {
         let how = match &info.launchd_label {
-            Some(label) if info.is_launchd_managed() => format!("this LaunchAgent, {label}"),
-            Some(label) => format!("launchd job {label}"),
+            Some(label) if info.is_launchd_managed() => format!("this {SERVICE}, {label}"),
+            Some(label) => format!("{JOB} {label}"),
             None => "started by hand".to_string(),
         };
+        (info, how)
+    });
+    if let Some((info, how)) = &running {
         if !takeover {
             bail!(
                 "ccd is already running as pid {} ({how}), and installing has to stop \
-                 it — the plist cannot be replaced under a live job.\n  \
-                 To pick up new binaries without rewriting the plist: `codeconnect daemon restart`.\n  \
+                 it — the {DEFINITION} cannot be replaced under a live job.\n  \
+                 To pick up new binaries without rewriting the {DEFINITION}: `codeconnect daemon restart`.\n  \
                  To go ahead anyway: drop --no-takeover.\n\
                  Sessions survive either way; they live in tmux and reconnect.",
                 info.pid
             );
         }
+    }
+    // Linger changes the machine too, so it waits until no refusal is left and
+    // comes before anything is stopped.
+    #[cfg(target_os = "linux")]
+    ensure_linger()?;
+    if let Some((info, how)) = running {
         if info.is_launchd_managed() {
             println!(
                 "stopping the running ccd (pid {}) to reinstall over it",
@@ -152,36 +230,23 @@ fn install(args: &[String]) -> Result<()> {
     // `ccd.lock` the new daemon refuses to start and waits out launchd's
     // throttle. `bootout` returns before launchd has finished reaping, so the
     // socket is what gets waited on.
-    let booted = launchctl(&["bootout".into(), service_target(uid)])?;
-    if booted.ok {
-        wait_for_daemon_to_stop(Duration::from_secs(10))
-            .context("the previous daemon did not release its socket after `launchctl bootout`")?;
+    if unload_job()? {
+        wait_for_daemon_to_stop(Duration::from_secs(10)).context(format!(
+            "the previous daemon did not release its socket after {UNLOAD}"
+        ))?;
     }
 
-    let document = plist_document(&ccd, &path_value());
-    write_atomically(&plist, &document).with_context(|| format!("writing {}", plist.display()))?;
-    println!("wrote {}", plist.display());
+    let document = definition_document(&ccd, &path_value());
+    write_atomically(&definition, &document)
+        .with_context(|| format!("writing {}", definition.display()))?;
+    println!("wrote {}", definition.display());
 
-    // `enable` clears a disable recorded by an earlier `bootout -w`-style flow;
-    // it is a no-op otherwise and must precede the bootstrap.
-    let _ = launchctl(&["enable".into(), service_target(uid)]);
-    let bootstrap = launchctl(&[
-        "bootstrap".into(),
-        format!("gui/{uid}"),
-        plist.to_string_lossy().into_owned(),
-    ])?;
-    if !bootstrap.ok {
-        bail!(
-            "launchctl bootstrap failed ({}): {}",
-            bootstrap.status,
-            bootstrap.stderr.trim()
-        );
-    }
+    load_job(&definition)?;
 
     match wait_for_daemon(READY_TIMEOUT) {
         Some(info) => {
             println!(
-                "the daemon is running (pid {}, version {}) and starts again at login",
+                "the daemon is running (pid {}, version {}) and starts again {AGAIN}",
                 info.pid, info.version
             );
             if !info.is_launchd_managed() {
@@ -194,7 +259,7 @@ fn install(args: &[String]) -> Result<()> {
             Ok(())
         }
         None => bail!(
-            "the LaunchAgent was installed but ccd did not answer {} within {}s; \
+            "the {SERVICE} was installed but ccd did not answer {} within {}s; \
              check {}",
             protocol::socket_path().display(),
             READY_TIMEOUT.as_secs(),
@@ -204,8 +269,44 @@ fn install(args: &[String]) -> Result<()> {
 }
 
 fn uninstall() -> Result<()> {
+    let plist = definition_path();
+    stop_for_removal(&plist)?;
+
+    match std::fs::remove_file(&plist) {
+        Ok(()) => println!("removed {}", plist.display()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            println!("{} was not installed", plist.display());
+        }
+        Err(err) => return Err(err).context(format!("removing {}", plist.display())),
+    }
+    #[cfg(target_os = "linux")]
+    {
+        systemctl(&["daemon-reload"])?;
+        println!(
+            "linger stays on for this user: other services may rely on it; \
+             `loginctl disable-linger` turns it off"
+        );
+    }
+
+    // Honest rather than optimistic: a daemon somebody started by hand is not
+    // affected by any of the above, and saying "stopped" would be a lie.
+    if let Some(info) = daemon_info() {
+        println!(
+            "note: a ccd is still running (pid {}, {}); it was not started by \
+             this {SERVICE}, so it was left alone",
+            info.pid,
+            info.launchd_label
+                .clone()
+                .unwrap_or_else(|| "started by hand".into())
+        );
+    }
+    Ok(())
+}
+
+/// Stop the job ahead of removing its definition, or refuse to go further.
+#[cfg(target_os = "macos")]
+fn stop_for_removal(plist: &Path) -> Result<()> {
     let uid = user_id()?;
-    let plist = plist_path();
     let booted = launchctl(&["bootout".into(), service_target(uid)])?;
     if booted.ok {
         println!("stopped {}", protocol::LAUNCHD_LABEL);
@@ -231,25 +332,30 @@ fn uninstall() -> Result<()> {
             service_target(uid),
         );
     }
+    Ok(())
+}
 
-    match std::fs::remove_file(&plist) {
-        Ok(()) => println!("removed {}", plist.display()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            println!("{} was not installed", plist.display());
-        }
-        Err(err) => return Err(err).context(format!("removing {}", plist.display())),
-    }
-
-    // Honest rather than optimistic: a daemon somebody started by hand is not
-    // affected by any of the above, and saying "stopped" would be a lie.
-    if let Some(info) = daemon_info() {
-        println!(
-            "note: a ccd is still running (pid {}, {}); it was not started by \
-             this LaunchAgent, so it was left alone",
-            info.pid,
-            info.launchd_label
-                .clone()
-                .unwrap_or_else(|| "started by hand".into())
+/// Stop and disable the unit ahead of removing it, or refuse to go further —
+/// for the same reason as on macOS: a unit file deleted under a unit that may
+/// still be running leaves a daemon nothing can manage.
+#[cfg(target_os = "linux")]
+fn stop_for_removal(unit: &Path) -> Result<()> {
+    let stopped = systemctl(&["disable", "--now", &unit_name()])?;
+    if stopped.ok {
+        println!("stopped {}", unit_name());
+    } else if stopped.stderr.contains("does not exist") || stopped.stderr.contains("not loaded") {
+        println!("{} was not loaded", unit_name());
+    } else {
+        bail!(
+            "`systemctl --user disable --now {}` failed ({}): {}\n\
+             {} was left in place, because removing it while the unit may still be \
+             running would leave a daemon nothing can manage. Investigate with \
+             `systemctl --user status {}`, then run this again.",
+            unit_name(),
+            stopped.status,
+            stopped.stderr.trim(),
+            unit.display(),
+            unit_name(),
         );
     }
     Ok(())
@@ -260,25 +366,22 @@ fn restart() -> Result<DaemonInfo> {
     // the file is invalid; the file is named here, to the person who just edited
     // it, not only in the daemon's log.
     protocol::config::Config::load();
-    let uid = user_id()?;
-    if !plist_path().exists() {
+    #[cfg(target_os = "linux")]
+    systemd_ready(
+        "To restart a daemon you started yourself, stop it (`codeconnect daemon status` shows \
+         its pid) and start it again:",
+    )?;
+    if !definition_path().exists() {
         bail!(
             "{} is not installed; run `codeconnect daemon install` first",
-            plist_path().display()
+            definition_path().display()
         );
     }
-    let result = launchctl(&["kickstart".into(), "-k".into(), service_target(uid)])?;
-    if !result.ok {
-        bail!(
-            "launchctl kickstart failed ({}): {}",
-            result.status,
-            result.stderr.trim()
-        );
-    }
+    kick_job()?;
     match wait_for_daemon(READY_TIMEOUT) {
         Some(info) => Ok(info),
         None => bail!(
-            "kickstart returned but ccd did not answer within {}s; check {}",
+            "{KICKED} but ccd did not answer within {}s; check {}",
             READY_TIMEOUT.as_secs(),
             protocol::daemon_stderr_log().display()
         ),
@@ -286,11 +389,11 @@ fn restart() -> Result<DaemonInfo> {
 }
 
 fn status() -> Result<()> {
-    let plist = plist_path();
-    println!("plist    {}", describe_plist(&plist));
+    let plist = definition_path();
+    println!("{DEFINITION_ROW}{}", describe_plist(&plist));
 
     let job = job_state()?;
-    println!("launchd  {job}");
+    println!("{MANAGER_ROW}{job}");
 
     match daemon_info() {
         // `endpoint_port == 0` is the probe's marker for "something owns the
@@ -329,8 +432,9 @@ fn status() -> Result<()> {
                 match &info.launchd_label {
                     Some(label) if info.is_launchd_managed() => format!("yes ({label})"),
                     Some(other) => format!("by a different job ({other})"),
-                    None =>
+                    None if can_take_over() =>
                         "no — started by hand; `codeconnect daemon install` takes over".to_string(),
+                    None => "no — started by hand".to_string(),
                 }
             );
         }
@@ -367,6 +471,18 @@ fn status() -> Result<()> {
 
 // ------------------------------------------------------------------- helpers
 
+/// Whether `codeconnect daemon install` could take over a daemon started by
+/// hand: always under launchd, and under systemd only where it has a manager.
+#[cfg(target_os = "macos")]
+fn can_take_over() -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn can_take_over() -> bool {
+    no_systemd().is_none()
+}
+
 fn describe_plist(path: &Path) -> String {
     match std::fs::metadata(path) {
         Ok(meta) => format!("{} ({} bytes)", path.display(), meta.len()),
@@ -374,6 +490,7 @@ fn describe_plist(path: &Path) -> String {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// What launchd thinks of the job, from `launchctl list`.
 ///
 /// `launchctl list` rather than `launchctl print`: its output has been the same
@@ -398,6 +515,7 @@ fn job_state() -> Result<String> {
 }
 
 /// Pull `"Key" = value;` out of `launchctl list` output.
+#[cfg(target_os = "macos")]
 fn plist_field(text: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\" = ");
     let line = text
@@ -418,6 +536,7 @@ fn plist_field(text: &str, key: &str) -> Option<String> {
 /// restarted on the strength of a stale plist would bootstrap a service the
 /// user had deliberately unloaded — enabling something nobody asked for, which
 /// is the one thing this product promises never to do.
+#[cfg(target_os = "macos")]
 pub fn job_is_loaded() -> bool {
     launchctl(&["list".into(), protocol::LAUNCHD_LABEL.into()])
         .map(|result| result.ok)
@@ -439,12 +558,14 @@ pub fn restart_managed_daemon() -> Result<bool> {
     Ok(true)
 }
 
+#[cfg(target_os = "macos")]
 pub fn plist_path() -> PathBuf {
     protocol::home_dir()
         .join("Library/LaunchAgents")
         .join(format!("{}.plist", protocol::LAUNCHD_LABEL))
 }
 
+#[cfg(target_os = "macos")]
 fn service_target(uid: u32) -> String {
     format!("gui/{uid}/{}", protocol::LAUNCHD_LABEL)
 }
@@ -454,6 +575,7 @@ fn service_target(uid: u32) -> String {
 /// `gui/<uid>` is the domain a LaunchAgent lives in; getting it wrong means
 /// bootstrapping into somebody else's session, which fails with a permission
 /// error that reads like a bug in this program.
+#[cfg(target_os = "macos")]
 fn user_id() -> Result<u32> {
     let output = Command::new("/usr/bin/id")
         .arg("-u")
@@ -473,6 +595,7 @@ struct Run {
     stderr: String,
 }
 
+#[cfg(target_os = "macos")]
 fn launchctl(args: &[String]) -> Result<Run> {
     let output = Command::new("/bin/launchctl")
         .args(args)
@@ -485,6 +608,261 @@ fn launchctl(args: &[String]) -> Result<Run> {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn definition_path() -> PathBuf {
+    plist_path()
+}
+
+#[cfg(target_os = "macos")]
+fn definition_document(ccd: &Path, path_value: &str) -> String {
+    plist_document(ccd, path_value)
+}
+
+/// Unload the job ahead of replacing its definition; whether one was loaded.
+#[cfg(target_os = "macos")]
+fn unload_job() -> Result<bool> {
+    let booted = launchctl(&["bootout".into(), service_target(user_id()?)])?;
+    Ok(booted.ok)
+}
+
+#[cfg(target_os = "macos")]
+fn load_job(plist: &Path) -> Result<()> {
+    let uid = user_id()?;
+    // `enable` clears a disable recorded by an earlier `bootout -w`-style flow;
+    // it is a no-op otherwise and must precede the bootstrap.
+    let _ = launchctl(&["enable".into(), service_target(uid)]);
+    let bootstrap = launchctl(&[
+        "bootstrap".into(),
+        format!("gui/{uid}"),
+        plist.to_string_lossy().into_owned(),
+    ])?;
+    if !bootstrap.ok {
+        bail!(
+            "launchctl bootstrap failed ({}): {}",
+            bootstrap.status,
+            bootstrap.stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn kick_job() -> Result<()> {
+    let result = launchctl(&["kickstart".into(), "-k".into(), service_target(user_id()?)])?;
+    if !result.ok {
+        bail!(
+            "launchctl kickstart failed ({}): {}",
+            result.status,
+            result.stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn unit_name() -> String {
+    format!("{}.service", protocol::LAUNCHD_LABEL)
+}
+
+#[cfg(target_os = "linux")]
+fn definition_path() -> PathBuf {
+    protocol::home_dir()
+        .join(".config/systemd/user")
+        .join(unit_name())
+}
+
+#[cfg(target_os = "linux")]
+fn definition_document(ccd: &Path, path_value: &str) -> String {
+    unit_document(ccd, path_value)
+}
+
+#[cfg(target_os = "linux")]
+fn systemctl(args: &[&str]) -> Result<Run> {
+    let output = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .context("running systemctl --user")?;
+    Ok(Run {
+        ok: output.status.success(),
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+/// Why this user has no systemd manager to run the unit — no systemd, or a
+/// container without one — or `None` when there is one.
+#[cfg(target_os = "linux")]
+fn no_systemd() -> Option<String> {
+    match systemctl(&["show-environment"]) {
+        Ok(run) if run.ok => None,
+        Ok(run) => Some(run.stderr.trim().to_string()),
+        Err(err) => Some(format!("{err:#}")),
+    }
+}
+
+/// A computer with no systemd manager gets the reason before anything changes,
+/// then `instead` and the line that runs the daemon by hand.
+#[cfg(target_os = "linux")]
+fn systemd_ready(instead: &str) -> Result<()> {
+    let Some(reason) = no_systemd() else {
+        return Ok(());
+    };
+    bail!(
+        "this computer has no systemd user manager for CodeConnect's daemon to run \
+         under (`systemctl --user` failed: {reason}); nothing was changed.\n\n  \
+         {instead}\n\n    {}",
+        hand_run_line()
+    )
+}
+
+/// The one line that runs the daemon without a service manager, appending to
+/// the log files the unit would. Nothing restarts a daemon started this way.
+#[cfg(target_os = "linux")]
+fn hand_run_line() -> String {
+    let ccd = resolve_ccd().unwrap_or_else(|_| protocol::root_dir().join("bin/ccd"));
+    format!(
+        "mkdir -p {} && nohup {} >>{} 2>>{} </dev/null &",
+        protocol::logs_dir().display(),
+        ccd.display(),
+        protocol::daemon_stdout_log().display(),
+        protocol::daemon_stderr_log().display()
+    )
+}
+
+/// Keep this user's systemd manager running at boot and after logout — which
+/// systemd calls linger — so the daemon does too. Without it the unit stops with
+/// the user's last session and does not start at boot. Asked for only when it is
+/// off; turning it on for oneself needs polkit's leave, and a refusal is reported
+/// with the command that does it, before anything else has changed.
+#[cfg(target_os = "linux")]
+fn ensure_linger() -> Result<()> {
+    let uid = unsafe { libc::getuid() }.to_string();
+    let lingering = Command::new("loginctl")
+        .args(["show-user", &uid, "-p", "Linger", "--value"])
+        .stdin(Stdio::null())
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "yes");
+    if lingering {
+        return Ok(());
+    }
+    let enabled = Command::new("loginctl")
+        .arg("enable-linger")
+        .stdin(Stdio::null())
+        .output()
+        .context("running loginctl enable-linger")?;
+    if !enabled.status.success() {
+        bail!(
+            "the daemon has to keep running when you are logged out, which systemd calls \
+             linger, and turning it on was refused (`loginctl enable-linger`: {}). Run \
+             `sudo loginctl enable-linger {uid}`, then install again; nothing was changed.",
+            String::from_utf8_lossy(&enabled.stderr).trim()
+        );
+    }
+    println!("turned on linger, so the daemon starts at boot and outlives your logins");
+    Ok(())
+}
+
+/// Stop and disable the unit ahead of replacing it; whether it was running.
+#[cfg(target_os = "linux")]
+fn unload_job() -> Result<bool> {
+    let was_active = job_is_loaded();
+    systemctl(&["disable", "--now", &unit_name()])?;
+    Ok(was_active)
+}
+
+/// Enable and start the unit just written. The logs directory is made first:
+/// systemd opens the two log files before ccd runs, and does not create their
+/// directory.
+#[cfg(target_os = "linux")]
+fn load_job(_unit: &Path) -> Result<()> {
+    protocol::fsperm::private_dir(&protocol::logs_dir())
+        .with_context(|| format!("creating {}", protocol::logs_dir().display()))?;
+    for args in [vec!["daemon-reload"], vec!["enable", "--now", &unit_name()]] {
+        let run = systemctl(&args)?;
+        if !run.ok {
+            bail!(
+                "`systemctl --user {}` failed ({}): {}",
+                args.join(" "),
+                run.status,
+                run.stderr.trim()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn kick_job() -> Result<()> {
+    let run = systemctl(&["restart", &unit_name()])?;
+    if !run.ok {
+        bail!(
+            "`systemctl --user restart {}` failed ({}): {}",
+            unit_name(),
+            run.status,
+            run.stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+/// Whether the unit is running now, or waiting to restart after a crash, as a
+/// launchd job between restarts is still loaded — not whether it is enabled. An
+/// update restarts what is running and nothing else: a unit somebody stopped
+/// stays stopped, and a running one that was never enabled still gets the new
+/// binaries.
+#[cfg(target_os = "linux")]
+pub fn job_is_loaded() -> bool {
+    systemctl(&["show", &unit_name(), "-p", "ActiveState", "--value"])
+        .is_ok_and(|run| matches!(run.stdout.trim(), "active" | "activating" | "reloading"))
+}
+
+/// What systemd thinks of the unit, from `systemctl --user show`.
+#[cfg(target_os = "linux")]
+fn job_state() -> Result<String> {
+    if let Some(reason) = no_systemd() {
+        return Ok(format!(
+            "none — no systemd user manager on this computer (`systemctl --user`: {reason})"
+        ));
+    }
+    let run = systemctl(&[
+        "show",
+        &unit_name(),
+        "-p",
+        "LoadState,UnitFileState,ActiveState,SubState,MainPID,ExecMainStatus",
+    ])?;
+    Ok(describe_unit_state(&run.stdout))
+}
+
+#[cfg(target_os = "linux")]
+fn describe_unit_state(show: &str) -> String {
+    let field = |key: &str| {
+        show.lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .unwrap_or("")
+    };
+    if field("LoadState") == "not-found" || field("LoadState").is_empty() {
+        return format!("{} is not installed", unit_name());
+    }
+    let mut state = format!(
+        "{}, {} ({})",
+        field("UnitFileState"),
+        field("ActiveState"),
+        field("SubState")
+    );
+    match field("MainPID") {
+        "" | "0" => {
+            if !field("ExecMainStatus").is_empty() {
+                state.push_str(&format!(", last exit status {}", field("ExecMainStatus")));
+            }
+        }
+        pid => state.push_str(&format!(", running as pid {pid}")),
+    }
+    state
 }
 
 /// The installed `ccd`, as an absolute path that exists.
@@ -746,6 +1124,7 @@ fn file_name(path: &Path) -> String {
 /// Generated rather than shipped as a file with a `__HOME__` placeholder: the
 /// binary path and `PATH` are resolved on the machine being installed onto, and
 /// a template can only ever encode one guess at where things are.
+#[cfg(target_os = "macos")]
 pub(crate) fn plist_document(ccd: &Path, path_value: &str) -> String {
     let home = protocol::home_dir();
     format!(
@@ -822,6 +1201,7 @@ pub(crate) fn plist_document(ccd: &Path, path_value: &str) -> String {
 /// Not paranoia: `$HOME` is user-controlled and a directory named `A&B` is
 /// perfectly legal on macOS. An unescaped `&` makes the whole plist unparseable,
 /// and launchd's diagnostic for that is a job that simply never starts.
+#[cfg(target_os = "macos")]
 fn xml_escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -837,10 +1217,66 @@ fn xml_escape(value: &str) -> String {
     out
 }
 
+/// Generate the systemd user unit, as the plist is generated on macOS.
+#[cfg(target_os = "linux")]
+fn unit_document(ccd: &Path, path_value: &str) -> String {
+    let home = protocol::home_dir();
+    format!(
+        "# Generated by `codeconnect daemon install`. Edit that command, not this file: a
+# reinstall overwrites it, and the paths below were resolved on this machine.
+#
+# * Restart=on-failure restarts ccd after a crash but respects a clean exit, so
+#   stopping the unit does not fight a restart loop.
+# * KillMode=process ends ccd alone. It is deliberately NOT the parent of any
+#   agent, and the helpers it starts to outlive it are left running.
+# * The log files are truncated in place by ccd itself once they pass its cap;
+#   systemd appends to them.
+[Unit]
+Description=CodeConnect daemon (ccd)
+
+[Service]
+ExecStart={ccd}
+Restart=on-failure
+RestartSec={throttle}
+KillMode=process
+Environment={path} {home} CODECONNECT_LOG=info CODECONNECT_SERVICE={label}
+StandardOutput=append:{stdout}
+StandardError=append:{stderr}
+
+[Install]
+WantedBy=default.target
+",
+        ccd = unit_quote(&ccd.to_string_lossy()),
+        throttle = THROTTLE_INTERVAL_SECS,
+        path = unit_quote(&format!("PATH={path_value}")),
+        home = unit_quote(&format!("HOME={}", home.to_string_lossy())),
+        label = protocol::LAUNCHD_LABEL,
+        stdout = unit_specifiers(&protocol::daemon_stdout_log().to_string_lossy()),
+        stderr = unit_specifiers(&protocol::daemon_stderr_log().to_string_lossy()),
+    )
+}
+
+/// A value quoted for a unit file: `"`, `\` and `%` escaped, so a home directory
+/// with a space or a percent sign is still read back as the path it is.
+#[cfg(target_os = "linux")]
+fn unit_quote(value: &str) -> String {
+    let escaped = unit_specifiers(value)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// A value with systemd's `%` specifiers made literal.
+#[cfg(target_os = "linux")]
+fn unit_specifiers(value: &str) -> String {
+    value.replace('%', "%%")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_generated_plist_is_valid_and_names_absolute_paths() {
         let document = plist_document(
@@ -868,6 +1304,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_plist_parses_as_a_property_list() {
         // The failure this catches is silent: launchd rejects a malformed plist
@@ -893,6 +1330,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_home_with_xml_metacharacters_still_produces_a_valid_plist() {
         let document = plist_document(Path::new("/Users/a&b/<c>/ccd"), "/usr/bin");
@@ -903,6 +1341,7 @@ mod tests {
         assert!(!document.contains("/Users/a&b/"), "raw ampersand survived");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn xml_escape_covers_every_entity() {
         assert_eq!(
@@ -913,6 +1352,7 @@ mod tests {
         assert_eq!(xml_escape(""), "");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn launchctl_list_output_is_parsed_for_pid_and_exit_status() {
         let sample = "{\n\
@@ -964,6 +1404,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_plist_and_the_rotator_agree_on_the_log_paths() {
         // Two files whose only relationship is that they must name the same
@@ -974,11 +1415,13 @@ mod tests {
         assert!(document.contains(&protocol::daemon_stderr_log().to_string_lossy().to_string()));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_service_target_names_the_gui_domain() {
         assert_eq!(service_target(501), "gui/501/com.codeconnect.ccd");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_plist_lands_in_the_user_launch_agents_directory() {
         let path = plist_path();
@@ -987,6 +1430,79 @@ mod tests {
             "{path:?}"
         );
         assert!(path.is_absolute());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_generated_unit_restarts_on_failure_and_ends_ccd_alone() {
+        let document = unit_document(
+            Path::new("/home/someone/.codeconnect/bin/ccd"),
+            "/usr/local/bin:/usr/bin",
+        );
+        for line in [
+            "ExecStart=\"/home/someone/.codeconnect/bin/ccd\"",
+            "Restart=on-failure",
+            "RestartSec=5",
+            "KillMode=process",
+            "CODECONNECT_SERVICE=com.codeconnect.ccd",
+            "\"PATH=/usr/local/bin:/usr/bin\"",
+            "WantedBy=default.target",
+        ] {
+            assert!(document.contains(line), "{line} missing:\n{document}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_home_with_quotes_spaces_or_percents_survives_the_unit_file() {
+        assert_eq!(unit_quote("/home/a b"), "\"/home/a b\"");
+        assert_eq!(unit_quote("/home/50%"), "\"/home/50%%\"");
+        assert_eq!(unit_quote(r#"/home/a"b\c"#), r#""/home/a\"b\\c""#);
+        assert_eq!(unit_specifiers("/logs/100%/ccd.log"), "/logs/100%%/ccd.log");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_unit_and_the_rotator_agree_on_the_log_paths() {
+        let document = unit_document(Path::new("/tmp/ccd"), "/usr/bin");
+        for log in [protocol::daemon_stdout_log(), protocol::daemon_stderr_log()] {
+            let line = format!("append:{}", log.to_string_lossy());
+            assert!(document.contains(&line), "{line} missing:\n{document}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_unit_lands_in_the_user_systemd_directory() {
+        let path = definition_path();
+        assert!(
+            path.ends_with(".config/systemd/user/com.codeconnect.ccd.service"),
+            "{path:?}"
+        );
+        assert!(path.is_absolute());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemctl_show_output_is_described_for_each_state() {
+        let running = "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\n\
+                       SubState=running\nMainPID=4242\nExecMainStatus=0\n";
+        assert_eq!(
+            describe_unit_state(running),
+            "enabled, active (running), running as pid 4242"
+        );
+        let crashed = "LoadState=loaded\nUnitFileState=enabled\nActiveState=activating\n\
+                       SubState=auto-restart\nMainPID=0\nExecMainStatus=101\n";
+        assert_eq!(
+            describe_unit_state(crashed),
+            "enabled, activating (auto-restart), last exit status 101"
+        );
+        let missing = "LoadState=not-found\nUnitFileState=\nActiveState=inactive\n\
+                       SubState=dead\nMainPID=0\nExecMainStatus=0\n";
+        assert_eq!(
+            describe_unit_state(missing),
+            "com.codeconnect.ccd.service is not installed"
+        );
     }
 
     #[test]

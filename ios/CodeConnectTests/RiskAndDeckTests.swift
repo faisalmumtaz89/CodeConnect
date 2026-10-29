@@ -330,9 +330,8 @@ final class RiskAndDeckTests: XCTestCase {
 
     /// The visibility test itself. A block counts as read when its **bottom
     /// edge** has been inside the visible region — where the visible region
-    /// ends at the top of the pinned action bar, not at the bottom of the
-    /// scroll view, because `safeAreaInset` draws the bar *over* the scroll
-    /// view rather than shortening it. That is the exact geometry of
+    /// ends at the top of the pinned action bar, which is where the scroll
+    /// view ends once the bar is laid out. That is the exact geometry of
     /// A MEDIUM card at AX5: the command block's bottom was below the bar
     /// and the gate was armed anyway.
     func testVisibilityIsAViewportTest() {
@@ -361,7 +360,7 @@ final class RiskAndDeckTests: XCTestCase {
     /// **The bug the real device found and every simulator run missed.**
     ///
     /// The four geometry facts arrive as four separate `onPreferenceChange`
-    /// callbacks, in whatever order SwiftUI delivers them. `actionBarHeight`
+    /// callbacks, in whatever order SwiftUI delivers them. The bar's measure
     /// defaulted to `0` — a legitimate value meaning "covers nothing" — so a
     /// frame in which the viewport had been reported and the bar had not
     /// computed `visibleBottom` as the *whole* scroll view, which extends
@@ -397,6 +396,7 @@ final class RiskAndDeckTests: XCTestCase {
             "a command behind a bar that has not been measured has not been read")
 
         // The bar reports, and the same command is still unreadable.
+        probe.cardHeight = 800
         probe.actionBarHeight = 140
         XCTAssertEqual(probe.visibleBottom, 660)
         XCTAssertFalse(
@@ -411,6 +411,7 @@ final class RiskAndDeckTests: XCTestCase {
         // command 4pt inside it counted as read.
         let transient = ReadGateProbe()
         transient.viewportBottom = 853
+        transient.cardHeight = 853
         transient.actionBarHeight = 1
         XCTAssertNil(
             transient.visibleBottom,
@@ -418,11 +419,62 @@ final class RiskAndDeckTests: XCTestCase {
 
         let settled = ReadGateProbe()
         settled.viewportBottom = 853
+        settled.cardHeight = 853
         settled.actionBarHeight = 168
         XCTAssertEqual(settled.visibleBottom, 685)
         XCTAssertFalse(
             ReadGate.isVisible(bottom: 848, visibleBottom: 685),
             "the command the device showed ends behind the bar")
+    }
+
+    /// **The bar is cleared once.** `safeAreaInset` shortens the scroll view to
+    /// end where the bar starts, so the readable strip ends there, not a bar's
+    /// height higher. Measured in the per-session sheet at AX5: the scroll
+    /// view ended at 286.7 over a 345pt bar, and taking the height off again
+    /// put the strip below zero, where no scroll could arm `Allow`.
+    @MainActor
+    func testABarTheScrollViewAlreadyEndsAtIsClearedOnce() {
+        let probe = ReadGateProbe()
+        probe.viewportBottom = 286.7
+        probe.cardHeight = 631.7
+        probe.actionBarHeight = 345
+
+        XCTAssertEqual(probe.visibleBottom ?? 0, 286.7, accuracy: 0.001)
+        XCTAssertTrue(
+            ReadGate.isVisible(bottom: 250, visibleBottom: 286.7),
+            "a command ending above the bar has been read")
+    }
+
+    /// **The two layout passes measured on a 700pt Deck card at M**, in the
+    /// order they arrived.
+    ///
+    /// The bar reports its height on a pass where the scroll view still
+    /// reaches the card's bottom; the readable part ends at the bar's top all
+    /// the same, so a command behind the bar is not read on that pass.
+    ///
+    /// And a bar that first laid out at the top of a card still growing to
+    /// its height: the scroll view settles at 580 over a 120pt bar, and the
+    /// command at 186 is read. Taken from the bar's position, which was never
+    /// reported again after it said `0`, this card's `Allow` never armed.
+    @MainActor
+    func testTheMeasuredLayoutPassesClearTheBarAndArm() {
+        let arriving = ReadGateProbe()
+        arriving.viewportBottom = 699
+        arriving.cardHeight = 700
+        arriving.actionBarHeight = 231.3
+        XCTAssertEqual(arriving.visibleBottom ?? 0, 468.7, accuracy: 0.001)
+        XCTAssertFalse(
+            ReadGate.isVisible(bottom: 600, visibleBottom: arriving.visibleBottom ?? 0),
+            "600 is behind the bar on this pass; nobody has read it")
+
+        let settled = ReadGateProbe()
+        settled.viewportBottom = 580
+        settled.cardHeight = 700
+        settled.actionBarHeight = 120
+        XCTAssertEqual(settled.visibleBottom, 580)
+        XCTAssertTrue(
+            ReadGate.isVisible(bottom: 186, visibleBottom: settled.visibleBottom ?? 0),
+            "the command is above the bar; the card arms")
     }
 
     func testUnmeasuredGeometryLeavesTheGateShut() {
@@ -540,7 +592,8 @@ final class FleetCountTests: XCTestCase {
             summary: summary(id, blockedOn: (0..<blockedCount).map { "r\($0)" }),
             status: status, subtitle: "", activity: nil,
             label: RunLabel(project: id, qualifier: nil),
-            capability: .control, blockedCount: blockedCount, lastEventAt: nil, cachedAt: nil)
+            capability: .control, blockedCount: blockedCount, lastEventAt: nil, cachedAt: nil,
+            machineID: nil, machineName: nil)
     }
 
     /// The state that was invisible in the shipping fixture: three blocked

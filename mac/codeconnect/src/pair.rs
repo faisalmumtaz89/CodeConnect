@@ -141,17 +141,28 @@ pub(crate) fn host_address(host: &str) -> Option<IpAddr> {
         .ok()
 }
 
+/// How to get Tailscale going, in the words of the system it runs on. On Linux
+/// the command, `--qr` and all, because a computer with no screen signs in from
+/// the phone that scans the QR.
+#[cfg(target_os = "macos")]
+const SET_UP_TAILSCALE: &str = "Set up or connect Tailscale";
+#[cfg(target_os = "linux")]
+const SET_UP_TAILSCALE: &str =
+    "Set up or connect Tailscale (`sudo tailscale up --qr`, then scan its QR \
+                                with your phone, signed in to Tailscale, and approve it there)";
+
 /// Why a code for this bind would be dead, and the way out.
 fn unreachable_bind_message(host: &str, problem: &str, cause: BindCause) -> String {
     let why = match cause {
-        BindCause::Tailnet => "With no `ws_bind` in ~/.codeconnect/config.json it uses this \
-                               Mac's Tailscale address, and it found none: Tailscale is not \
-                               set up or not connected on this Mac.\n\n  \
-                               Set up or connect Tailscale, or set `ws_bind` \
-                               (https://codeconnect.sh/support explains both), then:"
-            .to_string(),
+        BindCause::Tailnet => format!(
+            "With no `ws_bind` in ~/.codeconnect/config.json it uses this computer's \
+             Tailscale address, and it found none when it started: Tailscale was not set up or \
+             not connected on this computer at that moment.\n\n  \
+             {SET_UP_TAILSCALE}, or set `ws_bind` (https://codeconnect.sh/support explains \
+             both), then:"
+        ),
         BindCause::Named => "`ws_bind` in ~/.codeconnect/config.json names this address. Set \
-                             it to this Mac's address on a network your phone is on, or remove \
+                             it to this computer's address on a network your phone is on, or remove \
                              it to use Tailscale (https://codeconnect.sh/support explains both), \
                              then:"
             .to_string(),
@@ -370,7 +381,7 @@ mod tests {
             |host: &str, ws_bind: &str| bind_cause(host_address(host), ws_bind.parse().ok());
         let tailnet = unreachable_bind_message("127.0.0.1", loopback, cause("127.0.0.1", ""));
         assert!(
-            tailnet.contains("Tailscale is not set up or not connected"),
+            tailnet.contains("Tailscale was not set up or not connected"),
             "{tailnet}"
         );
         assert!(
@@ -383,7 +394,7 @@ mod tests {
         let named = unreachable_bind_message("::1", loopback, cause("::1", "::1"));
         assert_eq!(cause("[::1]", "::1"), BindCause::Named);
         assert!(named.contains("names this address"), "{named}");
-        assert!(!named.contains("Tailscale is not set up"), "{named}");
+        assert!(!named.contains("Tailscale was not set up"), "{named}");
 
         let pending =
             unreachable_bind_message("127.0.0.1", loopback, cause("127.0.0.1", "192.168.1.20"));
@@ -391,7 +402,7 @@ mod tests {
             pending.contains("names 192.168.1.20, which the daemon has not applied yet"),
             "{pending}"
         );
-        assert!(!pending.contains("Tailscale is not set up"), "{pending}");
+        assert!(!pending.contains("Tailscale was not set up"), "{pending}");
 
         for message in [&tailnet, &named, &pending] {
             assert!(

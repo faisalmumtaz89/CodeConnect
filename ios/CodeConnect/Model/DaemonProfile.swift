@@ -17,21 +17,40 @@ struct DaemonProfile: Sendable, Hashable {
     var capabilities: Capabilities?
     /// What `codeconnect devices` calls this phone, once the daemon has said.
     var deviceName: String?
+    /// What the owner calls the computer, once the daemon has said (minor 25).
+    var machineName: String?
+    /// `"macos"` or `"linux"`, once the daemon has said (minor 25).
+    var machineOS: String?
 
     static let unknown = DaemonProfile(
         protocolVersion: 0, protocolMinor: 0, capabilities: nil, deviceName: nil)
 
     init(
         protocolVersion: UInt32, protocolMinor: UInt32, capabilities: Capabilities?,
-        deviceName: String? = nil
+        deviceName: String? = nil, machineName: String? = nil, machineOS: String? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.protocolMinor = protocolMinor
         self.capabilities = capabilities
         self.deviceName = deviceName
+        self.machineName = machineName
+        self.machineOS = machineOS
     }
 
     var isConnected: Bool { capabilities != nil }
+
+    /// The computer's system as a person writes it, or nil for one this build
+    /// does not know — nothing is shown rather than a raw token.
+    var machineSystem: String? { Self.system(forOS: machineOS) }
+
+    /// `hello_ack.machine_os` as a person writes it.
+    static func system(forOS os: String?) -> String? {
+        switch os {
+        case "macos": "macOS"
+        case "linux": "Linux"
+        default: nil
+        }
+    }
 
     /// The daemon reports protocol minor 1 or newer, which is where
     /// `turn_complete`, `get_diff`, pairing codes, per-device tokens, `risk`

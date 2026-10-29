@@ -204,7 +204,7 @@ fn codex_version_bounded(bin: &Path, budget: Duration) -> Result<String, String>
     // Stop the whole group before reaping: the leader is still unreaped here, so
     // its pid — and this pgid — cannot have been handed to anything else.
     let _ = Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{}", child.id())])
+        .args(["-KILL", "--", &format!("-{}", child.id())])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -258,7 +258,7 @@ fn live_gate() -> Option<PathBuf> {
 fn processes_referencing(tag: &str) -> Vec<(i32, String)> {
     let me = std::process::id() as i32;
     let out = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
         .expect("run /bin/ps — a scan that cannot run must FAIL, never report 'nothing found'");
     assert!(out.status.success(), "/bin/ps exited {}", out.status);
@@ -276,7 +276,7 @@ fn processes_referencing(tag: &str) -> Vec<(i32, String)> {
 fn tagged_pids(tag: &str) -> Vec<i32> {
     let me = std::process::id() as i32;
     let Ok(out) = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
     else {
         return Vec::new();

@@ -44,7 +44,7 @@ Verified at baseline commit `c2ffdf2`:
 - `RegisterPush` currently carries an APNs token and optional environment. Bootstrap-token connections are refused; registration requires a paired `device_id`.
 - Token claiming, replacement, revocation filtering, late-410 protection, and environment correction are implemented atomically in `mac/ccd/src/store.rs` and `state.rs`.
 - `mac/ccd/src/push_gate.rs` owns the per-device seen watermark, per-session ambient latch, one decision push per card (a `permission_prompt` notice is matched to its open card), and ticket invalidation.
-- `Daemon::dispatch_push` waits 400 ms, revalidates the session/card/ticket, computes device exclusions and the blocked-run aggregate, and only then invokes the sender. While the Mac has had keyboard or mouse input within `presence::RING_IDLE` (two minutes) it holds the push: it reads the idle time every `presence::POLL` (100 ms), checks the ticket and card once a second, and, the first time the Mac has been left that long, reads a Claude decision's pane once (`Daemon::answered_at_the_mac`), asks presence again, repeats all of the above and sends. A run's newer quiet-state push retires its older one (`push_gate::quiet_ticket`).
+- `Daemon::dispatch_push` waits 400 ms, revalidates the session/card/ticket, computes device exclusions and the count of decisions waiting, and only then invokes the sender. While the Mac has had keyboard or mouse input within `presence::RING_IDLE` (two minutes) it holds the push: it reads the idle time every `presence::POLL` (100 ms), checks the ticket and card once a second, and, the first time the Mac has been left that long, reads a Claude decision's pane once (`Daemon::answered_at_the_mac`), asks presence again, repeats all of the above and sends. A run's newer quiet-state push retires its older one (`push_gate::quiet_ticket`).
 - There are four payload kinds—`approval`, `input`, `done`, and `idle`—but more than four call paths can produce them. The separate `PermissionRequest` path can also admit an approval.
 - The current title is the selected project label when one is available, not simply “single blocked run”; it falls back to `CodeConnect` when no unambiguous label exists.
 - `session_uid` is retained for local logging but is not serialized into APNs payloads.
@@ -147,9 +147,9 @@ For ordinary relay notifications:
   - `Waiting for your input`
   - `Finished a turn`
   - `Waiting for you`
-  - `{n} agents need you`
+  - `{n} waiting for you`
 
-- Badge is the bounded blocked-run count.
+- Badge is the bounded count of decisions waiting (every pending approval and question, as the app's fleet counts them); the wire field is `blocked_count`.
 - `interruption-level` remains `time-sensitive`.
 - `codeconnect.kind` remains one of `approval`, `input`, `done`, or `idle`; a question is routed as `approval`.
 - The doorbell DTO's `kind` is one of `approval`, `question`, `input`, `done`, or `idle`. A relay that does not know `question` refuses it as `malformed`, and the daemon then sends the same doorbell as `approval`.
@@ -166,7 +166,7 @@ A Notification Service Extension is rejected. It cannot reliably reach the Mac w
 
 The public statement should say:
 
-> When relay-backed notifications are enabled, your daemon sends CodeConnect’s push relay only the APNs token and environment, an opaque token-bound credential, one of five fixed event kinds, a blocked-run count, a test marker when applicable, and ordinary network metadata. The relay never receives project names, session identifiers, commands, file paths, diffs, or conversation content; it builds a generic notification and forwards it to Apple.
+> When relay-backed notifications are enabled, your daemon sends CodeConnect’s push relay only the APNs token and environment, an opaque token-bound credential, one of five fixed event kinds, a count of waiting decisions, a test marker when applicable, and ordinary network metadata. The relay never receives project names, session identifiers, commands, file paths, diffs, or conversation content; it builds a generic notification and forwards it to Apple.
 
 The adjacent paragraph should disclose that enrollment sends an App Attest attestation (key ID, challenge, token, and environment) and that the relay retains content-free relay state and short-lived operational records: the verified public key and receipt, an assertion counter and its trust state, a hash of the App Attest key ID, the attestation environment, the attested bundle version, the validation category, the APNs environment, the credential generation, the APNs token and credential hashes, the binding status and any terminal reason, timestamps, internal row relationships, expiring challenge hashes, and opaque rate buckets.
 
@@ -364,7 +364,7 @@ The following remain daemon-side and unchanged:
 - Permission-prompt twin deduplication.
 - Session/ticket/card revalidation.
 - The 400 ms dispatch grace.
-- Blocked-run aggregation.
+- Counting the decisions waiting.
 - Per-device recipient exclusion.
 - Per-device queue ordering and latest-doorbell replacement.
 - Test queue handling.

@@ -10,6 +10,9 @@
 //!   * **A ring.** The phone is for when the owner is away: a ring raised while
 //!     someone has used the Mac within [`RING_IDLE`] waits, and rings once the
 //!     Mac has been left that long.
+//!
+//! A Linux machine has no input-idle reading here, so it always counts as
+//! left: its questions and its rings go to the phone straight away.
 
 use std::time::Duration;
 
@@ -28,6 +31,7 @@ pub const POLL: Duration = Duration::from_millis(100);
 /// for none. `None` when it cannot be read, and each caller reads that so that
 /// nothing is hidden: a background question counts someone as here and goes to
 /// the Mac; a ring counts nobody as here and goes to the phone.
+#[cfg(target_os = "macos")]
 pub fn hid_idle() -> Option<Duration> {
     use std::ffi::{c_char, c_void};
     type CFTypeRef = *const c_void;
@@ -93,7 +97,18 @@ fn used_within(idle: Option<Duration>, within: Duration) -> Option<bool> {
 
 #[cfg(not(test))]
 fn idle() -> Option<Duration> {
+    machine_idle()
+}
+
+#[cfg(target_os = "macos")]
+fn machine_idle() -> Option<Duration> {
     hid_idle()
+}
+
+/// Longer than any caller's time, so a Linux machine is never someone there.
+#[cfg(target_os = "linux")]
+fn machine_idle() -> Option<Duration> {
+    Some(Duration::MAX)
 }
 
 /// In tests the Mac's idle time is the test's, set per thread with
@@ -121,12 +136,22 @@ mod tests {
     /// Read off the real HID system, so this is the only test that proves the
     /// FFI is wired: a broken read returns `None`, which `at_the_mac` would
     /// quietly turn into "someone is here" everywhere.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_mac_s_idle_time_reads_without_any_permission() {
-        let idle = hid_idle().expect("HIDIdleTime must read");
+        let idle = machine_idle().expect("HIDIdleTime must read");
         assert!(idle < Duration::from_secs(365 * 24 * 3600), "{idle:?}");
-        let again = hid_idle().unwrap();
+        let again = machine_idle().unwrap();
         assert_ne!(idle, again, "the value is computed at read time");
+    }
+
+    /// A Linux machine is away for both callers, so a background question and
+    /// a ring both go to the phone at once.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_machine_always_counts_as_left() {
+        assert_eq!(used_within(machine_idle(), QUESTION_IDLE), Some(false));
+        assert_eq!(used_within(machine_idle(), RING_IDLE), Some(false));
     }
 
     /// The presence rule as a table: input more recent than the caller's time

@@ -5,7 +5,7 @@ struct CodeConnectApp: App {
     /// Apple delivers the APNs token — and a notification tap — to a
     /// `UIApplicationDelegate`, and SwiftUI's `App` has none, so one is adopted.
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
-    @State private var model = AppModel()
+    @State private var machines = Machines()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -22,7 +22,7 @@ struct CodeConnectApp: App {
             #endif
         }
         .onChange(of: scenePhase) { _, phase in
-            model.scenePhaseChanged(to: phase)
+            machines.scenePhaseChanged(to: phase)
         }
     }
 
@@ -52,7 +52,7 @@ struct CodeConnectApp: App {
         RootView()
             // Dark-only, applied once at the root. See DesignKit.swift.
             .ccAppearance()
-            .environment(model)
+            .environment(machines)
             // Drains a tap that launched the app, which can arrive before this
             // view — and therefore the observer below — exists.
             .task {
@@ -66,10 +66,10 @@ struct CodeConnectApp: App {
                         PushWire.seedTapForTesting(kind: kind)
                     }
                 #endif
-                model.consumePendingTap()
-                model.bootstrap()
+                machines.consumePendingTap()
+                machines.bootstrap()
             }
-            // Deep links land on the model, not on a view: the target has to
+            // Deep links land on `Machines`, not on a view: the target has to
             // survive the app being cold-started by the link, and a tapped
             // notification uses the same entry point for the same reason.
             .onOpenURL { url in
@@ -88,13 +88,13 @@ struct CodeConnectApp: App {
                         return
                     }
                 #endif
-                _ = model.open(url: url)
+                _ = machines.open(url: url)
             }
             // A tapped notification lands the same way a link does, and for the
             // same reason: it may have cold-started the app, so the destination
             // has to survive there being no view yet.
             .onReceive(NotificationCenter.default.publisher(for: PushWire.tapNotification)) { _ in
-                model.consumePendingTap()
+                machines.consumePendingTap()
             }
     }
 }

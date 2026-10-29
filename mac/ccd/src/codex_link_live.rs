@@ -351,7 +351,7 @@ fn codex_version_bounded(bin: &Path, budget: Duration) -> Result<String, String>
     });
     let answer = rx.recv_timeout(budget);
     let _ = Command::new("/bin/kill")
-        .args(["-KILL", &format!("-{}", child.id())])
+        .args(["-KILL", "--", &format!("-{}", child.id())])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -403,7 +403,7 @@ fn live_gate() -> Option<PathBuf> {
 fn tagged_processes(tag: &str) -> Vec<(i32, String)> {
     let me = std::process::id() as i32;
     let Ok(out) = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
     else {
         return Vec::new();
@@ -2024,7 +2024,7 @@ fn disposition_delivered(line: &str) -> Option<bool> {
 const LOSER_SENTENCE: [(&str, &str); 3] = [
     (
         "Some(Tui)",
-        "this card was answered at the Mac first, so nothing you chose was applied",
+        "this card was answered at the computer first, so nothing you chose was applied",
     ),
     (
         "Some(Ccd)",
@@ -6475,17 +6475,17 @@ async fn a_claim_outstanding_across_a_daemon_bounce_becomes_one_terminal_unknown
     /// an operator reads on a card that can never be answered again, and a change to
     /// it is a change to what the fleet was told.
     const RECOVERED_CAUSE: &str =
-        "this Mac stopped between writing the answer and learning what became of it";
+        "the computer stopped between writing the answer and learning what became of it";
     /// What the caller waiting on the aborted link is told. `LinkAnswers::answer`'s
     /// dropped-sender arm: the task took the ask and then went away, so the only
     /// truthful thing to say is that nothing here knows.
     const LOST_CALLER_SENTENCE: &str =
         "the link stopped while this answer was being written, so whether it reached \
-         Codex is not known; it will not be sent again. Check the Mac.";
+         Codex is not known; it will not be sent again. Check the computer.";
     /// What a second tap is told, once the ledger is terminal.
     const REFUSED_AFTERWARDS: &str =
         "an answer to this card was already sent and what became of it is not known; \
-         it will not be sent again. Check the Mac.";
+         it will not be sent again. Check the computer.";
 
     let Some(codex) = live_gate() else { return };
     let sb = LiveSandbox::new("bounce4");

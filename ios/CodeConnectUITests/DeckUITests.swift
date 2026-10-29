@@ -24,9 +24,10 @@ import XCTest
 /// assertions are what this suite is for, and none of them are about speed.
 final class DeckUITests: XCTestCase {
 
-    /// The two sizes the design is verified at.
+    /// The sizes the design is verified at.
     private enum TypeSize: String {
         case medium = "UICTContentSizeCategoryM"
+        case ax4 = "UICTContentSizeCategoryAccessibilityXXL"
         case ax5 = "UICTContentSizeCategoryAccessibilityXXXL"
     }
 
@@ -333,6 +334,34 @@ final class DeckUITests: XCTestCase {
             "and the gate says nothing, because it is not in the way")
     }
 
+    /// **The sheet a chat opens a card in arms the same way.** The sheet is
+    /// shorter than the Deck, so at the largest sizes its pinned bar takes most
+    /// of it, and the readable strip above the bar is all a reader has: reading
+    /// the path there has to arm `Allow`, at each size where that strip is thin.
+    func testTheSessionSheetArmsAfterScrollingAtAX4() { assertTheSessionSheetArms(at: .ax4) }
+
+    func testTheSessionSheetArmsAfterScrollingAtAX5() { assertTheSessionSheetArms(at: .ax5) }
+
+    /// Opens `fx-2`'s chat at `size`, opens its `Write` card with the approval
+    /// row's `Review`, and scrolls until `Allow` arms.
+    private func assertTheSessionSheetArms(at size: TypeSize) {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+            "-UIPreferredContentSizeCategoryName", size.rawValue,
+            "-CC_DEEPLINK", "codeconnect://session/fx-2",
+        ]
+        app.launch()
+        let review = app.buttons["Review"].firstMatch
+        XCTAssertTrue(review.waitForExistence(timeout: 25), "fx-2's approval row")
+        review.tap()
+
+        let allow = allowButton(app, tool: "Write")
+        XCTAssertTrue(allow.waitForExistence(timeout: 25), "the sheet opened the Write card")
+        scrollUntil(app, "the read gate arms") { allowButton(app, tool: "Write").isEnabled }
+        attach(app, "sheet-\(size.rawValue)-armed")
+    }
+
     /// An answer the Mac has not confirmed says how long it has waited, and
     /// VoiceOver hears that as a duration — "4 seconds" — never as "4s",
     /// which it reads "four ess".
@@ -517,9 +546,8 @@ final class DeckUITests: XCTestCase {
         XCTAssertTrue(refusal.waitForExistence(timeout: 25))
         attach(app, "face-id-banner-pinned")
 
-        // The bar is drawn *over* the scroll view rather than shortening it, so
-        // the edge that matters is the pinned control's own top — the same edge
-        // the read gate tests against.
+        // The edge that matters is the pinned control's own top — the same
+        // edge the read gate tests against.
         let deny = app.buttons.matching(identifier: "Deny this Bash call").firstMatch
         XCTAssertTrue(deny.exists)
         XCTAssertTrue(

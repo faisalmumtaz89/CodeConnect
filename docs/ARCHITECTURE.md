@@ -18,7 +18,7 @@ Terminal bytes are read for exactly one purpose: confirming that the prompt we a
 ```
  iPhone (SwiftUI)                          Mac
 ┌──────────────────────┐        ┌──────────────────────────────────┐
-│ Fleet                │  WSS   │  ccd  (Rust, launchd)            │
+│ Fleet                │  WSS   │  ccd  (Rust, launchd/systemd)    │
 │ Session timeline     │◄──────►│  ┌────────────────────────────┐  │
 │ Approval card        │ tailnet│  │ ingest → assign seq → dedup│  │
 │ Live terminal (tmux) │        │  │ SQLite WAL   PK(uid, seq)  │◄─┼── source of truth

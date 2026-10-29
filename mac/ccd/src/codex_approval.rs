@@ -158,7 +158,7 @@ pub(crate) const REQUEST_APPROVAL_SUFFIX: &str = "/requestApproval";
 const OBSERVE_ONLY_REASONS: &[(&str, &str)] = &[(
     "item/permissions/requestApproval",
     "it asks for a permission profile rather than a decision about one action, so \
-     there is nothing a card could offer and it must be answered at the Mac",
+     there is nothing a card could offer and it must be answered at the computer",
 )];
 
 /// Is this a request this leg is handed and this daemon does not card?
@@ -198,7 +198,7 @@ pub(crate) fn observe_only_reason(method: &str) -> &'static str {
         .unwrap_or(
             "this build has no card for it — it is an approval family that arrived \
              after the two a phone answers, so nothing here knows what to offer for \
-             it and it must be answered at the Mac",
+             it and it must be answered at the computer",
         )
 }
 
@@ -2090,7 +2090,7 @@ mod tests {
             observe_only_reason("some/future/requestApproval"),
         ] {
             assert!(
-                reason.contains("must be answered at the Mac"),
+                reason.contains("must be answered at the computer"),
                 "an arrival is all this leg sees, so the sentence may not claim an \
                  answer it never watched: {reason}"
             );

@@ -9,8 +9,10 @@
 //! So tmux copies the pane's output into a private file, from the same command
 //! that creates the session: tmux runs a command list without reading any pane
 //! output between its commands, so the copy starts before the first byte is read.
-//! The copy keeps the last [`LIMIT`] bytes — where an error is — and writes them
-//! when the pane's output ends. The launcher holds a lock on the copy for as long
+//! The copy is this binary's [`SUBCOMMAND`], which keeps the last [`LIMIT`] bytes
+//! — where an error is — and writes them when the pane's output ends. It does
+//! its own keeping rather than run `tail -c`: uutils' `tail`, Ubuntu's since
+//! 26.04, keeps more than it is asked to when its input arrives in short reads. The launcher holds a lock on the copy for as long
 //! as it lives; when the session ends, the run's supervisor waits for that lock —
 //! the launcher may be in its note, about to show what an ended agent printed —
 //! and then removes the copy, so a launcher that dies without cleaning up, its
@@ -22,13 +24,16 @@
 //! gone and whose answers would otherwise be typed into the user's shell.
 
 use std::fs::{DirBuilder, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+
+/// The hidden subcommand `pipe-pane` runs to keep the copy.
+pub const SUBCOMMAND: &str = "internal-early-output";
 
 /// The copy's directory in the session's, its bytes, and the mark its writer
 /// leaves once it has written them all.
@@ -105,17 +110,17 @@ impl EarlyOutput {
     /// sequences in it before `/bin/sh -c` sees it, so the paths are shell-quoted
     /// first and then have `#` and `%` doubled, which both expansions undo.
     pub fn pipe_command(&self) -> Result<String> {
-        let path = |name: &str| -> Result<String> {
-            let path = self.dir.join(name);
+        let quoted = |path: &Path| -> Result<String> {
             let path = path
                 .to_str()
                 .with_context(|| format!("{} is not UTF-8", path.display()))?;
             Ok(tmux_literal(&crate::settings::shell_quote(path)))
         };
         Ok(format!(
-            "/usr/bin/tail -c {LIMIT} >{}; : >{}",
-            path(OUTPUT)?,
-            path(DONE)?
+            "{} {SUBCOMMAND} >{}; : >{}",
+            quoted(&crate::tmux::pane_exe()?)?,
+            quoted(&self.dir.join(OUTPUT))?,
+            quoted(&self.dir.join(DONE))?
         ))
     }
 
@@ -283,9 +288,71 @@ fn undoubled(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `codeconnect internal-early-output`: the last [`LIMIT`] bytes of standard
+/// input, written to standard output once it ends.
+pub fn run() -> Result<()> {
+    keep_last(
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout().lock(),
+        LIMIT,
+    )
+}
+
+/// Read `input` to its end through a ring of `limit` bytes, then write what the
+/// ring holds, oldest first.
+fn keep_last(input: &mut impl Read, output: &mut impl Write, limit: usize) -> Result<()> {
+    let mut ring = vec![0u8; limit];
+    let (mut end, mut wrapped) = (0, false);
+    loop {
+        let read = match input.read(&mut ring[end..]) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err).context("reading the pane's output"),
+        };
+        end += read;
+        if end == limit {
+            (end, wrapped) = (0, true);
+        }
+    }
+    if wrapped {
+        output.write_all(&ring[end..])?;
+    }
+    output.write_all(&ring[..end])?;
+    output.flush().context("writing the early output")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reads of every size, as a pipe hands over bursts: the case uutils'
+    /// `tail -c` keeps too much of.
+    #[test]
+    fn the_copy_keeps_exactly_the_last_bytes_whatever_the_reads() {
+        struct Uneven<'a>(&'a [u8], usize);
+        impl Read for Uneven<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let size = [1, 3, 700, 2, 1999, 64][self.1 % 6]
+                    .min(buf.len())
+                    .min(self.0.len());
+                self.1 += 1;
+                buf[..size].copy_from_slice(&self.0[..size]);
+                self.0 = &self.0[size..];
+                Ok(size)
+            }
+        }
+        let input: Vec<u8> = (0..9_000u32).map(|i| (i % 251) as u8).collect();
+        for (len, limit) in [(9_000, 1_000), (9_000, 9_000), (500, 1_000), (0, 1_000)] {
+            let mut kept = Vec::new();
+            keep_last(&mut Uneven(&input[..len], 0), &mut kept, limit).unwrap();
+            assert_eq!(
+                kept,
+                input[len.saturating_sub(limit)..len],
+                "{len} bytes, keeping {limit}"
+            );
+        }
+    }
 
     #[test]
     fn text_colour_movement_and_screen_modes_are_kept_whole() {

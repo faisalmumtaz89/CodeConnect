@@ -3,6 +3,38 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## CodeConnect runs on Linux
+
+- The same command installs it on Linux (x86_64 or arm64): `curl -fsSL https://codeconnect.sh | sh`.
+  It checks the release's signature with OpenSSL 3 before anything is unpacked or run, and
+  without `openssl` it installs nothing and says which package to add.
+- The daemon runs as a systemd user unit under the same `codeconnect daemon` commands: it starts at
+  boot, keeps running when you log out, and restarts after a crash. Where the system asks for it,
+  `codeconnect daemon install` prints the one `sudo loginctl enable-linger` line to run first.
+- `codeconnect update` on Linux installs only releases signed with CodeConnect's Linux release key.
+- CodeConnect finds Tailscale where Linux packages install it, and the phone shows the computer by its
+  hostname. A computer whose Tailscale is switched off waits on its own and joins the tailnet when
+  it comes back.
+- Containers and cloud sandboxes where Tailscale runs in userspace mode work too: the daemon listens
+  on loopback, where Tailscale delivers tailnet connections, and the pairing code carries the
+  computer's tailnet address.
+- Without systemd (Alpine, most containers) you start the daemon by hand, with the one line the
+  installer and `codeconnect daemon install` print. `--source` installs are macOS-only.
+- The terminal's notes and pairing messages, and the daemon's warnings about its address, files
+  and service, say "this computer" where they said "this Mac".
+- The phone and the computer say "the computer" where they said "the Mac" — on a Mac, on Linux
+  and on a cloud machine alike: a card's notes, why an answer, a message or Stop did not go
+  through, and the app's own words. An iPhone app older than this release still shows the
+  computer's messages, but after a Codex link refusal that names the computer it no longer greys
+  Stop for its few seconds; the matching app does.
+
+## The phone names your Mac the way you do
+
+- While connected, Settings on the iPhone shows your Mac by its computer name, with "macOS" under
+  it, instead of its network address. Renaming the Mac shows on the phone the next time it connects.
+  Needs both this Mac release and the matching iPhone app; with an older Mac the phone still shows the
+  address.
+
 ## Codex says goodbye as it does run directly again
 
 - Quitting `codeconnect codex` ends with what `codex` prints run directly — its token usage and

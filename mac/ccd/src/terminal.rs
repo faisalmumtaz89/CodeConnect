@@ -1110,7 +1110,7 @@ impl TerminalLeases {
             }
             let permit = self.slots.clone().try_acquire_owned().map_err(|_| {
                 OpenError::AttachmentLimit(format!(
-                    "the Mac already has {MAX_TERMINAL_ATTACHMENTS} terminals open"
+                    "the computer already has {MAX_TERMINAL_ATTACHMENTS} terminals open"
                 ))
             })?;
             active.insert(session_uid.to_string(), holder);
@@ -3467,9 +3467,10 @@ pub(crate) mod tests {
         };
         entries
             .filter_map(|entry| entry.ok())
+            // Through the entry: on Linux each `/dev/fd` entry is a symlink to
+            // what the descriptor holds.
             .filter(|entry| {
-                entry
-                    .metadata()
+                std::fs::metadata(entry.path())
                     .map(|meta| meta.file_type().is_fifo())
                     .unwrap_or(false)
             })
@@ -7330,7 +7331,7 @@ pub(crate) mod tests {
         assert_eq!(
             busy.close_code(),
             protocol::ws::terminal_close::SESSION_BUSY,
-            "not `attachment_limit`: the Mac is not full, one terminal is stuck"
+            "not `attachment_limit`: the computer is not full, one terminal is stuck"
         );
         assert!(
             leases.held("uid-1"),
@@ -7395,6 +7396,9 @@ pub(crate) mod tests {
     /// this.
     #[tokio::test]
     async fn no_hand_over_exceeds_one_frames_worth_however_large_the_grant() {
+        // `forward` records when it arms a stall deadline process-wide, and a
+        // test measuring a close against that record must not run beside it.
+        let _serial = fixture_test_guard().await;
         let max = protocol::ws::MAX_TERMINAL_CHUNK_BYTES;
         let credit = Arc::new(Semaphore::new(
             protocol::ws::TERMINAL_MAX_OUTSTANDING_CREDIT as usize,

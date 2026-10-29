@@ -845,7 +845,7 @@ fn send_text(
         // written against. Any substitute budget could outlive the daemon's
         // real wait; nothing has been typed, so refusing is the safe answer.
         (Some(_), None) => {
-            let reason = "this Mac's monotonic clock could not be read, so the send could \
+            let reason = "the computer's monotonic clock could not be read, so the send could \
                           not be bounded; nothing was typed"
                 .to_string();
             log_line(args, &format!("refused: {reason}"));
@@ -1040,13 +1040,13 @@ impl ActuationFailure {
             ActuationFailure::Typing(err) => SupervisorResult::Error {
                 message: format!(
                     "{err}. The keys may have reached the session, so they will not be sent \
-                     again; check the Mac."
+                     again; check the computer."
                 ),
             },
             ActuationFailure::Submitting(err) => SupervisorResult::Error {
                 message: format!(
                     "the text was typed but Enter was not confirmed ({err}); it may or may \
-                     not have been submitted, so it will not be sent again — check the Mac."
+                     not have been submitted, so it will not be sent again — check the computer."
                 ),
             },
         }
@@ -1310,7 +1310,7 @@ fn recover_composer_with(
     {
         return SupervisorResult::RecoveryUnconfirmed {
             matched,
-            reason: "a prompt is waiting for an answer on the Mac, so no key was sent".into(),
+            reason: "a prompt is waiting for an answer on the computer, so no key was sent".into(),
         };
     }
 
@@ -1550,9 +1550,9 @@ fn authorise(
 ) -> std::result::Result<String, String> {
     let Some(matched) = require.find_match(pane, None) else {
         return Err(if targets_composer {
-            "the message box is not on screen at the Mac".into()
+            "the message box is not on screen at the computer".into()
         } else {
-            "that prompt is not on screen at the Mac".into()
+            "that prompt is not on screen at the computer".into()
         });
     };
     // Only the composer. A permission prompt is a view too — it hides the
@@ -1567,7 +1567,7 @@ fn authorise(
             tmux::Keyboard::Program => {}
             tmux::Keyboard::View => {
                 return Err(
-                    "a menu or view at the Mac has the keyboard, so the message box takes \
+                    "a menu or view at the computer has the keyboard, so the message box takes \
                      no keys"
                         .into(),
                 );
@@ -1585,7 +1585,7 @@ fn authorise(
             // `q` leaves one mode per press, so a stack takes one each.
             tmux::Keyboard::Scrollback(_) => {
                 return Err(
-                    "tmux has the keyboard at the Mac: the session is in one of tmux's own \
+                    "tmux has the keyboard at the computer: the session is in one of tmux's own \
                      modes, so the message box takes no keys — press q there until it clears"
                         .into(),
                 );
@@ -1595,7 +1595,8 @@ fn authorise(
     if let Some(expect) = expect {
         if !expect.still_on_screen(pane) {
             return Err(
-                "the prompt on screen at the Mac has changed since this answer was made".into(),
+                "the prompt on screen at the computer has changed since this answer was made"
+                    .into(),
             );
         }
     }
@@ -3305,8 +3306,9 @@ mod tests {
         }
     }
 
-    const FAKE_TUI: &str = r#"#!/bin/sh
+    const FAKE_TUI: &str = r#"#!/bin/bash
 # A composer that a "/dialog" line replaces with a view, restored by Escape.
+# bash rather than sh for `printf "\x.."`, which dash, Debian's sh, lacks.
 # The composer is drawn in the box Claude draws one in — rule, prompt row,
 # rule, footer — because that box is what the presence check reads.
 # `stty raw` so Escape arrives as a byte we can read.
@@ -4119,7 +4121,7 @@ means the full history gets re-read on your next message.
         let refused =
             send_through_the_interlock(&tui, "SWALLOWED").expect_err("no composer, no keystroke");
         assert!(
-            refused.contains("the message box is not on screen at the Mac"),
+            refused.contains("the message box is not on screen at the computer"),
             "the composer's own refusal, reached without touching the pane: {refused}"
         );
         assert_eq!(tui.modes(), "1", "the scroll position was not taken");

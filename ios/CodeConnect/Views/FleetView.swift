@@ -51,7 +51,10 @@ private struct PendingRemoval {
 ///    still appear per-element: a cached row gets a hollow dot, never the word
 ///    "cached".
 struct FleetView: View {
+    /// The machine the app-wide surfaces speak for — see `Machines.linkModel`.
+    /// A row, a session or a card is acted on through its own machine's model.
     @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
     @Environment(\.dynamicTypeSize) private var typeSize
     /// Every tool label's width on screen, so every command beside one starts
     /// on the same edge. Settles on the first pass and then stops changing, so
@@ -86,7 +89,7 @@ struct FleetView: View {
     /// inline one to take over, so the screen never shows its name twice.
     ///
     /// Deliberately a `Bool` and not a continuous opacity: this view's `body`
-    /// re-reads `model.fleet`, and on a soak-tested daemon that walks two dozen
+    /// re-reads `machines.fleet`, and on a soak-tested daemon that walks two dozen
     /// event logs. A per-frame opacity turned a flick into two dozen full fleet
     /// rebuilds and hung the main thread — measured, on a 24-session daemon.
     /// One state change per direction, cross-faded by the animation, is
@@ -205,7 +208,7 @@ struct FleetView: View {
             .background(CC.color.bg)
             .scrollIndicators(.hidden)
             .ccCollectsToolColumn(into: $toolLabelWidths)
-            .refreshable { model.refreshFleet() }
+            .refreshable { machines.refreshFleet() }
             // Opaque `bg` *and* a hard scroll edge, welded together in the kit
             // because either one alone is a different wrong bar.
             .ccNavigationChrome()
@@ -218,6 +221,7 @@ struct FleetView: View {
                 // its open sheets, its timeline wiring — under the new key, and
                 // never show it appearing, so the link it came by stays unread.
                 SessionDetailView(route: route)
+                    .environment(owner(route.key))
                     .id(route.key)
             }
             .toolbar {
@@ -283,7 +287,7 @@ struct FleetView: View {
             // swipe row down. A destructive control must not sit armed under
             // whatever the user comes back to.
             .onChange(of: overlayFingerprint) { swipeCloses.closeAll() }
-            .sheet(isPresented: $showSettings) { PairingView() }
+            .sheet(isPresented: $showSettings) { PairingView().environment(machines.current) }
             .sheet(isPresented: $showLinkDetail) { LinkHealthSheet() }
             .sheet(item: $capabilityReason) { CapabilitySheet(reason: $0.text) }
             .fullScreenCover(isPresented: $showDeck) {
@@ -295,7 +299,7 @@ struct FleetView: View {
             }
             .sheet(item: $diffRoute) { route in
                 DiffSheet(key: route.key)
-                    .environment(model)
+                    .environment(owner(route.key))
             }
             // An alert, not a confirmation dialog: on iOS 26 a dialog pops out of
             // whatever it is attached to, and this one is attached to the screen.
@@ -309,9 +313,9 @@ struct FleetView: View {
             } message: { removal in
                 Text(removal.message)
             }
-            .onChange(of: model.pendingDeepLink) { _, _ in consumeDeepLink() }
+            .onChange(of: machines.pendingDeepLink) { _, _ in consumeDeepLink() }
             // A name that waited out a catch-up is resolved at its release.
-            .onChange(of: model.isCatchingUp) { _, _ in consumeDeepLink() }
+            .onChange(of: machines.isCatchingUp) { _, _ in consumeDeepLink() }
             .onAppear {
                 appearedAt = Date()
                 consumeDeepLink()
@@ -384,18 +388,18 @@ struct FleetView: View {
         #if DEBUG
             FleetRowRenders.fleetRead()
         #endif
-        // One sort per screen: `model.fleet` re-sorts on every access. Nothing
+        // One sort per screen: `machines.fleet` re-sorts on every access. Nothing
         // on this screen ticks it any more — see `FleetRowView.now` — so a body
         // pass now means the fleet itself changed, or a Stop cooldown is
         // counting down (`stopBlockedReason`).
-        let rows = model.fleet
-        // Read once for the same reason, and for a sharper one: `model.deck`
+        let rows = machines.fleet
+        // Read once for the same reason, and for a sharper one: `machines.deck`
         // flat-maps `pendingApprovals` across every session, which walks every
         // event log the app holds. Read inside the `safeAreaInset` builder it was
         // re-evaluated on every *layout* pass — so one flick on a 24-session
         // daemon walked two dozen logs a frame and took the main thread down for
         // thirty seconds. Measured.
-        let top = model.deck.first
+        let top = machines.deck.first
         return FleetScreen(
             rows: rows,
             // Everything each row draws, read here and nowhere below: a model
@@ -408,7 +412,16 @@ struct FleetView: View {
                 DeckPreview(
                     place: place(for: $0), command: command(for: $0), waitingSince: $0.requestedAt)
             },
-            hasLiveFleet: model.hasLiveFleet)
+            hasLiveFleet: machines.hasLiveFleet)
+    }
+
+    /// The model of the machine this session is on.
+    private func owner(_ key: String) -> AppModel {
+        machines.model(forSession: key) ?? model
+    }
+
+    private func owner(of row: FleetRow) -> AppModel {
+        machines.model(for: row.machineID) ?? model
     }
 
     // MARK: Header
@@ -611,11 +624,12 @@ struct FleetView: View {
         _ row: FleetRow, bandCapability: CapabilityBadge?, isLast: Bool
     ) -> FleetRowCell.Content {
         let key = row.summary.sessionKey
+        let owner = owner(of: row)
         // Removable runs only, and only when the daemon says it accepts the
         // request. `isRemovable` is `lifecycle`, not the derived status — the
         // rule can read Ended without the run being proven exited — plus the
         // unhosted case, where no proof of death can ever exist.
-        let removable = canRemove(row.summary)
+        let removable = canRemove(row)
         let choosable = selecting && row.status == .ended && removable
         return FleetRowCell.Content(
             row: row,
@@ -641,9 +655,9 @@ struct FleetView: View {
             // disagreed, and the disagreement shipped: an `interrupt` left for
             // sessions the phone already knew were `bound`, `offline` or `none`,
             // measured at the send stub.
-            stopOffered: model.stopUnavailable(for: key) == nil,
+            stopOffered: owner.stopUnavailable(for: key) == nil,
             stopBlockedReason: stopBlockedReason(for: row),
-            stop: model.codexControls(for: key).stop)
+            stop: owner.codexControls(for: key).stop)
     }
 
     /// One row, and the actions it is handed. Each action is built from what
@@ -651,16 +665,17 @@ struct FleetView: View {
     private func rowCell(_ cell: FleetRowCell.Content) -> some View {
         let key = cell.row.summary.sessionKey
         let summary = cell.row.summary
+        let owner = owner(of: cell.row)
         return FleetRowCell(
             content: cell,
-            remove: { await model.removeSession(summary).refusal },
+            remove: { await owner.removeSession(summary).refusal },
             confirm: { removal in
-                pendingRemoval = PendingRemoval(row: summary, model: model, remove: removal)
+                pendingRemoval = PendingRemoval(row: summary, model: owner, remove: removal)
             },
             coordinator: swipeCloses,
             onOpenDiff: { diffRoute = DiffRoute(key: key) },
-            onMarkReviewed: { model.markReviewed(key) },
-            onStop: { Task { await model.stopCodexTurn(sessionKey: key) } },
+            onMarkReviewed: { owner.markReviewed(key) },
+            onStop: { Task { await owner.stopCodexTurn(sessionKey: key) } },
             onTap: { tap(cell) }
         )
         .equatable()
@@ -700,20 +715,21 @@ struct FleetView: View {
     /// cooldown stands and the fleet is on screen the clock runs the body once
     /// a second; every other row is skipped.
     private func stopBlockedReason(for row: FleetRow) -> String? {
-        guard model.codexControls(for: row.summary.sessionKey).isStopGreyed(now: model.now)
+        let owner = owner(of: row)
+        guard owner.codexControls(for: row.summary.sessionKey).isStopGreyed(now: owner.now)
         else { return nil }
         return "Try again in a moment."
     }
 
-    /// Whether this Mac will remove this run: the one rule the swipe, VoiceOver
+    /// Whether its Mac will remove this run: the one rule the swipe, VoiceOver
     /// and a selection all ask.
-    private func canRemove(_ summary: SessionSummary) -> Bool {
-        summary.isRemovable && model.daemonProfile.removesSessions
+    private func canRemove(_ row: FleetRow) -> Bool {
+        row.summary.isRemovable && owner(of: row).daemonProfile.removesSessions
     }
 
     /// The rows a selection can hold, in fleet order: ended, and removable.
     private func selectableKeys(_ rows: [FleetRow]) -> [String] {
-        rows.filter { $0.status == .ended && canRemove($0.summary) }.map(\.summary.sessionKey)
+        rows.filter { $0.status == .ended && canRemove($0) }.map(\.summary.sessionKey)
     }
 
     private func endSelection() {
@@ -762,23 +778,23 @@ struct FleetView: View {
             batchRunning = true
             batchRefused = [:]
             Task {
-                let refused = await model.removeSessions(keys: keys)
+                let refused = await machines.removeSessions(keys: keys)
                 batchRunning = false
                 batchRefused = refused
                 // What the batch did not remove is exactly what it has a reason
                 // for. Still choosing, that is what stays chosen; if the link
                 // went and choosing ended, the note is what is left to say so.
                 if selecting {
-                    selected = Set(refused.keys).intersection(selectableKeys(model.fleet))
+                    selected = Set(refused.keys).intersection(selectableKeys(machines.fleet))
                 }
-                if let note = batchNote(model.fleet.filter { $0.status == .ended }) {
+                if let note = batchNote(machines.fleet.filter { $0.status == .ended }) {
                     UIAccessibility.post(
                         notification: .announcement, argument: "\(note.title). \(note.reasons)")
                 }
             }
         }
-        if keys.count == 1, let row = model.shownSummary(for: keys[0]) {
-            pendingRemoval = PendingRemoval(row: row, model: model, remove: run)
+        if keys.count == 1, let row = owner(keys[0]).shownSummary(for: keys[0]) {
+            pendingRemoval = PendingRemoval(row: row, model: owner(keys[0]), remove: run)
         } else {
             pendingRemoval = PendingRemoval(count: keys.count, remove: run)
         }
@@ -866,7 +882,7 @@ struct FleetView: View {
         guard row.status == .blocked || row.status == .failed else {
             return row.summary.updatedDate
         }
-        return model.shown(for: row.summary.sessionKey)?.pendingApprovals
+        return owner(of: row).shown(for: row.summary.sessionKey)?.pendingApprovals
             .map(\.requestedAt).min() ?? row.summary.updatedDate
     }
 
@@ -880,8 +896,9 @@ struct FleetView: View {
     /// how a reader learns to distrust both.
     private func blockedCard(_ row: FleetRow) -> BlockedCard? {
         guard row.status == .blocked else { return nil }
-        let pending = model.shown(for: row.summary.sessionKey)?.pendingApprovals ?? []
-        guard let front = DeckOrdering.sort(pending, profile: model.daemonProfile).first else {
+        let owner = owner(of: row)
+        let pending = owner.shown(for: row.summary.sessionKey)?.pendingApprovals ?? []
+        guard let front = DeckOrdering.sort(pending, profile: owner.daemonProfile).first else {
             return nil
         }
         let tool = front.card.toolName
@@ -890,7 +907,7 @@ struct FleetView: View {
                 tool: tool,
                 argument: ToolSummary.principalArgument(
                     tool: tool, input: front.card.toolInput)?.firstLine),
-            risk: front.assessment(profile: model.daemonProfile).effective,
+            risk: front.assessment(profile: owner.daemonProfile).effective,
             truncation: .head)
     }
 
@@ -1001,7 +1018,7 @@ struct FleetView: View {
     /// sat above it in the queue, and the one detail the product volunteered at
     /// 2am was its least important item.
     private func place(for approval: ApprovalItem) -> String {
-        model.runLabel(for: approval.sessionKey).inline
+        owner(approval.sessionKey).runLabel(for: approval.sessionKey).inline
     }
 
     /// What that card wants to run. The command rather than the tool name, for
@@ -1037,12 +1054,12 @@ struct FleetView: View {
     /// A deep link aimed at the Deck opens it here; anything session-shaped is
     /// pushed onto the stack and handled by the detail view.
     private func consumeDeepLink() {
-        switch model.pendingDeepLink {
+        switch machines.pendingDeepLink {
         case .fleet:
-            _ = model.consumeDeepLink()
+            _ = machines.consumeDeepLink()
             clearPresentations()
         case .deck(let requestID):
-            _ = model.consumeDeepLink()
+            _ = machines.consumeDeepLink()
             // **Everything on top goes first.** A warm app may be showing
             // settings, link health, a capability sheet, a diff, or a session —
             // and a Deck presented underneath one of those is a Deck the reader
@@ -1057,8 +1074,8 @@ struct FleetView: View {
             // as it stands, so the detail view can say that plainly rather than
             // the tap doing nothing at all — except during a catch-up, when the
             // name waits for the list it ends on.
-            guard let key = model.resolveSessionKey(reference: reference)
-                ?? (model.isCatchingUp ? nil : reference)
+            guard let key = machines.resolveSessionKey(reference: reference)
+                ?? (machines.isCatchingUp ? nil : reference)
             else { return }
             if path.last?.key != key {
                 path = [SessionRoute(key: key)]
@@ -1197,7 +1214,10 @@ private struct LinkPill: View {
 /// ladder, the two-second grace on a reconnect, and the compound cached message
 /// are unchanged; only the owner of the read moved.
 private struct FleetBanner: View {
+    /// `Machines.linkModel`: the link banner speaks only once no machine can be
+    /// reached.
     @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
     let onSettings: () -> Void
 
     var body: some View {
@@ -1249,7 +1269,7 @@ private struct FleetBanner: View {
         // phone is the thing that is behind. Rendered as what the reader can act
         // on — update the app — with the type named, so the next engineer has
         // the whole diagnosis rather than "an unreadable frame".
-        if let unreadable = model.connection.unreadableFrame {
+        if let unreadable = machines.models.lazy.compactMap(\.connection.unreadableFrame).first {
             return [
                 CCBannerItem(
                     // Above `offline` and everything under it: this is a
@@ -1314,7 +1334,7 @@ private struct FleetBanner: View {
             }
         }
         return model.linkHealth.ccBannerItem(
-            onRetry: { model.connection.retryNow() },
+            onRetry: { machines.retryNow() },
             onSettings: onSettings,
             onTailscale: { TailscaleAssist.open() })
     }
@@ -1340,7 +1360,7 @@ private struct FleetBanner: View {
             tone: .warning,
             icon: "clock.arrow.circlepath",
             actionTitle: "Retry",
-            action: { model.connection.retryNow() })
+            action: { machines.retryNow() })
     }
 }
 
@@ -1378,11 +1398,12 @@ private struct FleetDeckBar: View {
 /// only thing that needs the clock.
 private struct FleetWaitingNotice: View {
     @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
     let since: Date
 
     var body: some View {
         CCWaitingNotice(elapsed: model.now.timeIntervalSince(since)) {
-            model.connection.retryNow()
+            machines.retryNow()
         }
     }
 }
@@ -2231,8 +2252,8 @@ struct LinkHealthSheet: View {
             CCFactRow(
                 "Transport", value: transport, tone: transportTone, separator: true)
             CCFactRow(
-                "Address", value: model.pairing.endpoint?.displayAddress ?? Self.unmeasured,
-                isUnmeasured: model.pairing.endpoint == nil, separator: true)
+                "Address", value: model.endpoint?.displayAddress ?? Self.unmeasured,
+                isUnmeasured: model.endpoint == nil, separator: true)
             CCFactRow(
                 "Protocol",
                 value: model.daemonProfile.isConnected

@@ -186,7 +186,7 @@ final class CodexRefusalClassifierTests: XCTestCase {
         XCTAssertFalse(
             CodexControls.isLinkStateRefusal(
                 "the operator said: there is no live link to this Codex session, so nothing "
-                    + "was sent; stop the turn at the Mac — but that was yesterday"))
+                    + "was sent; stop the turn at the computer — but that was yesterday"))
     }
 
     /// **A template that ends in literal text must end the sentence.**

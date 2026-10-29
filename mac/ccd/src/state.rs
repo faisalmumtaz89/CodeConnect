@@ -203,6 +203,10 @@ pub struct Daemon {
     /// the tests — which never open a real listener — say nothing instead of
     /// inventing an address.
     pub bind_ip: std::sync::OnceLock<String>,
+    /// Which daemon this is (`protocol::machine_id_path`), told by `main` once it
+    /// has read or minted it, and sent in every `hello_ack`. A `OnceLock` for the
+    /// same reason as `bind_ip`: the tests never mint one, and say none.
+    pub machine_id: std::sync::OnceLock<String>,
     /// (path, sha256) of the executable this process is running, captured by
     /// `main` at startup for the staleness line in `daemon status`.
     pub exe_identity: std::sync::OnceLock<(String, String)>,
@@ -211,9 +215,10 @@ pub struct Daemon {
     /// `codeconnect pair` is refused with that reason instead of being handed a
     /// code no phone could use.
     pub listener_refusal: std::sync::OnceLock<String>,
-    /// When this process started, and which launchd job it belongs to. Captured
-    /// once at construction: `XPC_SERVICE_NAME` is set by launchd at exec, and
-    /// reading it later would be reading whatever the environment has become.
+    /// When this process started, and which job it belongs to. Captured once at
+    /// construction: [`SERVICE_LABEL_VAR`] is set by launchd, or by CodeConnect's
+    /// systemd unit, at exec, and reading it later would be reading whatever the
+    /// environment has become.
     started_at: String,
     launchd_label: Option<String>,
     inner: Arc<Mutex<Inner>>,
@@ -1473,7 +1478,7 @@ fn respond_by_stamp(timeout_ms: u64) -> Result<u64, SupervisorFailure> {
         .map(|now| now + timeout_ms)
         .ok_or_else(|| {
             SupervisorFailure::NotSent(
-                "this Mac's monotonic clock could not be read, so the send could not be \
+                "the computer's monotonic clock could not be read, so the send could not be \
                  bounded; nothing was typed"
                     .to_string(),
             )
@@ -1845,17 +1850,17 @@ fn the_card<'a>(inner: &'a Inner, session_uid: &str, key: &CardKey) -> Option<&'
     inner.pending.get(&(session_uid.to_string(), key.0.clone()))
 }
 
-/// Which runs are holding a decision, and what each is called.
-///
-/// **Runs, not cards.** One run can hold several decisions at once — background
-/// agents each ask their own — and the alert says "agents", so counting cards
-/// would make the sentence say something untrue about the fleet.
+/// Which runs are holding a decision, and what each is called: the doorbell's
+/// title names the run when exactly one is, however many decisions it holds.
+/// Its count is of the decisions themselves (`pending`), as the app's fleet
+/// counts them — one run can hold several at once, since background agents
+/// each ask their own.
 ///
 /// **Every agent's runs, whichever agent rang.** A phone keeps one CodeConnect
 /// notification — every doorbell shares one collapse id, and a device's queue
 /// replaces a waiting doorbell with the newer one — and its badge is this
 /// count. A count of the ringing agent's runs alone let a finished Codex turn
-/// replace "2 agents need you" with "Finished a turn" and a badge of 0 while
+/// replace "2 waiting for you" with "Finished a turn" and a badge of 0 while
 /// Claude decisions waited, and the same the other way round.
 fn blocked_runs(inner: &Inner) -> Vec<(String, String)> {
     let mut by_run: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
@@ -1909,6 +1914,7 @@ impl Daemon {
             ring_order: tokio::sync::Mutex::new(()),
             endpoint,
             bind_ip: std::sync::OnceLock::new(),
+            machine_id: std::sync::OnceLock::new(),
             exe_identity: std::sync::OnceLock::new(),
             listener_refusal: std::sync::OnceLock::new(),
             started_at: protocol::time::now_rfc3339(),
@@ -3290,7 +3296,7 @@ impl Daemon {
         if card.question_hold == Some(QuestionHold::Held) && encoded > self.config.max_payload_bytes
         {
             crate::log_info!(
-                "{request_id} goes to the Mac: its card would be {encoded} bytes against a {}-byte \
+                "{request_id} goes to this computer: its card would be {encoded} bytes against a {}-byte \
                  payload limit, which the phone could not read",
                 self.config.max_payload_bytes
             );
@@ -3489,7 +3495,7 @@ impl Daemon {
                     },
                     // See `describing`: the count belongs to the moment of
                     // ringing, not the moment of admission.
-                    blocked_sessions: 0,
+                    decisions: 0,
                     session_uid: session.uid.clone(),
                 },
                 ticket,
@@ -3537,7 +3543,7 @@ impl Daemon {
                 _ => None,
             };
             if let Some(_responder) = responder {
-                crate::log_info!("{} released to the Mac: someone is at it", id.1);
+                crate::log_info!("{} released to this computer: someone is at it", id.1);
                 self.set_question_hold(id, QuestionHold::AtMac).await;
                 return;
             }
@@ -3575,7 +3581,7 @@ impl Daemon {
                 &session,
                 AnswerDecision::Decline,
                 ResolvedBy::Local,
-                "the question was closed at the Mac (Escape or the session ending) before \
+                "the question was closed at the computer (Escape or the session ending) before \
                  the phone answered it",
                 true,
             )
@@ -3648,7 +3654,7 @@ impl Daemon {
                 session,
                 AnswerDecision::Decline,
                 ResolvedBy::Local,
-                "the question was closed at the Mac before the phone answered it",
+                "the question was closed at the computer before the phone answered it",
                 true,
             )
             .await;
@@ -3911,7 +3917,7 @@ impl Daemon {
                     if looked.is_none_or(|at| at.elapsed() >= LOOK) {
                         if looked.is_none() {
                             crate::log_debug!(
-                                "push for {} held: someone is at the Mac",
+                                "push for {} held: someone is at this computer",
                                 session_uid
                             );
                         }
@@ -3940,7 +3946,7 @@ impl Daemon {
                 if let Some(key) = &needs_card {
                     if daemon.answered_at_the_mac(&session_uid, key).await {
                         crate::log_debug!(
-                            "push for {} dropped: its card was answered at the Mac",
+                            "push for {} dropped: its card was answered at this computer",
                             session_uid
                         );
                         return;
@@ -4000,7 +4006,7 @@ impl Daemon {
                     );
                     return;
                 };
-                let blocked: Vec<(String, String)> = {
+                let (decisions, blocked): (usize, Vec<(String, String)>) = {
                     let held = inner.lock().await;
                     if let Some(key) = &needs_card {
                         if !card_is_open(&held, &session_uid, key) {
@@ -4011,7 +4017,7 @@ impl Daemon {
                             return;
                         }
                     }
-                    blocked_runs(&held)
+                    (held.pending.len(), blocked_runs(&held))
                 };
                 // The subject's name comes out of the same snapshot as the count —
                 // see `PushHint::describing` and `PendingApproval::project_label`.
@@ -4019,7 +4025,7 @@ impl Daemon {
                     [(_, label)] => Some(label.clone()),
                     _ => None,
                 };
-                let described = hint.describing(blocked.len(), named);
+                let described = hint.describing(decisions, named);
                 // **The exclusion list is one thing: who already knows.** It carries
                 // the devices whose live socket wrote this event to them during the
                 // grace, and nothing else — a doorbell must not ring a phone that is
@@ -4111,7 +4117,7 @@ impl Daemon {
                 kind: push_kind,
                 // Overwritten at ring time by `describing`, which reads the
                 // fleet as it is when the doorbell actually goes.
-                blocked_sessions: 0,
+                decisions: 0,
                 session_uid: session.uid.clone(),
             },
             ticket,
@@ -4493,7 +4499,7 @@ impl Daemon {
                     PushHint {
                         project_label: label,
                         kind: crate::apns::PushKind::Approval,
-                        blocked_sessions: 0,
+                        decisions: 0,
                         session_uid: session.uid.clone(),
                     },
                     ticket,
@@ -4802,7 +4808,7 @@ impl Daemon {
                 // and nothing an agent produced ever does.
                 kind: crate::apns::PushKind::Completed,
                 // Overwritten at ring time by `describing`.
-                blocked_sessions: 0,
+                decisions: 0,
                 session_uid: session.uid.clone(),
             },
             ticket,
@@ -5322,7 +5328,7 @@ impl Daemon {
             Ok(Some(crate::store::AnswerStatus::Indeterminate)) => {
                 return AnswerResult::Rejected {
                     reason: "an answer to this card was already sent and what became of it \
-                             is not known; it will not be sent again. Check the Mac."
+                             is not known; it will not be sent again. Check the computer."
                         .into(),
                 }
             }
@@ -5440,7 +5446,7 @@ impl Daemon {
             Some(answers) => answers.answer(request_id, wire, claimed, admitted).await,
             None => crate::codex_link::AnswerReport::NotApplied(
                 "there is no live link to this Codex session, so nothing was sent; \
-                 answer at the Mac"
+                 answer at the computer"
                     .into(),
             ),
         };
@@ -6341,7 +6347,7 @@ impl Daemon {
                         option_id: claim.claimed.route.clone(),
                     }),
                     write_stage: protocol::ws::WriteStage::UpstreamWriteUnconfirmed,
-                    cause: "this Mac stopped between writing the answer and learning \
+                    cause: "the computer stopped between writing the answer and learning \
                             what became of it"
                         .into(),
                 },
@@ -6507,7 +6513,9 @@ impl Daemon {
             // attach it is the last check before the lease, with no later existence
             // test behind it. A row this daemon could not find is not evidence that
             // the run is Claude's.
-            Ok(None) => ClaudeOnly::Unknown(format!("{session_ref} is not a run this Mac hosts")),
+            Ok(None) => {
+                ClaudeOnly::Unknown(format!("{session_ref} is not a run the computer hosts"))
+            }
             Err(err) => ClaudeOnly::Unknown(format!("session lookup failed: {err}")),
         }
     }
@@ -6684,7 +6692,7 @@ impl Daemon {
                     _ => AnswerResult::Rejected {
                         reason: "a previous attempt to apply this answer was interrupted and \
                                  whether it reached the agent is unknown; it will not be sent \
-                                 again. Answer at the Mac."
+                                 again. Answer at the computer."
                             .into(),
                     },
                 };
@@ -6821,7 +6829,7 @@ impl Daemon {
                     _ => AnswerResult::Rejected {
                         reason: format!(
                             "{reason}; whether it reached the agent is unknown and it will not \
-                             be sent again. Check the Mac."
+                             be sent again. Check the computer."
                         ),
                     },
                 };
@@ -6918,7 +6926,7 @@ impl Daemon {
         if responder.send(hook).is_err() {
             return Actuation::Refused(
                 "Claude stopped waiting for the phone's answer before it was sent; nothing was \
-                 sent. Answer at the Mac."
+                 sent. Answer at the computer."
                     .into(),
             );
         }
@@ -6943,7 +6951,7 @@ impl Daemon {
         hook: HookDecision,
         confirm: oneshot::Receiver<serde_json::Value>,
     ) -> Actuation {
-        let answered_at_mac = "this question was answered at the Mac first, so the phone's \
+        let answered_at_mac = "this question was answered at the computer first, so the phone's \
                                answer was not used";
         let Some(responder) = responder else {
             return Actuation::Refused(NOT_HELD.into());
@@ -6952,7 +6960,7 @@ impl Daemon {
         if responder.send(hook).is_err() {
             return Actuation::Refused(
                 "Claude stopped waiting for the phone's answer before it was sent; nothing was \
-                 sent. Answer at the Mac."
+                 sent. Answer at the computer."
                     .into(),
             );
         }
@@ -10136,7 +10144,7 @@ impl Daemon {
                     AnswerDecision::Answers {
                         answers: Vec::new(),
                     },
-                    "the question was answered at the Mac",
+                    "the question was answered at the computer",
                 )
             } else if *rejected {
                 (AnswerDecision::Deny, CALL_REJECTED)
@@ -10687,27 +10695,28 @@ impl Daemon {
 }
 
 /// Why a decision cannot answer a question card.
-const QUESTION_NEEDS_CARD: &str = "Claude is asking you a question. Answer it at the Mac, or \
+const QUESTION_NEEDS_CARD: &str = "Claude is asking you a question. Answer it at the computer, or \
                                    update CodeConnect to answer it here. Nothing was typed.";
 
 /// Why a question decision cannot answer an ordinary card.
 const NOT_A_QUESTION: &str = "this answers a question, and this card is not one; nothing was sent";
 
 /// How a card closes when its call's own result says the Mac answered it.
-const CALL_RAN: &str = "the tool ran, so it was approved at the Mac";
+const CALL_RAN: &str = "the tool ran, so it was approved at the computer";
 /// What a phone answer to an approval is recorded as: sent, not confirmed.
 const SENT_TO_CLAUDE: &str = "Sent to Claude from a phone";
-const CALL_REJECTED: &str = "Claude rejected the call, so it was answered at the Mac";
+const CALL_REJECTED: &str = "Claude rejected the call, so it was answered at the computer";
 /// How a card closes when the run that asked it ends first.
 const RUN_ENDED: &str = "the session ended before anyone answered";
 
 /// Why a claimed answer was not handed over: its call ended first.
-const ANSWERED_AT_MAC: &str = "this was answered at the Mac before the phone's answer could be \
+const ANSWERED_AT_MAC: &str =
+    "this was answered at the computer before the phone's answer could be \
                                handed over; nothing was sent";
 
 /// Why a card cannot be answered from the phone right now.
 const NOT_HELD: &str = "this card is not being held for the phone (Claude is showing it at the \
-                        Mac); answer it there. Nothing was sent.";
+                        computer); answer it there. Nothing was sent.";
 
 /// What the hook says when it does not hold a card: Claude shows it at the Mac.
 const SHOWN_ON_THE_PHONE: &str = "CodeConnect: shown on your phone; answer it here";
@@ -10769,7 +10778,7 @@ fn hook_decision(
             return Err(NOT_A_QUESTION.into())
         }
         _ if entry.tool_ran => {
-            return Err("this call was already answered at the Mac; nothing was sent".into())
+            return Err("this call was already answered at the computer; nothing was sent".into())
         }
         _ if !held => return Err(NOT_HELD.into()),
         _ => {}
@@ -10798,7 +10807,7 @@ fn hook_decision(
             ..HookDecision::passthrough()
         }),
         _ => Err(
-            "the phone can allow or deny this card; any other choice is made at the Mac. \
+            "the phone can allow or deny this card; any other choice is made at the computer. \
              Nothing was sent."
                 .into(),
         ),
@@ -10818,7 +10827,9 @@ fn question_hook_decision(
         | AnswerDecision::Text { .. }
         | AnswerDecision::OptionId { .. } => return Err(QUESTION_NEEDS_CARD.into()),
         _ if entry.tool_ran => {
-            return Err("this question was already answered at the Mac; nothing was sent".into())
+            return Err(
+                "this question was already answered at the computer; nothing was sent".into(),
+            )
         }
         _ => {}
     }
@@ -11455,7 +11466,8 @@ where
     }
 }
 
-/// The launchd job this process belongs to, or `None` if it has none.
+/// The job this process belongs to — launchd's on macOS, CodeConnect's systemd
+/// unit on Linux — or `None` if it has none.
 ///
 /// macOS sets `XPC_SERVICE_NAME` for every process, not only for launchd jobs:
 /// a program started from a shell inherits the literal string `"0"`, which is
@@ -11466,11 +11478,22 @@ where
 ///
 /// "Managed by a different job" is still a distinct outcome worth reporting, so
 /// a real label that is not ours is passed through untouched.
+///
+/// On Linux nothing sets a variable for every service, so CodeConnect's own
+/// systemd unit sets [`SERVICE_LABEL_VAR`] to the label, and a `ccd` started any
+/// other way has none.
 pub(crate) fn launchd_label() -> Option<String> {
-    std::env::var("XPC_SERVICE_NAME")
+    std::env::var(SERVICE_LABEL_VAR)
         .ok()
         .filter(|label| !label.is_empty() && label != "0")
 }
+
+/// The variable that names the job running this process: launchd's own on
+/// macOS, the one CodeConnect's systemd unit sets on Linux.
+#[cfg(target_os = "macos")]
+pub(crate) const SERVICE_LABEL_VAR: &str = "XPC_SERVICE_NAME";
+#[cfg(target_os = "linux")]
+pub(crate) const SERVICE_LABEL_VAR: &str = "CODECONNECT_SERVICE";
 
 /// Compare without an early exit, so a wrong token cannot be discovered a byte
 /// at a time by timing the reply.
@@ -13640,7 +13663,7 @@ mod tests {
         // label makes `codeconnect daemon status` claim a hand-started daemon belongs to
         // "a different job (0)".
         //
-        // `XPC_SERVICE_NAME` is process-global and these tests run in threads,
+        // The label variable is process-global and these tests run in threads,
         // and one other test writes it: `main`'s
         // `only_codeconnects_own_launchd_job_counts_as_something_that_would_restart_it`,
         // which asserts what `managed_by_codeconnect_job` makes of the same
@@ -16403,16 +16426,15 @@ mod tests {
         );
     }
 
-    /// **The badge is a count of runs, read at the moment of ringing.**
+    /// **The badge is a count of decisions, read at the moment of ringing.**
     ///
-    /// The sentence says "agents", so the number has to be agents. Asserting it
-    /// on a hand-made hint would only re-check the composer's arithmetic; this
-    /// drives two runs to a decision each and reads the count off the hint the
-    /// daemon actually sent. Both say two: the second run blocked while the
+    /// Asserting it on a hand-made hint would only re-check the composer's
+    /// arithmetic; this drives two runs to a decision each and reads the count
+    /// off the hint the daemon actually sent. Both say two: the second run blocked while the
     /// first doorbell was still inside its dispatch grace, and a doorbell
     /// describes the fleet it is about to interrupt someone for.
     #[tokio::test]
-    async fn the_badge_counts_the_runs_that_are_blocked() {
+    async fn the_badge_counts_the_decisions_waiting_across_runs() {
         let (daemon, capture) = capture_daemon();
         raise_prompt_in(&daemon, "cc-1", TEST_UID, "p-a", "echo a").await;
         raise_prompt_in(
@@ -16426,13 +16448,41 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(700)).await;
         let rings = capture.0.lock().unwrap();
-        let counts: Vec<usize> = rings.iter().map(|(h, _)| h.blocked_sessions).collect();
+        let counts: Vec<usize> = rings.iter().map(|(h, _)| h.decisions).collect();
         assert_eq!(
             counts,
             vec![2, 2],
             "the count is of the fleet when the doorbell rings, and by then both \
              runs were blocked: {rings:?}"
         );
+    }
+
+    /// **The count is the app's: every decision waiting, not every run.**
+    ///
+    /// One run holding two decisions and another holding one is three things
+    /// to answer, and the app's fleet says "3 waiting for you"; a doorbell
+    /// saying 2 in the same words would contradict it on the lock screen.
+    #[tokio::test]
+    async fn the_doorbell_counts_every_decision_waiting() {
+        let (daemon, capture) = capture_daemon();
+        raise_prompt_in(&daemon, "cc-1", TEST_UID, "p-a1", "echo a1").await;
+        raise_prompt_in(&daemon, "cc-1", TEST_UID, "p-a2", "echo a2").await;
+        raise_prompt_in(
+            &daemon,
+            "cc-2",
+            "01K1B3XQ8ZC0DE5FGH7JKMNPQS",
+            "p-b",
+            "echo b",
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let rings = capture.0.lock().unwrap();
+        let (last, _) = rings.last().expect("a doorbell rang");
+        assert_eq!(last.decisions, 3, "{rings:?}");
+        // The badge is this same count (`ApnsPushSender::payload`, the relay's
+        // `doorbell`), so one number reaches both.
+        assert_eq!(crate::apns::alert(last).1, "3 waiting for you");
     }
 
     /// **The notice must not eat the decision's key, and must not outlive it.**
@@ -16617,7 +16667,7 @@ mod tests {
         let hint = |uid: &str| PushHint {
             project_label: "Aion".into(),
             kind: crate::apns::PushKind::NeedsInput,
-            blocked_sessions: 1,
+            decisions: 1,
             session_uid: uid.into(),
         };
 
@@ -16938,7 +16988,7 @@ mod tests {
         );
         let after_codex_turn = newest_doorbell(&capture);
         assert_eq!(
-            (after_codex_turn.kind, after_codex_turn.blocked_sessions),
+            (after_codex_turn.kind, after_codex_turn.decisions),
             (PushKind::Approval, 1),
             "a finished Codex turn must not replace the waiting Claude decision with \
              a finished turn and a badge of 0: {after_codex_turn:?}"
@@ -16956,11 +17006,11 @@ mod tests {
         );
         let both_waiting = newest_doorbell(&capture);
         assert_eq!(
-            (both_waiting.kind, both_waiting.blocked_sessions),
+            (both_waiting.kind, both_waiting.decisions),
             (PushKind::Approval, 2),
             "one Claude and one Codex decision are two agents waiting: {both_waiting:?}"
         );
-        assert_eq!(crate::apns::alert(&both_waiting).1, "2 agents need you");
+        assert_eq!(crate::apns::alert(&both_waiting).1, "2 waiting for you");
     }
 
     /// A [`CaptureSender`] whose FIRST send stands still until the test lets it
@@ -17111,7 +17161,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .map(|(hint, _)| (hint.kind, hint.blocked_sessions))
+            .map(|(hint, _)| (hint.kind, hint.decisions))
             .collect();
         assert_eq!(
             rung.last(),
@@ -17143,7 +17193,7 @@ mod tests {
         );
         let after_claude_turn = newest_doorbell(&capture);
         assert_eq!(
-            (after_claude_turn.kind, after_claude_turn.blocked_sessions),
+            (after_claude_turn.kind, after_claude_turn.decisions),
             (PushKind::Approval, 1),
             "a finished Claude turn must not replace the waiting Codex decision: \
              {after_claude_turn:?}"
@@ -18032,11 +18082,17 @@ mod tests {
     }
 
     /// One transcript line, read the way the tailer reads it.
+    ///
+    /// A path of its own for every write: a file written where one was just
+    /// removed can get its inode back (ext4 does), and the cursor would then
+    /// verify against it instead of rescanning from zero.
     async fn transcript_line(daemon: &Arc<Daemon>, line: &serde_json::Value) {
+        static WRITTEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "ccd-line-{}-{}.jsonl",
+            "ccd-line-{}-{}-{}.jsonl",
             std::process::id(),
-            line["uuid"].as_str().unwrap()
+            line["uuid"].as_str().unwrap(),
+            WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::write(&path, format!("{line}\n")).unwrap();
         let run = SessionKey::new(TEST_UID, "cc-1");
@@ -28055,7 +28111,7 @@ mod tests {
             panic!("a Claude session must be refused: {refused:?}");
         };
         assert!(reason.contains("Claude session"), "{reason}");
-        assert!(reason.contains("at the Mac"), "{reason}");
+        assert!(reason.contains("at the computer"), "{reason}");
 
         // **A run some future build wrote.** "Not Claude" is not evidence of Codex.
         let refused = daemon
@@ -28212,7 +28268,7 @@ mod tests {
         );
         assert!(
             reason.contains("still picking up its thread") && reason.contains("few seconds"),
-            "and the honest advice is to wait, not to walk to the Mac: {reason}"
+            "and the honest advice is to wait, not to walk to the computer: {reason}"
         );
 
         assert_eq!(
@@ -31659,7 +31715,7 @@ mod tests {
         .await
         {
             AnswerResult::Rejected { reason } => {
-                assert!(reason.contains("answered at the Mac"), "{reason}")
+                assert!(reason.contains("answered at the computer"), "{reason}")
             }
             other => panic!("the late phone answer is refused: {other:?}"),
         }
@@ -31689,7 +31745,10 @@ mod tests {
         question_ran(&daemon, uid, keyboard["tool_input"].clone()).await;
         match answering.await.unwrap() {
             AnswerResult::Rejected { reason } => {
-                assert!(reason.contains("answered at the Mac first"), "{reason}")
+                assert!(
+                    reason.contains("answered at the computer first"),
+                    "{reason}"
+                )
             }
             other => panic!("the beaten answer is not applied: {other:?}"),
         }

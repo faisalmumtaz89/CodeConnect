@@ -34,9 +34,17 @@ enum DeckOrdering {
     /// ranking that guessed differently would put a card in a tier its own
     /// badge disagrees with.
     static func sort(_ items: [ApprovalItem], profile: DaemonProfile) -> [ApprovalItem] {
+        sort(items) { _ in profile }
+    }
+
+    /// Cards from several machines, each assessed by the profile of the daemon
+    /// that raised it.
+    static func sort(
+        _ items: [ApprovalItem], profile: (ApprovalItem) -> DaemonProfile
+    ) -> [ApprovalItem] {
         // One assessment per card rather than one per comparison: `resolve`
         // re-reads the tool input, and a sort does O(n log n) comparisons.
-        let ranked = items.map { (item: $0, risk: $0.assessment(profile: profile).effective) }
+        let ranked = items.map { (item: $0, risk: $0.assessment(profile: profile($0)).effective) }
         return ranked.sorted { lhs, rhs in
             if lhs.risk != rhs.risk { return lhs.risk > rhs.risk }
             if lhs.item.requestedAt != rhs.item.requestedAt {
@@ -91,6 +99,12 @@ struct DeckPass: Sendable, Equatable {
     /// `approval_resolved` event arrives, and leaving it on top of the stack for
     /// that beat would invite a second answer to a decision already made.
     func arrange(_ pending: [ApprovalItem], profile: DaemonProfile) -> [ApprovalItem] {
+        arrange(pending) { _ in profile }
+    }
+
+    func arrange(
+        _ pending: [ApprovalItem], profile: (ApprovalItem) -> DaemonProfile
+    ) -> [ApprovalItem] {
         let ordered = DeckOrdering.sort(
             pending.filter { !settled.contains($0.id) }, profile: profile)
         guard !deferred.isEmpty else { return ordered }

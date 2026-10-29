@@ -1404,13 +1404,13 @@ enum CodexFixtures {
         case .stopRefusedLate:
             return .rejected(
                 reason:
-                    "this Mac has lost its control link to the Codex session and is reconnecting, "
-                    + "so nothing was sent; try again shortly, or stop the turn at the Mac")
+                    "the computer has lost its control link to the Codex session and is reconnecting, "
+                    + "so nothing was sent; try again shortly, or stop the turn at the computer")
         case .stopIndeterminate:
             return .indeterminate(
                 reason:
                     "this interrupt was already sent and what became of it is not known; "
-                    + "it will not be sent again. Check the Mac.")
+                    + "it will not be sent again. Check the computer.")
         default: return nil
         }
     }
@@ -1426,7 +1426,7 @@ enum CodexFixtures {
         case .composeRejected:
             return .rejected(
                 reason:
-                    "this Mac is connected to the Codex session but is not yet watching its thread, "
+                    "the computer is connected to the Codex session but is not yet watching its thread, "
                     + "so a message cannot be confirmed; nothing was sent")
         // **`compose_already_sent_unknown`, verbatim.** This was a hand-written
         // approximation — "that message was written and what became of it is
@@ -1439,7 +1439,7 @@ enum CodexFixtures {
             return .indeterminate(
                 reason:
                     "this message was already sent and what became of it is not known; "
-                    + "it will not be sent again. Check the Mac.")
+                    + "it will not be sent again. Check the computer.")
         default: return nil
         }
     }

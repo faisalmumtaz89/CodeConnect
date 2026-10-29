@@ -68,7 +68,7 @@ pub(crate) const SESSION_LOOKUP_FAILED: &str = "session lookup failed";
 pub(crate) fn interrupt_on_claude(uid: &str) -> String {
     format!(
         "{uid} is a Claude session, which this daemon cannot stop from a phone; \
-        press Escape at the Mac"
+        press Escape at the computer"
     )
 }
 
@@ -96,30 +96,30 @@ pub(crate) const INTERRUPT_LEDGER_UNREADABLE: &str =
 
 pub(crate) const INTERRUPT_ALREADY_SENT_UNKNOWN: &str =
     "this interrupt was already sent and what became of it \
-    is not known; it will not be sent again. Check the Mac.";
+    is not known; it will not be sent again. Check the computer.";
 
 // ---- The link's state as the daemon reads it, before it writes ---------------
 
 pub(crate) const INTERRUPT_LINK_BOUND: &str =
-    "this Mac is connected to the Codex session but is not yet watching \
+    "the computer is connected to the Codex session but is not yet watching \
     its thread, so a stop cannot be confirmed; nothing was sent";
 
 pub(crate) const INTERRUPT_LINK_RECONNECTING: &str =
-    "this Mac has lost its control link to the Codex session and is \
+    "the computer has lost its control link to the Codex session and is \
     reconnecting, so nothing was sent; try again shortly, or stop the \
-    turn at the Mac";
+    turn at the computer";
 
 pub(crate) const INTERRUPT_LINK_NOT_REACHED: &str =
-    "this Mac has not yet reached the Codex session, so nothing was \
-    sent; try again shortly, or stop the turn at the Mac";
+    "the computer has not yet reached the Codex session, so nothing was \
+    sent; try again shortly, or stop the turn at the computer";
 
 pub(crate) const LINK_STILL_PICKING_UP_THREAD: &str =
-    "this Mac is connected to the Codex session and is still picking up \
+    "the computer is connected to the Codex session and is still picking up \
     its thread, so nothing was sent; try again in a few seconds";
 
 pub(crate) const INTERRUPT_NO_LINK: &str =
     "there is no live link to this Codex session, so nothing was sent; \
-    stop the turn at the Mac";
+    stop the turn at the computer";
 
 pub(crate) fn compose_on_claude(uid: &str) -> String {
     format!(
@@ -146,40 +146,40 @@ pub(crate) const COMPOSE_STALE_HASH: &str =
     request names; nothing was sent";
 
 pub(crate) const COMPOSE_LINK_BOUND: &str =
-    "this Mac is connected to the Codex session but is not yet watching its \
+    "the computer is connected to the Codex session but is not yet watching its \
     thread, so a message cannot be confirmed; nothing was sent";
 
 pub(crate) const COMPOSE_LINK_RECONNECTING: &str =
-    "this Mac has lost its control link to the Codex session and is \
+    "the computer has lost its control link to the Codex session and is \
     reconnecting, so nothing was sent; try again shortly, or say it at the \
-    Mac";
+    computer";
 
 pub(crate) const COMPOSE_LINK_NOT_REACHED: &str =
-    "this Mac has not yet reached the Codex session, so nothing was sent; try \
-    again shortly, or say it at the Mac";
+    "the computer has not yet reached the Codex session, so nothing was sent; try \
+    again shortly, or say it at the computer";
 
 pub(crate) const COMPOSE_NO_LINK: &str =
     "there is no live link to this Codex session, so nothing was sent; say it \
-    at the Mac";
+    at the computer";
 
 // ---- The channel to the link task, and the teardown that drains it -----------
 
 pub(crate) const INTERRUPT_LINK_NOT_RUNNING: &str =
     "the link to this Codex session is not running, so nothing was sent; \
-    stop the turn at the Mac";
+    stop the turn at the computer";
 
 pub(crate) const INTERRUPT_LINK_STOPPED_MID_WRITE: &str =
     "the link stopped while this interrupt was being written, so whether it \
-    reached Codex is not known; it will not be sent again. Check the Mac.";
+    reached Codex is not known; it will not be sent again. Check the computer.";
 
 pub(crate) const INTERRUPT_NO_CONNECTION: &str =
     "the link to this Codex session has no live connection, so nothing was \
-    sent; stop the turn at the Mac";
+    sent; stop the turn at the computer";
 
 pub(crate) fn interrupt_settled_unknown(cause: &str) -> String {
     format!(
         "{cause}, so whether that turn was stopped is not known; it will not be \
-        sent again. Check the Mac."
+        sent again. Check the computer."
     )
 }
 
@@ -188,35 +188,35 @@ pub(crate) fn interrupt_settled_unknown(cause: &str) -> String {
 /// that made the record unwritable is logged at the call site and never carried here.
 pub(crate) fn interrupt_settled_unrecorded(cause: &str) -> String {
     format!(
-        "{cause}, and this Mac could not record that either, so it \
-        cannot say what became of it. Check the Mac."
+        "{cause}, and the computer could not record that either, so it \
+        cannot say what became of it. Check the computer."
     )
 }
 
 pub(crate) const COMPOSE_LINK_WENT_AWAY: &str =
-    "this Mac's link to the Codex session went away before that message was \
+    "the computer's link to the Codex session went away before that message was \
     written, so nothing was said; try again";
 
 pub(crate) const COMPOSE_LINK_STOPPED_MID_WRITE: &str =
-    "this Mac's link to the Codex session stopped while that message was in \
+    "the computer's link to the Codex session stopped while that message was in \
     flight, so whether it was said is not known; it will not be sent again. \
-    Check the Mac.";
+    Check the computer.";
 
 pub(crate) const COMPOSE_NO_CONNECTION: &str =
     "the link to this Codex session has no live connection, so nothing was \
-    said; say it at the Mac";
+    said; say it at the computer";
 
 pub(crate) fn compose_settled_unknown(cause: &str) -> String {
     format!(
         "{cause}, so whether that message reached the model is not known; it will \
-        not be sent again. Check the Mac."
+        not be sent again. Check the computer."
     )
 }
 
 pub(crate) fn compose_settled_unrecorded(cause: &str) -> String {
     format!(
-        "{cause}, and this Mac could not record that either, so it cannot say \
-        what became of it. Check the Mac."
+        "{cause}, and the computer could not record that either, so it cannot say \
+        what became of it. Check the computer."
     )
 }
 
@@ -235,12 +235,12 @@ pub(crate) const LINK_INTERRUPT_NAMES_NO_TURN: &str =
     "this request names no turn, so there is nothing to stop; nothing was sent";
 
 pub(crate) const INTERRUPT_RECONNECTED_IN_FLIGHT: &str =
-    "this Mac's link to the Codex session reconnected while that request was \
+    "the computer's link to the Codex session reconnected while that request was \
     in flight, so nothing was sent; try again";
 
 pub(crate) const INTERRUPT_OTHER_THREAD: &str =
     "this Codex session is not on the thread that turn belongs to, so nothing was \
-    sent; stop it at the Mac";
+    sent; stop it at the computer";
 
 pub(crate) const INTERRUPT_VISIT_MOVED_ON: &str =
     "this Codex session has moved on since that turn was shown, so nothing was \
@@ -259,12 +259,12 @@ pub(crate) const INTERRUPT_ALREADY_WAITING: &str =
     was sent again";
 
 pub(crate) const COMPOSE_RECONNECTED_IN_FLIGHT: &str =
-    "this Mac's link to the Codex session reconnected while that message was in \
+    "the computer's link to the Codex session reconnected while that message was in \
     flight, so nothing was said; try again";
 
 pub(crate) const COMPOSE_OTHER_THREAD: &str =
     "this Codex session is not on the thread that message was addressed to, so \
-    nothing was said; say it at the Mac";
+    nothing was said; say it at the computer";
 
 pub(crate) const COMPOSE_VISIT_MOVED_ON: &str =
     "this Codex session has moved on since that message was composed, so nothing \
@@ -299,7 +299,7 @@ pub(crate) const COMPOSE_NO_TURN_TO_STEER: &str =
 /// like a fault. It carries `try again shortly` because it is exactly that kind of fact —
 /// the same ask a moment later is written.
 pub(crate) const COMPOSE_START_IN_FLIGHT: &str =
-    "the first turn on this Codex thread was just started from a phone and this Mac \
+    "the first turn on this Codex thread was just started from a phone and the computer \
     has not caught up with it yet, so nothing was said; try again shortly";
 
 pub(crate) const INTERRUPT_ID_REUSED_ON_LINK: &str =
@@ -316,8 +316,8 @@ pub(crate) const INTERRUPT_CLAIM_UNRECORDED: &str =
 pub(crate) const COMPOSE_RUN_IS_GONE: &str = "this run is gone, so nothing can be said to it";
 
 pub(crate) const COMPOSE_CLAIM_UNRECORDED: &str =
-    "this Mac could not record that the message is being sent; nothing \
-    was sent. Check the Mac.";
+    "the computer could not record that the message is being sent; nothing \
+    was sent. Check the computer.";
 
 /// **"you already said this and I cannot tell you what happened."**
 ///
@@ -329,7 +329,7 @@ pub(crate) const COMPOSE_CLAIM_UNRECORDED: &str =
 /// each copy is correct on its own.
 pub(crate) const COMPOSE_ALREADY_SENT_UNKNOWN: &str =
     "this message was already sent and what became of it is not known; it will not be \
-     sent again. Check the Mac.";
+     sent again. Check the computer.";
 
 /// **"that id already says something else."**
 ///
@@ -362,11 +362,11 @@ pub(crate) const COMPOSE_WIRE_REMEDY: &str = "it can be sent again from the phon
 // message it is never passed on.
 
 pub(crate) const INTERRUPT_PAUSED: &str =
-    "Codex is paused at the Mac (Ctrl+Z), so that stop was not sent; it continues after \
+    "Codex is paused at the computer (Ctrl+Z), so that stop was not sent; it continues after \
      fg there, and the turn can be stopped then";
 
 pub(crate) const COMPOSE_PAUSED: &str =
-    "Codex is paused at the Mac (Ctrl+Z), so that message was not sent; it continues after \
+    "Codex is paused at the computer (Ctrl+Z), so that message was not sent; it continues after \
      fg there, and the message can be sent again then";
 
 // ---- After the write, when the evidence is missing or contradicts ------------
@@ -383,43 +383,43 @@ pub(crate) fn interrupt_turn_ended_itself(status: &str) -> String {
 /// settlement that failed logged the store's own `Display` where it failed; what
 /// crosses the wire is the fact and the remedy.
 pub(crate) const INTERRUPT_OUTCOME_UNRECORDED: &str =
-    "this Mac could not record what became of that request to stop the turn, so it \
-    cannot say; it will not be sent again. Check the Mac.";
+    "the computer could not record what became of that request to stop the turn, so it \
+    cannot say; it will not be sent again. Check the computer.";
 
 pub(crate) const INTERRUPT_SETTLED_ELSEWHERE: &str =
     "this request to stop the turn was already settled elsewhere and what \
-    became of it is not known; it will not be sent again. Check the Mac.";
+    became of it is not known; it will not be sent again. Check the computer.";
 
 pub(crate) const INTERRUPT_SETTLED_ELSEWHERE_UNREADABLE: &str =
-    "this request to stop the turn was settled elsewhere and this Mac cannot \
-    read what became of it; it will not be sent again. Check the Mac.";
+    "this request to stop the turn was settled elsewhere and the computer cannot \
+    read what became of it; it will not be sent again. Check the computer.";
 
 pub(crate) const INTERRUPT_BOUNDARY_UNRECORDED: &str =
-    "this Mac could not record that the turn ended (turn boundary \
+    "the computer could not record that the turn ended (turn boundary \
     unrecorded), so it cannot say the turn was stopped from here; \
-    it will not be sent again. Check the Mac.";
+    it will not be sent again. Check the computer.";
 
 pub(crate) const INTERRUPT_BOUNDARY_UNREADABLE: &str =
-    "this Mac could not read whether the turn boundary was recorded, so it \
+    "the computer could not read whether the turn boundary was recorded, so it \
     cannot say the turn was stopped from here; it will not be sent \
-    again. Check the Mac.";
+    again. Check the computer.";
 
 pub(crate) const COMPOSE_ANSWER_UNREADABLE: &str =
-    "Codex answered this message with something this Mac could not read, \
+    "Codex answered this message with something the computer could not read, \
     so it cannot say what became of it; it will not be sent again. Check \
-    the Mac.";
+    the computer.";
 
 pub(crate) const COMPOSE_SETTLED_ELSEWHERE: &str =
     "this message was sent and what became of it is not known; it will \
-    not be sent again. Check the Mac.";
+    not be sent again. Check the computer.";
 
 pub(crate) const COMPOSE_SETTLED_ELSEWHERE_UNREADABLE: &str =
-    "this message was sent and this Mac could not read what became of it; \
-    it will not be sent again. Check the Mac.";
+    "this message was sent and the computer could not read what became of it; \
+    it will not be sent again. Check the computer.";
 
 pub(crate) const COMPOSE_OUTCOME_UNRECORDED: &str =
-    "this message was sent and this Mac could not record what became of it; \
-    it will not be sent again. Check the Mac.";
+    "this message was sent and the computer could not record what became of it; \
+    it will not be sent again. Check the computer.";
 
 // ---- Replaying a ledger row that is already terminal -------------------------
 
@@ -453,7 +453,7 @@ pub(crate) const REPLAY_COMPOSE_REFUSED: &str =
     sent again";
 
 pub(crate) const REPLAY_COMPOSE_SETTLED: &str =
-    "this message is already settled and will not be sent again; check the Mac";
+    "this message is already settled and will not be sent again; check the computer";
 
 pub(crate) const INTERRUPT_CONNECTION_ENDED: &str =
     "the link's connection to Codex ended while this request to stop the turn \
@@ -1077,7 +1077,7 @@ pub(crate) fn fixture() -> serde_json::Value {
                           the outcome is already recorded",
             "wire_code": "the app-server or the broker refused the write; the \
                           sentence carries their numeric code and never their message",
-            "transient_local": "this Mac's own store or lookup failed BEFORE anything \
+            "transient_local": "the computer's own store or lookup failed BEFORE anything \
                                 was written; nothing reached Codex and the same ask may \
                                 well succeed on a retry"
         },

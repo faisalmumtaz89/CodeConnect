@@ -41,6 +41,7 @@ use anyhow::{Context, Result};
 /// reviewing the source can see it. A build-time value would let a
 /// misconfigured or hostile build environment quietly change whom every
 /// existing install trusts, which is the opposite of what pinning is for.
+#[cfg(target_os = "macos")]
 pub const TEAM_ID: &str = "2XL2264MC8";
 
 /// What a release binary's signature must satisfy, in Apple's requirement
@@ -60,6 +61,7 @@ pub const TEAM_ID: &str = "2XL2264MC8";
 /// ad-hoc, Apple Development, anybody's — and only this requirement refuses
 /// them. The refusal is proven by a test below against a real ad-hoc
 /// signature.
+#[cfg(target_os = "macos")]
 pub fn signature_requirement() -> String {
     format!(
         "anchor apple generic \
@@ -74,6 +76,7 @@ pub fn signature_requirement() -> String {
 /// `--all-architectures` because a universal binary carries one signature per
 /// slice and the host would otherwise only ever check its own: an x86_64 half
 /// could be replaced wholesale and an arm64 Mac would never look at it.
+#[cfg(target_os = "macos")]
 pub fn verify_signature(binary: &Path) -> Result<()> {
     let output = std::process::Command::new("/usr/bin/codesign")
         .arg("--verify")
@@ -93,6 +96,42 @@ pub fn verify_signature(binary: &Path) -> Result<()> {
         binary.display(),
         why.trim()
     )
+}
+
+/// The Ed25519 key whose signature every Linux release checksum file carries.
+///
+/// A Linux binary carries no signature of its own, so the release is signed
+/// instead: each archive's `.sha256` file, whose digest then binds the archive.
+/// A constant in the source for the reason [`TEAM_ID`] is one — it is whom
+/// this program believes, and a reader reviewing the source should see it.
+#[cfg(target_os = "linux")]
+pub const RELEASE_KEY: [u8; 32] = [
+    0xa2, 0xc1, 0xa5, 0x0e, 0x98, 0xfe, 0x9b, 0x40, 0xb7, 0xbd, 0x42, 0x6c, 0xe3, 0xf5, 0xff, 0x15,
+    0x6b, 0x2d, 0x6e, 0xee, 0x53, 0x21, 0xa8, 0xd7, 0x3c, 0x0c, 0xaf, 0x83, 0x65, 0x36, 0xf4, 0xbd,
+];
+
+/// Whether `signature` is CodeConnect's release signature over the exact bytes
+/// of `checksum`. Judged before a byte of the checksum file is read for its
+/// meaning, so the digest the archive is held to is one the release key vouched
+/// for.
+#[cfg(target_os = "linux")]
+pub fn verify_checksum(checksum: &Path, signature: &Path) -> Result<()> {
+    let text = std::fs::read(checksum).context("reading the checksum file")?;
+    let signature = std::fs::read(signature).context("reading the checksum signature")?;
+    if !signed_by(&RELEASE_KEY, &text, &signature) {
+        anyhow::bail!(
+            "{} is not signed by CodeConnect's release key, so the release was not installed",
+            checksum.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn signed_by(key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+        .verify(message, signature)
+        .is_ok()
 }
 
 /// Fetch one file, refusing anything that is not plain https or is larger than
@@ -138,12 +177,19 @@ pub fn digest_of(path: &Path) -> Result<[u8; 32]> {
     Ok(hasher.finalize().into())
 }
 
+/// The system tar. Alpine's is busybox's, at `/bin/tar` and nowhere else; every
+/// other Linux this runs on links `/bin` into `/usr`.
+#[cfg(target_os = "macos")]
+const TAR: &str = "/usr/bin/tar";
+#[cfg(target_os = "linux")]
+const TAR: &str = "/bin/tar";
+
 /// What the archive says it contains, without unpacking any of it.
 ///
 /// The listing pass exists so the whole archive can be judged before a byte is
 /// written; see `update_release::validate_members`.
 pub fn list_members(archive: &Path) -> Result<Vec<crate::update_release::Member>> {
-    let output = std::process::Command::new("/usr/bin/tar")
+    let output = std::process::Command::new(TAR)
         .arg("-tvzf")
         .arg(archive)
         .stdin(std::process::Stdio::null())
@@ -157,23 +203,29 @@ pub fn list_members(archive: &Path) -> Result<Vec<crate::update_release::Member>
     }
     let listing = String::from_utf8_lossy(&output.stdout);
     let mut members = Vec::new();
+    // `tar -tv` on macOS prints: mode links owner group size month day time
+    // name. GNU tar and busybox's both print: mode owner/group size date time
+    // name.
+    // Measured against the system tar rather than assumed — reading the
+    // wrong column silently reports every member as zero bytes, which
+    // makes a size bound that looks present do nothing at all.
+    #[cfg(target_os = "macos")]
+    let (size_field, name_field) = (4, 8);
+    #[cfg(target_os = "linux")]
+    let (size_field, name_field) = (2, 5);
     for line in listing.lines().filter(|line| !line.trim().is_empty()) {
-        // `tar -tv` prints: mode links owner group size month day time name.
-        // Measured against the system tar rather than assumed — reading the
-        // wrong column silently reports every member as zero bytes, which
-        // makes a size bound that looks present do nothing at all.
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 9 {
+        if fields.len() <= name_field {
             anyhow::bail!("the archive listing has a line this cannot read: {line}");
         }
-        let size = fields[4]
+        let size = fields[size_field]
             .parse::<u64>()
             .map_err(|_| anyhow::anyhow!("the archive listing has no size for: {line}"))?;
-        // Everything from the ninth field on, so a name containing spaces is
+        // Everything from the name field on, so a name containing spaces is
         // carried whole rather than truncated into a different name. A link
         // prints `name -> target` and is refused by type before its path is
         // ever used.
-        let name = fields[8..].join(" ");
+        let name = fields[name_field..].join(" ");
         members.push(crate::update_release::Member {
             path: name.trim_end_matches('/').to_string(),
             is_regular_file: fields[0].starts_with('-'),
@@ -190,7 +242,7 @@ pub fn list_members(archive: &Path) -> Result<Vec<crate::update_release::Member>
 /// else can see.
 pub fn extract(archive: &Path, into: &Path) -> Result<()> {
     std::fs::create_dir_all(into).with_context(|| format!("creating {}", into.display()))?;
-    let status = std::process::Command::new("/usr/bin/tar")
+    let status = std::process::Command::new(TAR)
         .arg("-xzf")
         .arg(archive)
         .arg("-C")
@@ -224,18 +276,24 @@ pub fn answer_of(binary: &Path, question: &str) -> Result<String> {
 }
 
 /// A universal file's header. Always big-endian on disk, whatever the host is.
+#[cfg(target_os = "macos")]
 const FAT_MAGIC: u32 = 0xcafe_babe;
 /// The same header with 64-bit offsets: wider entries, identical `cputype`.
+#[cfg(target_os = "macos")]
 const FAT_MAGIC_64: u32 = 0xcafe_babf;
 /// A single-architecture 64-bit Mach-O, in the host's byte order. Every binary
 /// macOS runs today is this or a fat file containing several of them.
+#[cfg(target_os = "macos")]
 const MH_MAGIC_64: u32 = 0xfeed_facf;
 /// A fat header names one architecture per entry. Apple ships two; the largest
 /// real files carry a handful. A header claiming thousands is malformed or
 /// hostile, not something to allocate for.
+#[cfg(target_os = "macos")]
 const MAX_FAT_ARCHS: u32 = 32;
 
+#[cfg(target_os = "macos")]
 const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+#[cfg(target_os = "macos")]
 const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 
 /// The architectures a Mach-O file carries, as `cputype` values.
@@ -243,6 +301,7 @@ const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 /// Only the `cputype` of each entry is read. The subtype is what distinguishes
 /// `arm64` from `arm64e`, and that distinction is not the question here: both
 /// are the same machine.
+#[cfg(target_os = "macos")]
 fn architectures(binary: &Path) -> Result<Vec<u32>> {
     use std::io::Read;
 
@@ -289,6 +348,7 @@ fn architectures(binary: &Path) -> Result<Vec<u32>> {
     anyhow::bail!("{} is not a Mach-O this can read", binary.display())
 }
 
+#[cfg(target_os = "macos")]
 fn arch_name(cputype: u32) -> String {
     match cputype {
         CPU_TYPE_ARM64 => "arm64".to_string(),
@@ -310,6 +370,7 @@ fn arch_name(cputype: u32) -> String {
 /// `codeconnect update` states that it needs no toolchain, and a check that
 /// only works where Xcode is installed would make that false on exactly the
 /// machines the promise is for.
+#[cfg(target_os = "macos")]
 pub fn is_universal(binary: &Path) -> Result<()> {
     let archs = architectures(binary)?;
     if archs.contains(&CPU_TYPE_ARM64) && archs.contains(&CPU_TYPE_X86_64) {
@@ -433,6 +494,7 @@ pub fn exchange(staged: &Path, live: &Path) -> io::Result<()> {
     let live_c = std::ffi::CString::new(live.as_os_str().as_bytes())?;
     // SAFETY: both pointers are NUL-terminated strings that outlive the call,
     // and `AT_FDCWD` makes the absolute paths absolute.
+    #[cfg(target_os = "macos")]
     let rc = unsafe {
         libc::renameatx_np(
             libc::AT_FDCWD,
@@ -442,6 +504,20 @@ pub fn exchange(staged: &Path, live: &Path) -> io::Result<()> {
             libc::RENAME_SWAP,
         )
     };
+    // SAFETY: as above. `RENAME_EXCHANGE` is Linux's `RENAME_SWAP`. The system
+    // call itself, because the musl the static build links has no `renameat2`
+    // wrapper.
+    #[cfg(target_os = "linux")]
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            staged_c.as_ptr(),
+            libc::AT_FDCWD,
+            live_c.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
     if rc == 0 {
         return Ok(());
     }
@@ -449,8 +525,12 @@ pub fn exchange(staged: &Path, live: &Path) -> io::Result<()> {
     // A filesystem that cannot exchange atomically cannot install atomically.
     // Falling back to three renames would silently give up the one property
     // this module exists to provide, so it refuses instead — having changed
-    // nothing.
-    if err.raw_os_error() == Some(libc::ENOTSUP) {
+    // nothing. Linux says so with `EINVAL`.
+    #[cfg(target_os = "macos")]
+    let cannot_exchange = libc::ENOTSUP;
+    #[cfg(target_os = "linux")]
+    let cannot_exchange = libc::EINVAL;
+    if err.raw_os_error() == Some(cannot_exchange) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
@@ -625,6 +705,7 @@ mod tests {
     /// The requirement is not a string this code merely stores: `codesign` has
     /// to accept it as a requirement, and a typo would otherwise only surface
     /// on a user's machine at the moment an update was refused.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_pinned_requirement_is_one_codesign_understands() {
         use std::io::Write;
@@ -812,6 +893,7 @@ mod tests {
     /// does not belong in a repository. The release workflow runs this exact
     /// requirement against the real signed binaries, which is where that half
     /// is proven.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_signature_that_is_not_developer_id_is_refused() {
         let root = scratch("signature");
@@ -852,6 +934,7 @@ mod tests {
     /// A fat header, byte for byte as one appears on disk: big-endian
     /// throughout, `magic` then `nfat_arch`, then one entry per architecture
     /// whose first four bytes are the `cputype`.
+    #[cfg(target_os = "macos")]
     fn fat_header(magic: u32, cputypes: &[u32], claimed: Option<u32>) -> Vec<u8> {
         let width = if magic == FAT_MAGIC_64 { 32 } else { 20 };
         let mut bytes = Vec::new();
@@ -868,6 +951,7 @@ mod tests {
     /// The rule, against headers laid out exactly as the loader sees them.
     /// Nothing here runs `lipo` — that is the point, and a machine with no
     /// developer directory reaches this code and no other.
+    #[cfg(target_os = "macos")]
     #[test]
     fn both_architectures_are_read_out_of_the_header_and_nothing_else_passes() {
         let root = scratch("universal");
@@ -944,6 +1028,7 @@ mod tests {
 
     /// The parser against a file nobody in this test wrote: the test binary
     /// itself, which `rustc` produced for this machine and is therefore thin.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_real_compiled_binary_is_read_as_the_single_architecture_it_is() {
         let me = std::env::current_exe().expect("a test binary has a path");
@@ -1020,5 +1105,51 @@ mod tests {
             "the premise: it really was still there"
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The release key's judgment, against a key made here: the private half of
+    /// the real one is not something a repository holds.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_the_signing_key_over_the_exact_checksum_bytes_passes() {
+        use ring::signature::KeyPair;
+        let random = ring::rand::SystemRandom::new();
+        let key = |random| {
+            let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(random).unwrap();
+            ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap()
+        };
+        let signer = key(&random);
+        let stranger = key(&random);
+        let public = signer.public_key().as_ref();
+        let text = b"0123abcd  codeconnect-1.2.3-linux-aarch64.tar.gz\n";
+        let signature = signer.sign(text);
+
+        assert!(signed_by(public, text, signature.as_ref()));
+
+        let mut altered = text.to_vec();
+        altered[0] ^= 1;
+        assert!(
+            !signed_by(public, &altered, signature.as_ref()),
+            "one changed byte of the text"
+        );
+        let mut forged = signature.as_ref().to_vec();
+        forged[10] ^= 1;
+        assert!(
+            !signed_by(public, text, &forged),
+            "one changed byte of the signature"
+        );
+        assert!(
+            !signed_by(stranger.public_key().as_ref(), text, signature.as_ref()),
+            "the right signature checked against another key"
+        );
+        assert!(
+            !signed_by(public, text, stranger.sign(text).as_ref()),
+            "another key's signature"
+        );
+        assert!(!signed_by(public, text, b""), "no signature");
+        assert!(
+            !signed_by(public, text, &signature.as_ref()[..63]),
+            "a truncated one"
+        );
     }
 }

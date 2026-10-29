@@ -23,7 +23,10 @@ struct DeckView: View {
     /// From a deep link: the card to put on top.
     var startingAt: String?
 
+    /// `Machines.linkModel`, for the clock and the link's own reason; each card
+    /// is answered through its own machine's model.
     @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -59,7 +62,7 @@ struct DeckView: View {
     @State private var arrivalNoticeTask: Task<Void, Never>?
 
     private var queue: [ApprovalItem] {
-        let arranged = pass.arrange(model.deck, profile: model.daemonProfile)
+        let arranged = pass.arrange(machines.deck) { machines.profile(forSession: $0.sessionKey) }
         // A deep link knows a request id and not which run raised it, so the
         // first card with that id is the one it lands on.
         guard let pinned, let index = arranged.firstIndex(where: { $0.card.requestID == pinned })
@@ -75,7 +78,7 @@ struct DeckView: View {
             let cards = queue
             ZStack {
                 CC.color.bg.ignoresSafeArea()
-                if model.deckAwaitsCatchUp {
+                if machines.deckAwaitsCatchUp {
                     catchingUp
                 } else if !cards.isEmpty {
                     stack(cards: cards)
@@ -133,7 +136,7 @@ struct DeckView: View {
             .toolbar {
                 // Nothing waiting is what the clear state says in full; a "0"
                 // beside it is the same fact twice.
-                if !cards.isEmpty, !model.deckAwaitsCatchUp {
+                if !cards.isEmpty, !machines.deckAwaitsCatchUp {
                     ToolbarItem(placement: .topBarLeading) { counter(cards.count) }
                         .ccPlainToolbarItem()
                 }
@@ -149,7 +152,7 @@ struct DeckView: View {
                 openedAt = Date()
                 endedAt = nil
                 openedEmpty = queue.isEmpty
-                openedWaiting = model.deckAwaitsCatchUp
+                openedWaiting = machines.deckAwaitsCatchUp
             }
             .onChange(of: cards.isEmpty) { _, isEmpty in
                 // The clock stops here, on the transition itself, rather than
@@ -162,8 +165,8 @@ struct DeckView: View {
             }
             .onChange(
                 of: DeckArrival(
-                    count: model.deck.count, waiting: model.deckAwaitsCatchUp,
-                    releases: model.catchUpReleases)
+                    count: machines.deck.count, waiting: machines.deckAwaitsCatchUp,
+                    releases: machines.catchUpReleases)
             ) { old, new in
                 // Opened from a notification mid-catch-up, the pass starts when
                 // the catch-up ends: its cards are what it opened on, not
@@ -194,7 +197,7 @@ struct DeckView: View {
             }
             .onDisappear {
                 arrivalNoticeTask?.cancel()
-                model.deckClosed()
+                machines.deckClosed()
             }
         }
     }
@@ -222,7 +225,7 @@ struct DeckView: View {
     }
 
     private var runningCount: Int {
-        model.fleet.filter { $0.status == .running || $0.status == .idle }.count
+        machines.fleet.filter { $0.status == .running || $0.status == .idle }.count
     }
 
     /// Then **120ms of nothing.** Pure `bg`. The pause is what makes the clear
@@ -310,6 +313,7 @@ struct DeckView: View {
                 onSettled: { settle(card) },
                 comeBackToThis: canPostpone ? { advance(past: card) } : nil
             )
+            .environment(machines.model(forSession: card.sessionKey) ?? model)
             // Belt and braces on the one piece of state that must never carry
             // over: a promoted card gets a fresh read gate, so "you have seen
             // this command" cannot be inherited from the card you just answered.

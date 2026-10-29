@@ -581,8 +581,8 @@ fn update_lock_path(root: &std::path::Path) -> PathBuf {
 /// Everything else the updater does — checksum arithmetic, archive judgment,
 /// Mach-O reading, staging, the exchange — is its own code and runs for real
 /// everywhere, tests included. These six are the seams a test injects,
-/// because a test can neither reach GitHub nor produce a Developer ID
-/// signature; injecting a permissive judge there proves the *sequence* around
+/// because a test can neither reach GitHub nor produce a Developer ID or
+/// release-key signature; injecting a permissive judge there proves the *sequence* around
 /// the judgment, never the judgment itself, which has its own tests.
 pub struct UpdateDeps<'a> {
     /// The release this run installs from: `releases/latest` for an update,
@@ -591,7 +591,11 @@ pub struct UpdateDeps<'a> {
     /// Fetch one asset URL into a file, within a byte ceiling.
     pub download: &'a dyn Fn(&str, &std::path::Path, u64) -> Result<()>,
     /// The Developer ID judgment on one file.
+    #[cfg(target_os = "macos")]
     pub verify_signature: &'a dyn Fn(&std::path::Path) -> Result<()>,
+    /// The release key's judgment on a checksum file and its signature file.
+    #[cfg(target_os = "linux")]
+    pub verify_checksum: &'a dyn Fn(&std::path::Path, &std::path::Path) -> Result<()>,
     /// Run a binary and return its `--version` line.
     pub probe_version: &'a dyn Fn(&std::path::Path) -> Result<String>,
     /// Run a binary with one argument and return what it printed: `-V` of
@@ -625,10 +629,13 @@ pub fn run_update() -> Result<()> {
     let deps = UpdateDeps {
         fetch_release: &fetch_latest_release,
         download: &crate::update_install::download,
+        #[cfg(target_os = "macos")]
         verify_signature: &crate::update_install::verify_signature,
+        #[cfg(target_os = "linux")]
+        verify_checksum: &crate::update_install::verify_checksum,
         probe_version: &crate::update_install::version_of,
         ask: &crate::update_install::answer_of,
-        restart_daemon: &crate::launchd::restart_managed_daemon,
+        restart_daemon: &crate::service::restart_managed_daemon,
     };
     run_update_at(&protocol::root_dir(), &deps)
 }
@@ -728,6 +735,10 @@ const INSTALL_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120
 /// gap shows. It is fetched once, announced, and needs no terminal. When it
 /// cannot be fetched the session still starts on a system tmux if there is
 /// one; with none, the session cannot start, and the error says what to run.
+///
+/// macOS only: every Linux release has shipped its tmux, so no Linux install
+/// is missing one this way.
+#[cfg(target_os = "macos")]
 pub fn ensure_tmux() -> Result<()> {
     let root = protocol::root_dir();
     let live = root.join("bin");
@@ -775,6 +786,7 @@ pub fn ensure_tmux() -> Result<()> {
 /// Whether a session start should install CodeConnect's tmux: no tmux was
 /// named explicitly, this binary is the installed one (through any symlink
 /// to it), and `cc-tmux` is not beside it.
+#[cfg(target_os = "macos")]
 fn bootstrap_applies(explicit_tmux: bool, exe: &std::path::Path, live: &std::path::Path) -> bool {
     if explicit_tmux {
         return false;
@@ -786,6 +798,7 @@ fn bootstrap_applies(explicit_tmux: bool, exe: &std::path::Path, live: &std::pat
 }
 
 /// The installation half of [`ensure_tmux`], under the update lock.
+#[cfg(target_os = "macos")]
 fn ensure_tmux_at(root: &std::path::Path, version: &str, deps: &UpdateDeps) -> Result<()> {
     let live = root.join("bin");
     let _only_one = wait_for_update_lock(root)?;
@@ -812,10 +825,13 @@ pub fn run_install_staged(args: &[String]) -> Result<()> {
     let deps = UpdateDeps {
         fetch_release: &fetch_own_release,
         download: &crate::update_install::download,
+        #[cfg(target_os = "macos")]
         verify_signature: &crate::update_install::verify_signature,
+        #[cfg(target_os = "linux")]
+        verify_checksum: &crate::update_install::verify_checksum,
         probe_version: &crate::update_install::version_of,
         ask: &crate::update_install::answer_of,
-        restart_daemon: &crate::launchd::restart_managed_daemon,
+        restart_daemon: &crate::service::restart_managed_daemon,
     };
     install_staged_at(
         &protocol::root_dir(),
@@ -836,13 +852,28 @@ fn install_staged_at(
     crate::update_install::clear_leftovers(root)?;
 
     let body = own_release(version, deps)?;
-    let tmux =
-        crate::update_release::select_assets(&body, version, Archive::Tmux).map_err(|why| {
+    let select = |archive| {
+        crate::update_release::select_assets(&body, version, archive).map_err(|why| {
             anyhow::anyhow!("release {version} cannot be installed: {why}. Nothing was changed.")
-        })?;
+        })
+    };
+    let tmux = select(Archive::Tmux)?;
+    #[cfg(target_os = "macos")]
     with_work_dir(root, |work| {
         install_set(from, &tmux, version, work, &root.join("bin"), root, deps)
     })?;
+    // A Linux binary carries no signature of its own, so the binaries the
+    // installer handed over cannot be proven here; the release's are fetched
+    // and proven by its signed checksum instead, exactly as `update` installs
+    // them. The handed-over `codeconnect` is only the one running this.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = from;
+        let core = select(Archive::Core)?;
+        with_work_dir(root, |work| {
+            install_release(&core, &tmux, version, work, &root.join("bin"), root, deps)
+        })?;
+    }
     Ok(())
 }
 
@@ -903,9 +934,15 @@ fn tmux_is_installed(live: &std::path::Path, deps: &UpdateDeps) -> bool {
     let Ok(required) = (deps.ask)(&live.join("codeconnect"), "--tmux-version") else {
         return false;
     };
-    (deps.verify_signature)(&tmux).is_ok()
-        && crate::update_install::is_universal(&tmux).is_ok()
-        && (deps.ask)(&tmux, "-V").is_ok_and(|said| said == required)
+    // On Linux an installed file has nothing of its own to prove it by; what
+    // was downloaded was proven by the release's signed checksum when it was.
+    #[cfg(target_os = "macos")]
+    if (deps.verify_signature)(&tmux).is_err()
+        || crate::update_install::is_universal(&tmux).is_err()
+    {
+        return false;
+    }
+    (deps.ask)(&tmux, "-V").is_ok_and(|said| said == required)
 }
 
 /// Download one archive, prove it intact and well formed, and unpack it.
@@ -927,6 +964,15 @@ fn fetch_and_unpack(
     )?;
     let checksum_file = work.join(&assets.checksum.name);
     (deps.download)(&assets.checksum.url, &checksum_file, 4096)?;
+    // The checksum is believed only once the release key has vouched for its
+    // exact bytes; everything after it — the digest, the listing, every binary
+    // run — rests on that.
+    #[cfg(target_os = "linux")]
+    {
+        let signature_file = work.join(&assets.signature.name);
+        (deps.download)(&assets.signature.url, &signature_file, 64)?;
+        (deps.verify_checksum)(&checksum_file, &signature_file)?;
+    }
 
     let expected = crate::update_release::parse_checksum(
         &std::fs::read_to_string(&checksum_file).context("reading the checksum file")?,
@@ -980,8 +1026,13 @@ fn stage_tmux(
 
     let from = fetch_and_unpack(assets, version, Archive::Tmux, work, deps)?;
     let candidate = from.join(TMUX_BINARY);
-    (deps.verify_signature)(&candidate)?;
-    crate::update_install::is_universal(&candidate)?;
+    // On Linux every byte unpacked here was proven by the release's signed
+    // checksum, and a binary for another architecture fails to run below.
+    #[cfg(target_os = "macos")]
+    {
+        (deps.verify_signature)(&candidate)?;
+        crate::update_install::is_universal(&candidate)?;
+    }
     let reported = (deps.ask)(&candidate, "-V")?;
     if reported != required {
         anyhow::bail!(
@@ -1118,8 +1169,13 @@ fn install_set(
     let mut common: Option<String> = None;
     for binary in crate::update_release::SHIPPED_BINARIES {
         let candidate = from.join(binary);
-        (deps.verify_signature)(&candidate)?;
-        install::is_universal(&candidate)?;
+        // On Linux these came out of an archive proven by the release's signed
+        // checksum, and a binary for another architecture fails to run below.
+        #[cfg(target_os = "macos")]
+        {
+            (deps.verify_signature)(&candidate)?;
+            install::is_universal(&candidate)?;
+        }
         let reported = (deps.probe_version)(&candidate)?;
         let Some(build) = install::reported_build(&reported, binary, version) else {
             anyhow::bail!(
@@ -2070,7 +2126,8 @@ mod tests {
     struct Ran {
         outcome: Result<()>,
         /// Every seam crossing, in order: `fetch`,
-        /// `download <url> (max <bytes>)`, `verify <place>/<file>`,
+        /// `download <url> (max <bytes>)`, `verify <place>/<file>` (macOS),
+        /// `authenticate <checksum file>` (Linux),
         /// `probe <place>/<file>`, `ask <place>/<file> <question>`, `restart`.
         events: Vec<String>,
     }
@@ -2125,7 +2182,12 @@ mod tests {
         let mut listed = Vec::new();
         for archive in [Archive::Core, Archive::Tmux] {
             package(&fixtures, version, archive);
-            for name in [archive.name(version), archive.checksum_name(version)] {
+            for name in [
+                archive.name(version),
+                archive.checksum_name(version),
+                #[cfg(target_os = "linux")]
+                archive.signature_name(version),
+            ] {
                 let url = format!("https://release.invalid/{name}");
                 by_url.insert(url.clone(), fixtures.join(&name));
                 let size = std::fs::metadata(fixtures.join(&name)).unwrap().len();
@@ -2180,6 +2242,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("no such asset: {url}"))?;
             std::fs::copy(from, into).map(|_| ()).map_err(Into::into)
         };
+        #[cfg(target_os = "macos")]
         let verify = |path: &std::path::Path| {
             let call = {
                 let mut count = signature_calls.borrow_mut();
@@ -2195,6 +2258,20 @@ mod tests {
             events.borrow_mut().push(format!("verify {place}/{name}"));
             if faults.refuse_signature_call == Some(call) {
                 anyhow::bail!("{name} is not signed by CodeConnect");
+            }
+            Ok(())
+        };
+        #[cfg(target_os = "linux")]
+        let verify_checksum = |checksum: &std::path::Path, _signature: &std::path::Path| {
+            let call = {
+                let mut count = signature_calls.borrow_mut();
+                *count += 1;
+                *count
+            };
+            let name = checksum.file_name().unwrap().to_string_lossy().into_owned();
+            events.borrow_mut().push(format!("authenticate {name}"));
+            if faults.refuse_signature_call == Some(call) {
+                anyhow::bail!("{name} is not signed by CodeConnect's release key");
             }
             Ok(())
         };
@@ -2252,7 +2329,10 @@ mod tests {
         let deps = UpdateDeps {
             fetch_release: &fetch,
             download: &download,
+            #[cfg(target_os = "macos")]
             verify_signature: &verify,
+            #[cfg(target_os = "linux")]
+            verify_checksum: &verify_checksum,
             probe_version: &probe,
             ask: &ask,
             restart_daemon: &restart,
@@ -2384,6 +2464,7 @@ mod tests {
         assert_eq!(snapshot(&fixture.live), before);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_refused_signature_on_any_of_the_four_stops_everything() {
         for call in 1..=4 {
@@ -2406,6 +2487,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_thin_binary_in_the_archive_is_refused() {
         let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
@@ -2489,8 +2571,12 @@ mod tests {
             format!("{hex}  {name}\n"),
         )
         .unwrap();
+        // Judged by the injected judge, never by the release key.
+        #[cfg(target_os = "linux")]
+        std::fs::write(fixtures.join(archive.signature_name(version)), b"signed").unwrap();
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_successful_update_downloads_verifies_exchanges_and_only_then_restarts() {
         let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
@@ -2684,6 +2770,8 @@ mod tests {
                     crate::update_release::MAX_ARCHIVE_BYTES
                 ),
                 &format!("download https://release.invalid/{tmux}.sha256 (max 4096)"),
+                #[cfg(target_os = "linux")]
+                &format!("download https://release.invalid/{tmux}.sha256.sig (max 64)"),
             ]
         );
         assert!(!ran.events.contains(&"restart".to_string()));
@@ -2712,6 +2800,7 @@ mod tests {
     /// A tmux that is there but not the one the binaries require, or not
     /// CodeConnect's, or not both architectures, is repaired rather than
     /// blessed.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_wrong_unsigned_or_thin_tmux_beside_current_binaries_is_replaced() {
         for (live_tmux, refuse_signature_call) in [
@@ -2760,6 +2849,7 @@ mod tests {
         assert_eq!(snapshot(&fixture.live), before);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_thin_tmux_in_the_release_is_refused() {
         let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
@@ -2801,8 +2891,191 @@ mod tests {
         assert_eq!(snapshot(&fixture.live), before);
     }
 
+    // ------------------------------------------------------------- Linux
+
+    /// A refused signature over either archive's checksum stops the update
+    /// before that checksum is read, with nothing changed: the refusal is the
+    /// signature's even when the checksum itself is also wrong.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_checksum_signature_on_either_archive_stops_everything() {
+        for call in 1..=2 {
+            let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+            let archive = if call == 1 {
+                Archive::Core
+            } else {
+                Archive::Tmux
+            };
+            let name = archive.name(&newer());
+            std::fs::write(
+                fixture
+                    .root
+                    .join("fixtures")
+                    .join(archive.checksum_name(&newer())),
+                format!("{}  {name}\n", "ab".repeat(32)),
+            )
+            .unwrap();
+            let before = snapshot(&fixture.live);
+            let ran = run(
+                &fixture,
+                Faults {
+                    refuse_signature_call: Some(call),
+                    ..Faults::default()
+                },
+            );
+            let said = ran.outcome.unwrap_err().to_string();
+            assert!(said.contains("release key"), "call {call}: {said}");
+            assert!(!ran.events.contains(&"restart".to_string()));
+            // Nothing from the refused archive ran. The core archive is
+            // judged and its binaries probed before the tmux archive is
+            // fetched, so a refused tmux signature comes after those.
+            let from_refused = if call == 1 {
+                "probe staged/"
+            } else {
+                "ask staged/cc-tmux"
+            };
+            assert!(
+                !ran.events
+                    .iter()
+                    .any(|event| event.starts_with(from_refused)),
+                "call {call}: {:?}",
+                ran.events
+            );
+            assert_eq!(snapshot(&fixture.live), before);
+        }
+    }
+
+    /// Each archive's checksum is authenticated, with its signature fetched
+    /// under its own small ceiling, before anything from that archive runs; the
+    /// smoke test comes after every judgment and the restart after it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_update_authenticates_each_checksum_before_anything_from_it_runs() {
+        let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
+
+        let core = Archive::Core.name(&newer());
+        let tmux = Archive::Tmux.name(&newer());
+        let max = crate::update_release::MAX_ARCHIVE_BYTES;
+        let downloads: Vec<&String> = ran
+            .events
+            .iter()
+            .filter(|event| event.starts_with("download"))
+            .collect();
+        assert_eq!(
+            downloads,
+            vec![
+                &format!("download https://release.invalid/{core} (max {max})"),
+                &format!("download https://release.invalid/{core}.sha256 (max 4096)"),
+                &format!("download https://release.invalid/{core}.sha256.sig (max 64)"),
+                &format!("download https://release.invalid/{tmux} (max {max})"),
+                &format!("download https://release.invalid/{tmux}.sha256 (max 4096)"),
+                &format!("download https://release.invalid/{tmux}.sha256.sig (max 64)"),
+            ]
+        );
+        let at = |needle: &str| {
+            ran.events
+                .iter()
+                .position(|event| event == needle)
+                .unwrap_or_else(|| panic!("{needle} missing from {:?}", ran.events))
+        };
+        let core_judged = at(&format!("authenticate {core}.sha256"));
+        let tmux_judged = at(&format!("authenticate {tmux}.sha256"));
+        for run in [
+            "probe staged/codeconnect",
+            "probe staged/ccd",
+            "probe staged/cc-hook",
+            "ask staged/codeconnect --tmux-version",
+        ] {
+            assert!(
+                core_judged < at(run),
+                "the core checksum was judged before `{run}`"
+            );
+        }
+        assert!(tmux_judged < at("ask staged/cc-tmux -V"));
+        assert!(!ran.events.iter().any(|event| event.starts_with("verify")));
+
+        let last = |needle: &str| {
+            ran.events
+                .iter()
+                .rposition(|event| event == needle)
+                .unwrap()
+        };
+        for smoke in [
+            "probe live/codeconnect",
+            "probe live/ccd",
+            "probe live/cc-hook",
+            "ask live/cc-tmux -V",
+        ] {
+            assert!(tmux_judged < last(smoke), "every judgment before `{smoke}`");
+            assert!(last(smoke) < last("restart"), "restart waits for `{smoke}`");
+        }
+        assert_eq!(ran.events.last().map(String::as_str), Some("restart"));
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            assert_eq!(
+                probe_says(&fixture.live.join(binary)).unwrap(),
+                format!("{binary} {} (bbbbbbbbbbbb)", newer())
+            );
+        }
+        assert_eq!(
+            line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
+            "release"
+        );
+    }
+
+    /// An installed tmux that is not the one the binaries require is replaced
+    /// from the release.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wrong_tmux_beside_current_binaries_is_replaced() {
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        place_binary(
+            &fixture.live.join("cc-tmux"),
+            fixture_tmux("tmux 3.7c-cc8", "live", false),
+        );
+        let ran = run(&fixture, Faults::default());
+        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
+        assert_eq!(
+            line_after(&fixture.live.join("cc-tmux"), "FROM:").unwrap(),
+            "release"
+        );
+    }
+
+    /// What the installer hands over is not what Linux installs: the release's
+    /// own binaries are, proven by its signed checksum.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_install_takes_the_release_binaries_not_the_handed_over_ones() {
+        let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
+        std::fs::remove_dir_all(&fixture.live).unwrap();
+        let unpacked_copy = fixture.root.join("handed-over");
+        std::fs::create_dir_all(&unpacked_copy).unwrap();
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            place_binary(
+                &unpacked_copy.join(binary),
+                fixture_binary(binary, &running(), "dddddddddddd", false),
+            );
+        }
+        let ran = run_entry(&fixture, Faults::default(), |root, deps| {
+            install_staged_at(root, &unpacked_copy, &running(), deps)
+        });
+        assert!(ran.outcome.is_ok(), "{:?}", ran.outcome);
+        for binary in ["codeconnect", "ccd", "cc-hook"] {
+            assert_eq!(
+                probe_says(&fixture.live.join(binary)).unwrap(),
+                format!("{binary} {} (bbbbbbbbbbbb)", running()),
+                "the release's {binary} is installed, not the one handed over"
+            );
+        }
+        assert!(ran.events.iter().any(
+            |event| event == &format!("authenticate {}.sha256", Archive::Core.name(&running()))
+        ));
+    }
+
     // ------------------------------------------------------ session start
 
+    #[cfg(target_os = "macos")]
     fn ensure(root: &std::path::Path, deps: &UpdateDeps) -> Result<()> {
         ensure_tmux_at(root, &running(), deps)
     }
@@ -2810,6 +3083,7 @@ mod tests {
     /// The first session after an updater that predates tmux: only tmux is
     /// fetched, from this version's own release, and the daemon is left
     /// alone. The next session finds it and fetches nothing.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_session_start_without_tmux_installs_it_once_from_its_own_release() {
         let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
@@ -2850,6 +3124,7 @@ mod tests {
 
     /// GitHub answering for another release is not this binary's release,
     /// however well formed: nothing is downloaded from it.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_session_start_refuses_a_release_that_is_not_its_own() {
         let fixture = rig(&newer(), ["aaaaaaaaaaaa"; 3]);
@@ -2864,6 +3139,7 @@ mod tests {
 
     /// A session start that meets a running installation waits for it, and
     /// then installs.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_session_start_waits_for_another_installation() {
         let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
@@ -2889,6 +3165,7 @@ mod tests {
 
     /// Only the installed binary, with nothing named in its place and no tmux
     /// beside it, installs one.
+    #[cfg(target_os = "macos")]
     #[test]
     fn only_the_installed_binary_without_tmux_installs_one() {
         let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);
@@ -2950,8 +3227,9 @@ mod tests {
                 .iter()
                 .filter(|event| event.starts_with("download"))
                 .count(),
-            2,
-            "only the tmux archive and its checksum are fetched: {:?}",
+            if cfg!(target_os = "macos") { 2 } else { 6 },
+            "macOS fetches only the tmux archive and its checksum; Linux fetches \
+             the release's own core archive too, each with its signature: {:?}",
             ran.events
         );
         for smoke in [
@@ -2991,6 +3269,7 @@ mod tests {
     /// The installer verified these binaries itself; they are proven again
     /// here by the same rules `update` applies, and a set that fails them is
     /// refused with nothing installed.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_handed_over_binary_that_fails_the_updaters_rules_is_refused() {
         let fixture = rig(&running(), ["aaaaaaaaaaaa"; 3]);

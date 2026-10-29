@@ -36,12 +36,23 @@
 //! fails closed rather than trusting a stale deadline. That `CLOCK_MONOTONIC`
 //! advances consistently across processes and its behaviour across sleep are
 //! [UNVERIFIED].
+//!
+//! ## Linux field choice
+//!
+//! The birth identity is `starttime` from `/proc/<pid>/stat`: clock ticks
+//! since boot, assigned at fork and kept across `execve`, the same two
+//! properties the Darwin field is chosen for. The same file gives the process
+//! group and the zombie state (`Z`). The boot identity is
+//! `/proc/sys/kernel/random/boot_id`, a random id the kernel fixes for one
+//! boot; the boot time `/proc/stat` reports would not do, because it is derived
+//! from the wall clock and moves when the clock is adjusted.
 
 use serde::{Deserialize, Serialize};
 
 /// A process's kernel-assigned birth time: seconds + microseconds of
-/// `p_starttime`. Compared for **exact** equality — this is an identity, not a
-/// clock reading, so "close" is not "same".
+/// `p_starttime` since the epoch on macOS, of `starttime` since boot on Linux.
+/// Compared for **exact** equality — this is an identity, not a clock reading,
+/// so "close" is not "same".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BirthIdentity {
     pub start_sec: i64,
@@ -56,8 +67,11 @@ pub struct ProcessIdentity {
     pub birth: BirthIdentity,
 }
 
-/// The OS boot identity: the boot wall-clock instant. Two monotonic readings
-/// are only comparable when they were taken under the **same** boot identity.
+/// The OS boot identity. On macOS the two words are the boot wall-clock instant
+/// in seconds and microseconds; on Linux they are the two 64-bit halves of
+/// `/proc/sys/kernel/random/boot_id`. Either way they are only ever compared
+/// for equality. Two monotonic readings are only comparable when they were
+/// taken under the **same** boot identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootIdentity {
     pub boot_sec: i64,
@@ -81,6 +95,7 @@ pub enum Liveness {
 /// Read the `proc_bsdinfo` of `pid`, or `None` when the process does not exist
 /// or the kernel could not be queried. Shared by [`read_birth_identity`] and
 /// [`read_pgid`] so both come off one kernel answer.
+#[cfg(target_os = "macos")]
 fn read_bsdinfo(pid: i32) -> Option<libc::proc_bsdinfo> {
     // SAFETY: `proc_pidinfo` writes at most `buffersize` bytes into `info` and
     // returns the number written; we zero it first and demand a full struct.
@@ -106,6 +121,7 @@ fn read_bsdinfo(pid: i32) -> Option<libc::proc_bsdinfo> {
 
 /// Read the birth identity of `pid`. `None` when the process does not exist or
 /// the kernel could not be queried.
+#[cfg(target_os = "macos")]
 pub fn read_birth_identity(pid: i32) -> Option<BirthIdentity> {
     let info = read_bsdinfo(pid)?;
     Some(BirthIdentity {
@@ -117,6 +133,7 @@ pub fn read_birth_identity(pid: i32) -> Option<BirthIdentity> {
 /// Read the process group id of `pid` off the same `proc_bsdinfo` answer as its
 /// birth identity, so a recorded `(pid, birth, pgid)` triple is internally
 /// consistent (the exec gate records the pgid alongside the birth identity).
+#[cfg(target_os = "macos")]
 pub fn read_pgid(pid: i32) -> Option<i32> {
     Some(read_bsdinfo(pid)?.pbi_pgid as i32)
 }
@@ -191,6 +208,7 @@ pub fn exited(pid: i32) -> bool {
 /// byte (offset 36 on 64-bit macOS; `SZOMB == 5`), verified against the live
 /// binary. `sysctl` is used rather than `proc_pidinfo` precisely because the
 /// latter returns a zero-length answer for a zombie.
+#[cfg(target_os = "macos")]
 fn is_zombie(pid: i32) -> Option<bool> {
     const P_STAT_OFFSET: usize = 36;
     const SZOMB: u8 = 5;
@@ -217,6 +235,7 @@ fn is_zombie(pid: i32) -> Option<bool> {
 }
 
 /// The OS boot identity, or `None` if it could not be read.
+#[cfg(target_os = "macos")]
 pub fn boot_identity() -> Option<BootIdentity> {
     // SAFETY: fixed MIB, single `timeval` out-param.
     unsafe {
@@ -239,6 +258,60 @@ pub fn boot_identity() -> Option<BootIdentity> {
             boot_usec: tv.tv_usec as i64,
         })
     }
+}
+
+/// The fields of `/proc/<pid>/stat` after the command name — the one field
+/// that may itself hold spaces and parentheses, so the split is at the last
+/// `)`. Counted from there, `state` is `[0]`, `pgrp` `[2]` and `starttime`
+/// `[19]`. `None` when the process does not exist.
+#[cfg(target_os = "linux")]
+fn read_stat(pid: i32) -> Option<Vec<String>> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(") ")?;
+    Some(fields.split_whitespace().map(str::to_owned).collect())
+}
+
+/// Read the birth identity of `pid`: its `starttime`, in clock ticks since
+/// boot, as seconds and microseconds. `None` when the process does not exist.
+#[cfg(target_os = "linux")]
+pub fn read_birth_identity(pid: i32) -> Option<BirthIdentity> {
+    let ticks: i64 = read_stat(pid)?.get(19)?.parse().ok()?;
+    // SAFETY: `sysconf` reads a constant of the running system.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as i64;
+    Some(BirthIdentity {
+        start_sec: ticks / hz,
+        start_usec: ticks % hz * 1_000_000 / hz,
+    })
+}
+
+/// Read the process group id of `pid` off the same `/proc/<pid>/stat` line
+/// its birth identity comes from.
+#[cfg(target_os = "linux")]
+pub fn read_pgid(pid: i32) -> Option<i32> {
+    read_stat(pid)?.get(2)?.parse().ok()
+}
+
+/// Whether `pid` is a **zombie** (exited, awaiting reap), from its `state`:
+/// `Z`, or `X` in the instant it is being reaped. `None` when it cannot be read.
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: i32) -> Option<bool> {
+    Some(matches!(read_stat(pid)?.first()?.as_str(), "Z" | "X"))
+}
+
+/// The OS boot identity: the kernel's random `boot_id`, fixed for one boot,
+/// as its two 64-bit halves.
+#[cfg(target_os = "linux")]
+pub fn boot_identity() -> Option<BootIdentity> {
+    let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let hex: String = id.trim().chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 {
+        return None;
+    }
+    let id = u128::from_str_radix(&hex, 16).ok()?;
+    Some(BootIdentity {
+        boot_sec: (id >> 64) as u64 as i64,
+        boot_usec: id as u64 as i64,
+    })
 }
 
 /// Nanoseconds on `CLOCK_MONOTONIC`. Boot-relative: only comparable to another

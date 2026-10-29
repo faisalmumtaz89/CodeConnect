@@ -267,6 +267,7 @@ dependencies = [
  "libc",
  "protocol",
  "qrcode",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

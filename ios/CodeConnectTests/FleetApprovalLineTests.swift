@@ -135,7 +135,8 @@ final class FleetApprovalLineTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(500))
         }
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
-        window.rootViewController = UIHostingController(rootView: FleetView().environment(model))
+        window.rootViewController = UIHostingController(
+            rootView: FleetView().environment(model).environment(Machines(holding: model)))
         window.isHidden = false
         window.rootViewController?.view.layoutIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(2))
@@ -166,7 +167,8 @@ final class FleetApprovalLineTests: XCTestCase {
         let model = try model(command: "\ngit push --force origin main")
         _ = try await blockedRow(model)
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
-        window.rootViewController = UIHostingController(rootView: FleetView().environment(model))
+        window.rootViewController = UIHostingController(
+            rootView: FleetView().environment(model).environment(Machines(holding: model)))
         window.isHidden = false
         window.rootViewController?.view.layoutIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(2))
@@ -208,7 +210,8 @@ final class FleetApprovalLineTests: XCTestCase {
             try frame(.object(["type": .string("sessions"), "sessions": .array([])])))
         try await Task.sleep(for: .milliseconds(500))
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
-        window.rootViewController = UIHostingController(rootView: FleetView().environment(model))
+        window.rootViewController = UIHostingController(
+            rootView: FleetView().environment(model).environment(Machines(holding: model)))
         window.isHidden = false
         window.rootViewController?.view.layoutIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(2))

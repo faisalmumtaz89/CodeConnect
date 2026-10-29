@@ -1,4 +1,6 @@
-# Builds, signs, notarizes and verifies the Mac binaries for a release.
+# Builds, signs, notarizes and verifies the Mac binaries for a release. The
+# Linux archives are built by linux-build.yml, which this calls; they are not
+# attached to the release.
 #
 # **Every run proves a draft end to end; publication is a separate, explicit
 # act.** `codeconnect update` installs whatever `releases/latest` points at, so
@@ -268,9 +270,54 @@ jobs:
             mac/target/${{ matrix.target }}/release/cc-hook
           if-no-files-found: error
 
+  linux:
+    name: Linux
+    needs: pin
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      ref: ${{ needs.pin.outputs.sha }}
+
+  # The only job that sees the Linux release key. It signs each checksum file
+  # and hands on the archives, checksums and signatures; the key never leaves
+  # it, and nothing it signs is published by it.
+  linux-sign:
+    name: Sign the Linux checksums
+    needs: [pin, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.pin.outputs.sha }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          path: linux
+          merge-multiple: true
+
+      - name: Sign
+        env:
+          KEY: ${{ secrets.LINUX_RELEASE_SIGNING_KEY }}
+        run: |
+          key="$RUNNER_TEMP/release-key.pem"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$KEY" > "$key")
+          .github/workflows/linux-sign.sh linux "$key" mac/codeconnect/src/update_install.rs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-signed
+          path: |
+            linux/*.tar.gz
+            linux/*.tar.gz.sha256
+            linux/*.tar.gz.sha256.sig
+          if-no-files-found: error
+
   publish:
     name: Sign, notarize, verify${{ (github.event_name == 'workflow_dispatch' && inputs.publish) && ', publish' || '' }}
-    needs: [pin, build]
+    needs: [pin, build, linux-sign]
     runs-on: macos-15
     # Promotions run one at a time across ALL tags: the monotonic decision
     # compares against `releases/latest`, and two promotions in parallel
@@ -625,6 +672,33 @@ jobs:
             echo "tmux_checksum_id=$tmux_checksum_id"
           } >> "$GITHUB_OUTPUT"
 
+          # The Linux files exactly as `linux-sign` signed them, the same way.
+          linux_assets='[]'
+          for path in slices/linux-signed/*; do
+            file="$(basename "$path")"
+            existing="$(asset_id "$file")"
+            for asset in $existing; do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset"
+            done
+            curl -fsS -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$path" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$file" \
+              > /dev/null
+            id="$(asset_id "$file")"
+            if [ -z "$id" ]; then
+              echo "::error::$file did not appear on draft $RELEASE_ID"
+              exit 1
+            fi
+            linux_assets="$(jq -c --argjson id "$id" --arg name "$file" '. + [{id: $id, name: $name}]' <<<"$linux_assets")"
+          done
+          if [ "$(jq 'length' <<<"$linux_assets")" != 12 ]; then
+            echo "::error::expected the 12 signed Linux files, attached $(jq 'length' <<<"$linux_assets")"
+            exit 1
+          fi
+          echo "linux_assets=$linux_assets" >> "$GITHUB_OUTPUT"
+
       # Downloaded back from the draft rather than checked in place: this is
       # the first moment the bytes a user would actually receive have existed.
       - name: Verify the assets a user would receive
@@ -637,6 +711,7 @@ jobs:
           TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
           TMUX_ARCHIVE_ID: ${{ steps.assets.outputs.tmux_archive_id }}
           TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
+          LINUX_ASSETS: ${{ steps.assets.outputs.linux_assets }}
           DIR: ${{ needs.pin.outputs.dir }}
         run: |
           mkdir -p roundtrip && cd roundtrip
@@ -689,6 +764,29 @@ jobs:
             exit 1
           fi
 
+          # The Linux files a user would receive are the bytes `linux-sign`
+          # signed and checked against RELEASE_KEY, each archive still matches
+          # its checksum, and each holds exactly what the updater allows.
+          mkdir linux
+          while read -r id name; do
+            fetch "$id" "linux/$name"
+            if ! cmp -s "linux/$name" "../slices/linux-signed/$name"; then
+              echo "::error::$name on the draft is not the file linux-sign signed"
+              exit 1
+            fi
+          done < <(jq -r '.[] | "\(.id) \(.name)"' <<<"$LINUX_ASSETS")
+          for arch in aarch64 x86_64; do
+            core="codeconnect-${DIR#codeconnect-}-linux-$arch.tar.gz"
+            tmux="codeconnect-${DIR#codeconnect-}-tmux-linux-$arch.tar.gz"
+            for archive in "$core" "$tmux"; do
+              (cd linux && shasum -a 256 -c "$archive.sha256")
+              [ -s "linux/$archive.sha256.sig" ] || { echo "::error::$archive.sha256.sig is missing"; exit 1; }
+            done
+            holds_exactly "linux/$core" \
+              "$DIR/codeconnect" "$DIR/ccd" "$DIR/cc-hook" "$DIR/LICENSE"
+            holds_exactly "linux/$tmux" "$DIR/cc-tmux" "$DIR/THIRD_PARTY_NOTICES"
+          done
+
       - name: Publish
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
         env:
@@ -698,6 +796,7 @@ jobs:
           CHECKSUM_ID: ${{ steps.assets.outputs.checksum_id }}
           TMUX_ARCHIVE_ID: ${{ steps.assets.outputs.tmux_archive_id }}
           TMUX_CHECKSUM_ID: ${{ steps.assets.outputs.tmux_checksum_id }}
+          LINUX_ASSETS: ${{ steps.assets.outputs.linux_assets }}
           ARCHIVE: ${{ steps.package.outputs.archive }}
           TMUX_ARCHIVE: ${{ steps.package.outputs.tmux_archive }}
           TAG: ${{ needs.pin.outputs.tag }}
@@ -706,7 +805,7 @@ jobs:
         run: |
           # Publication is a PATCH on the id this run adopted, made only after
           # re-reading what that id holds *now*: still a draft, still this
-          # tag, and exactly the four assets the verification step downloaded —
+          # tag, and exactly the sixteen assets the verification step downloaded —
           # by id, name, and state, because an id survives a rename and the
           # updater selects by name — not whatever a concurrent writer left.
           state="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
@@ -722,10 +821,12 @@ jobs:
           expected="$(jq -n --argjson aid "$ARCHIVE_ID" --argjson cid "$CHECKSUM_ID" \
             --argjson taid "$TMUX_ARCHIVE_ID" --argjson tcid "$TMUX_CHECKSUM_ID" \
             --arg archive "$ARCHIVE" --arg tmux "$TMUX_ARCHIVE" \
+            --argjson linux "$LINUX_ASSETS" \
             '[{id: $aid, name: $archive, state: "uploaded"},
               {id: $cid, name: ($archive + ".sha256"), state: "uploaded"},
               {id: $taid, name: $tmux, state: "uploaded"},
-              {id: $tcid, name: ($tmux + ".sha256"), state: "uploaded"}] | sort_by(.id) | tojson')"
+              {id: $tcid, name: ($tmux + ".sha256"), state: "uploaded"}]
+              + [$linux[] | {id, name, state: "uploaded"}] | sort_by(.id) | tojson')"
           if [ "$held" != "$(jq -r . <<<"$expected")" ]; then
             echo "::error::draft $RELEASE_ID does not hold exactly the verified assets; refusing"
             echo "held:     $held"

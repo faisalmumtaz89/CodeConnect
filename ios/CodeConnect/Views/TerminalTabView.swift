@@ -806,7 +806,7 @@ struct TerminalTabView: View {
     /// The paired daemon's host. There is nothing to override: the terminal goes
     /// wherever the timeline already is.
     private var host: String? {
-        model.pairing.endpoint?.host.isEmpty == false ? model.pairing.endpoint?.host : nil
+        model.endpoint?.host.isEmpty == false ? model.endpoint?.host : nil
     }
 
     /// Where this terminal would connect, as an identifier — never a sentence.

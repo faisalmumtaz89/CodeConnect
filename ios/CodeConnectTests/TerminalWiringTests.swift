@@ -928,6 +928,7 @@ private struct SurfaceHarness: View {
             surfaceForTesting: Binding(get: { current }, set: { box.value = $0 })
         )
         .environment(model)
+        .environment(Machines(holding: model))
     }
 }
 
@@ -943,7 +944,7 @@ private struct SurfaceHarness: View {
 /// for the id it chose, and that id is private and unguessable by design.
 @MainActor
 private final class StubbedDaemon {
-    let model = AppModel()
+    let model = AppModel(machineID: "automation")
     /// The id the carrier chose. Every later frame has to carry it, or the
     /// carrier is right to ignore the frame.
     private(set) var attachmentID: String?

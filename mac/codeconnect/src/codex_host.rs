@@ -844,7 +844,22 @@ fn create_run_dir_atomically(run_dir: &Path, uid: &str, launch_nonce: &str) -> R
     let c_to = std::ffi::CString::new(run_dir.as_os_str().as_encoded_bytes())
         .with_context(|| format!("{} contains a NUL byte", run_dir.display()))?;
     // SAFETY: two NUL-terminated paths owned by the CStrings above, live for the call.
+    #[cfg(target_os = "macos")]
     let rc = unsafe { libc::renamex_np(c_from.as_ptr(), c_to.as_ptr(), libc::RENAME_EXCL) };
+    // SAFETY: as above; `AT_FDCWD` reads both paths as given. `RENAME_NOREPLACE`
+    // is Linux's `RENAME_EXCL`. The system call itself, because the musl the
+    // static build links has no `renameat2` wrapper.
+    #[cfg(target_os = "linux")]
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            c_from.as_ptr(),
+            libc::AT_FDCWD,
+            c_to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
         let _ = std::fs::remove_dir_all(&temp);
@@ -2062,6 +2077,7 @@ fn take_kill_after_go_fault() -> bool {
 }
 
 /// The child's own image, or `None` if it has no image to report (it is gone).
+#[cfg(target_os = "macos")]
 fn child_image(pid: i32) -> Option<std::path::PathBuf> {
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: `buf` is exactly the size this call documents and outlives it.
@@ -2073,6 +2089,13 @@ fn child_image(pid: i32) -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(std::ffi::OsString::from(
         String::from_utf8(buf).ok()?,
     )))
+}
+
+/// The child's own image, or `None` if it has no image to report: the kernel's
+/// `/proc/<pid>/exe` link, which a dead or zombie child no longer has.
+#[cfg(target_os = "linux")]
+fn child_image(pid: i32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
 /// Whether two image paths name the **same file**, not merely the same spelling.
@@ -4505,6 +4528,7 @@ mod tests {
     /// are asserted UNEQUAL as strings first, so the test cannot pass by the alias
     /// having quietly stopped existing, and `same_image` is then required to say
     /// they are one file anyway.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_image_compare_sees_through_the_data_volume_alias() {
         let ours = std::env::current_exe().expect("this test binary's own path");
