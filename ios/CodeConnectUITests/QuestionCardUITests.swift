@@ -203,7 +203,7 @@ final class QuestionCardUITests: XCTestCase {
         app.launch()
         // Only the Mac can answer it, so its row offers View, not Answer.
         XCTAssertTrue(
-            app.staticTexts["Asking at the Mac"].waitForExistence(timeout: 30),
+            app.staticTexts["Asking at the computer"].waitForExistence(timeout: 30),
             "the row says where the question is")
         XCTAssertFalse(app.buttons["Answer"].exists)
         app.buttons["View"].firstMatch.tap()
@@ -249,7 +249,7 @@ final class QuestionCardUITests: XCTestCase {
         XCTAssertTrue(decline.isHittable, "and is on screen to be tapped")
         decline.tap()
         XCTAssertTrue(
-            app.staticTexts["Declined from the phone, as Escape does at the Mac."]
+            app.staticTexts["Declined from the phone, as Escape does at the computer."]
                 .waitForExistence(timeout: 10),
             "the decline was sent")
         XCTAssertFalse(app.buttons["question-decline"].exists)

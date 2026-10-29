@@ -479,6 +479,21 @@ pub enum ServerMessage {
         /// against its own copy and persists the difference instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         push_environment: Option<String>,
+        /// What the owner calls the computer this daemon runs on — on a Mac, its
+        /// computer name. Absent when it could not be read; the phone then names
+        /// the machine by the host it paired with. Minor 25.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine_name: Option<String>,
+        /// The computer's operating system: `"macos"` or `"linux"`. Absent when the
+        /// daemon does not say. Minor 25.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine_os: Option<String>,
+        /// Which daemon this is, whatever address reached it: minted once into
+        /// the daemon's home and the same on every handshake. A phone that paired
+        /// the same daemon under two addresses knows by this that they are one
+        /// machine. Minor 26.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine_id: Option<String>,
     },
     Sessions {
         sessions: Vec<SessionSummary>,
@@ -1549,9 +1564,16 @@ mod tests {
             device_id: None,
             device_name: None,
             push_environment: None,
+            machine_name: None,
+            machine_os: None,
+            machine_id: None,
         };
         let encoded = serde_json::to_string(&ack).unwrap();
         assert!(!encoded.contains("device_token"), "{encoded}");
+        assert!(
+            !encoded.contains("machine_"),
+            "a name that could not be read is left out, never sent empty: {encoded}"
+        );
         assert!(
             !encoded.contains("push_environment"),
             "a daemon holding no token for this device claims no environment: {encoded}"
@@ -1692,10 +1714,18 @@ mod tests {
             crate::PROTOCOL_MINOR >= 24,
             "`belongs_before` on a Codex item read back from history is minor 24"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 25,
+            "`machine_name` and `machine_os` on `hello_ack` are minor 25"
+        );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 26,
+            "`machine_id` on `hello_ack` is minor 26"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 24);
+        assert_eq!(crate::PROTOCOL_MINOR, 26);
     }
 
     /// **The tags, pinned on this side too.**

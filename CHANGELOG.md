@@ -3,6 +3,23 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## One phone, several computers
+
+- The iPhone keeps every computer it pairs with and stays connected to all of them: scanning
+  another computer's code adds it, and the fleet shows every computer's sessions together.
+- Settings lists your computers, each with its name, its system and how its link is. Each one's own
+  screen shows how the phone reaches it and what its daemon offers, and removes that computer alone.
+  Offline, a computer is still called by the name it last reported.
+- One computer paired under two addresses — an IP, then its MagicDNS name — is one computer: the
+  daemon tells the phone which daemon it is (protocol minor 26).
+
+## The phone names your Mac the way you do
+
+- While connected, Settings on the iPhone shows your Mac by its computer name, with "macOS" under
+  it, instead of its network address. Renaming the Mac shows on the phone the next time it connects.
+  Needs both this Mac release and the matching iPhone app; with an older Mac the phone still shows the
+  address.
+
 ## Codex says goodbye as it does run directly again
 
 - Quitting `codeconnect codex` ends with what `codex` prints run directly — its token usage and

@@ -2,24 +2,31 @@ import SwiftUI
 
 /// One root (Fleet), one detail stack (Session), sheets for everything else — a
 /// notification-led information architecture. No tab bar.
+///
+/// Everything below is handed the model of the machine the app-wide surfaces
+/// speak for (`Machines.linkModel`); the screens under a session are handed
+/// that session's own.
 struct RootView: View {
-    @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
 
     var body: some View {
-        if !model.showsFleet {
-            PairingView(isOnboarding: true)
-        } else if model.launchSettled {
-            FleetView()
-        } else {
-            LaunchLoader()
+        Group {
+            if !machines.showsFleet {
+                PairingView(isOnboarding: true)
+            } else if machines.launchSettled {
+                FleetView()
+            } else {
+                LaunchLoader()
+            }
         }
+        .environment(machines.linkModel)
     }
 }
 
 /// What the app shows until it has caught up with the Mac. How long it waits is
 /// `AppModel.waitOutLaunch`.
 private struct LaunchLoader: View {
-    @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
 
     var body: some View {
         VStack(spacing: CC.space.sm) {
@@ -31,7 +38,7 @@ private struct LaunchLoader: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(CC.color.bg)
         .accessibilityElement(children: .combine)
-        .task { await model.waitOutLaunch() }
+        .task { await machines.waitOutLaunch() }
     }
 }
 

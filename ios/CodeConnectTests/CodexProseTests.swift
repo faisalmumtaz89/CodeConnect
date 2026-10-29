@@ -557,10 +557,10 @@ final class ReadOnlyCardProseTests: XCTestCase {
             caveat.contains(promise),
             "the caveat must not restate the promise it contradicts: \(caveat)")
         XCTAssertTrue(
-            caveat.contains("answer it at the Mac"),
+            caveat.contains("answer it at the computer"),
             "a read-only card must say where the question CAN be answered: \(caveat)")
         XCTAssertTrue(
-            caveat.contains("Update the Mac"),
+            caveat.contains("Update it"),
             "and what makes it answerable here: \(caveat)")
         // **Short enough to survive AX5.** Measured, not guessed: the previous
         // wording ran to four lines in the pinned action bar on a 6.9" phone at

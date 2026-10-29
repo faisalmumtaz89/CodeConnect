@@ -16,7 +16,11 @@ import UIKit
 struct PairingView: View {
     var isOnboarding = false
 
+    /// The machine paired most recently (`Machines.current`), or the one model
+    /// with nothing paired. A pairing goes through `Machines`, which adds a
+    /// machine rather than repointing this one.
     @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
@@ -26,8 +30,7 @@ struct PairingView: View {
     @State private var showScanner = false
     @State private var scanError: String?
     @State private var showManualEntry = false
-    @State private var showLinkHealth = false
-    @State private var confirmingUnpair = false
+    @State private var openMachineID: String?
     @State private var pairingStartedAt: Date?
 
     var body: some View {
@@ -61,7 +64,7 @@ struct PairingView: View {
     private var onboarding: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                if model.isPairing {
+                if machines.isPairing {
                     pairingProgress
                         .transition(.opacity)
                 } else {
@@ -72,7 +75,7 @@ struct PairingView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, CC.space.md)
             .padding(.vertical, CC.space.xxl)
-            .ccAnimation(CC.motion.medium, value: model.isPairing)
+            .ccAnimation(CC.motion.medium, value: machines.isPairing)
         }
         .background(CC.color.bg)
         // No navigation bar draws behind the status bar here, so scrolled text
@@ -167,9 +170,9 @@ struct PairingView: View {
                 // may not demand another app (App Review 4.2.3).
                 CCStepRow(
                     index: 1,
-                    title: "Make sure your iPhone can reach your Mac",
+                    title: "Make sure your iPhone can reach your computer",
                     message:
-                        "By default they connect over Tailscale, with both signed in to the same tailnet; your local network works with a setting on the Mac ([codeconnect.sh/support](https://codeconnect.sh/support)), but without Tailscale's encryption or the live terminal. The connection never goes through a server of ours.")
+                        "By default they connect over Tailscale, with both signed in to the same tailnet; your local network works with a setting on the computer ([codeconnect.sh/support](https://codeconnect.sh/support)), but without Tailscale's encryption or the live terminal. The connection never goes through a server of ours.")
                 CCHairline()
                 // The command is the only thing on this screen a reader cannot
                 // get anywhere else, and it is given exactly as it must be
@@ -179,15 +182,15 @@ struct PairingView: View {
                 // find first.
                 CCStepRow(
                     index: 2,
-                    title: "Install CodeConnect on your Mac",
+                    title: "Install CodeConnect on your computer",
                     message:
-                        "Run this in Terminal and answer yes to its questions: it installs the signed release, starts CodeConnect and shows a code to scan here. Your Mac also needs Claude Code or Codex.",
+                        "Run this in Terminal and answer yes to its questions: it installs the signed release, starts CodeConnect and shows a code to scan here. Your computer also needs Claude Code or Codex.",
                     command: "curl -fsSL https://codeconnect.sh | sh")
                 CCHairline()
                 CCStepRow(
                     index: 3,
                     title: "Pair this iPhone",
-                    message: "Scan the code the installer shows. For a new one, run this at the Mac.",
+                    message: "Scan the code the installer shows. For a new one, run this at the computer.",
                     command: "codeconnect pair")
                 CCHairline()
                 CCStepRow(
@@ -206,7 +209,7 @@ struct PairingView: View {
             CCBanner("Could not read that code", message: scanError, tone: .warning)
                 .padding(.bottom, CC.space.md)
         }
-        if let error = model.pairingError {
+        if let error = machines.pairingError {
             CCBanner("Pairing failed", message: error, tone: .danger)
                 .padding(.bottom, CC.space.md)
         }
@@ -268,7 +271,7 @@ struct PairingView: View {
         VStack(alignment: .leading, spacing: CC.space.md) {
             // A failed exchange is over: a spinner and a running clock beside
             // its reason would say it is still going.
-            if let error = model.pairingError {
+            if let error = machines.pairingError {
                 CCBanner("Pairing failed", message: error, tone: .danger)
             } else {
                 CCProgressRing(.lg)
@@ -295,9 +298,9 @@ struct PairingView: View {
             // a bare centred label, indistinguishable from the body copy above
             // it.
             CCButton(
-                model.pairingError == nil ? "Cancel pairing" : "Back", variant: .ghost, size: .md
+                machines.pairingError == nil ? "Cancel pairing" : "Back", variant: .ghost, size: .md
             ) {
-                model.cancelPairing()
+                machines.cancelPairing()
                 pairingStartedAt = nil
             }
         }
@@ -316,7 +319,7 @@ struct PairingView: View {
     /// The keyboard path. It never goes away, on any screen, for any reason.
     @ViewBuilder
     private var manualEntry: some View {
-        // 12, matching `macSection`. These are the same relationship — a header
+        // 12, matching `machinesSection`. These are the same relationship — a header
         // meeting the card it introduces — written 16 here and 12 there, on one screen.
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             // **Flush, and in a card, and the two go together.**
@@ -383,7 +386,7 @@ struct PairingView: View {
 
             CCButton(
                 "Save and connect", variant: .primary, size: .lg, fullWidth: true,
-                isLoading: model.isPairing,
+                isLoading: machines.isPairing,
                 disabledReason: manualEntryBlockedReason
             ) {
                 save()
@@ -410,16 +413,8 @@ struct PairingView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: CC.rhythm.sections) {
-                    macSection
-                    transportSection
-                    capabilitiesSection
+                    machinesSection
                     aboutSection
-                    // Nothing is paired in the sample fleet, so there is
-                    // nothing to unpair — and the button's cache erase would
-                    // delete real history from inside a fake fleet.
-                    if !model.sampleFleetActive {
-                        unpairSection
-                    }
                 }
                 .padding(.horizontal, CC.space.md)
                 .padding(.vertical, CC.space.lg)
@@ -431,8 +426,12 @@ struct PairingView: View {
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { doneItem }
-            .sheet(isPresented: $showLinkHealth) {
-                LinkHealthSheet().environment(model)
+            // The machine is fixed by its id when its row is tapped, so its
+            // screen shows — and removes — that machine, whatever the others do.
+            .navigationDestination(item: $openMachineID) { id in
+                if let machine = machines.model(for: id) {
+                    MachineScreen().environment(machine)
+                }
             }
             .sheet(isPresented: $showManualEntry) {
                 repairSheet
@@ -464,42 +463,33 @@ struct PairingView: View {
         .ccHitTarget(minWidth: CC.size.hitTarget)
     }
 
-    private var macSection: some View {
+    /// Every machine this iPhone keeps, oldest first, and the way to add one. A
+    /// machine's link, transport and what its daemon advertises are on its own
+    /// screen, behind its row.
+    private var machinesSection: some View {
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             // Flush: the header owns the content column itself. Anything added
             // here is added twice.
-            CCSectionHeader("Mac")
+            CCSectionHeader("Machines")
 
             CCCard(padding: 0) {
                 VStack(spacing: 0) {
-                    // The one row in the app outside a settings list that earns
-                    // a chevron, and it earns it because the row below it does
-                    // not have one — a chevron only means anything when it
-                    // distinguishes.
-                    //
-                    // No route to link health from the sample fleet: that screen
-                    // reports on a connection, and there is none to report on.
-                    // The row still states what is true — not paired, no link.
-                    CCRow(
-                        model.pairing.endpoint?.host ?? "Not paired",
-                        meta: model.pairing.endpoint?.displayAddress,
-                        action: model.sampleFleetActive ? nil : { showLinkHealth = true }
-                    ) {
-                        CCStatusDot(
-                            color: model.linkHealth.level.ccTone.color,
-                            isHollow: model.linkHealth.level == .offline,
-                            pulses: model.linkHealth.level == .connecting,
-                            accessibilityText: "Link health")
-                    } trailing: {
-                        Text(model.linkHealth.shortText)
-                            .ccType(CC.type.monoSmall)
-                            .foregroundStyle(CC.text.tertiary)
-                            .fixedSize()
+                    // Nothing paired — the sample fleet — has no machine to open,
+                    // and the row says so.
+                    if listedMachines.isEmpty {
+                        CCRow("Not paired") {
+                            CCStatusDot(
+                                color: CC.text.tertiary, isHollow: true,
+                                accessibilityText: "Not paired")
+                        }
+                    }
+                    ForEach(listedMachines, id: \.machineID) { machine in
+                        machineRow(machine)
                     }
 
                     CCRow(
-                        "Scan a new pairing code",
-                        subtitle: "Replaces the token this iPhone holds. Nothing is unpaired first.",
+                        "Add a machine",
+                        subtitle: "Run codeconnect pair in Terminal on that computer, then scan its code.",
                         showsChevron: false,
                         separator: false,
                         action: {
@@ -515,92 +505,36 @@ struct PairingView: View {
         }
     }
 
-    /// Prefer the daemon's own report over what this end asked for.
-    private var encrypted: Bool {
-        model.daemonProfile.connectionEncrypted || model.connection.usingTLS
+    /// The machines Settings lists: every paired one and, in a fixture run, the
+    /// fixture standing in for one.
+    private var listedMachines: [AppModel] {
+        machines.models.filter { $0.machineID != nil || $0.fixturesActive }
     }
 
-    /// Amber means **something is degraded**, and the only degraded transport is
-    /// a daemon that holds a certificate this socket is not using.
-    ///
-    /// The row shipped as `tone: encrypted ? .neutral : .warning`, which painted
-    /// plain `ws` amber on a daemon reporting `Holds a certificate: no` — the
-    /// designed configuration, inside the tailnet, with the footnote directly
-    /// beneath the row explaining that WireGuard carries the encryption.
-    /// "If a colour isn't telling you something actionable, it's a bug", and a
-    /// warning nobody can act on is also the one that gets ignored on the day it
-    /// is real. Link Health computes this same fact this same way; two screens
-    /// disagreeing about whether one socket is degraded is worse than either
-    /// answer.
-    private var transportTone: CCTone {
-        guard !encrypted else { return .neutral }
-        return model.connection.capabilities?.tls == true ? .warning : .neutral
-    }
-
-    /// Everything that qualifies the transport row, in prose, under it. Both can
-    /// be true at once — a daemon that holds a certificate it is not serving on
-    /// *this* socket, and a stated reason why — and neither is the other's
-    /// paraphrase.
-    private var transportNotes: [String] {
-        var notes: [String] = []
-        if let capabilities = model.connection.capabilities, capabilities.tls, !encrypted {
-            notes.append(
-                "The daemon holds a certificate but this connection is not using it.")
-        }
-        if let reason = model.pairing.tlsUnavailableReason {
-            notes.append(reason)
-        }
-        return notes
-    }
-
-    private var transportSection: some View {
-        VStack(alignment: .leading, spacing: CC.space.sm) {
-            CCSectionHeader("Transport")
-
-            CCCard(padding: 0) {
-                VStack(alignment: .leading, spacing: 0) {
-                    // The daemon reports whether *this* connection is encrypted,
-                    // separately from whether it holds a certificate at all.
-                    // Both are shown, because "the server can do TLS" and "you
-                    // are using it" are different facts and only one of them is
-                    // about you.
-                    //
-                    // `wss` / `ws` and nothing else in the value: the shipped
-                    // row read `ws (plain)`, where `plain` is an English word
-                    // wearing monospace. What qualifies the transport is a
-                    // sentence, and there is a slot for it below.
-                    CCFactRow(
-                        "Encryption",
-                        value: encrypted ? "wss" : "ws",
-                        tone: transportTone,
-                        separator: false,
-                        accessibilityValueText: encrypted
-                            ? "wss, TLS" : "ws, not encrypted by TLS"
-                    )
-
-                    ForEach(transportNotes, id: \.self) { note in
-                        CCHairline()
-                        Text(note)
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(CC.color.warning)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.leading, CC.space.md)
-                            .padding(.trailing, CC.space.md)
-                            .padding(.vertical, CC.space.sm)
-                    }
-                }
-            }
-
-            // `CCProse`, so the config key it names is set as code.
-            CCProse(
-                Self.transportFootnote(
-                    encrypted: encrypted,
-                    paired: model.connection.helloAck?.deviceID != nil,
-                    capabilities: model.connection.capabilities),
-                style: CC.type.footnote, color: CC.text.tertiary
-            )
-            .fixedSize(horizontal: false, vertical: true)
+    /// One machine: its link in the app's own words for that level, dimmed while
+    /// it is offline.
+    private func machineRow(_ machine: AppModel) -> some View {
+        let health = machine.linkHealth
+        let offline = health.level == .offline
+        let name = machine.machineName ?? "Not paired"
+        return CCRow(
+            name,
+            subtitle: machine.machineSystem,
+            isDimmed: offline,
+            accessibilityLabelText: [name, machine.machineSystem, health.word]
+                .compactMap { $0 }.joined(separator: ", "),
+            action: machine.machineID.map { id in { openMachineID = id } }
+        ) {
+            CCStatusDot(
+                color: health.level.ccTone.color,
+                isHollow: offline,
+                pulses: health.level == .connecting,
+                accessibilityText: health.word)
+        } trailing: {
+            Text(health.word)
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.tertiary)
+                .fixedSize()
         }
     }
 
@@ -620,65 +554,10 @@ struct PairingView: View {
                 return "Plain ws:// on a private path: inside the tailnet, WireGuard carries the encryption. The app moves to wss:// as soon as the daemon offers a certificate."
             }
             if capabilities.withholdsTerminal {
-                return "Plain ws://, not encrypted by CodeConnect: the Mac allows it on this network (`ws_allow_plaintext`). The live terminal is not offered over it."
+                return "Plain ws://, not encrypted by CodeConnect: the computer allows it on this network (`ws_allow_plaintext`). The live terminal is not offered over it."
             }
         }
         return "Plain ws://: private only where a VPN such as Tailscale carries it. The app moves to wss:// as soon as the daemon offers a certificate."
-    }
-
-    @ViewBuilder
-    private var capabilitiesSection: some View {
-        VStack(alignment: .leading, spacing: CC.space.sm) {
-            // The note slot rather than a second sentence: when there is no
-            // daemon there is nothing to list, and the header says so before the
-            // reader gets to an empty card.
-            CCSectionHeader(
-                "What this daemon advertises",
-                note: model.connection.capabilities == nil ? "not connected" : nil
-            )
-
-            CCCard(padding: 0) {
-                VStack(spacing: 0) {
-                    if let capabilities = model.connection.capabilities {
-                        let rows = capabilities.advertisedRows
-                        ForEach(Array(rows.enumerated()), id: \.element.name) { index, row in
-                            // `CCFactRow`, not fifteen hand-written lines: the
-                            // 48pt floor, the `key` label style and the stacked
-                            // form at accessibility sizes all come from one place
-                            // now.
-                            //
-                            // The separator moves outside the row so it stays
-                            // full card width while the row's *text* takes the
-                            // content column — the shipped list drew its hairline
-                            // at a 16pt leading inset and flush right, an
-                            // asymmetry nothing else in the app has.
-                            if index > 0 { CCHairline() }
-                            CCFactRow(
-                                row.name, value: row.value, labelStyle: .key, separator: false
-                            )
-                        }
-                    } else {
-                        // Never a guess and never a blank: the app says it does
-                        // not know, in the daemon's absence.
-                        Text("Unknown - not connected.")
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(CC.text.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.leading, CC.space.md)
-                            .padding(.trailing, CC.space.md)
-                            .padding(.vertical, CC.space.md)
-                    }
-                }
-            }
-
-            Text(
-                "Listed exactly as the daemon reported it, including anything this app version does not have a name for."
-            )
-            .ccType(CC.type.footnote)
-            .foregroundStyle(CC.text.tertiary)
-            .fixedSize(horizontal: false, vertical: true)
-        }
     }
 
     /// The privacy policy has to be readable from inside the app, not only from
@@ -697,32 +576,6 @@ struct PairingView: View {
         }
     }
 
-    private var unpairSection: some View {
-        VStack(alignment: .leading, spacing: CC.space.sm) {
-            CCButton("Unpair and erase cache", variant: .destructive, size: .lg, fullWidth: true) {
-                confirmingUnpair = true
-            }
-
-            Text(
-                "Removes the token from the Keychain and deletes cached events. Revoke this iPhone at the Mac with `codeconnect revoke`."
-            )
-            .ccType(CC.type.footnote)
-            .foregroundStyle(CC.text.tertiary)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-        .confirmationDialog(
-            "Unpair and erase cache?", isPresented: $confirmingUnpair, titleVisibility: .visible
-        ) {
-            Button("Unpair", role: .destructive) {
-                model.unpair()
-                dismiss()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This iPhone will need a new pairing code before it can see the fleet again.")
-        }
-    }
-
     /// Manual entry, presented as a sheet from Settings rather than inline —
     /// on this screen it is a repair job, not the main event.
     private var repairSheet: some View {
@@ -738,7 +591,7 @@ struct PairingView: View {
     // MARK: - Actions
 
     private func prefill() {
-        guard let endpoint = model.pairing.endpoint else { return }
+        guard let endpoint = model.endpoint else { return }
         address = endpoint.displayAddress
         token = endpoint.token ?? ""
     }
@@ -748,7 +601,7 @@ struct PairingView: View {
         case .success(let parsed):
             scanError = nil
             pairingStartedAt = Date()
-            model.pair(withQR: parsed)
+            machines.pair(withQR: parsed)
         case .failure(let failure):
             scanError = failure.localizedDescription
         }
@@ -767,13 +620,13 @@ struct PairingView: View {
         validationError = nil
         switch credential {
         case .token:
-            model.pair(with: endpoint)
+            machines.pair(with: endpoint)
             if !isOnboarding { showManualEntry = false }
         case .pairingCode(let code):
             // A typed code is the same one-shot exchange the QR performs; it
             // must not be stored, so it goes through the pairing path.
             pairingStartedAt = Date()
-            model.pair(
+            machines.pair(
                 withQR: PairingQRPayload(host: endpoint.host, port: endpoint.port, code: code))
             if !isOnboarding { showManualEntry = false }
         }
@@ -856,11 +709,11 @@ struct PairingScanSheet: View {
         .overlay {
             CCScannerFrame(
                 isDetected: detected,
-                caption: "Point the camera at the QR code in your Mac's terminal.")
+                caption: "Point the camera at the QR code in your computer's terminal.")
             .ignoresSafeArea()
         }
         .overlay(alignment: .bottom) { torchButton }
-        .accessibilityLabel("Point the camera at the QR code printed by codeconnect pair on your Mac.")
+        .accessibilityLabel("Point the camera at the QR code printed by codeconnect pair on your computer.")
     }
 
     private func unavailable(
@@ -916,5 +769,241 @@ struct PairingScanSheet: View {
     private func openSystemSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+}
+
+// MARK: - One machine
+
+/// One paired machine: its link, how this iPhone reaches it, what its daemon
+/// advertises, and the way to remove it. Pushed from its row in Settings with
+/// that machine's model, so it speaks for — and removes — that machine alone.
+struct MachineScreen: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var showLinkHealth = false
+    @State private var confirmingRemove = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: CC.rhythm.sections) {
+                computerSection
+                transportSection
+                capabilitiesSection
+                removeSection
+            }
+            .padding(.horizontal, CC.space.md)
+            .padding(.vertical, CC.space.lg)
+        }
+        .background(CC.color.bg)
+        .ccNavigationChrome()
+        .navigationTitle(model.machineName ?? "Machine")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showLinkHealth) {
+            LinkHealthSheet().environment(model)
+        }
+    }
+
+    private var computerSection: some View {
+        VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
+            // Flush: the header owns the content column itself. Anything added
+            // here is added twice.
+            CCSectionHeader("Computer")
+
+            CCCard(padding: 0) {
+                CCRow(
+                    model.machineName ?? "Not paired",
+                    subtitle: model.machineSystem,
+                    meta: model.endpoint?.displayAddress,
+                    separator: false,
+                    action: { showLinkHealth = true }
+                ) {
+                    CCStatusDot(
+                        color: model.linkHealth.level.ccTone.color,
+                        isHollow: model.linkHealth.level == .offline,
+                        pulses: model.linkHealth.level == .connecting,
+                        accessibilityText: "Link health")
+                } trailing: {
+                    Text(model.linkHealth.shortText)
+                        .ccType(CC.type.monoSmall)
+                        .foregroundStyle(CC.text.tertiary)
+                        .fixedSize()
+                }
+            }
+        }
+    }
+
+    /// Prefer the daemon's own report over what this end asked for.
+    private var encrypted: Bool {
+        model.daemonProfile.connectionEncrypted || model.connection.usingTLS
+    }
+
+    /// Amber means **something is degraded**, and the only degraded transport is
+    /// a daemon that holds a certificate this socket is not using.
+    ///
+    /// The row shipped as `tone: encrypted ? .neutral : .warning`, which painted
+    /// plain `ws` amber on a daemon reporting `Holds a certificate: no` — the
+    /// designed configuration, inside the tailnet, with the footnote directly
+    /// beneath the row explaining that WireGuard carries the encryption.
+    /// "If a colour isn't telling you something actionable, it's a bug", and a
+    /// warning nobody can act on is also the one that gets ignored on the day it
+    /// is real. Link Health computes this same fact this same way; two screens
+    /// disagreeing about whether one socket is degraded is worse than either
+    /// answer.
+    private var transportTone: CCTone {
+        guard !encrypted else { return .neutral }
+        return model.connection.capabilities?.tls == true ? .warning : .neutral
+    }
+
+    /// Everything that qualifies the transport row, in prose, under it. Both can
+    /// be true at once — a daemon that holds a certificate it is not serving on
+    /// *this* socket, and a stated reason why — and neither is the other's
+    /// paraphrase.
+    private var transportNotes: [String] {
+        var notes: [String] = []
+        if let capabilities = model.connection.capabilities, capabilities.tls, !encrypted {
+            notes.append(
+                "The daemon holds a certificate but this connection is not using it.")
+        }
+        if let reason = model.tlsUnavailableReason {
+            notes.append(reason)
+        }
+        return notes
+    }
+
+    private var transportSection: some View {
+        VStack(alignment: .leading, spacing: CC.space.sm) {
+            CCSectionHeader("Transport")
+
+            CCCard(padding: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    // The daemon reports whether *this* connection is encrypted,
+                    // separately from whether it holds a certificate at all.
+                    // Both are shown, because "the server can do TLS" and "you
+                    // are using it" are different facts and only one of them is
+                    // about you.
+                    //
+                    // `wss` / `ws` and nothing else in the value: the shipped
+                    // row read `ws (plain)`, where `plain` is an English word
+                    // wearing monospace. What qualifies the transport is a
+                    // sentence, and there is a slot for it below.
+                    CCFactRow(
+                        "Encryption",
+                        value: encrypted ? "wss" : "ws",
+                        tone: transportTone,
+                        separator: false,
+                        accessibilityValueText: encrypted
+                            ? "wss, TLS" : "ws, not encrypted by TLS"
+                    )
+
+                    ForEach(transportNotes, id: \.self) { note in
+                        CCHairline()
+                        Text(note)
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.color.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, CC.space.md)
+                            .padding(.trailing, CC.space.md)
+                            .padding(.vertical, CC.space.sm)
+                    }
+                }
+            }
+
+            // `CCProse`, so the config key it names is set as code.
+            CCProse(
+                PairingView.transportFootnote(
+                    encrypted: encrypted,
+                    paired: model.connection.helloAck?.deviceID != nil,
+                    capabilities: model.connection.capabilities),
+                style: CC.type.footnote, color: CC.text.tertiary
+            )
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var capabilitiesSection: some View {
+        VStack(alignment: .leading, spacing: CC.space.sm) {
+            // The note slot rather than a second sentence: when there is no
+            // daemon there is nothing to list, and the header says so before the
+            // reader gets to an empty card.
+            CCSectionHeader(
+                "What this daemon advertises",
+                note: model.connection.capabilities == nil ? "not connected" : nil
+            )
+
+            CCCard(padding: 0) {
+                VStack(spacing: 0) {
+                    if let capabilities = model.connection.capabilities {
+                        let rows = capabilities.advertisedRows
+                        ForEach(Array(rows.enumerated()), id: \.element.name) { index, row in
+                            // `CCFactRow`, not fifteen hand-written lines: the
+                            // 48pt floor, the `key` label style and the stacked
+                            // form at accessibility sizes all come from one place
+                            // now.
+                            //
+                            // The separator moves outside the row so it stays
+                            // full card width while the row's *text* takes the
+                            // content column — the shipped list drew its hairline
+                            // at a 16pt leading inset and flush right, an
+                            // asymmetry nothing else in the app has.
+                            if index > 0 { CCHairline() }
+                            CCFactRow(
+                                row.name, value: row.value, labelStyle: .key, separator: false
+                            )
+                        }
+                    } else {
+                        // Never a guess and never a blank: the app says it does
+                        // not know, in the daemon's absence.
+                        Text("Unknown - not connected.")
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, CC.space.md)
+                            .padding(.trailing, CC.space.md)
+                            .padding(.vertical, CC.space.md)
+                    }
+                }
+            }
+
+            Text(
+                "Listed exactly as the daemon reported it, including anything this app version does not have a name for."
+            )
+            .ccType(CC.type.footnote)
+            .foregroundStyle(CC.text.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Removing a machine forgets it and nothing else: every other machine stays
+    /// paired, connected and cached.
+    private var removeSection: some View {
+        VStack(alignment: .leading, spacing: CC.space.sm) {
+            CCButton("Remove this machine", variant: .destructive, size: .lg, fullWidth: true) {
+                confirmingRemove = true
+            }
+
+            CCProse(
+                "Removes this computer's pairing and its cached events from this iPhone; other computers stay paired. To revoke this iPhone at the computer, run `codeconnect revoke` there.",
+                style: CC.type.footnote, color: CC.text.tertiary
+            )
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .confirmationDialog(
+            "Remove this machine?", isPresented: $confirmingRemove, titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                machines.unpair(model)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This iPhone forgets \(model.machineName ?? "this computer"). To use it again, run codeconnect pair on it and scan the code."
+            )
+        }
     }
 }

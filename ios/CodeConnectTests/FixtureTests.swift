@@ -182,13 +182,13 @@ final class FixtureTests: XCTestCase {
     }
 }
 
-/// Deep links land on the model, survive a cold start, and are consumed exactly
+/// Deep links land on `Machines`, survive a cold start, and are consumed exactly
 /// once — so the fleet and the session detail cannot both act on the same link.
 @MainActor
 final class DeepLinkRoutingTests: XCTestCase {
-    private func makeModel() -> AppModel {
-        AppModel(
-            pairing: PairingStore(),
+    private func makeApp() -> Machines {
+        Machines(
+            pairing: PairingStore(ephemeral: true),
             cache: EventCache(
                 root: URL(fileURLWithPath: NSTemporaryDirectory())
                     .appendingPathComponent(UUID().uuidString)),
@@ -196,26 +196,26 @@ final class DeepLinkRoutingTests: XCTestCase {
     }
 
     func testKnownLinksAreAccepted() throws {
-        let model = makeModel()
-        XCTAssertTrue(model.open(url: try XCTUnwrap(URL(string: "codeconnect://deck"))))
-        XCTAssertEqual(model.pendingDeepLink, .deck(requestID: nil))
+        let app = makeApp()
+        XCTAssertTrue(app.open(url: try XCTUnwrap(URL(string: "codeconnect://deck"))))
+        XCTAssertEqual(app.pendingDeepLink, .deck(requestID: nil))
     }
 
     func testForeignLinksAreRejectedAndChangeNothing() throws {
-        let model = makeModel()
-        model.pendingDeepLink = .deck(requestID: "keep-me")
-        XCTAssertFalse(model.open(url: try XCTUnwrap(URL(string: "https://example.com"))))
+        let app = makeApp()
+        app.pendingDeepLink = .deck(requestID: "keep-me")
+        XCTAssertFalse(app.open(url: try XCTUnwrap(URL(string: "https://example.com"))))
         XCTAssertEqual(
-            model.pendingDeepLink, .deck(requestID: "keep-me"),
+            app.pendingDeepLink, .deck(requestID: "keep-me"),
             "an unrecognised URL must not clear a pending target")
     }
 
     func testALinkIsConsumedOnlyOnce() throws {
-        let model = makeModel()
-        _ = model.open(url: try XCTUnwrap(URL(string: "codeconnect://session/cc-1/diff")))
-        XCTAssertEqual(model.consumeDeepLink(), .diff(sessionID: "cc-1"))
-        XCTAssertNil(model.consumeDeepLink(), "two surfaces must not both act on one link")
-        XCTAssertNil(model.pendingDeepLink)
+        let app = makeApp()
+        _ = app.open(url: try XCTUnwrap(URL(string: "codeconnect://session/cc-1/diff")))
+        XCTAssertEqual(app.consumeDeepLink(), .diff(sessionID: "cc-1"))
+        XCTAssertNil(app.consumeDeepLink(), "two surfaces must not both act on one link")
+        XCTAssertNil(app.pendingDeepLink)
     }
 }
 
@@ -281,19 +281,20 @@ final class SampleFleetTests: XCTestCase {
     /// pairing form — takes the sample state down first, entirely.
     func testPairingTearsTheSampleFleetDown() async {
         let model = makeModel()
+        let app = Machines(holding: model)
         model.startSampleFleet()
         for state in model.statesForTesting.values { await state.settleForTesting() }
-        XCTAssertEqual(model.deckCount, 3)
+        XCTAssertEqual(app.deck.count, 3)
 
-        model.pair(
+        app.pair(
             with: DaemonEndpoint(
                 host: "mac.example", port: 8787, credential: .token("t"), useTLS: false))
-        defer { model.connection.stop() }
+        defer { app.cancelPairing() }
 
         XCTAssertFalse(model.sampleFleetActive)
         XCTAssertFalse(model.fixturesActive, "the network side effects come back with the pairing")
         XCTAssertTrue(model.summaries.isEmpty)
-        XCTAssertEqual(model.deckCount, 0, "a sample card must never be counted beside a real one")
+        XCTAssertEqual(app.deck.count, 0, "a sample card must never be counted beside a real one")
     }
 
     /// Leaving returns the app to onboarding rather than to an empty fleet.

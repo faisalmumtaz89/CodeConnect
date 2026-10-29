@@ -52,7 +52,7 @@ struct DecisionCardView: View {
     /// The read-before-you-decide gate. A geometry test, never a lifecycle one —
     /// see `ReadGate`.
     @State private var gate = ReadGate()
-    /// Where the gate's four measurements live — **deliberately outside the
+    /// Where the gate's five measurements live — **deliberately outside the
     /// view's own state.**
     ///
     /// Writing a scroll-varying number into `@State` re-runs `body`, which
@@ -337,10 +337,24 @@ struct DecisionCardView: View {
         .background {
             GeometryReader { proxy in
                 Color.clear.preference(
-                    key: ViewportBottomKey.self, value: proxy.frame(in: .global).maxY)
+                    key: ViewportBottomKey.self,
+                    value: proxy.frame(in: .named(Self.readGateSpace)).maxY)
             }
         }
+        // The read gate's space: the scroll view's own frame, after the reader
+        // above and before the bar, so the viewport and every edge inside it are
+        // measured from the same origin wherever the card is on the screen.
+        .coordinateSpace(name: Self.readGateSpace)
         .safeAreaInset(edge: .bottom, spacing: 0) { pinnedFooter }
+        // The card's whole height, bar included. The bar is pinned to the
+        // card's bottom, so its top is this height less the bar's own: two
+        // sizes, which are reported again whenever they change, where the
+        // bar's position was not.
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: CardHeightKey.self, value: proxy.size.height)
+            }
+        }
         // After `safeAreaInset`, so the bar's own geometry reaches these.
         .onPreferenceChange(CommandBottomKey.self) { value in
             probe.commandBottom = value
@@ -356,6 +370,10 @@ struct DecisionCardView: View {
         }
         .onPreferenceChange(ActionBarHeightKey.self) { value in
             probe.actionBarHeight = value
+            updateGate()
+        }
+        .onPreferenceChange(CardHeightKey.self) { value in
+            probe.cardHeight = value
             updateGate()
         }
         .onPreferenceChange(DiffWidthKey.self) { value in
@@ -546,18 +564,22 @@ struct DecisionCardView: View {
         return core(intent) != core(command)
     }
 
-    /// Reports a view's bottom edge in screen coordinates.
+    /// The scroll view's frame, which the read gate measures every edge in.
+    private static let readGateSpace = "decisionReadGate"
+
+    /// Reports a view's bottom edge in the read gate's space.
     ///
-    /// Screen coordinates rather than the scroll view's own space because the
-    /// thing the block has to clear is the **pinned action bar**, and
-    /// `safeAreaInset` draws that bar over the scroll view rather than
-    /// shortening it — so a test against the scroll view's frame would call a
-    /// command "seen" while the bar was covering it, which is exactly what a
-    /// render of a MEDIUM card at AX5 showed.
+    /// The scroll view's own space, not the screen's: the cover and the stack
+    /// move a card into place without laying it out again, so an edge measured
+    /// on the screen while the card arrived was the only one it ever reported,
+    /// and a command fully on screen stayed "unseen". Measured against the
+    /// scroll view's frame, where the card is on the screen does not matter.
+    /// The **pinned action bar** still has to be cleared, which
+    /// `ReadGateProbe.visibleBottom` does from the card's height and the bar's.
     private func bottomProbe<K: PreferenceKey>(_ key: K.Type) -> some View
     where K.Value == CGFloat? {
         GeometryReader { proxy in
-            Color.clear.preference(key: key, value: proxy.frame(in: .global).maxY)
+            Color.clear.preference(key: key, value: proxy.frame(in: .named(Self.readGateSpace)).maxY)
         }
     }
 
@@ -1485,34 +1507,60 @@ struct DecisionCardView: View {
         }
         switch agent {
         case .codex:
-            if let caveat = model.daemonProfile.codexAnswerCaveat { return caveat }
-            guard verification.renderMatchesDisplayText else {
-                return ApprovalCard.unverifiableCodexLine
-            }
-            return "This card arrived without the options Codex answers by, so it can only be "
-                + "answered at the Mac."
+            return Self.codexUnanswerableReason(
+                isKnown: model.daemonProfile.isConnected,
+                caveat: model.daemonProfile.codexAnswerCaveat,
+                isVerified: verification.renderMatchesDisplayText,
+                linkReason: model.actionsBlockedReason)
         case .unsupported(let raw):
-            return "This app does not know how to answer a \(raw) session. Answer it at the Mac."
+            return "This app does not know how to answer a \(raw) session. Answer it at the "
+                + "computer."
         case .claude:
             return Self.claudeUnanswerableReason(
                 isQuestion: approval.card.toolName == QuestionCard.toolName,
-                hookOnlyApprovals: model.daemonProfile.answersApprovalsByHook, hold: hold)
+                hookOnlyApprovals: model.daemonProfile.capabilities?.hookOnlyApprovals,
+                linkReason: model.actionsBlockedReason, hold: hold)
         }
+    }
+
+    /// Why a Codex card offers nothing to tap. Static so the words can be
+    /// asserted without a `View`.
+    ///
+    /// Unknown is not old: while nothing is known of the Mac (`isKnown` false,
+    /// its link down) the card says what is known, which is the link — never the
+    /// caveat, and never that the card came without its options.
+    static func codexUnanswerableReason(
+        isKnown: Bool, caveat: String?, isVerified: Bool, linkReason: String?
+    ) -> String {
+        guard isKnown else {
+            return linkReason ?? "The phone can no longer answer this. Answer it at the computer."
+        }
+        if let caveat { return caveat }
+        guard isVerified else { return ApprovalCard.unverifiableCodexLine }
+        return "This card arrived without the options Codex answers by, so it can only be "
+            + "answered at the computer."
     }
 
     /// Why a Claude card offers nothing to tap: the Mac's CodeConnect would type
     /// the answer, or the card is not held for the phone. Static so the words can
     /// be asserted without a `View`.
+    ///
+    /// `hookOnlyApprovals` is nil while nothing is known of the Mac — its link
+    /// is down and took its capabilities with it. Unknown is not old: the card
+    /// then says what is known, which is the link.
     static func claudeUnanswerableReason(
-        isQuestion: Bool, hookOnlyApprovals: Bool, hold: QuestionHold?
+        isQuestion: Bool, hookOnlyApprovals: Bool?, linkReason: String?, hold: QuestionHold?
     ) -> String {
         if isQuestion { return "This card cannot be answered from here." }
-        guard hookOnlyApprovals else {
-            return "This Mac's CodeConnect is too old to answer Claude's approvals from the "
-                + "phone. Update it, or answer at the Mac."
+        guard let hookOnlyApprovals else {
+            return linkReason ?? "The phone can no longer answer this. Answer it at the computer."
         }
-        if hold == .atMac { return "Claude is asking this at the Mac, so answer it there." }
-        return "The phone can no longer answer this. Answer it at the Mac."
+        guard hookOnlyApprovals else {
+            return "This computer's CodeConnect is too old to answer Claude's approvals from the "
+                + "phone. Update it, or answer at the computer."
+        }
+        if hold == .atMac { return "Claude is asking this at the computer, so answer it there." }
+        return "The phone can no longer answer this. Answer it at the computer."
     }
 
     private var codexBarNote: String {
@@ -1887,10 +1935,9 @@ struct ReadGate: Equatable {
     /// …and so has the bottom edge of the risk class and its provenance.
     var hasSeenProvenance = false
 
-    /// Both edges are measured in screen coordinates. `visibleBottom` is the
-    /// scroll view's own bottom less whatever the pinned action bar covers,
-    /// because the bar is drawn *over* the scroll view rather than shortening
-    /// it.
+    /// Both edges are measured in the scroll view's own space. `visibleBottom`
+    /// is where the readable part of the scroll view ends: its own bottom, or
+    /// the pinned action bar's top where that is higher.
     ///
     /// Every way of not knowing answers **no**: an unmeasured edge (`nil`), a
     /// layout that has not happened (`visibleBottom <= 0`), a non-finite value
@@ -1943,7 +1990,7 @@ struct ReadGate: Equatable {
     }
 }
 
-/// The four numbers the read gate is decided from.
+/// The five numbers the read gate is decided from.
 ///
 /// A class, and held in `@State` rather than as `@State` values, for one
 /// measured reason: `commandBottom` changes on every frame of a scroll, and
@@ -1954,8 +2001,8 @@ struct ReadGate: Equatable {
 /// decision, not part of the view's identity; only the decision is state.
 @MainActor
 final class ReadGateProbe {
-    /// The bottom edge of the block carrying the command, in screen
-    /// coordinates.
+    /// The bottom edge of the block carrying the command, in the scroll view's
+    /// own space.
     ///
     /// **`nil` means "not measured yet", stated as `nil`.** A sentinel —
     /// `.infinity`, `.greatestFiniteMagnitude` — puts a value into the program
@@ -1967,7 +2014,9 @@ final class ReadGateProbe {
     var provenanceBottom: CGFloat?
     /// The bottom of the scroll view's own frame.
     var viewportBottom: CGFloat?
-    /// How much of that frame the pinned action bar covers. A *height* rather
+    /// The whole card's height, the pinned bar included.
+    var cardHeight: CGFloat?
+    /// How tall the pinned action bar is. A *height* rather
     /// than an edge: `safeAreaInset` renders its content into the hierarchy
     /// more than once, and the spare instance reports zero — zero height means
     /// "covers nothing" and is harmless, where a zero *edge* would have meant
@@ -1975,7 +2024,7 @@ final class ReadGateProbe {
     ///
     /// Optional for the same reason every edge here is: **"not measured yet"
     /// and "measures zero" are different facts.** This defaulted to `0`, and the
-    /// four geometry reports arrive as four separate `onPreferenceChange`
+    /// five geometry reports arrive as five separate `onPreferenceChange`
     /// callbacks in whatever order SwiftUI delivers them. A frame with the
     /// viewport reported and the bar not yet reported therefore computed the
     /// readable region as the *whole* scroll view — which extends underneath
@@ -2003,11 +2052,26 @@ final class ReadGateProbe {
     /// tappable control, and `CC.size.hitTarget` is this product's rule for the
     /// smallest a tappable thing may be. A bar shorter than one control has not
     /// been laid out yet, whatever number it just reported.
+    ///
+    /// The bar's top is the card's height less the bar's, and the readable
+    /// part ends at the higher of that and the scroll view's bottom.
+    /// `safeAreaInset` ends the scroll view at the bar once it has laid the bar
+    /// out, but on the pass where the bar first reports its height the scroll
+    /// view still reaches the card's bottom: measured, `vp=699 bar=231.3` on a
+    /// 700pt card. Only sizes are read, because a size is reported again when
+    /// it changes and a position is not: the bar's top once stayed at `0` while
+    /// the card grew to 700pt under it, and `Allow` never armed.
+    ///
+    /// The card is never shorter than the scroll view inside it, so a card
+    /// height below the viewport is a report that never caught up — measured,
+    /// `vp=580 bar=120` with the card's last report still `120` — and the bar's
+    /// top is taken from the viewport instead, which can only place it higher.
     var visibleBottom: CGFloat? {
         guard let viewportBottom, viewportBottom.isFinite else { return nil }
+        guard let cardHeight, cardHeight.isFinite else { return nil }
         guard let actionBarHeight, actionBarHeight.isFinite else { return nil }
         guard actionBarHeight >= CC.size.hitTarget else { return nil }
-        return viewportBottom - actionBarHeight
+        return min(viewportBottom, max(cardHeight, viewportBottom) - actionBarHeight)
     }
 }
 
@@ -2047,6 +2111,9 @@ private struct ProvenanceBottomKey: ReadGateEdgeKey {}
 
 /// The bottom of the scroll view's own frame.
 private struct ViewportBottomKey: ReadGateEdgeKey {}
+
+/// The whole card's height, the pinned bar included.
+private struct CardHeightKey: ReadGateEdgeKey {}
 
 /// How tall the pinned action bar is — a *height*, not an edge.
 ///

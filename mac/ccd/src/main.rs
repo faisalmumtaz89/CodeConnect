@@ -26,6 +26,7 @@ mod legacy_credentials;
 mod liveness;
 mod log;
 mod logrotate;
+mod machine;
 mod presence;
 mod project_label;
 mod push_gate;
@@ -98,6 +99,9 @@ async fn main() -> Result<()> {
     // to the CLI's reachability advisory, which must reason about the socket
     // that exists, not the name the QR advertises.
     let _ = daemon.bind_ip.set(bind.ip().to_string());
+    let _ = daemon
+        .machine_id
+        .set(load_or_create_machine_id(&protocol::machine_id_path())?);
     // Its own bytes, hashed now: the file at this path can change under a
     // running process (that is the whole point of recording it), so the hash
     // must be of what was actually loaded, as close to exec as we get.
@@ -1892,6 +1896,24 @@ fn load_or_create_token(path: &Path) -> Result<String> {
     Ok(token)
 }
 
+/// Which daemon this is: minted the first time this home starts a daemon, then
+/// read back unchanged, so a phone that reached it under two addresses can tell
+/// they are one machine. Not a credential — it is sent to every paired phone —
+/// but written private like the rest of the home.
+fn load_or_create_machine_id(path: &Path) -> Result<String> {
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        let trimmed = existing.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+    let id = secret::hex(&secret::random_bytes::<16>()?);
+    protocol::fsperm::write_private(path, format!("{id}\n").as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    crate::log_info!("minted this daemon's machine id at {}", path.display());
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2070,6 +2092,29 @@ mod tests {
         let reread = load_or_create_token(&path).unwrap();
         assert_eq!(reread, created, "the existing token must be preserved");
         assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn the_machine_id_is_minted_once_owner_only_and_read_back_unchanged() {
+        let root = scratch_root("machine-id");
+        protocol::fsperm::private_dir(&root).unwrap();
+        let path = root.join("machine_id");
+
+        let minted = load_or_create_machine_id(&path).unwrap();
+        assert_eq!(minted.len(), 32, "16 random bytes, hex: {minted}");
+        assert!(minted.chars().all(|c| c.is_ascii_hexdigit()), "{minted}");
+        assert_eq!(mode(&path), 0o600);
+
+        // The next start, and the one after: the same machine.
+        assert_eq!(load_or_create_machine_id(&path).unwrap(), minted);
+        assert_eq!(load_or_create_machine_id(&path).unwrap(), minted);
+        // Another home is another machine.
+        let other = scratch_root("machine-id-other");
+        protocol::fsperm::private_dir(&other).unwrap();
+        assert_ne!(
+            load_or_create_machine_id(&other.join("machine_id")).unwrap(),
+            minted
+        );
     }
 
     #[test]

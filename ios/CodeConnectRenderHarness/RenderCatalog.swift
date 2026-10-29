@@ -491,7 +491,7 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.require(app.buttons["pairing-sample-mode"], "the first screen")
                 try driver.scrollUntil(app, "the network step on screen") {
-                    driver.element(containing: "reach your Mac", in: app).isHittable
+                    driver.element(containing: "reach your computer", in: app).isHittable
                 }
             }),
 
@@ -926,9 +926,30 @@ enum RenderCatalog {
 
         RenderScenario(
             name: "settings",
-            purpose: "the trust screen: what this daemon advertises, verbatim",
+            purpose: "the machines this iPhone keeps, and the way to add another",
             arguments: ["-CC_FIXTURE", "deck"],
             reach: { app, driver in try driver.openSettings(app) }),
+
+        RenderScenario(
+            name: "settings-machines",
+            purpose: "two machines, one offline with the longest name, and the way to add another",
+            arguments: secondMachineArguments,
+            reach: { app, driver in
+                try driver.openSettings(app)
+                try driver.require(secondMachineRow(app), "the offline machine's row")
+            }),
+
+        RenderScenario(
+            name: "machine",
+            purpose: "one machine's own screen: its link, transport, what its daemon advertises, Remove",
+            arguments: secondMachineArguments,
+            reach: { app, driver in
+                try driver.openSettings(app)
+                try driver.require(secondMachineRow(app), "the offline machine's row").tap()
+                try driver.require(
+                    app.navigationBars[secondMachine], "that machine's own screen, by its name")
+                try driver.require(app.buttons["Remove this machine"], "Remove this machine")
+            }),
 
         RenderScenario(
             name: "link-health",
@@ -1033,6 +1054,18 @@ enum RenderCatalog {
     /// (in the unit target, which *can* see both) pins them against each other.
     /// A state added on one side and not the other fails there rather than
     /// producing a render nobody notices is missing.
+    /// A second machine beside the fixture's, offline, named as long as a
+    /// machine's name gets.
+    static let secondMachine = "build-server-eu-west-1"
+    static let secondMachineArguments = [
+        "-CC_FIXTURE", "deck", "-CC_FIXTURE_SECOND_MACHINE", secondMachine,
+    ]
+
+    /// Its row in Settings, by the name its label starts with.
+    static func secondMachineRow(_ app: XCUIApplication) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", secondMachine)).firstMatch
+    }
+
     static let codexSessionKey = "cx-1"
 
     /// One scenario, with the boilerplate every Codex render shares.
@@ -1236,7 +1269,7 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.openDeck(app)
                 try driver.require(
-                    driver.element(containing: "answer it at the Mac", in: app),
+                    driver.element(containing: "answer it at the computer", in: app),
                     "the card's own reason, and where the question can be answered")
                 guard !driver.element(containing: "Choose one", in: app).exists else {
                     throw RenderFailure.unreachable(
@@ -1697,7 +1730,7 @@ enum RenderCatalog {
             opensWith: "View",
             reach: { app, driver in
                 try driver.require(
-                    driver.element(containing: "Asking at the Mac", in: app), "the card's status")
+                    driver.element(containing: "Asking at the computer", in: app), "the card's status")
             }),
         questionScenario(
             "ended", state: "ended",

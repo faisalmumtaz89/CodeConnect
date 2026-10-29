@@ -565,7 +565,25 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     `source_event_id` of the fact it belongs immediately before. A client draws
 ///     it there. Additive, and a client written against minor 23 needs none of it:
 ///     without it such an item is drawn where it was filed, as before.
-pub const PROTOCOL_MINOR: u32 = 24;
+///   * `25` — **Which computer this is.**
+///
+///     A phone names the computer it is paired with the way its owner does.
+///     Additive, and a client written against minor 24 needs none of it:
+///       - [`ws::ServerMessage::HelloAck`]'s `machine_name` — the computer's name
+///         (a Mac's computer name), absent when it could not be read.
+///       - its `machine_os` — `"macos"` or `"linux"`, absent when not said.
+///
+///     A client that gets neither names the computer by the host it paired with.
+///   * `26` — **Which daemon this is, whatever address reached it.**
+///
+///     A phone can pair one daemon under two addresses (an IP, then its MagicDNS
+///     name) and must still hold it as one machine. Additive, and a client written
+///     against minor 25 needs none of it:
+///       - [`ws::ServerMessage::HelloAck`]'s `machine_id` — minted once into the
+///         daemon's home ([`machine_id_path`]) and the same on every handshake.
+///
+///     A client that gets none tells machines apart by address, as before.
+pub const PROTOCOL_MINOR: u32 = 26;
 
 #[cfg(test)]
 mod ledger_tests {
@@ -783,6 +801,13 @@ pub fn db_path() -> PathBuf {
 /// before per-device tokens existed never locks itself out.
 pub fn token_path() -> PathBuf {
     root_dir().join("token")
+}
+
+/// Which daemon this is, minted once and sent in every `hello_ack`. Lives with
+/// the rest of the daemon's state, so it is this home's identity: an update or a
+/// reinstall keeps it, and a fresh home is a new machine.
+pub fn machine_id_path() -> PathBuf {
+    root_dir().join("machine_id")
 }
 
 /// Cached `tailscale cert` material. Owner-only: the private key lives here.

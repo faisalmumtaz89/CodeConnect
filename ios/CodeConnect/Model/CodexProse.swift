@@ -259,8 +259,8 @@ enum CodexProse {
     /// interpret says nothing about whether the mutation happened, and the copy
     /// must not decide for it in either direction.
     static func unknownStatusSentence(_ status: String) -> String {
-        "The Mac answered with a status this app does not know (“\(status)”), so what became of "
-            + "this is not something the app can say. Update the app, and check the Mac."
+        "The computer answered with a status this app does not know (“\(status)”), so what became "
+            + "of this is not something the app can say. Update the app, and check the computer."
     }
 
     // MARK: What became of a message
@@ -338,7 +338,7 @@ enum CodexProse {
     ) -> String? {
         guard agent == .codex else { return "Only a Codex session can be stopped from here." }
         guard daemonHonoursStop else {
-            return "This Mac's CodeConnect is too old to stop a Codex turn. Update it."
+            return "This computer's CodeConnect is too old to stop a Codex turn. Update it."
         }
         // **The one honest hide** is the absent turn: with nothing to name there
         // is nothing to send, so the control is absent rather than dead.
@@ -352,7 +352,7 @@ enum CodexProse {
     ) -> String? {
         guard agent == .codex else { return "Only a Codex session is spoken to this way." }
         guard daemonUnderstandsCompose else {
-            return "This Mac's CodeConnect is too old to carry a message to Codex. Update it."
+            return "This computer's CodeConnect is too old to carry a message to Codex. Update it."
         }
         return link.blockedReason(for: .compose)
     }

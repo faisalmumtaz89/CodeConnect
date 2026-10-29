@@ -111,7 +111,9 @@ final class DaemonConnection {
             protocolVersion: helloAck.protocolVersion,
             protocolMinor: helloAck.protocolMinor,
             capabilities: helloAck.capabilities,
-            deviceName: helloAck.deviceName)
+            deviceName: helloAck.deviceName,
+            machineName: helloAck.machineName,
+            machineOS: helloAck.machineOS)
     }
     /// When a frame last arrived from the daemon. The only honest basis for a
     /// freshness claim — a socket that is open but silent is not fresh.

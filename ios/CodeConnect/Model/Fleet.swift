@@ -145,9 +145,16 @@ struct FleetRow: Sendable, Identifiable, Hashable {
     var lastEventAt: Date?
     /// Non-nil when nothing live has arrived for this session this launch.
     var cachedAt: Date?
+    /// The machine the run is on (`PairedMachine.id`; nil in the sample fleet
+    /// and a fixture run), and what that machine is called. Its link is not
+    /// the row's: a row is held as it was while a catch-up runs, and the link
+    /// is live — `Machines.model(for: machineID)?.linkHealth`.
+    var machineID: String?
+    var machineName: String?
 
     /// The run, not the name: two rows can share `cc-1` and a `ForEach` that
-    /// cannot tell them apart renders one of them.
+    /// cannot tell them apart renders one of them. A run's uid is minted once,
+    /// for it alone, so two machines' runs never share one either.
     var id: String { summary.sessionKey }
 }
 
@@ -488,6 +495,19 @@ struct LinkHealth: Sendable, Equatable {
     }
 
     var ageText: String { age.map(Format.age) ?? "-" }
+
+    /// The level in words, as the link's spoken value and each machine's row in
+    /// Settings say it.
+    var word: String {
+        switch level {
+        case .live: return "Live"
+        case .lagging: return "Lagging"
+        case .stale: return "Stale"
+        case .connecting: return "Connecting"
+        case .offline: return "Offline"
+        case .rejected: return "Token rejected"
+        }
+    }
 
     var symbol: String {
         switch level {

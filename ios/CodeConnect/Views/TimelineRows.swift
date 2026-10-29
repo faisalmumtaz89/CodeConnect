@@ -27,6 +27,9 @@ struct TimelineRow: View {
     let profile: DaemonProfile
     /// The run's agent, which decides whether a card is Claude's question.
     let agent: AgentKind?
+    /// Why the run's computer cannot be reached now, which a question says
+    /// while nothing is known of it.
+    let linkReason: String?
     /// Fired after a long message collapses, with this row's own id, so the
     /// screen can bring the row back under the viewport — see `AgentMessageRow`.
     var onCollapse: ((String) -> Void)? = nil
@@ -50,7 +53,7 @@ struct TimelineRow: View {
                 QuestionRow(
                     approval: approval, questions: questions,
                     risk: approval.assessment(profile: profile).effective,
-                    answersQuestions: profile.answersQuestions
+                    answersQuestions: profile.knownAnswersQuestions, linkReason: linkReason
                 ) { onOpenApproval(approval) }
             } else {
                 ApprovalRow(
@@ -858,7 +861,8 @@ struct QuestionRow: View {
     let approval: ApprovalItem
     let questions: QuestionCard
     let risk: RiskClass
-    let answersQuestions: Bool
+    let answersQuestions: Bool?
+    let linkReason: String?
     let onOpen: () -> Void
 
     /// See `ApprovalRow.lastTick`: the same clock, for the same two ages.
@@ -874,7 +878,7 @@ struct QuestionRow: View {
     }
 
     private var status: QuestionCardStatus {
-        .recorded(approval, answersQuestions: answersQuestions)
+        .recorded(approval, answersQuestions: answersQuestions, linkReason: linkReason)
     }
 
     private var title: String {

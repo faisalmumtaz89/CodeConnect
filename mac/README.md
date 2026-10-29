@@ -891,6 +891,14 @@ turn) and the `model` and `permission_mode` facts, each with the seq of the
 event that decided it. A page moves no subscription watermark and is not counted
 as a delivery for notifications; a second page asked for a session while one is
 being sent is queued behind it. The new summary fields are omitted when empty.
+`>= 25` says which computer this is: `hello_ack.machine_name`, the Mac's computer
+name read on every handshake (omitted when it cannot be read), and
+`hello_ack.machine_os`, `macos` or `linux`. A phone that gets no name names the
+computer by the host it paired with.
+`>= 26` says which daemon this is, whatever address reached it:
+`hello_ack.machine_id`, minted once into `~/.codeconnect/machine_id` and the same
+on every handshake, so a phone that paired this daemon under two addresses (an IP,
+then its MagicDNS name) holds it as one machine.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

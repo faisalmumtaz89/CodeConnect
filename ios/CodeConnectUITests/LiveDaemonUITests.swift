@@ -124,6 +124,10 @@ final class LiveDaemonUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
         app.buttons["Settings and pairing"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
+        // What a daemon advertises is on its machine's own screen, behind its row.
+        let machine = app.buttons.matching(NSPredicate(format: "label ENDSWITH 'Live'")).firstMatch
+        XCTAssertTrue(machine.waitForExistence(timeout: 10), "the connected machine's row")
+        machine.tap()
 
         let advertised = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS 'What this daemon advertises'")

@@ -114,7 +114,7 @@ final class QuestionCardTests: XCTestCase {
         ) -> QuestionCardStatus {
             QuestionCardStatus.resolve(
                 outcome: outcome, attempt: attempt, isBacked: backed, hold: hold,
-                answersQuestions: capable)
+                answersQuestions: capable, linkReason: nil)
         }
         XCTAssertEqual(status(hold: .held), .answerable)
         XCTAssertEqual(status(hold: .atMac), .askingAtMac)
@@ -158,7 +158,7 @@ final class QuestionCardTests: XCTestCase {
                 from: JSONEncoder().encode(JSONValue.object(mac.merging(changes) { $1 })))
             return QuestionCardStatus.resolve(
                 outcome: outcome, attempt: attempt, isBacked: true, hold: .ended,
-                answersQuestions: true)
+                answersQuestions: true, linkReason: nil)
         }
         let deny: JSONValue = .object(["type": .string("deny")])
         let decline: JSONValue = .object(["type": .string("decline")])
@@ -391,7 +391,7 @@ final class QuestionCardTests: XCTestCase {
                 return nil
             }.last)
         let card = try XCTUnwrap(QuestionCard(card: item.card))
-        let status = QuestionCardStatus.recorded(item, answersQuestions: capable)
+        let status = QuestionCardStatus.recorded(item, answersQuestions: capable, linkReason: nil)
         return (status, status.summary(of: card))
     }
 
@@ -399,10 +399,11 @@ final class QuestionCardTests: XCTestCase {
     /// banner says, and an answer from the phone is what was chosen.
     func testTheTimelineStatesWhatTheCardStates() throws {
         XCTAssertNil(try recorded(["held_request"]).1, "answerable: the row offers Answer instead")
-        XCTAssertEqual(try recorded(["at_mac_request"]).1, "Asking at the Mac")
-        XCTAssertEqual(try recorded(["held_request", "hold_ended"]).1, "Answer at the Mac")
-        XCTAssertEqual(try recorded(["held_request"], capable: false).1, "Answer at the Mac")
-        XCTAssertEqual(try recorded(["at_mac_request", "answered_at_mac"]).1, "Answered at the Mac")
+        XCTAssertEqual(try recorded(["at_mac_request"]).1, "Asking at the computer")
+        XCTAssertEqual(try recorded(["held_request", "hold_ended"]).1, "Answer at the computer")
+        XCTAssertEqual(try recorded(["held_request"], capable: false).1, "Answer at the computer")
+        XCTAssertEqual(
+            try recorded(["at_mac_request", "answered_at_mac"]).1, "Answered at the computer")
         XCTAssertEqual(
             try recorded(["held_request", "answered_from_phone"]).1,
             "Answered: Dedupe with hardlinks (Recommended) · Unit tests, Soak test · "
@@ -424,7 +425,7 @@ final class QuestionCardTests: XCTestCase {
                 if case .approval(let approval) = item.content { return approval }
                 return nil
             }.first)
-        let status = QuestionCardStatus.recorded(item, answersQuestions: true)
+        let status = QuestionCardStatus.recorded(item, answersQuestions: true, linkReason: nil)
         XCTAssertEqual(status, .closed)
         XCTAssertEqual(status.summary(of: try XCTUnwrap(QuestionCard(card: item.card))), "Closed")
     }

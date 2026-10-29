@@ -527,14 +527,14 @@ final class CatchUpTests: XCTestCase {
 
     // MARK: G9, G10
 
-    /// Unpairing mid-catch-up shows nothing it was holding.
+    /// A machine left mid-catch-up shows nothing it was holding.
     func testUnpairingMidCatchUpShowsNoHeldData() async {
         let (model, _) = await caughtUp([Row(uid: a, lastSeq: 3)])
         returnToForeground(model)
         answer(model, [Row(uid: a, lastSeq: 20)])
         inject(model, a, 4...10)
         await settle(model)
-        model.unpair()
+        model.leave()
         XCTAssertTrue(model.fleet.isEmpty)
         XCTAssertTrue(model.deck.isEmpty)
         XCTAssertNil(model.shown(for: a))

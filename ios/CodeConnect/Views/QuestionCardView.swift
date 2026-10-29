@@ -57,7 +57,8 @@ struct QuestionCardView: View {
                 live: live?.outcome, snapshot: approval.outcome),
             attempt: attempt, isBacked: live != nil,
             hold: (live ?? approval).questionHold,
-            answersQuestions: model.daemonProfile.answersQuestions)
+            answersQuestions: model.daemonProfile.knownAnswersQuestions,
+            linkReason: model.actionsBlockedReason)
     }
 
     private var count: Int { questions.questions.count }

@@ -17,21 +17,40 @@ struct DaemonProfile: Sendable, Hashable {
     var capabilities: Capabilities?
     /// What `codeconnect devices` calls this phone, once the daemon has said.
     var deviceName: String?
+    /// What the owner calls the computer, once the daemon has said (minor 25).
+    var machineName: String?
+    /// `"macos"` or `"linux"`, once the daemon has said (minor 25).
+    var machineOS: String?
 
     static let unknown = DaemonProfile(
         protocolVersion: 0, protocolMinor: 0, capabilities: nil, deviceName: nil)
 
     init(
         protocolVersion: UInt32, protocolMinor: UInt32, capabilities: Capabilities?,
-        deviceName: String? = nil
+        deviceName: String? = nil, machineName: String? = nil, machineOS: String? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.protocolMinor = protocolMinor
         self.capabilities = capabilities
         self.deviceName = deviceName
+        self.machineName = machineName
+        self.machineOS = machineOS
     }
 
     var isConnected: Bool { capabilities != nil }
+
+    /// The computer's system as a person writes it, or nil for one this build
+    /// does not know — nothing is shown rather than a raw token.
+    var machineSystem: String? { Self.system(forOS: machineOS) }
+
+    /// `hello_ack.machine_os` as a person writes it.
+    static func system(forOS os: String?) -> String? {
+        switch os {
+        case "macos": "macOS"
+        case "linux": "Linux"
+        default: nil
+        }
+    }
 
     /// The daemon reports protocol minor 1 or newer, which is where
     /// `turn_complete`, `get_diff`, pairing codes, per-device tokens, `risk`
@@ -125,6 +144,10 @@ struct DaemonProfile: Sendable, Hashable {
             && capabilities?.questionCard == true
     }
 
+    /// `answersQuestions`, or nil while nothing is known of the daemon — its
+    /// link is down and took its capabilities with it. Unknown is not old.
+    var knownAnswersQuestions: Bool? { isConnected ? answersQuestions : nil }
+
     /// **The daemon answers a Claude approval only through the hook Claude holds
     /// for that card's own call** — the `hook_only_approvals` capability (minor
     /// 22). Without it a Claude approval is read-only here: an older daemon
@@ -153,8 +176,8 @@ struct DaemonProfile: Sendable, Hashable {
     /// and clipped its own last two words off the bottom of the screen.
     var codexAnswerCaveat: String? {
         guard !resolvesCodexCards else { return nil }
-        return "This Mac's CodeConnect is too old for answers from the phone; answer it at "
-            + "the Mac. Update the Mac to answer here."
+        return "This computer's CodeConnect is too old for answers from the phone; answer it at "
+            + "the computer. Update it to answer here."
     }
 
     /// Why Codex's controls are absent on a daemon that is otherwise working,

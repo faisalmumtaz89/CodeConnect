@@ -203,6 +203,10 @@ pub struct Daemon {
     /// the tests — which never open a real listener — say nothing instead of
     /// inventing an address.
     pub bind_ip: std::sync::OnceLock<String>,
+    /// Which daemon this is (`protocol::machine_id_path`), told by `main` once it
+    /// has read or minted it, and sent in every `hello_ack`. A `OnceLock` for the
+    /// same reason as `bind_ip`: the tests never mint one, and say none.
+    pub machine_id: std::sync::OnceLock<String>,
     /// (path, sha256) of the executable this process is running, captured by
     /// `main` at startup for the staleness line in `daemon status`.
     pub exe_identity: std::sync::OnceLock<(String, String)>,
@@ -1909,6 +1913,7 @@ impl Daemon {
             ring_order: tokio::sync::Mutex::new(()),
             endpoint,
             bind_ip: std::sync::OnceLock::new(),
+            machine_id: std::sync::OnceLock::new(),
             exe_identity: std::sync::OnceLock::new(),
             listener_refusal: std::sync::OnceLock::new(),
             started_at: protocol::time::now_rfc3339(),

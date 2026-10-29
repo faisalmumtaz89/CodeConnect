@@ -147,8 +147,8 @@ release build:
 
 | Argument | What it does |
 |---|---|
-| `-CC_HOST -CC_TOKEN` | pairs without typing |
-| `-CC_PAIR_HOST -CC_PAIR_CODE` | runs the real pairing-code exchange without a camera |
+| `-CC_HOST -CC_TOKEN` | pairs without typing, with that machine alone |
+| `-CC_PAIR_HOST -CC_PAIR_CODE` | runs the real pairing-code exchange without a camera, adding a machine as a scan does (`-CC_PAIR_PORT` for a port other than 8787) |
 | `-CC_FIXTURE deck` | replays daemon frames for three blocked agents at three risk classes |
 | `-CC_FIXTURE stacked` | the same fleet plus a **second decision on one agent** and a fifth agent **running a tool**. With one card per agent, "count the agents" and "count the cards" return the same number, so the fleet's headline and its accessory bar agreed by coincidence while counting different things; and with no Running band, a shell command set in proportional type could not be reached from a fixture at all |
 | `-CC_FIXTURE longOutput` | the `deck` fleet plus `fx-5`'s turn ending in a finished command with **60 lines of output** and one more call after it. The only fixture with a tool output past its 40-line "Show all", which at the tail is the geometry where the timeline once carried the reader to the last line |
@@ -431,6 +431,37 @@ is enforced.
   a pairing hello omits `token` entirely, because the daemon *prefers* a token
   when both are present, so even an empty string would be checked as the
   credential and the code would never be read.
+* **One phone keeps several machines** (`PairingStore.machines`), all in one
+  Keychain item. A machine is its host and port, compared without case: scanning
+  a new one adds it, re-scanning one already paired replaces only its credential,
+  and removing one removes only its record and its cache folder
+  (`EventCache.machine(_:)`, under `cache/machines/<id>/`). The same computer paired
+  once by address and once by name is one machine once its daemon has said which
+  daemon it is (`hello_ack.machine_id`, minor 26, kept as `PairedMachine.daemonID`):
+  the machine paired first keeps its record, its cache and its name and takes the
+  later pairing's address, credential and place, and the later record and its
+  folder go (`Machines.identified`, `PairingStore.merge`). A record whose address
+  never answers is never identified, so it stays until removed; a daemon older
+  than minor 26 is told apart by address alone. The single pairing an earlier
+  build kept becomes the first machine on first launch, with its cached history
+  moved into that machine's folder.
+* **Every machine has its own connection, and one fleet shows them all**
+  (`Machines`). Each paired machine has an `AppModel` of its own — its link, its
+  cache folder, its catch-up, its sessions — so nothing one Mac says reaches
+  another's state, and the screens under a session (approve, answer, stop,
+  compose, diff, terminal) are handed the model of the machine the session is
+  on. The fleet, the headline count, the Deck and its bar merge every machine's
+  sessions and cards; each row carries its machine (`FleetRow.machineID`,
+  `machineName`), whose link is its model's own (`Machines.model(for:)`,
+  `AppModel.linkHealth`). One machine offline leaves the others
+  live and actionable: each session's own screen and its cards speak for that
+  session's machine's link, the fleet's rows carry it as data (the fleet does
+  not draw it yet), and the app-wide link banner and pill speak only once no
+  machine can be reached (`Machines.linkModel`).
+  Adding a machine dials it on its own link without touching the others';
+  removing one closes its link and deletes its cache. A notification tap opens
+  the merged Deck, which waits for the machines still catching up on a live
+  link.
 * **Risk is reconciled by taking the stricter reading** (`RiskAssessment`). The
   daemon sees the repo and can tighten a gate; it can never loosen one below
   what this build's own reading of the command justifies. `git push --force`

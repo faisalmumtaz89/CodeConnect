@@ -152,16 +152,28 @@ enum RelayPushState: Equatable, Sendable {
     case failed(String)
 }
 
-/// Application state: one daemon, N sessions, one event stream.
+/// One machine's state: its daemon, its sessions, its event stream. `Machines`
+/// holds one per paired machine and makes their fleet.
 @MainActor
 @Observable
 final class AppModel {
+    /// The machine this model is for, by `PairedMachine.id`. Nil only for the one
+    /// model there is with nothing paired — the welcome screen's, the sample
+    /// fleet's, a fixture run's. A pairing that has not finished has its id
+    /// already, so every frame of its link reaches its own cache.
+    let machineID: String?
     let pairing: PairingStore
     let connection: DaemonConnection
     let settings: AppSettings
     /// The live terminal, riding the same paired connection as everything else.
     let terminal: TerminalCarrier
+    /// This machine's folder of the event cache.
     private let cache: EventCache
+    /// Called once this machine's pairing is saved: its daemon has answered it.
+    @ObservationIgnored var onPaired: (() -> Void)?
+    /// Called at the end of every `hello_ack`, once what the daemon said about
+    /// itself is kept: the last thing the handshake does on this model.
+    @ObservationIgnored var onIdentified: (() -> Void)?
 
     /// The Mac's list of runs, as it last said. The truth: what is on screen is
     /// `shownSummaries`.
@@ -240,9 +252,6 @@ final class AppModel {
     private(set) var now = Date()
     /// One diff per session, keyed like `states`, fetched only when asked for.
     private(set) var diffs: [String: DiffState] = [:]
-    /// Where a deep link (a `codeconnect://` URL, or a tapped notification)
-    /// wants the UI to go. Cleared by whichever surface consumes it.
-    var pendingDeepLink: DeepLink?
 
     /// How far back to backfill a session we have never cached. The daemon pages
     /// at 500; this keeps a cold open bounded without hiding recent work.
@@ -327,18 +336,19 @@ final class AppModel {
     private var tickTask: Task<Void, Never>?
     private var fleetRefreshTask: Task<Void, Never>?
 
+    /// `cache` is every machine's; this model reads and writes its own folder of
+    /// it.
     init(
-        pairing: PairingStore = PairingStore(), cache: EventCache = EventCache(),
-        settings: AppSettings = AppSettings(),
+        machineID: String? = nil, pairing: PairingStore = PairingStore(),
+        cache: EventCache = EventCache(), settings: AppSettings = AppSettings(),
         relayEnrollment: RelayEnrollment = RelayEnrollment(),
         codexSpentLedger: CodexSpentLedger = CodexSpentLedger()
     ) {
-        // Startup housekeeping, on the one object the app builds exactly once.
-        LegacyCredentials.purge()
+        self.machineID = machineID
         self.pairing = pairing
         self.connection = DaemonConnection()
         self.settings = settings
-        self.cache = cache
+        self.cache = machineID.map { cache.machine($0) } ?? cache
         self.relayEnrollment = relayEnrollment
         self.codexSpentLedger = codexSpentLedger
         // Owned here, not by the Terminal tab: the terminal rides the paired
@@ -372,7 +382,12 @@ final class AppModel {
         }
         connection.onDeviceToken = { [weak self] token in self?.adopt(deviceToken: token) }
         connection.onTransportSettled = { [weak self] useTLS in
-            self?.pairing.noteTransport(useTLS: useTLS)
+            // A pairing's link is not yet the saved one, whose transport this
+            // would rewrite.
+            guard let self, self.pendingPairing == nil, let machineID = self.machineID else {
+                return
+            }
+            self.pairing.noteTransport(useTLS: useTLS, id: machineID)
         }
         installPushWiring()
     }
@@ -718,30 +733,16 @@ final class AppModel {
         }
     }
 
-    /// Where a tapped notification lands.
-    ///
-    /// Routed through `pendingDeepLink` rather than by setting a view's state,
-    /// because a cold-started tap arrives before any view exists — the same
-    /// reason a `codeconnect://` URL takes this path.
-    ///
-    /// A tapped notification opens the decision list for an approval, and the
-    /// fleet for anything else.
-    ///
-    /// It opens the *list*, never a card: the payload names no decision, so
-    /// nothing here can point at something already answered. The other three
-    /// kinds have no card in that list and never will — `Finished a turn` has
-    /// nothing to decide — so sending them there would be a wrong answer rather
-    /// than a stale one.
-    ///
-    /// Opened while a catch-up holds the screen — and one does from the moment
-    /// the app leaves — the list waits for it and says so
-    /// (`deckAwaitsCatchUp`), then shows its cards in one go.
-    func openFromNotification(kind: String?) {
-        pendingDeepLink = kind == "approval" ? .deck(requestID: nil) : .fleet
-        if kind == "approval", isCatchingUp { deckAwaitsCatchUp = true }
+    /// A notification opened the Deck. Opened while this machine's catch-up
+    /// holds the screen — and one does from the moment the app leaves — the
+    /// Deck waits for it and says so (`deckAwaitsCatchUp`), then shows its cards
+    /// in one go.
+    func deckOpenedFromNotification() {
+        if isCatchingUp { deckAwaitsCatchUp = true }
     }
 
-    /// The Deck a notification opened is waiting for the catch-up to end.
+    /// The Deck a notification opened is waiting for this machine's catch-up to
+    /// end.
     private(set) var deckAwaitsCatchUp = false
 
     /// The Deck closed: whatever it was waiting for, the next one opened from
@@ -755,23 +756,8 @@ final class AppModel {
     /// looked.
     private(set) var catchUpReleases = 0
 
-    /// Drain a tap that arrived before anything was listening.
-    func consumePendingTap() {
-        if let tap = PushWire.consumeTap() { openFromNotification(kind: tap.kind) }
-    }
-
-    func bootstrap() {
-        var pairedByCode = false
-        #if DEBUG
-            applyAutomationPairing()
-            pairedByCode = applyAutomationPairingCode()
-            // Before anything reads from disk: a fixture run has to be hermetic
-            // or a previous live session's cache bleeds into it, and a test that
-            // is half real data is a test of nothing.
-            applyFixtures()
-            // After the fixtures, so a link naming one of their cards resolves.
-            applyAutomationDeepLink()
-        #endif
+    /// Start this machine's clocks, put its saved fleet on screen, and dial it.
+    func start() {
         startTicking()
         // A fixture run is the whole fleet already; nothing is catching up.
         guard !fixturesActive else {
@@ -787,7 +773,7 @@ final class AppModel {
             await loadCachedFleet()
             // A pairing exchange is already dialling; starting a second
             // connection would spend the single-use code twice.
-            if !pairedByCode, let endpoint = pairing.endpoint {
+            if !isPairing, let endpoint {
                 connect(to: endpoint)
                 // Push registration deliberately does NOT happen here: before
                 // the handshake the daemon's capabilities are unknown, and
@@ -806,9 +792,10 @@ final class AppModel {
 
     /// The daemon answered a pairing code with a durable device token.
     private func adopt(deviceToken: String) {
-        guard let endpoint = pendingPairing ?? pairing.endpoint else { return }
-        pairing.adopt(deviceToken: deviceToken, from: endpoint)
+        guard let machineID, let endpoint = pendingPairing ?? endpoint else { return }
+        pairing.adopt(deviceToken: deviceToken, from: endpoint, id: machineID)
         pendingPairing = nil
+        onPaired?()
         // No push call here: `onConnected` fires for this same handshake and
         // is the one registration site — a second call from the pairing path
         // was a duplicate workflow, measured as stacked observers.
@@ -820,62 +807,10 @@ final class AppModel {
         /// does not draw it. Not observed: reading it redraws nothing.
         static var lateFramesDelivered = 0
 
-        /// Test seam: `-CC_HOST <host> -CC_TOKEN <token>` on the launch command
-        /// line pairs the app without anyone typing, which is what lets the UI
-        /// test drive a real daemon. Debug builds only — a release build has no
-        /// way to be paired except by a person.
-        private func applyAutomationPairing() {
-            let defaults = UserDefaults.standard
-            guard let host = defaults.string(forKey: "CC_HOST"),
-                let token = defaults.string(forKey: "CC_TOKEN"),
-                let endpoint = DaemonEndpoint.parse(address: host, token: token)
-            else { return }
-            if defaults.bool(forKey: "CC_RESET_CACHE") {
-                Task { [cache] in await cache.clearAll() }
-            }
-            // Ephemeral on purpose: this unsigned automation build has no
-            // Keychain entitlement, so a durable save cannot work — measured
-            // as every `-CC_HOST` launch landing on the welcome screen.
-            pairing.saveEphemeral(endpoint)
-        }
-
-        /// Test seam: `-CC_PAIR_HOST <host> -CC_PAIR_CODE <code>` runs the real
-        /// pairing exchange — tokenless `hello{pairing_code}`, `hello_ack`
-        /// device token, Keychain — without a camera. It is the same call the
-        /// scanner makes; only the source of the payload differs, which is
-        /// exactly the part a simulator cannot provide.
-        private func applyAutomationPairingCode() -> Bool {
-            let defaults = UserDefaults.standard
-            guard let host = defaults.string(forKey: "CC_PAIR_HOST"),
-                let code = defaults.string(forKey: "CC_PAIR_CODE"), !code.isEmpty
-            else { return false }
-            pairing.clear()
-            let port = defaults.integer(forKey: "CC_PAIR_PORT")
-            pair(
-                withQR: PairingQRPayload(
-                    host: host, port: (1...65535).contains(port) ? port : DaemonEndpoint.defaultPort,
-                    code: code))
-            return true
-        }
-
-        /// Test seam: `-CC_DEEPLINK codeconnect://deck/<request-id>` opens the
-        /// app on one named card — something a URL can do and a tapped
-        /// notification cannot, since its payload names no decision.
-        ///
-        /// It exists because the read gate has to be asserted **on a named
-        /// card**, and the only other way to reach the second card in the queue
-        /// is to postpone the first — which at AX5 means three drags to bring
-        /// `Come back to this` above the fold before the tap. That is a lot of
-        /// harness standing between a test and a safety assertion, and every
-        /// bit of it can fail for reasons that have nothing to do with the gate.
-        /// The link goes through `DeepLink.init(url:)` and the real
-        /// `pendingDeepLink` path, so it exercises the routing rather than
-        /// bypassing it.
-        private func applyAutomationDeepLink() {
-            guard let raw = UserDefaults.standard.string(forKey: "CC_DEEPLINK"),
-                let url = URL(string: raw)
-            else { return }
-            _ = open(url: url)
+        /// Test seam: `-CC_RESET_CACHE` starts an automation launch with this
+        /// machine's saved history gone.
+        func resetCacheForAutomation() {
+            Task { [cache] in await cache.clearAll() }
         }
 
         /// Test seam: `-CC_CODEX <state>` stages one Codex state end to end.
@@ -954,7 +889,7 @@ final class AppModel {
         /// Debug builds only, and it deliberately does *not* pair: a fixture run
         /// never has a socket, so nothing it shows can be confused with a live
         /// link that has gone quiet.
-        private func applyFixtures() {
+        func applyFixtures() {
             // `-CC_CODEX <state>` stages one Codex state, seeded from
             // `fixtures/codex/*`. Its own entry point rather than a `Variant`,
             // because a Codex state is not a *shape of fleet* — it is a shape of
@@ -1234,7 +1169,7 @@ final class AppModel {
 
     /// Leave the sample fleet and go back to pairing.
     ///
-    /// Also called on the way *into* a pairing, from both entry points: the
+    /// Also called on the way *into* every pairing (`Machines.pair`): the
     /// sample fleet is reachable while its own Settings sheet is open, so
     /// "sample and live never mix" has to be enforced where a live link begins,
     /// not only where the sample one ends.
@@ -1363,10 +1298,7 @@ final class AppModel {
     /// back to the screen that could fix it. The endpoint is committed by
     /// `commitPendingPairing()` once a daemon has actually answered.
     func pair(with endpoint: DaemonEndpoint) {
-        stopSampleFleet()
-        pendingPairing = endpoint
-        subscribed.removeAll()
-        forgetDaemonKeying()
+        startPairing(endpoint)
         // A typed token is still a pairing: nothing is saved until the daemon's
         // `hello_ack` proves the credential, and someone is watching the screen
         // for that verdict — so the dial must be bounded, not endlessly patient.
@@ -1379,10 +1311,19 @@ final class AppModel {
     /// the durable token arriving. A typed token has no exchange to complete, so
     /// the proof is the `hello_ack` itself: the daemon accepted this credential.
     private func commitPendingPairing() {
-        guard let endpoint = pendingPairing, case .token = endpoint.credential else { return }
-        pairing.save(endpoint)
+        guard let machineID, let endpoint = pendingPairing, case .token = endpoint.credential
+        else { return }
+        pairing.save(endpoint, id: machineID)
         pendingPairing = nil
+        onPaired?()
         // No push call here either — same handshake, same `onConnected`.
+    }
+
+    /// Hold `endpoint` as this machine's pairing in progress.
+    private func startPairing(_ endpoint: DaemonEndpoint) {
+        pendingPairing = endpoint
+        subscribed.removeAll()
+        forgetDaemonKeying()
     }
 
     /// A different Mac may identify its runs differently, so nothing about the
@@ -1401,44 +1342,40 @@ final class AppModel {
     /// arrives in `hello_ack` and *that* is what gets saved.
     ///
     func pair(withQR payload: PairingQRPayload) {
-        stopSampleFleet()
         let endpoint = payload.endpoint
-        pendingPairing = endpoint
-        subscribed.removeAll()
-        forgetDaemonKeying()
+        startPairing(endpoint)
         connection.start(endpoint: endpoint)
     }
 
     /// True while a scanned code is being exchanged for a device token.
     var isPairing: Bool { pendingPairing != nil }
 
+    /// Give up this machine's pairing in progress, and go back to the link it
+    /// had.
     func cancelPairing() {
         pendingPairing = nil
-        if let endpoint = pairing.endpoint {
+        if let endpoint {
             connect(to: endpoint)
         } else {
             connection.stop()
         }
     }
 
-    func unpair() {
-        // Unpairing returns the app to the unpaired ground state, and being
-        // inside the sample fleet is not part of that state: left set, these
-        // flags strand an empty fleet under a Sample banner, and
-        // `startSampleFleet`'s own guard then refuses re-entry.
-        sampleFleetActive = false
-        fixturesActive = false
+    /// This machine is gone from the phone, or its pairing never finished: its
+    /// link closes, its clocks stop, and everything that came over it goes.
+    func leave() {
         connection.stop()
-        pairing.clear()
         forgetFleet()
         pendingPairing = nil
-        forgetDaemonKeying()
-        Task { await cache.clearAll() }
+        tickTask?.cancel()
+        tickTask = nil
+        fleetRefreshTask?.cancel()
+        fleetRefreshTask = nil
     }
 
     /// Drop every trace of the fleet on screen, including what feeds the Deck.
     ///
-    /// Shared by `unpair` and by leaving the sample fleet, because "completely"
+    /// Shared by `leave` and by leaving the sample fleet, because "completely"
     /// has to mean the same thing both times: a card left in `states` is a card
     /// still counted by the Deck, and after a re-pair it would be counted beside
     /// a real Mac's.
@@ -1600,6 +1537,29 @@ final class AppModel {
     /// are real here.
     var daemonProfile: DaemonProfile { connection.profile }
 
+    /// This model's machine as the phone keeps it. Nil with nothing paired, and
+    /// for a new machine until its pairing is saved.
+    var machine: PairedMachine? { machineID.flatMap(pairing.machine(id:)) }
+
+    /// Where this machine is reached.
+    var endpoint: DaemonEndpoint? { machine?.endpoint }
+
+    /// Why this machine's encrypted connection cannot be used, when it cannot.
+    var tlsUnavailableReason: String? { machineID.flatMap(pairing.tlsUnavailableReason(for:)) }
+
+    /// The computer as its owner names it: the name its daemon reports, or what
+    /// it last reported while it is not connected, or — from a daemon that has
+    /// never said (older than minor 25) — the host this phone paired with. Nil
+    /// when nothing is paired.
+    var machineName: String? {
+        daemonProfile.machineName ?? machine?.name ?? endpoint?.host
+    }
+
+    /// The computer's system, by the same rule as its name.
+    var machineSystem: String? {
+        DaemonProfile.system(forOS: daemonProfile.machineOS ?? machine?.os)
+    }
+
     /// Every card in the fleet still waiting on a human, **urgency-ranked**:
     /// HIGH → MEDIUM → LOW, then oldest first inside a tier.
     ///
@@ -1643,6 +1603,7 @@ final class AppModel {
 
     var fleet: [FleetRow] {
         let labels = RunLabel.labels(for: shownSummaries)
+        let name = machineName
         return FleetOrdering.sort(
             shownSummaries.map { summary in
                 let shown = shownSessions[summary.sessionKey]?.shown
@@ -1660,7 +1621,8 @@ final class AppModel {
                         summary: summary, capabilities: connection.capabilities),
                     blockedCount: max(summary.blockedOn.count, pending.count),
                     lastEventAt: shown?.lastEventAt,
-                    cachedAt: (shown?.hasLiveData ?? false) ? nil : shown?.loadedFromCacheAt)
+                    cachedAt: (shown?.hasLiveData ?? false) ? nil : shown?.loadedFromCacheAt,
+                    machineID: machineID, machineName: name)
             })
     }
 
@@ -2032,11 +1994,18 @@ final class AppModel {
             // The daemon accepted this credential, which is the only proof a
             // hand-typed token ever gets.
             commitPendingPairing()
-            // A certificate the pairing's address can never validate is a fact
-            // worth stating, not a silent downgrade.
-            pairing.noteTLSUnusable(
-                ack.capabilities.tls && pairing.endpoint?.hostIsIPLiteral == true)
+            if let machineID {
+                pairing.noteMachine(
+                    name: ack.machineName, os: ack.machineOS, daemonID: ack.machineID,
+                    id: machineID)
+                // A certificate the pairing's address can never validate is a
+                // fact worth stating, not a silent downgrade.
+                pairing.noteTLSUnusable(
+                    ack.capabilities.tls && endpoint?.hostIsIPLiteral == true, id: machineID)
+            }
             startCacheMigration()
+            // Last: it may find this model is another's machine, and leave it.
+            onIdentified?()
         case .interruptResult, .composeResult:
             // Awaited by the control that asked, correlated on the request id it
             // minted. Nothing here may act on one: a stop or a message is a
@@ -2075,22 +2044,7 @@ final class AppModel {
 
     // MARK: - Deep links
 
-    /// Aim the UI at a decision, from a `codeconnect://` URL. A tapped
-    /// notification takes a different route in — it names nothing, so it has no
-    /// URL — and the two meet at `pendingDeepLink`, which is why the target is a
-    /// value the model holds rather than navigation done inline.
-    func open(url: URL) -> Bool {
-        guard let link = DeepLink(url: url) else { return false }
-        pendingDeepLink = link
-        return true
-    }
-
-    func consumeDeepLink() -> DeepLink? {
-        defer { pendingDeepLink = nil }
-        return pendingDeepLink
-    }
-
-    /// Turn a link's session reference into a key this app can look up.
+    /// Turn a link's session reference into a key this machine can look up.
     ///
     /// A `codeconnect://session/…` URL may carry either: a uid (which survives
     /// a name being reused — a notification never sends one) or a tmux
@@ -2821,9 +2775,19 @@ final class AppModel {
             knownEnded: states[key]?.endedTurns ?? [])
     }
 
+    /// Why a Codex control cannot act while nothing is known of this daemon —
+    /// its link is down and took its capabilities with it — or nil when the
+    /// daemon is known. Unknown is not old: the control says what is known, the
+    /// link, rather than that the daemon predates it.
+    private func unknownDaemonReason(_ summary: SessionSummary) -> String? {
+        guard summary.agent == .codex, !daemonProfile.isConnected else { return nil }
+        return actionsBlockedReason ?? "Not connected to the daemon."
+    }
+
     /// Why Stop is not offered on this session as drawn, or nil when it is.
     func stopUnavailable(for key: String) -> String? {
         guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
+        if let reason = unknownDaemonReason(summary) { return reason }
         return CodexProse.stopUnavailable(
             agent: summary.agent,
             daemonHonoursStop: daemonProfile.stopsCodexTurns,
@@ -2834,6 +2798,7 @@ final class AppModel {
     /// The same rule against the truth: what decides whether a stop may leave.
     private func stopBlocked(for key: String) -> String? {
         guard let summary = summary(for: key) else { return "This run is not in the fleet." }
+        if let reason = unknownDaemonReason(summary) { return reason }
         return CodexProse.stopUnavailable(
             agent: summary.agent,
             daemonHonoursStop: daemonProfile.stopsCodexTurns,
@@ -2844,12 +2809,14 @@ final class AppModel {
     /// Why the Codex composer cannot send as drawn, or nil when it can.
     func composeUnavailable(for key: String) -> String? {
         guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
+        if let reason = unknownDaemonReason(summary) { return reason }
         return Self.composeUnavailable(summary, profile: daemonProfile)
     }
 
     /// The same rule against the truth: what decides whether a message may leave.
     private func composeBlocked(for key: String) -> String? {
         guard let summary = summary(for: key) else { return "This run is not in the fleet." }
+        if let reason = unknownDaemonReason(summary) { return reason }
         return Self.composeUnavailable(summary, profile: daemonProfile)
     }
 

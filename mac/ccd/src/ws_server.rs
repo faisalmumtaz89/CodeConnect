@@ -2510,6 +2510,9 @@ async fn hello_ack(
         device_id,
         device_name,
         push_environment,
+        machine_name: crate::machine::computer_name(),
+        machine_os: Some(std::env::consts::OS.to_string()),
+        machine_id: daemon.machine_id.get().cloned(),
     })
 }
 
@@ -4032,6 +4035,39 @@ mod tests {
         let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
         assert_eq!(reply["type"], "hello_ack");
         assert_eq!(reply["protocol_version"], protocol::PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn the_ack_names_this_machine_as_its_owner_named_it() {
+        // `scutil` is the owner's own view of the name, read independently of
+        // the call under test.
+        let scutil = std::process::Command::new("/usr/sbin/scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .unwrap();
+        let computer_name = String::from_utf8(scutil.stdout).unwrap();
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(reply["type"], "hello_ack");
+        assert_eq!(reply["machine_name"], computer_name.trim_end_matches('\n'));
+        assert_eq!(reply["machine_os"], "macos");
+    }
+
+    #[tokio::test]
+    async fn every_ack_says_which_daemon_this_is() {
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        server
+            .daemon
+            .machine_id
+            .set("0123456789abcdef0123456789abcdef".into())
+            .unwrap();
+        for _ in 0..2 {
+            let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+            assert_eq!(
+                reply["machine_id"], "0123456789abcdef0123456789abcdef",
+                "{reply}"
+            );
+        }
     }
 
     #[tokio::test]

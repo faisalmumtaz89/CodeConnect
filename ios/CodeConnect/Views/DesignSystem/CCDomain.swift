@@ -209,15 +209,7 @@ extension CCFreshnessPill {
     }
 
     private static func spokenValue(for health: LinkHealth) -> String {
-        let word: String
-        switch health.level {
-        case .live: word = "Live"
-        case .lagging: word = "Lagging"
-        case .stale: word = "Stale"
-        case .connecting: word = "Connecting"
-        case .offline: word = "Offline"
-        case .rejected: word = "Token rejected"
-        }
+        let word = health.word
         switch health.level {
         case .live, .lagging, .stale:
             // VoiceOver reads "14s" as "fourteen ess"; spell it out.

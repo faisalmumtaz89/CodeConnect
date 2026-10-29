@@ -876,6 +876,8 @@ private struct HistoryHead: View {
 /// left with nothing but a back chevron on purpose: the pushed screen's own
 /// header carries the project, and a project name is longer than a title bar
 /// can render honestly.
+/// Handed the model of the machine the session is on, so everything done here
+/// goes to that machine.
 struct SessionDetailView: View {
     let route: SessionRoute
 
@@ -888,6 +890,7 @@ struct SessionDetailView: View {
     }
 
     @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
     /// Read for one decision only: the Stop control's label. "Stop this turn"
     /// clipped mid-word at AX5 and grew the header enough to push the pending
     /// card's own controls off screen.
@@ -1167,7 +1170,7 @@ struct SessionDetailView: View {
             composeResultClearTask?.cancel()
             wantedRequestID = nil
         }
-        .onChange(of: model.pendingDeepLink) { _, _ in consumeDeepLink() }
+        .onChange(of: machines.pendingDeepLink) { _, _ in consumeDeepLink() }
         // A name that waited out a catch-up is resolved at its release.
         .onChange(of: model.isCatchingUp) { _, _ in consumeDeepLink() }
         // The card the link named arriving is the moment to open it.
@@ -1426,12 +1429,12 @@ struct SessionDetailView: View {
 
     /// A deep link aimed at *this* session opens what it asked for.
     private func consumeDeepLink() {
-        switch model.pendingDeepLink {
+        switch machines.pendingDeepLink {
         case .diff(let reference) where addresses(reference):
-            _ = model.consumeDeepLink()
+            _ = machines.consumeDeepLink()
             showDiff = true
         case .session(let reference, let requestID) where addresses(reference):
-            _ = model.consumeDeepLink()
+            _ = machines.consumeDeepLink()
             if let requestID { wantedRequestID = requestID }
             openWantedApproval()
         default:
@@ -1758,6 +1761,7 @@ private struct SessionTimeline: View {
                             TimelineRow(
                                 item: item, profile: model.daemonProfile,
                                 agent: model.shownSummary(for: key)?.agent,
+                                linkReason: model.actionsBlockedReason,
                                 // Fired *before* the collapse — see
                                 // `AgentMessageRow` — so the target is the row in
                                 // its expanded geometry, which is always reachable.
