@@ -41,7 +41,6 @@ struct PairingView: View {
                 settings
             }
         }
-        .onAppear(perform: prefill)
         .sheet(isPresented: $showScanner) {
             PairingScanSheet(
                 onScan: { payload in
@@ -590,12 +589,6 @@ struct PairingView: View {
 
     // MARK: - Actions
 
-    private func prefill() {
-        guard let endpoint = model.endpoint else { return }
-        address = endpoint.displayAddress
-        token = endpoint.token ?? ""
-    }
-
     private func handle(scanned payload: String) {
         switch PairingQRPayload.decode(payload) {
         case .success(let parsed):
@@ -790,8 +783,8 @@ struct MachineScreen: View {
             VStack(alignment: .leading, spacing: CC.rhythm.sections) {
                 computerSection
                 transportSection
-                capabilitiesSection
                 removeSection
+                capabilitiesSection
             }
             .padding(.horizontal, CC.space.md)
             .padding(.vertical, CC.space.lg)

@@ -39,7 +39,7 @@ Once CodeConnect is set up ([Getting started](#getting-started)), you start agen
   - *Terminal queries* are answered by tmux where tmux answers them (device attributes, cursor position, version), so an agent sees tmux there rather than your terminal; its default colours are your terminal's, or black if your terminal does not report them. tmux's device-attributes answer arrives before your terminal's answer to kitty's keyboard query, the order agents read as "no kitty keyboard support".
   - *Two tabs on one session* share one size: tmux sizes the session for the tab used most recently, so a differently sized second tab shows it drawn for the other one.
 - **iPhone only, and a Mac or Linux computer.** The phone side is an iPhone app, [CodeConnect Remote on the App Store](https://apps.apple.com/app/codeconnect-remote/id6797021894); the computer side runs on macOS 13 or later, or on Linux (x86_64 or arm64) with systemd. The iOS source is public to be read and audited — see the license.
-- **It assumes one Mac, one tailnet, one person.** That is the shape it is used in daily; anything else is unexplored.
+- **It assumes one person on one tailnet.** One iPhone pairs with several computers — add each from Settings → Machines, with `codeconnect pair` on that computer; anything beyond that is unexplored.
 
 ## How it works
 
