@@ -539,6 +539,12 @@ fn hello_ack() -> ServerMessage {
         // No push of any kind, so there is no token and no environment to have
         // an opinion about.
         push_environment: None,
+        // It runs in a Linux container, not on anybody's computer, so it names
+        // itself and claims no system.
+        machine_name: Some(DEVICE_NAME.into()),
+        machine_os: None,
+        // No home of its own to be one machine across restarts.
+        machine_id: None,
     }
 }
 
@@ -919,6 +925,9 @@ mod tests {
         assert_eq!(ack["protocol_version"], protocol::PROTOCOL_VERSION);
         assert_eq!(ack["protocol_minor"], protocol::PROTOCOL_MINOR);
         assert_eq!(ack["device_name"], DEVICE_NAME);
+        assert_eq!(ack["machine_name"], DEVICE_NAME);
+        assert!(ack.get("machine_os").is_none(), "{ack}");
+        assert!(ack.get("machine_id").is_none(), "{ack}");
         let capabilities = &ack["capabilities"];
         for offered in [
             "send_text",

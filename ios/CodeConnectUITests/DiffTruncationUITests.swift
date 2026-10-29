@@ -42,7 +42,7 @@ final class DiffTruncationUITests: XCTestCase {
 
     /// Fixture fleet → the first session → its diff.
     private func openDiff(_ app: XCUIApplication) throws {
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 30))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 30))
         let session = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH 'session-'")
         ).firstMatch
@@ -70,7 +70,7 @@ final class DiffTruncationUITests: XCTestCase {
 
         // The stamp, which is what makes this a capture rather than a live read.
         let stamp = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'Captured on the Mac'")
+            NSPredicate(format: "label CONTAINS 'Captured on the computer'")
         ).firstMatch
         XCTAssertTrue(stamp.exists, "a rendered diff always carries its capture time")
 

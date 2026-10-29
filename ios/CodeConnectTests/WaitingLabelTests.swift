@@ -105,7 +105,7 @@ final class WaitingLabelTests: XCTestCase {
         let found = try spoken(
             QuestionRow(
                 approval: approval, questions: questions, risk: .low, answersQuestions: true,
-                onOpen: {}))
+                linkReason: nil, onOpen: {}))
         XCTAssertTrue(found.contains { $0.hasSuffix(". waiting 1 minute.") }, "\(found)")
     }
 
@@ -118,14 +118,14 @@ final class WaitingLabelTests: XCTestCase {
         }
     }
 
-    /// The Deck bar's spoken preview ends with the wait, as a duration.
-    func testTheDeckBarSpeaksHowLongItHasWaited() throws {
-        let now = Date()
+    /// The Deck bar speaks every risk level that holds something, riskiest
+    /// first, and no level that holds nothing.
+    func testTheDeckBarSpeaksHowManyWaitAtEachRisk() throws {
         let found = try spokenValues(
-            DeckAccessoryBar(
-                count: 1, topPlace: "work", topCommand: "git status",
-                waitingSince: now.addingTimeInterval(-72), now: now, open: {}))
-        XCTAssertTrue(found.contains("work · git status · waiting 1 minute"), "\(found)")
+            DeckAccessoryBar(count: 4, risks: [.low: 1, .high: 1, .medium: 2], open: {}))
+        XCTAssertTrue(found.contains("1 high risk, 2 medium risk, 1 low risk"), "\(found)")
+        let medium = try spokenValues(DeckAccessoryBar(count: 1, risks: [.medium: 1], open: {}))
+        XCTAssertTrue(medium.contains("1 medium risk"), "\(medium)")
     }
 
     /// A tool call whose argument starts with a blank line is spoken as the

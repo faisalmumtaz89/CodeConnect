@@ -43,7 +43,7 @@ final class UpdateCompatibilityTests: XCTestCase {
         let refusal = DaemonConnection.incompatibility(of: ack(version: Wire.protocolVersion + 1))
         XCTAssertNotNil(refusal, "a newer major must be refused")
         XCTAssertTrue(
-            refusal?.contains("Update CodeConnect on the Mac") == true,
+            refusal?.contains("Update CodeConnect on the computer") == true,
             "the refusal names the fix: \(refusal ?? "nil")")
 
         XCTAssertNil(

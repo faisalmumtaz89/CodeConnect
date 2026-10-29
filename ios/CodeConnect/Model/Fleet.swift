@@ -145,9 +145,16 @@ struct FleetRow: Sendable, Identifiable, Hashable {
     var lastEventAt: Date?
     /// Non-nil when nothing live has arrived for this session this launch.
     var cachedAt: Date?
+    /// The machine the run is on (`PairedMachine.id`; nil in the sample fleet
+    /// and a fixture run), and what that machine is called. Its link is not
+    /// the row's: a row is held as it was while a catch-up runs, and the link
+    /// is live — `Machines.model(for: machineID)?.linkHealth`.
+    var machineID: String?
+    var machineName: String?
 
     /// The run, not the name: two rows can share `cc-1` and a `ForEach` that
-    /// cannot tell them apart renders one of them.
+    /// cannot tell them apart renders one of them. A run's uid is minted once,
+    /// for it alone, so two machines' runs never share one either.
     var id: String { summary.sessionKey }
 }
 
@@ -165,9 +172,9 @@ struct FleetRow: Sendable, Identifiable, Hashable {
 ///
 /// Both numbers were true. Neither string said which question it was answering,
 /// so the reader had no way to reconcile them and no reason to trust either.
-/// The noun is now stated — a **decision** is the thing you have to answer, and
-/// it is what the Deck behind the bar is a queue of — and the arithmetic lives
-/// here, once, so the two call sites cannot drift apart again.
+/// Both now count what the Deck behind the bar is a queue of — each thing you
+/// have to answer — in one sentence, and the arithmetic lives here, once, so
+/// the two call sites cannot drift apart again.
 enum FleetCount {
     /// Every decision the fleet is waiting on a human for.
     ///
@@ -175,8 +182,8 @@ enum FleetCount {
     /// is the daemon's authoritative statement that a request is open, and it
     /// arrives before the card that carries the request's *contents* reaches the
     /// event stream — so a Deck-derived count reads zero for the beat between a
-    /// row turning amber and its card landing, and the headline would say
-    /// "Nothing needs you" over a visibly blocked band.
+    /// row turning amber and its card landing, and no count would stand under
+    /// the fleet's title over a visibly blocked run.
     static func decisions(in rows: [FleetRow]) -> Int {
         rows.filter { $0.status == .blocked }
             // A blocked row is holding at least one, by the definition of
@@ -187,9 +194,10 @@ enum FleetCount {
 
     /// The sentence, in the canonical words. One string, every surface: the
     /// fleet's display line, the accessory bar's aggregate, and what a screen
-    /// reader hears from either.
-    static func needsYou(_ count: Int) -> String {
-        count == 1 ? "1 decision needs you" : "\(count) decisions need you"
+    /// reader hears from either. It names no noun, because what waits is
+    /// sometimes a command, sometimes a file, sometimes a question.
+    static func waitingForYou(_ count: Int) -> String {
+        "\(count) waiting for you"
     }
 }
 
@@ -433,7 +441,7 @@ enum FleetStatusRule {
             return .observe(reason: "The link to this session is degraded; answers may not land.")
         case .detached:
             return .observe(
-                reason: "No supervisor is attached to this session. It can only be answered at the Mac."
+                reason: "No supervisor is attached to this session. It can only be answered at the computer."
             )
         case .stale:
             return .observe(reason: "The daemon has not heard from this session recently.")
@@ -488,6 +496,19 @@ struct LinkHealth: Sendable, Equatable {
     }
 
     var ageText: String { age.map(Format.age) ?? "-" }
+
+    /// The level in words, as the link's spoken value and each machine's row in
+    /// Settings say it.
+    var word: String {
+        switch level {
+        case .live: return "Live"
+        case .lagging: return "Lagging"
+        case .stale: return "Stale"
+        case .connecting: return "Connecting"
+        case .offline: return "Offline"
+        case .rejected: return "Token rejected"
+        }
+    }
 
     var symbol: String {
         switch level {

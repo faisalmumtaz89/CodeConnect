@@ -613,7 +613,7 @@ struct TerminalTabView: View {
 
     private var busyText: String {
         switch phase {
-        case .attaching: return "Opening a terminal on \(host ?? "the Mac")…"
+        case .attaching: return "Opening a terminal on \(host ?? "the computer")…"
         default: return "Working…"
         }
     }
@@ -806,7 +806,7 @@ struct TerminalTabView: View {
     /// The paired daemon's host. There is nothing to override: the terminal goes
     /// wherever the timeline already is.
     private var host: String? {
-        model.pairing.endpoint?.host.isEmpty == false ? model.pairing.endpoint?.host : nil
+        model.endpoint?.host.isEmpty == false ? model.endpoint?.host : nil
     }
 
     /// Where this terminal would connect, as an identifier — never a sentence.
@@ -857,14 +857,14 @@ struct TerminalTabView: View {
         guard host != nil else {
             return .blocked(
                 Blocked(
-                    reason: "Pair with your Mac first; the terminal uses the same connection.",
+                    reason: "Pair with your computer first; the terminal uses the same connection.",
                     fix: .init(title: "Pair", run: { showPairing = true })))
         }
         // The terminal is the same connection as everything else, so a link
         // that is down is the whole story — there is no second thing to try.
         guard model.connection.phase.isConnected else {
             return .blocked(
-                Blocked(reason: "Not connected to the Mac. The terminal uses the same connection."))
+                Blocked(reason: "Not connected to the computer. The terminal uses the same connection."))
         }
         // Shell-equivalent authority is never granted to the bootstrap token,
         // so the daemon says per connection whether it will open one at all.
@@ -878,13 +878,13 @@ struct TerminalTabView: View {
                 return .blocked(
                     Blocked(
                         reason:
-                            "The Mac opens the live terminal over Tailscale, not over this connection."
+                            "The computer opens the live terminal over Tailscale, not over this connection."
                     ))
             }
             return .blocked(
                 Blocked(
                     reason:
-                        "This connection may not open a terminal. Pair this device with the Mac, then try again.",
+                        "This connection may not open a terminal. Pair this device with the computer, then try again.",
                     fix: .init(title: "Pair", run: { showPairing = true })))
         }
         guard tmuxName != nil else {
@@ -987,7 +987,7 @@ enum TerminalDesignState {
                 // screen keeps the transcript under a snapshot frame instead of
                 // replacing it with a card.
                 return .ended(
-                    reason: "The connection to the Mac dropped.", wasAttached: true)
+                    reason: "The connection to the computer dropped.", wasAttached: true)
             default:
                 return nil
             }

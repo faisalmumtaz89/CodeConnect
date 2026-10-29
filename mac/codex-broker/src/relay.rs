@@ -729,7 +729,7 @@ where
                     if let Shape::Request { id, .. } = shape {
                         if let RelayAction::SyntheticError { frame, .. } = paused_refusal(id) {
                             (ctx.log)(&format!(
-                                "Ccd: refuse->synthetic error (codex is paused at the Mac) (conn {conn})"
+                                "Ccd: refuse->synthetic error (codex is paused at this computer) (conn {conn})"
                             ));
                             ws.send(Message::Text(frame)).await?;
                         }
@@ -751,7 +751,7 @@ fn paused_refusal(id: Option<RequestId>) -> RelayAction {
         id,
         crate::refusal::E_POLICY_REFUSED,
         crate::refusal::PAUSED_MESSAGE,
-        "codex is paused at the Mac".to_string(),
+        "codex is paused at this computer".to_string(),
     )
 }
 

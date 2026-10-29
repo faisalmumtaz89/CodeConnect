@@ -67,7 +67,7 @@ struct SnapshotSheet: View {
         case .capturing:
             HStack(spacing: CC.space.sm) {
                 CCProgressRing(.sm)
-                Text("Typing /\(command.rawValue) on the Mac…")
+                Text("Typing /\(command.rawValue) on the computer…")
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
             }
@@ -75,7 +75,7 @@ struct SnapshotSheet: View {
             .padding(.vertical, CC.space.lg)
 
         case .captured(let pane, let capturedAt):
-            CCSectionHeader("The Mac’s screen when /\(command.rawValue) opened")
+            CCSectionHeader("The computer’s screen when /\(command.rawValue) opened")
             Text(Self.takenLine(capturedAt: capturedAt))
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.tertiary)
@@ -107,7 +107,7 @@ struct SnapshotSheet: View {
             notice(
                 title: "No readable snapshot",
                 message:
-                    "The Mac view was closed and the composer is ready, "
+                    "The computer's view was closed and the composer is ready, "
                     + "but the captured pane contained no readable text.")
             HStack(spacing: CC.space.xs) {
                 CCButton("Try again", variant: .secondary, size: .sm) {
@@ -118,7 +118,7 @@ struct SnapshotSheet: View {
 
         case .noView:
             notice(
-                title: "No Mac view appeared",
+                title: "No computer view appeared",
                 message:
                     "/\(command.rawValue) was typed, but CodeConnect did not observe "
                     + "a view to capture. The composer is still ready.")

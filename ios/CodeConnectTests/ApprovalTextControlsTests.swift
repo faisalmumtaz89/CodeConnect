@@ -69,8 +69,8 @@ final class ApprovalTextControlsTests: XCTestCase {
 
     /// Each control in the spoofed command is drawn and spoken as U+FFFD on the
     /// chat's row, on the decision card's command block, and in what the fleet
-    /// row and the Deck bar are built from. `SpoofedCommandUITests` reads the
-    /// fleet row, the Deck bar, the chat row and the card off the screen.
+    /// row is built from. `SpoofedCommandUITests` reads the fleet row, the chat
+    /// row and the card off the screen.
     func testEachControlInACommandIsDrawnAndSpokenAsAReplacementCharacter() throws {
         for control in Self.controls {
             let input = JSONValue.object(["command": .string("git push origin \(control)niam ecrof--")])
@@ -83,7 +83,7 @@ final class ApprovalTextControlsTests: XCTestCase {
                 "the decision card's command, \(name)")
             XCTAssertEqual(
                 ToolSummary.principalArgument(tool: "Bash", input: input), shown,
-                "the chat row, the fleet row and the Deck bar draw this, \(name)")
+                "the chat row and the fleet row draw this, \(name)")
             XCTAssertTrue(
                 ApprovalRow(approval: item, risk: .medium, onOpen: {}).accessibilityLabel
                     .hasPrefix("Pending approval, risk MEDIUM, Bash, \(shown), waiting "),
@@ -179,7 +179,7 @@ final class ApprovalTextControlsTests: XCTestCase {
     ///
     ///   * `ToolSummary.principalArgument` — the chat's approval row (drawn
     ///     and spoken), the fleet row's activity line and its spoken sentence,
-    ///     the fleet's line for a blocked run, the Deck bar's command, and the
+    ///     the fleet's line for a blocked run, and the
     ///     decision card's command block (through `primaryText`);
     ///   * `ToolSummary.intent` — the description under the card's command;
     ///   * `ApprovalCard.primaryText` — the card's command block, which falls

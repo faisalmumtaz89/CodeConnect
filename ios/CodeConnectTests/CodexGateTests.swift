@@ -302,7 +302,7 @@ final class CodexGateTests: XCTestCase {
         let controls = CodexControls()
         let hash = CodexHash.compose(sessionRef: "u-1", text: "words")
         let first = controls.composeRequestID(material: hash)
-        controls.settleCompose(.rejected(reason: "this Mac has lost its control link"), material: hash)
+        controls.settleCompose(.rejected(reason: "the computer has lost its control link"), material: hash)
         XCTAssertEqual(controls.composeRequestID(material: hash), first)
     }
 
@@ -336,8 +336,8 @@ final class CodexGateTests: XCTestCase {
         controls.settleStop(
             .rejected(
                 reason:
-                    "this Mac has lost its control link to the Codex session and is reconnecting, "
-                    + "so nothing was sent; try again shortly, or stop the turn at the Mac"),
+                    "the computer has lost its control link to the Codex session and is reconnecting, "
+                    + "so nothing was sent; try again shortly, or stop the turn at the computer"),
             material: "m", turnID: "t-1", now: now)
         XCTAssertTrue(controls.isStopGreyed(now: now.addingTimeInterval(1)))
         XCTAssertTrue(controls.isStopGreyed(now: now.addingTimeInterval(9)))
@@ -365,8 +365,8 @@ final class CodexGateTests: XCTestCase {
         controls.settleStop(
             .rejected(
                 reason:
-                    "this Mac has lost its control link to the Codex session and is reconnecting, "
-                    + "so nothing was sent; try again shortly, or stop the turn at the Mac"),
+                    "the computer has lost its control link to the Codex session and is reconnecting, "
+                    + "so nothing was sent; try again shortly, or stop the turn at the computer"),
             material: "m", turnID: "t-1", now: now)
         XCTAssertTrue(controls.isStopGreyed(now: clock()))
         XCTAssertEqual(reads, 1, "a standing grey is timed")
@@ -381,8 +381,8 @@ final class CodexGateTests: XCTestCase {
         controls.settleStop(
             .rejected(
                 reason:
-                    "this Mac has lost its control link to the Codex session and is reconnecting, "
-                    + "so nothing was sent; try again shortly, or stop the turn at the Mac"),
+                    "the computer has lost its control link to the Codex session and is reconnecting, "
+                    + "so nothing was sent; try again shortly, or stop the turn at the computer"),
             material: "m", turnID: "t-1", now: now)
         controls.beginCompose()
         XCTAssertFalse(controls.isStopGreyed(now: clock()))
@@ -411,7 +411,7 @@ final class CodexGateTests: XCTestCase {
             .indeterminate(
                 reason:
                     "this interrupt was already sent and what became of it is not known; "
-                    + "it will not be sent again. Check the Mac."),
+                    + "it will not be sent again. Check the computer."),
             material: "m", turnID: "t-1", now: now)
         XCTAssertFalse(controls.isStopGreyed(now: now.addingTimeInterval(1)))
     }
@@ -428,7 +428,7 @@ final class CodexGateTests: XCTestCase {
         let controls = CodexControls()
         controls.beginStop()
         controls.settleStop(
-            .rejected(reason: "this Mac has lost its control link"), material: "m", turnID: "t-1")
+            .rejected(reason: "the computer has lost its control link"), material: "m", turnID: "t-1")
         guard case .settled = controls.stop else { return XCTFail("the stop was answered") }
 
         // A compose refused before it could begin: the stop's banner must go.

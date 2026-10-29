@@ -106,7 +106,8 @@ final class CatchUpScreenTests: XCTestCase {
             UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         return Host(
             SessionDetailView(route: SessionRoute(key: a), surfaceForTesting: .constant(.timeline))
-                .environment(model),
+                .environment(model)
+                .environment(Machines(holding: model)),
             scene: scene, size: CGSize(width: 402, height: 874))
     }
 

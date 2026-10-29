@@ -7,8 +7,8 @@ import XCTest
 /// `spoofedCommand` holds one card whose command is `git push origin
 /// <U+202E>niam ecrof--`. Drawn as it arrives, the override reverses the rest
 /// of the line and the screen reads `git push origin --force main`. Every place
-/// the card is shown — the fleet row, the Deck bar, the chat's approval row and
-/// the decision card — draws the override as U+FFFD instead, so the screen
+/// the command is shown — the fleet row, the chat's approval row and the
+/// decision card — draws the override as U+FFFD instead, so the screen
 /// reads the bytes in the order they run, and speaks them with U+FFFD where the
 /// override was.
 ///
@@ -59,15 +59,11 @@ final class SpoofedCommandUITests: XCTestCase {
         XCTAssertFalse(pixels.contains("forcemain"), "\(what) draws \(pixels)", file: file, line: line)
     }
 
-    func testTheFleetRowAndTheDeckBarShowTheCommandThatRuns() {
+    func testTheFleetRowShowsTheCommandThatRuns() {
         let app = launch()
         let row = app.buttons["session-fx-1"]
         XCTAssertTrue(row.waitForExistence(timeout: 25), "the blocked run's row")
         assertShowsTheBytesThatRun(row, spoken: row.label, "the fleet row")
-
-        let bar = app.buttons["deck-bar"]
-        XCTAssertTrue(bar.waitForExistence(timeout: 25), "the Deck bar")
-        assertShowsTheBytesThatRun(bar, spoken: bar.value as? String ?? "", "the Deck bar")
     }
 
     func testTheChatRowShowsTheCommandThatRuns() {

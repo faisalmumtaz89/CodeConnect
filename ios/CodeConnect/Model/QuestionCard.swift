@@ -172,6 +172,9 @@ enum QuestionCardStatus: Sendable, Hashable {
     case answerAtMac
     /// The Mac's CodeConnect predates answering questions from the phone.
     case macTooOld
+    /// Nothing is known of the Mac: its link is down and took its
+    /// capabilities with it. Carries the link's own reason.
+    case unreachable(String)
     /// Claude ran with exactly the answers sent from a phone, which carries
     /// them. Which phone is not recorded, and the same answers chosen at the
     /// Mac would read no differently.
@@ -192,9 +195,13 @@ enum QuestionCardStatus: Sendable, Hashable {
     /// One decision for the whole card, so no control can be offered that the
     /// status withholds. A recorded ending outranks everything; a card nothing
     /// backs is never answerable; then the daemon's age, then the hold.
+    ///
+    /// `answersQuestions` is nil while nothing is known of the Mac. Unknown is
+    /// not old: the card says what is known, the link (`linkReason`), and with
+    /// no reason to give it is as it is once the hold ended.
     static func resolve(
         outcome: AnswerOutcome?, attempt: AnswerAttempt?, isBacked: Bool,
-        hold: QuestionHold?, answersQuestions: Bool
+        hold: QuestionHold?, answersQuestions: Bool?, linkReason: String?
     ) -> QuestionCardStatus {
         switch attempt {
         case .applied(let outcome), .indeterminate(let outcome), .duplicate(let outcome, _):
@@ -209,6 +216,7 @@ enum QuestionCardStatus: Sendable, Hashable {
         }
         if let outcome { return ended(by: outcome) }
         guard isBacked else { return .unavailable }
+        guard let answersQuestions else { return linkReason.map(Self.unreachable) ?? .answerAtMac }
         guard answersQuestions else { return .macTooOld }
         switch hold {
         case .held: return .answerable
@@ -222,10 +230,12 @@ enum QuestionCardStatus: Sendable, Hashable {
     /// The timeline's item is the live one, so it is backed; no answer attempt
     /// is consulted, because the row states what was recorded and the card owns
     /// what this phone is in the middle of sending.
-    static func recorded(_ approval: ApprovalItem, answersQuestions: Bool) -> QuestionCardStatus {
+    static func recorded(
+        _ approval: ApprovalItem, answersQuestions: Bool?, linkReason: String?
+    ) -> QuestionCardStatus {
         resolve(
             outcome: approval.outcome, attempt: nil, isBacked: true,
-            hold: approval.questionHold, answersQuestions: answersQuestions)
+            hold: approval.questionHold, answersQuestions: answersQuestions, linkReason: linkReason)
     }
 
     /// The one line a timeline row says about where the question stands, in the
@@ -240,6 +250,8 @@ enum QuestionCardStatus: Sendable, Hashable {
                 card.choices(of: answer, for: index).joined(separator: ", ")
             }
             return "Answered: " + chosen.joined(separator: " · ")
+        case .unreachable(let reason):
+            return reason
         default:
             return banner?.title
         }
@@ -264,24 +276,26 @@ enum QuestionCardStatus: Sendable, Hashable {
             return nil
         case .askingAtMac:
             return (
-                "Asking at the Mac",
-                "Claude is asking this at the Mac, so it can only be answered there.",
+                "Asking at the computer",
+                "Claude is asking this at the computer, so it can only be answered there.",
                 .info, "desktopcomputer"
             )
         case .answerAtMac:
             return (
-                "Answer at the Mac",
+                "Answer at the computer",
                 "This question can no longer be answered from the phone. It may still be open "
-                    + "at the Mac.",
+                    + "at the computer.",
                 .warning, "desktopcomputer"
             )
         case .macTooOld:
             return (
-                "Answer at the Mac",
-                "This Mac's CodeConnect is too old to answer Claude's questions from the phone. "
-                    + "Answer it at the Mac, or update the Mac to answer here.",
+                "Answer at the computer",
+                "This computer's CodeConnect is too old to answer Claude's questions from the "
+                    + "phone. Answer it at the computer, or update it to answer here.",
                 .warning, "desktopcomputer"
             )
+        case .unreachable(let reason):
+            return ("Not connected", reason, .warning, "desktopcomputer")
         case .answeredOnPhone:
             return (
                 "Answered", "Claude has the answers sent from the phone.", .success,
@@ -289,19 +303,20 @@ enum QuestionCardStatus: Sendable, Hashable {
             )
         case .answeredAtMac:
             return (
-                "Answered at the Mac",
-                "This question was answered at the Mac. Nothing from this phone was used.",
+                "Answered at the computer",
+                "This question was answered at the computer. Nothing from this phone was used.",
                 .info, "desktopcomputer"
             )
         case .declined:
             return (
-                "Declined", "Declined from the phone, as Escape does at the Mac.", .info,
+                "Declined", "Declined from the phone, as Escape does at the computer.", .info,
                 "xmark.circle"
             )
         case .unconfirmed:
             return (
                 "Unconfirmed",
-                "The Mac took this answer but could not confirm Claude received it. Check the Mac.",
+                "The computer took this answer but could not confirm Claude received it. "
+                    + "Check the computer.",
                 .warning, "questionmark.circle"
             )
         case .closed:

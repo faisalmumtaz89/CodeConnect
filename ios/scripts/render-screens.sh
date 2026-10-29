@@ -80,17 +80,21 @@ for d in json.load(sys.stdin)["devicetypes"]:
 )"
 [[ -n "$DEVICE_TYPE_ID" ]] || { echo "no such device type: $DEVICE_TYPE" >&2; exit 2; }
 
+# The newest runtime that can run the device type: a runtime can support only some
+# devices (iOS 27.1 shipped supporting one), and `simctl create` refuses the rest.
 RUNTIME_ID="$(
     xcrun simctl list runtimes --json \
         | python3 -c '
 import json, sys
+device = sys.argv[1]
 runtimes = [r for r in json.load(sys.stdin)["runtimes"]
-            if r["isAvailable"] and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS")]
+            if r["isAvailable"] and r["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS")
+            and any(d["identifier"] == device for d in r.get("supportedDeviceTypes", []))]
 runtimes.sort(key=lambda r: [int(p) for p in r["version"].split(".")])
 print(runtimes[-1]["identifier"] if runtimes else "")
-'
+' "$DEVICE_TYPE_ID"
 )"
-[[ -n "$RUNTIME_ID" ]] || { echo "no available iOS simulator runtime" >&2; exit 2; }
+[[ -n "$RUNTIME_ID" ]] || { echo "no available iOS simulator runtime runs $DEVICE_TYPE" >&2; exit 2; }
 
 SIM_ID="$(xcrun simctl create "CodeConnect Renders $STAMP" "$DEVICE_TYPE_ID" "$RUNTIME_ID")"
 

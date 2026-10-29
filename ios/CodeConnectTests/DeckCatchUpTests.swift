@@ -85,16 +85,17 @@ final class DeckCatchUpTests: XCTestCase {
     /// catch-up brought.
     func testANotificationTapMidCatchUpWaitsForTheRelease() async {
         let model = await caughtUp()
+        let app = Machines(holding: model)
         model.scenePhaseChanged(to: .background)
         model.scenePhaseChanged(to: .active)
-        model.openFromNotification(kind: "approval")
-        XCTAssertTrue(model.deckAwaitsCatchUp, "the ring, not the held cards")
-        XCTAssertEqual(model.pendingDeepLink, .deck(requestID: nil))
+        app.openFromNotification(kind: "approval")
+        XCTAssertTrue(app.deckAwaitsCatchUp, "the ring, not the held cards")
+        XCTAssertEqual(app.pendingDeepLink, .deck(requestID: nil))
 
         model.connection.injectForTesting(sessions(4))
         model.connection.injectForTesting(card(4))
         await settle(model)
-        XCTAssertFalse(model.deckAwaitsCatchUp)
+        XCTAssertFalse(app.deckAwaitsCatchUp)
         XCTAssertEqual(model.deck.map(\.card.requestID), ["toolu_4"], "the cards, in one go")
     }
 
@@ -102,47 +103,51 @@ final class DeckCatchUpTests: XCTestCase {
     /// for that catch-up.
     func testATapHeardBeforeTheReturnWaitsToo() async {
         let model = await caughtUp()
+        let app = Machines(holding: model)
         model.scenePhaseChanged(to: .background)
         model.connection.setPhaseForTesting(.connecting)
-        model.openFromNotification(kind: "approval")
+        app.openFromNotification(kind: "approval")
         model.scenePhaseChanged(to: .active)
-        XCTAssertTrue(model.deckAwaitsCatchUp, "the return's catch-up, on a link coming back")
+        XCTAssertTrue(app.deckAwaitsCatchUp, "the return's catch-up, on a link coming back")
     }
 
     /// Closed while it waits, the Deck stops waiting: opened again from the
     /// bar, it shows the cards on screen.
     func testClosingTheDeckEndsItsWait() async {
         let model = await caughtUp()
+        let app = Machines(holding: model)
         model.scenePhaseChanged(to: .background)
         model.scenePhaseChanged(to: .active)
-        model.openFromNotification(kind: "approval")
-        model.deckClosed()
-        XCTAssertFalse(model.deckAwaitsCatchUp)
+        app.openFromNotification(kind: "approval")
+        app.deckClosed()
+        XCTAssertFalse(app.deckAwaitsCatchUp)
     }
 
     /// Each release is counted, so a Deck already open takes it as its
     /// reopening rather than as cards arriving mid-pass.
     func testEachReleaseIsCounted() async {
         let model = await caughtUp()
-        let releases = model.catchUpReleases
+        let app = Machines(holding: model)
+        let releases = app.catchUpReleases
         model.scenePhaseChanged(to: .background)
         model.scenePhaseChanged(to: .active)
         model.connection.injectForTesting(sessions(4))
         model.connection.injectForTesting(card(4))
         await settle(model)
-        XCTAssertEqual(model.catchUpReleases, releases + 1)
+        XCTAssertEqual(app.catchUpReleases, releases + 1)
     }
 
     /// Opened from the bar, the Deck shows the cards on screen; and a tap with
     /// nothing catching up has nothing to wait for.
     func testOnlyANotificationTapMidCatchUpWaits() async {
         let model = await caughtUp()
-        model.openFromNotification(kind: "approval")
-        XCTAssertFalse(model.deckAwaitsCatchUp, "nothing is catching up")
+        let app = Machines(holding: model)
+        app.openFromNotification(kind: "approval")
+        XCTAssertFalse(app.deckAwaitsCatchUp, "nothing is catching up")
         model.scenePhaseChanged(to: .background)
         model.scenePhaseChanged(to: .active)
-        XCTAssertFalse(model.deckAwaitsCatchUp, "a tap in the foreground is not one made while away")
-        model.openFromNotification(kind: "finished")
-        XCTAssertFalse(model.deckAwaitsCatchUp, "only an approval opens the Deck")
+        XCTAssertFalse(app.deckAwaitsCatchUp, "a tap in the foreground is not one made while away")
+        app.openFromNotification(kind: "finished")
+        XCTAssertFalse(app.deckAwaitsCatchUp, "only an approval opens the Deck")
     }
 }

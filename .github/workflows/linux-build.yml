@@ -1,0 +1,147 @@
+# Builds and packages CodeConnect for Linux: static musl `codeconnect`, `ccd`
+# and `cc-hook`, and the static `cc-tmux`, for x86_64 and aarch64, each on a
+# native runner.
+#
+# **One place, two callers.** The release calls this with its pinned commit, and
+# CI calls it with every change's, so a pull request runs exactly the steps a
+# release does. It publishes nothing: the archives leave as workflow artifacts,
+# and attaching them to a release is the caller's business.
+#
+# Each architecture gets the archives the macOS release ships, named for it:
+# `codeconnect-<version>-linux-<arch>.tar.gz` holds the three binaries and the
+# licence, named one by one so it has no directory member, and
+# `codeconnect-<version>-tmux-linux-<arch>.tar.gz` holds cc-tmux and its
+# notices; each beside its `.sha256`.
+name: Linux build
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The commit to build"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Linux ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Refuse a tree that is not provably clean
+        run: |
+          if ! status="$(git status --porcelain)"; then
+            echo "::error::git status failed; a clean tree cannot be proven"
+            exit 1
+          fi
+          if [ -n "$status" ]; then
+            echo "::error::the tree is dirty; binaries would claim they were built from an edited tree"
+            printf '%s\n' "$status"
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl
+          cargo build --release --locked --manifest-path mac/Cargo.toml \
+            --target ${{ matrix.arch }}-unknown-linux-musl \
+            --bin codeconnect --bin ccd --bin cc-hook
+
+      # Static, so one binary runs on any distribution: no interpreter to load
+      # it and no shared library to find. And the build says exactly what it is,
+      # compared as a literal from the commit it was built from.
+      - name: Check the binaries are static and say exactly what they are
+        run: |
+          version="$(awk -F'"' '/^version = /{print $2; exit}' mac/Cargo.toml)"
+          sha="$(git rev-parse HEAD)"
+          for binary in codeconnect ccd cc-hook; do
+            path="mac/target/${{ matrix.arch }}-unknown-linux-musl/release/$binary"
+            if readelf -l "$path" | grep -q INTERP || readelf -d "$path" | grep -q NEEDED; then
+              echo "::error::$binary is not statically linked"
+              exit 1
+            fi
+            expected="$binary $version (${sha:0:12})"
+            said="$("$path" --version)"
+            if [ "$said" != "$expected" ]; then
+              echo "::error::$binary reports '$said', expected '$expected'"
+              exit 1
+            fi
+          done
+
+      # On Alpine, the musl system build.sh requires, pinned by digest for both
+      # architectures; the binary it writes runs on this runner as it is.
+      - name: Build tmux
+        run: |
+          mkdir -p "$RUNNER_TEMP/tmux"
+          docker run --rm -v "$PWD/mac/tmux:/build:ro" -v "$RUNNER_TEMP/tmux:/out" \
+            alpine:3.22@sha256:2e0b81d60597f449baa56dc25d355367869d2dca4cd57e866f1e2b52af3eb55f \
+            sh -c 'apk add --no-cache bash build-base curl pkgconf linux-headers bison && bash /build/build.sh /out'
+
+      - name: Check the tmux is the one codeconnect requires
+        run: |
+          expected="$("mac/target/${{ matrix.arch }}-unknown-linux-musl/release/codeconnect" --tmux-version)"
+          said="$("$RUNNER_TEMP/tmux/cc-tmux-${{ matrix.arch }}" -V)"
+          if [ -z "$expected" ] || [ "$said" != "$expected" ]; then
+            echo "::error::cc-tmux reports '$said', codeconnect requires '$expected'"
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          version="$(awk -F'"' '/^version = /{print $2; exit}' mac/Cargo.toml)"
+          dir="codeconnect-$version"
+          mkdir -p "$RUNNER_TEMP/package/$dir"
+          cd "$RUNNER_TEMP/package"
+          for binary in codeconnect ccd cc-hook; do
+            install -m 0755 "$GITHUB_WORKSPACE/mac/target/${{ matrix.arch }}-unknown-linux-musl/release/$binary" "$dir/$binary"
+          done
+          # The licence travels with the binaries because the licence says it
+          # must: a binaries-only archive is a distribution without its notice.
+          install -m 0644 "$GITHUB_WORKSPACE/LICENSE" "$dir/LICENSE"
+          install -m 0755 "$RUNNER_TEMP/tmux/cc-tmux-${{ matrix.arch }}" "$dir/cc-tmux"
+          install -m 0644 "$RUNNER_TEMP/tmux/THIRD_PARTY_NOTICES" "$dir/THIRD_PARTY_NOTICES"
+          archive="codeconnect-$version-linux-${{ matrix.arch }}.tar.gz"
+          tar -czf "$archive" "$dir/codeconnect" "$dir/ccd" "$dir/cc-hook" "$dir/LICENSE"
+          sha256sum "$archive" > "$archive.sha256"
+          tmux_archive="codeconnect-$version-tmux-linux-${{ matrix.arch }}.tar.gz"
+          tar -czf "$tmux_archive" "$dir/cc-tmux" "$dir/THIRD_PARTY_NOTICES"
+          sha256sum "$tmux_archive" > "$tmux_archive.sha256"
+          # The rule the updater applies to an archive: exactly these members,
+          # nothing else, no directory entry.
+          holds_exactly() {
+            local archive="$1" expected actual
+            shift
+            expected="$(printf '%s\n' "$@" | sort)"
+            actual="$(tar -tzf "$archive" | sort)"
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::$archive does not hold exactly the expected members"
+              diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+              exit 1
+            fi
+          }
+          holds_exactly "$archive" "$dir/codeconnect" "$dir/ccd" "$dir/cc-hook" "$dir/LICENSE"
+          holds_exactly "$tmux_archive" "$dir/cc-tmux" "$dir/THIRD_PARTY_NOTICES"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/package/*.tar.gz
+            ${{ runner.temp }}/package/*.tar.gz.sha256
+          if-no-files-found: error

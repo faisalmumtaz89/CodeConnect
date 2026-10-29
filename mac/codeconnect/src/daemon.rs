@@ -159,9 +159,17 @@ pub fn agent_support_on(
 pub fn request_within(frame: &ClientFrame, timeout: Duration) -> Result<DaemonFrame> {
     let socket = protocol::socket_path();
     let mut stream = UnixStream::connect(&socket).with_context(|| {
+        // With no systemd, `daemon install` refuses: name the line that starts it by hand.
+        #[cfg(target_os = "linux")]
+        let start = crate::service::no_systemd().map_or_else(
+            || "codeconnect daemon install".to_string(),
+            |_| crate::service::hand_run_line(),
+        );
+        #[cfg(not(target_os = "linux"))]
+        let start = "codeconnect daemon install";
         format!(
             "cannot reach the CodeConnect daemon at {}: start it with \
-             `codeconnect daemon install`, or check it with `codeconnect daemon status`",
+             `{start}`, or check it with `codeconnect daemon status`",
             socket.display()
         )
     })?;

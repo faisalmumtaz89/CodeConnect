@@ -19,7 +19,7 @@ enum SnapshotCommand: String, CaseIterable, Identifiable {
     /// how you got there.
     var title: String {
         switch self {
-        case .status: return "Mac status"
+        case .status: return "Computer status"
         case .usage, .cost: return "Usage"
         }
     }
@@ -171,7 +171,7 @@ enum ClaudeCommandPolicy {
                     command: command,
                     reason:
                         "/\(command) takes no arguments here. Remove the "
-                        + "extra text to capture the Mac's view.")
+                        + "extra text to capture the computer's view.")
             }
             guard recoversComposer else {
                 return .blocked(
@@ -187,7 +187,7 @@ enum ClaudeCommandPolicy {
             return .blocked(
                 command: command,
                 reason:
-                    "/\(command) opens a view on the Mac that Esc does not close, so "
+                    "/\(command) opens a view on the computer that Esc does not close, so "
                     + "CodeConnect cannot recover the composer for you. "
                     + "Use the Terminal tab to run it.")
         }
@@ -195,7 +195,7 @@ enum ClaudeCommandPolicy {
             return .blocked(
                 command: command,
                 reason:
-                    "/\(command) opens a view on the Mac and would take over this "
+                    "/\(command) opens a view on the computer and would take over this "
                     + "composer. Use the Terminal tab to run it.")
         }
         if unobservableCommands.contains(command) {
@@ -203,7 +203,7 @@ enum ClaudeCommandPolicy {
                 command: command,
                 reason:
                     "/\(command) changes something CodeConnect cannot yet observe. "
-                    + "Use the Terminal tab until the Mac reports it back to the app.")
+                    + "Use the Terminal tab until the computer reports it back to the app.")
         }
         // Everything else — a measured-inline built-in, a custom skill, a
         // project command, a typo — is typed. The supervisor's recovery

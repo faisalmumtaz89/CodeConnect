@@ -28,7 +28,7 @@ final class SessionIdentityLiveUITests: XCTestCase {
         // previous run of the suite left on disk.
         app.launchArguments = ["-CC_HOST", host, "-CC_TOKEN", token, "-CC_RESET_CACHE", "YES"]
         app.launch()
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 25))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 25))
         return app
     }
 
@@ -96,7 +96,7 @@ final class SessionIdentityLiveUITests: XCTestCase {
         let first = shared.element(boundBy: 0)
         let identifier = first.identifier
         first.tap()
-        XCTAssertFalse(app.navigationBars["Fleet"].exists, "tapping a row pushes the detail stack")
+        XCTAssertFalse(app.navigationBars["Projects"].exists, "tapping a row pushes the detail stack")
 
         // The diff is a round trip that names the session on the wire; a request
         // scoped to a uid the daemon does not know would come back as an error
@@ -105,7 +105,7 @@ final class SessionIdentityLiveUITests: XCTestCase {
         let settled = app.staticTexts.matching(
             NSPredicate(
                 format:
-                    "label CONTAINS 'Captured on the Mac' OR label CONTAINS 'No diff' OR label CONTAINS 'not a git'"
+                    "label CONTAINS 'Captured on the computer' OR label CONTAINS 'No diff' OR label CONTAINS 'not a git'"
             )
         ).firstMatch
         XCTAssertTrue(

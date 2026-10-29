@@ -101,7 +101,7 @@ pub fn updated_input(tool_input: &Value, answers: &[QuestionAnswer]) -> Result<V
         if let Some(other) = &answer.other {
             if question.takes_notes() {
                 return Err(format!(
-                    "question {number} has no \"Other\" at the Mac, so it takes none here"
+                    "question {number} has no \"Other\" at the computer, so it takes none here"
                 ));
             }
             if other.trim().is_empty() {
@@ -182,7 +182,7 @@ fn questions(tool_input: &Value) -> Result<Vec<Question<'_>>, String> {
                 .ok_or(format!("question {number} has no text"))?;
             if !shown_as_written(text, false) {
                 return Err(format!(
-                    "question {number}'s text is shown differently at the Mac"
+                    "question {number}'s text is shown differently at the computer"
                 ));
             }
             if seen.contains(&text) {
@@ -211,12 +211,12 @@ fn questions(tool_input: &Value) -> Result<Vec<Question<'_>>, String> {
                     .and_then(Value::as_str)
                     .filter(|label| shown_as_written(label, false))
                     .ok_or(format!(
-                        "question {number} has an option the phone cannot show as the Mac does"
+                        "question {number} has an option the phone cannot show as the computer does"
                     ))?;
                 let label = folded(label);
                 if label.is_empty() || shown.iter().any(|(seen, _)| *seen == label) {
                     return Err(format!(
-                        "question {number} has two options the Mac shows alike"
+                        "question {number} has two options the computer shows alike"
                     ));
                 }
                 let preview = match option.get("preview") {
@@ -229,7 +229,7 @@ fn questions(tool_input: &Value) -> Result<Vec<Question<'_>>, String> {
                     }
                     Some(_) => {
                         return Err(format!(
-                            "question {number} has a preview the phone cannot show as the Mac does"
+                            "question {number} has a preview the phone cannot show as the computer does"
                         ))
                     }
                 };

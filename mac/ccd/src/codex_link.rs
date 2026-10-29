@@ -2251,14 +2251,14 @@ impl LinkAnswers {
         {
             return AnswerReport::NotApplied(
                 "the link to this Codex session is not running, so nothing was sent; \
-                 answer at the Mac"
+                 answer at the computer"
                     .into(),
             );
         }
         outcome.await.unwrap_or_else(|_| {
             AnswerReport::Unknown(
                 "the link stopped while this answer was being written, so whether it \
-                 reached Codex is not known; it will not be sent again. Check the Mac."
+                 reached Codex is not known; it will not be sent again. Check the computer."
                     .into(),
             )
         })
@@ -2574,8 +2574,8 @@ async fn settle_won_answer(daemon: &Arc<Daemon>, session: &SessionKey, held: Pen
                 AnswerReport::Delivered
             } else {
                 AnswerReport::Unknown(
-                    "your answer reached Codex but this Mac could not record it, so do not \
-                     answer it again; check the Mac"
+                    "your answer reached Codex but the computer could not record it, so do not \
+                     answer it again; check the computer"
                         .into(),
                 )
             }
@@ -2584,7 +2584,7 @@ async fn settle_won_answer(daemon: &Arc<Daemon>, session: &SessionKey, held: Pen
         // than as an applied answer, because what the operator will see is a card
         // that is still there.
         crate::state::Retirement::Failed => AnswerReport::Unknown(
-            "your answer reached Codex but this Mac could not record it, so the card is \
+            "your answer reached Codex but the computer could not record it, so the card is \
              still showing; do not answer it again"
                 .into(),
         ),
@@ -2620,7 +2620,7 @@ async fn settle_lost_answer(
 ) {
     let recorded = settle_claim_alone(daemon, session, &held.request_id, ANSWER_LOST).await;
     let why = match winner {
-        "tui" => "this card was answered at the Mac first, so nothing you chose was applied",
+        "tui" => "this card was answered at the computer first, so nothing you chose was applied",
         "ccd" => {
             "this card was answered through another CodeConnect daemon first, so nothing \
              you chose was applied"
@@ -2692,7 +2692,7 @@ async fn settle_claim_alone(
 /// managed to write down. Recovery will make the claim terminal on the next start, which
 /// is why "check the Mac" is the useful half.
 const LEDGER_NOT_RECORDED: &str =
-    ", but this Mac could not record that, so check the Mac before answering anything else";
+    ", but the computer could not record that, so check the computer before answering anything else";
 
 /// **Make every answer this connection was still waiting on terminal.**
 ///
@@ -2912,9 +2912,9 @@ pub(crate) async fn settle_open_interrupts(
 /// the same terminal — which is the fail-closed direction.
 fn write_cause(wire: &str) -> &'static str {
     match wire {
-        WIRE_WRITE_FAILED => "this Mac could not put your answer on the Codex socket",
-        WIRE_UNCONFIRMED => "this Mac could not confirm your answer reached Codex",
-        _ => "the broker reported an ending this Mac has no words for",
+        WIRE_WRITE_FAILED => "the computer could not put your answer on the Codex socket",
+        WIRE_UNCONFIRMED => "the computer could not confirm your answer reached Codex",
+        _ => "the broker reported an ending the computer has no words for",
     }
 }
 
@@ -2953,7 +2953,7 @@ async fn settle_unknown_answer(
 ) {
     let told = format!(
         "{cause}, so whether your answer reached Codex is not known; it will not be \
-         sent again. Check the Mac."
+         sent again. Check the computer."
     );
     retire_answer_as_unknown(daemon, session, answer, cause, told).await;
 }
@@ -2984,7 +2984,7 @@ async fn settle_unattributed_answer(
     /// Spelled once: the phone reads it inside a longer sentence, and the durable
     /// resolution records it on its own, and the two must not drift apart.
     const UNATTRIBUTED: &str =
-        "nothing you chose was sent, and this Mac was not told what settled this card";
+        "nothing you chose was sent, and the computer was not told what settled this card";
     retire_answer_as_unknown(
         daemon,
         session,
@@ -2992,7 +2992,7 @@ async fn settle_unattributed_answer(
         UNATTRIBUTED,
         format!(
             "{UNATTRIBUTED}, so how it ended is not known; it will not be sent again. \
-             Check the Mac."
+             Check the computer."
         ),
     )
     .await;
@@ -3328,7 +3328,7 @@ pub async fn run(
         while let Ok(ask) = answers.try_recv() {
             let _ = ask.reply.send(AnswerReport::NotApplied(
                 "the link to this Codex session has no live connection, so nothing was \
-                 sent; answer at the Mac"
+                 sent; answer at the computer"
                     .into(),
             ));
         }
@@ -5239,7 +5239,7 @@ const BROKER_POLICY_REFUSED: i64 = -32001;
 /// The broker's message for a request refused while Codex is stopped at the Mac (Ctrl+Z).
 /// Mirrors `codex_broker::refusal::PAUSED_MESSAGE`, restated for
 /// [`BROKER_POLICY_REFUSED`]'s reason. Read to tell the pause apart; never passed on.
-const BROKER_PAUSED_MESSAGE: &str = "codex is paused at the Mac (Ctrl+Z); run fg there";
+const BROKER_PAUSED_MESSAGE: &str = "codex is paused at the computer (Ctrl+Z); run fg there";
 
 impl Connection<'_> {
     /// The ccd role's handshake: `initialize`, then the one notification the leg
@@ -6433,7 +6433,7 @@ impl Connection<'_> {
             refuse(
                 ask,
                 "this Codex session is not on the thread that card belongs to, so \
-                 nothing was sent; answer at the Mac",
+                 nothing was sent; answer at the computer",
             );
             return Ok(());
         }
@@ -6471,7 +6471,7 @@ impl Connection<'_> {
             refuse(
                 ask,
                 "this connection holds no live request id for that card, so nothing \
-                 was sent; answer at the Mac",
+                 was sent; answer at the computer",
             );
             return Ok(());
         };
@@ -6520,7 +6520,7 @@ impl Connection<'_> {
             Ok(crate::store::MutationClaim::Indeterminate { .. }) => {
                 let _ = ask.reply.send(AnswerReport::Unknown(
                     "an answer to this card was already sent and what became of it is not \
-                     known; it will not be sent again. Check the Mac."
+                     known; it will not be sent again. Check the computer."
                         .into(),
                 ));
                 return Ok(());
@@ -8033,7 +8033,7 @@ impl Connection<'_> {
             }
             Ok(false) => {
                 crate::log_error!(
-                    "codex link for {}: the turn {turn_id} ended and this Mac could not \
+                    "codex link for {}: the turn {turn_id} ended and this computer could not \
                      record that it did, so the interrupts waiting on it are recorded \
                      as unknown rather than as aborts nothing in the log supports",
                     self.session.name
@@ -18829,7 +18829,7 @@ mod tests {
         let hint = push.last().expect("an approval doorbell");
         assert_eq!(hint.kind, crate::apns::PushKind::Approval);
         assert_eq!(hint.session_uid, session.uid);
-        assert_eq!(hint.blocked_sessions, 1);
+        assert_eq!(hint.decisions, 1);
     }
 
     /// **An approval for a thread this link is not visiting is filtered like any
@@ -19616,12 +19616,12 @@ mod tests {
         fn tells_the_phone_nothing_local(verb: &str, reason: &str, secret: &str) {
             assert!(
                 !reason.contains(secret),
-                "the {verb} refusal repeated this Mac's own store error to the phone: \
+                "the {verb} refusal repeated the computer's own store error to the phone: \
                  {reason}"
             );
             assert!(
                 !reason.contains("/Users/"),
-                "the {verb} refusal named a place on this Mac's disk: {reason}"
+                "the {verb} refusal named a place on the computer's disk: {reason}"
             );
         }
 
@@ -19629,7 +19629,7 @@ mod tests {
         for row in crate::codex_refusals::catalogue() {
             assert!(
                 !row.text.contains("{err}"),
-                "the refusal `{}` is still assembled from this Mac's own store error, \
+                "the refusal `{}` is still assembled from the computer's own store error, \
                  which is an anyhow chain naming absolute filesystem paths: {}",
                 row.id,
                 row.text
@@ -19698,7 +19698,7 @@ mod tests {
             };
             tells_the_phone_nothing_local("compose", &reason, &secret);
             assert!(
-                reason.contains("Check the Mac"),
+                reason.contains("Check the computer"),
                 "and it still says what to do: {reason}"
             );
 
@@ -19733,7 +19733,7 @@ mod tests {
             };
             tells_the_phone_nothing_local("interrupt", &reason, &secret);
             assert!(
-                reason.contains("Check the Mac"),
+                reason.contains("Check the computer"),
                 "and it still says what to do: {reason}"
             );
         }
@@ -20312,7 +20312,7 @@ mod tests {
             panic!("a paused refusal is a refusal")
         };
         assert!(
-            reason.contains("paused at the Mac") && reason.contains("fg"),
+            reason.contains("paused at the computer") && reason.contains("fg"),
             "the phone is told Codex is paused and that fg brings it back: {reason}"
         );
         assert!(
@@ -20373,7 +20373,7 @@ mod tests {
             panic!("a paused refusal is a refusal")
         };
         assert!(
-            reason.contains("paused at the Mac") && reason.contains("fg"),
+            reason.contains("paused at the computer") && reason.contains("fg"),
             "the phone is told Codex is paused and that fg brings it back: {reason}"
         );
         assert_eq!(
@@ -20662,7 +20662,7 @@ mod tests {
                 "{message}: the same id is a first attempt again"
             );
             assert!(
-                reason.contains("sent again from the phone") && !reason.contains("at the Mac"),
+                reason.contains("sent again from the phone") && !reason.contains("at the computer"),
                 "{message}: {reason}"
             );
             assert!(!reason.contains(message), "{message}: {reason}");
@@ -20690,7 +20690,7 @@ mod tests {
             assert_eq!(status, None, "{message}: nothing reached Codex, so no row");
             assert_eq!(resend, crate::store::MutationClaim::Claimed, "{message}");
             assert!(
-                reason.contains("from the phone") && !reason.contains("at the Mac"),
+                reason.contains("from the phone") && !reason.contains("at the computer"),
                 "{message}: {reason}"
             );
         }
@@ -21008,7 +21008,7 @@ mod tests {
         assert!(conn.note_compose_response(&paused_refusal(7105)).await);
         for told in [first.await, joined.await] {
             assert!(
-                matches!(told.expect("told"), ComposeReport::NotApplied(ref why) if why.contains("paused at the Mac")),
+                matches!(told.expect("told"), ComposeReport::NotApplied(ref why) if why.contains("paused at the computer")),
                 "both waiters hear the one refusal"
             );
         }
@@ -21097,7 +21097,7 @@ mod tests {
             panic!("the paused broker refuses the first: {paused:?}")
         };
         assert!(
-            reason.contains("paused at the Mac") && reason.contains("fg"),
+            reason.contains("paused at the computer") && reason.contains("fg"),
             "{reason}"
         );
         assert!(
@@ -24069,20 +24069,20 @@ mod tests {
             "codex link for cc-1: item/permissions/requestApproval for item {ITEM} is \
              observed and not carded — it asks for a permission profile rather than a \
              decision about one action, so there is nothing a card could offer and it \
-             must be answered at the Mac"
+             must be answered at the computer"
         );
         assert_eq!(said(&profile), expected);
         // **"must be answered", never "is answered".** This leg observes the
         // arrival and nothing else: no answer to it crosses here, so a line
         // claiming one would be reporting something nobody looked at.
-        assert!(!expected.contains("it is answered at the Mac"));
+        assert!(!expected.contains("it is answered at the computer"));
 
         let expected_future = format!(
             "codex link for cc-1: item/somethingNew/requestApproval for item \
              {FUTURE_ITEM} is observed and not carded — this build has no card for it \
              — it is an approval family that arrived after the two a phone answers, \
              so nothing here knows what to offer for it and it must be answered at \
-             the Mac"
+             the computer"
         );
         assert_eq!(said(&future), expected_future);
 
@@ -24515,8 +24515,8 @@ mod tests {
         let result = link.answer(&card, "accept").await;
         let why = refusal(&result);
         assert!(
-            why.contains("at the Mac") && why.contains("nothing you chose was applied"),
-            "the arbiter named the TUI, so the phone is told the Mac answered: {why}"
+            why.contains("at the computer") && why.contains("nothing you chose was applied"),
+            "the arbiter named the TUI, so the phone is told the computer answered: {why}"
         );
         link.await_burst().await;
 
@@ -24576,12 +24576,12 @@ mod tests {
 
         let why = refusal(&result);
         assert!(
-            why.contains("at the Mac"),
+            why.contains("at the computer"),
             "the loss is still true and still named: {why}"
         );
         assert!(
-            why.contains("could not record") || why.contains("check the Mac"),
-            "a ledger this Mac could not write is not an ordinary outcome: {why}"
+            why.contains("could not record") || why.contains("check the computer"),
+            "a ledger the computer could not write is not an ordinary outcome: {why}"
         );
         assert_eq!(
             link.answer_status(&card.request_id),
@@ -24628,7 +24628,7 @@ mod tests {
         let why = refusal(&result);
         assert!(
             !why.contains("answered this card first")
-                && !why.contains("at the Mac")
+                && !why.contains("at the computer")
                 && !why.contains("another CodeConnect daemon"),
             "no winner was named, so nothing may be described as having answered: {why}"
         );
@@ -24885,7 +24885,7 @@ mod tests {
         let result = link.answer(&card, "accept").await;
         let why = refusal(&result);
         assert!(
-            !why.contains("something else answered") && !why.contains("at the Mac"),
+            !why.contains("something else answered") && !why.contains("at the computer"),
             "nothing answered this card, so nothing may be described as having: {why}"
         );
         assert!(

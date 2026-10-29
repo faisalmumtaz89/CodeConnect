@@ -321,10 +321,10 @@ enum CodexLinkState: Sendable, Hashable {
             case .compose: return nil
             case .stop: return "This Codex session has not started a turn yet."
             }
-        case .bound: return "This Mac has reached the Codex session but is not yet watching it."
-        case .offline: return "This Mac has lost its link to the Codex session and is reconnecting."
+        case .bound: return "The computer has reached the Codex session but is not yet watching it."
+        case .offline: return "The computer has lost its link to the Codex session and is reconnecting."
         case .none: return "There is no live link to this Codex session."
-        case .unknown: return "This Mac reports a link state this app does not recognise."
+        case .unknown: return "The computer reports a link state this app does not recognise."
         }
     }
 
@@ -1215,7 +1215,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
     var provenance: String {
         switch resolvedBy {
         case .phone: return "from a phone"
-        case .local: return "at the Mac"
+        case .local: return "at the computer"
         case .timeout where detail == Self.sessionEnded: return "when the session ended"
         case .timeout: return "by timeout - nobody answered"
         case .superseded: return "superseded"
@@ -2016,6 +2016,14 @@ struct HelloAck: Sendable, Hashable {
     /// this to its cached tuple on every handshake and **persists a difference
     /// rather than resending its stale value** — the daemon→app correction path.
     var pushEnvironment: String?
+    /// What the owner calls the computer the daemon runs on (a Mac's computer
+    /// name). Minor 25; absent from an older daemon, or when it could not be read.
+    var machineName: String?
+    /// `"macos"` or `"linux"`. Minor 25; absent when the daemon does not say.
+    var machineOS: String?
+    /// Which daemon this is, the same whatever address reached it. Minor 26;
+    /// absent from an older daemon, which is told apart by address instead.
+    var machineID: String?
 }
 
 /// What became of a `delete_session`.
@@ -2077,7 +2085,7 @@ enum DeleteSessionResult: Decodable, Sendable, Hashable {
         case "failed":
             self = .failed(
                 message: try c.decodeIfPresent(String.self, forKey: .message)
-                    ?? "The Mac could not remove that session.")
+                    ?? "The computer could not remove that session.")
         default: self = .unknown(status: status)
         }
     }
@@ -2124,7 +2132,7 @@ enum TestPushResult: Decodable, Sendable, Hashable {
         case "failed":
             self = .failed(
                 reason: try c.decodeIfPresent(String.self, forKey: .reason)
-                    ?? "The Mac could not send the test.")
+                    ?? "The computer could not send the test.")
         default: self = .unknown(status: status)
         }
     }
@@ -2246,6 +2254,9 @@ extension ServerMessage: Decodable {
         case sessionUID = "session_uid"
         case deviceName = "device_name"
         case pushEnvironment = "push_environment"
+        case machineName = "machine_name"
+        case machineOS = "machine_os"
+        case machineID = "machine_id"
         case sessions
         case event
         case requestID = "request_id"
@@ -2280,7 +2291,10 @@ extension ServerMessage: Decodable {
                     deviceToken: try c.decodeIfPresent(String.self, forKey: .deviceToken),
                     deviceID: try c.decodeIfPresent(String.self, forKey: .deviceID),
                     deviceName: try c.decodeIfPresent(String.self, forKey: .deviceName),
-                    pushEnvironment: try c.decodeIfPresent(String.self, forKey: .pushEnvironment)))
+                    pushEnvironment: try c.decodeIfPresent(String.self, forKey: .pushEnvironment),
+                    machineName: try c.decodeIfPresent(String.self, forKey: .machineName),
+                    machineOS: try c.decodeIfPresent(String.self, forKey: .machineOS),
+                    machineID: try c.decodeIfPresent(String.self, forKey: .machineID)))
         case "diff":
             self = .diff(try SessionDiff(from: decoder))
         case "sessions":

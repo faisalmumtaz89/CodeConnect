@@ -22,11 +22,11 @@ pub struct PushHint {
     /// Which sentence to use. The daemon never passes a sentence; it passes
     /// the *kind*, and the words live with the composer.
     pub kind: PushKind,
-    /// How many runs are holding a *decision* — distinct sessions with a
-    /// pending approval, of every agent, which is what `blocked_runs` counts. A run merely
-    /// waiting for input is not among them. The alert says "agents", so the
-    /// word matches the number.
-    pub blocked_sessions: usize,
+    /// How many *decisions* are waiting — every pending approval and question,
+    /// of every agent's runs: the number the app's fleet shows as "N waiting for
+    /// you", so the lock screen and the app never give one sentence two numbers.
+    /// A run merely waiting for input is not among them.
+    pub decisions: usize,
     /// Which run rang, for the log only. **Never serialised into a payload**: a
     /// ULID's leading bits are the run's start time, and a notification that
     /// carried one would let Apple group a device's pushes into sessions.
@@ -48,28 +48,28 @@ impl PushHint {
     /// fleet is no longer about the run that triggered it: saying `Ledger` over
     /// `Waiting on an approval` when the decision belongs to `Aion` sends a
     /// reader looking in the wrong place. So the title follows the subject —
-    /// the one blocked run when there is exactly one, and nobody in particular
-    /// when there are several, where the body is a count rather than a claim
-    /// about any single project.
+    /// the one blocked run when exactly one run holds decisions, however many
+    /// it holds (`blocked_label`, which the caller gives only then), and nobody
+    /// in particular when several runs do, where the body is a count rather
+    /// than a claim about any single project.
     ///
     /// The count is read at ring time rather than at admission for the same
     /// reason: a number taken before the dispatch grace can describe a fleet
     /// that has since answered everything.
-    pub fn describing(&self, blocked: usize, blocked_label: Option<String>) -> PushHint {
+    pub fn describing(&self, decisions: usize, blocked_label: Option<String>) -> PushHint {
         PushHint {
             // The question's own ring keeps its words while it is the one
             // decision waiting.
-            kind: match (blocked, self.kind) {
+            kind: match (decisions, self.kind) {
                 (0, kind) | (1, kind @ PushKind::Question) => kind,
                 _ => PushKind::Approval,
             },
-            blocked_sessions: blocked,
-            project_label: match blocked {
+            decisions,
+            // With several runs blocked the caller gives no label: a title
+            // naming one of them would be picking a favourite.
+            project_label: match decisions {
                 0 => self.project_label.clone(),
-                1 => blocked_label.unwrap_or_default(),
-                // Several. The body is "N agents need you", and a title naming
-                // one of them would be picking a favourite.
-                _ => String::new(),
+                _ => blocked_label.unwrap_or_default(),
             },
             session_uid: self.session_uid.clone(),
         }
@@ -91,7 +91,7 @@ impl PushKind {
     /// The stable, machine-readable form, for deciding where a tap lands.
     ///
     /// **Coarse metadata, not a duplicate.** Under coalescing the body becomes
-    /// `{n} agents need you`, so this is not always visible in the alert — it is
+    /// `{n} waiting for you`, so this is not always visible in the alert — it is
     /// one of four words describing why the doorbell rang, and it is deliberate
     /// additional information. What it is *not* is an identifier: it names no
     /// session, no decision and no device, and two notifications carrying the
@@ -438,7 +438,7 @@ pub fn build(
 /// beats telling them something meaningless.
 ///
 /// Body is a canned sentence picked by [`PushKind`], or the count once more
-/// than one session is blocked: with four waiting, which one rang is not the
+/// than one decision is waiting: with four waiting, which one rang is not the
 /// useful fact and the lock screen has no room for the rest.
 ///
 /// **What is deliberately absent**: the tool name, the risk class, the command,
@@ -454,9 +454,9 @@ pub fn alert(hint: &PushHint) -> (String, String) {
     // **The count is the whole fleet's**, Claude and Codex runs alike: the
     // phone keeps one notification, so it says what everything waiting needs,
     // in the same words the relay uses.
-    let body = match hint.blocked_sessions {
+    let body = match hint.decisions {
         0 | 1 => hint.kind.sentence().to_string(),
-        n => format!("{n} agents need you"),
+        n => format!("{n} waiting for you"),
     };
     (title, body)
 }
@@ -473,7 +473,7 @@ mod tests {
         PushHint {
             project_label: "Aion".into(),
             kind: PushKind::Approval,
-            blocked_sessions: blocked,
+            decisions: blocked,
             session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
         }
     }
@@ -491,8 +491,8 @@ mod tests {
     }
 
     #[test]
-    fn several_blocked_sessions_coalesce_to_the_count() {
-        assert_eq!(alert(&hint(3)).1, "3 agents need you");
+    fn several_decisions_coalesce_to_the_count() {
+        assert_eq!(alert(&hint(3)).1, "3 waiting for you");
     }
 
     /// **A doorbell never announces the lesser fact while a decision waits.**
@@ -513,7 +513,7 @@ mod tests {
 
             let mut ambient = hint(0);
             ambient.kind = rang;
-            assert_eq!(alert(&ambient.describing(3, None)).1, "3 agents need you");
+            assert_eq!(alert(&ambient.describing(3, None)).1, "3 waiting for you");
             if rang == PushKind::Question {
                 continue;
             }
@@ -563,7 +563,7 @@ mod tests {
         // nothing about any one of them.
         assert_eq!(
             alert(&ledger.describing(3, None)),
-            ("CodeConnect".into(), "3 agents need you".into())
+            ("CodeConnect".into(), "3 waiting for you".into())
         );
 
         // Nothing blocked: the run that rang is the subject, and keeps its name.
@@ -821,6 +821,6 @@ mod tests {
         let sender = LoggingPushSender::new();
         assert_eq!(sender.mode(), PushMode::Off);
         sender.send(&hint(2), &[]);
-        assert_eq!(sender.last().unwrap().blocked_sessions, 2);
+        assert_eq!(sender.last().unwrap().decisions, 2);
     }
 }

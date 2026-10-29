@@ -88,6 +88,12 @@ enum Fixtures {
         /// and whose description a NUL — `spoofedCard`. The one fixture whose
         /// command, drawn as it arrives, reads as a different command.
         case spoofedCommand
+        /// Paired and connected, with no session at all: the first screen after
+        /// pairing, and the one between days.
+        case empty
+        /// `deck` with one card: the force-push on `fx-1`. The accessory bar's
+        /// ordinary case, which every other fixture overstates.
+        case single
 
         init?(_ raw: String?) {
             guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -99,6 +105,8 @@ enum Fixtures {
             case .deck, .ended, .ended45, .longOutput: return deckCards
             case .stacked, .wideTool, .mcpApproval: return deckCards + [stackedCard]
             case .spoofedCommand: return [spoofedCard]
+            case .empty: return []
+            case .single: return deckCards.filter { $0.sessionID == "fx-1" }
             }
         }
 
@@ -112,7 +120,9 @@ enum Fixtures {
             switch self {
             case .ended: return 8
             case .ended45: return 45
-            case .deck, .stacked, .longOutput, .wideTool, .mcpApproval, .spoofedCommand: return 0
+            case .deck, .stacked, .longOutput, .wideTool, .mcpApproval, .spoofedCommand, .empty,
+                .single:
+                return 0
             }
         }
 
@@ -123,8 +133,9 @@ enum Fixtures {
         /// either.
         var sessionCount: Int {
             switch self {
-            case .deck, .ended, .ended45, .spoofedCommand: return 4
+            case .deck, .ended, .ended45, .spoofedCommand, .single: return 4
             case .stacked, .longOutput, .wideTool, .mcpApproval: return 5
+            case .empty: return 0
             }
         }
 
@@ -323,7 +334,9 @@ enum Fixtures {
     /// `protocol::PROTOCOL_MINOR` and `ws_server::capabilities`. `push` is
     /// false because a fixture daemon holds no APNs key, and `test_push`
     /// follows it for that reason. The release sample fleet does not use
-    /// this ack; see `sampleHelloAckJSON`.
+    /// this ack; see `sampleHelloAckJSON`. `machine_name` and `machine_os`
+    /// are what a minor-25 daemon sends, set here so the cards show a
+    /// computer; the phone decodes them at any minor.
     private static let helloAckJSON = """
         {"type":"hello_ack","protocol_version":1,"protocol_minor":14,\
         "server_time":"2026-07-31T09:14:00.000Z",\
@@ -334,6 +347,7 @@ enum Fixtures {
         "send_text_idempotent":true,"slash_composer_recovery":true,\
         "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
         "hook_only_approvals":true},\
+        "machine_name":"Jordan’s Mac Studio","machine_os":"macos",\
         "device_name":"iPhone"}
         """
 
@@ -464,7 +478,7 @@ enum Fixtures {
     /// Every other session omits the key, which `SessionSummary` decodes as Claude.
     private static func sessionsJSON(now: Date, variant: Variant, cards: [Card]) -> String {
         let stamp = rfc3339(now)
-        let summaries = (1...variant.sessionCount).map { index in
+        let summaries = (0..<variant.sessionCount).map { $0 + 1 }.map { index in
             let id = "fx-\(index)"
             let blocked = cards.filter { $0.sessionID == id }.map { quoted($0.requestID) }
             let codex =
@@ -1404,13 +1418,13 @@ enum CodexFixtures {
         case .stopRefusedLate:
             return .rejected(
                 reason:
-                    "this Mac has lost its control link to the Codex session and is reconnecting, "
-                    + "so nothing was sent; try again shortly, or stop the turn at the Mac")
+                    "the computer has lost its control link to the Codex session and is reconnecting, "
+                    + "so nothing was sent; try again shortly, or stop the turn at the computer")
         case .stopIndeterminate:
             return .indeterminate(
                 reason:
                     "this interrupt was already sent and what became of it is not known; "
-                    + "it will not be sent again. Check the Mac.")
+                    + "it will not be sent again. Check the computer.")
         default: return nil
         }
     }
@@ -1426,7 +1440,7 @@ enum CodexFixtures {
         case .composeRejected:
             return .rejected(
                 reason:
-                    "this Mac is connected to the Codex session but is not yet watching its thread, "
+                    "the computer is connected to the Codex session but is not yet watching its thread, "
                     + "so a message cannot be confirmed; nothing was sent")
         // **`compose_already_sent_unknown`, verbatim.** This was a hand-written
         // approximation — "that message was written and what became of it is
@@ -1439,7 +1453,7 @@ enum CodexFixtures {
             return .indeterminate(
                 reason:
                     "this message was already sent and what became of it is not known; "
-                    + "it will not be sent again. Check the Mac.")
+                    + "it will not be sent again. Check the computer.")
         default: return nil
         }
     }

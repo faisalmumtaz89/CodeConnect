@@ -33,10 +33,6 @@ final class DecisionTextSourceTests: XCTestCase {
                 "argument: ToolSummary.principalArgument(",
                 "tool: tool, input: front.card.toolInput)?.firstLine),",
             ]),
-            ("FleetView.swift", [
-                "let line = ToolSummary.principalArgument(",
-                "tool: approval.card.toolName, input: approval.card.toolInput)?.firstLine",
-            ]),
             ("TimelineRows.swift", [
                 "if let argument = ToolSummary.principalArgument(",
                 "tool: approval.card.toolName, input: approval.card.toolInput)",

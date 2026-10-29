@@ -78,10 +78,13 @@ final class SampleModeUITests: XCTestCase {
             app.staticTexts["Live"].exists,
             "sample data must never be presented as a live link to a Mac")
 
-        // Nor the control that reports one: link health is a statement about a
-        // connection, and there is none to make a statement about.
-        XCTAssertFalse(
-            app.descendants(matching: .any)["Link health"].exists,
-            "the sample fleet must not offer a link-health reading")
+        // Nor does Settings name a computer: none is paired, so no card names
+        // one either.
+        app.buttons["Settings"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "label BEGINSWITH 'Not paired'")
+            ).firstMatch.waitForExistence(timeout: 10),
+            "Settings must say no computer is paired")
     }
 }

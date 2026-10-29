@@ -54,6 +54,12 @@ struct DaemonEndpoint: Codable, Sendable, Hashable {
 
     var displayAddress: String { "\(scheme)://\(host):\(port)" }
 
+    /// Whether `other` names the same daemon: the same host, compared without
+    /// case, and the same port. Credential and scheme do not enter into it.
+    func isSameAddress(as other: DaemonEndpoint) -> Bool {
+        port == other.port && host.caseInsensitiveCompare(other.host) == .orderedSame
+    }
+
     /// True when `host` is a literal address rather than a name.
     ///
     /// It matters for exactly one reason: a `tailscale cert` certificate carries
@@ -191,7 +197,7 @@ struct PairingQRPayload: Sendable, Hashable {
                 return "That pairing code has an impossible port (\(port))."
             case .unreachableHost(let host, let why):
                 return
-                    "That pairing code points at \(host), which \(why). Connect the Mac to the network your iPhone reaches it on (Tailscale, by default), run `codeconnect daemon restart`, then `codeconnect pair` again."
+                    "That pairing code points at \(host), which \(why). Connect the computer to the network your iPhone reaches it on (Tailscale, by default), run `codeconnect daemon restart`, then `codeconnect pair` again."
             }
         }
     }
@@ -213,7 +219,7 @@ struct PairingQRPayload: Sendable, Hashable {
         let trimmed = host.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return "is empty" }
         if trimmed.caseInsensitiveCompare("localhost") == .orderedSame {
-            return "is the Mac's own loopback name"
+            return "is the computer's own loopback name"
         }
         // An IPv6 literal may arrive bracketed, as it does inside a URL.
         var bare = trimmed
@@ -227,7 +233,7 @@ struct PairingQRPayload: Sendable, Hashable {
             // `IPv4Address.isLoopback` matches only the canonical literal, which
             // let `127.1.2.3` through — a real gap the Rust side does not have,
             // since `Ipv4Addr::is_loopback` covers the block.
-            if octets.first == 127 { return "only that Mac can reach" }
+            if octets.first == 127 { return "only that computer can reach" }
             if octets == Data([0, 0, 0, 0]) { return "is not an address to connect to" }
             if octets.count == 4, octets[0] == 169, octets[1] == 254 {
                 return "is a link-local address that does not route"
@@ -235,7 +241,7 @@ struct PairingQRPayload: Sendable, Hashable {
             return nil
         }
         if let v6 = IPv6Address(bare) {
-            if v6.isLoopback { return "only that Mac can reach" }
+            if v6.isLoopback { return "only that computer can reach" }
             if v6.isLinkLocal { return "is a link-local address that does not route" }
             if v6.rawValue.allSatisfy({ $0 == 0 }) { return "is not an address to connect to" }
             return nil
@@ -322,25 +328,55 @@ enum PairingCredentialInput {
 
 // MARK: - Store
 
-/// Owns the pairing. The whole record lives in the Keychain rather than only
-/// the token: one item to write, one to revoke.
+/// One computer this phone is paired with.
+struct PairedMachine: Codable, Sendable, Hashable, Identifiable {
+    /// This phone's own name for the pairing, minted when it was added. Names the
+    /// machine's folder in the event cache.
+    let id: String
+    var endpoint: DaemonEndpoint
+    /// What its daemon last said it is (minor 25), kept so a machine that is not
+    /// connected still reads as itself.
+    var name: String?
+    var os: String?
+    /// Which daemon it is, whatever address reached it (`hello_ack.machine_id`,
+    /// minor 26). Nil until that daemon has said, and from an older one.
+    var daemonID: String?
+}
+
+/// Owns the pairings. Every machine's whole record lives in one Keychain item
+/// rather than only the tokens: one item to write, one to revoke.
+///
+/// Two machines are the same machine when they share a host and port, compared
+/// without case — so re-scanning a Mac replaces only its own credential — or, once
+/// their daemons have said, when they share a `daemonID`: the same Mac paired once
+/// by address and once by name is merged into one (`merge(_:into:)`). From a
+/// daemon too old to say, the two stay two; removing one is the owner's fix.
 @MainActor
 @Observable
 final class PairingStore {
-    private static let account = "daemon"
+    private let legacyAccount: String
+    /// Nil once the store holds a pairing in memory only: from then on nothing it
+    /// holds is written, so a test or an automation launch never replaces the
+    /// machines the device keeps.
+    private var machinesAccount: String?
 
-    private(set) var endpoint: DaemonEndpoint?
+    /// Oldest first, so the last is the machine paired most recently.
+    private(set) var machines: [PairedMachine] = []
     private(set) var lastError: String?
-    /// Set when the daemon advertises TLS but the pairing points at an IP
-    /// literal, which no certificate can cover. Surfaced in Settings, because
-    /// the fix — re-pair from a QR carrying the MagicDNS name — is the user's.
-    private(set) var tlsUnavailableReason: String?
+    /// By machine: set when its daemon advertises TLS but the pairing points at
+    /// an IP literal, which no certificate can cover. Surfaced in Settings,
+    /// because the fix — re-pair from a QR carrying the MagicDNS name — is the
+    /// user's.
+    private var tlsUnavailableReasons: [String: String] = [:]
 
-    var isPaired: Bool { endpoint != nil }
+    /// The machine paired most recently: the one Settings speaks for.
+    var current: PairedMachine? { machines.last }
+    var isPaired: Bool { !machines.isEmpty }
 
     init() {
-        guard let data = Keychain.load(account: Self.account) else { return }
-        endpoint = try? JSONDecoder().decode(DaemonEndpoint.self, from: data)
+        legacyAccount = "daemon"
+        machinesAccount = "machines"
+        load()
     }
 
     #if DEBUG
@@ -353,24 +389,65 @@ final class PairingStore {
         /// item in `setUp` would make the suite pass by deleting the developer's
         /// pairing; this lets the suite own its own state instead of destroying
         /// theirs.
-        init(ephemeral: Bool) {}
+        init(ephemeral: Bool) {
+            legacyAccount = "daemon"
+            machinesAccount = nil
+        }
+
+        /// Test seam: the real Keychain, under accounts of the suite's own, so a
+        /// suite exercises loading and migration without touching the pairing
+        /// the simulator holds.
+        init(keychainPrefix prefix: String) {
+            legacyAccount = prefix + "daemon"
+            machinesAccount = prefix + "machines"
+            load()
+        }
     #endif
 
-    /// Persist a durable pairing. A pairing code is refused on purpose: it is
-    /// single-use, so storing one would produce a pairing that looks valid and
-    /// can never connect.
-    func save(_ endpoint: DaemonEndpoint) {
+    /// Builds before several machines kept one endpoint under the legacy account.
+    /// It becomes the first machine, field for field, and its item is deleted only
+    /// once the new one is written — so a migration stopped in between is finished
+    /// on the next launch, and one that cannot write leaves the old item in place.
+    private func load() {
+        guard let machinesAccount else { return }
+        if let data = Keychain.load(account: machinesAccount) {
+            guard let stored = try? JSONDecoder().decode([PairedMachine].self, from: data) else {
+                return
+            }
+            machines = stored
+            Keychain.delete(account: legacyAccount)
+        } else if let data = Keychain.load(account: legacyAccount),
+            let endpoint = try? JSONDecoder().decode(DaemonEndpoint.self, from: data)
+        {
+            machines = [PairedMachine(id: UUID().uuidString, endpoint: endpoint)]
+            if persist(machines) { Keychain.delete(account: legacyAccount) }
+        }
+    }
+
+    /// The paired machine at this endpoint's host and port, if there is one.
+    func machine(matching endpoint: DaemonEndpoint) -> PairedMachine? {
+        machines.first { $0.endpoint.isSameAddress(as: endpoint) }
+    }
+
+    func machine(id: String) -> PairedMachine? {
+        machines.first { $0.id == id }
+    }
+
+    /// Persist a durable pairing: added as a new machine, or — for a host and port
+    /// already paired — replacing only that machine's endpoint, keeping its id, its
+    /// cache and its name. Either way it becomes the machine paired most recently.
+    /// `id` names a new machine; the app chooses it when the pairing starts, so the
+    /// machine's cache is its own from the first frame.
+    ///
+    /// A pairing code is refused on purpose: it is single-use, so storing one would
+    /// produce a pairing that looks valid and can never connect.
+    func save(_ endpoint: DaemonEndpoint, id: String = UUID().uuidString) {
         guard !endpoint.isPairingCode else {
             lastError = "Internal: a single-use pairing code cannot be stored as a pairing."
             return
         }
-        do {
-            try Keychain.save(JSONEncoder().encode(endpoint), account: Self.account)
-            self.endpoint = endpoint
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
+        let next = upserting(endpoint, id: id)
+        if persist(next) { machines = next }
     }
 
     #if DEBUG
@@ -379,28 +456,120 @@ final class PairingStore {
         /// `CODE_SIGNING_ALLOWED=NO`, and an unsigned build has no Keychain
         /// entitlement — `save` fails with "A required entitlement isn't
         /// present", measured, which left every automation launch unpaired.
-        /// Ephemeral is also the more hermetic behavior for a test seam.
+        /// Ephemeral is also the more hermetic behavior for a test seam, and so is
+        /// holding this machine alone: every paired machine is dialled, and an
+        /// automation launch talks to the daemon it names and no other. One fixed
+        /// id, so its cache folder is the same from one automation launch to the
+        /// next.
         func saveEphemeral(_ endpoint: DaemonEndpoint) {
             guard !endpoint.isPairingCode else { return }
-            self.endpoint = endpoint
+            machinesAccount = nil
+            machines = [PairedMachine(id: "automation", endpoint: endpoint)]
             lastError = nil
         }
     #endif
 
     /// The daemon has answered a pairing code with a device token. Swap the
     /// spent code for the durable credential and keep everything else.
-    func adopt(deviceToken: String, from endpoint: DaemonEndpoint) {
+    func adopt(deviceToken: String, from endpoint: DaemonEndpoint, id: String) {
         var durable = endpoint
         durable.credential = .token(deviceToken)
-        save(durable)
+        save(durable, id: id)
     }
 
-    /// Remember the transport that actually completed a handshake, so the next
-    /// launch starts on it instead of paying for the fallback ladder again.
-    func noteTransport(useTLS: Bool) {
-        guard var endpoint, endpoint.useTLS != useTLS, !endpoint.isPairingCode else { return }
-        endpoint.useTLS = useTLS
-        save(endpoint)
+    /// Remember the transport that actually completed a handshake with this
+    /// machine, so the next launch starts on it instead of paying for the
+    /// fallback ladder again.
+    func noteTransport(useTLS: Bool, id: String) {
+        guard let endpoint = machine(id: id)?.endpoint, endpoint.useTLS != useTLS,
+            !endpoint.isPairingCode
+        else { return }
+        update(id) { $0.endpoint.useTLS = useTLS }
+    }
+
+    /// Keep what this machine's daemon says it is, for when it is not
+    /// connected. Written only when it changed.
+    func noteMachine(name: String?, os: String?, daemonID: String?, id: String) {
+        guard let machine = machine(id: id),
+            machine.name != name || machine.os != os || machine.daemonID != daemonID
+        else { return }
+        update(id) {
+            $0.name = name
+            $0.os = os
+            $0.daemonID = daemonID
+        }
+    }
+
+    /// The other machine whose daemon is this one's: the same Mac, paired under a
+    /// second address.
+    func sameDaemon(as id: String) -> PairedMachine? {
+        guard let daemonID = machine(id: id)?.daemonID else { return nil }
+        return machines.first { $0.id != id && $0.daemonID == daemonID }
+    }
+
+    /// One Mac paired under two addresses becomes one machine. `kept` stays — its
+    /// id, so its cache folder, and its name — and takes `dropped`'s endpoint and
+    /// place in the order, which are the later pairing's: the address and
+    /// credential the owner chose last, and the machine Settings speaks for.
+    /// `dropped` goes. Persisted before it is published, as `save` is.
+    func merge(_ dropped: String, into kept: String) {
+        guard var survivor = machine(id: kept), let other = machine(id: dropped) else { return }
+        survivor.endpoint = other.endpoint
+        let next = machines.compactMap { machine -> PairedMachine? in
+            switch machine.id {
+            case kept: return nil
+            case dropped: return survivor
+            default: return machine
+            }
+        }
+        guard persist(next) else { return }
+        machines = next
+        tlsUnavailableReasons[kept] = tlsUnavailableReasons.removeValue(forKey: dropped)
+    }
+
+    /// Forget one machine. Every other machine's record is left as it was.
+    func remove(id: String) {
+        let next = machines.filter { $0.id != id }
+        guard persist(next) else { return }
+        machines = next
+        tlsUnavailableReasons[id] = nil
+    }
+
+    /// Change one machine's record where it stands: no other machine's record,
+    /// and no machine's place in the order, moves.
+    private func update(_ id: String, _ change: (inout PairedMachine) -> Void) {
+        guard let index = machines.firstIndex(where: { $0.id == id }) else { return }
+        var next = machines
+        change(&next[index])
+        machines = next
+        persist(next)
+    }
+
+    private func upserting(_ endpoint: DaemonEndpoint, id: String) -> [PairedMachine] {
+        var next = machines
+        var machine = PairedMachine(id: id, endpoint: endpoint)
+        if let index = next.firstIndex(where: { $0.endpoint.isSameAddress(as: endpoint) }) {
+            machine = next.remove(at: index)
+            machine.endpoint = endpoint
+        }
+        next.append(machine)
+        return next
+    }
+
+    @discardableResult
+    private func persist(_ machines: [PairedMachine]) -> Bool {
+        guard let machinesAccount else {
+            lastError = nil
+            return true
+        }
+        do {
+            try Keychain.save(JSONEncoder().encode(machines), account: machinesAccount)
+            lastError = nil
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
     }
 
     /// Record that the daemon has a certificate this pairing can never use.
@@ -409,18 +578,15 @@ final class PairingStore {
     /// against `100.x.y.z` cannot validate it. The fix is the user's — re-pair
     /// from a QR carrying the MagicDNS name — so it is stated rather than
     /// silently endured.
-    func noteTLSUnusable(_ unusable: Bool) {
-        guard let endpoint else { return }
-        tlsUnavailableReason =
+    func noteTLSUnusable(_ unusable: Bool, id: String) {
+        guard let endpoint = machine(id: id)?.endpoint else { return }
+        tlsUnavailableReasons[id] =
             unusable
             ? "This daemon serves TLS, but the pairing points at the address \(endpoint.host) and a `tailscale cert` certificate only covers the MagicDNS name. Scan a fresh QR code to move onto the encrypted connection."
             : nil
     }
 
-    func clear() {
-        Keychain.delete(account: Self.account)
-        endpoint = nil
-        lastError = nil
-        tlsUnavailableReason = nil
+    func tlsUnavailableReason(for id: String) -> String? {
+        tlsUnavailableReasons[id]
     }
 }

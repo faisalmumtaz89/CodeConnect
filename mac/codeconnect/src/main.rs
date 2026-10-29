@@ -27,8 +27,8 @@ mod forked_holder;
 #[cfg(test)]
 mod home_guard;
 mod job;
-mod launchd;
 mod pair;
+mod service;
 mod sessions;
 mod settings;
 mod supervisor;
@@ -60,6 +60,13 @@ fn main() -> Result<()> {
     {
         return job::run(&raw[1..]);
     }
+    // Hidden: the copy of an agent's early output `pipe-pane` runs. Machinery.
+    if raw
+        .first()
+        .is_some_and(|command| command == early_output::SUBCOMMAND)
+    {
+        return early_output::run();
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = args
         .split_first()
@@ -86,7 +93,7 @@ fn main() -> Result<()> {
         "pair" => pair::pair(rest),
         "devices" => pair::devices(rest),
         "revoke" => pair::revoke(rest),
-        "daemon" => launchd::command(rest),
+        "daemon" => service::command(rest),
         // Hidden: spawned by `codeconnect claude`, never typed by a human.
         "supervise" => supervise(rest),
         // Hidden: the inert exec gate. Spawned by a launch actor to bring a
@@ -186,15 +193,15 @@ codeconnect — host coding agents your iPhone can see and answer
   codeconnect update              install the latest release (the daemon restarts)
   codeconnect --version           print the installed version
 
-  codeconnect daemon install      install the daemon and start it, now and at login
+  codeconnect daemon install      install the daemon and keep it running
   codeconnect daemon status       show whether the daemon is installed and running
   codeconnect daemon restart      restart the daemon
-  codeconnect daemon uninstall    stop the daemon and remove it from login
+  codeconnect daemon uninstall    stop the daemon and remove it
 
   codeconnect pair                show a QR code that pairs a phone (single use, 5 min)
   codeconnect devices             list paired devices
   codeconnect revoke <device>     revoke a device's token
-  codeconnect token               print the Mac's permanent token (instead of a pairing code)
+  codeconnect token               print the computer's permanent token (instead of a pairing code)
 "
 }
 
@@ -355,7 +362,7 @@ fn retirement_notice(retired: RetiredCommand, style: update_check::Style) -> Str
     // aim the operator at somebody else's key with only their memory to stop
     // them, so what is safe to remove is described by its shape instead.
     let check = format!(
-        "To see what is still in that file on this Mac, search for the tag\n\
+        "To see what is still in that file on this computer, search for the tag\n\
          those entries carry:\n\n\
          {}\n\n\
          Nothing printed means nothing there carries the tag; grep saying\n\
@@ -524,6 +531,7 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
         let err = Command::new(&binary).args(passthrough).exec();
         return Err(err).with_context(|| format!("running {}", binary.display()));
     }
+    #[cfg(target_os = "macos")]
     update_check::ensure_tmux()?;
     // Held from here, before the name claim, so a Ctrl+Z cannot stop this launch
     // while it holds the claim every other launch is waiting on.
@@ -613,6 +621,24 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     tmux::attach_launched(&launched, early)
 }
 
+/// How to turn Tailscale on, in the words of the system it runs on: the menu
+/// bar app on macOS; on Linux, `sudo tailscale up --qr` — refused to a normal
+/// user without sudo unless they have been made Tailscale's operator, and with
+/// `--qr` a computer with no screen signs in from a phone that scans the QR.
+#[cfg(target_os = "macos")]
+const CONNECT_TAILSCALE: &str = "Connect Tailscale (menu bar, or `tailscale up`)";
+#[cfg(target_os = "macos")]
+const RECONNECT_TAILSCALE: &str = "Connect Tailscale (menu bar)";
+#[cfg(target_os = "macos")]
+const TAILSCALE_UP: &str = "tailscale up";
+#[cfg(target_os = "linux")]
+const CONNECT_TAILSCALE: &str = "Connect Tailscale: run `sudo tailscale up --qr`, scan the QR it\n\
+                                 prints with your phone signed in to Tailscale and approve it there";
+#[cfg(target_os = "linux")]
+const RECONNECT_TAILSCALE: &str = "Connect Tailscale";
+#[cfg(target_os = "linux")]
+const TAILSCALE_UP: &str = "sudo tailscale up --qr";
+
 /// The "your phone cannot reach this Mac" note, or `None` while nothing here
 /// says it cannot — for a daemon address, the same fact the app shows as its
 /// "Connect Tailscale" banner, told in the same words at the other keyboard;
@@ -655,7 +681,7 @@ fn phone_unreachable_note(
         std::time::Duration::from_millis(400),
     ) {
         Ok(protocol::ipc::DaemonFrame::Daemon(info)) => info,
-        Err(err) if no_daemon_and_no_job(&err, crate::launchd::job_is_loaded) => {
+        Err(err) if no_daemon_and_no_job(&err, crate::service::job_is_loaded) => {
             return Some(daemon_down_note(style));
         }
         _ => return None,
@@ -718,7 +744,8 @@ fn daemon_down_note(style: update_check::Style) -> String {
             emphasized("codeconnect daemon install", style)
         ),
         "This session is unaffected \u{2014} it is already running.\n\
-         Once the daemon runs, the phone catches up as soon as it can reach this Mac.",
+         Once the daemon runs, the phone catches up as soon as it can reach\n\
+         this computer.",
         style,
     )
 }
@@ -842,7 +869,7 @@ fn phone_reachability_note(
     // the heading — this one *is* a current impairment, which is exactly
     // what the app's amber means — and bold alone on an isolated command.
     let assurance = "This session is unaffected \u{2014} it is already running and recording.\n\
-                     The phone catches up as soon as it can reach this Mac.";
+                     The phone catches up as soon as it can reach this computer.";
 
     let (explanation, remedy) =
         if let Some(problem) = protocol::pairing::unreachable_host(endpoint_host) {
@@ -858,7 +885,7 @@ fn phone_reachability_note(
                 // A bind `ws_bind` chose is `ws_bind`'s to fix: Tailscale has no
                 // part in it, and no restart moves an explicit address.
                 (crate::pair::BindCause::Named, _) => format!(
-                    "Set `ws_bind` in ~/.codeconnect/config.json to this Mac's address on a\n\
+                    "Set `ws_bind` in ~/.codeconnect/config.json to this computer's address on a\n\
                  network your phone is on, or remove it to use Tailscale, then:\n\n\
                  {}",
                     emphasized("codeconnect daemon restart", style)
@@ -878,14 +905,14 @@ fn phone_reachability_note(
                     emphasized("codeconnect daemon restart", style)
                 ),
                 _ => format!(
-                    "Connect Tailscale (menu bar, or `tailscale up`), then:\n\n\
+                    "{CONNECT_TAILSCALE}, then:\n\n\
                  {}",
                     emphasized("codeconnect daemon restart", style)
                 ),
             };
             (explanation, remedy)
         } else if signal == TailscaleSignal::Down && bind_ip.is_some_and(tailnet_shaped_ip) {
-            let explanation = "Tailscale is off on this Mac.".to_string();
+            let explanation = "Tailscale is off on this computer.".to_string();
             // Scoped to what has been watched happen. The daemon does keep its
             // bind across the toggle — that is a property of the socket, not a
             // guess — but "nothing needs restarting" is a promise about every
@@ -893,12 +920,12 @@ fn phone_reachability_note(
             // once. Saying what is known, and naming the fallback, costs the
             // reader one sentence and claims only what was seen.
             let remedy = format!(
-                "Connect Tailscale (menu bar), or run:\n\n\
+                "{RECONNECT_TAILSCALE}, or run:\n\n\
              {}\n\n\
              The daemon holds its tailnet address across the toggle, so it is\n\
              normally reachable again as soon as the tunnel is. If the phone\n\
              still cannot reach it, restart the daemon.",
-                emphasized("tailscale up", style)
+                emphasized(TAILSCALE_UP, style)
             );
             (explanation, remedy)
         } else {
@@ -1834,13 +1861,16 @@ mod tests {
         .unwrap();
         let mut lines = note.lines();
         assert_eq!(lines.next(), Some("Phone unreachable"));
-        assert_eq!(lines.next(), Some("Tailscale is off on this Mac."));
-        assert_eq!(lines.next(), Some(""));
-        assert_eq!(lines.next(), Some("Connect Tailscale (menu bar), or run:"));
+        assert_eq!(lines.next(), Some("Tailscale is off on this computer."));
         assert_eq!(lines.next(), Some(""));
         assert_eq!(
             lines.next(),
-            Some("tailscale up"),
+            Some(format!("{RECONNECT_TAILSCALE}, or run:").as_str())
+        );
+        assert_eq!(lines.next(), Some(""));
+        assert_eq!(
+            lines.next(),
+            Some(TAILSCALE_UP),
             "the command has to stand on its own line to be copyable"
         );
         assert!(
@@ -2006,9 +2036,9 @@ mod tests {
         // restart as a fallback rather than ruling it out.
         let toggled_off =
             note("mac.tailnet.ts.net", Some("100.64.0.7"), Down).expect("dead tailnet warns");
-        assert!(toggled_off.contains("Tailscale is off on this Mac"));
+        assert!(toggled_off.contains("Tailscale is off on this computer"));
         assert!(toggled_off.contains("holds its tailnet address"));
-        assert!(toggled_off.contains("\ntailscale up\n"));
+        assert!(toggled_off.contains(&format!("\n{TAILSCALE_UP}\n")));
         assert!(
             toggled_off.contains("restart the daemon"),
             "the standing bind is the expectation, not a guarantee: {toggled_off}"
@@ -2025,7 +2055,7 @@ mod tests {
         )
         .unwrap();
         assert!(styled.starts_with("\u{1b}[1;33mPhone unreachable\u{1b}[0m\n"));
-        assert!(styled.contains("\u{1b}[1mtailscale up\u{1b}[0m"));
+        assert!(styled.contains(&format!("\u{1b}[1m{TAILSCALE_UP}\u{1b}[0m")));
 
         // Silence, each for its own reason.
         assert_eq!(
@@ -2097,7 +2127,7 @@ mod tests {
         );
         assert!(!tailnet_shaped_ip("100.63.255.255"));
         assert!(!tailnet_shaped_ip("192.168.1.20"));
-        assert!(tailnet_shaped_ip("fd7a:115c:a1e0::6001:6740"));
+        assert!(tailnet_shaped_ip("fd7a:115c:a1e0::1"));
         assert!(
             !tailnet_shaped_ip("fd7a:2222::1"),
             "a stranger's ULA in fd7a::/16 is not Tailscale's"
@@ -2425,7 +2455,7 @@ mod tests {
                 "\n",
                 "codeconnect pair\n",
                 "\n",
-                "To see what is still in that file on this Mac, search for the tag\n",
+                "To see what is still in that file on this computer, search for the tag\n",
                 "those entries carry:\n",
                 "\n",
                 "grep codeconnect: ~/.ssh/authorized_keys\n",
@@ -2475,7 +2505,7 @@ mod tests {
                 "Revoking also asks the daemon to sweep ~/.ssh/authorized_keys\n",
                 "again, on the same best effort it makes at startup.\n",
                 "\n",
-                "To see what is still in that file on this Mac, search for the tag\n",
+                "To see what is still in that file on this computer, search for the tag\n",
                 "those entries carry:\n",
                 "\n",
                 "grep codeconnect: ~/.ssh/authorized_keys\n",

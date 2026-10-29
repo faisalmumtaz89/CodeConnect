@@ -37,7 +37,7 @@ struct GapNotice: Sendable, Hashable {
             return "Resynced. The daemon's log was reset; cached history was discarded."
         case .cacheDiscarded:
             return
-                "Resynced. This Mac now tells its runs apart, so history cached under the old name was discarded."
+                "Resynced. The computer now tells its runs apart, so history cached under the old name was discarded."
         }
     }
 }

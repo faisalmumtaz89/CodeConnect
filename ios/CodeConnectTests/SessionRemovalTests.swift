@@ -152,7 +152,9 @@ final class SessionRemovalTests: XCTestCase {
         canDelete: Bool = true, answering result: DeleteSessionResult = .deleted(events: 3),
         cache: EventCache = EventCache()
     ) -> AppModel {
-        let model = AppModel(cache: cache)
+        // Ephemeral: a pairing the simulator holds would file the cache under
+        // that machine, away from the top-level files these tests seed and read.
+        let model = AppModel(pairing: PairingStore(ephemeral: true), cache: cache)
         let caps = capabilities(
             #"{"can_approve_reliably":true,"fail_mode":"fail_open","answer_path":"hook_return","hold_secs":25,"send_text":true,"capture":true,"push":true,"tls":false\#(canDelete ? #","delete_session":true"# : "")}"#
         )

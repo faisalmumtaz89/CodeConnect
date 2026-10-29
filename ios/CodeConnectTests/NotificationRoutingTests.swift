@@ -13,11 +13,11 @@ final class NotificationRoutingTests: XCTestCase {
     /// An approval tap opens the decision list.
     @MainActor
     func testAnApprovalTapOpensTheDecisionList() {
-        let model = AppModel()
-        XCTAssertNil(model.pendingDeepLink, "nothing pending before the tap")
-        model.openFromNotification(kind: "approval")
+        let app = Machines(holding: AppModel())
+        XCTAssertNil(app.pendingDeepLink, "nothing pending before the tap")
+        app.openFromNotification(kind: "approval")
         XCTAssertEqual(
-            model.pendingDeepLink, .deck(requestID: nil),
+            app.pendingDeepLink, .deck(requestID: nil),
             "the list, never a card — the payload names no decision to open")
     }
 
@@ -28,10 +28,10 @@ final class NotificationRoutingTests: XCTestCase {
     @MainActor
     func testEveryOtherKindOpensTheFleetExplicitly() {
         for kind in ["input", "done", "idle", nil] {
-            let model = AppModel()
-            model.openFromNotification(kind: kind)
+            let app = Machines(holding: AppModel())
+            app.openFromNotification(kind: kind)
             XCTAssertEqual(
-                model.pendingDeepLink, .fleet,
+                app.pendingDeepLink, .fleet,
                 "\(kind ?? "an unknown kind") has no card to open")
         }
     }
@@ -50,7 +50,7 @@ final class NotificationRoutingTests: XCTestCase {
         XCTAssertNil(PushWire.consumeTap(), "drained once, not replayed")
     }
 
-    /// A tap that arrived before anything was listening still reaches a model
+    /// A tap that arrived before anything was listening still reaches an app
     /// constructed afterwards.
     @MainActor
     func testATapThatArrivesBeforeAnythingIsListeningStillLands() {
@@ -60,11 +60,11 @@ final class NotificationRoutingTests: XCTestCase {
         // the production path doing its job, and exactly what a cold launch
         // does not have.
         PushWire.seedTapForTesting(kind: "approval")
-        let model = AppModel()
-        XCTAssertNil(model.pendingDeepLink, "nothing has drained it yet")
+        let app = Machines(holding: AppModel())
+        XCTAssertNil(app.pendingDeepLink, "nothing has drained it yet")
 
-        model.consumePendingTap()
-        XCTAssertEqual(model.pendingDeepLink, .deck(requestID: nil))
+        app.consumePendingTap()
+        XCTAssertEqual(app.pendingDeepLink, .deck(requestID: nil))
         XCTAssertNil(PushWire.consumeTap(), "a tap is drained once, not replayed")
     }
 
@@ -106,10 +106,10 @@ final class NotificationRoutingTests: XCTestCase {
     /// landed on the fleet, so this pins the word itself.
     @MainActor
     func testTheApprovalWordIsTheOneTheDaemonWrites() {
-        let model = AppModel()
-        model.openFromNotification(kind: "approval")
+        let app = Machines(holding: AppModel())
+        app.openFromNotification(kind: "approval")
         XCTAssertEqual(
-            model.pendingDeepLink, .deck(requestID: nil),
+            app.pendingDeepLink, .deck(requestID: nil),
             "the daemon writes exactly \"approval\"; anything else routes to the fleet")
     }
 

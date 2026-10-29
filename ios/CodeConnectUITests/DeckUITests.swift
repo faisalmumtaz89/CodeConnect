@@ -24,9 +24,10 @@ import XCTest
 /// assertions are what this suite is for, and none of them are about speed.
 final class DeckUITests: XCTestCase {
 
-    /// The two sizes the design is verified at.
+    /// The sizes the design is verified at.
     private enum TypeSize: String {
         case medium = "UICTContentSizeCategoryM"
+        case ax4 = "UICTContentSizeCategoryAccessibilityXXL"
         case ax5 = "UICTContentSizeCategoryAccessibilityXXXL"
     }
 
@@ -75,12 +76,13 @@ final class DeckUITests: XCTestCase {
     // MARK: The bar
 
     /// The accessory bar rises when something is pending, counts what is
-    /// waiting, and is the only way into the queue.
+    /// waiting and at which risk, and is the only way into the queue.
     func testAccessoryBarRisesWithPendingCount() {
         let app = launch()
         let bar = app.buttons["deck-bar"]
         XCTAssertTrue(bar.waitForExistence(timeout: 25))
-        XCTAssertEqual(bar.label, "3 decisions need you")
+        XCTAssertEqual(bar.label, "3 waiting for you")
+        XCTAssertEqual(bar.value as? String, "1 high risk, 1 medium risk, 1 low risk")
         attach(app, "deck-bar")
     }
 
@@ -100,9 +102,9 @@ final class DeckUITests: XCTestCase {
         let bar = app.buttons["deck-bar"]
         XCTAssertTrue(bar.waitForExistence(timeout: 25))
 
-        XCTAssertEqual(bar.label, "4 decisions need you", "three agents, four decisions")
+        XCTAssertEqual(bar.label, "4 waiting for you", "three agents, four decisions")
         let headline = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'decisions need you'")
+            NSPredicate(format: "label ENDSWITH ' waiting for you'")
         ).firstMatch
         XCTAssertTrue(headline.waitForExistence(timeout: 20))
         XCTAssertTrue(
@@ -113,21 +115,9 @@ final class DeckUITests: XCTestCase {
         // …and the row that is holding two says so, so the arithmetic closes for
         // a reader: three rows, one of them `+1 more`.
         XCTAssertTrue(
-            app.buttons["session-fx-2"].label.contains("2 pending decisions"),
+            app.buttons["session-fx-2"].label.contains("2 waiting for you"),
             "the stacked agent has to account for the difference")
         attach(app, "counts-agree")
-    }
-
-    /// The bar advertises the card `Review` actually opens. Under the old
-    /// age-first order it named `app-3 · Read` — the least consequential item in
-    /// the queue — while a `git push --force` sat above it in the stack.
-    func testAccessoryBarAdvertisesTheCardReviewOpens() {
-        let app = launch()
-        let bar = app.buttons["deck-bar"]
-        XCTAssertTrue(bar.waitForExistence(timeout: 25))
-        XCTAssertTrue(
-            bar.value as? String == nil || (bar.value as! String).contains("git push --force"),
-            "the bar's preview must name the riskiest card, not the oldest: \(bar.value ?? "nil")")
     }
 
     /// **The door still opens where the door is drawn.**
@@ -144,7 +134,7 @@ final class DeckUITests: XCTestCase {
         XCTAssertTrue(bar.waitForExistence(timeout: 25))
         bar.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.28)).tap()
         XCTAssertTrue(
-            app.navigationBars["Needs you"].waitForExistence(timeout: 20),
+            app.navigationBars["Waiting for you"].waitForExistence(timeout: 20),
             "the bar is the button; a tap where the chevron is drawn must open the deck")
         attach(app, "deck-opened-from-chevron-ax5")
     }
@@ -333,6 +323,34 @@ final class DeckUITests: XCTestCase {
             "and the gate says nothing, because it is not in the way")
     }
 
+    /// **The sheet a chat opens a card in arms the same way.** The sheet is
+    /// shorter than the Deck, so at the largest sizes its pinned bar takes most
+    /// of it, and the readable strip above the bar is all a reader has: reading
+    /// the path there has to arm `Allow`, at each size where that strip is thin.
+    func testTheSessionSheetArmsAfterScrollingAtAX4() { assertTheSessionSheetArms(at: .ax4) }
+
+    func testTheSessionSheetArmsAfterScrollingAtAX5() { assertTheSessionSheetArms(at: .ax5) }
+
+    /// Opens `fx-2`'s chat at `size`, opens its `Write` card with the approval
+    /// row's `Review`, and scrolls until `Allow` arms.
+    private func assertTheSessionSheetArms(at size: TypeSize) {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-CC_FIXTURE", "deck", "-CC_BIOMETRICS", "allow",
+            "-UIPreferredContentSizeCategoryName", size.rawValue,
+            "-CC_DEEPLINK", "codeconnect://session/fx-2",
+        ]
+        app.launch()
+        let review = app.buttons["Review"].firstMatch
+        XCTAssertTrue(review.waitForExistence(timeout: 25), "fx-2's approval row")
+        review.tap()
+
+        let allow = allowButton(app, tool: "Write")
+        XCTAssertTrue(allow.waitForExistence(timeout: 25), "the sheet opened the Write card")
+        scrollUntil(app, "the read gate arms") { allowButton(app, tool: "Write").isEnabled }
+        attach(app, "sheet-\(size.rawValue)-armed")
+    }
+
     /// An answer the Mac has not confirmed says how long it has waited, and
     /// VoiceOver hears that as a duration — "4 seconds" — never as "4s",
     /// which it reads "four ess".
@@ -349,12 +367,12 @@ final class DeckUITests: XCTestCase {
         XCTAssertTrue(allow.waitForExistence(timeout: 25))
         allow.tap()
         let notice = app.staticTexts.matching(
-            NSPredicate(format: "label BEGINSWITH 'Still waiting on the Mac'")
+            NSPredicate(format: "label BEGINSWITH 'Still waiting on the computer'")
         ).firstMatch
         XCTAssertTrue(notice.waitForExistence(timeout: 15), "the unconfirmed notice")
         XCTAssertNotNil(
             notice.label.range(
-                of: #"^Still waiting on the Mac, \d+ seconds?\.$"#, options: .regularExpression),
+                of: #"^Still waiting on the computer, \d+ seconds?\.$"#, options: .regularExpression),
             notice.label)
     }
 
@@ -374,7 +392,7 @@ final class DeckUITests: XCTestCase {
     func testDeepLinkOpensTheCardItNames() {
         let app = launch(openingCard: Self.mediumRequestID)
         XCTAssertTrue(
-            app.navigationBars["Needs you"].waitForExistence(timeout: 25),
+            app.navigationBars["Waiting for you"].waitForExistence(timeout: 25),
             "a deep link lands in the Deck, past the fleet")
         XCTAssertTrue(app.staticTexts["Write"].firstMatch.waitForExistence(timeout: 20))
         XCTAssertFalse(
@@ -517,9 +535,8 @@ final class DeckUITests: XCTestCase {
         XCTAssertTrue(refusal.waitForExistence(timeout: 25))
         attach(app, "face-id-banner-pinned")
 
-        // The bar is drawn *over* the scroll view rather than shortening it, so
-        // the edge that matters is the pinned control's own top — the same edge
-        // the read gate tests against.
+        // The edge that matters is the pinned control's own top — the same
+        // edge the read gate tests against.
         let deny = app.buttons.matching(identifier: "Deny this Bash call").firstMatch
         XCTAssertTrue(deny.exists)
         XCTAssertTrue(
@@ -611,7 +628,7 @@ final class DeckUITests: XCTestCase {
         XCTAssertTrue(bar.waitForExistence(timeout: 25), "the deck bar is the way in")
         bar.tap()
         XCTAssertTrue(
-            app.navigationBars["Needs you"].waitForExistence(timeout: 20), "the deck opened")
+            app.navigationBars["Waiting for you"].waitForExistence(timeout: 20), "the deck opened")
     }
 
     /// Sends the top card to the back of the queue.

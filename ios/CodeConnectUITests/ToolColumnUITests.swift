@@ -138,11 +138,15 @@ final class ToolColumnUITests: XCTestCase {
                 row.tap()
                 XCTAssertTrue(app.buttons["open-diff"].waitForExistence(timeout: 20))
             case "link-health":
+                let row = app.buttons.matching(
+                    NSPredicate(format: "identifier BEGINSWITH 'session-'")
+                ).firstMatch
+                if row.waitForExistence(timeout: 25) { row.tap() }
                 let pill = app.buttons["Link health"].firstMatch
                 if pill.waitForExistence(timeout: 20) { pill.tap() }
             case "settings":
-                let gear = app.buttons["Settings and pairing"].firstMatch
-                if gear.waitForExistence(timeout: 20) { gear.tap() }
+                let settings = app.buttons["Settings"].firstMatch
+                if settings.waitForExistence(timeout: 20) { settings.tap() }
             default:
                 break
             }

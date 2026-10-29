@@ -55,6 +55,42 @@ actor EventCache {
         try? FileManager.default.createDirectory(at: self.root, withIntermediateDirectories: true)
     }
 
+    // MARK: - Machines
+
+    /// One paired machine's cache: a folder of its own under this one, so two
+    /// machines' runs never share a file and removing one removes only its own.
+    nonisolated func machine(_ id: String) -> EventCache {
+        EventCache(root: machineFolder(id))
+    }
+
+    /// Delete one machine's cache, and nothing else.
+    nonisolated func removeMachine(_ id: String) {
+        try? FileManager.default.removeItem(at: machineFolder(id))
+    }
+
+    /// Builds before several machines filed their cache at the top of this
+    /// folder. Those files are the first machine's — the pairing those builds
+    /// held — and move into its folder; once moved, there is nothing to move.
+    nonisolated func moveUnfiledFiles(toMachine id: String) {
+        let files = FileManager.default
+        let loose =
+            ((try? files.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent != Self.machinesFolder }
+        guard !loose.isEmpty else { return }
+        let folder = machineFolder(id)
+        try? files.createDirectory(at: folder, withIntermediateDirectories: true)
+        for file in loose {
+            try? files.moveItem(at: file, to: folder.appendingPathComponent(file.lastPathComponent))
+        }
+    }
+
+    private static let machinesFolder = "machines"
+
+    private nonisolated func machineFolder(_ id: String) -> URL {
+        root.appendingPathComponent(Self.machinesFolder, isDirectory: true)
+            .appendingPathComponent(id, isDirectory: true)
+    }
+
     // MARK: - Files
 
     private struct EventEnvelope: Codable {

@@ -67,7 +67,20 @@ pub fn pair(args: &[String]) -> Result<()> {
     // at which refusing costs nothing.
     if let Some(problem) = unreachable_host(&host) {
         let cause = bind_cause(host_address(&host), configured_ws_bind(&config));
-        bail!("{}", unreachable_bind_message(&host, problem, cause));
+        // With no systemd, `daemon restart` refuses: name the line that starts it by hand.
+        #[cfg(target_os = "linux")]
+        let restart = crate::service::no_systemd().map(|_| {
+            format!(
+                "stop the daemon (`codeconnect daemon status` shows its pid) and start it again:\n        {}",
+                crate::service::hand_run_line()
+            )
+        });
+        #[cfg(not(target_os = "linux"))]
+        let restart: Option<String> = None;
+        bail!(
+            "{}",
+            unreachable_bind_message(&host, problem, cause, restart.as_deref())
+        );
     }
 
     let payload = QrPayload::new(&host, port, &code);
@@ -141,17 +154,35 @@ pub(crate) fn host_address(host: &str) -> Option<IpAddr> {
         .ok()
 }
 
-/// Why a code for this bind would be dead, and the way out.
-fn unreachable_bind_message(host: &str, problem: &str, cause: BindCause) -> String {
+/// How to get Tailscale going, in the words of the system it runs on. On Linux
+/// the command, `--qr` and all, because a computer with no screen signs in from
+/// the phone that scans the QR.
+#[cfg(target_os = "macos")]
+const SET_UP_TAILSCALE: &str = "Set up or connect Tailscale";
+#[cfg(target_os = "linux")]
+const SET_UP_TAILSCALE: &str =
+    "Set up or connect Tailscale (`sudo tailscale up --qr`, then scan its QR \
+                                with your phone, signed in to Tailscale, and approve it there)";
+
+/// Why a code for this bind would be dead, and the way out: `restart` is the step
+/// that restarts the daemon, `codeconnect daemon restart` when `None`.
+fn unreachable_bind_message(
+    host: &str,
+    problem: &str,
+    cause: BindCause,
+    restart: Option<&str>,
+) -> String {
+    let restart = restart.unwrap_or("codeconnect daemon restart");
     let why = match cause {
-        BindCause::Tailnet => "With no `ws_bind` in ~/.codeconnect/config.json it uses this \
-                               Mac's Tailscale address, and it found none: Tailscale is not \
-                               set up or not connected on this Mac.\n\n  \
-                               Set up or connect Tailscale, or set `ws_bind` \
-                               (https://codeconnect.sh/support explains both), then:"
-            .to_string(),
+        BindCause::Tailnet => format!(
+            "With no `ws_bind` in ~/.codeconnect/config.json it uses this computer's \
+             Tailscale address, and it found none when it started: Tailscale was not set up or \
+             not connected on this computer at that moment.\n\n  \
+             {SET_UP_TAILSCALE}, or set `ws_bind` (https://codeconnect.sh/support explains \
+             both), then:"
+        ),
         BindCause::Named => "`ws_bind` in ~/.codeconnect/config.json names this address. Set \
-                             it to this Mac's address on a network your phone is on, or remove \
+                             it to this computer's address on a network your phone is on, or remove \
                              it to use Tailscale (https://codeconnect.sh/support explains both), \
                              then:"
             .to_string(),
@@ -164,7 +195,7 @@ fn unreachable_bind_message(host: &str, problem: &str, cause: BindCause) -> Stri
         "this daemon is listening on {host}, which {problem}, so a paired \
          phone could never reach it.\n\n  \
          {why}\n\n      \
-         codeconnect daemon restart\n      \
+         {restart}\n      \
          codeconnect pair\n\n  \
          `codeconnect daemon status` shows the address it is currently bound to."
     )
@@ -368,9 +399,9 @@ mod tests {
         let loopback = "is a loopback address";
         let cause =
             |host: &str, ws_bind: &str| bind_cause(host_address(host), ws_bind.parse().ok());
-        let tailnet = unreachable_bind_message("127.0.0.1", loopback, cause("127.0.0.1", ""));
+        let tailnet = unreachable_bind_message("127.0.0.1", loopback, cause("127.0.0.1", ""), None);
         assert!(
-            tailnet.contains("Tailscale is not set up or not connected"),
+            tailnet.contains("Tailscale was not set up or not connected"),
             "{tailnet}"
         );
         assert!(
@@ -380,18 +411,22 @@ mod tests {
         assert!(!tailnet.contains("not up yet"), "{tailnet}");
         assert!(!tailnet.contains("`ccd`"), "{tailnet}");
 
-        let named = unreachable_bind_message("::1", loopback, cause("::1", "::1"));
+        let named = unreachable_bind_message("::1", loopback, cause("::1", "::1"), None);
         assert_eq!(cause("[::1]", "::1"), BindCause::Named);
         assert!(named.contains("names this address"), "{named}");
-        assert!(!named.contains("Tailscale is not set up"), "{named}");
+        assert!(!named.contains("Tailscale was not set up"), "{named}");
 
-        let pending =
-            unreachable_bind_message("127.0.0.1", loopback, cause("127.0.0.1", "192.168.1.20"));
+        let pending = unreachable_bind_message(
+            "127.0.0.1",
+            loopback,
+            cause("127.0.0.1", "192.168.1.20"),
+            None,
+        );
         assert!(
             pending.contains("names 192.168.1.20, which the daemon has not applied yet"),
             "{pending}"
         );
-        assert!(!pending.contains("Tailscale is not set up"), "{pending}");
+        assert!(!pending.contains("Tailscale was not set up"), "{pending}");
 
         for message in [&tailnet, &named, &pending] {
             assert!(
@@ -399,6 +434,19 @@ mod tests {
                 "{message}"
             );
         }
+
+        // With no systemd the restart step is the one given, never `daemon restart`.
+        let by_hand = unreachable_bind_message(
+            "127.0.0.1",
+            loopback,
+            cause("127.0.0.1", ""),
+            Some("start it again: nohup ccd &"),
+        );
+        assert!(
+            by_hand.contains("start it again: nohup ccd &\n      codeconnect pair"),
+            "{by_hand}"
+        );
+        assert!(!by_hand.contains("daemon restart"), "{by_hand}");
     }
 
     /// What `pair` prints for the app's Address field is what that field

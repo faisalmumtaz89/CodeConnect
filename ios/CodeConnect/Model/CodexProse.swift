@@ -100,14 +100,14 @@ enum CodexProse {
         case .cleared(.itemCompleted):
             return Banner(
                 title: "This step finished",
-                message: "It was settled at the Mac. Codex is still working.",
+                message: "It was settled at the computer. Codex is still working.",
                 icon: "checkmark.circle", tone: .info)
 
         case .cleared(.unknown(let raw)):
             return Banner(
                 title: "The question was withdrawn",
                 message:
-                    "The Mac gave a reason this app does not recognise (\(raw)). "
+                    "The computer gave a reason this app does not recognise (\(raw)). "
                     + "Nothing was approved and nothing was denied.",
                 icon: "questionmark.circle", tone: .warning)
 
@@ -125,16 +125,16 @@ enum CodexProse {
             return Banner(
                 title: "Sent, outcome unknown",
                 message:
-                    "\(who) was written and the Mac did not learn what became of it. "
-                    + "\(writeStage(stage)) It will not be sent again — check the Mac. (\(cause))",
+                    "\(who) was written and the computer did not learn what became of it. "
+                    + "\(writeStage(stage)) It will not be sent again — check the computer. (\(cause))",
                 icon: "questionmark.circle", tone: .warning)
 
         case .unrecognisedStatus(let raw):
             return Banner(
                 title: "Ending not recognised",
                 message:
-                    "The Mac reported an ending this app has never seen (\(raw)), so it cannot say "
-                    + "what became of this question. Check the Mac.",
+                    "The computer reported an ending this app has never seen (\(raw)), so it cannot say "
+                    + "what became of this question. Check the computer.",
                 icon: "questionmark.circle", tone: .warning)
         }
     }
@@ -151,7 +151,7 @@ enum CodexProse {
         // so the daemon knows somebody answered and not what they chose.
         case .local:
             return Banner(
-                title: "Answered at the Mac",
+                title: "Answered at the computer",
                 message:
                     "Someone answered at the keyboard before this phone did. "
                     + "Codex does not report which choice they made.",
@@ -160,7 +160,7 @@ enum CodexProse {
             return Banner(
                 title: "Answered",
                 message:
-                    "The Mac names an answerer this app does not recognise (\(raw)), "
+                    "The computer names an answerer this app does not recognise (\(raw)), "
                     + "so it cannot say where this was decided.",
                 icon: "questionmark.circle", tone: .warning)
         }
@@ -183,7 +183,7 @@ enum CodexProse {
         case .answered(.local, nil):
             return "Not known. The Codex wire carries no provenance for a keyboard answer."
         case .answered(_, nil):
-            return "Not known. The Mac recorded who answered but not what they chose."
+            return "Not known. The computer recorded who answered but not what they chose."
         case .unknown(_, .some(.optionId(let id)), _, _):
             return "The option “\(id)” was written, and its outcome was never confirmed."
         case .cleared, .timeout:
@@ -193,7 +193,7 @@ enum CodexProse {
         // choice landed — and the adjacent banner says so. Saying "Nothing"
         // beside it would be the same screen contradicting itself.
         case .unknown, .unrecognisedStatus:
-            return "Not known. The Mac could not account for what became of this."
+            return "Not known. The computer could not account for what became of this."
         }
     }
 
@@ -234,7 +234,7 @@ enum CodexProse {
         // verbatim; the title says who refused, which the sentence does not.
         case .rejected(let reason):
             return Banner(
-                title: "The Mac refused this",
+                title: "The computer refused this",
                 message: reason,
                 icon: "exclamationmark.triangle.fill", tone: .warning,
                 messageIsVerbatim: true)
@@ -259,8 +259,8 @@ enum CodexProse {
     /// interpret says nothing about whether the mutation happened, and the copy
     /// must not decide for it in either direction.
     static func unknownStatusSentence(_ status: String) -> String {
-        "The Mac answered with a status this app does not know (“\(status)”), so what became of "
-            + "this is not something the app can say. Update the app, and check the Mac."
+        "The computer answered with a status this app does not know (“\(status)”), so what became "
+            + "of this is not something the app can say. Update the app, and check the computer."
     }
 
     // MARK: What became of a message
@@ -296,7 +296,7 @@ enum CodexProse {
                 icon: "doc.on.doc", tone: .info)
         case .rejected(let reason):
             return Banner(
-                title: "The Mac refused this",
+                title: "The computer refused this",
                 message: reason,
                 icon: "exclamationmark.triangle.fill", tone: .warning,
                 messageIsVerbatim: true)
@@ -338,7 +338,7 @@ enum CodexProse {
     ) -> String? {
         guard agent == .codex else { return "Only a Codex session can be stopped from here." }
         guard daemonHonoursStop else {
-            return "This Mac's CodeConnect is too old to stop a Codex turn. Update it."
+            return "This computer's CodeConnect is too old to stop a Codex turn. Update it."
         }
         // **The one honest hide** is the absent turn: with nothing to name there
         // is nothing to send, so the control is absent rather than dead.
@@ -352,7 +352,7 @@ enum CodexProse {
     ) -> String? {
         guard agent == .codex else { return "Only a Codex session is spoken to this way." }
         guard daemonUnderstandsCompose else {
-            return "This Mac's CodeConnect is too old to carry a message to Codex. Update it."
+            return "This computer's CodeConnect is too old to carry a message to Codex. Update it."
         }
         return link.blockedReason(for: .compose)
     }

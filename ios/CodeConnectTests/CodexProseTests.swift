@@ -456,7 +456,7 @@ final class CodexProseTests: XCTestCase {
             "this Mac is connected to the Codex session but is not yet watching its thread, "
             + "so a message cannot be confirmed; nothing was sent"
         let banner = CodexProse.compose(.rejected(reason: sentence))
-        XCTAssertEqual(banner.title, "The Mac refused this")
+        XCTAssertEqual(banner.title, "The computer refused this")
         XCTAssertFalse(
             banner.title.lowercased().contains("nothing was sent"),
             "the clause is already in the message: \(banner.title) / \(banner.message)")
@@ -557,10 +557,10 @@ final class ReadOnlyCardProseTests: XCTestCase {
             caveat.contains(promise),
             "the caveat must not restate the promise it contradicts: \(caveat)")
         XCTAssertTrue(
-            caveat.contains("answer it at the Mac"),
+            caveat.contains("answer it at the computer"),
             "a read-only card must say where the question CAN be answered: \(caveat)")
         XCTAssertTrue(
-            caveat.contains("Update the Mac"),
+            caveat.contains("Update it"),
             "and what makes it answerable here: \(caveat)")
         // **Short enough to survive AX5.** Measured, not guessed: the previous
         // wording ran to four lines in the pinned action bar on a 6.9" phone at

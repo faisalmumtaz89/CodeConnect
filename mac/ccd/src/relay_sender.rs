@@ -5,7 +5,7 @@
 //! crosses that boundary is fixed by [`docs/push-gateway.md`] §4 and by the
 //! relay's own parser: a schema number, the device's APNs token, the word
 //! `sandbox` or `production`, and either which of four kinds rang with how many
-//! runs are blocked, or a marker saying this one is a test. There is no field
+//! decisions are waiting, or a marker saying this one is a test. There is no field
 //! for a title, a body, a project, a session, a path, or an `aps` object — the
 //! relay refuses unknown keys rather than dropping them, so a future call site
 //! cannot smuggle one past it and believe it arrived.
@@ -62,7 +62,7 @@ const SCHEMA: u32 = 1;
 ///
 /// The relay refuses a larger count rather than clamping it, because a clamp
 /// there would make a wrong number look plausible. Here the clamp is correct
-/// and the reasoning inverts: a thousand simultaneously blocked runs is not a
+/// and the reasoning inverts: a thousand decisions waiting at once is not a
 /// state anyone is in, and dropping the doorbell entirely over an implausible
 /// count would silence a real fleet to protect an arithmetic nicety. It is
 /// logged, never silent.
@@ -387,14 +387,14 @@ fn as_approval(document: &str) -> Option<String> {
 /// every key that is not one of these and would answer `400` to a document
 /// carrying one.
 fn doorbell_document(target: &PushTarget, hint: &PushHint) -> String {
-    let blocked = if hint.blocked_sessions > MAX_BLOCKED_COUNT {
+    let blocked = if hint.decisions > MAX_BLOCKED_COUNT {
         crate::log_warn!(
-            "push: {} runs are blocked; the relay is told {MAX_BLOCKED_COUNT}",
-            hint.blocked_sessions
+            "push: {} decisions are waiting; the relay is told {MAX_BLOCKED_COUNT}",
+            hint.decisions
         );
         MAX_BLOCKED_COUNT
     } else {
-        hint.blocked_sessions
+        hint.decisions
     };
     serde_json::json!({
         "schema": SCHEMA,
@@ -707,7 +707,7 @@ mod tests {
         PushHint {
             project_label: "Aion".into(),
             kind: PushKind::Approval,
-            blocked_sessions: blocked,
+            decisions: blocked,
             session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
         }
     }

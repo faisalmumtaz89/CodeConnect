@@ -246,7 +246,8 @@ final class DecisionSurfaceTextTests: XCTestCase {
         defer { try? setAccessibility(false) }
         let scene = try XCTUnwrap(
             UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-        let controller = UIHostingController(rootView: root.environment(model))
+        let controller = UIHostingController(
+            rootView: root.environment(model).environment(Machines(holding: model)))
         let previous = scene.windows.first { $0.isKeyWindow }
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 402, height: height)
@@ -539,7 +540,7 @@ final class DecisionSurfaceTextTests: XCTestCase {
         assertScreenIsSafe(
             try await screen(
                 "claude-card", model, ScrollView { DecisionCardView(approval: approval) },
-                opening: ["Full tool input", "The Mac's screen"]
+                opening: ["Full tool input", "The computer's screen"]
             ).spoken,
             "the Claude card", expected: ["\"command\": \"git push origin \u{FFFD}niam", " git push origin \u{FFFD}niam", "app\u{FFFD}"])
         // The tool row speaks one combined label, so its opened input is

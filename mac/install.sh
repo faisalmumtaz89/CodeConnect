@@ -44,11 +44,13 @@ echo
 # not happen. Sessions survive the restart by architecture: ccd is never a
 # session's parent, and the soak harness kills it mid-session to prove the
 # log comes back gap-free.
-# Gated on the plist file, not on running the binary: the kernel can refuse
-# the freshly signed inode exactly once (observed: Abort trap: 6 on the first
-# exec, healthy ever after), and a file test cannot be refused. The same
-# transient gets one settle-and-retry around the restart itself.
-if [ -f "$HOME/Library/LaunchAgents/com.codeconnect.ccd.plist" ]; then
+# Gated on the service's file — the plist, or on Linux the systemd user unit —
+# not on running the binary: the kernel can refuse the freshly signed inode
+# exactly once (observed: Abort trap: 6 on the first exec, healthy ever after),
+# and a file test cannot be refused. The same transient gets one
+# settle-and-retry around the restart itself.
+if [ -f "$HOME/Library/LaunchAgents/com.codeconnect.ccd.plist" ] \
+    || [ -f "$HOME/.config/systemd/user/com.codeconnect.ccd.service" ]; then
     echo "restarting the daemon onto these binaries…"
     "$bin/codeconnect" daemon restart || { sleep 1; "$bin/codeconnect" daemon restart; }
 else

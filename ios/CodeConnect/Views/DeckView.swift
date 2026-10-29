@@ -23,7 +23,10 @@ struct DeckView: View {
     /// From a deep link: the card to put on top.
     var startingAt: String?
 
+    /// `Machines.linkModel`, for the clock and the link's own reason; each card
+    /// is answered through its own machine's model.
     @Environment(AppModel.self) private var model
+    @Environment(Machines.self) private var machines
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -59,7 +62,7 @@ struct DeckView: View {
     @State private var arrivalNoticeTask: Task<Void, Never>?
 
     private var queue: [ApprovalItem] {
-        let arranged = pass.arrange(model.deck, profile: model.daemonProfile)
+        let arranged = pass.arrange(machines.deck) { machines.profile(forSession: $0.sessionKey) }
         // A deep link knows a request id and not which run raised it, so the
         // first card with that id is the one it lands on.
         guard let pinned, let index = arranged.firstIndex(where: { $0.card.requestID == pinned })
@@ -75,7 +78,7 @@ struct DeckView: View {
             let cards = queue
             ZStack {
                 CC.color.bg.ignoresSafeArea()
-                if model.deckAwaitsCatchUp {
+                if machines.deckAwaitsCatchUp {
                     catchingUp
                 } else if !cards.isEmpty {
                     stack(cards: cards)
@@ -125,15 +128,15 @@ struct DeckView: View {
             // measurement loop this whole arrangement exists to avoid.
             .ccViewport(height: max(0, deckHeight - CC.space.xl))
             .ccNavigationChrome()
-            // One vocabulary. The band header says `BLOCKED` from the agent's
-            // side; every surface that speaks to the *reader* says `needs you`,
-            // and this screen is the one where the reader answers.
-            .navigationTitle("Needs you")
+            // One vocabulary. Every surface that speaks to the *reader* says
+            // `waiting for you` — the fleet's headline, its band, the bar — and
+            // this screen is the one where the reader answers.
+            .navigationTitle("Waiting for you")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 // Nothing waiting is what the clear state says in full; a "0"
                 // beside it is the same fact twice.
-                if !cards.isEmpty, !model.deckAwaitsCatchUp {
+                if !cards.isEmpty, !machines.deckAwaitsCatchUp {
                     ToolbarItem(placement: .topBarLeading) { counter(cards.count) }
                         .ccPlainToolbarItem()
                 }
@@ -149,7 +152,7 @@ struct DeckView: View {
                 openedAt = Date()
                 endedAt = nil
                 openedEmpty = queue.isEmpty
-                openedWaiting = model.deckAwaitsCatchUp
+                openedWaiting = machines.deckAwaitsCatchUp
             }
             .onChange(of: cards.isEmpty) { _, isEmpty in
                 // The clock stops here, on the transition itself, rather than
@@ -162,8 +165,8 @@ struct DeckView: View {
             }
             .onChange(
                 of: DeckArrival(
-                    count: model.deck.count, waiting: model.deckAwaitsCatchUp,
-                    releases: model.catchUpReleases)
+                    count: machines.deck.count, waiting: machines.deckAwaitsCatchUp,
+                    releases: machines.catchUpReleases)
             ) { old, new in
                 // Opened from a notification mid-catch-up, the pass starts when
                 // the catch-up ends: its cards are what it opened on, not
@@ -194,7 +197,7 @@ struct DeckView: View {
             }
             .onDisappear {
                 arrivalNoticeTask?.cancel()
-                model.deckClosed()
+                machines.deckClosed()
             }
         }
     }
@@ -222,7 +225,7 @@ struct DeckView: View {
     }
 
     private var runningCount: Int {
-        model.fleet.filter { $0.status == .running || $0.status == .idle }.count
+        machines.fleet.filter { $0.status == .running || $0.status == .idle }.count
     }
 
     /// Then **120ms of nothing.** Pure `bg`. The pause is what makes the clear
@@ -310,6 +313,7 @@ struct DeckView: View {
                 onSettled: { settle(card) },
                 comeBackToThis: canPostpone ? { advance(past: card) } : nil
             )
+            .environment(machines.model(forSession: card.sessionKey) ?? model)
             // Belt and braces on the one piece of state that must never carry
             // over: a promoted card gets a fresh read gate, so "you have seen
             // this command" cannot be inherited from the card you just answered.
@@ -368,7 +372,7 @@ struct DeckView: View {
         .fixedSize()
         .accessibilityElement(children: .ignore)
         // Cards, spoken as what they are. This counted cards and said "agents".
-        .accessibilityLabel(FleetCount.needsYou(count))
+        .accessibilityLabel(FleetCount.waitingForYou(count))
         .accessibilityIdentifier("deck-count")
     }
 
@@ -504,7 +508,7 @@ private struct DeckClearState: View {
             CCStatStrip([
                 CCStat(
                     "Cleared", value: "\(settled)",
-                    spokenValue: settled == 1 ? "1 decision" : "\(settled) decisions"),
+                    spokenValue: settled == 1 ? "1 request" : "\(settled) requests"),
                 CCStat(
                     "This pass", value: Format.age(elapsed),
                     spokenValue: Format.spokenDuration(elapsed)),
@@ -516,14 +520,13 @@ private struct DeckClearState: View {
         }
     }
 
-    /// One vocabulary: `needs you` is the state, `waiting` belongs to the clock
-    /// and nowhere else. The composition — green mark, two lines, no confetti —
-    /// is untouched.
+    /// One vocabulary: `waiting for you` is the state, on every surface. The
+    /// composition — green mark, two lines, no confetti — is untouched.
     private var runningLine: String {
-        guard stillRunning > 0 else { return "Nothing needs you." }
+        guard stillRunning > 0 else { return "Nothing is waiting for you." }
         return stillRunning == 1
-            ? "1 agent still running · nothing needs you"
-            : "\(stillRunning) agents still running · nothing needs you"
+            ? "1 agent still running · nothing waiting for you"
+            : "\(stillRunning) agents still running · nothing waiting for you"
     }
 
     private func play() {
@@ -565,21 +568,21 @@ private struct Checkmark: Shape {
 
 // MARK: - Accessory bar
 
-/// The bar that rises from the bottom of the fleet when decisions are pending.
+/// The bar that rises from the bottom of the fleet when anything is waiting for
+/// you: how many, how serious, and the door.
 ///
-/// It is a summary and a door, never a decision: there is no approve button
+/// It is a summary and a door, never an answer: there is no approve button
 /// here, because a control that answers without showing you what it is answering
 /// is the thing this product exists to replace. The orange lives in the dot,
 /// where one instance of it is enough — `Review` is white on black like every
 /// other primary in the app.
+///
+/// The cards above it already show every command; what the bar adds is the one
+/// thing a list makes you count yourself — how many wait at each risk.
 struct DeckAccessoryBar: View {
     let count: Int
-    /// Where the card `Review` opens comes from.
-    let topPlace: String
-    /// **What it wants to run**, on a line of its own — see `subtitleLine`.
-    let topCommand: String?
-    let waitingSince: Date?
-    let now: Date
+    /// How many waiting cards sit at each risk.
+    let risks: [RiskClass: Int]
     /// Set when the link cannot carry an answer. The bar still rises — you must
     /// know agents are waiting — and says why it cannot be used.
     var blockedReason: String?
@@ -617,11 +620,10 @@ struct DeckAccessoryBar: View {
             // third wording over the card count — the noun was wrong as well as
             // unshared.
             .accessibilityLabel(aggregate)
-            // The full subtitle even where the visible one is dropped at
+            // Every level even where only the riskiest is drawn at
             // accessibility sizes: a screen reader has no height budget.
-            .accessibilityValue(subtitle)
-            .accessibilityHint(
-                blockedReason ?? "Opens the deck of pending decisions, riskiest first")
+            .accessibilityValue(spokenRisks)
+            .accessibilityHint(blockedReason ?? "Opens everything waiting for you, riskiest first")
             .accessibilityIdentifier("deck-bar")
             .buttonStyle(.plain)
             .disabled(blockedReason != nil)
@@ -633,7 +635,7 @@ struct DeckAccessoryBar: View {
         // 45% of the viewport because that bar is where the decision is made;
         // this one summarises the list behind it and opens a door, so it gets a
         // **sixth**. At reading sizes that is more room than the 76pt row
-        // needs — the bar measures 109.33 against the 110.0 budget and never
+        // needs — the bar measures 102.33 against the 110.0 budget and never
         // caps — and at AX5 it is what stops the blocked state, whose sentence
         // runs to five lines there, from annexing a third of the screen. Past
         // the ceiling the bar gives the room back and scrolls; nothing is
@@ -649,11 +651,11 @@ struct DeckAccessoryBar: View {
     /// The most of the screen this bar may ever take.
     ///
     /// **The 110.0 row budget is this rule's value at `L`, not the rule.**
-    /// Measured, the bar is 109.33 at `L` — inside the budget, uncapped — and
-    /// 167.00 at AX5, where one line of `callout` is 55pt and the aggregate
-    /// needs two of them.
-    /// There is no layout that states `3 decisions need you` at AX5 inside
-    /// 110pt, and the two ways to force it — truncating the sentence or capping
+    /// Measured, the bar is 102.33 at `L` — inside the budget, uncapped — and
+    /// 161.33 at AX5, where one line of `callout` is 55pt and the bar draws two:
+    /// the count and its riskiest level.
+    /// There is no layout that states how many wait, and at which risk, at AX5
+    /// inside 110pt, and the two ways to force it — truncating the sentence or capping
     /// Dynamic Type — are both worse than the height. So the constant travels as
     /// a *share*: a sixth, which is 145.67 of an 874pt viewport.
     ///
@@ -662,7 +664,7 @@ struct DeckAccessoryBar: View {
     /// under the text.
     private static let viewportShare: CGFloat = 1.0 / 6.0
 
-    /// The dot, the aggregate, the preview, and the door.
+    /// The dot, the aggregate, the risks, and the door.
     private var summary: some View {
         HStack(alignment: .center, spacing: CC.space.sm) {
             HStack(alignment: .top, spacing: 0) {
@@ -679,9 +681,9 @@ struct DeckAccessoryBar: View {
                 .frame(
                     width: ContentColumn.gutterWidth(dot: gutterDot), alignment: .leading)
 
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: CC.space.xxs) {
                     aggregateLine
-                    subtitleLine
+                    riskLine
                 }
                 Spacer(minLength: CC.space.xs)
             }
@@ -708,9 +710,12 @@ struct DeckAccessoryBar: View {
         .contentShape(Rectangle())
     }
 
+    /// At accessibility sizes the sentence drops `for you`: whole, it wrapped
+    /// to two lines there and pushed the risk under the home indicator.
+    /// VoiceOver still hears it whole, as the button's label.
     private var aggregateLine: some View {
         HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-            Text(aggregate)
+            Text(isLargeType ? "\(count) waiting" : aggregate)
                 .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.primary)
                 .contentTransition(.numericText(countsDown: true))
@@ -778,75 +783,49 @@ struct DeckAccessoryBar: View {
     /// you` here against `2 need you` in the display slot 631pt above, because
     /// this counted cards and that counted sessions. Identical words, different
     /// numbers, one viewport.
-    private var aggregate: String { FleetCount.needsYou(count) }
+    private var aggregate: String { FleetCount.waitingForYou(count) }
 
-    /// **The command gets a line of its own.**
-    ///
-    /// It shipped glued to the place inside one `Text` — `app-1 · git push
-    /// --force origin main` — set in *proportional* type and middle-truncated,
-    /// which on a bar that also carries a clock and an 84pt `Review` rendered
-    /// `app-1 · git p…origin main`. Two halves of a command spliced by an
-    /// ellipsis is not a command, and the half that went is the one that says
-    /// whether the branch about to be overwritten is `main` or `master`.
-    ///
-    /// The place and the clock are short and fixed; the command is neither, so
-    /// it takes the whole measure underneath them. That costs the bar one 16pt
-    /// line and buys it 33 monospace characters — enough for the command this
-    /// screen exists to advertise, whole.
+    /// Riskiest first, and only the risks that hold something: a level with
+    /// nothing in it is a zero, and a zero is a fact nobody asked for.
+    private var levels: [(risk: RiskClass, count: Int)] {
+        [RiskClass.high, .medium, .low].compactMap { risk in
+            risks[risk].map { (risk, $0) }
+        }
+    }
+
+    /// `1 HIGH   1 MEDIUM   1 LOW` — how many wait at each risk, in the fleet's
+    /// own risk tags. LOW draws nothing on a row, where silence means low; here
+    /// a missing level would read as zero, so LOW is the plain tag. At
+    /// accessibility sizes only the riskiest level fits the width, and it is
+    /// the one that matters.
     @ViewBuilder
-    private var subtitleLine: some View {
+    private var riskLine: some View {
         // Nothing when the link cannot carry an answer: what the bar owes the
         // reader then is the reason, and `reasonLine` draws that below, outside
         // the disabled control so it is neither dimmed nor cut.
-        if blockedReason == nil, !isLargeType {
-            // Dropped entirely at accessibility sizes. Measured at AX5: the bar
-            // wrapped `3 agents` / `need you` onto two lines, then the card
-            // name, then the clock, then a full-width `Review` — roughly 45% of
-            // the viewport, leaving the fleet behind it one clipped row. The
-            // aggregate and the door are what the bar is for; the preview is a
-            // luxury, and VoiceOver still gets it as the button's value.
-            HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
-                Text(verbatim: topPlace)
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.tertiary)
-                    .lineLimit(1)
-                    // From the front, as the rows are: this is a project, and a
-                    // project is recognised by how it starts. Trimming its
-                    // middle returns two elisions and neither name.
-                    .truncationMode(.tail)
-                if let waitingSince {
-                    Text("·")
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.disabled)
-                    CCWaitClock(since: waitingSince, now: now, prefix: "waiting")
+        if blockedReason == nil {
+            HStack(alignment: .center, spacing: CC.space.md) {
+                ForEach(levels.prefix(isLargeType ? 1 : levels.count), id: \.risk) { level in
+                    HStack(alignment: .center, spacing: CC.space.xxs) {
+                        Text(verbatim: "\(level.count)")
+                            .ccType(CC.type.monoSmall)
+                            .foregroundStyle(CC.text.secondary)
+                        if level.risk == .low {
+                            CCTag(level.risk.label, accessibilityText: "")
+                        } else {
+                            CCRiskTag(level.risk)
+                        }
+                    }
                 }
-            }
-            if let topCommand {
-                // The kit's container-less mono run, shared with the fleet row
-                // and the session's approval preview.
-                CCMonoBlock(inline: topCommand)
-                    .padding(.top, 1)
             }
         }
     }
 
-    /// What VoiceOver hears. Always the whole command, at every type size —
-    /// including the sizes where the visible preview is dropped for height,
-    /// because a screen reader has no height budget to spend.
-    ///
-    /// **Not the blocked reason.** It used to be, back when the reason replaced
-    /// this line inside the button; the reason is now its own visible element
-    /// with its own label, and it is the button's hint besides, so returning it
-    /// here would have a reader hear the same sentence three times and lose the
-    /// preview at exactly the moment they are deciding whether to open the Deck
-    /// at all.
-    private var subtitle: String {
-        var parts = [topPlace]
-        if let topCommand { parts.append(topCommand) }
-        if let waitingSince {
-            parts.append("waiting \(Format.spokenDuration(now.timeIntervalSince(waitingSince)))")
-        }
-        return parts.joined(separator: " · ")
+    /// What VoiceOver hears after the aggregate: every level, at every type
+    /// size — `1 high risk, 2 medium risk, 1 low risk`.
+    private var spokenRisks: String {
+        levels.map { "\($0.count) \($0.risk.label.lowercased()) risk" }
+            .joined(separator: ", ")
     }
 }
 

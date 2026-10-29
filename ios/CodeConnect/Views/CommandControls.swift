@@ -65,10 +65,10 @@ struct CommandPalette: View {
             icon: "plus.forwardslash.minus",
             action: .nativeDiff),
         PaletteRow(
-            command: "status", subtitle: "Capture the Mac status view", icon: "info.circle",
+            command: "status", subtitle: "Capture the computer's status view", icon: "info.circle",
             action: .nativeSnapshot(.status)),
         PaletteRow(
-            command: "usage", subtitle: "Capture the Mac usage view", icon: "chart.bar",
+            command: "usage", subtitle: "Capture the computer's usage view", icon: "chart.bar",
             action: .nativeSnapshot(.usage)),
         // Kept as a row because Claude Code accepts `/cost` and a reader who
         // thinks in cost should find it — but the subtitle states the measured
@@ -133,7 +133,7 @@ struct CommandPalette: View {
                     // scanned the whole list starts wondering where the rest of
                     // the commands went.
                     if content.showsCaption {
-                        Text("Run other commands on the Mac from the Terminal tab.")
+                        Text("Run other commands on the computer from the Terminal tab.")
                             .ccType(CC.type.footnote)
                             .foregroundStyle(CC.text.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -355,7 +355,7 @@ struct ModelSheet: View {
         switch fact.provenance {
         case .sessionStart: origin = "Confirmed at session start"
         case .command: origin = "Confirmed by /model"
-        case .reported: origin = "Reported by the Mac"
+        case .reported: origin = "Reported by the computer"
         }
         return "\(origin) · \(RelativeAge.text(since: fact.at, now: now))"
     }
@@ -469,12 +469,12 @@ struct ModelSheet: View {
         case .idle:
             EmptyView()
         case .sending(let alias):
-            statusLine("Typing /model \(alias) on the Mac…", tone: .neutral)
+            statusLine("Typing /model \(alias) on the computer…", tone: .neutral)
         case .waiting(_, quietly: false):
             statusLine("Waiting for Claude Code to confirm…", tone: .neutral)
         case .waiting(let alias, quietly: true):
             statusLine(
-                "Sent /model \(alias) to the Mac. Still waiting for Claude Code to confirm.",
+                "Sent /model \(alias) to the computer. Still waiting for Claude Code to confirm.",
                 tone: .neutral)
         case .confirmed(let line):
             statusLine(line, tone: .success)
@@ -550,7 +550,7 @@ struct ModelSheet: View {
                 // does not identify views.
                 onLanded()
                 phase = .neutral(
-                    "/model \(alias) took the composer on the Mac and CodeConnect "
+                    "/model \(alias) took the composer on the computer and CodeConnect "
                         + "pressed Esc to give it back. No model change was confirmed.")
                 // On 2.1.223 that recovered path was followed by `Kept model as …`.
                 // The UI reports only the observed recovery and that no change
@@ -732,12 +732,12 @@ struct EffortSheet: View {
         case .idle:
             EmptyView()
         case .sending(let value):
-            effortStatusLine("Typing /effort \(value) on the Mac…", tone: .neutral)
+            effortStatusLine("Typing /effort \(value) on the computer…", tone: .neutral)
         case .waiting(_, quietly: false):
             effortStatusLine("Waiting for Claude Code to confirm…", tone: .neutral)
         case .waiting(let value, quietly: true):
             effortStatusLine(
-                "Sent /effort \(value) to the Mac. Still waiting for Claude Code to confirm.",
+                "Sent /effort \(value) to the computer. Still waiting for Claude Code to confirm.",
                 tone: .neutral)
         case .confirmed(let line):
             effortStatusLine(line, tone: .success)
@@ -792,7 +792,7 @@ struct EffortSheet: View {
                 // Claude Code then prints `Kept effort level as …`.
                 onLanded()
                 phase = .neutral(
-                    "/effort \(value) took the composer on the Mac and CodeConnect "
+                    "/effort \(value) took the composer on the computer and CodeConnect "
                         + "pressed Esc to give it back. No effort change was confirmed.")
             case .composerLost:
                 phase = .failed("Couldn’t restore the composer. Open Terminal to recover.")
@@ -930,12 +930,12 @@ struct CompactSheet: View {
         case .idle:
             EmptyView()
         case .sending:
-            compactStatusLine("Typing /compact on the Mac…", tone: .neutral)
+            compactStatusLine("Typing /compact on the computer…", tone: .neutral)
         case .waiting(quietly: false):
             compactStatusLine("Waiting for Claude Code to confirm…", tone: .neutral)
         case .waiting(quietly: true):
             compactStatusLine(
-                "Compaction requested on the Mac. "
+                "Compaction requested on the computer. "
                     + "CodeConnect has not received a completion signal.",
                 tone: .neutral)
         case .confirmed(let line):

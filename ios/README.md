@@ -147,14 +147,16 @@ release build:
 
 | Argument | What it does |
 |---|---|
-| `-CC_HOST -CC_TOKEN` | pairs without typing |
-| `-CC_PAIR_HOST -CC_PAIR_CODE` | runs the real pairing-code exchange without a camera |
+| `-CC_HOST -CC_TOKEN` | pairs without typing, with that machine alone |
+| `-CC_PAIR_HOST -CC_PAIR_CODE` | runs the real pairing-code exchange without a camera, adding a machine as a scan does (`-CC_PAIR_PORT` for a port other than 8787) |
 | `-CC_FIXTURE deck` | replays daemon frames for three blocked agents at three risk classes |
-| `-CC_FIXTURE stacked` | the same fleet plus a **second decision on one agent** and a fifth agent **running a tool**. With one card per agent, "count the agents" and "count the cards" return the same number, so the fleet's headline and its accessory bar agreed by coincidence while counting different things; and with no Running band, a shell command set in proportional type could not be reached from a fixture at all |
+| `-CC_FIXTURE stacked` | the same fleet plus a **second decision on one agent** and a fifth agent **running a tool**. With one card per agent, "count the agents" and "count the cards" return the same number, so the count under the fleet's title and its accessory bar agreed by coincidence while counting different things; and with no Running band, a shell command set in proportional type could not be reached from a fixture at all |
 | `-CC_FIXTURE longOutput` | the `deck` fleet plus `fx-5`'s turn ending in a finished command with **60 lines of output** and one more call after it. The only fixture with a tool output past its 40-line "Show all", which at the tail is the geometry where the timeline once carried the reader to the last line |
 | `-CC_FIXTURE wideTool` | the `stacked` fleet with the running agent one call further on, an MCP tool (`mcp__filesystem__list_directory_with_sizes`) whose name alone is **wider than a phone row**. A row that wide must not move the screen's edge: the fleet's stack once sized itself to it and pushed every band header off the left of the screen |
 | `-CC_FIXTURE mcpApproval` | the `stacked` fleet with `fx-5`'s turn held on an **MCP tool's approval** (`mcp__filesystem__list_directory_with_sizes`, after its last call). The only fixture with an MCP name on the chat's approval row, whose width once left that row and every tool row above it showing no command |
 | `-CC_FIXTURE spoofedCommand` | one blocked agent whose command carries a **right-to-left override** (`git push origin <U+202E>niam ecrof--`, drawn as it arrives as `git push origin --force main`) and whose description carries a NUL. The only fixture whose command reads as a different command; every surface draws the override as U+FFFD |
+| `-CC_FIXTURE single` | the `deck` fleet with **one card**, the force-push on `fx-1`: the accessory bar's ordinary case, which every other fixture overstates |
+| `-CC_FIXTURE empty` | paired and connected with **no session at all**: the first screen after pairing. The only fixture that reaches the empty fleet's instruction — how to start Claude Code or Codex, and where |
 | `-CC_QUESTION <state>` | one Claude session holding a four-question `AskUserQuestion` card from a minor-21 daemon — `held`, `at-mac`, `ended`, `answered`, or `old-mac` (minor 20, no `question_card`). See *Claude's questions* |
 | `-CC_FIXTURE_LATE_EVENT_MS <n>[,<n>…]` | delivers the fixture's last frame `n` ms after the rest — or, with several delays, its last frames in stream order, one per delay, the shortest delay first: events that arrive while the reader is on screen, so a test can act first and then see whether each is followed or counted as "N new" |
 | `-CC_FIXTURE_ANSWER_MS <n>` | holds a fixture's answer `n` ms before it lands, so a test can see a card while its answer is on its way |
@@ -289,7 +291,7 @@ is enforced.
   count the cards a catch-up brings as arrivals. The clock every age reads
   (`AppModel.now`) is set on the change to active or inactive, so no age is a
   second stale on the way back.
-* **A cold open waits to be caught up.** The loader ("Connecting to your Mac…")
+* **A cold open waits to be caught up.** The loader ("Connecting to your computer…")
   shows until the first link's catch-up ends, then the fleet in one step. The
   Mac is dialled once the saved fleet is loaded and on screen, so the saved
   fleet is what the loader holds. A Mac that has not answered gets three seconds
@@ -305,10 +307,10 @@ is enforced.
   `display_text` against `payload_hash`.
 * **An inferred outcome is never stated as fact.** `ResolvedBy::Local` carries
   `inferred: true` — the daemon saw the prompt leave, it did not see the answer —
-  so the UI says "Closed at the Mac", never "Allowed" or "answered"
+  so the UI says "Closed at the computer", never "Allowed" or "answered"
   (`AnswerOutcome.decisionLabel`). Where an answer came from is said as far as the
   record proves it (`AnswerOutcome.provenance`): `phone` is "from a phone", any
-  paired one, never "this app"; `local` is "at the Mac".
+  paired one, never "this app"; `local` is "at the computer".
 * **A disconnected terminal says so.** The last bytes stay on screen under an
   explicit not-live banner, because a frozen terminal is indistinguishable from
   a live one and clearing it would lie about what you just read.
@@ -431,6 +433,39 @@ is enforced.
   a pairing hello omits `token` entirely, because the daemon *prefers* a token
   when both are present, so even an empty string would be checked as the
   credential and the code would never be read.
+* **One phone keeps several machines** (`PairingStore.machines`), all in one
+  Keychain item. A machine is its host and port, compared without case: scanning
+  a new one adds it, re-scanning one already paired replaces only its credential,
+  and removing one removes only its record and its cache folder
+  (`EventCache.machine(_:)`, under `cache/machines/<id>/`). The same computer paired
+  once by address and once by name is one machine once its daemon has said which
+  daemon it is (`hello_ack.machine_id`, minor 26, kept as `PairedMachine.daemonID`):
+  the machine paired first keeps its record, its cache and its name and takes the
+  later pairing's address, credential and place, and the later record and its
+  folder go (`Machines.identified`, `PairingStore.merge`). A record whose address
+  never answers is never identified, so it stays until removed; a daemon older
+  than minor 26 is told apart by address alone. The single pairing an earlier
+  build kept becomes the first machine on first launch, with its cached history
+  moved into that machine's folder.
+* **Every machine has its own connection, and one fleet shows them all**
+  (`Machines`). Each paired machine has an `AppModel` of its own — its link, its
+  cache folder, its catch-up, its sessions — so nothing one Mac says reaches
+  another's state, and the screens under a session (approve, answer, stop,
+  compose, diff, terminal) are handed the model of the machine the session is
+  on. The fleet, the count under its title, the Deck and its bar merge every
+  machine's sessions and cards; each row carries its machine
+  (`FleetRow.machineID`, `machineName`), whose link is its model's own
+  (`Machines.model(for:)`, `AppModel.linkHealth`). One machine offline leaves the
+  others live and actionable: each session's own screen and its cards speak for
+  that session's machine's link, each project's card on the fleet names its
+  computer and that computer's link (one folder on two computers is two cards,
+  and the summary says how many computers once there are several), and the
+  app-wide link banner speaks only once no machine can be reached
+  (`Machines.linkModel`).
+  Adding a machine dials it on its own link without touching the others';
+  removing one closes its link and deletes its cache. A notification tap opens
+  the merged Deck, which waits for the machines still catching up on a live
+  link.
 * **Risk is reconciled by taking the stricter reading** (`RiskAssessment`). The
   daemon sees the repo and can tighten a gate; it can never loosen one below
   what this build's own reading of the command justifies. `git push --force`
@@ -768,7 +803,8 @@ CC.type    display title headline rowTitle body callout footnote
 **Type is applied with `.ccType(_:)`**, never `.font(...)`. The modifier scales
 size, tracking *and* leading together against Dynamic Type, so the scale keeps
 its proportions from `xSmall` to `AX5`. `display` and `title` stop growing at
-`.accessibility1`; everything carrying information is uncapped. Mono tokens use
+`.accessibility1`; everything carrying information is uncapped, including an
+empty state's title, which is its screen's whole instruction. Mono tokens use
 `monospacedDigit()` so ticking ages do not reflow the row.
 
 `.ccType` deliberately does **not** set colour — components apply the
@@ -825,7 +861,7 @@ haptic is not motion, and removing it removes information.
 | `CCRow` | `CCRow(title, titleStyle:, subtitle:, meta:, titleTruncation:, subtitleLineLimit:, showsChevron:, separator:, density:, isDimmed:, disabledReason:, accessibilityLabelText:, action:) { leading } trailing: { } meta: { }` — 64pt min, full-row target. **`meta` spans the whole row**, under the trailing accessory rather than beside it |
 | `CCFactRow` | `CCFactRow(label, value:, labelStyle: .prose/.identifier/.key, tone:, isUnmeasured:, age:, separator:)` · `CCFactRow(label) { value }` · `CCFactRow(label, detail: { })` — 48pt. Lands its own text on the 52pt column; no call site adds anything |
 | `CCBadge` | `CCBadge(text, icon:, tone:, count:, isSelected:, action:)` · `CCBadge(status:count:)` · `CCBadge(capability:)` — **one construction**, and no `style:` to pick another: tint@12 fill, tint@40 border, full-strength label, radius 6. A badge is **20pt**; the same construction **with an `action`** is a control and is `CC.size.chip` 32 with a wider inset, because a chip is a thing you press. `danger` takes a 1.5pt edge; nothing takes a saturated fill |
-| `CCTag` | `CCTag(text, accessibilityText:)` · `CCTag(agent:)` — which agent a session is (`Claude Code`, `Codex`, or an unsupported agent's own word), on every fleet row and in the session header. No fill, 1pt `borderStrong`, 9pt semibold uppercase `textTertiary`, **15pt** tall, radius 4; wraps at accessibility sizes like `CCBadge` |
+| `CCTag` | `CCTag(text, accessibilityText:)` · `CCTag(agent:)` — which agent a session is (`Claude Code`, `Codex`, or an unsupported agent's own word), on an ended fleet row and in the session header; a run in a project card is titled with the same word instead. No fill, 1pt `borderStrong`, 9pt semibold uppercase `textTertiary`, **15pt** tall, radius 4; wraps at accessibility sizes like `CCBadge` |
 | `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH. <rationale>` |
 | `CCCountChip` | `CCCountChip(3)` — the same construction with a number in it. Used by `CCSectionHeader`; never hand-rolled |
 | `CCStatusDot` | `CCStatusDot(color:size:isHollow:pulses:)` · `CCStatusDot(tone:…)` · `CCStatusDot(status:size:isCached:)` — scales with Dynamic Type to `CC.size.dotMaxScale` (8 → 14 at AX5) |
@@ -900,10 +936,10 @@ from one to the other. `markCentre` 20 (36 on screen) is the one axis every mark
 is centred on — fleet and session dots, a card's status dot, the timeline's glyphs
 (`ccGutterMark()`) and the YOU bar — so marks of different widths share a line.
 
-**One row leaves the gutter empty on purpose:** a Fleet row with no dot — every
-row in the Blocked and Failed bands — drops the column and starts its title at
-the card's own content edge (32 on screen), so a band of dotless rows lines up
-as one column instead of holding an 8pt gutter nothing is drawn in.
+**One row leaves the gutter empty on purpose:** a Fleet row with no dot — a
+blocked or failed run — drops the column and starts its title at the card's own
+content edge (32 on screen) instead of holding an 8pt gutter nothing is drawn
+in.
 
 **A section-header label is text**, so it starts on 52 like everything else, and
 `CCSectionHeader` now places its own label there. It

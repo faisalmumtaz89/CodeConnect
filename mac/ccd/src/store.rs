@@ -4014,7 +4014,7 @@ fn harden_sidecars(path: &Path) {
         if let Err(err) = protocol::fsperm::harden_file(&sidecar) {
             crate::log_error!(
                 "could not make {} owner-only ({err}); recent events may be readable by other \
-                 accounts on this Mac",
+                 accounts on this computer",
                 sidecar.display()
             );
         }
