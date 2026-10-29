@@ -25,7 +25,7 @@ final class LiveDaemonUITests: XCTestCase {
     }
 
     private func openFirstSession(_ app: XCUIApplication) throws {
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 20))
         let session = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH 'session-'")
         ).firstMatch
@@ -50,7 +50,7 @@ final class LiveDaemonUITests: XCTestCase {
     /// that skips.
     func testDiffFromTheLiveDaemon() throws {
         let app = try launchApp()
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 20))
 
         let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session-'"))
         try XCTSkipUnless(
@@ -75,7 +75,7 @@ final class LiveDaemonUITests: XCTestCase {
             // happen — for any session, not just the one that answers — is a
             // spinner that never resolves.
             let captured = app.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS 'Captured on the Mac'")
+                NSPredicate(format: "label CONTAINS 'Captured on the computer'")
             ).firstMatch
             let refused = app.staticTexts.matching(
                 NSPredicate(
@@ -83,7 +83,7 @@ final class LiveDaemonUITests: XCTestCase {
                         "label CONTAINS 'No diff' OR label CONTAINS 'not a git'"
                         + " OR label CONTAINS 'No uncommitted changes'"
                         + " OR label CONTAINS 'could not read the diff'"
-                        + " OR label CONTAINS 'No answer from the Mac'")
+                        + " OR label CONTAINS 'No answer from the computer'")
             ).firstMatch
 
             let settled = XCTNSPredicateExpectation(
@@ -108,7 +108,7 @@ final class LiveDaemonUITests: XCTestCase {
             if done.exists { done.tap() }
             let back = app.navigationBars.buttons.firstMatch
             if back.exists { back.tap() }
-            _ = app.navigationBars["Fleet"].waitForExistence(timeout: 15)
+            _ = app.navigationBars["Projects"].waitForExistence(timeout: 15)
         }
 
         attach(app, "live-diff-none")
@@ -121,8 +121,8 @@ final class LiveDaemonUITests: XCTestCase {
     /// on, so the trust screen has to show what actually arrived.
     func testDaemonAdvertisesItsCapabilities() throws {
         let app = try launchApp()
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
-        app.buttons["Settings and pairing"].tap()
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 20))
+        app.buttons["Settings"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 10))
         // What a daemon advertises is on its machine's own screen, behind its row.
         let machine = app.buttons.matching(NSPredicate(format: "label ENDSWITH 'Live'")).firstMatch
@@ -189,7 +189,7 @@ final class LiveDaemonUITests: XCTestCase {
         let finder = XCUIApplication()
         finder.launchArguments = ["-CC_HOST", host, "-CC_TOKEN", token, "-CC_RESET_CACHE", "YES"]
         finder.launch()
-        XCTAssertTrue(finder.navigationBars["Fleet"].waitForExistence(timeout: 20))
+        XCTAssertTrue(finder.navigationBars["Projects"].waitForExistence(timeout: 20))
         let row = finder.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH 'session-'")
         ).firstMatch
@@ -226,9 +226,9 @@ final class LiveDaemonUITests: XCTestCase {
         let settled = app.staticTexts.matching(
             NSPredicate(
                 format:
-                    "label CONTAINS 'Captured on the Mac' OR label CONTAINS 'Not connected'"
+                    "label CONTAINS 'Captured on the computer' OR label CONTAINS 'Not connected'"
                     + " OR label CONTAINS 'No uncommitted changes' OR label CONTAINS 'No diff to show'"
-                    + " OR label CONTAINS 'No answer from the Mac'")
+                    + " OR label CONTAINS 'No answer from the computer'")
         ).firstMatch
         XCTAssertTrue(
             settled.waitForExistence(timeout: 30),
@@ -269,9 +269,11 @@ final class PairingLiveUITests: XCTestCase {
         // the device token came back — the app never stores the code, so a
         // second connection could only succeed with the token.
         XCTAssertTrue(
-            app.navigationBars["Fleet"].waitForExistence(timeout: 30),
+            app.navigationBars["Projects"].waitForExistence(timeout: 30),
             "a pairing code must buy a working, durable pairing")
-        XCTAssertTrue(app.buttons["Link health"].waitForExistence(timeout: 10))
+        app.buttons["Settings"].tap()
+        let machine = app.buttons.matching(NSPredicate(format: "label ENDSWITH 'Live'")).firstMatch
+        XCTAssertTrue(machine.waitForExistence(timeout: 10), "the paired machine's row")
 
         let shot = XCTAttachment(screenshot: app.screenshot())
         shot.name = "live-paired-by-code"

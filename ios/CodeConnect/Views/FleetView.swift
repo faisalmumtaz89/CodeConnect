@@ -23,20 +23,20 @@ private struct PendingRemoval {
     @MainActor
     init(row: SessionSummary, model: AppModel, remove: @escaping () -> Void) {
         title = "Remove \(model.runLabel(for: row.sessionKey).project)?"
-        message = "\(row.agent.displayName)'s own transcript stays on the Mac."
+        message = "\(row.agent.displayName)'s own transcript stays on the computer."
         self.remove = remove
     }
 
     init(count: Int, remove: @escaping () -> Void) {
         title = "Remove \(count) sessions?"
-        message = "Their own transcripts stay on the Mac."
+        message = "Their own transcripts stay on the computer."
         self.remove = remove
     }
 }
 
-/// The 2am glance. Fixed sort, every fact stamped with its age, and the one
-/// number that matters — how many agents need you — in the largest type on the
-/// screen rather than a caption under the word `Fleet`.
+/// The 2am glance. Fixed sort, every fact stamped with its age, one card per
+/// project saying where it is, and the one number that matters — how many
+/// agents need you — directly under the title.
 ///
 /// Three rules do most of the work here:
 ///
@@ -44,8 +44,9 @@ private struct PendingRemoval {
 ///    carries something non-redundant. A calm fleet of eight running agents is
 ///    sixteen lines of text; two blockers grow exactly two rows.
 ///  * **Colour is information.** The only coloured container on the screen is
-///    the Failed band's border. Blocked is carried by its band, its position at
-///    the top and the headline, and risk by a tag that is brightness, not hue.
+///    the border of a card led by a failed run. Blocked is carried by its
+///    section, its position at the top and the count under the title, and
+///    risk by a tag that is brightness, not hue.
 ///  * **One banner, ever.** Every candidate goes to `CCBannerSlot` and it picks
 ///    by rank: rejected beats offline beats stale beats cached. Facts that lose
 ///    still appear per-element: a cached row gets a hollow dot, never the word
@@ -65,7 +66,6 @@ struct FleetView: View {
     /// The one-open-swipe-row rules. Rows observe it; this view only calls
     /// methods on it, so a pulse closes a row without re-rendering the fleet.
     @State private var swipeCloses = CCSwipeCloseCoordinator()
-    @State private var showLinkDetail = false
     @State private var showDeck = false
     @State private var deckStartsAt: String?
     @State private var diffRoute: DiffRoute?
@@ -127,19 +127,21 @@ struct FleetView: View {
         let screen = hidden ?? liveScreen()
         return NavigationStack(path: $path) {
             ScrollView {
-                // A `VStack`, **not** a `LazyVStack`. Each band is one item
-                // holding all its rows, so at the accessibility sizes a band is
-                // several screens tall, and over items that tall the lazy stack
-                // never settled its placement: one of the first few drags pinned
-                // the main thread for over a minute (`sample`: spinning in
-                // `LazySubviewPlacements`), the same failure the timeline had
-                // before it became a `List`. The bands are eager inside, at most
-                // eight sit in this stack, and the eager stack measured no cost
+                // A `VStack`, **not** a `LazyVStack`. Each card and the Ended
+                // band is one item holding all its rows, so at the accessibility
+                // sizes one item can be several screens tall, and over items that
+                // tall the lazy stack never settled its placement: one of the
+                // first few drags pinned the main thread for over a minute
+                // (`sample`: spinning in `LazySubviewPlacements`), the same
+                // failure the timeline had before it became a `List`. The items
+                // are eager inside, and the eager stack measured no cost
                 // at the largest real fleet — 45 ended runs expanded, default
                 // size: expanding 1.59–1.62s lazy against 1.61–1.63s eager,
                 // drags alike, idle CPU 12.7–14.4% against 11.6–12.5%.
                 VStack(alignment: .leading, spacing: 0) {
-                    scrollHeader(screen)
+                    // An empty fleet is one instruction, not a list with no rows:
+                    // a header above it would name the same emptiness again.
+                    if !screen.isEmpty { scrollHeader(screen) }
                     content(screen)
                 }
                 // Whether the fleet is in the window, which is whether any of it
@@ -212,7 +214,7 @@ struct FleetView: View {
             // Opaque `bg` *and* a hard scroll edge, welded together in the kit
             // because either one alone is a different wrong bar.
             .ccNavigationChrome()
-            .navigationTitle("Fleet")
+            .navigationTitle("Projects")
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: SessionRoute.self) { route in
                 // One chat per session. A link that swaps the chat on top for
@@ -225,15 +227,11 @@ struct FleetView: View {
                     .id(route.key)
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    LinkPill { showLinkDetail = true }
-                }
-                .ccPlainToolbarItem()
                 ToolbarItem(placement: .principal) {
                     // The same word the scroll header carries, arriving only as
                     // that header leaves. Two titles at once is the bug this
                     // fade exists to prevent.
-                    Text("Fleet")
+                    Text("Projects")
                         .ccType(CC.type.headline)
                         .foregroundStyle(CC.text.primary)
                         .opacity(titleVisible ? 1 : 0)
@@ -246,20 +244,16 @@ struct FleetView: View {
                         CCHaptic.light.fire()
                         showSettings = true
                     } label: {
-                        CCIcon("gearshape", size: 17, weight: .medium)
+                        Text("Settings")
+                            .ccType(CC.type.body)
                             .foregroundStyle(CC.text.primary)
-                            // The circle scales with the glyph inside it — a
-                            // fixed 36pt ring around a symbol that grows is a
-                            // symbol that escapes its ring at AX sizes.
-                            .ccGlyphContainer(CC.size.controlSm)
                             .ccHitTarget()
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Settings and pairing")
                 }
                 .ccPlainToolbarItem()
             }
-            // The bar prints the headline's own number, not its own count of the
+            // The bar prints the header's own number, not its own count of the
             // cards it happens to hold — see `FleetCount`.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if selecting {
@@ -288,7 +282,6 @@ struct FleetView: View {
             // whatever the user comes back to.
             .onChange(of: overlayFingerprint) { swipeCloses.closeAll() }
             .sheet(isPresented: $showSettings) { PairingView().environment(machines.current) }
-            .sheet(isPresented: $showLinkDetail) { LinkHealthSheet() }
             .sheet(item: $capabilityReason) { CapabilitySheet(reason: $0.text) }
             .fullScreenCover(isPresented: $showDeck) {
                 // A mode, not an inspection — and the presentation is
@@ -351,21 +344,23 @@ struct FleetView: View {
     /// the model when they run.
     private struct FleetScreen {
         let rows: [FleetRow]
-        let bands: [Band]
+        /// Every live run, one card per working directory, the project holding
+        /// the most urgent run first.
+        let projects: [Project]
+        /// The runs that have ended, as one band; nil with none.
+        let ended: Band?
         /// The rows a selection can hold, in fleet order: ended, and removable.
         let selectable: [String]
-        /// The headline's count, which the Deck bar prints too.
+        /// The count under the title, which the Deck bar prints too.
         let decisions: Int
-        /// What the Deck bar says about the card `Review` opens first; nil with
-        /// nothing waiting.
-        let deck: DeckPreview?
+        /// How many waiting cards sit at each risk, for the Deck bar; empty until
+        /// a card has arrived, and then the bar rises.
+        let risks: [RiskClass: Int]
         let hasLiveFleet: Bool
-    }
 
-    private struct DeckPreview {
-        let place: String
-        let command: String
-        let waitingSince: Date
+        /// The daemon has said there is no session, as opposed to not having
+        /// said anything yet.
+        var isEmpty: Bool { rows.isEmpty && hasLiveFleet }
     }
 
     /// Hold the fleet as it is now, unless it is already held.
@@ -399,18 +394,19 @@ struct FleetView: View {
         // re-evaluated on every *layout* pass — so one flick on a 24-session
         // daemon walked two dozen logs a frame and took the main thread down for
         // thirty seconds. Measured.
-        let top = machines.deck.first
+        let deck = machines.deck
         return FleetScreen(
             rows: rows,
             // Everything each row draws, read here and nowhere below: a model
             // read inside a row's own builders would redraw that row on any
             // session's event. See `FleetRowCell`.
-            bands: bands(of: rows),
+            projects: projects(of: rows),
+            ended: bands(of: rows.filter { $0.status == .ended }).first,
             selectable: selectableKeys(rows),
             decisions: FleetCount.decisions(in: rows),
-            deck: top.map {
-                DeckPreview(
-                    place: place(for: $0), command: command(for: $0), waitingSince: $0.requestedAt)
+            // Each card at the risk its own card shows.
+            risks: deck.reduce(into: [:]) {
+                $0[$1.assessment(profile: machines.profile(forSession: $1.sessionKey)).effective, default: 0] += 1
             },
             hasLiveFleet: machines.hasLiveFleet)
     }
@@ -426,36 +422,29 @@ struct FleetView: View {
 
     // MARK: Header
 
-    /// **The largest type on the triage screen is the answer, not the noun.**
+    /// **A large, calm title, and the one sentence that may not be calm.**
     ///
-    /// `Fleet` used to own the display slot: 32pt, white, the brightest thing on
-    /// screen, and carrying no information at all — a tired reader learned the
-    /// name of the app they had just opened. The name is now a `micro` eyebrow
-    /// and the state sentence is the largest type on the screen, so the reading
-    /// order is *how many need me* → *what is left* → *which agent*. It is set
-    /// at `title` (22), not `display` (32), which leaves the rows below it room
-    /// to be read.
+    /// `Projects` in the iOS large-title place, then the shape of the work in one
+    /// quiet line. When decisions wait, their count comes between the two, in the
+    /// warning hue the accessory bar's dot uses, so it is the first thing read
+    /// after the screen's own name and it cannot be mistaken for the summary.
     private func scrollHeader(_ screen: FleetScreen) -> some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
-            Text("Fleet")
-                .ccType(CC.type.micro)
-                .foregroundStyle(CC.text.tertiary)
-                .accessibilityHidden(true)
-            Text(headline(screen))
-                // `title` caps at 30pt, below the eyebrow and the summary line at
-                // accessibility sizes, so there the sentence keeps `display`.
-                .ccType(typeSize.isAccessibilitySize ? CC.type.display : CC.type.title)
+            Text("Projects")
+                .ccType(CC.type.display)
                 .foregroundStyle(CC.text.primary)
-                .fixedSize(horizontal: false, vertical: true)
-                .contentTransition(.numericText(countsDown: true))
                 .accessibilityAddTraits(.isHeader)
-                .accessibilityLabel("Fleet. \(headline(screen))")
-            if let summary = summaryLine(screen.rows) {
-                Text(summary)
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.secondary)
+            if let alert = alert(screen) {
+                Text(alert.text)
+                    .ccType(CC.type.headline)
+                    .foregroundStyle(alert.colour)
                     .fixedSize(horizontal: false, vertical: true)
+                    .contentTransition(.numericText(countsDown: true))
             }
+            Text(summaryLine(screen))
+                .ccType(CC.type.callout)
+                .foregroundStyle(CC.text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, CC.space.md)
@@ -463,43 +452,37 @@ struct FleetView: View {
         .padding(.bottom, CC.space.xl)
     }
 
-    /// The one number that matters, in the canonical words — and it is the same
-    /// number, from the same function, that the accessory bar prints. One
-    /// function owns this sentence and every surface prints that one sentence,
-    /// so no two surfaces can disagree about how many agents need you.
-    ///
-    /// It used to count rows in the Blocked band while the bar counted cards in
-    /// the Deck, which is a lie the moment one agent stacks two approvals. See
-    /// `FleetCount`.
-    private func headline(_ screen: FleetScreen) -> String {
-        guard !screen.rows.isEmpty else {
-            return screen.hasLiveFleet ? "Nothing needs you" : "Nothing has arrived yet"
+    /// What needs a person: the decisions, in the canonical words — the same
+    /// number, from the same function, that the accessory bar prints (see
+    /// `FleetCount`) — or failing those the failures.
+    private func alert(_ screen: FleetScreen) -> (text: String, colour: Color)? {
+        if screen.decisions > 0 {
+            return (FleetCount.waitingForYou(screen.decisions), CC.color.warning)
         }
-        if screen.decisions > 0 { return FleetCount.needsYou(screen.decisions) }
-        // Nothing is held, but something broke, and that is still the first
-        // thing a reader should be told.
         let failed = screen.rows.filter { $0.status == .failed }.count
-        if failed > 0 { return failed == 1 ? "1 failed" : "\(failed) failed" }
-        return "Nothing needs you"
+        return failed > 0 ? ("\(failed) failed", CC.color.danger) : nil
     }
 
-    /// What is left after the headline has taken its count. Bands with nothing
-    /// in them are omitted rather than printed as `0` — a zero is a fact nobody
-    /// asked for — and `nil` draws no line at all.
-    private func summaryLine(_ rows: [FleetRow]) -> String? {
-        guard !rows.isEmpty else { return nil }
-        var parts: [String] = []
-        let blocked = rows.filter { $0.status == .blocked }.count
-        let failed = rows.filter { $0.status == .failed }.count
-        // Only when the headline did not already take it.
-        if blocked > 0, failed > 0 { parts.append("\(failed) failed") }
-        let running = rows.filter { $0.status == .running }.count
-        let done = rows.filter { $0.status == .doneUnreviewed }.count
-        let idle = rows.filter { $0.status == .idle }.count
-        if running > 0 { parts.append("\(running) running") }
-        if done > 0 { parts.append("\(done) done") }
-        if idle > 0 { parts.append("\(idle) idle") }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    /// `4 agents on 2 computers · 1 done`: every live run, the computers they
+    /// are on when there are several, and what they are doing — less whatever
+    /// the alert above said. A status with nothing in it is omitted rather than
+    /// printed as `0`.
+    private func summaryLine(_ screen: FleetScreen) -> String {
+        guard !screen.projects.isEmpty else {
+            return screen.rows.isEmpty ? "Nothing has arrived yet" : "No agents running"
+        }
+        let live = screen.rows.filter { $0.status != .ended }
+        let computers = Set(live.map(\.machineID)).count
+        let overview = "\(live.count) \(live.count == 1 ? "agent" : "agents")"
+            + (computers > 1 ? " on \(computers) computers" : "")
+        let taken: FleetStatus? =
+            screen.decisions > 0 ? .blocked : (live.contains { $0.status == .failed } ? .failed : nil)
+        let rest = FleetStatus.allCases.compactMap { status -> String? in
+            guard status != taken else { return nil }
+            let count = live.filter { $0.status == status }.count
+            return count > 0 ? "\(count) \(status.label.lowercased())" : nil
+        }
+        return ([overview] + rest).joined(separator: " · ")
     }
 
     // MARK: Content
@@ -510,21 +493,137 @@ struct FleetView: View {
         // here that read belonged to the whole fleet.
         FleetBanner { showSettings = true }
 
-        if screen.rows.isEmpty {
-            if screen.hasLiveFleet {
-                emptyState
-            } else {
-                loadingState
-            }
+        if screen.isEmpty {
+            emptyState
+        } else if screen.rows.isEmpty {
+            loadingState
         } else {
-            ForEach(screen.bands, id: \.status) { band in
-                if band.status == .ended && !showEnded {
-                    endedFooter(band)
+            // A decision outranks the grouping: the projects holding one come
+            // first, under a header that says why.
+            let waiting = screen.projects.filter(\.needsYou)
+            let others = screen.projects.filter { !$0.needsYou }
+            if !waiting.isEmpty {
+                sectionHeader("Waiting for you")
+                ForEach(waiting, id: \.id) { projectCard($0) }
+                if !others.isEmpty {
+                    sectionHeader("Other projects").padding(.top, CC.space.md)
+                }
+            }
+            ForEach(others, id: \.id) { projectCard($0) }
+            if let ended = screen.ended {
+                if showEnded {
+                    bandView(ended).padding(.top, CC.space.lg)
                 } else {
-                    bandView(band)
+                    endedFooter(ended).padding(.top, CC.space.md)
                 }
             }
         }
+    }
+
+    // MARK: Projects
+
+    /// Every live run in one working directory on one computer.
+    private struct Project {
+        /// The computer and the working directory as drawn, which together make
+        /// two runs one project: one folder on two computers is two.
+        struct ID: Hashable {
+            let machineID: String?
+            let folder: String
+        }
+        let id: ID
+        let name: String
+        /// The folder as a shell prints it: `~/infra`.
+        let path: String
+        /// What its computer is called; nil in the sample fleet.
+        let machineName: String?
+        let cells: [FleetRowCell.Content]
+        let border: Color
+        let needsYou: Bool
+    }
+
+    /// The home folder as `~`, the way a shell prints it: `/Users/<name>/…` on a
+    /// Mac and `/home/<name>/…` on Linux.
+    private static func shellPath(_ cwd: String) -> String {
+        let parts = cwd.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count >= 3, parts[0].isEmpty, parts[1] == "Users" || parts[1] == "home"
+        else { return cwd }
+        return (["~"] + parts.dropFirst(3)).joined(separator: "/")
+    }
+
+    /// Grouped in fleet order, which is urgency order: a project's place is its
+    /// most urgent run's, and its runs keep their order inside it.
+    private func projects(of rows: [FleetRow]) -> [Project] {
+        var order: [Project.ID] = []
+        var groups: [Project.ID: [FleetRow]] = [:]
+        for row in rows where row.status != .ended {
+            let id = Project.ID(machineID: row.machineID, folder: row.summary.shownCwd)
+            if groups[id] == nil { order.append(id) }
+            groups[id, default: []].append(row)
+        }
+        return order.compactMap { id in
+            guard let members = groups[id], let lead = members.first else { return nil }
+            return Project(
+                id: id,
+                name: lead.label.project,
+                path: Self.shellPath(id.folder),
+                machineName: lead.machineName,
+                // Control is the promise and its presence is not news, so a
+                // card has no header note and an observe-only row says so on
+                // its own line.
+                cells: members.enumerated().map { index, row in
+                    cellContent(
+                        row, bandCapability: .control, isLast: index == members.count - 1,
+                        titledByAgent: true)
+                },
+                border: bandBorder(lead.status),
+                needsYou: lead.status == .blocked)
+        }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        CCSectionHeader(title)
+            .padding(.horizontal, CC.space.md)
+            .frame(minHeight: CC.space.xxl)
+            .padding(.bottom, CC.space.xs)
+    }
+
+    /// One card per project, headed by where it is — its name, its folder and
+    /// the computer it is on — with each run below named by its agent.
+    private func projectCard(_ project: Project) -> some View {
+        CCCard(padding: 0, border: project.border) {
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: CC.space.xxs) {
+                    CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
+                        // Wrapped, never cut: a folder's name is what tells two
+                        // cards apart.
+                        Text(project.name)
+                            .ccType(CC.type.headline)
+                            .foregroundStyle(CC.text.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        CCAdaptiveSpacer(minLength: CC.space.sm)
+                        MachineLabel(machineID: project.id.machineID, name: project.machineName)
+                    }
+                    // Cut from the front: the end of a folder is the part that
+                    // names it. Whole at accessibility sizes, where the cut would
+                    // leave little more than the name above it.
+                    Text(verbatim: project.path)
+                        .ccType(CC.type.monoSmall)
+                        .foregroundStyle(CC.text.tertiary)
+                        .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                        .truncationMode(.head)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, CC.space.md)
+                .padding(.vertical, CC.space.sm)
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isHeader)
+                CCHairline()
+                ForEach(project.cells, id: \.row.id) { rowCell($0) }
+            }
+        }
+        .padding(.horizontal, CC.space.md)
+        .padding(.bottom, CC.space.sm)
     }
 
     // MARK: Bands
@@ -579,7 +678,6 @@ struct FleetView: View {
         hasher.combine(path)
         hasher.combine(showSettings)
         hasher.combine(diffRoute)
-        hasher.combine(showLinkDetail)
         hasher.combine(capabilityReason != nil)
         hasher.combine(showDeck)
         return hasher.finalize()
@@ -606,10 +704,10 @@ struct FleetView: View {
         .padding(.bottom, CC.space.xl)
     }
 
-    /// The Failed band's is the only coloured container on the screen, and the
-    /// only place the Fleet spends a hue on something other than a dot. Blocked
-    /// is neutral like every other band: its place at the top of the list and
-    /// the headline above it already say it needs you.
+    /// A card led by a failed run has the only coloured border on the screen,
+    /// and the only place the fleet spends a hue on something other than a dot.
+    /// Blocked is neutral like every other card: its section at the top of the
+    /// list and the count under the title already say it needs you.
     private func bandBorder(_ status: FleetStatus) -> Color {
         switch status {
         case .failed: return CC.color.danger.opacity(0.30)
@@ -619,9 +717,10 @@ struct FleetView: View {
 
 
     /// Everything one row draws or decides, read here — from `liveScreen()`,
-    /// through `bands(of:)` — so the row itself reads nothing.
+    /// through `projects(of:)` or `bands(of:)` — so the row itself reads nothing.
     private func cellContent(
-        _ row: FleetRow, bandCapability: CapabilityBadge?, isLast: Bool
+        _ row: FleetRow, bandCapability: CapabilityBadge?, isLast: Bool,
+        titledByAgent: Bool = false
     ) -> FleetRowCell.Content {
         let key = row.summary.sessionKey
         let owner = owner(of: row)
@@ -637,6 +736,7 @@ struct FleetView: View {
             blocked: blockedCard(row),
             showsCapability: showsCapability(row, bandCapability: bandCapability),
             separator: !isLast,
+            titledByAgent: titledByAgent,
             // Not while choosing: removal then goes through the selection, and
             // a second route would race the batch for the same session.
             removalOffered: removable && !selecting,
@@ -925,7 +1025,7 @@ struct FleetView: View {
         }
         // **The screen's own edge, not the dot column.** `textColumn` is where text
         // sits *beside a status dot*, and this footer has no dot — so it was
-        // indented past "Fleet" and the headline for a mark that is not drawn. The
+        // indented past the title and the count for a mark that is not drawn. The
         // same mistake `CCSectionHeader` had; this is `FleetView`'s private copy of
         // that column, which is why fixing the shared component did not reach here.
         .padding(.leading, CC.space.md)
@@ -938,24 +1038,42 @@ struct FleetView: View {
 
     // MARK: States
 
+    /// What to run, and where, to put an agent on this screen: the two agents
+    /// as equal choices, centred in the viewport.
     private var emptyState: some View {
-        CCEmptyState(
-            glyph: "terminal",
-            title: "No agents running",
-            message: "Start one from your project's folder on the Mac:"
-        ) {
-            CCMonoBlock("codeconnect claude")
-                .frame(maxWidth: 280)
-                .padding(.top, CC.space.xxs)
-            CCProse(
-                "For Codex: `codeconnect codex`.", style: CC.type.footnote,
-                color: CC.text.tertiary
-            )
-            .multilineTextAlignment(.center)
-            .padding(.top, CC.space.xs)
+        ZStack {
+            // At least the viewport's height, so the instruction sits on its
+            // centre; taller content at the largest sizes still scrolls.
+            Color.clear.containerRelativeFrame(.vertical)
+            CCEmptyState(
+                glyph: "terminal",
+                title: "Start an agent on your computer",
+                message:
+                    "Start one with CodeConnect and its project shows up here, ready to follow and answer from this phone."
+            ) {
+                VStack(spacing: CC.space.md) {
+                    command("Claude Code", "codeconnect claude")
+                    command("Codex", "codeconnect codex")
+                }
+                .frame(maxWidth: 300)
+                .padding(.top, CC.space.xs)
+                Text("Run it in Terminal, in a project’s folder on a paired computer.")
+                    .ccType(CC.type.footnote)
+                    .foregroundStyle(CC.text.tertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 300)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, CC.space.xs)
+            }
         }
-        .padding(.horizontal, CC.space.md)
-        .padding(.top, CC.space.xxl)
+    }
+
+    private func command(_ agent: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: CC.space.xxs) {
+            Text(agent.uppercased())
+                .ccType(CC.type.fieldLabel, color: nil)
+            CCMonoBlock(text)
+        }
     }
 
     /// A shape, a sentence, and a ticking counter. No shimmer: a stalled link
@@ -987,49 +1105,20 @@ struct FleetView: View {
 
     // MARK: Deck
 
-    /// The accessory bar that rises when decisions are pending, and the door to
-    /// the cross-fleet queue behind it.
+    /// The accessory bar that rises when anything is waiting for you, and the
+    /// door to the cross-fleet queue behind it.
     ///
-    /// Its count is the *fleet's*, the headline's own, rather than recomputed:
-    /// the bar and the headline say the same sentence, so they must not each
+    /// Its count is the *fleet's*, the header's own, rather than recomputed:
+    /// the bar and the header say the same sentence, so they must not each
     /// arrive at the number their own hand happens to hold.
     @ViewBuilder
     private func deckBar(_ screen: FleetScreen) -> some View {
-        if let top = screen.deck {
-            // The bar counts a wait in seconds, so it is one of the few things
-            // here that has earned a tick. It owns that read rather than
-            // charging it to the list above it.
-            FleetDeckBar(
-                count: screen.decisions,
-                topPlace: top.place,
-                topCommand: top.command,
-                waitingSince: top.waitingSince
-            ) {
+        if !screen.risks.isEmpty {
+            FleetDeckBar(count: screen.decisions, risks: screen.risks) {
                 deckStartsAt = nil
                 showDeck = true
             }
         }
-    }
-
-    /// Where the card `Review` actually opens comes from.
-    ///
-    /// `pending` is urgency-ranked, so `first` is the riskiest — under the old
-    /// age-first order this line named `app-3 · Read` while a `git push --force`
-    /// sat above it in the queue, and the one detail the product volunteered at
-    /// 2am was its least important item.
-    private func place(for approval: ApprovalItem) -> String {
-        owner(approval.sessionKey).runLabel(for: approval.sessionKey).inline
-    }
-
-    /// What that card wants to run. The command rather than the tool name, for
-    /// the same reason the row carries it: `Bash` is not a fact.
-    ///
-    /// Handed to the bar separately from the place, because the two were one
-    /// string and the string was middle-truncated — see `subtitleLine`.
-    private func command(for approval: ApprovalItem) -> String {
-        let line = ToolSummary.principalArgument(
-            tool: approval.card.toolName, input: approval.card.toolInput)?.firstLine
-        return line.flatMap { $0.isEmpty ? nil : $0 } ?? approval.card.toolName
     }
 
     /// Dismisses everything Fleet itself can present.
@@ -1039,7 +1128,6 @@ struct FleetView: View {
     /// enumerate the others.
     private func clearPresentations() {
         showSettings = false
-        showLinkDetail = false
         capabilityReason = nil
         diffRoute = nil
         // The Deck too. A `.fleet` route arriving while the Deck is up must
@@ -1185,23 +1273,49 @@ struct BlockedCard: Equatable {
 /// one decision — a third line has to carry something the two above it do not.
 // MARK: - The three views that are allowed to read the clock
 
-/// **The one thing on this screen that has to change every second.**
+/// **The computer a project is on, and whether it is answering.**
 ///
-/// How long ago the Mac last spoke is the screen's whole warrant, so the pill
-/// ticks — and it is also the smallest thing on the screen. Read from
-/// `FleetView.body`, that second was charged to the entire 45-session list,
-/// which was rebuilt and re-sorted to redraw two characters in the toolbar. The
-/// read now lives with the only view whose output depends on it.
-private struct LinkPill: View {
-    @Environment(AppModel.self) private var model
-    let action: () -> Void
+/// A green dot is a live link and says nothing more: a healthy link is not news.
+/// Anything else is said in a word beside the name — the dot alone would be a
+/// colour asked to carry a fact. The link is that computer's own, and the label
+/// reads it itself because the link is derived from the clock, and read from
+/// `FleetView.body` that second was charged to the whole list. Nothing when the
+/// computer has no name — nothing is paired and no daemon has named one, the
+/// sample fleet among them, whose dot would report a link that does not exist.
+private struct MachineLabel: View {
+    @Environment(Machines.self) private var machines
+    let machineID: String?
+    let name: String?
+    /// Half the footnote's cap height, so the dot sits on the first line's
+    /// middle however many lines the name wraps to.
+    @ScaledMetric(relativeTo: .footnote) private var capMiddle: CGFloat = 4.5
 
     var body: some View {
-        // Nothing at all in the sample fleet. The pill's whole subject is how
-        // long ago a Mac last spoke, and a control reporting on a link that does
-        // not exist is worse than an empty slot however honestly it renders.
-        if !model.sampleFleetActive {
-            CCFreshnessPill(health: model.linkHealth, action: action)
+        if let name, let model = machines.model(for: machineID) {
+            let state = Self.state(model.linkHealth.level)
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
+                CCStatusDot(color: state.dot, size: CC.size.dotSm, isHollow: state.hollow)
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + capMiddle }
+                // One run of text, so it wraps rather than truncates: half a
+                // computer's name names none.
+                (Text(verbatim: name).foregroundStyle(CC.text.secondary)
+                    + Text(state.word.map { " · \($0)" } ?? "").foregroundStyle(CC.text.primary))
+                    .ccType(CC.type.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("On \(name), \(state.word ?? "connected")")
+        }
+    }
+
+    private static func state(_ level: LinkHealth.Level) -> (dot: Color, hollow: Bool, word: String?) {
+        switch level {
+        case .live: return (CC.color.success, false, nil)
+        case .lagging: return (CC.color.warning, false, nil)
+        case .stale: return (CC.color.danger, false, "Stale")
+        case .connecting: return (CC.color.info, false, "Connecting")
+        case .offline: return (CC.text.tertiary, true, "Offline")
+        case .rejected: return (CC.color.danger, false, "Not paired")
         }
     }
 }
@@ -1278,7 +1392,7 @@ private struct FleetBanner: View {
                     // note that says the connection is fine.
                     .rejected,
                     title: "Update CodeConnect on this iPhone",
-                    message: "\(unreadable) Some of what your Mac reports will be missing here.",
+                    message: "\(unreadable) Some of what your computer reports will be missing here.",
                     tone: .warning,
                     icon: "arrow.down.circle")
             ]
@@ -1364,27 +1478,22 @@ private struct FleetBanner: View {
     }
 }
 
-/// The accessory bar, clocked by itself.
+/// The accessory bar, reading the link by itself.
 ///
-/// It prints the oldest wait in seconds and quotes the link's own reason for
-/// disabling `Review`, so it genuinely does change every second while a card is
-/// waiting. That is one view at the bottom of the screen; it was costing a
-/// rebuild of every row above it.
+/// It quotes the link's own reason for disabling `Review`, and the link's state
+/// is a function of the clock — it goes stale on its own. That is one view at
+/// the bottom of the screen; read from the fleet, it was costing a rebuild of
+/// every row above it.
 private struct FleetDeckBar: View {
     @Environment(AppModel.self) private var model
     let count: Int
-    let topPlace: String
-    let topCommand: String
-    let waitingSince: Date
+    let risks: [RiskClass: Int]
     let onOpen: () -> Void
 
     var body: some View {
         DeckAccessoryBar(
             count: count,
-            topPlace: topPlace,
-            topCommand: topCommand,
-            waitingSince: waitingSince,
-            now: model.now,
+            risks: risks,
             // The link's own per-level sentence. A hard-coded "Link stale"
             // reported a *rejected token* as a stale link, which sends the
             // reader to the wrong screen.
@@ -1463,6 +1572,8 @@ struct FleetRowCell: View, Equatable {
         let blocked: BlockedCard?
         let showsCapability: Bool
         let separator: Bool
+        /// Inside a project card that names the project above it.
+        let titledByAgent: Bool
         /// The swipe and VoiceOver's named action: this Mac will remove the
         /// run, and no selection is being made.
         let removalOffered: Bool
@@ -1527,6 +1638,7 @@ struct FleetRowCell: View, Equatable {
                 blocked: content.blocked,
                 showsCapability: content.showsCapability,
                 separator: content.separator,
+                titledByAgent: content.titledByAgent,
                 onOpenDiff: onOpenDiff,
                 onMarkReviewed: onMarkReviewed,
                 onRemove: content.removalOffered ? { removeWithAnnouncement() } : nil,
@@ -1598,6 +1710,9 @@ struct FleetRowView: View {
     let blocked: BlockedCard?
     let showsCapability: Bool
     let separator: Bool
+    /// Titled with its agent rather than its project, because the project card
+    /// it sits in is headed with the project.
+    var titledByAgent = false
     let onOpenDiff: () -> Void
     let onMarkReviewed: () -> Void
     /// Present only on a row that can actually be removed, so VoiceOver never
@@ -1729,23 +1844,25 @@ struct FleetRowView: View {
         #endif
     }
 
-    /// **The dot is gone from the Blocked and Failed bands**, where it was a
-    /// fourth encoding of a state the band header, its place in the list and the
+    /// **The dot is gone from blocked and failed runs**, where it was a fourth
+    /// encoding of a state the section header, its place in the list and the
     /// clock all carry. It stays where it discriminates: hollow means *this row
     /// came off the disk*, which nothing else on the screen says.
     ///
     /// **So is its column.** A row with no dot starts its title at the card's
-    /// own content edge rather than holding an empty 8pt gutter: the band is
-    /// one kind of row, and every row in it lines up with the others.
+    /// own content edge rather than holding an empty 8pt gutter.
     private func content<Leading: View>(
         @ViewBuilder leading: @escaping () -> Leading
     ) -> some View {
         CCRow(
             // The place, always. A fleet is a set of places, and the place is
             // the stable, scannable anchor — never the AI title, which is
-            // sometimes a sentence and sometimes a folder name.
-            placeName,
-            titleStyle: CC.type.rowTitle,
+            // sometimes a sentence and sometimes a folder name. Inside a
+            // project's card the card names the place, and the row its agent.
+            titledByAgent ? CCTag(agent: row.summary.agent).text : placeName,
+            // Regular under a project's semibold name, so the card reads as one
+            // project and its agents rather than as several titles.
+            titleStyle: titledByAgent ? CC.type.callout : CC.type.rowTitle,
             // **From the front.** The title is a project — a directory
             // somebody named — and a directory is recognised by how it starts.
             // Trimming the middle of a long one returns
@@ -1756,7 +1873,7 @@ struct FleetRowView: View {
             titleTruncation: .tail,
             showsChevron: false,
             separator: separator,
-            density: .comfortable,
+            density: titledByAgent ? .compact : .comfortable,
             isDimmed: row.status == .ended,
             accessibilityLabelText: accessibilityLabel,
             action: action,
@@ -1799,29 +1916,33 @@ struct FleetRowView: View {
             // tag only some rows carry reads as an alarm on those rows, and a
             // fleet that mixes agents is read by which one each row is. It
             // leads the activity line rather than sitting beside the title,
-            // where the risk tag and the wait clock already are.
-            CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
-                CCTag(agent: row.summary.agent)
-                if let activity {
-                    activityLine(
-                    activity,
-                    truncation: blocked?.truncation ?? .head,
-                    // The tool name takes full contrast only where the row is
-                    // asking for something. A Running row's activity is not
-                    // urgent, so it stays one step down and the *face* — prose
-                    // against monospace — is what carries the distinction.
-                        tone: blocked == nil ? CC.text.secondary : CC.text.primary)
-                } else {
-                    // The daemon's own *sentence* — a user message, an agent
-                    // reply, a notice — which has no argument to set as code.
-                    Text(row.subtitle)
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.secondary)
-                        .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
-                        .fixedSize(horizontal: false, vertical: true)
+            // where the risk tag and the wait clock already are — unless the
+            // title already is the agent, where an idle run has no line at all.
+            if !titledByAgent || activity != nil || !row.subtitle.isEmpty || onStop != nil {
+                CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
+                    if !titledByAgent { CCTag(agent: row.summary.agent) }
+                    if let activity {
+                        activityLine(
+                            activity,
+                            truncation: blocked?.truncation ?? .head,
+                            // The tool name takes full contrast only where the row
+                            // is asking for something. A Running row's activity is
+                            // not urgent, so it stays one step down and the *face*
+                            // — prose against monospace — is what carries the
+                            // distinction.
+                            tone: blocked == nil ? CC.text.secondary : CC.text.primary)
+                    } else {
+                        // The daemon's own *sentence* — a user message, an agent
+                        // reply, a notice — which has no argument to set as code.
+                        Text(row.subtitle)
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.secondary)
+                            .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    CCAdaptiveSpacer(minLength: 0)
+                    stopControl
                 }
-                CCAdaptiveSpacer(minLength: 0)
-                stopControl
             }
             if showsIdentity || showsCapability || row.blockedCount > 1 { exceptionLine }
         }
@@ -1973,7 +2094,7 @@ struct FleetRowView: View {
             parts.append(blocked.risk.rationale)
         }
         if row.cachedAt != nil { parts.append("from cache") }
-        if row.blockedCount > 1 { parts.append("\(row.blockedCount) pending decisions") }
+        if row.blockedCount > 1 { parts.append(FleetCount.waitingForYou(row.blockedCount)) }
         parts.append(spokenActivity)
         if isBlockedOrFailed {
             parts.append("waiting \(Format.spokenDuration(now.timeIntervalSince(waitingSince)))")
@@ -2109,7 +2230,7 @@ struct CapabilitySheet: View {
 
                     CCSectionHeader("What still works")
                     Text(
-                        "Everything on this screen is still true. You can read the timeline, open the diff and attach the terminal, you just answer at the Mac."
+                        "Everything on this screen is still true. You can read the timeline, open the diff and attach the terminal, you just answer at the computer."
                     )
                     .ccType(CC.type.callout)
                     .foregroundStyle(CC.text.secondary)
@@ -2476,21 +2597,21 @@ struct LinkHealthSheet: View {
             let receipt = apnsID.map { " Apple's receipt: \($0)." } ?? ""
             return "Accepted by Apple — the banner on this phone is the proof.\(receipt)"
         case .pushUnconfigured:
-            return "The Mac has no APNs key configured, so nothing was sent."
+            return "The computer has no APNs key configured, so nothing was sent."
         case .notPairedDevice:
             return "This connection uses the bootstrap token; pair the phone to test push."
         case .noRegisteredToken:
-            return "The Mac holds no notification token for this phone yet. Enable notifications, then try again."
+            return "The computer holds no notification token for this phone yet. Enable notifications, then try again."
         case .credentialInvalid:
             return "The relay no longer trusts this phone’s credential. Reset notification registration to enroll again."
         case .rateLimited(let secs):
             return "Tested a moment ago — try again in \(secs)s."
         case .failed(let reason):
-            return "The Mac could not send it: \(reason)"
+            return "The computer could not send it: \(reason)"
         case .unknown(let status):
-            return "The Mac answered “\(status)”, which this build does not know."
+            return "The computer answered “\(status)”, which this build does not know."
         case .none:
-            return "No answer from the Mac."
+            return "No answer from the computer."
         }
     }
 
@@ -2507,7 +2628,7 @@ struct LinkHealthSheet: View {
             return "This daemon does not send push notifications, so there is nothing to test."
         }
         guard capabilities.testsPush else {
-            return "This daemon predates push testing. Update the Mac to prove the doorbell."
+            return "This daemon predates push testing. Update the computer to prove the doorbell."
         }
         // Relay mode has an enrollment step direct mode does not; its states fold
         // in here so the one button explains why it is waiting or stuck.
@@ -2515,11 +2636,11 @@ struct LinkHealthSheet: View {
             // A bootstrap/static connection has no device row, so enrollment can
             // never begin — say that plainly instead of "Setting up…" forever.
             guard model.connection.helloAck?.deviceID != nil else {
-                return "This is a bootstrap connection. Pair this iPhone with the Mac to receive notifications."
+                return "This is a bootstrap connection. Pair this iPhone with the computer to receive notifications."
             }
             switch model.relayPushState {
             case .unsupported:
-                return "This iPhone can’t use CodeConnect’s push relay — it has no App Attest support. Everything else still works; a Mac with its own Apple push key can notify you directly."
+                return "This iPhone can’t use CodeConnect’s push relay — it has no App Attest support. Everything else still works; a computer with its own Apple push key can notify you directly."
             case .enrolling:
                 return "Enrolling this iPhone with the push relay…"
             case .failed(let reason):

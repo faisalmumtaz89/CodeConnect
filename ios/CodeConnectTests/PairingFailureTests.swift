@@ -49,7 +49,7 @@ final class PairingFailureTests: XCTestCase {
         // And it says where it looked and how to find out why, not only the
         // system's own sentence.
         guard case .failed(let reason) = connection.phase else { return }
-        XCTAssertTrue(reason.contains("Could not reach the Mac at 127.0.0.1:1"), reason)
+        XCTAssertTrue(reason.contains("Could not reach the computer at 127.0.0.1:1"), reason)
         XCTAssertTrue(reason.contains("`codeconnect daemon status`"), reason)
     }
 

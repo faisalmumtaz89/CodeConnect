@@ -65,9 +65,12 @@ struct CCEmptyState<Detail: View>: View {
                 .padding(.bottom, CC.space.xxs)
 
             Text(title)
-                .ccType(CC.type.title)
+                .ccType(Self.titleStyle)
                 .foregroundStyle(CC.text.primary)
                 .multilineTextAlignment(.center)
+                // An empty state fills its screen, so its title is the heading
+                // VoiceOver's rotor lands on there.
+                .accessibilityAddTraits(.isHeader)
 
             if let message {
                 // `CCProse`: an empty state is where the product explains how to
@@ -136,6 +139,15 @@ struct CCEmptyState<Detail: View>: View {
 
     private var mark: some View {
         CCScreenMark(glyph: glyph, tone: tone)
+    }
+
+    /// `title` without its ceiling (see `CCTextStyle.maxSize`): the title is
+    /// the screen's whole instruction, so it is information, and it must stay
+    /// at least as large as the uncapped `callout` message under it.
+    private static var titleStyle: CCTextStyle {
+        var style = CC.type.title
+        style.maxSize = nil
+        return style
     }
 }
 

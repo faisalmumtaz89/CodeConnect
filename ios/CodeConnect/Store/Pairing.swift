@@ -197,7 +197,7 @@ struct PairingQRPayload: Sendable, Hashable {
                 return "That pairing code has an impossible port (\(port))."
             case .unreachableHost(let host, let why):
                 return
-                    "That pairing code points at \(host), which \(why). Connect the Mac to the network your iPhone reaches it on (Tailscale, by default), run `codeconnect daemon restart`, then `codeconnect pair` again."
+                    "That pairing code points at \(host), which \(why). Connect the computer to the network your iPhone reaches it on (Tailscale, by default), run `codeconnect daemon restart`, then `codeconnect pair` again."
             }
         }
     }
@@ -219,7 +219,7 @@ struct PairingQRPayload: Sendable, Hashable {
         let trimmed = host.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return "is empty" }
         if trimmed.caseInsensitiveCompare("localhost") == .orderedSame {
-            return "is the Mac's own loopback name"
+            return "is the computer's own loopback name"
         }
         // An IPv6 literal may arrive bracketed, as it does inside a URL.
         var bare = trimmed
@@ -233,7 +233,7 @@ struct PairingQRPayload: Sendable, Hashable {
             // `IPv4Address.isLoopback` matches only the canonical literal, which
             // let `127.1.2.3` through — a real gap the Rust side does not have,
             // since `Ipv4Addr::is_loopback` covers the block.
-            if octets.first == 127 { return "only that Mac can reach" }
+            if octets.first == 127 { return "only that computer can reach" }
             if octets == Data([0, 0, 0, 0]) { return "is not an address to connect to" }
             if octets.count == 4, octets[0] == 169, octets[1] == 254 {
                 return "is a link-local address that does not route"
@@ -241,7 +241,7 @@ struct PairingQRPayload: Sendable, Hashable {
             return nil
         }
         if let v6 = IPv6Address(bare) {
-            if v6.isLoopback { return "only that Mac can reach" }
+            if v6.isLoopback { return "only that computer can reach" }
             if v6.isLinkLocal { return "is a link-local address that does not route" }
             if v6.rawValue.allSatisfy({ $0 == 0 }) { return "is not an address to connect to" }
             return nil

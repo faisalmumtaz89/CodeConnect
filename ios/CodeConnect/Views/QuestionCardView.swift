@@ -531,7 +531,7 @@ struct QuestionCardView: View {
             }
             .disabled(blockedReason != nil)
             .accessibilityIdentifier("question-decline")
-            .accessibilityHint(blockedReason ?? "Declines the question, as Escape does at the Mac.")
+            .accessibilityHint(blockedReason ?? "Declines the question, as Escape does at the computer.")
             if let comeBackToThis { comeBackButton(comeBackToThis) }
         }
     }

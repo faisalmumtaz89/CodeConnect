@@ -25,18 +25,18 @@ final class ProvenanceWordingTests: XCTestCase {
     }
 
     func testAnAnswerAtTheMacSaysTheMac() throws {
-        XCTAssertEqual(ApprovalRow.resolutionText(for: try outcome("local")), "Allowed at the Mac")
+        XCTAssertEqual(ApprovalRow.resolutionText(for: try outcome("local")), "Allowed at the computer")
     }
 
     /// The daemon saw the prompt leave, not an answer: closed, never answered.
     func testAnInferredEndingClaimsNoAnswer() throws {
         let inferred = try outcome("local", inferred: true)
-        XCTAssertEqual(ApprovalRow.resolutionText(for: inferred), "Closed at the Mac")
+        XCTAssertEqual(ApprovalRow.resolutionText(for: inferred), "Closed at the computer")
         XCTAssertEqual(inferred.decisionLabel, "Closed")
         XCTAssertEqual(
             DecisionCardView.alreadyResolvedMessage(
                 for: inferred, now: inferred.resolvedDate.addingTimeInterval(65)),
-            "Closed at the Mac · 1m ago", "the place said once")
+            "Closed at the computer · 1m ago", "the place said once")
     }
 
     /// Codex's `resolved_by: phone` names a paired phone too.
@@ -52,6 +52,6 @@ final class ProvenanceWordingTests: XCTestCase {
                 for: phone, now: phone.resolvedDate.addingTimeInterval(5)),
             "Allowed from a phone · 5s ago")
         XCTAssertEqual(
-            ResolutionBanner.headline(for: .answeredAtKeyboard("x")), "Answered at the Mac")
+            ResolutionBanner.headline(for: .answeredAtKeyboard("x")), "Answered at the computer")
     }
 }

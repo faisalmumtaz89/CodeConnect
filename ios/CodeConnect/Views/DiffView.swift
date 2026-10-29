@@ -114,7 +114,7 @@ struct DiffSheet: View {
             CCEmptyState(
                 glyph: "stop.circle",
                 title: "Stopped asking",
-                message: "The Mac never answered, so nothing was rendered. Nothing was changed.",
+                message: "The computer never answered, so nothing was rendered. Nothing was changed.",
                 actionTitle: "Ask again",
                 action: { start(force: true) })
         case .idle, .loading:
@@ -158,8 +158,8 @@ struct DiffSheet: View {
 
                 CCWaitingNotice(
                     elapsed: elapsed,
-                    label: "Asking the Mac for git diff HEAD",
-                    lateLabel: "Still asking the Mac",
+                    label: "Asking the computer for git diff HEAD",
+                    lateLabel: "Still asking the computer",
                     lateAfter: 8,
                     actionTitle: "Cancel",
                     action: cancelAction)
@@ -198,7 +198,7 @@ struct DiffSheet: View {
         ScrollView {
             CCEmptyState(
                 glyph: "exclamationmark.octagon",
-                title: "The Mac could not read the diff",
+                title: "The computer could not read the diff",
                 message: "No diff was produced. The daemon's own reason follows, verbatim.",
                 tone: .danger,
                 actionTitle: "Try again",
@@ -225,7 +225,7 @@ struct DiffSheet: View {
         ScrollView {
             CCEmptyState(
                 glyph: "questionmark.circle",
-                title: "No answer from the Mac",
+                title: "No answer from the computer",
                 message:
                     "The link is up and the request went out. Nothing came back, and the daemon "
                     + "gave no reason. This is the app's own account of what it saw.",
@@ -458,7 +458,7 @@ private struct DiffRefreshButton: View {
         }
         .buttonStyle(.plain)
         .disabled(isLoading || blockedReason != nil)
-        .accessibilityLabel("Ask the Mac for a fresh diff")
+        .accessibilityLabel("Ask the computer for a fresh diff")
         // The visible reason for this control lives in the content beneath it —
         // the ticking wait notice while it is loading, the link's own account of
         // itself when the link is what stopped it. A header row has nowhere to
@@ -941,7 +941,7 @@ struct DiffDocumentView: View {
     }
 
     static func fullAgeLine(captured age: String) -> String {
-        "Captured on the Mac \(age) ago · git diff HEAD"
+        "Captured on the computer \(age) ago · git diff HEAD"
     }
 
     /// The empty state's copy of the same sentence — a different composition
@@ -1463,7 +1463,7 @@ private struct DiffCommentSheet: View {
         case .composerRecovered:
             return "The comment was typed into the session."
         case .composerLost:
-            return "The comment was typed, but the Mac's composer did not come back. "
+            return "The comment was typed, but the computer's composer did not come back. "
                 + "Open Terminal to recover."
         }
     }

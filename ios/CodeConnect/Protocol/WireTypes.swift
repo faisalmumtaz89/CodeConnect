@@ -321,10 +321,10 @@ enum CodexLinkState: Sendable, Hashable {
             case .compose: return nil
             case .stop: return "This Codex session has not started a turn yet."
             }
-        case .bound: return "This Mac has reached the Codex session but is not yet watching it."
-        case .offline: return "This Mac has lost its link to the Codex session and is reconnecting."
+        case .bound: return "The computer has reached the Codex session but is not yet watching it."
+        case .offline: return "The computer has lost its link to the Codex session and is reconnecting."
         case .none: return "There is no live link to this Codex session."
-        case .unknown: return "This Mac reports a link state this app does not recognise."
+        case .unknown: return "The computer reports a link state this app does not recognise."
         }
     }
 
@@ -1215,7 +1215,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
     var provenance: String {
         switch resolvedBy {
         case .phone: return "from a phone"
-        case .local: return "at the Mac"
+        case .local: return "at the computer"
         case .timeout where detail == Self.sessionEnded: return "when the session ended"
         case .timeout: return "by timeout - nobody answered"
         case .superseded: return "superseded"
@@ -2085,7 +2085,7 @@ enum DeleteSessionResult: Decodable, Sendable, Hashable {
         case "failed":
             self = .failed(
                 message: try c.decodeIfPresent(String.self, forKey: .message)
-                    ?? "The Mac could not remove that session.")
+                    ?? "The computer could not remove that session.")
         default: self = .unknown(status: status)
         }
     }
@@ -2132,7 +2132,7 @@ enum TestPushResult: Decodable, Sendable, Hashable {
         case "failed":
             self = .failed(
                 reason: try c.decodeIfPresent(String.self, forKey: .reason)
-                    ?? "The Mac could not send the test.")
+                    ?? "The computer could not send the test.")
         default: self = .unknown(status: status)
         }
     }

@@ -346,6 +346,19 @@ final class QuestionCardTests: XCTestCase {
         }
     }
 
+    /// A daemon that names the machine "the computer" says the same thing in
+    /// those words, for a question and for a card.
+    func testTheComputerAnsweringFirstReadsAsAnsweredAtTheComputer() {
+        for reason in [
+            "this question was answered at the computer first, so the phone's answer was not used",
+            "this card was answered at the computer first, so nothing you chose was applied",
+        ] {
+            guard case .answeredAtKeyboard = AppModel.classify(rejection: reason) else {
+                return XCTFail("the computer's answer won; it is not a refusal to retry: \(reason)")
+            }
+        }
+    }
+
     /// The staged question is the daemon's own events with longer words: every
     /// state's frames decode, its card verifies, the hold is the state's, and
     /// the event after the card is the daemon's.

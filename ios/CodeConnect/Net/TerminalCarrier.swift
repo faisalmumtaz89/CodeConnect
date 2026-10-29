@@ -264,7 +264,7 @@ final class TerminalCarrier {
         self.connection = connection
         connection.onTerminal = { [weak self] message in self?.handle(message) }
         connection.onDisconnected = { [weak self] in
-            self?.end(reason: "The connection to the Mac dropped.", code: nil)
+            self?.end(reason: "The connection to the computer dropped.", code: nil)
         }
     }
 
@@ -318,7 +318,7 @@ final class TerminalCarrier {
     func attach(sessionUID: String, cols: Int, rows: Int) {
         guard canAttach else { return }
         guard connection.isConnected else {
-            end(reason: "Not connected to the Mac.", code: nil)
+            end(reason: "Not connected to the computer.", code: nil)
             return
         }
         guard connection.servesTerminal else {
@@ -532,7 +532,7 @@ final class TerminalCarrier {
             guard let data = Data(base64Encoded: base64) else {
                 // Undecodable output is not something to draw. Ending is the
                 // honest answer: the stream's framing is not what it claims.
-                detachAfterProtocolFault("The Mac sent output this app could not decode.")
+                detachAfterProtocolFault("The computer sent output this app could not decode.")
                 return
             }
             let bytes = [UInt8](data)
@@ -550,7 +550,7 @@ final class TerminalCarrier {
             // arithmetic below, so it cannot be the second test.
             guard bytes.count <= maxChunkBytes else {
                 detachAfterProtocolFault(
-                    "The Mac sent a larger burst of terminal output than the protocol allows.")
+                    "The computer sent a larger burst of terminal output than the protocol allows.")
                 return
             }
             // Absorbing this was the silent failure: clamping the ledger to
@@ -559,7 +559,7 @@ final class TerminalCarrier {
             // one — which is the whole thing the window is for.
             guard UInt32(bytes.count) <= outputCredit else {
                 detachAfterProtocolFault(
-                    "The Mac sent more terminal output than this app had asked for.")
+                    "The computer sent more terminal output than this app had asked for.")
                 return
             }
             totalOutputBytes += bytes.count
@@ -582,7 +582,7 @@ final class TerminalCarrier {
             let granted = UInt64(inputCredit) + UInt64(bytes)
             guard granted <= UInt64(maxOutstandingCredit) else {
                 detachAfterProtocolFault(
-                    "The Mac granted more terminal input than the protocol allows.")
+                    "The computer granted more terminal input than the protocol allows.")
                 return
             }
             inputCredit = UInt32(granted)
@@ -880,7 +880,7 @@ final class TerminalCarrier {
     /// Mac's silence is the only fact this side has, and naming a reason for it
     /// would be a guess the reader cannot check.
     private static let unansweredAttachReason =
-        "The Mac did not answer the terminal request. Try again."
+        "The computer did not answer the terminal request. Try again."
 
     /// How long to wait, and the seam a test drives it through.
     ///
@@ -915,7 +915,7 @@ final class TerminalCarrier {
     /// actionable thing here. No close code, because there is no daemon in this
     /// answer — and because `nil` is what leaves `Reconnect` offered, which is
     /// the right control for a link that may well come back.
-    private static let writeFailureReason = "This terminal lost its connection to the Mac."
+    private static let writeFailureReason = "This terminal lost its connection to the computer."
 
     #if DEBUG
         /// Waits until the outbound chain is quiet. Tests await this fact
@@ -1013,11 +1013,11 @@ final class TerminalCarrier {
         let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { return trimmed }
         switch code {
-        case .sessionNotHosted: return "That session is not running on the Mac."
+        case .sessionNotHosted: return "That session is not running on the computer."
         case .sessionExited: return "The session ended."
         case .identityMismatch: return "The session changed under the terminal."
-        case .tmuxUnavailable: return "The Mac could not open a terminal for that session."
-        case .attachmentLimit: return "The Mac already has as many terminals open as it allows."
+        case .tmuxUnavailable: return "The computer could not open a terminal for that session."
+        case .attachmentLimit: return "The computer already has as many terminals open as it allows."
         case .superseded: return "Another terminal took over this session."
         case .sessionBusy: return "The session's previous terminal is still closing; try again."
         case .notAuthorised: return "This connection may not open a terminal."

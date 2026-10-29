@@ -211,7 +211,7 @@ final class TerminalCarrierTests: XCTestCase {
         // Mac-wide cap, so its sentence may no longer name the session.
         XCTAssertEqual(
             TerminalCarrier.describe(code: .attachmentLimit, reason: ""),
-            "The Mac already has as many terminals open as it allows.")
+            "The computer already has as many terminals open as it allows.")
     }
 
     // MARK: The ceilings the daemon advertises
@@ -523,7 +523,7 @@ final class TerminalCarrierTests: XCTestCase {
         guard case .ended(let reason, let wasAttached) = carrier.phase else {
             return XCTFail("an unanswered attach left the carrier in \(carrier.phase)")
         }
-        XCTAssertEqual(reason, "The Mac did not answer the terminal request. Try again.")
+        XCTAssertEqual(reason, "The computer did not answer the terminal request. Try again.")
         // Never live, so the tab shows the connect card rather than a snapshot
         // of a pane that never drew anything.
         XCTAssertFalse(wasAttached)

@@ -143,7 +143,7 @@ struct RenderDriver {
     ///
     ///   * a **control** must be `isHittable`. Geometry alone passed
     ///     `codex-stop-offered--ax5`, where the Stop sits *inside* the
-    ///     window but *underneath* the fleet's "1 decision needs you" bar. A
+    ///     window but *underneath* the fleet's "1 waiting for you" bar. A
     ///     control the shutter cannot see and a thumb cannot reach is exactly
     ///     the certificate this gate exists to refuse.
     ///   * anything **else** — a `Text` in a banner, a section header — is never
@@ -359,7 +359,7 @@ struct RenderDriver {
     // MARK: Common routes
 
     func fleet(_ app: XCUIApplication) throws {
-        try require(app.navigationBars["Fleet"], "the Fleet root")
+        try require(app.navigationBars["Projects"], "the Fleet root")
     }
 
     func openFirstSession(_ app: XCUIApplication) throws {
@@ -375,15 +375,27 @@ struct RenderDriver {
         let bar = app.buttons["deck-bar"]
         try require(bar, "the Deck accessory bar")
         bar.tap()
-        try require(app.navigationBars["Needs you"], "the Deck")
+        try require(app.navigationBars["Waiting for you"], "the Deck")
     }
 
     func openSettings(_ app: XCUIApplication) throws {
         try fleet(app)
-        let settings = app.buttons["Settings and pairing"]
+        let settings = app.buttons["Settings"]
         try require(settings, "the Settings toolbar button")
         settings.tap()
         try require(app.navigationBars["Settings"], "the Settings screen")
+    }
+
+    /// Link health, from the session screen's pill. A fixture's computer has no
+    /// screen of its own in Settings to open it from.
+    func openLinkHealth(_ app: XCUIApplication) throws {
+        try openFirstSession(app)
+        let pill = app.buttons["Link health"].firstMatch
+        try require(pill, "the session's link pill")
+        pill.tap()
+        // The sheet is `CCSheetChrome`, so there is no navigation bar to wait
+        // on — the measured sentence is the signal.
+        try require(element(containing: "daemon last spoke", in: app), "the link-health sheet")
     }
 
     /// The session's Terminal tab. `firstMatch` because `safeAreaInset` renders
@@ -400,7 +412,7 @@ struct RenderDriver {
     /// suites use. Navigates only if the Fleet is still on screen, so a
     /// scenario that arrived by deep link is not sent back to the root.
     func typeIntoComposer(_ app: XCUIApplication, _ text: String) throws {
-        if app.navigationBars["Fleet"].exists { try openFirstSession(app) }
+        if app.navigationBars["Projects"].exists { try openFirstSession(app) }
         let field =
             app.textViews.firstMatch.exists
             ? app.textViews.firstMatch : app.textFields.firstMatch
@@ -514,6 +526,23 @@ enum RenderCatalog {
             reach: { app, driver in try driver.fleet(app) }),
 
         RenderScenario(
+            name: "fleet-single",
+            purpose: "one request waiting: the bar's ordinary case",
+            arguments: ["-CC_FIXTURE", "single"],
+            reach: { app, driver in try driver.require(app.buttons["deck-bar"], "the Deck bar") }),
+
+        RenderScenario(
+            name: "fleet-empty",
+            purpose: "paired with no session: how to start an agent, and where",
+            arguments: ["-CC_FIXTURE", "empty"],
+            reach: { app, driver in
+                try driver.fleet(app)
+                try driver.require(
+                    driver.element(containing: "Start an agent on your computer", in: app),
+                    "the empty fleet's instruction")
+            }),
+
+        RenderScenario(
             name: "fleet-cached",
             purpose:
                 "a fleet read off disk, stating its age while the wait clocks keep ticking",
@@ -557,7 +586,7 @@ enum RenderCatalog {
                 "-CC_DEEPLINK", "codeconnect://deck/toolu_fixture_high",
             ],
             reach: { app, driver in
-                try driver.require(app.navigationBars["Needs you"], "the Deck")
+                try driver.require(app.navigationBars["Waiting for you"], "the Deck")
                 try driver.require(
                     app.staticTexts.matching(
                         NSPredicate(format: "label BEGINSWITH 'Risk HIGH'")
@@ -573,7 +602,7 @@ enum RenderCatalog {
                 "-CC_DEEPLINK", "codeconnect://deck/toolu_fixture_high",
             ],
             reach: { app, driver in
-                try driver.require(app.navigationBars["Needs you"], "the named HIGH card")
+                try driver.require(app.navigationBars["Waiting for you"], "the named HIGH card")
                 let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
                 try driver.require(hold, "the hold-to-allow control")
                 try driver.scrollUntil(app, "the read gate arms") { hold.isEnabled }
@@ -588,7 +617,7 @@ enum RenderCatalog {
                 "-CC_DEEPLINK", "codeconnect://deck/toolu_fixture_high",
             ],
             reach: { app, driver in
-                try driver.require(app.navigationBars["Needs you"], "the named HIGH card")
+                try driver.require(app.navigationBars["Waiting for you"], "the named HIGH card")
                 let hold = app.buttons.matching(identifier: "Hold to allow").firstMatch
                 try driver.require(hold, "the hold-to-allow control")
                 try driver.scrollUntil(app, "the read gate arms") { hold.isEnabled }
@@ -896,7 +925,7 @@ enum RenderCatalog {
                 try driver.require(diff, "the diff button")
                 diff.tap()
                 try driver.require(
-                    driver.text(containing: "Captured on the Mac", in: app),
+                    driver.text(containing: "Captured on the computer", in: app),
                     "a rendered diff carrying its capture time")
             }),
 
@@ -955,19 +984,7 @@ enum RenderCatalog {
             name: "link-health",
             purpose: "freshness measured, not assumed",
             arguments: ["-CC_FIXTURE", "deck"],
-            reach: { app, driver in
-                try driver.fleet(app)
-                // `firstMatch`: the pill is in the fleet toolbar and in the
-                // session detail's, and both stacks can be live.
-                let pill = app.buttons["Link health"].firstMatch
-                try driver.require(pill, "the freshness pill")
-                pill.tap()
-                // The sheet is `CCSheetChrome`, so there is no navigation bar to
-                // wait on — the measured sentence is the signal.
-                try driver.require(
-                    driver.element(containing: "daemon last spoke", in: app),
-                    "the link-health sheet")
-            }),
+            reach: { app, driver in try driver.openLinkHealth(app) }),
 
         // **The relay push states, folded into the one test button.** A relay
         // enrollment cannot happen in a render pass — no App Attest hardware, no
@@ -980,8 +997,7 @@ enum RenderCatalog {
             purpose: "the test button while the relay credential is being minted",
             arguments: ["-CC_FIXTURE", "deck", "-CC_PUSH_STATE", "enrolling"],
             reach: { app, driver in
-                try driver.fleet(app)
-                try driver.require(app.buttons["Link health"].firstMatch, "the freshness pill").tap()
+                try driver.openLinkHealth(app)
                 // `isHittable`, not `exists`: the reason is below the fold at AX5
                 // and `exists` is true off-screen, which would photograph the top
                 // of the sheet instead of the state this scenario is here for.
@@ -994,8 +1010,7 @@ enum RenderCatalog {
             purpose: "enrollment failed, said plainly, with the reset action offered",
             arguments: ["-CC_FIXTURE", "deck", "-CC_PUSH_STATE", "failed"],
             reach: { app, driver in
-                try driver.fleet(app)
-                try driver.require(app.buttons["Link health"].firstMatch, "the freshness pill").tap()
+                try driver.openLinkHealth(app)
                 try driver.scrollUntil(app, "the failure reason on screen") {
                     driver.element(containing: "could not be reached", in: app).isHittable
                 }
@@ -1008,8 +1023,7 @@ enum RenderCatalog {
             purpose: "an iPhone with no App Attest: the honest no-relay message, everything else kept",
             arguments: ["-CC_FIXTURE", "deck", "-CC_PUSH_STATE", "unsupported"],
             reach: { app, driver in
-                try driver.fleet(app)
-                try driver.require(app.buttons["Link health"].firstMatch, "the freshness pill").tap()
+                try driver.openLinkHealth(app)
                 try driver.scrollUntil(app, "the unsupported message on screen") {
                     driver.element(containing: "App Attest", in: app).isHittable
                 }
@@ -1019,8 +1033,7 @@ enum RenderCatalog {
             purpose: "a relay daemon over a bootstrap connection: pairing required, no dead reset",
             arguments: ["-CC_FIXTURE", "deck", "-CC_PUSH_STATE", "bootstrap"],
             reach: { app, driver in
-                try driver.fleet(app)
-                try driver.require(app.buttons["Link health"].firstMatch, "the freshness pill").tap()
+                try driver.openLinkHealth(app)
                 try driver.scrollUntil(app, "the pairing-required message on screen") {
                     driver.element(containing: "bootstrap connection", in: app).isHittable
                 }
@@ -1313,7 +1326,7 @@ enum RenderCatalog {
             reach: { app, driver in
                 try openResolvedCard(app, driver)
                 try driver.require(
-                    driver.element(containing: "Answered at the Mac", in: app),
+                    driver.element(containing: "Answered at the computer", in: app),
                     "the ending's own sentence, on the card")
             }),
         codexScenario(

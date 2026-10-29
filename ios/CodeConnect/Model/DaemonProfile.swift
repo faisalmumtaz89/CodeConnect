@@ -188,16 +188,16 @@ struct DaemonProfile: Sendable, Hashable {
         // Returning nil left the Codex surface silent on a dropped link while
         // the diff surface beside it said what was wrong.
         guard isConnected else {
-            return "Not connected. This Mac has not said what it can do for a Codex session."
+            return "Not connected. The computer has not said what it can do for a Codex session."
         }
         switch (stopsCodexTurns, composesToCodex) {
         case (true, true): return nil
         case (true, false):
-            return "This Mac's CodeConnect can stop a Codex turn but cannot carry a message to one. Update it."
+            return "The computer's CodeConnect can stop a Codex turn but cannot carry a message to one. Update it."
         case (false, true):
-            return "This Mac's CodeConnect can carry a message to Codex but cannot stop a turn. Update it."
+            return "The computer's CodeConnect can carry a message to Codex but cannot stop a turn. Update it."
         case (false, false):
-            return "This Mac's CodeConnect cannot stop or speak to a Codex session. Update it."
+            return "The computer's CodeConnect cannot stop or speak to a Codex session. Update it."
         }
     }
 

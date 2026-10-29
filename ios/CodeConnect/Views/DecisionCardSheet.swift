@@ -123,7 +123,7 @@ struct ResolutionBanner: View {
             }
             return "\(outcome.decisionLabel), but the daemon couldn’t confirm it landed"
         case .duplicate: return "Already answered"
-        case .answeredAtKeyboard: return "Answered at the Mac"
+        case .answeredAtKeyboard: return "Answered at the computer"
         case .staleCard: return "This card is out of date"
         case .rejected: return "The daemon refused this answer"
         case .failed: return "The answer did not reach the daemon"
@@ -155,7 +155,7 @@ struct ResolutionBanner: View {
         // the TTY" or "returned to the hook", the exact positive actuation the
         // daemon could not confirm. The provenance states the uncertainty instead.
         case .indeterminate(let outcome) where outcome.wasSentToClaude:
-            return "Claude takes the first answer, the Mac’s or this one, so whether it used this one is not known."
+            return "Claude takes the first answer, the computer’s or this one, so whether it used this one is not known."
         case .indeterminate(let outcome):
             return [
                 "The daemon accepted this but never confirmed it reached the agent.",
@@ -171,7 +171,7 @@ struct ResolutionBanner: View {
                 ? original + " The card you answered was also out of date." : original
         case .answeredAtKeyboard(let reason):
             return
-                "The prompt was gone before the keystrokes could land, so somebody answered it on the Mac. Nothing was typed. (\(reason))"
+                "The prompt was gone before the keystrokes could land, so somebody answered it on the computer. Nothing was typed. (\(reason))"
         case .staleCard(let reason): return reason
         case .rejected(let reason): return reason
         case .failed(let reason): return "\(reason) Answers are idempotent. Retrying is safe."

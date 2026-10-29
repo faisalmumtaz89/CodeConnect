@@ -190,7 +190,7 @@ final class FleetRowRenderUITests: XCTestCase {
                 "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
             ] + entry
         app.launch()
-        XCTAssertTrue(app.navigationBars["Needs you"].waitForExistence(timeout: 30), "the Deck opens")
+        XCTAssertTrue(app.navigationBars["Waiting for you"].waitForExistence(timeout: 30), "the Deck opens")
         // Past 30.5 s after the fixture loaded, which was before the Deck
         // opened. The later launch must be read before its first event at
         // 60.5 s; its `late` count says if a slow run was not.
@@ -215,7 +215,7 @@ final class FleetRowRenderUITests: XCTestCase {
     private func behindTheDeck(_ app: XCUIApplication, for seconds: TimeInterval) -> TimeInterval {
         let opened = Date()
         XCUIDevice.shared.system.open(URL(string: "codeconnect://deck")!)
-        XCTAssertTrue(app.navigationBars["Needs you"].waitForExistence(timeout: 15), "the Deck opens")
+        XCTAssertTrue(app.navigationBars["Waiting for you"].waitForExistence(timeout: 15), "the Deck opens")
         RunLoop.current.run(until: opened.addingTimeInterval(seconds))
         app.buttons["Done"].firstMatch.tap()
         XCTAssertTrue(

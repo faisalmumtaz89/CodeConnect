@@ -60,7 +60,7 @@ extension ApprovalCard {
     /// What a Codex card says when the phone cannot vouch for its rendering.
     /// One sentence, and never the daemon's `tool\n{JSON}`.
     static let unverifiableCodexLine =
-        "This card could not be verified on the phone. Answer it at the Mac."
+        "This card could not be verified on the phone. Answer it at the computer."
 
     /// The single line that identifies what will run.
     ///

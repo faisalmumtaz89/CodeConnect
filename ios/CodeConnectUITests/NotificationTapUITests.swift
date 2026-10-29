@@ -44,7 +44,7 @@ final class NotificationTapUITests: XCTestCase {
     func testAnApprovalTapLandsOnTheVisibleDecisionList() {
         let app = launch(tap: "approval")
         XCTAssertTrue(
-            app.navigationBars["Needs you"].waitForExistence(timeout: 25),
+            app.navigationBars["Waiting for you"].waitForExistence(timeout: 25),
             "the tap has to arrive at the list, not just set a route nobody consumed")
     }
 
@@ -53,10 +53,10 @@ final class NotificationTapUITests: XCTestCase {
     func testAFinishedTurnTapLandsOnTheFleetRatherThanAnEmptyList() {
         let app = launch(tap: "done")
         XCTAssertTrue(
-            app.staticTexts["Fleet"].waitForExistence(timeout: 25),
+            app.staticTexts["Projects"].waitForExistence(timeout: 25),
             "the fleet is where a run that finished a turn lives")
         XCTAssertFalse(
-            app.navigationBars["Needs you"].exists,
+            app.navigationBars["Waiting for you"].exists,
             "there is no card to answer, so the decision list is the wrong place")
     }
 
@@ -67,14 +67,14 @@ final class NotificationTapUITests: XCTestCase {
     func testATapAboutAFinishedTurnDismissesTheDecisionListItLandedOn() {
         let app = launch(showing: "codeconnect://deck")
         XCTAssertTrue(
-            app.navigationBars["Needs you"].waitForExistence(timeout: 25),
+            app.navigationBars["Waiting for you"].waitForExistence(timeout: 25),
             "the run-up: the decision list is what the reader is looking at")
 
         tap("done")
         let gone = NSPredicate(format: "exists == false")
-        expectation(for: gone, evaluatedWith: app.navigationBars["Needs you"])
+        expectation(for: gone, evaluatedWith: app.navigationBars["Waiting for you"])
         waitForExpectations(timeout: 25)
-        XCTAssertTrue(app.staticTexts["Fleet"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Projects"].waitForExistence(timeout: 10))
     }
 
     /// **From a chat opened on the fleet**, which the fleet stops drawing for
@@ -92,17 +92,17 @@ final class NotificationTapUITests: XCTestCase {
 
         tap("done")
         XCTAssertTrue(
-            app.staticTexts["Fleet. 3 decisions need you"].waitForExistence(timeout: 15),
-            "the fleet is back, with its headline")
+            app.staticTexts["3 waiting for you"].waitForExistence(timeout: 15),
+            "the fleet is back, with its count under the title")
         XCTAssertEqual(
-            app.buttons["deck-bar"].label, "3 decisions need you", "and the Deck bar under it")
+            app.buttons["deck-bar"].label, "3 waiting for you", "and the Deck bar under it")
         XCTAssertFalse(app.buttons["Terminal"].exists, "and the chat is gone")
 
         row.tap()
         XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 20), "fx-1's chat again")
         tap("approval")
         XCTAssertTrue(
-            app.navigationBars["Needs you"].waitForExistence(timeout: 25),
+            app.navigationBars["Waiting for you"].waitForExistence(timeout: 25),
             "the tap takes them to the decision")
     }
 
@@ -118,7 +118,7 @@ final class NotificationTapUITests: XCTestCase {
 
         tap("approval")
         XCTAssertTrue(
-            app.navigationBars["Needs you"].waitForExistence(timeout: 25),
+            app.navigationBars["Waiting for you"].waitForExistence(timeout: 25),
             "the tap has to take them to the decision")
         XCTAssertFalse(
             app.buttons["Terminal"].exists,
@@ -149,7 +149,7 @@ final class NotificationTapUITests: XCTestCase {
         waitForExpectations(timeout: 10)
 
         app.navigationBars.buttons.firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Fleet"].waitForExistence(timeout: 10), "Back lands on the fleet")
+        XCTAssertTrue(app.staticTexts["Projects"].waitForExistence(timeout: 10), "Back lands on the fleet")
         XCTAssertFalse(
             app.descendants(matching: .any)["session-timeline"].waitForExistence(timeout: 3),
             "and stays there: no chat is pushed again")
@@ -210,7 +210,7 @@ final class NotificationTapUITests: XCTestCase {
             "and still holds the draft: \(String(describing: field.value))")
 
         app.navigationBars.buttons.firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Fleet"].waitForExistence(timeout: 10), "Back lands on the fleet")
+        XCTAssertTrue(app.staticTexts["Projects"].waitForExistence(timeout: 10), "Back lands on the fleet")
         XCTAssertFalse(
             app.descendants(matching: .any)["session-timeline"].waitForExistence(timeout: 3),
             "and stays there: the link was followed once")

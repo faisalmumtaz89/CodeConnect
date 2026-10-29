@@ -1801,7 +1801,7 @@ final class HistoryPagesTests: XCTestCase {
         let confirmed = try XCTUnwrap(model.confirmedModel(for: uid))
         XCTAssertEqual(confirmed.provenance, .reported)
         XCTAssertTrue(
-            ModelSheet.provenanceLine(confirmed, now: confirmed.at).hasPrefix("Reported by the Mac"))
+            ModelSheet.provenanceLine(confirmed, now: confirmed.at).hasPrefix("Reported by the computer"))
     }
 
     /// A window in a test process is never on a display, so nothing drives

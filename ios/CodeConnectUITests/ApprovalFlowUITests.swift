@@ -38,17 +38,14 @@ final class ApprovalFlowUITests: XCTestCase {
         return app
     }
 
-    /// Pairing, the fleet list, and the freshness pill all come up against a
+    /// Pairing, the fleet list, and the computer's link all come up against a
     /// live daemon.
     func testFleetConnectsToLiveDaemon() throws {
         let app = try launchApp(resetCache: true)
 
         XCTAssertTrue(
-            app.navigationBars["Fleet"].waitForExistence(timeout: 20),
+            app.navigationBars["Projects"].waitForExistence(timeout: 20),
             "Fleet should be the root screen once a token is present")
-
-        let pill = app.buttons["Link health"]
-        XCTAssertTrue(pill.waitForExistence(timeout: 20), "the freshness pill is always visible")
 
         // A live link is the only state that produces session rows.
         let anySession = app.buttons.matching(
@@ -57,13 +54,18 @@ final class ApprovalFlowUITests: XCTestCase {
         XCTAssertTrue(
             anySession.waitForExistence(timeout: 30),
             "the daemon should report at least one session")
+        XCTAssertTrue(
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS ', connected'")
+            ).firstMatch.waitForExistence(timeout: 20),
+            "a project's card says its computer is connected")
         attachScreenshot(app, name: "fleet")
     }
 
     /// The money path: a real pending approval, answered by a real tap.
     func testAnswerBlockedApproval() throws {
         let app = try launchApp()
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 20))
 
         let review = deckBar(app)
         try XCTSkipUnless(
@@ -78,7 +80,7 @@ final class ApprovalFlowUITests: XCTestCase {
         // card view, and asserting on *its* title made this test fail after the
         // Deck became the way in.
         XCTAssertTrue(
-            app.navigationBars["Needs you"].waitForExistence(timeout: 15),
+            app.navigationBars["Waiting for you"].waitForExistence(timeout: 15),
             "the Deck should land on the decision card")
         attachScreenshot(app, name: "decision-card")
 
@@ -140,13 +142,13 @@ final class ApprovalFlowUITests: XCTestCase {
     /// Mac, since a keyboard answer settles the card too; no pending decision skips.
     func testAnswerCodexApproval() throws {
         let app = try launchApp()
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 20))
 
         let review = deckBar(app)
         try XCTSkipUnless(
             review.waitForExistence(timeout: 45), "no decision is pending on the daemon")
         review.tap()
-        XCTAssertTrue(app.navigationBars["Needs you"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.navigationBars["Waiting for you"].waitForExistence(timeout: 15))
 
         let proceed = app.buttons["Option 1: Yes, proceed"]
         try XCTSkipUnless(
@@ -156,7 +158,7 @@ final class ApprovalFlowUITests: XCTestCase {
                 NSPredicate(format: "label BEGINSWITH 'Verified against the daemon'")
             ).firstMatch.exists,
             "payload_hash verification must pass for a card straight off the wire")
-        // "N decisions need you": an answered card leaves the stack, so N falls. A
+        // "N waiting for you": an answered card leaves the stack, so N falls. A
         // decision arriving meanwhile raises it, which says nothing about this answer.
         let counter = app.descendants(matching: .any)["deck-count"].firstMatch
         func pending() -> Int? {
@@ -210,12 +212,12 @@ final class ApprovalFlowUITests: XCTestCase {
     /// phone" case this has to survive.
     func testDuplicateAnswerShowsOriginalOutcome() throws {
         let app = try launchApp()
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 20))
 
         let review = deckBar(app)
         try XCTSkipUnless(review.waitForExistence(timeout: 45), "no approval is pending")
         review.tap()
-        XCTAssertTrue(app.navigationBars["Needs you"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.navigationBars["Waiting for you"].waitForExistence(timeout: 15))
 
         // The sheet holds the card it was opened with, so it stays answerable
         // while the outside world resolves it underneath.
@@ -243,12 +245,12 @@ final class ApprovalFlowUITests: XCTestCase {
     /// trips that both have to be confirmed before the card claims success.
     func testDenyWithReason() throws {
         let app = try launchApp()
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 20))
 
         let review = deckBar(app)
         try XCTSkipUnless(review.waitForExistence(timeout: 45), "no approval is pending")
         review.tap()
-        XCTAssertTrue(app.navigationBars["Needs you"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.navigationBars["Waiting for you"].waitForExistence(timeout: 15))
 
         let openReasonField = app.buttons["Deny with a reason"]
         XCTAssertTrue(openReasonField.waitForExistence(timeout: 5))
@@ -286,7 +288,7 @@ final class ApprovalFlowUITests: XCTestCase {
     /// Typing into the agent's composer from the phone.
     func testComposeSendsText() throws {
         let app = try launchApp()
-        XCTAssertTrue(app.navigationBars["Fleet"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.navigationBars["Projects"].waitForExistence(timeout: 20))
 
         // `cells.firstMatch` is the section header, not a session — rows carry
         // an explicit identifier so the query cannot drift.
@@ -296,7 +298,7 @@ final class ApprovalFlowUITests: XCTestCase {
         try XCTSkipUnless(firstSession.waitForExistence(timeout: 30), "no sessions")
         firstSession.tap()
         XCTAssertFalse(
-            app.navigationBars["Fleet"].exists, "tapping a session must push the detail stack")
+            app.navigationBars["Projects"].exists, "tapping a session must push the detail stack")
 
         // A vertical-axis TextField is backed by a text view, not a text field.
         let field = app.textViews.firstMatch.exists

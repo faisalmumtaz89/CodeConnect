@@ -185,9 +185,9 @@ final class Machines {
         pairing.current.flatMap { model(for: $0.id) } ?? models[models.count - 1]
     }
 
-    /// The machine the app-wide surfaces — the link pill, the one banner, the
-    /// Deck's wait — speak for: the best connected, so they report trouble only
-    /// when every machine has it. Each machine's own link is on its rows and its
+    /// The machine the app-wide surfaces — the one banner, the Deck's wait —
+    /// speak for: the best connected, so they report trouble only when every
+    /// machine has it. Each machine's own link is on its project cards and its
     /// sessions. With one machine, that machine.
     var linkModel: AppModel {
         models.min { Self.reach($0.linkHealth.level) < Self.reach($1.linkHealth.level) }

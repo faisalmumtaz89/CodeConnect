@@ -2960,16 +2960,16 @@ final class AppModel {
     }
 
     private static let noUidSentence =
-        "This Mac has not given this run an id of its own, so nothing was sent."
+        "The computer has not given this run an id of its own, so nothing was sent."
 
     private static func alreadyIssuedSentence(verb: String) -> String {
         "This was already sent and what became of it is not known; it will not be \(verb) again. "
-            + "Check the Mac."
+            + "Check the computer."
     }
 
     private static func sentNoAnswerSentence(verb: String) -> String {
-        "This left the phone and the Mac never answered, so what became of it is not known; "
-            + "it will not be \(verb) again. Check the Mac."
+        "This left the phone and the computer never answered, so what became of it is not known; "
+            + "it will not be \(verb) again. Check the computer."
     }
 
     /// A typed refusal in the app's own words. **Never dressed as the daemon's**
@@ -2980,7 +2980,7 @@ final class AppModel {
         switch refusal {
         case .notAdvertised:
             return
-                "This Mac's CodeConnect never said it could \(verb), so nothing was sent. Update it."
+                "The computer's CodeConnect never said it could \(verb), so nothing was sent. Update it."
         case .notACodexSession(let agent):
             return "This is a \(agent) session, so nothing was sent."
         case .nothingToSend(let reason):
@@ -3003,7 +3003,7 @@ final class AppModel {
         // had left the fleet sent an `allow` for an agent nobody could name.
         guard let agent = summary(for: item.sessionKey)?.agent else {
             return .rejected(
-                "This run is no longer on the fleet, so nothing was sent. Answer it at the Mac.")
+                "This run is no longer on the fleet, so nothing was sent. Answer it at the computer.")
         }
         if let mismatch = Self.decisionMismatch(
             decision: decision, agent: agent,
@@ -3043,7 +3043,7 @@ final class AppModel {
             return AnswerAttempt.classify(duplicate: outcome, staleHash: false)
         }
         if card.codexResolution != nil {
-            return .failed("This card was resolved on the Mac before your answer left, so nothing was sent.")
+            return .failed("This card was resolved on the computer before your answer left, so nothing was sent.")
         }
         return nil
     }
@@ -3074,22 +3074,22 @@ final class AppModel {
                     + "so nothing was sent."
             }
             guard answersQuestions else {
-                return "This Mac's CodeConnect is too old to answer Claude's questions from the "
-                    + "phone, so nothing was sent. Answer at the Mac."
+                return "The computer's CodeConnect is too old to answer Claude's questions from the "
+                    + "phone, so nothing was sent. Answer at the computer."
             }
             return nil
         case (.claude, _) where isQuestion:
             return "Claude is asking a question, which is answered by choosing its answers, "
                 + "so nothing was sent."
         case (.claude, _) where !answersApprovalsByHook:
-            return "This Mac's CodeConnect is too old to answer Claude's approvals from the "
-                + "phone, so nothing was sent. Update it, or answer at the Mac."
+            return "The computer's CodeConnect is too old to answer Claude's approvals from the "
+                + "phone, so nothing was sent. Update it, or answer at the computer."
         case (.codex, _) where !resolvesCodexCards:
             // **Old daemons.** Below minor 19 the resolution carries no `request_id`, so
             // an answered card can never be retired. A card that cannot be
             // retired must not be answered from here, by any vocabulary.
-            return "This Mac's CodeConnect is too old to answer a Codex card from the phone, "
-                + "so nothing was sent. Update it, or answer at the Mac."
+            return "The computer's CodeConnect is too old to answer a Codex card from the phone, "
+                + "so nothing was sent. Update it, or answer at the computer."
         case (.codex, .allow), (.codex, .deny), (.codex, .option),
             (.codex, .text), (.codex, .answers), (.codex, .decline):
             return "A Codex card is answered by naming one of the options it offered, "
@@ -3217,7 +3217,7 @@ final class AppModel {
         // which is a dead end in a fleet whose banner says nothing is
         // connected.
         if sampleFleetActive {
-            return .failed("These agents are not real. Pair with your Mac to talk to your own.")
+            return .failed("These agents are not real. Pair with your computer to talk to your own.")
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed("Nothing to send.") }
@@ -3370,9 +3370,10 @@ final class AppModel {
         if lowered.contains("already-resolved") || lowered.contains("already being applied") {
             return .answeredAtKeyboard(reason)
         }
-        // A question the Mac answered first: Claude took the keyboard's answer
-        // and the phone's was not used.
-        if lowered.contains("answered at the mac") {
+        // A question the computer answered first: Claude took the keyboard's
+        // answer and the phone's was not used. A daemon before "the computer"
+        // says "the Mac".
+        if lowered.contains("answered at the mac") || lowered.contains("answered at the computer") {
             return .answeredAtKeyboard(reason)
         }
         if lowered.contains("stale payload_hash") || lowered.contains("out of date") {
@@ -3440,9 +3441,9 @@ extension Optional where Wrapped == DeleteSessionResult {
         // The Mac's own word, because it has none better: it never established
         // what happened to this run, and saying "still running" here would
         // invent the one fact it is missing.
-        case .notExited(let lifecycle): "Mac says “\(lifecycle)”"
+        case .notExited(let lifecycle): "Computer says “\(lifecycle)”"
         case .failed(let message): message
-        case .unknown(let status): "Mac said “\(status)”"
+        case .unknown(let status): "Computer said “\(status)”"
         case .none: "No answer"
         }
     }

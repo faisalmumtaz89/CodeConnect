@@ -1279,7 +1279,7 @@ struct SessionDetailView: View {
                         let claudeID = summary?.claudeSessionID, !claudeID.isEmpty
                     {
                         VStack(alignment: .leading, spacing: CC.rhythm.text) {
-                            Text("Pick this conversation up at the Mac")
+                            Text("Pick this conversation up at the computer")
                                 .ccType(CC.type.footnote)
                                 .foregroundStyle(CC.text.secondary)
                             // Quoted, because this is a command a person copies
@@ -1421,7 +1421,7 @@ struct SessionDetailView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Diff")
-        .accessibilityHint("Asks the Mac for this session's uncommitted changes")
+        .accessibilityHint("Asks the computer for this session's uncommitted changes")
         .accessibilityIdentifier("open-diff")
     }
 
@@ -2091,9 +2091,8 @@ private struct SessionFreshness: View {
 
 /// **The one thing in this toolbar that has to change every second.**
 ///
-/// The fleet's `LinkPill`, on the pushed screen, and it is here for the reason
-/// stated there: how long ago the Mac last spoke is what licenses everything
-/// else on the screen, `linkHealth` is derived from `now`, and read from
+/// How long ago the Mac last spoke is what licenses everything else on the
+/// screen, `linkHealth` is derived from `now`, and read from
 /// `SessionDetailView.body` that second was charged to a 400-event timeline to
 /// redraw two characters. The read now lives with the only view whose output
 /// depends on it.
@@ -2102,7 +2101,9 @@ private struct SessionLinkPill: View {
     let action: () -> Void
 
     var body: some View {
-        // Absent in the sample fleet, for the reason `LinkPill` states.
+        // Nothing at all in the sample fleet. The pill's whole subject is how
+        // long ago a Mac last spoke, and a control reporting on a link that does
+        // not exist is worse than an empty slot however honestly it renders.
         if !model.sampleFleetActive {
             CCFreshnessPill(health: model.linkHealth, action: action)
         }
@@ -2411,7 +2412,7 @@ private struct SessionComposeBar: View {
                 text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
         } else if isObserveOnly {
             ComposeNote(
-                text: "Observe only - answers are given at the Mac.",
+                text: "Observe only - answers are given at the computer.",
                 tone: .neutral, glyph: nil, action: ("Why?", onWhy))
         }
     }
@@ -2509,13 +2510,13 @@ private struct SessionComposeBar: View {
             // confirmation that the daemon's one Esc then cancels. A green tick
             // over that is the claim this app exists not to make.
             ComposeNote(
-                text: "After \(command) was typed, the Mac composer disappeared. "
+                text: "After \(command) was typed, the computer's composer disappeared. "
                     + "CodeConnect pressed Esc and confirmed it returned. "
                     + "The command's outcome was not confirmed.",
                 tone: .warning, glyph: "questionmark.circle.fill")
         case .composerLost(let command):
             ComposeNote(
-                text: "\(command) was typed, but the Mac's composer did not come back. "
+                text: "\(command) was typed, but the computer's composer did not come back. "
                     + "Open Terminal to recover.",
                 tone: .danger, glyph: "exclamationmark.triangle.fill")
         }
@@ -2540,7 +2541,7 @@ private struct SessionComposeBar: View {
         // beside a card that answers in sample vocabulary would be two different
         // accounts of the same absence on one screen.
         if model.sampleFleetActive {
-            return "These agents are not real. Pair with your Mac to talk to your own."
+            return "These agents are not real. Pair with your computer to talk to your own."
         }
         if let reason = model.linkHealth.disabledReason { return reason }
         if let summary, summary.isCodex {

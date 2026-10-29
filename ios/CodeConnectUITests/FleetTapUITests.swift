@@ -20,6 +20,14 @@ final class FleetTapUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 30), "the fixture fleet has fx-4")
         XCTAssertTrue(
             row.label.contains("Done"), "fx-4 must read Done, or this proves nothing: \(row.label)")
+        // Below the waiting projects' cards, under the Deck bar: scrolled clear
+        // of it, as a reader would, so the tap lands on the row.
+        let bar = app.buttons["deck-bar"]
+        var swipes = 0
+        while bar.exists, row.frame.maxY > bar.frame.minY, swipes < 6 {
+            app.swipeUp(velocity: .slow)
+            swipes += 1
+        }
         row.tap()
 
         XCTAssertTrue(

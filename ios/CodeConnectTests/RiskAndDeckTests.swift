@@ -619,13 +619,13 @@ final class FleetCountTests: XCTestCase {
             row("fx-4", .running, blockedCount: 0),
         ]
         XCTAssertEqual(FleetCount.decisions(in: rows), 4)
-        XCTAssertEqual(FleetCount.needsYou(4), "4 decisions need you")
+        XCTAssertEqual(FleetCount.waitingForYou(4), "4 waiting for you")
     }
 
     /// **`blocked_on` before the card.** The daemon says a request is open one
     /// frame before the card carrying its contents reaches the stream, so a
-    /// count taken from the Deck reads zero over a visibly blocked band. The
-    /// headline would say "Nothing needs you" above an amber card.
+    /// count taken from the Deck reads zero over a visibly blocked run, and no
+    /// count would stand under the title above it.
     func testARowWhoseCardHasNotArrivedStillCounts() {
         let rows = [row("fx-1", .blocked, blockedCount: 0)]
         XCTAssertEqual(
@@ -639,10 +639,10 @@ final class FleetCountTests: XCTestCase {
             FleetCount.decisions(in: [row("fx-1", .running, blockedCount: 0)]), 0)
     }
 
-    /// Singular is a different sentence, not a pluralised one.
+    /// One sentence for one and for many: it names no noun to agree with.
     func testTheSentenceAgreesWithItself() {
-        XCTAssertEqual(FleetCount.needsYou(1), "1 decision needs you")
-        XCTAssertEqual(FleetCount.needsYou(2), "2 decisions need you")
+        XCTAssertEqual(FleetCount.waitingForYou(1), "1 waiting for you")
+        XCTAssertEqual(FleetCount.waitingForYou(2), "2 waiting for you")
     }
 }
 

@@ -39,7 +39,7 @@ enum BiometricGate {
     /// class: an authentication prompt that does not say what it authorises is a
     /// prompt people learn to clear reflexively.
     static func reason(for toolName: String) -> String {
-        "Approve a high-risk \(toolName) on your Mac"
+        "Approve a high-risk \(toolName) on your computer"
     }
 
     static func confirm(reason: String) async -> Outcome {
@@ -58,7 +58,7 @@ enum BiometricGate {
             let detail = accessError?.takeRetainedValue().localizedDescription
                 ?? "the access policy could not be created"
             return .unavailable(
-                "High-risk approvals need Face ID or a passcode, and this iPhone could not set that up (\(detail)). Answer this one at the Mac."
+                "High-risk approvals need Face ID or a passcode, and this iPhone could not set that up (\(detail)). Answer this one at the computer."
             )
         }
 
@@ -97,21 +97,21 @@ enum BiometricGate {
     private static func unavailableReason(_ error: NSError?) -> String {
         guard let error, let code = LAError.Code(rawValue: error.code) else {
             return
-                "High-risk approvals need Face ID or a passcode and this iPhone cannot run that check. Answer this one at the Mac."
+                "High-risk approvals need Face ID or a passcode and this iPhone cannot run that check. Answer this one at the computer."
         }
         switch code {
         case .passcodeNotSet:
             return
-                "This iPhone has no passcode, so it cannot prove who is holding it. High-risk approvals have to be answered at the Mac."
+                "This iPhone has no passcode, so it cannot prove who is holding it. High-risk approvals have to be answered at the computer."
         case .biometryNotEnrolled:
             return
-                "Face ID is not set up on this iPhone. Set it up, or answer high-risk approvals at the Mac, the passcode alone is offered when Face ID is available but unrecognised."
+                "Face ID is not set up on this iPhone. Set it up, or answer high-risk approvals at the computer, the passcode alone is offered when Face ID is available but unrecognised."
         case .biometryNotAvailable:
             return
-                "Face ID is unavailable on this iPhone. High-risk approvals need it, or the passcode; answer this one at the Mac."
+                "Face ID is unavailable on this iPhone. High-risk approvals need it, or the passcode; answer this one at the computer."
         default:
             return
-                "High-risk approvals need Face ID or a passcode: \(error.localizedDescription). Answer this one at the Mac."
+                "High-risk approvals need Face ID or a passcode: \(error.localizedDescription). Answer this one at the computer."
         }
     }
 

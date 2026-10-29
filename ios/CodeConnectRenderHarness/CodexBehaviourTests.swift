@@ -84,7 +84,7 @@ final class CodexBehaviourTests: XCTestCase {
         try driver.scrollUntil(app, "the View button on screen") { view.isHittable }
         view.tap()
         try driver.require(
-            driver.element(containing: "Answered at the Mac", in: app), "the ending's sentence")
+            driver.element(containing: "Answered at the computer", in: app), "the ending's sentence")
         XCTAssertFalse(app.buttons["Allow"].exists)
         XCTAssertFalse(app.buttons["Deny"].exists)
         XCTAssertFalse(

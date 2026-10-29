@@ -544,7 +544,8 @@ struct CCTextStyle: Equatable {
     /// `display` and `title` stop growing at `.accessibility1`: they are
     /// already large, and past that they only steal room from the content the
     /// user actually enlarged the type to read. Everything that carries
-    /// information is uncapped.
+    /// information is uncapped — including an empty state's title, which is
+    /// that screen's whole instruction (`CCEmptyState.titleStyle`).
     var maxSize: CGFloat?
 
     func weight(_ weight: Font.Weight) -> CCTextStyle {

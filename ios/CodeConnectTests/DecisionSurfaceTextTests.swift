@@ -540,7 +540,7 @@ final class DecisionSurfaceTextTests: XCTestCase {
         assertScreenIsSafe(
             try await screen(
                 "claude-card", model, ScrollView { DecisionCardView(approval: approval) },
-                opening: ["Full tool input", "The Mac's screen"]
+                opening: ["Full tool input", "The computer's screen"]
             ).spoken,
             "the Claude card", expected: ["\"command\": \"git push origin \u{FFFD}niam", " git push origin \u{FFFD}niam", "app\u{FFFD}"])
         // The tool row speaks one combined label, so its opened input is

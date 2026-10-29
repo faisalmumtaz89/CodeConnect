@@ -31,7 +31,7 @@ private struct LaunchLoader: View {
     var body: some View {
         VStack(spacing: CC.space.sm) {
             CCProgressRing(.md)
-            Text("Connecting to your Mac…")
+            Text("Connecting to your computer…")
                 .ccType(CC.type.body)
                 .foregroundStyle(CC.text.secondary)
         }

@@ -206,6 +206,14 @@ final class WideToolLabelUITests: XCTestCase {
                 "commands start \(edge - start)pt after their labels; the widest short label is \(widest)")
         }
 
+        // Below the waiting projects' cards, under the Deck bar: scrolled clear
+        // of it, so its pixels are the row's.
+        let bar = app.buttons["deck-bar"]
+        var swipes = 0
+        while bar.exists, mcp.frame.maxY > bar.frame.minY, swipes < 6 {
+            app.swipeUp(velocity: .slow)
+            swipes += 1
+        }
         assertInside(mcp, screen, "the MCP row's card")
         XCTAssertTrue(
             app.staticTexts["mcp__filesystem__list_directory_with_sizes"].exists,

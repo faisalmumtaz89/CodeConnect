@@ -876,7 +876,7 @@ struct DecisionCardView: View {
             .ccType(CC.type.footnote)
             .foregroundStyle(CC.color.warning)
             .fixedSize(horizontal: false, vertical: true)
-            Text("Approving this approves those too. Review them at the Mac.")
+            Text("Approving this approves those too. Review them at the computer.")
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -987,7 +987,7 @@ struct DecisionCardView: View {
             }
 
             if let pane = approval.paneSnapshot {
-                CCDisclosure("The Mac's screen when Claude asked") {
+                CCDisclosure("The computer's screen when Claude asked") {
                     VStack(alignment: .leading, spacing: CC.space.xs) {
                         // This block must never imply liveness: no pulsing dot,
                         // no "live" wording, no auto-refresh.
@@ -1578,12 +1578,12 @@ struct DecisionCardView: View {
                     relativeTo: .caption
                 )
                 .foregroundStyle(CC.color.warning)
-                Text("Still waiting on the Mac - \(Format.age(elapsed)).")
+                Text("Still waiting on the computer - \(Format.age(elapsed)).")
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel(
-                        "Still waiting on the Mac, \(Format.spokenDuration(elapsed)).")
+                        "Still waiting on the computer, \(Format.spokenDuration(elapsed)).")
             }
             if elapsed >= 20 {
                 CCButton("Check link", variant: .ghost, size: .sm) {
@@ -1849,7 +1849,7 @@ struct DecisionCardView: View {
         case .text: sent = "Deny with your reason"
         case .unrecognised: sent = "this answer"
         }
-        return "In a live session this would send \(sent) to your Mac."
+        return "In a live session this would send \(sent) to your computer."
     }
 
     private func submit(_ decision: AnswerDecision, key: String) {

@@ -55,7 +55,7 @@ final class MultiMachineLiveUITests: XCTestCase {
         XCTAssertTrue(review.waitForExistence(timeout: 45), "the bar counts the held approvals")
         attachScreenshot(app, name: "two-waiting")
         review.tap()
-        XCTAssertTrue(app.navigationBars["Needs you"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.navigationBars["Waiting for you"].waitForExistence(timeout: 15))
         let counter = app.descendants(matching: .any)["deck-count"].firstMatch
         XCTAssertTrue(counter.waitForExistence(timeout: 5))
         XCTAssertTrue(counter.label.hasPrefix("2"), "both machines' cards: \(counter.label)")

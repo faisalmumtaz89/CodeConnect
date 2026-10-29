@@ -240,7 +240,7 @@ extension CCBannerItem {
             .rejected,
             title: "Sample fleet",
             message:
-                "These agents are not real and nothing here is connected to a Mac. Leave to pair with your own.",
+                "These agents are not real and nothing here is connected to a computer. Leave to pair with your own.",
             tone: .info,
             icon: "eye",
             actionTitle: "Leave",
@@ -278,7 +278,7 @@ extension LinkHealth {
                 return CCBannerItem(
                     .offline, title: "Connect Tailscale",
                     message:
-                        "`\(host)` isn't resolving. Use Tailscale to put this iPhone on the same tailnet as your Mac — CodeConnect reconnects on its own.",
+                        "`\(host)` isn't resolving. Use Tailscale to put this iPhone on the same tailnet as your computer — CodeConnect reconnects on its own.",
                     tone: .neutral,
                     icon: "bolt.horizontal.circle",
                     actionTitle: TailscaleAssist.isInstallHintNeeded
