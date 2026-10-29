@@ -38,13 +38,13 @@ Once CodeConnect is set up ([Getting started](#getting-started)), you start agen
   - *Re-attaching* in a new tab (`codeconnect attach`) repaints the session from tmux's record of it — the history and screen with their colours, the cursor, and the modes tmux tracks. Two modes tmux does not track are not restored: kitty keyboard flags and focus reporting. An agent that turned them on when it started (Codex and Claude Code push kitty flags) gets your terminal's default key encoding and no focus events in a re-attached tab.
   - *Terminal queries* are answered by tmux where tmux answers them (device attributes, cursor position, version), so an agent sees tmux there rather than your terminal; its default colours are your terminal's, or black if your terminal does not report them. tmux's device-attributes answer arrives before your terminal's answer to kitty's keyboard query, the order agents read as "no kitty keyboard support".
   - *Two tabs on one session* share one size: tmux sizes the session for the tab used most recently, so a differently sized second tab shows it drawn for the other one.
-- **iPhone and Mac only.** The phone side is an iPhone app, [CodeConnect Remote on the App Store](https://apps.apple.com/app/codeconnect-remote/id6797021894); the Mac side runs on macOS 13 or later. The iOS source is public to be read and audited — see the license.
+- **iPhone only, and a Mac or Linux computer.** The phone side is an iPhone app, [CodeConnect Remote on the App Store](https://apps.apple.com/app/codeconnect-remote/id6797021894); the computer side runs on macOS 13 or later, or on Linux (x86_64 or arm64) with systemd. The iOS source is public to be read and audited — see the license.
 - **It assumes one Mac, one tailnet, one person.** That is the shape it is used in daily; anything else is unexplored.
 
 ## How it works
 
 ```
-iPhone (SwiftUI)  ──wss:// tailnet (ws:// fallback)──▶  ccd (Rust daemon, launchd)
+iPhone (SwiftUI)  ──wss:// tailnet (ws:// fallback)──▶  ccd (Rust daemon, launchd or systemd)
       ▲                                                       │
       └── push (a doorbell: direct APNs, or the content-free relay) ──┘
                                                                │ unix socket
@@ -62,7 +62,7 @@ Your **answer** to a Claude card goes back through the hook Claude holds for tha
 
 ## Getting started
 
-You need an iPhone on iOS 17 or later, and a Mac on macOS 13 or later (Apple silicon or Intel) with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in Terminal. However you installed them — their own installers, Homebrew, npm, bun, pnpm or mise — CodeConnect runs the `claude` and `codex` your shell runs. By default your iPhone reaches your Mac over [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet; your local network works too, with a setting on the Mac (see [Is Tailscale required?](https://codeconnect.sh/support)), but without Tailscale's encryption or the live terminal.
+You need an iPhone on iOS 17 or later, and a Mac on macOS 13 or later (Apple silicon or Intel) — or a Linux computer (x86_64 or arm64) with systemd and OpenSSL 3, see [On Linux](mac/README.md#on-linux) — with [Claude Code](https://code.claude.com/docs/en/setup) or Codex already working in Terminal. However you installed them — their own installers, Homebrew, npm, bun, pnpm or mise — CodeConnect runs the `claude` and `codex` your shell runs. By default your iPhone reaches your Mac over [Tailscale](https://tailscale.com/download): install it on both and sign in to the same tailnet; your local network works too, with a setting on the Mac (see [Is Tailscale required?](https://codeconnect.sh/support)), but without Tailscale's encryption or the live terminal.
 
 1. Install the app on your iPhone: [CodeConnect Remote on the App Store](https://apps.apple.com/app/codeconnect-remote/id6797021894).
 2. On your Mac:
@@ -84,13 +84,14 @@ run `claude` or `codex` directly. With no terminal to show a session in — a sc
 pipe, `ssh` without `-t` — `codeconnect claude` hosts nothing and runs the Claude Code it
 would have hosted directly, so its output and status are Claude Code's.
 
-The installer downloads the latest release, verifies its Developer ID
-signature before installing anything, and installs it with CodeConnect's own
+The installer downloads the latest release, verifies its signature before
+installing anything — the Developer ID signature on macOS, CodeConnect's release
+key on Linux — and installs it with CodeConnect's own
 tmux, so a Mac needs neither Homebrew nor tmux. It asks once before adding
 `~/.codeconnect/bin` to your `PATH` — one marked block in your shell's startup
 file, which you can delete to undo — never uses sudo, and enables nothing without asking.
 Prefer to read it first? It is plain text at
-[codeconnect.sh](https://codeconnect.sh). Building from source instead is
+[codeconnect.sh](https://codeconnect.sh). Building from source instead (macOS) is
 `cd mac && ./install.sh` from a clone — the same script contributors use; a
 source build runs on the Mac's own tmux.
 

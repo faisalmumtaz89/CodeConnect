@@ -1733,6 +1733,21 @@ fn open_subdir_at(parent: &DirFd, name: &std::ffi::CStr) -> std::io::Result<DirF
     Ok(DirFd(fd))
 }
 
+/// Set this thread's `errno`.
+fn set_errno(value: libc::c_int) {
+    // SAFETY: the C library's pointer to this thread's `errno`, valid for the
+    // thread's whole life.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        *libc::__error() = value
+    };
+    // SAFETY: as above.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        *libc::__errno_location() = value
+    };
+}
+
 /// How deep the sweep will descend before refusing. A run dir holds sockets and
 /// logs one level down; anything deeper than this is not a shape this code made,
 /// and unbounded recursion driven by directory contents is not something to offer.
@@ -1784,7 +1799,7 @@ pub(crate) fn remove_tree_beneath(
         // *partial* directory — and this function's caller then unlinks the owner
         // marker and reports success over whatever was never listed. So errno is
         // cleared immediately before each call and consulted after each NULL.
-        unsafe { *libc::__error() = 0 };
+        set_errno(0);
         // SAFETY: `stream` is a live DIR*. `readdir` returns a pointer into it that
         // is valid until the next call; the name is copied out immediately.
         let entry = unsafe { libc::readdir(stream) };
@@ -1793,7 +1808,7 @@ pub(crate) fn remove_tree_beneath(
         // must survive therefore gets the same thread-local seam `DIR_FSYNC_FAULT`
         // has, armed by exactly one test and consumed once.
         let entry = if take_readdir_fault() {
-            unsafe { *libc::__error() = libc::EIO };
+            set_errno(libc::EIO);
             std::ptr::null_mut()
         } else {
             entry
@@ -3003,8 +3018,13 @@ pub fn mint_nonce() -> String {
     // trusts; a launch nonce need not be a ULID, only unguessable and unique.
     let mut buf = [0u8; 16];
     // getrandom via libc, matching the crate's no-extra-deps posture.
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-    if rc != 0 {
+    #[cfg(target_os = "macos")]
+    let filled = unsafe { libc::getentropy(buf.as_mut_ptr() as *mut libc::c_void, buf.len()) } == 0;
+    // musl has no `getentropy` binding; `getrandom` is in glibc and musl alike.
+    #[cfg(target_os = "linux")]
+    let filled = unsafe { libc::getrandom(buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) }
+        == buf.len() as isize;
+    if !filled {
         // Fall back to time+pid; a nonce that is merely unique (not secret) is
         // acceptable here because the record is 0700 and identity-guarded.
         let t = std::time::SystemTime::now()

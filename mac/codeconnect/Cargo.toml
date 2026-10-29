@@ -35,3 +35,8 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 qrcode = { workspace = true }
 tokio = { workspace = true }
+
+# The Linux release is proven by an Ed25519 signature over its checksum files
+# (`update_install::verify_checksum`); macOS proves each binary with codesign.
+[target.'cfg(target_os = "linux")'.dependencies]
+ring = { workspace = true }

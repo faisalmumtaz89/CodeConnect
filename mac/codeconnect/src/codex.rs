@@ -301,6 +301,7 @@ fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Re
     // one `cc-N` sequence across both agents, so `ls` and `attach` see one fleet. (The
     // coordinator would default to a fixed `cc-codex`, which is fine for a harness
     // and wrong for a machine that runs more than one.)
+    #[cfg(target_os = "macos")]
     crate::update_check::ensure_tmux()?;
     let session_name = crate::tmux::next_session_name()?;
     // Minted here, once, before anything else knows the session exists — the same

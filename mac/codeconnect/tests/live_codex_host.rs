@@ -782,7 +782,7 @@ fn read_file(path: &Path) -> String {
 fn processes_referencing(tag: &str) -> Vec<(i32, String)> {
     let me = std::process::id() as i32;
     let out = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
         .expect("run /bin/ps to scan the process table — a scan that cannot run must FAIL the live gate, never silently report 'nothing found'");
     assert!(
@@ -836,7 +836,7 @@ fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
 /// passing test's output.
 fn kill_pid(pid: i32, signal: &str) {
     let _ = Command::new("/bin/kill")
-        .args([signal, &pid.to_string()])
+        .args([signal, "--", &pid.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -1083,7 +1083,7 @@ impl Drop for PtyHost {
 fn tagged_pids_best_effort(tag: &str) -> Vec<i32> {
     let me = std::process::id() as i32;
     let Ok(out) = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
     else {
         return Vec::new();

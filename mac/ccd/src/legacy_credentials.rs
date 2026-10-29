@@ -126,7 +126,7 @@ pub fn purge_authorized_keys() -> usize {
         crate::log_warn!(
             "no absolute $HOME, so ~/.ssh/authorized_keys cannot be resolved and nothing was \
              swept; if an earlier release installed lines tagged `{TAG_PREFIX}…` there, they \
-             still grant a phone a shell on this Mac. In the home of the account this daemon \
+             still grant a phone a shell on this computer. In the home of the account this daemon \
              runs as: `grep -n {TAG_PREFIX} ~/.ssh/authorized_keys`"
         );
         return 0;
@@ -157,7 +157,7 @@ pub fn purge_authorized_keys() -> usize {
                     "{} line(s) in {} carry `{TAG_PREFIX}…` and are not the adjacent \
                      marker-and-key pair earlier releases wrote, so they are left as they \
                      are. If any of them is an `ssh-ed25519` line, it still grants a phone a \
-                     shell on this Mac; delete it and its `{TAG_PREFIX}` comment by hand. \
+                     shell on this computer; delete it and its `{TAG_PREFIX}` comment by hand. \
                      `grep -n {TAG_PREFIX} {}` lists them",
                     sweep.left,
                     path.display(),
@@ -176,7 +176,7 @@ pub fn purge_authorized_keys() -> usize {
             crate::log_warn!(
                 "could not read {}: {err:#} — this daemon removed nothing and has not seen \
                  what is in that file. If an earlier release installed lines tagged \
-                 `{TAG_PREFIX}…` there, they still grant a phone a shell on this Mac. \
+                 `{TAG_PREFIX}…` there, they still grant a phone a shell on this computer. \
                  `grep -n {TAG_PREFIX} {}` settles it: a marker comment and the \
                  `ssh-ed25519` line directly under it carrying the same tag are one entry, \
                  and both lines go by hand",
@@ -188,7 +188,7 @@ pub fn purge_authorized_keys() -> usize {
         Err(Stopped::Unwritten { err, doomed }) => {
             crate::log_warn!(
                 "could not rewrite {}: {err:#} — this sweep read {doomed} line(s) out of it \
-                 that grant a phone a shell on this Mac, and removed none of them; delete \
+                 that grant a phone a shell on this computer, and removed none of them; delete \
                  them by hand. `grep -n {TAG_PREFIX} {}` lists what is in it now, along \
                  with anything else carrying the tag",
                 path.display(),
@@ -208,7 +208,7 @@ pub fn purge_authorized_keys() -> usize {
                  {reason} — this daemon removed nothing rather than put a replacement it had \
                  already computed over an edit it never saw. As of the last read, {doomed} \
                  line(s) tagged `{TAG_PREFIX}…` were in it; if they are still there they \
-                 still grant a phone a shell on this Mac. Running `codeconnect revoke` again \
+                 still grant a phone a shell on this computer. Running `codeconnect revoke` again \
                  sweeps it afresh; `grep -n {TAG_PREFIX} {}` settles what is in it now",
                 path.display(),
                 path.display()
@@ -240,7 +240,7 @@ pub async fn purge_authorized_keys_off_runtime() -> usize {
                 "the sweep of ~/.ssh/authorized_keys did not finish: {err} — it removed \
                  nothing this caller can account for, and if an earlier release installed \
                  lines tagged `{TAG_PREFIX}…` there they still grant a phone a shell on this \
-                 Mac. In the home of the account this daemon runs as: \
+                 computer. In the home of the account this daemon runs as: \
                  `grep -n {TAG_PREFIX} ~/.ssh/authorized_keys`"
             );
             0
@@ -1128,7 +1128,7 @@ mod tests {
         // resolve themselves, in the account this daemon runs as.
         let homeless = warning(&told, "no absolute $HOME");
         assert!(
-            homeless.contains("still grant a phone a shell on this Mac")
+            homeless.contains("still grant a phone a shell on this computer")
                 && homeless.contains("`grep -n codeconnect: ~/.ssh/authorized_keys`"),
             "a sweep that never resolved a path still owes the risk and a check: {homeless}"
         );

@@ -3657,10 +3657,10 @@ mod tests {
         // saw it too. Thirty seconds is past anything a local `connect(2)` to a bound
         // listener can plausibly cost, and still finite, so a leg that never serves is
         // a failure rather than a hang.
-        let serving_soon = |path: &std::path::Path| -> bool {
+        let settles_to = |path: &std::path::Path, serving: bool| -> bool {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             loop {
-                if leg_is_serving(path) {
+                if leg_is_serving(path) == serving {
                     return true;
                 }
                 if std::time::Instant::now() >= deadline {
@@ -3669,19 +3669,24 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         };
-        assert!(serving_soon(&live), "a bound, listening socket is a leg");
+        assert!(
+            settles_to(&live, true),
+            "a bound, listening socket is a leg"
+        );
 
         // The case `stat` cannot see, and the reason readiness connects instead of
         // stat-ing: a socket INODE outlives the process that bound it. Drop the
         // listener and the file is still there, still a socket, still passing every
-        // file-type check — and serving nothing.
+        // file-type check — and serving nothing. Waited for as well: a child another
+        // test is spawning holds a copy of the listener until it execs, and the socket
+        // answers until then.
         drop(listener);
         assert!(
             std::fs::symlink_metadata(&live).is_ok(),
             "the inode should still exist after the listener is gone"
         );
         assert!(
-            !leg_is_serving(&live),
+            settles_to(&live, false),
             "an unbound socket inode must not count as a serving leg — this is exactly \
              what a host killed abnormally leaves behind"
         );

@@ -648,7 +648,7 @@ while True:
 fn processes_referencing(tag: &str) -> Vec<(i32, String)> {
     let me = std::process::id() as i32;
     let out = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
         .expect(
             "run /bin/ps — a scan that cannot run must FAIL the test, never report 'nothing found'",
@@ -669,7 +669,7 @@ fn processes_referencing(tag: &str) -> Vec<(i32, String)> {
 fn tagged_pids(tag: &str) -> Vec<i32> {
     let me = std::process::id() as i32;
     let Ok(out) = Command::new("/bin/ps")
-        .args(["-Axww", "-o", "pid=,command="])
+        .args(["-Aww", "-o", "pid=,command="])
         .output()
     else {
         return Vec::new();
@@ -1174,7 +1174,7 @@ fn a_stopped_codex_stops_its_app_server_and_refuses_the_phone() {
     let refused = phone_request(&run).expect("the phone's request is answered while stopped");
     assert_eq!(refused["code"], -32001, "{refused}");
     assert_eq!(
-        refused["message"], "codex is paused at the Mac (Ctrl+Z); run fg there",
+        refused["message"], "codex is paused at the computer (Ctrl+Z); run fg there",
         "{refused}"
     );
 

@@ -121,7 +121,7 @@ impl ApnsPushSender {
             "aps": {
                 "alert": { "title": title, "body": body },
                 "sound": "default",
-                "badge": hint.blocked_sessions,
+                "badge": hint.decisions,
                 "interruption-level": "time-sensitive",
             },
             "codeconnect": { "kind": hint.kind.tag() }
@@ -745,7 +745,7 @@ mod tests {
         PushHint {
             project_label: "Aion".into(),
             kind: crate::apns::PushKind::Approval,
-            blocked_sessions: blocked,
+            decisions: blocked,
             session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
         }
     }
@@ -1533,7 +1533,7 @@ mod tests {
                     let hint = PushHint {
                         project_label: label.into(),
                         kind,
-                        blocked_sessions: blocked,
+                        decisions: blocked,
                         session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
                     };
                     let payload = ApnsPushSender::payload(&hint);
@@ -1546,7 +1546,7 @@ mod tests {
                         label
                     };
                     let body = if blocked > 1 {
-                        format!("{blocked} agents need you")
+                        format!("{blocked} waiting for you")
                     } else {
                         kind.sentence().to_string()
                     };
@@ -1616,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn many_blocked_sessions_coalesce_to_a_count() {
+    fn many_decisions_coalesce_to_a_count() {
         let payload = ApnsPushSender::payload(&hint(4));
         let parsed: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
         assert_eq!(parsed["aps"]["badge"], 4);

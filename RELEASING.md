@@ -103,6 +103,22 @@ Each block starts from the repository root.
    checks stop a bad release being made, the updater's stops one that
    already exists from being installed.
 
+   The same run builds the Linux archives (`linux-build.yml`: static x86_64
+   and aarch64 binaries and tmux). Job `linux-sign` — the only job given the
+   secret `LINUX_RELEASE_SIGNING_KEY` — refuses unless that key's public half
+   is `RELEASE_KEY` in the tagged source
+   (`mac/codeconnect/src/update_install.rs`), checks each archive against its
+   `.sha256`, signs each `.sha256`, and verifies every signature against the
+   pinned half before handing the files on. The draft then holds the four
+   macOS assets and twelve Linux ones, each downloaded back and checked, and
+   publication requires exactly those sixteen: a Linux build that fails stops
+   the release. The key's private half lives only in that secret and the
+   owner's offline backup. Losing it means a new key and a new `RELEASE_KEY`,
+   and every installed Linux updater refuses releases signed with the new key
+   until the installer — one that pins the new key — is run again with
+   `--reinstall` (`curl -fsSL https://codeconnect.sh | sh -s -- --reinstall`):
+   a plain rerun on an existing install finishes its setup and downloads nothing.
+
    ```sh
    git tag vX.Y.Z && git push origin vX.Y.Z
    gh run watch                                   # ends at "verified draft"

@@ -476,7 +476,7 @@ fn harden_state_dir(root: &Path) -> Result<()> {
         if let Err(err) = protocol::fsperm::harden_file(file) {
             crate::log_error!(
                 "could not make {} owner-only ({err}); its contents may be readable by other \
-                 accounts on this Mac",
+                 accounts on this computer",
                 file.display()
             );
         }
@@ -728,6 +728,10 @@ enum BindOrigin {
     Tailnet,
     /// Nothing else was available. The phone cannot reach this daemon.
     LoopbackFallback,
+    /// This node's tailnet IPv4, served from loopback: Tailscale runs in
+    /// userspace mode, where no interface holds the address and tailscaled
+    /// hands each tailnet connection to it to `127.0.0.1` on the same port.
+    Userspace(IpAddr),
 }
 
 /// What this start does about a tailnet address that is not there yet.
@@ -787,7 +791,12 @@ async fn resolve_bind(config: &Config) -> BindPlan {
     } else {
         Vec::new()
     };
-    let plan = plan_bind(config, &tailnet, managed_by_codeconnect_job());
+    let mut plan = plan_bind(config, &tailnet, managed_by_codeconnect_job());
+    if plan.origin == BindOrigin::LoopbackFallback {
+        if let Some(ip) = userspace_tailnet_address().await {
+            plan = userspace_plan(plan, ip);
+        }
+    }
 
     match plan.watch_tailnet {
         // Everything here is conditional on a tailnet address turning up, which
@@ -803,10 +812,10 @@ async fn resolve_bind(config: &Config) -> BindPlan {
         // promise this whole watch exists to stop making.
         TailnetWatch::Restart => crate::log_warn!(
             "no tailnet IPv4 address found; binding loopback (the phone will not reach it). \
-             Watching for one for as long as this process runs: launchd's {} job manages this \
-             daemon, so when one appears this process ends and launchd starts another, which \
-             tries the address for itself. Until a start finds one in time, this daemon stays \
-             on loopback and no phone reaches it.",
+             Watching for one for as long as this process runs: {SERVICE_MANAGER}'s {} \
+             {SERVICE_KIND} manages this daemon, so when one appears this process ends and \
+             {SERVICE_MANAGER} starts another, which tries the address for itself. Until a start \
+             finds one in time, this daemon stays on loopback and no phone reaches it.",
             protocol::LAUNCHD_LABEL
         ),
         // The same watch, and the honest form of the same sentence. Nothing
@@ -816,8 +825,8 @@ async fn resolve_bind(config: &Config) -> BindPlan {
         TailnetWatch::Report => crate::log_warn!(
             "no tailnet IPv4 address found; binding loopback (the phone will not reach it). \
              Watching for one to appear and reporting it when it does — this process is not \
-             run by launchd's {} job, so nothing here restarts it. Making this daemon \
-             reachable is a restart you run.",
+             run by {SERVICE_MANAGER}'s {} {SERVICE_KIND}, so nothing here restarts it. Making \
+             this daemon reachable is a restart you run.",
             protocol::LAUNCHD_LABEL
         ),
         TailnetWatch::Idle => {}
@@ -829,7 +838,7 @@ async fn resolve_bind(config: &Config) -> BindPlan {
              bearer token and everything a connection carries cross that network in the \
              clear, and are exactly as private as it is. The Terminal tab is the one thing \
              not offered on it: a live shell's keystrokes are not something this daemon \
-             sends in the clear. Provide a certificate, or bind loopback or this Mac's \
+             sends in the clear. Provide a certificate, or bind loopback or this computer's \
              tailnet address, and the terminal is available again.",
             plan.bind
         ),
@@ -931,13 +940,15 @@ fn never_a_tailnet_address(ip: IpAddr) -> bool {
 /// Turn the config and this node's tailnet addresses into one start's plan.
 ///
 /// Pure, and the only place these choices are made.
-/// Whether the process is run by CodeConnect's own launchd job — the one thing
-/// that starts `ccd` again after the tailnet watcher ends it.
+/// Whether the process is run by CodeConnect's own launchd job, or on Linux its
+/// systemd unit — the one thing that starts `ccd` again after the tailnet
+/// watcher ends it.
 ///
 /// **CodeConnect's own job, not merely some job.** macOS sets
 /// `XPC_SERVICE_NAME` for every process a launchd job starts, so a `ccd` run
 /// from inside another one — a build step, a wrapper script's agent — carries a
-/// label that will never restart it. Equality with [`protocol::LAUNCHD_LABEL`]
+/// label that will never restart it. On Linux only CodeConnect's unit sets
+/// `CODECONNECT_SERVICE`; see [`state::SERVICE_LABEL_VAR`]. Equality with [`protocol::LAUNCHD_LABEL`]
 /// is what tells the two apart; anything looser reads "a label exists" as
 /// "something will restart me", which is exactly the promise this must not
 /// make on a process nothing is watching.
@@ -945,7 +956,7 @@ fn managed_by_codeconnect_job() -> bool {
     state::launchd_label().as_deref() == Some(protocol::LAUNCHD_LABEL)
 }
 
-/// Held for the length of any test that writes `XPC_SERVICE_NAME`, by way of
+/// Held for the length of any test that writes [`state::SERVICE_LABEL_VAR`], by way of
 /// [`LaunchdLabelEnv`] — which is the only thing that can take it, and the only
 /// place in this crate that writes the variable at all.
 ///
@@ -967,7 +978,7 @@ fn managed_by_codeconnect_job() -> bool {
 #[cfg(test)]
 static LAUNCHD_LABEL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Exclusive use of `XPC_SERVICE_NAME` for as long as this value is alive.
+/// Exclusive use of [`state::SERVICE_LABEL_VAR`] for as long as this value is alive.
 ///
 /// Bundled rather than left as a bare lock because the two mistakes here are
 /// the same mistake: writing the variable without excluding the other test, and
@@ -998,7 +1009,7 @@ impl LaunchdLabelEnv {
             _lock: LAUNCHD_LABEL_ENV_LOCK
                 .lock()
                 .unwrap_or_else(|held| held.into_inner()),
-            previous: std::env::var_os("XPC_SERVICE_NAME"),
+            previous: std::env::var_os(state::SERVICE_LABEL_VAR),
         }
     }
 
@@ -1007,8 +1018,8 @@ impl LaunchdLabelEnv {
     /// [`state::launchd_label`] and both have to be reachable from a test.
     pub(crate) fn set(&self, label: Option<&str>) {
         match label {
-            Some(value) => std::env::set_var("XPC_SERVICE_NAME", value),
-            None => std::env::remove_var("XPC_SERVICE_NAME"),
+            Some(value) => std::env::set_var(state::SERVICE_LABEL_VAR, value),
+            None => std::env::remove_var(state::SERVICE_LABEL_VAR),
         }
     }
 }
@@ -1017,8 +1028,8 @@ impl LaunchdLabelEnv {
 impl Drop for LaunchdLabelEnv {
     fn drop(&mut self) {
         match &self.previous {
-            Some(value) => std::env::set_var("XPC_SERVICE_NAME", value),
-            None => std::env::remove_var("XPC_SERVICE_NAME"),
+            Some(value) => std::env::set_var(state::SERVICE_LABEL_VAR, value),
+            None => std::env::remove_var(state::SERVICE_LABEL_VAR),
         }
     }
 }
@@ -1067,6 +1078,25 @@ fn plan_bind(config: &Config, tailnet: &[IpAddr], managed_by_codeconnect_job: bo
         } else {
             TailnetWatch::Report
         },
+    }
+}
+
+/// The loopback fallback, made reachable by a userspace-mode tailscaled.
+///
+/// Only that plan changes: the listener stays on loopback, where tailscaled
+/// delivers this node's tailnet connections, and the QR carries `ip`. The trust
+/// stays [`ws_server::PlaintextTrust::TrustedPath`] — WireGuard to this machine,
+/// then loopback — and there is nothing left to watch for. Every other plan,
+/// an explicit `ws_bind` or a tailnet address held here, is returned as it came.
+fn userspace_plan(plan: BindPlan, ip: IpAddr) -> BindPlan {
+    if plan.origin != BindOrigin::LoopbackFallback {
+        return plan;
+    }
+    BindPlan {
+        origin: BindOrigin::Userspace(ip),
+        tailnet_confirmed: true,
+        watch_tailnet: TailnetWatch::Idle,
+        ..plan
     }
 }
 
@@ -1131,12 +1161,12 @@ fn refused_opt_in_message(plan: &BindPlan) -> String {
     // Held in common: an address that is refused here is refused because it is
     // not one anybody can vouch for, and a certificate is what serves clients
     // on it regardless of which of the three it is.
-    let tail = "Bind this Mac's own LAN address and it is honoured there; on this one only a \
+    let tail = "Bind this computer's own LAN address and it is honoured there; on this one only a \
                 certificate makes the listener serve anybody.";
     if ip.is_unspecified() {
         return format!(
             "ws_allow_plaintext is set but is not honoured on {bind}: a wildcard bind puts the \
-             bearer token on every interface this Mac has, including the ones nobody can \
+             bearer token on every interface this computer has, including the ones nobody can \
              enumerate in advance. {tail}"
         );
     }
@@ -1262,7 +1292,7 @@ fn plaintext_refusal_advice(config: &Config, plan: &BindPlan, certificate: bool)
         )
     } else {
         format!(
-            "{certificate}, or bind this Mac's own LAN address instead: plaintext is never \
+            "{certificate}, or bind this computer's own LAN address instead: plaintext is never \
              opted into on a wildcard or a public address; then run `codeconnect daemon \
              restart`."
         )
@@ -1361,7 +1391,7 @@ fn tailnet_watch_delay(attempt: u32) -> Duration {
 async fn watch_for_tailnet(watch: TailnetWatch) {
     watch_tailnet_with(
         watch,
-        tailnet_addresses,
+        reachable_tailnet,
         tailnet_watch_delay,
         report_tailnet_change,
     )
@@ -1406,11 +1436,11 @@ fn report_tailnet_change(found: Option<IpAddr>) {
         Some(ip) => crate::log_warn!(
             "tailnet address {ip} is up now, and this daemon bound loopback because it found \
              no tailnet IPv4 address at startup, so no phone can reach it. Restarting ccd \
-             probes again, and a start that finds {ip} binds it and advertises it — with a \
+             probes again, and a start that finds {ip} serves the phone at it — with a \
              certificate if one can be had, and plaintext over WireGuard if not. A start that \
              does not find it in time is on loopback and watching again. Nothing here will do \
-             any of that: this process is not run by launchd's {} job, so the restart is yours \
-             to run.",
+             any of that: this process is not run by {SERVICE_MANAGER}'s {} {SERVICE_KIND}, so \
+             the restart is yours to run.",
             protocol::LAUNCHD_LABEL
         ),
         None => crate::log_warn!(
@@ -1464,9 +1494,9 @@ async fn watch_tailnet_with<Probe, Fut, Report>(
                 // ends here, and the address is the next one's to win.
                 crate::log_warn!(
                     "tailnet address {ip} is up now, and this daemon bound loopback because it \
-                     found no tailnet IPv4 address at startup. Exiting so launchd starts a \
-                     fresh ccd, which probes for itself: a start that finds {ip} binds it and \
-                     advertises it — with a certificate if one can be had, and plaintext over \
+                     found no tailnet IPv4 address at startup. Exiting so {SERVICE_MANAGER} \
+                     starts a fresh ccd, which probes for itself: a start that finds {ip} serves \
+                     the phone at it — with a certificate if one can be had, and plaintext over \
                      WireGuard if not. A start that does not is on loopback and watching again."
                 );
                 return;
@@ -1498,6 +1528,18 @@ async fn watch_tailnet_with<Probe, Fut, Report>(
     }
 }
 
+/// What runs this daemon as a service, named in the log lines that say what it
+/// will do about a tailnet address: launchd's job on macOS, systemd's user unit
+/// on Linux.
+#[cfg(target_os = "macos")]
+const SERVICE_MANAGER: &str = "launchd";
+#[cfg(target_os = "macos")]
+const SERVICE_KIND: &str = "job";
+#[cfg(target_os = "linux")]
+const SERVICE_MANAGER: &str = "systemd";
+#[cfg(target_os = "linux")]
+const SERVICE_KIND: &str = "unit";
+
 /// How long the whole `tailscale ip` probe gets — across every candidate binary
 /// — before the daemon gives up on it. One total budget, not per candidate, so
 /// several hung candidates cannot add up. A wedged tailscale service must not
@@ -1508,6 +1550,11 @@ const TAILSCALE_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// tailscale is not installed, not up, or does not answer in time. Bounded by
 /// one absolute deadline and `kill_on_drop`, so a hung `tailscale` process is
 /// killed rather than awaited forever.
+///
+/// Held means this machine can bind it now: after `tailscale down` on Linux,
+/// `tailscale ip` still prints the node's addresses while the interface no
+/// longer carries them, and binding one fails and ends the daemon on every
+/// start. Until the tunnel is back they count as no tailnet at all.
 async fn tailnet_addresses() -> Vec<IpAddr> {
     let deadline = tokio::time::Instant::now() + TAILSCALE_PROBE_TIMEOUT;
     for candidate in protocol::pairing::TAILSCALE_CANDIDATES {
@@ -1533,12 +1580,63 @@ async fn tailnet_addresses() -> Vec<IpAddr> {
         let addresses: Vec<IpAddr> = String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.trim().parse().ok())
+            .filter(|ip| held_here(*ip))
             .collect();
         if !addresses.is_empty() {
             return addresses;
         }
     }
     Vec::new()
+}
+
+/// Whether a socket can bind `ip` on this machine right now.
+fn held_here(ip: IpAddr) -> bool {
+    std::net::UdpSocket::bind((ip, 0)).is_ok()
+}
+
+/// This node's tailnet IPv4 when tailscaled runs in userspace mode and is
+/// connected, from `tailscale status --json`; `None` otherwise.
+///
+/// Asked only when no tailnet address is held here. In userspace mode none
+/// ever is — there is no TUN device to carry one — and tailscaled hands every
+/// tailnet connection to this node's address on to `127.0.0.1` on the same port.
+async fn userspace_tailnet_address() -> Option<IpAddr> {
+    let bin = protocol::pairing::tailscale_bin()?;
+    let run = tokio::process::Command::new(bin)
+        .args(["status", "--json"])
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(TAILSCALE_PROBE_TIMEOUT, run)
+        .await
+        .ok()?
+        .ok()?;
+    userspace_tailnet_ip(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The first IPv4 in `TailscaleIPs`, when the status says no TUN device
+/// (`"TUN": false`) and a running backend; `None` for anything else.
+fn userspace_tailnet_ip(status_json: &str) -> Option<IpAddr> {
+    let status: serde_json::Value = serde_json::from_str(status_json).ok()?;
+    if status.get("TUN")?.as_bool()? || status.get("BackendState")?.as_str()? != "Running" {
+        return None;
+    }
+    status
+        .get("TailscaleIPs")?
+        .as_array()?
+        .iter()
+        .filter_map(|ip| ip.as_str()?.parse::<IpAddr>().ok())
+        .find(IpAddr::is_ipv4)
+}
+
+/// What the watcher asks: the held tailnet addresses, or, with none held, the
+/// userspace one — the two answers a start acts on, so the watcher never waits
+/// for an address a start would not use (see [`preferred_tailnet_ip`]).
+async fn reachable_tailnet() -> Vec<IpAddr> {
+    let held = tailnet_addresses().await;
+    if !held.is_empty() {
+        return held;
+    }
+    userspace_tailnet_address().await.into_iter().collect()
 }
 
 /// How long the name the QR would carry gets to resolve before the daemon stops
@@ -1644,7 +1742,7 @@ where
                 ))
             }
             Ok(Ok(_)) => "it resolves to no address here".to_string(),
-            Ok(Err(err)) => format!("this Mac cannot resolve it ({err})"),
+            Ok(Err(err)) => format!("this computer cannot resolve it ({err})"),
             Err(_) => format!(
                 "it did not resolve inside {}s",
                 ADVERTISED_NAME_TIMEOUT.as_secs()
@@ -1769,6 +1867,23 @@ where
         port: bind.port(),
         tls: false,
     };
+
+    // Tailscale in userspace mode delivers this node's tailnet connections to
+    // the loopback listener, so the QR carries the tailnet address, over
+    // WireGuard and without a certificate.
+    if let BindOrigin::Userspace(ip) = plan.origin {
+        crate::log_info!(
+            "Tailscale runs in userspace mode on this computer: listening on {bind}, where \
+             tailscaled delivers connections to {ip}, and advertising {ip}"
+        );
+        return (
+            None,
+            Endpoint {
+                host: ip.to_string(),
+                ..fallback
+            },
+        );
+    }
 
     // Settled by the bind alone, and settled before anything is looked up: no
     // device but this Mac can open a connection to a loopback listener, so
@@ -1919,6 +2034,14 @@ mod tests {
     use super::*;
     use crate::store::SessionRow;
     use protocol::event::{EventKind, Lifecycle, PendingEvent, SessionKey, Source};
+
+    /// An address `tailscale ip` names but no interface carries — what Linux
+    /// reports after `tailscale down` — is not held; one an interface carries is.
+    #[test]
+    fn an_address_no_interface_carries_is_not_held() {
+        assert!(held_here(IpAddr::from([127, 0, 0, 1])));
+        assert!(!held_here(IpAddr::from([192, 0, 2, 1])));
+    }
 
     fn temp_store() -> Store {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -2829,6 +2952,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_userspace_address_needs_no_tun_and_a_running_backend() {
+        let status = |tun: &str, state: &str, ips: &str| {
+            format!(
+                r#"{{"Version":"1.104.4","TUN":{tun},"BackendState":"{state}","TailscaleIPs":{ips}}}"#
+            )
+        };
+        let both = r#"["fd7a:115c:a1e0::1","100.64.0.1"]"#;
+        assert_eq!(
+            userspace_tailnet_ip(&status("false", "Running", both)),
+            Some(IpAddr::from([100, 64, 0, 1]))
+        );
+        // A TUN device holds the addresses, so `held_here` already answered.
+        assert_eq!(userspace_tailnet_ip(&status("true", "Running", both)), None);
+        for state in ["NeedsLogin", "NeedsMachineAuth", "Stopped", "Starting"] {
+            assert_eq!(
+                userspace_tailnet_ip(&status("false", state, both)),
+                None,
+                "{state}"
+            );
+        }
+        // Not logged in, as Tailscale 1.104 prints it.
+        assert_eq!(
+            userspace_tailnet_ip(&status("false", "NeedsLogin", "null")),
+            None
+        );
+        assert_eq!(
+            userspace_tailnet_ip(&status("false", "Running", r#"["fd7a:115c:a1e0::1"]"#)),
+            None
+        );
+        assert_eq!(
+            userspace_tailnet_ip(r#"{"BackendState":"Running","TailscaleIPs":["100.64.0.1"]}"#),
+            None
+        );
+        assert_eq!(userspace_tailnet_ip("not json"), None);
+    }
+
+    #[test]
+    fn a_userspace_address_changes_only_the_loopback_fallback() {
+        let ip = IpAddr::from([100, 64, 0, 1]);
+        for managed in [true, false] {
+            let plan = userspace_plan(plan_bind(&config_with(None), &[], managed), ip);
+            assert_eq!(plan.bind, "127.0.0.1:8787".parse().unwrap());
+            assert_eq!(plan.origin, BindOrigin::Userspace(ip));
+            assert_eq!(plan.trust, PlaintextTrust::TrustedPath);
+            assert_eq!(plan.watch_tailnet, TailnetWatch::Idle);
+            assert!(!plan.bind_is_tailnet);
+        }
+        for (bind, held) in [
+            (Some("127.0.0.1"), Vec::new()),
+            (Some("192.168.1.20"), Vec::new()),
+            (Some("100.64.12.34"), tailnet()),
+            (None, tailnet()),
+        ] {
+            let plan = plan_bind(&config_with(bind), &held, true);
+            assert_eq!(userspace_plan(plan, ip), plan, "{bind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_userspace_plan_advertises_the_tailnet_address_it_is_reached_at() {
+        // TLS on and a certificate on offer change nothing: the QR carries the
+        // address tailscaled answers at, and plaintext crosses WireGuard only.
+        let config = config_with(None);
+        let ip = IpAddr::from([100, 64, 0, 1]);
+        let plan = userspace_plan(plan_bind(&config, &[], false), ip);
+        let (acceptor, endpoint) =
+            resolve_transport_with(&config, &plan, magic_dns, resolving_to(&[]), a_certificate)
+                .await;
+        assert_eq!(endpoint.host, "100.64.0.1");
+        assert_eq!(endpoint.port, 8787);
+        assert!(!endpoint.tls);
+        assert!(acceptor.is_none());
+        assert_eq!(protocol::pairing::unreachable_host(&endpoint.host), None);
+    }
+
     #[tokio::test]
     async fn an_explicit_lan_bind_advertises_the_address_it_listens_on() {
         // The whole of the claim: MagicDNS resolves to the tailnet interface,
@@ -3052,7 +3251,7 @@ mod tests {
     /// promise the daemon must not make about a process nothing is watching.
     #[test]
     fn only_codeconnects_own_launchd_job_counts_as_something_that_would_restart_it() {
-        // `XPC_SERVICE_NAME` is process-global while tests run in parallel, and
+        // The label variable is process-global while tests run in parallel, and
         // `state`'s sentinel test writes it too — see [`LaunchdLabelEnv`], which
         // is what makes those two exclusive rather than merely orderly.
         let env = LaunchdLabelEnv::take();
@@ -3072,7 +3271,8 @@ mod tests {
             assert_eq!(
                 managed_by_codeconnect_job(),
                 restartable,
-                "XPC_SERVICE_NAME={label:?}"
+                "{}={label:?}",
+                state::SERVICE_LABEL_VAR
             );
         }
     }

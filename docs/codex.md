@@ -29,7 +29,7 @@ Close the tab and it keeps running; `codeconnect attach <name>` brings it back.
 Ctrl+Z stops Codex as it does run directly: the Codex UI and the server behind it both
 stop, a turn that is running pauses with them, and your shell prints its own job line;
 `fg` brings Codex back where it was. While it is stopped, a message or Stop from the
-phone is refused at once, saying Codex is paused at the Mac and continues after `fg`
+phone is refused at once, saying Codex is paused at the computer and continues after `fg`
 there, and nothing reaches Codex. The refusal does not use the message or the Stop up:
 sent again after `fg`, it goes through once. A link the daemon opens meanwhile is
 answered the same way, its `initialize` included, and connects once Codex runs again. An approval answered on the phone
@@ -180,7 +180,7 @@ Mac.** Codex sends what a file change will write only when the edit starts, and 
 connection opened after that never sees it, so it raises no card for the request. Measured
 on 0.164.0: the card the phone already holds stays on screen, and choosing an option is
 refused with "this connection holds no live request id for that card, so nothing was sent;
-answer at the Mac". A command approval is not affected — Codex sends it again to the new
+answer at the computer". A command approval is not affected — Codex sends it again to the new
 connection, and the phone can answer it.
 
 **3. History read back from Codex can have gaps.** When the daemon was not watching a Codex
@@ -360,8 +360,8 @@ worth anything:
 
 | Kind | How many | What it means | Try again? |
 |---|---|---|---|
-| Link state | 21 | A fact about the Mac's control link right now — reconnecting, not yet watching the thread, no link at all — or Codex paused at the Mac with Ctrl+Z. | Yes, shortly (after `fg` for a pause). |
-| This Mac's own store | 5 | A local lookup or record failed **before** anything was sent. Nothing reached Codex. | Yes. Then check the Mac. |
+| Link state | 21 | A fact about the computer's control link right now — reconnecting, not yet watching the thread, no link at all — or Codex paused at the computer with Ctrl+Z. | Yes, shortly (after `fg` for a pause). |
+| The computer's own store | 5 | A local lookup or record failed **before** anything was sent. Nothing reached Codex. | Yes. Then check the computer. |
 | Settled | 43 | The ask was wrong, the id is spent, or the outcome is already recorded. | No. |
 | Wire code | 2 | Codex, or CodeConnect's own broker rules, refused the write in a way that proves nothing reached Codex, and the sentence carries the numeric code — never the refuser's message. | Yes, from the phone. A refusal by a rule refuses again. |
 

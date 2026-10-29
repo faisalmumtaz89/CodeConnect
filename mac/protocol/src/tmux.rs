@@ -3796,7 +3796,7 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
 
         // Restart the whole server, then re-create the same uid/name. The new
         // server has a different pid/start_time; the pinned epoch is stale.
-        tmux(&["kill-server"]);
+        kill_server(&bin, &sock);
         start("cc-1", &uid);
 
         // Liveness against the stale pin: Gone (different epoch), never a false Live.
@@ -4350,12 +4350,37 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
             .success());
     }
 
+    /// Stop the server on `sock` and wait until it has exited. `kill-server`
+    /// returns while the server is still going away, and a client that connects
+    /// in that moment reaches the dying server — "server exited unexpectedly" —
+    /// instead of starting the next one.
     fn kill_server(bin: &std::path::Path, sock: &str) {
+        let pid = std::process::Command::new(bin)
+            .args(["-S", sock, "display-message", "-p", "#{pid}"])
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .and_then(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+            });
         std::process::Command::new(bin)
             .args(["-S", sock, "kill-server"])
             .stdin(Stdio::null())
             .output()
             .ok();
+        if let Some(pid) = pid {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !crate::proc_identity::exited(pid) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the tmux server {pid} on {sock} outlived kill-server"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
     }
 
     /// A closure that kills the server and re-creates `cc-1` for a given uid on a

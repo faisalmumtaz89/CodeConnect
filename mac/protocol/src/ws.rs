@@ -480,8 +480,8 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         push_environment: Option<String>,
         /// What the owner calls the computer this daemon runs on — on a Mac, its
-        /// computer name. Absent when it could not be read; the phone then names
-        /// the machine by the host it paired with. Minor 25.
+        /// computer name; on Linux, its hostname. Absent when it could not be read;
+        /// the phone then names the machine by the host it paired with. Minor 25.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         machine_name: Option<String>,
         /// The computer's operating system: `"macos"` or `"linux"`. Absent when the

@@ -253,7 +253,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     key cannot be shipped to a customer's Mac, so a CodeConnect-operated
 ///     relay holds it: the daemon hands over a closed event document — the
 ///     schema, the device's token and its environment, and either which of four
-///     kinds rang with how many runs are blocked or the fixed test variant —
+///     kinds rang with how many decisions are waiting or the fixed test variant —
 ///     with the opaque credential riding only in the `Authorization` header,
 ///     never in the body; the relay composes a generic alert titled
 ///     `CodeConnect`, carrying no project label, and talks to Apple. Every
@@ -570,7 +570,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     A phone names the computer it is paired with the way its owner does.
 ///     Additive, and a client written against minor 24 needs none of it:
 ///       - [`ws::ServerMessage::HelloAck`]'s `machine_name` — the computer's name
-///         (a Mac's computer name), absent when it could not be read.
+///         (a Mac's computer name, a Linux machine's hostname), absent when it
+///         could not be read.
 ///       - its `machine_os` — `"macos"` or `"linux"`, absent when not said.
 ///
 ///     A client that gets neither names the computer by the host it paired with.

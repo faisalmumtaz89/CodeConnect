@@ -119,12 +119,13 @@ const TITLE: &str = "CodeConnect";
 /// **One slot, so the body describes the fleet rather than the event that rang.**
 /// A phone holds one CodeConnect notification and a later one replaces it, so a
 /// run finishing a turn would otherwise overwrite an outstanding decision. While
-/// more than one agent is blocked the body is the count; only below that does
-/// the kind get to speak for itself.
+/// more than one decision is waiting the body is the count — the daemon's count
+/// of decisions, the number the app shows — and only below that does the kind
+/// get to speak for itself.
 pub fn doorbell(kind: PushKind, blocked_count: u32) -> String {
     let body = match blocked_count {
         0 | 1 => kind.sentence().to_string(),
-        n => format!("{n} agents need you"),
+        n => format!("{n} waiting for you"),
     };
     let document = Doorbell {
         aps: Aps {
@@ -200,11 +201,11 @@ mod tests {
         );
         assert_eq!(
             doorbell(PushKind::Approval, 2),
-            r#"{"aps":{"alert":{"title":"CodeConnect","body":"2 agents need you"},"sound":"default","badge":2,"interruption-level":"time-sensitive"},"codeconnect":{"kind":"approval"}}"#
+            r#"{"aps":{"alert":{"title":"CodeConnect","body":"2 waiting for you"},"sound":"default","badge":2,"interruption-level":"time-sensitive"},"codeconnect":{"kind":"approval"}}"#
         );
         assert_eq!(
             doorbell(PushKind::Completed, 7),
-            r#"{"aps":{"alert":{"title":"CodeConnect","body":"7 agents need you"},"sound":"default","badge":7,"interruption-level":"time-sensitive"},"codeconnect":{"kind":"done"}}"#
+            r#"{"aps":{"alert":{"title":"CodeConnect","body":"7 waiting for you"},"sound":"default","badge":7,"interruption-level":"time-sensitive"},"codeconnect":{"kind":"done"}}"#
         );
     }
 
@@ -214,7 +215,7 @@ mod tests {
         for kind in PushKind::ALL {
             let composed = doorbell(*kind, 4);
             assert!(
-                composed.contains(r#""body":"4 agents need you""#),
+                composed.contains(r#""body":"4 waiting for you""#),
                 "{composed}"
             );
             assert!(

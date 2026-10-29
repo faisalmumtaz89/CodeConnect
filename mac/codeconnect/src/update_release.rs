@@ -33,6 +33,9 @@ pub struct Asset {
 pub struct ReleaseAssets {
     pub archive: Asset,
     pub checksum: Asset,
+    /// The release key's signature over the checksum file.
+    #[cfg(target_os = "linux")]
+    pub signature: Asset,
 }
 
 /// The largest archive worth downloading.
@@ -52,6 +55,15 @@ pub const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
+/// The machines an archive is built for, as its name says: one universal macOS
+/// archive, and one Linux archive per architecture.
+#[cfg(target_os = "macos")]
+const PLATFORM: &str = "macos-universal";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const PLATFORM: &str = "linux-x86_64";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const PLATFORM: &str = "linux-aarch64";
+
 /// The two archives a release carries.
 ///
 /// **tmux has an archive of its own.** Every released updater takes the core
@@ -70,14 +82,20 @@ impl Archive {
     /// What the archive is called for a given version.
     pub fn name(self, version: &str) -> String {
         match self {
-            Archive::Core => format!("codeconnect-{version}-macos-universal.tar.gz"),
-            Archive::Tmux => format!("codeconnect-{version}-tmux-macos-universal.tar.gz"),
+            Archive::Core => format!("codeconnect-{version}-{PLATFORM}.tar.gz"),
+            Archive::Tmux => format!("codeconnect-{version}-tmux-{PLATFORM}.tar.gz"),
         }
     }
 
     /// What its checksum file is called for a given version.
     pub fn checksum_name(self, version: &str) -> String {
         format!("{}.sha256", self.name(version))
+    }
+
+    /// What the signature over its checksum file is called.
+    #[cfg(target_os = "linux")]
+    pub fn signature_name(self, version: &str) -> String {
+        format!("{}.sig", self.checksum_name(version))
     }
 
     /// The files it installs into `bin`, and the only files it may hold.
@@ -155,6 +173,8 @@ pub fn select_assets(
     Ok(ReleaseAssets {
         archive: asset,
         checksum,
+        #[cfg(target_os = "linux")]
+        signature: wanted(&archive.signature_name(version))?,
     })
 }
 
@@ -316,6 +336,12 @@ mod tests {
                 "https://example.invalid/a.sha256",
                 90,
             ),
+            #[cfg(target_os = "linux")]
+            (
+                &Archive::Core.signature_name(version),
+                "https://example.invalid/a.sha256.sig",
+                64,
+            ),
         ])
     }
 
@@ -323,15 +349,46 @@ mod tests {
     fn a_release_carrying_both_assets_yields_their_urls() {
         let picked =
             select_assets(&both("1.2.3"), "1.2.3", Archive::Core).expect("both are present");
+        #[cfg(target_os = "macos")]
         assert_eq!(
             picked.archive.name,
             "codeconnect-1.2.3-macos-universal.tar.gz"
         );
+        // The names linux-build.yml gives the archives it packages.
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            picked.archive.name,
+            format!("codeconnect-1.2.3-linux-{}.tar.gz", std::env::consts::ARCH)
+        );
         assert_eq!(picked.archive.url, "https://example.invalid/a.tar.gz");
         assert_eq!(
             picked.checksum.name,
-            "codeconnect-1.2.3-macos-universal.tar.gz.sha256"
+            format!("{}.sha256", picked.archive.name)
         );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            picked.signature.name,
+            format!("{}.sha256.sig", picked.archive.name)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_release_missing_the_signature_is_refused_by_name() {
+        let unsigned = listing(&[
+            (
+                &Archive::Core.name("1.2.3"),
+                "https://example.invalid/a.tar.gz",
+                4096,
+            ),
+            (
+                &Archive::Core.checksum_name("1.2.3"),
+                "https://example.invalid/a.sha256",
+                90,
+            ),
+        ]);
+        let err = select_assets(&unsigned, "1.2.3", Archive::Core).unwrap_err();
+        assert!(err.contains(".sha256.sig"), "{err}");
     }
 
     /// The version is part of the name, so a release's assets cannot satisfy a
@@ -339,10 +396,7 @@ mod tests {
     #[test]
     fn assets_for_another_version_do_not_satisfy_this_one() {
         let err = select_assets(&both("1.2.3"), "1.2.4", Archive::Core).unwrap_err();
-        assert!(
-            err.contains("codeconnect-1.2.4-macos-universal.tar.gz"),
-            "{err}"
-        );
+        assert!(err.contains(&Archive::Core.name("1.2.4")), "{err}");
     }
 
     #[test]
@@ -604,6 +658,7 @@ mod tests {
 
     /// The names the release workflow publishes, spelled out rather than
     /// derived: these are the strings both sides must agree on.
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_archives_are_named_as_the_release_publishes_them() {
         assert_eq!(
@@ -617,6 +672,41 @@ mod tests {
         assert_eq!(
             Archive::Tmux.checksum_name("1.2.3"),
             "codeconnect-1.2.3-tmux-macos-universal.tar.gz.sha256"
+        );
+    }
+
+    /// The names linux-build.yml packages and release.yml signs, spelled out.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[test]
+    fn the_linux_archives_are_named_as_the_release_publishes_them() {
+        assert_eq!(
+            Archive::Core.name("1.2.3"),
+            "codeconnect-1.2.3-linux-aarch64.tar.gz"
+        );
+        assert_eq!(
+            Archive::Tmux.name("1.2.3"),
+            "codeconnect-1.2.3-tmux-linux-aarch64.tar.gz"
+        );
+        assert_eq!(
+            Archive::Tmux.signature_name("1.2.3"),
+            "codeconnect-1.2.3-tmux-linux-aarch64.tar.gz.sha256.sig"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn the_linux_archives_are_named_as_the_release_publishes_them() {
+        assert_eq!(
+            Archive::Core.name("1.2.3"),
+            "codeconnect-1.2.3-linux-x86_64.tar.gz"
+        );
+        assert_eq!(
+            Archive::Tmux.name("1.2.3"),
+            "codeconnect-1.2.3-tmux-linux-x86_64.tar.gz"
+        );
+        assert_eq!(
+            Archive::Tmux.signature_name("1.2.3"),
+            "codeconnect-1.2.3-tmux-linux-x86_64.tar.gz.sha256.sig"
         );
     }
 
@@ -645,6 +735,18 @@ mod tests {
                 "https://example.invalid/c.sha256",
                 90,
             ),
+            #[cfg(target_os = "linux")]
+            (
+                &Archive::Core.signature_name("1.2.3"),
+                "https://example.invalid/c.sha256.sig",
+                64,
+            ),
+            #[cfg(target_os = "linux")]
+            (
+                &Archive::Tmux.signature_name("1.2.3"),
+                "https://example.invalid/t.sha256.sig",
+                64,
+            ),
         ]);
         let core = select_assets(&release, "1.2.3", Archive::Core).unwrap();
         assert_eq!(core.archive.url, "https://example.invalid/c.tar.gz");
@@ -657,10 +759,7 @@ mod tests {
     #[test]
     fn a_release_without_the_tmux_archive_says_so_by_name() {
         let err = select_assets(&both("1.2.3"), "1.2.3", Archive::Tmux).unwrap_err();
-        assert!(
-            err.contains("codeconnect-1.2.3-tmux-macos-universal.tar.gz"),
-            "{err}"
-        );
+        assert!(err.contains(&Archive::Tmux.name("1.2.3")), "{err}");
     }
 
     fn tmux_members(paths: &[&str]) -> Vec<Member> {

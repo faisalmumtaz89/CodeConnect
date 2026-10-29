@@ -262,6 +262,8 @@ def check(root):
         # The session ending ends the client cleanly and restores the terminal.
         tmux_run("kill-session", "-t", "=cc-1")
         again.until(again.exited, "the client exited", seconds=5)
+        # Its exit can be seen before its last bytes are read from the terminal.
+        again.settle(0.5)
         assert again.status == 0, again.status
         assert again.output.endswith(b"\x1b[<99u") or b"\x1b[?25h" in again.output[-200:], again.output[-200:]
         print("Native bytes, one answer per query, resize, phone beside, detach, re-attach and exit passed")

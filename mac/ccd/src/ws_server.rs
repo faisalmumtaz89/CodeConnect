@@ -2946,7 +2946,7 @@ fn validated_registration(
     let token = crate::apns::normalize_device_token(token).map_err(|err| format!("{err}"))?;
     match mode {
         crate::apns::PushMode::Off => {
-            Err("push is not configured on this Mac, so there is nowhere to register".into())
+            Err("push is not configured on this computer, so there is nowhere to register".into())
         }
         crate::apns::PushMode::Direct => Ok((token, None)),
         crate::apns::PushMode::Relay => {
@@ -4037,6 +4037,7 @@ mod tests {
         assert_eq!(reply["protocol_version"], protocol::PROTOCOL_VERSION);
     }
 
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn the_ack_names_this_machine_as_its_owner_named_it() {
         // `scutil` is the owner's own view of the name, read independently of
@@ -4051,6 +4052,23 @@ mod tests {
         assert_eq!(reply["type"], "hello_ack");
         assert_eq!(reply["machine_name"], computer_name.trim_end_matches('\n'));
         assert_eq!(reply["machine_os"], "macos");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_ack_names_this_linux_machine_by_its_hostname() {
+        // `uname -n` is the system's own view of the name, read independently
+        // of the call under test.
+        let uname = std::process::Command::new("uname")
+            .arg("-n")
+            .output()
+            .unwrap();
+        let hostname = String::from_utf8(uname.stdout).unwrap();
+        let (server, _) = live_server(protocol::config::Config::default()).await;
+        let (_socket, reply) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(reply["type"], "hello_ack");
+        assert_eq!(reply["machine_name"], hostname.trim_end_matches('\n'));
+        assert_eq!(reply["machine_os"], "linux");
     }
 
     #[tokio::test]

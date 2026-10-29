@@ -87,14 +87,16 @@ impl QrPayload {
 /// `ws_bind` to a reachable LAN address on purpose. Refusing what is certainly
 /// broken is a fact; refusing what is merely unfamiliar is a guess, and this
 /// system does not guess.
-/// Where the Tailscale CLI lives when it is installed at all. launchd hands
-/// daemons no shell `PATH`, so lookup is by known install location, never
-/// `which` — and the CLI shares this list so "is Tailscale installed" cannot
-/// answer differently on the two sides of one machine.
+/// Where the Tailscale CLI lives when it is installed at all. Neither launchd
+/// nor a systemd user unit hands the daemon a shell `PATH`, so lookup is by
+/// known install location, never `which` — and the CLI shares this list so "is
+/// Tailscale installed" cannot answer differently on the two sides of one
+/// machine. The last entry is where Linux distribution packages put it.
 pub const TAILSCALE_CANDIDATES: &[&str] = &[
     "/usr/local/bin/tailscale",
     "/opt/homebrew/bin/tailscale",
     "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/bin/tailscale",
 ];
 
 /// The installed Tailscale binary, if any candidate exists.
@@ -111,7 +113,7 @@ pub fn unreachable_host(host: &str) -> Option<&'static str> {
         return Some("is empty");
     }
     if trimmed.eq_ignore_ascii_case("localhost") {
-        return Some("is this Mac's own loopback name");
+        return Some("is this computer's own loopback name");
     }
     // An IPv6 literal may arrive bracketed, as it does inside a URL.
     let bare = trimmed
@@ -123,7 +125,7 @@ pub fn unreachable_host(host: &str) -> Option<&'static str> {
         return None;
     };
     if ip.is_loopback() {
-        return Some("is a loopback address only this Mac can reach");
+        return Some("is a loopback address only this computer can reach");
     }
     if ip.is_unspecified() {
         return Some("is the unspecified address, which is not somewhere to connect");

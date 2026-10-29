@@ -547,6 +547,90 @@ holds those descriptors open, so an external rotator that renames the file would
 leave launchd appending to an unlinked inode — the log stops growing, the disk
 keeps filling, and nothing says so.
 
+## On Linux
+
+The same three binaries, built static (musl) for x86_64 and aarch64, so one archive runs on any
+distribution; checked on Debian 12, Ubuntu 22.04 to 26.04, Fedora 44 and Alpine 3.22.
+
+**Install.** The installer at codeconnect.sh downloads the release's
+`codeconnect-<version>-linux-<arch>.tar.gz`, its `.sha256`, and `.sha256.sig` — an Ed25519
+signature over that checksum file by CodeConnect's Linux release key — and checks the signature
+with `openssl` against the key it pins before the checksum is believed or anything is unpacked or
+run. That takes OpenSSL 3 (Debian 12, Ubuntu 22.04 and later, Fedora and current Alpine ship it,
+though minimal images leave out the `openssl` command): without it the installer installs nothing and names
+the package to add. It never falls back to an unsigned install. `--source` is macOS-only.
+
+**The daemon** runs as a systemd user unit, `~/.config/systemd/user/com.codeconnect.ccd.service`,
+under the same commands as the LaunchAgent (`codeconnect daemon install`, `status`, `restart`,
+`uninstall`). It restarts five seconds after a crash and stays stopped after a clean exit;
+`KillMode=process`, because tmux and the helpers ccd starts outlive a daemon restart by design, as
+they do under launchd. Its output goes to the same `~/.codeconnect/logs/` files. A user unit stops
+at logout unless systemd's *linger* is on for the user, so `install` turns it on with
+`loginctl enable-linger` — where the system refuses that to a normal user, it stops before changing
+anything and prints the one line to run, `sudo loginctl enable-linger <uid>`. `uninstall` leaves
+linger as it is and says so. With no systemd user manager (Alpine and other OpenRC systems, a shell
+reached with `sudo -u`, most containers), `install` and `restart` refuse, change nothing, and print
+the one line that starts `ccd` by hand, appending to the same log files; `status` still shows the
+daemon. Nothing restarts a daemon started that way.
+
+**Updating** works as on macOS, with the release key in place of codesign: `codeconnect update`
+and the installer's `install-staged` take the archives named for this machine's architecture, and
+believe a checksum only once its signature verifies against `RELEASE_KEY`
+(`codeconnect/src/update_install.rs`) — before the digest, the listing, the unpacking, or running
+anything. On Linux, `install-staged` installs the release's own verified binaries rather than the
+ones the installer handed over. Archives are listed and unpacked with `/bin/tar` (busybox's on
+Alpine reads the same).
+
+**Tailscale.** The CLI is looked for at `/usr/bin/tailscale` too, where the distribution packages
+put it. An address `tailscale ip` names counts only while this machine can bind it: after
+`tailscale down` the CLI still prints the node's addresses while the interface no longer carries
+them, so the daemon stays on loopback and moves onto the tailnet when the tunnel is back, instead of
+failing to bind on every start. `tailscale up` is refused to a normal user unless they are
+Tailscale's operator, so the notes say `sudo tailscale up --qr` on Linux: it prints a QR code that
+you scan with your phone, signed in to Tailscale, and approve there, so a computer with no screen or
+browser signs in from the phone.
+
+**The machine's name** on the phone is its hostname — the kernel's, the one `hostname` prints —
+read on every handshake, so a rename shows on the next connection.
+
+### Tailscale in userspace mode (containers, cloud sandboxes)
+
+Where Tailscale cannot have a TUN device (`tailscaled` stops with `tstun.New("tailscale0"): operation
+not permitted`), it runs with `--tun=userspace-networking`: no interface holds the node's tailnet
+address, and tailscaled hands each tailnet connection to that address on to `127.0.0.1`, same port.
+The daemon then finds no tailnet address it can bind and asks `tailscale status --json`; when that
+says `"TUN": false` and a running backend, it listens on `127.0.0.1:8787` and the pairing code
+carries the tailnet IPv4 address, served as `ws://` over WireGuard. Such machines usually have no
+systemd either, so `ccd` is started by hand. From a root shell on a fresh Debian or Ubuntu machine:
+
+```sh
+apt-get update && apt-get install -y curl openssl
+curl -fsSL https://tailscale.com/install.sh | sh
+mkdir -p /var/lib/tailscale
+nohup tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state >/var/log/tailscaled.log 2>&1 </dev/null &
+tailscale up --qr              # scan the QR with your phone, signed in to Tailscale, and approve
+useradd -m -s /bin/bash dev    # the installer does not run as root
+su - dev
+```
+
+Then, as that user:
+
+```sh
+curl -fsSL https://codeconnect.sh | sh
+mkdir -p ~/.codeconnect/logs && nohup ~/.codeconnect/bin/ccd >>~/.codeconnect/logs/ccd.out.log 2>>~/.codeconnect/logs/ccd.err.log </dev/null &
+```
+
+Once it has started, a second later, show the pairing code:
+
+```sh
+~/.codeconnect/bin/codeconnect pair
+```
+
+Start `ccd` after `tailscale up`. One started before stays on loopback and says in its log when the
+address appears; restart it by stopping it (`codeconnect daemon status` shows its pid) and running
+the same line again. Nothing starts tailscaled or `ccd` again after either stops or the machine
+restarts.
+
 ## Soaking it
 
 `soak/` is a repeatable gauntlet against the **installed** daemon — the same
@@ -626,7 +710,8 @@ Two checks now make that state impossible to hand to a phone:
   unspecified, and names the recovery for what chose that bind: with no `ws_bind`,
   set up or connect Tailscale (or set `ws_bind`); with a `ws_bind` naming that
   address, change it; with one naming another address, it is not applied yet —
-  then `codeconnect daemon restart`. The launch note reads the bind the same way.
+  then `codeconnect daemon restart` (with no systemd, stopping the daemon and starting
+  it again by hand, with the line it prints). The launch note reads the bind the same way.
 
 The phone applies the same rule to a scanned code, offline, before it dials — see
 `PairingQRPayload.unreachableHost`. Both sides reject only what is *definitionally*
@@ -892,7 +977,8 @@ event that decided it. A page moves no subscription watermark and is not counted
 as a delivery for notifications; a second page asked for a session while one is
 being sent is queued behind it. The new summary fields are omitted when empty.
 `>= 25` says which computer this is: `hello_ack.machine_name`, the Mac's computer
-name read on every handshake (omitted when it cannot be read), and
+name or the Linux hostname, read on every handshake (omitted when it cannot be
+read), and
 `hello_ack.machine_os`, `macos` or `linux`. A phone that gets no name names the
 computer by the host it paired with.
 `>= 26` says which daemon this is, whatever address reached it:
@@ -1272,6 +1358,10 @@ for](#what-the-phone-can-ask-for).
 cargo test                        # the workspace suite, including fixture replay
 soak/run.sh                       # the live gauntlet, against a real session
 ```
+
+On Linux, run the suite with `TMPDIR` set to a folder you own: the tests make
+their temporary folder owner-only, as macOS's per-user one already is, and the
+shared `/tmp` is not yours to change.
 
 The daemon's own tests drive a **fake supervisor** over a screen the test
 controls: before typing it checks for the prompt with the same `protocol::ipc`
