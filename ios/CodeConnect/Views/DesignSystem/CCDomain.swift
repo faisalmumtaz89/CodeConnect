@@ -155,68 +155,72 @@ extension CCStatusDot {
     }
 }
 
-extension CCFreshnessPill {
-    /// Link health, expressed so that no state is ever shown without its age.
-    ///
-    /// This initialiser is the **only** written-down copy of the freshness
-    /// table. Note that the label colour is not simply the tone colour: `live`
-    /// prints its age in `textTertiary`, because a healthy link is not news.
-    init(health: LinkHealth, action: (() -> Void)? = nil) {
-        let dot: Color
-        let label: Color
-        var hollow = false
-        var pulses = false
+/// **A computer, and whether it is answering** — the one label for it, on the
+/// home screen's project cards and in a session's header.
+///
+/// A green dot is a live link and says nothing more: a healthy link is not news.
+/// Anything else is said in a word beside the name — the dot alone would be a
+/// colour asked to carry a fact. It takes the link's level rather than reading
+/// it, because the level is derived from the clock: each caller reads it in a
+/// view of its own, so the second is charged to that view and not to a list.
+struct CCMachineLabel: View {
+    /// Nil while no daemon has named the computer: the dot and any word stand
+    /// alone.
+    let name: String?
+    let level: LinkHealth.Level
+    /// Nil wraps, which a project card has room for; the header's one line
+    /// truncates instead.
+    var lineLimit: Int?
+    /// Half the footnote's cap height, so the dot sits on the first line's
+    /// middle however many lines the name wraps to.
+    @ScaledMetric(relativeTo: .footnote) private var capMiddle: CGFloat = 4.5
 
-        switch health.level {
-        case .live:
-            dot = CC.color.success
-            label = CC.text.tertiary
-        case .lagging:
-            dot = CC.color.warning
-            label = CC.color.warning
-        case .stale:
-            dot = CC.color.danger
-            label = CC.color.danger
-        case .connecting:
-            dot = CC.color.info
-            label = CC.text.tertiary
-            pulses = true
-        case .offline:
-            dot = CC.text.tertiary
-            label = CC.text.tertiary
-            hollow = true
-        case .rejected:
-            dot = CC.color.danger
-            label = CC.color.danger
+    var body: some View {
+        let mark = level.machineMark
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
+            CCStatusDot(color: mark.dot, size: CC.size.dotSm, isHollow: mark.hollow)
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + capMiddle }
+            // One run of text, so it wraps or truncates as a whole: a word cut
+            // off the end of a name it belongs to reads as part of the name.
+            (Text(verbatim: name ?? "").foregroundStyle(CC.text.secondary)
+                + Text(Self.suffix(name: name, word: mark.word)).foregroundStyle(CC.text.primary))
+                .ccType(CC.type.footnote)
+                .lineLimit(lineLimit)
+                .fixedSize(horizontal: false, vertical: lineLimit == nil)
         }
-
-        let isAge: Bool
-        switch health.level {
-        case .live, .lagging, .stale: isAge = true
-        case .connecting, .offline, .rejected: isAge = false
-        }
-        self.init(
-            age: health.shortText,
-            prefix: isAge ? "link" : nil,
-            dotColor: dot,
-            labelColor: label,
-            isHollow: hollow,
-            pulses: pulses,
-            accessibilityLabelText: "Link health",
-            accessibilityValueText: Self.spokenValue(for: health),
-            accessibilityHintText: action == nil ? nil : "Opens connection details",
-            action: action)
     }
 
-    private static func spokenValue(for health: LinkHealth) -> String {
-        let word = health.word
-        switch health.level {
+    private static func suffix(name: String?, word: String?) -> String {
+        guard let word else { return "" }
+        return name == nil ? word : " · \(word)"
+    }
+}
+
+extension LinkHealth.Level {
+    /// The dot, and the word said beside a computer's name — none while the
+    /// link is live or merely lagging.
+    var machineMark: (dot: Color, hollow: Bool, word: String?) {
+        switch self {
+        case .live: return (CC.color.success, false, nil)
+        case .lagging: return (CC.color.warning, false, nil)
+        case .stale: return (CC.color.danger, false, "Stale")
+        case .connecting: return (CC.color.info, false, "Connecting")
+        case .offline: return (CC.text.tertiary, true, "Offline")
+        case .rejected: return (CC.color.danger, false, "Not paired")
+        }
+    }
+}
+
+extension LinkHealth {
+    /// What VoiceOver says for the link: the state, and its age while there is
+    /// a link to age, spelled out — "14s" is read as "fourteen ess".
+    var spokenValue: String {
+        switch level {
         case .live, .lagging, .stale:
-            // VoiceOver reads "14s" as "fourteen ess"; spell it out.
-            let age = health.age.map(Format.spokenAge) ?? "unknown"
+            let age = age.map(Format.spokenAge) ?? "unknown"
             return "\(word). Daemon last spoke \(age)."
         default:
-            return "\(word). \(health.detail)"
+            return "\(word). \(detail)"
         }
     }
 }

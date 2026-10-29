@@ -242,6 +242,23 @@ enum TimelineBuilder {
         return ordered
     }
 
+    /// **The rows the session screen draws: every item, less a "Turn complete"
+    /// that Claude's own reply already ends.**
+    ///
+    /// A turn that ends on Claude's words needs no second line saying so. One
+    /// that ends on a tool call, a card or nothing at all has no other end on
+    /// screen until Claude Code's `idle_prompt` — a minute later — so its line
+    /// stays. Only the row goes: the item stays in the timeline, where fleet
+    /// status reads it.
+    static func drawn(_ items: [TimelineItem]) -> [TimelineItem] {
+        items.enumerated().compactMap { index, item in
+            guard case .notice(let notice) = item.content, notice.kind == .turnComplete,
+                index > 0, case .agentMessage = items[index - 1].content
+            else { return item }
+            return nil
+        }
+    }
+
     static func build(_ events: [Event]) -> [TimelineItem] {
         guard !events.isEmpty else { return [] }
         let events = inHistoryOrder(events)

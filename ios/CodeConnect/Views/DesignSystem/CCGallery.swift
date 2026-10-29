@@ -115,7 +115,7 @@ import SwiftUI
                 badgeSection
                 tagSection
                 dotSection
-                freshnessSection
+                machineLabelSection
             case .controls:
                 fieldSection
                 voiceButtonSection
@@ -1006,28 +1006,20 @@ import SwiftUI
             }
         }
 
-        // MARK: Freshness
+        // MARK: Machine label
 
-        private var freshnessSection: some View {
-            section("CCFreshnessPill") {
-                // Three to a row: six labelled pills are wider than a phone, and a
-                // row wider than the page scrolled the whole page sideways.
-                CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
-                    CCFreshnessPill(
-                        health: LinkHealth(level: .live, age: 1.2, detail: "Live."),
-                        action: { lastAction = "link" })
-                    CCFreshnessPill(
-                        health: LinkHealth(level: .lagging, age: 18, detail: "Link lagging."))
-                    CCFreshnessPill(
-                        health: LinkHealth(level: .stale, age: 61, detail: "Gone quiet."))
-                }
-                CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
-                    CCFreshnessPill(
-                        health: LinkHealth(level: .connecting, age: nil, detail: "Opening."))
-                    CCFreshnessPill(
-                        health: LinkHealth(level: .offline, age: nil, detail: "Not paired."))
-                    CCFreshnessPill(
-                        health: LinkHealth(level: .rejected, age: nil, detail: "Token rejected."))
+        private var machineLabelSection: some View {
+            section("CCMachineLabel") {
+                VStack(alignment: .leading, spacing: CC.space.xs) {
+                    ForEach(
+                        [LinkHealth.Level.live, .lagging, .stale, .connecting, .offline, .rejected],
+                        id: \.self
+                    ) { level in
+                        CCMachineLabel(name: "Jordan’s Mac Studio", level: level)
+                    }
+                    CCMachineLabel(
+                        name: "Jordan’s MacBook Pro (16-inch, Nov 2024)", level: .offline,
+                        lineLimit: 1)
                 }
             }
         }

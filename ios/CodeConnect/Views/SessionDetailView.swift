@@ -1064,7 +1064,7 @@ struct SessionDetailView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 // Interactive everywhere. A control that looks tappable and is
                 // not is worse than no control.
-                SessionLinkPill { showLinkDetail = true }
+                SessionMachineLink { showLinkDetail = true }
             }
             .ccPlainToolbarItem()
         }
@@ -1756,7 +1756,10 @@ private struct SessionTimeline: View {
                     // evaluate every entry to count them: measured at 3000
                     // entries, opening took 1.04–1.15s with the marker as a row
                     // of its own and 0.57–0.61s with it folded in.
-                    ForEach(Array(state.timeline.enumerated()), id: \.element.id) { index, item in
+                    // Drawn rows, not items: a reply already ends its turn, so
+                    // its "Turn complete" row is left out (`TimelineBuilder.drawn`).
+                    let rows = TimelineBuilder.drawn(state.timeline)
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, item in
                         VStack(alignment: .leading, spacing: 0) {
                             TimelineRow(
                                 item: item, profile: model.daemonProfile,
@@ -1787,9 +1790,9 @@ private struct SessionTimeline: View {
                             }
                             // 8pt inside a turn, 20pt between turns. One rule, and it
                             // does more for readability than any amount of styling.
-                            .padding(.top, topSpacing(at: index, in: state.timeline))
+                            .padding(.top, topSpacing(at: index, in: rows))
 
-                            if let gap = state.gap, index == gapIndex(state.timeline, gap: gap) {
+                            if let gap = state.gap, index == gapIndex(rows, gap: gap) {
                                 CCGapMarker(
                                     label: gap.message,
                                     actionLabel: "Dismiss this notice",
@@ -1862,7 +1865,8 @@ private struct SessionTimeline: View {
                 // gated on the settled flag alone they went uncounted and
                 // the pill said "Latest" over rows never seen.
                 guard tailWatch.isAway else { return }
-                tailWatch.newSinceLeaving += TimelineEnd.rowsAfter(old, in: state.timeline)
+                tailWatch.newSinceLeaving += TimelineEnd.rowsAfter(
+                    old, in: TimelineBuilder.drawn(state.timeline))
             }
             .onChange(of: model.isReadyToPage(key)) { _, ready in
                 if ready { pageAnchor.wake() }
@@ -2058,9 +2062,8 @@ private struct SessionFreshness: View {
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    /// Said with what it measures. Bare, `53s` sat a row below the link pill's
-    /// own bare `0s` and above a card's `waiting 4s`: three numbers of seconds
-    /// on one screen, two of them unexplained. At accessibility sizes it is
+    /// Said with what it measures. Bare, `53s` sat above a card's `waiting 4s`:
+    /// numbers of seconds on one screen, unexplained. At accessibility sizes it is
     /// `1m ago`: the whole phrase beside an AX5 title read `last… 1… ago`, and
     /// moving it to a line of its own pushed the screen down a line.
     var body: some View {
@@ -2096,16 +2099,34 @@ private struct SessionFreshness: View {
 /// `SessionDetailView.body` that second was charged to a 400-event timeline to
 /// redraw two characters. The read now lives with the only view whose output
 /// depends on it.
-private struct SessionLinkPill: View {
+/// **The computer this session is on, and whether it is answering** — the home
+/// screen's label (`CCMachineLabel`), on one line, as the button that opens the
+/// link's details. It reads the link itself, so the clock ticks this view alone.
+private struct SessionMachineLink: View {
     @Environment(AppModel.self) private var model
     let action: () -> Void
 
     var body: some View {
-        // Nothing at all in the sample fleet. The pill's whole subject is how
-        // long ago a Mac last spoke, and a control reporting on a link that does
-        // not exist is worse than an empty slot however honestly it renders.
+        // Nothing at all in the sample fleet: a control reporting on a link
+        // that does not exist is worse than an empty slot however honestly it
+        // renders.
         if !model.sampleFleetActive {
-            CCFreshnessPill(health: model.linkHealth, action: action)
+            let health = model.linkHealth
+            Button {
+                CCHaptic.light.fire()
+                action()
+            } label: {
+                CCMachineLabel(name: model.machineName, level: health.level, lineLimit: 1)
+                    .frame(minHeight: CC.size.hitTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Link health")
+            .accessibilityValue(
+                [model.machineName, health.spokenValue].compactMap { $0 }.joined(separator: ". "))
+            .accessibilityHint("Opens connection details")
+            .accessibilityAddTraits(.isButton)
         }
     }
 }

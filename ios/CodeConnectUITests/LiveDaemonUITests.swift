@@ -143,6 +143,11 @@ final class LiveDaemonUITests: XCTestCase {
     /// The Stop hook now arrives as `EventKind::TurnComplete`, and the timeline
     /// renders it as a finished turn rather than a finished session.
     ///
+    /// A finished turn shows as its "Turn complete" line where nothing else ends
+    /// it, and as Claude's idle reminder a minute later where its reply did —
+    /// either one is a turn that finished, and neither may read as a session
+    /// that ended.
+    ///
     /// Skips unless something has actually run a turn — this reads the log, it
     /// does not drive the agent.
     func testTurnCompleteRendersAsAFinishedTurn() throws {
@@ -150,7 +155,8 @@ final class LiveDaemonUITests: XCTestCase {
         try openFirstSession(app)
 
         let turn = app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS 'Turn complete'")
+            NSPredicate(
+                format: "label CONTAINS 'Turn complete' OR label CONTAINS 'waiting for your input'")
         ).firstMatch
         let ended = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS 'Session ended'")
