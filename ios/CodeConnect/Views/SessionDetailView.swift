@@ -975,7 +975,7 @@ struct SessionDetailView: View {
             // items into an overflow menu on a phone — the diff button
             // disappeared behind a "…" — and it clips outright at large Dynamic
             // Type sizes. Below the bar it has the whole width and grows.
-            // Absent in the sample fleet, like the link pill: the terminal is
+            // Absent in the sample fleet, like the header's link: the terminal is
             // the same connection as everything else, and the sample has none.
             // With the picker gone the timeline default is the only surface,
             // so the tab that would answer in pairing vocabulary cannot be
@@ -1896,16 +1896,23 @@ private struct SessionTimeline: View {
             }
             .onAppear {
                 proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
-                pageAnchor.timeline = { [weak model, key] in model?.shown(for: key)?.timeline ?? [] }
+                // The anchor maps list rows to items, so it is handed the rows the
+                // list draws (`TimelineBuilder.drawn`), never the items behind them.
+                pageAnchor.timeline = { [weak model, key] in
+                    TimelineBuilder.drawn(model?.shown(for: key)?.timeline ?? [])
+                }
                 pageAnchor.pageBackOnItsOwn = { [weak model, key] in
                     model?.pageBackOnItsOwn(key: key)
                 }
                 model.onWindowChange(of: key) { [weak anchor = pageAnchor] shown, next, change in
-                    anchor?.willChange(shown: shown, next: next, change: change)
+                    anchor?.willChange(
+                        shown: TimelineBuilder.drawn(shown), next: TimelineBuilder.drawn(next),
+                        change: change)
                 }
                 model.onCatchUpLanding(of: key) { [weak anchor = pageAnchor] shown, next in
                     anchor?.catchUpWillLand(
-                        shown: shown.timeline, next: next.timeline,
+                        shown: TimelineBuilder.drawn(shown.timeline),
+                        next: TimelineBuilder.drawn(next.timeline),
                         endMoves: TimelineEnd(shown.timeline, drawnThrough: shown.drawnThrough)
                             != TimelineEnd(next.timeline, drawnThrough: next.drawnThrough))
                 }
@@ -2092,19 +2099,16 @@ private struct SessionFreshness: View {
     }
 }
 
-/// **The one thing in this toolbar that has to change every second.**
-///
-/// How long ago the Mac last spoke is what licenses everything else on the
-/// screen, `linkHealth` is derived from `now`, and read from
-/// `SessionDetailView.body` that second was charged to a 400-event timeline to
-/// redraw two characters. The read now lives with the only view whose output
-/// depends on it.
 /// **The computer this session is on, and whether it is answering** — the home
 /// screen's label (`CCMachineLabel`), on one line, as the button that opens the
 /// link's details. It reads the link itself, so the clock ticks this view alone.
 private struct SessionMachineLink: View {
     @Environment(AppModel.self) private var model
     let action: () -> Void
+
+    /// Under what a 375pt phone's bar leaves beside its margins and the back
+    /// and diff buttons: about 238pt, from those measured on a 402pt bar.
+    private static let widest: CGFloat = 220
 
     var body: some View {
         // Nothing at all in the sample fleet: a control reporting on a link
@@ -2116,7 +2120,14 @@ private struct SessionMachineLink: View {
                 CCHaptic.light.fire()
                 action()
             } label: {
+                // Left to the bar, the label is measured short of its own text
+                // ("Jordan’s Mac Stu…" with the bar half empty), and an item
+                // wider than the bar's room goes behind "•••". So it sets its
+                // own width: its text, up to what the narrowest phone leaves
+                // beside the back and diff buttons, where the name gives way.
                 CCMachineLabel(name: model.machineName, level: health.level, lineLimit: 1)
+                    .frame(maxWidth: Self.widest, alignment: .trailing)
+                    .fixedSize()
                     .frame(minHeight: CC.size.hitTarget)
                     .contentShape(Rectangle())
             }

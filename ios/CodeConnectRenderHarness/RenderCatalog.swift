@@ -375,13 +375,13 @@ struct RenderDriver {
         try require(app.navigationBars["Settings"], "the Settings screen")
     }
 
-    /// Link health, from the session screen's pill. A fixture's computer has no
-    /// screen of its own in Settings to open it from.
+    /// Link health, from the session header's computer name. A fixture's
+    /// computer has no screen of its own in Settings to open it from.
     func openLinkHealth(_ app: XCUIApplication) throws {
         try openFirstSession(app)
-        let pill = app.buttons["Link health"].firstMatch
-        try require(pill, "the session's link pill")
-        pill.tap()
+        let link = app.buttons["Link health"].firstMatch
+        try require(link, "the session header's link")
+        link.tap()
         // The sheet is `CCSheetChrome`, so there is no navigation bar to wait
         // on — the measured sentence is the signal.
         try require(element(containing: "daemon last spoke", in: app), "the link-health sheet")

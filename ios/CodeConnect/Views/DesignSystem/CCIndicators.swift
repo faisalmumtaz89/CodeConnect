@@ -4,7 +4,7 @@ import SwiftUI
 //  CCBadge / CCTag / CCStatusDot — how state gets on screen.
 //
 //  "Status is one dot + one word. Never a coloured pill *and* a rail *and* an
-//  icon." These three are the entire vocabulary; a screen that needs a fifth
+//  icon." These three are the entire vocabulary; a screen that needs a fourth
 //  needs a conversation, not a one-off.
 // =============================================================================
 

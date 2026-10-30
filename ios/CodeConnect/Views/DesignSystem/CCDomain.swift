@@ -169,7 +169,7 @@ struct CCMachineLabel: View {
     let name: String?
     let level: LinkHealth.Level
     /// Nil wraps, which a project card has room for; the header's one line
-    /// truncates instead.
+    /// truncates the name instead, and never the word.
     var lineLimit: Int?
     /// Half the footnote's cap height, so the dot sits on the first line's
     /// middle however many lines the name wraps to.
@@ -180,13 +180,25 @@ struct CCMachineLabel: View {
         HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
             CCStatusDot(color: mark.dot, size: CC.size.dotSm, isHollow: mark.hollow)
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + capMiddle }
-            // One run of text, so it wraps or truncates as a whole: a word cut
-            // off the end of a name it belongs to reads as part of the name.
-            (Text(verbatim: name ?? "").foregroundStyle(CC.text.secondary)
-                + Text(Self.suffix(name: name, word: mark.word)).foregroundStyle(CC.text.primary))
+            if let lineLimit {
+                // Cut short, the name gives way and the word stays whole: the
+                // word is the one fact the dot cannot say alone.
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    Text(verbatim: name ?? "").foregroundStyle(CC.text.secondary)
+                        .lineLimit(lineLimit)
+                    Text(Self.suffix(name: name, word: mark.word))
+                        .foregroundStyle(CC.text.primary)
+                        .fixedSize()
+                }
                 .ccType(CC.type.footnote)
-                .lineLimit(lineLimit)
-                .fixedSize(horizontal: false, vertical: lineLimit == nil)
+            } else {
+                // One run of text, so it wraps as a whole: a word wrapped apart
+                // from the name it belongs to reads as a second fact.
+                (Text(verbatim: name ?? "").foregroundStyle(CC.text.secondary)
+                    + Text(Self.suffix(name: name, word: mark.word)).foregroundStyle(CC.text.primary))
+                    .ccType(CC.type.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
