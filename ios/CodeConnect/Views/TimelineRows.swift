@@ -77,11 +77,11 @@ struct TimelineRow: View {
 /// edge, by `ccGutterMark()` (measured at L: a tool glyph spans 26.7–44.7,
 /// centre 35.7).
 ///
-/// Named rather than repeated so a tool row, a notice row and a user message
-/// cannot drift apart, which is exactly what happened when each of them owned
+/// Named rather than repeated so a tool row and a notice row cannot drift
+/// apart, which is exactly what happened when each of them owned
 /// its own padding.
 enum TimelineSpine {
-    /// Holds the tool glyph, the notice glyph and the user-message bar: 16 → 40
+    /// Holds the tool glyph and the notice glyph: 16 → 40
     /// from the screen's edge, each centred on the mark axis (`ccGutterMark()`).
     static let gutter: CGFloat = CC.space.xl
     static let gap: CGFloat = CC.space.sm
@@ -111,12 +111,11 @@ extension View {
 
 // MARK: - Messages
 
-/// What you said, marked by a bar rather than by a colour.
+/// What you said, in a quiet surface on Claude's own reading lane.
 ///
-/// This replaces a `Color.accentColor.opacity(0.12)` block. The accent is the
-/// primary action's fill; spending it on "a human typed this" made every user
-/// message look like a button, and put a second blue on a screen where blue is
-/// supposed to mean nothing at all.
+/// Your words and the reply they prompted start on one edge, 28pt from the
+/// screen's, so a conversation reads down one line. Nothing marks the row in
+/// the gutter: "YOU" and the raised surface already say whose words these are.
 struct UserMessageRow: View {
     let text: String
     let date: Date
@@ -136,39 +135,25 @@ struct UserMessageRow: View {
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.tertiary)
             }
-            // **`YOU` is a text run, so it starts where text starts.** It sat on
-            // the list's own 16pt margin — measured x=16.33 — while the message
-            // it labels, the notice rows around it and the identity block above
-            // it all held 52.67. Δ −35.67pt, on a screen that is allowed two
-            // vertical edges. The timestamp keeps the trailing edge, which is a
-            // different rule and is correct.
-            .padding(.leading, TimelineSpine.content)
+            // **`YOU` is a text run, so it starts where text starts**: on the
+            // reading lane, one `sm` step off the list's 16pt margin, where
+            // Claude's reply starts too. The timestamp keeps the trailing edge.
+            .padding(.leading, CC.space.sm)
 
-            // The bubble **hangs back by its own padding**, so its text — not
-            // its border — starts on 52 under `YOU`: border 40, text 52, the
-            // kit's rule for a nested surface (`CCColumn.hang`). Set at the
-            // gap, the label sat on the border and the words 12pt right of it.
-            HStack(alignment: .top, spacing: TimelineSpine.gap - CC.space.sm) {
-                // The marker. 2pt of `borderStrong` says "this one is yours"
-                // without spending a hue on it — and it sits in the same gutter
-                // as every glyph on this screen.
-                Rectangle()
-                    .fill(CC.color.borderStrong)
-                    .frame(width: 2)
-                    .ccGutterMark()
-                    .accessibilityHidden(true)
-                Text(text)
-                    .ccType(isCommand ? CC.type.monoSmall : CC.type.callout)
-                    .foregroundStyle(CC.text.primary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(CC.space.sm)
-                    .background(
-                        CC.color.surfaceRaised,
-                        in: RoundedRectangle(cornerRadius: CC.radius.md, style: .continuous))
-            }
-            .fixedSize(horizontal: false, vertical: true)
+            // The surface **hangs back by its own padding**, the kit's rule for
+            // a surface on the reading lane (`CCColumn.hang`): border on the 16pt
+            // page margin, words on 28 under `YOU` — the same edges a code block
+            // or table in Claude's reply keeps.
+            Text(text)
+                .ccType(isCommand ? CC.type.monoSmall : CC.type.userMessage)
+                .foregroundStyle(CC.text.primary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(CC.space.sm)
+                .background(
+                    CC.color.surfaceRaised,
+                    in: RoundedRectangle(cornerRadius: CC.radius.md, style: .continuous))
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("You said: \(text)")
@@ -353,10 +338,11 @@ struct AgentMessageRow: View {
         // **No container is not the same as no column.** The agent's prose is
         // the ground of the timeline and draws nothing around itself, so it
         // reads in its own lane: one `sm` step off the list's 16pt margin, which
-        // lands text on x=28. That is deliberately inside the 52 the tool,
-        // notice and user rows hold — those carry a glyph or a bar in the gutter
-        // and stay on the operational column, while prose, which has no mark to
-        // hang there, reads wider. The asymmetry is the point of the reading lane.
+        // lands text on x=28. That is deliberately inside the 52 the tool and
+        // notice rows hold — those carry a glyph in the gutter and stay on the
+        // operational column, while prose, which has no mark to hang there,
+        // reads wider; your own messages share this lane. The asymmetry is the
+        // point of the reading lane.
         .padding(.leading, CC.space.sm)
         // And having stepped out, it says so: the declared column is what lets a
         // mono block or a table inside this message hang its border one inner
@@ -983,6 +969,21 @@ struct NoticeRow: View {
     let date: Date
 
     var body: some View {
+        if notice.kind == .turnComplete {
+            // Drawn only where nothing else ends the turn
+            // (`TimelineBuilder.drawn`), so it is one quiet line on the reading
+            // lane rather than a success mark.
+            Text(notice.title)
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, CC.space.sm)
+        } else {
+            marked
+        }
+    }
+
+    private var marked: some View {
         HStack(alignment: .top, spacing: TimelineSpine.gap) {
             CCIcon(
                 notice.symbol, size: CC.size.icon, weight: .medium, maxSize: CCColumn.markMaxSize)

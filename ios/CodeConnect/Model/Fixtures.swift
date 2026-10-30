@@ -94,6 +94,13 @@ enum Fixtures {
         /// `deck` with one card: the force-push on `fx-1`. The accessory bar's
         /// ordinary case, which every other fixture overstates.
         case single
+        /// Two conversations on `fx-6` and `fx-7`: the short one a new user has
+        /// first ("hi"), and a longer one whose second turn ends on a tool call
+        /// with no reply after it — the one shape that keeps "Turn complete".
+        case timeline
+        /// `timeline` on a computer whose name is longer than the session
+        /// header's line, as a Mac's default name can be.
+        case timelineLongName
 
         init?(_ raw: String?) {
             guard let raw, let value = Variant(rawValue: raw) else { return nil }
@@ -105,7 +112,7 @@ enum Fixtures {
             case .deck, .ended, .ended45, .longOutput: return deckCards
             case .stacked, .wideTool, .mcpApproval: return deckCards + [stackedCard]
             case .spoofedCommand: return [spoofedCard]
-            case .empty: return []
+            case .empty, .timeline, .timelineLongName: return []
             case .single: return deckCards.filter { $0.sessionID == "fx-1" }
             }
         }
@@ -121,7 +128,7 @@ enum Fixtures {
             case .ended: return 8
             case .ended45: return 45
             case .deck, .stacked, .longOutput, .wideTool, .mcpApproval, .spoofedCommand, .empty,
-                .single:
+                .single, .timeline, .timelineLongName:
                 return 0
             }
         }
@@ -136,6 +143,7 @@ enum Fixtures {
             case .deck, .ended, .ended45, .spoofedCommand, .single: return 4
             case .stacked, .longOutput, .wideTool, .mcpApproval: return 5
             case .empty: return 0
+            case .timeline, .timelineLongName: return 7
             }
         }
 
@@ -213,7 +221,12 @@ enum Fixtures {
         let cards = variant.cards
         let held = variant.heldCard.map { [$0] } ?? []
         var messages: [ServerMessage] = []
-        if let ack = decode(helloAckJSON) { messages.append(ack) }
+        let ackJSON =
+            variant == .timelineLongName
+            ? helloAckJSON.replacingOccurrences(
+                of: "Jordan’s Mac Studio", with: "Jordan’s MacBook Pro (16-inch, Nov 2024)")
+            : helloAckJSON
+        if let ack = decode(ackJSON) { messages.append(ack) }
         if let sessions = decode(sessionsJSON(now: now, variant: variant, cards: cards + held)) {
             messages.append(sessions)
         }
@@ -235,6 +248,11 @@ enum Fixtures {
         }
         if variant == .longOutput {
             for json in longOutputJSON(now: now) {
+                if let event = decode(json) { messages.append(event) }
+            }
+        }
+        if variant == .timeline || variant == .timelineLongName {
+            for json in conversationsJSON(now: now) {
                 if let event = decode(json) { messages.append(event) }
             }
         }
@@ -685,6 +703,62 @@ enum Fixtures {
         "tool_name":"mcp__filesystem__list_directory_with_sizes",\
         "tool_input":{"path":"/Users/dev/app"}}}}
         """
+    }
+
+    /// `timeline`'s two conversations, in the shapes ccd logs for a Claude Code
+    /// run: the transcript's prompt and reply, the hooks' tool calls and Stop,
+    /// and the `idle_prompt` reminder.
+    private static func conversationsJSON(now: Date) -> [String] {
+        func event(_ session: String, _ seq: Int, _ ago: Double, _ kind: String, _ source: String,
+                   _ payload: String) -> String {
+            "{\"type\":\"event\",\"event\":{\"seq\":\(seq),\"session_id\":\"\(session)\","
+                + "\"ts\":\"\(rfc3339(now.addingTimeInterval(-ago)))\",\"kind\":\"\(kind)\","
+                + "\"source\":\"\(source)\",\"payload\":\(payload)}}"
+        }
+        func said(_ text: String) -> String { "{\"message\":{\"content\":\(quoted(text))}}" }
+        func reply(_ text: String) -> String {
+            "{\"message\":{\"content\":[{\"type\":\"text\",\"text\":\(quoted(text))}]}}"
+        }
+        func call(_ id: String, _ tool: String, _ input: String) -> String {
+            "{\"tool_use_id\":\"\(id)\",\"tool_name\":\"\(tool)\",\"tool_input\":\(input)}"
+        }
+        func result(_ id: String, _ output: String) -> String {
+            "{\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\(id)\","
+                + "\"is_error\":false,\"content\":\(quoted(output))}]}}"
+        }
+        let stop = "{\"hook_event_name\":\"Stop\"}"
+        let idle =
+            "{\"hook_event_name\":\"Notification\",\"notification_type\":\"idle_prompt\","
+            + "\"message\":\"Claude is waiting for your input\"}"
+        return [
+            event("fx-6", 1, 70, "user_message", "transcript", said("hi")),
+            event("fx-6", 2, 68, "agent_message", "transcript", reply("Hi! What can I help you with?")),
+            event("fx-6", 3, 68, "turn_complete", "hook", stop),
+            event("fx-6", 4, 8, "notification", "hook", idle),
+
+            event("fx-7", 1, 300, "user_message", "transcript",
+                  said("Run the tests and fix whatever fails.")),
+            event("fx-7", 2, 298, "agent_message", "transcript", reply("I'll run the suite first.")),
+            event("fx-7", 3, 297, "tool_call", "hook", call("toolu_tl_1", "Bash", "{\"command\":\"npm test\"}")),
+            event("fx-7", 4, 290, "tool_result", "transcript",
+                  result("toolu_tl_1", "41 passed, 1 failed: parser.test.ts")),
+            event("fx-7", 5, 288, "agent_message", "transcript",
+                  reply("One failure in `parser.test.ts`: the date parser drops the timezone offset. Fixing it now.")),
+            event("fx-7", 6, 287, "tool_call", "hook",
+                  call("toolu_tl_2", "Edit", "{\"file_path\":\"/Users/dev/app-7/src/parser.ts\"}")),
+            event("fx-7", 7, 286, "tool_result", "transcript", result("toolu_tl_2", "Updated src/parser.ts")),
+            event("fx-7", 8, 285, "tool_call", "hook", call("toolu_tl_3", "Bash", "{\"command\":\"npm test\"}")),
+            event("fx-7", 9, 278, "tool_result", "transcript", result("toolu_tl_3", "42 passed")),
+            event("fx-7", 10, 276, "agent_message", "transcript",
+                  reply("All 42 tests pass. The parser now keeps the offset when it reads an ISO date.")),
+            event("fx-7", 11, 276, "turn_complete", "hook", stop),
+            event("fx-7", 12, 120, "user_message", "transcript", said("Now run the linter.")),
+            event("fx-7", 13, 118, "tool_call", "hook",
+                  call("toolu_tl_4", "Bash", "{\"command\":\"npm run lint\"}")),
+            event("fx-7", 14, 112, "tool_result", "transcript", result("toolu_tl_4", "0 problems")),
+            event("fx-7", 15, 112, "turn_complete", "hook", stop),
+            event("fx-7", 16, 50, "notification", "hook", idle),
+        ]
     }
 
     private static func turnCompleteJSON(now: Date) -> String {

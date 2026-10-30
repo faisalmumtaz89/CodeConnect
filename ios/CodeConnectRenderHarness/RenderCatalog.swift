@@ -259,17 +259,6 @@ struct RenderDriver {
         ).firstMatch
     }
 
-    /// That list's frame, resolved now and kept — the rectangle a scroll-back
-    /// aims inside for as long as it takes, after the row that named it is
-    /// gone. The screen's own frame is the fallback, and a wrong one: it is
-    /// there so a missing list fails as a subject that never came on screen
-    /// rather than as a crash.
-    func listFrame(holding fragment: String, in app: XCUIApplication) throws -> CGRect {
-        let list = list(holding: fragment, in: app)
-        guard list.waitForExistence(timeout: timeout) else { return app.frame }
-        return list.frame
-    }
-
     /// **A drag that lands inside a named element**, and therefore inside the
     /// scroll view that holds it.
     ///
@@ -296,7 +285,7 @@ struct RenderDriver {
     /// existence check inside the loop rather than a `waitForExistence` in
     /// front of it.
     /// - Parameter inside: the list's own frame, measured by the caller
-    ///   **before any scrolling** — see `listFrame(holding:in:)`. Screen
+    ///   **before any scrolling**. Screen
     ///   fractions were tried first and are wrong here for the same reason they
     ///   were wrong for the command palette: at AX5 a fixed 0.35 of the screen
     ///   lands on a decision card's own controls and 0.70 on the composer, and
@@ -386,13 +375,13 @@ struct RenderDriver {
         try require(app.navigationBars["Settings"], "the Settings screen")
     }
 
-    /// Link health, from the session screen's pill. A fixture's computer has no
-    /// screen of its own in Settings to open it from.
+    /// Link health, from the session header's computer name. A fixture's
+    /// computer has no screen of its own in Settings to open it from.
     func openLinkHealth(_ app: XCUIApplication) throws {
         try openFirstSession(app)
-        let pill = app.buttons["Link health"].firstMatch
-        try require(pill, "the session's link pill")
-        pill.tap()
+        let link = app.buttons["Link health"].firstMatch
+        try require(link, "the session header's link")
+        link.tap()
         // The sheet is `CCSheetChrome`, so there is no navigation bar to wait
         // on — the measured sentence is the signal.
         try require(element(containing: "daemon last spoke", in: app), "the link-health sheet")
@@ -634,6 +623,39 @@ enum RenderCatalog {
             reach: { app, driver in
                 try driver.openFirstSession(app)
                 try driver.require(app.buttons["open-diff"], "the session detail")
+            }),
+
+        // **A conversation, as a new user's first one reads.** Your words and
+        // Claude's on one edge, no "Turn complete" under a reply, and the
+        // computer named in the header.
+        RenderScenario(
+            name: "session-conversation",
+            purpose: "\"hi\" and Claude's answer: one edge, no line under a reply",
+            arguments: [
+                "-CC_FIXTURE", "timeline", "-CC_DEEPLINK", "codeconnect://session/fx-6",
+            ],
+            reach: { app, driver in
+                try driver.require(
+                    driver.text(containing: "waiting for your input", in: app), "the idle reminder")
+            }),
+        RenderScenario(
+            name: "session-conversation-tools",
+            purpose: "a longer exchange whose last turn ends on a tool: its line stays",
+            arguments: [
+                "-CC_FIXTURE", "timeline", "-CC_DEEPLINK", "codeconnect://session/fx-7",
+            ],
+            reach: { app, driver in
+                try driver.require(driver.text(containing: "Turn complete", in: app), "the line")
+            }),
+        // The header's one line, when the computer's name is longer than it.
+        RenderScenario(
+            name: "session-header-long-name",
+            purpose: "a computer name longer than the header's line",
+            arguments: [
+                "-CC_FIXTURE", "timelineLongName", "-CC_DEEPLINK", "codeconnect://session/fx-6",
+            ],
+            reach: { app, driver in
+                try driver.require(app.buttons["Link health"].firstMatch, "the header's link")
             }),
 
         // **The decision, as a sheet.** The Deck renders this card full
@@ -1500,9 +1522,11 @@ enum RenderCatalog {
                 // this catalogue had ever needed to do. The command row first,
                 // then the words just above it, so the photograph ends on the
                 // thing the operator could not see.
-                // Measured once, from a row that is on screen at the tail:
-                // the rectangle stays valid after that row has scrolled away.
-                let timeline = try driver.listFrame(holding: "Turn complete", in: app)
+                // The timeline list itself, measured once: its rectangle stays
+                // where it is while the rows scroll back under it.
+                let timeline = try driver.require(
+                    app.collectionViews["session-timeline"], "the session timeline"
+                ).frame
                 try driver.requireEarlier(
                     driver.element(containing: "/bin/zsh", in: app),
                     "the command tool row, whose argument the payload holds at its top level",

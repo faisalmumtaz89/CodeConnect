@@ -97,6 +97,81 @@ final class TimelineTurnTests: XCTestCase {
         }
     }
 
+    // MARK: The drawn rows
+
+    private func tool(_ seq: UInt64) -> Event {
+        event(
+            seq, "tool_call",
+            #"{"tool_use_id":"toolu_\#(seq)","tool_name":"Bash","tool_input":{"command":"npm run lint"}}"#)
+    }
+
+    /// A turn Claude's reply ends needs no second line saying so; the item stays
+    /// for the fleet's status, only the row goes.
+    func testAReplyEndsItsTurnWithoutATurnCompleteRow() {
+        let items = TimelineBuilder.build([user(1), reply(2, "Hi!"), stop(3)])
+        XCTAssertEqual(shape(items), ["you", "reply:Hi!", "notice:Turn complete"])
+        XCTAssertEqual(shape(TimelineBuilder.drawn(items)), ["you", "reply:Hi!"])
+    }
+
+    /// A turn that ends on a tool call has no other end on screen until the
+    /// idle reminder, a minute later, so its line stays.
+    func testATurnEndingOnAToolKeepsItsTurnCompleteRow() {
+        let items = TimelineBuilder.build([user(1), tool(2), stop(3)])
+        XCTAssertEqual(
+            shape(TimelineBuilder.drawn(items)), ["you", "tool:Bash", "notice:Turn complete"])
+    }
+
+    func testATurnWithNothingAfterThePromptKeepsItsTurnCompleteRow() {
+        let items = TimelineBuilder.build([user(1), stop(2)])
+        XCTAssertEqual(shape(TimelineBuilder.drawn(items)), ["you", "notice:Turn complete"])
+    }
+
+    /// The rule reads the row before the line, so it rests on Claude's reply
+    /// being logged before its own turn's Stop. Every Claude recording the
+    /// daemon emitted says it is: after a Stop, no reply arrives before the next
+    /// prompt — a scheduled task's included — starts another turn.
+    func testInEveryRecordedClaudeTurnTheReplyIsLoggedBeforeItsStop() throws {
+        let recordings = [
+            "transcript-api-errors-wire", "transcript-big-image-prompt-wire",
+            "transcript-interrupts-wire", "transcript-local-commands-wire",
+            "transcript-scheduled-prompt-wire", "transcript-skill-invocation-wire",
+            "transcript-user-lines-wire",
+        ]
+        var stops = 0
+        for name in recordings {
+            let stored = try WireRecording.json(name)
+            let runs: [[[String: Any]]] =
+                (stored as? [[String: Any]]).map { [$0] }
+                ?? (stored as? [String: [[String: Any]]]).map { Array($0.values) } ?? []
+            XCTAssertFalse(runs.isEmpty, "\(name) holds no events")
+            for run in runs {
+                let events = try WireRecording.decode(run)
+                for (index, stop) in events.enumerated() where stop.kind == .turnComplete {
+                    stops += 1
+                    for later in events[(index + 1)...] {
+                        if later.kind == .userMessage { break }
+                        XCTAssertNotEqual(
+                            later.kind, .agentMessage,
+                            "\(name): a reply at seq \(later.seq) after its turn's Stop at \(stop.seq)")
+                    }
+                }
+            }
+        }
+        XCTAssertGreaterThan(stops, 10, "the recordings carry too few turns to prove anything")
+    }
+
+    /// The word beside a computer's name, on the home screen and in a
+    /// session's header alike: none while the link is live or only lagging.
+    func testAComputersLinkIsSaidInAWordOnlyWhenItIsNotLive() {
+        let words: [LinkHealth.Level: String?] = [
+            .live: nil, .lagging: nil, .stale: "Stale", .connecting: "Connecting",
+            .offline: "Offline", .rejected: "Not paired",
+        ]
+        for (level, word) in words {
+            XCTAssertEqual(level.machineMark.word, word, "\(level)")
+        }
+    }
+
     // MARK: The idle reminder
 
     func testTheIdleReminderIsNeutralAndSaysItOnce() throws {

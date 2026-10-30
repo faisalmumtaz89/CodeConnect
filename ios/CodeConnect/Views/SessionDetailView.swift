@@ -975,7 +975,7 @@ struct SessionDetailView: View {
             // items into an overflow menu on a phone — the diff button
             // disappeared behind a "…" — and it clips outright at large Dynamic
             // Type sizes. Below the bar it has the whole width and grows.
-            // Absent in the sample fleet, like the link pill: the terminal is
+            // Absent in the sample fleet, like the header's link: the terminal is
             // the same connection as everything else, and the sample has none.
             // With the picker gone the timeline default is the only surface,
             // so the tab that would answer in pairing vocabulary cannot be
@@ -1064,7 +1064,7 @@ struct SessionDetailView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 // Interactive everywhere. A control that looks tappable and is
                 // not is worse than no control.
-                SessionLinkPill { showLinkDetail = true }
+                SessionMachineLink { showLinkDetail = true }
             }
             .ccPlainToolbarItem()
         }
@@ -1756,7 +1756,10 @@ private struct SessionTimeline: View {
                     // evaluate every entry to count them: measured at 3000
                     // entries, opening took 1.04–1.15s with the marker as a row
                     // of its own and 0.57–0.61s with it folded in.
-                    ForEach(Array(state.timeline.enumerated()), id: \.element.id) { index, item in
+                    // Drawn rows, not items: a reply already ends its turn, so
+                    // its "Turn complete" row is left out (`TimelineBuilder.drawn`).
+                    let rows = TimelineBuilder.drawn(state.timeline)
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, item in
                         VStack(alignment: .leading, spacing: 0) {
                             TimelineRow(
                                 item: item, profile: model.daemonProfile,
@@ -1787,9 +1790,9 @@ private struct SessionTimeline: View {
                             }
                             // 8pt inside a turn, 20pt between turns. One rule, and it
                             // does more for readability than any amount of styling.
-                            .padding(.top, topSpacing(at: index, in: state.timeline))
+                            .padding(.top, topSpacing(at: index, in: rows))
 
-                            if let gap = state.gap, index == gapIndex(state.timeline, gap: gap) {
+                            if let gap = state.gap, index == gapIndex(rows, gap: gap) {
                                 CCGapMarker(
                                     label: gap.message,
                                     actionLabel: "Dismiss this notice",
@@ -1862,7 +1865,8 @@ private struct SessionTimeline: View {
                 // gated on the settled flag alone they went uncounted and
                 // the pill said "Latest" over rows never seen.
                 guard tailWatch.isAway else { return }
-                tailWatch.newSinceLeaving += TimelineEnd.rowsAfter(old, in: state.timeline)
+                tailWatch.newSinceLeaving += TimelineEnd.rowsAfter(
+                    old, in: TimelineBuilder.drawn(state.timeline))
             }
             .onChange(of: model.isReadyToPage(key)) { _, ready in
                 if ready { pageAnchor.wake() }
@@ -1892,16 +1896,23 @@ private struct SessionTimeline: View {
             }
             .onAppear {
                 proxy.scrollTo(Self.tailAnchor, anchor: .bottom)
-                pageAnchor.timeline = { [weak model, key] in model?.shown(for: key)?.timeline ?? [] }
+                // The anchor maps list rows to items, so it is handed the rows the
+                // list draws (`TimelineBuilder.drawn`), never the items behind them.
+                pageAnchor.timeline = { [weak model, key] in
+                    TimelineBuilder.drawn(model?.shown(for: key)?.timeline ?? [])
+                }
                 pageAnchor.pageBackOnItsOwn = { [weak model, key] in
                     model?.pageBackOnItsOwn(key: key)
                 }
                 model.onWindowChange(of: key) { [weak anchor = pageAnchor] shown, next, change in
-                    anchor?.willChange(shown: shown, next: next, change: change)
+                    anchor?.willChange(
+                        shown: TimelineBuilder.drawn(shown), next: TimelineBuilder.drawn(next),
+                        change: change)
                 }
                 model.onCatchUpLanding(of: key) { [weak anchor = pageAnchor] shown, next in
                     anchor?.catchUpWillLand(
-                        shown: shown.timeline, next: next.timeline,
+                        shown: TimelineBuilder.drawn(shown.timeline),
+                        next: TimelineBuilder.drawn(next.timeline),
                         endMoves: TimelineEnd(shown.timeline, drawnThrough: shown.drawnThrough)
                             != TimelineEnd(next.timeline, drawnThrough: next.drawnThrough))
                 }
@@ -2058,9 +2069,8 @@ private struct SessionFreshness: View {
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
-    /// Said with what it measures. Bare, `53s` sat a row below the link pill's
-    /// own bare `0s` and above a card's `waiting 4s`: three numbers of seconds
-    /// on one screen, two of them unexplained. At accessibility sizes it is
+    /// Said with what it measures. Bare, `53s` sat above a card's `waiting 4s`:
+    /// numbers of seconds on one screen, unexplained. At accessibility sizes it is
     /// `1m ago`: the whole phrase beside an AX5 title read `last… 1… ago`, and
     /// moving it to a line of its own pushed the screen down a line.
     var body: some View {
@@ -2089,23 +2099,45 @@ private struct SessionFreshness: View {
     }
 }
 
-/// **The one thing in this toolbar that has to change every second.**
-///
-/// How long ago the Mac last spoke is what licenses everything else on the
-/// screen, `linkHealth` is derived from `now`, and read from
-/// `SessionDetailView.body` that second was charged to a 400-event timeline to
-/// redraw two characters. The read now lives with the only view whose output
-/// depends on it.
-private struct SessionLinkPill: View {
+/// **The computer this session is on, and whether it is answering** — the home
+/// screen's label (`CCMachineLabel`), on one line, as the button that opens the
+/// link's details. It reads the link itself, so the clock ticks this view alone.
+private struct SessionMachineLink: View {
     @Environment(AppModel.self) private var model
     let action: () -> Void
 
+    /// Under what a 375pt phone's bar leaves beside its margins and the back
+    /// and diff buttons: about 238pt, from those measured on a 402pt bar.
+    private static let widest: CGFloat = 220
+
     var body: some View {
-        // Nothing at all in the sample fleet. The pill's whole subject is how
-        // long ago a Mac last spoke, and a control reporting on a link that does
-        // not exist is worse than an empty slot however honestly it renders.
+        // Nothing at all in the sample fleet: a control reporting on a link
+        // that does not exist is worse than an empty slot however honestly it
+        // renders.
         if !model.sampleFleetActive {
-            CCFreshnessPill(health: model.linkHealth, action: action)
+            let health = model.linkHealth
+            Button {
+                CCHaptic.light.fire()
+                action()
+            } label: {
+                // Left to the bar, the label is measured short of its own text
+                // ("Jordan’s Mac Stu…" with the bar half empty), and an item
+                // wider than the bar's room goes behind "•••". So it sets its
+                // own width: its text, up to what the narrowest phone leaves
+                // beside the back and diff buttons, where the name gives way.
+                CCMachineLabel(name: model.machineName, level: health.level, lineLimit: 1)
+                    .frame(maxWidth: Self.widest, alignment: .trailing)
+                    .fixedSize()
+                    .frame(minHeight: CC.size.hitTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Link health")
+            .accessibilityValue(
+                [model.machineName, health.spokenValue].compactMap { $0 }.joined(separator: ". "))
+            .accessibilityHint("Opens connection details")
+            .accessibilityAddTraits(.isButton)
         }
     }
 }

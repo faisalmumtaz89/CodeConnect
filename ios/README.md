@@ -865,7 +865,7 @@ haptic is not motion, and removing it removes information.
 | `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH. <rationale>` |
 | `CCCountChip` | `CCCountChip(3)` — the same construction with a number in it. Used by `CCSectionHeader`; never hand-rolled |
 | `CCStatusDot` | `CCStatusDot(color:size:isHollow:pulses:)` · `CCStatusDot(tone:…)` · `CCStatusDot(status:size:isCached:)` — scales with Dynamic Type to `CC.size.dotMaxScale` (8 → 14 at AX5) |
-| `CCFreshnessPill` | `CCFreshnessPill(health:action:)` — the only written copy of the freshness table: each `LinkHealth.level` maps to one dot, one mono label (an age, after the word `link`, while there is a link to age), whether actions are enabled, and which banner (if any) shows |
+| `CCMachineLabel` | `CCMachineLabel(name:level:lineLimit:)` — a computer and whether it answers: a dot, the name, and a word (`Stale`, `Connecting`, `Offline`, `Not paired`) only while the link is not live. The home screen's project cards wrap it; the session header sets it on one line, where the name truncates and the word stays whole, as the button that opens the link's details. The one table is `LinkHealth.Level.machineMark` |
 | `CCField` | `CCField(label:text:placeholder:hint:error:axis:lineLimit:isSecure:keyboardType:…:isMono:labelOnContentColumn:onSubmit:)` — 52pt. `label` is **optional**: an empty string still reserves ~22pt of its line, `nil` draws no row. The label steps out to the content column unless `labelOnContentColumn: false`, for a document with no gutter (the question sheet), where it sits on the field's edge |
 | `CCSectionHeader` | `CCSectionHeader("Blocked", count:, dotColor:, dotPulses:, note:, noteAction:, actionTitle:, action:)` — **place it flush**: it puts its own label on the 52pt column and takes no column parameter. The dot hangs itself into the 32pt gutter, takes no layout width, and stays centred on that axis as it scales |
 | `CCEmptyState` | `CCEmptyState(glyph:title:message:tone:actionTitle:action:actionDisabledReason:secondaryActionTitle:secondaryAction:)` — the primary action is `.primary`, because an empty state has exactly one action worth taking, and `actionDisabledReason:` *draws* why the only way out is shut |
@@ -909,9 +909,7 @@ it measures as a pass and fails under a thumb.
 So `CCSegmented` draws its 36pt track inside a button that is genuinely 44pt
 tall (4pt of transparent overhang, 3pt of track padding, a 30pt thumb — every
 point inside the `Button`'s own frame); it shipped with the border drawn around
-the hit target and measured **49.67pt**. `CCFreshnessPill` draws its 36 inside
-44 — it shipped as the height of its own content, **22.33pt**, beside a 36pt
-bordered circle on the same baseline. And a `CCBadge` that carries an `action` is
+the hit target and measured **49.67pt**. And a `CCBadge` that carries an `action` is
 not a badge: file chips and toggles are `CC.size.chip`
 32, not the label's 20, so a row of things to press stops reading as a strip of
 captions.
@@ -1211,8 +1209,8 @@ as a tall portrait box with a word wedged into it.
 **VoiceOver** — every interactive component carries a label, the right traits
 (`.isButton`, `.isSelected`, `.isHeader`), and a value where state exists
 (`"Busy"` while loading). `CCHoldButton` exposes a plain activation because
-VoiceOver cannot express a hold. `CCFreshnessPill` speaks ages as words
-("14 seconds ago"), never "fourteen ess".
+VoiceOver cannot express a hold. The session header's link button speaks the
+link's age as words ("14 seconds ago"), never "fourteen ess".
 
 ## Reviewing the system
 

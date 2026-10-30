@@ -626,28 +626,37 @@ extension CC {
             size: 16, lineHeight: 22, weight: .regular, tracking: 0,
             design: .default, relativeTo: .body, documentedColor: CC.text.primary)
 
-        /// 18/25 regular, uncapped. **Agent reading prose — that alone.**
+        /// 13.5/18.75 regular, uncapped. **Agent reading prose — that alone.**
         ///
-        /// A point larger and a line taller than `body`, on its own token so the
-        /// timeline's reading lane can grow without dragging `body`'s other
-        /// callers — the composer, fact rows, buttons, onboarding — up with it,
-        /// which would make body copy larger than a headline everywhere else.
+        /// On its own token so the timeline's reading lane can be sized without
+        /// moving `body`'s other callers — the composer, fact rows, buttons,
+        /// onboarding. Set so a reply reads as a conversation rather than a page,
+        /// which puts it under a tool row's name.
         /// Uncapped on purpose: this is the one run a reader enlarged the type to
         /// read, so it must keep growing to AX5 rather than meet a ceiling.
         static let reading = CCTextStyle(
-            size: 18, lineHeight: 25, weight: .regular, tracking: 0,
+            size: 13.5, lineHeight: 18.75, weight: .regular, tracking: 0,
             design: .default, relativeTo: .body, documentedColor: CC.text.primary)
 
-        /// 18/25 **semibold**, uncapped. **A heading inside agent reading prose.**
+        /// 13.5/18.75 **semibold**, uncapped. **A heading inside agent reading
+        /// prose.**
         ///
-        /// The same size and leading as `reading`, heavier only — because a
-        /// heading set at `headline` (17) would render *smaller* than the 18pt
-        /// prose beneath it, inverting the hierarchy. It rides the same `.body`
-        /// ramp as `reading`, so the two scale in lockstep and the heading is
-        /// never smaller than the prose it titles, at any Dynamic Type step.
+        /// The same size and leading as `reading`, heavier only, so a heading is
+        /// never set smaller than the prose beneath it. It rides the same `.body`
+        /// ramp as `reading`, so the two scale in lockstep at every Dynamic Type
+        /// step.
         static let readingHeading = CCTextStyle(
-            size: 18, lineHeight: 25, weight: .semibold, tracking: 0,
+            size: 13.5, lineHeight: 18.75, weight: .semibold, tracking: 0,
             design: .default, relativeTo: .body, documentedColor: CC.text.primary)
+
+        /// 11.25/15 regular. **What you said, in the timeline — that alone.**
+        ///
+        /// Three-quarters of `callout`, on its `.callout` ramp: your own words
+        /// are the context for the reply, not the thing being read, so they sit
+        /// a step under Claude's.
+        static let userMessage = CCTextStyle(
+            size: 11.25, lineHeight: 15, weight: .regular, tracking: 0,
+            design: .default, relativeTo: .callout, documentedColor: CC.text.primary)
 
         /// 15/20 semibold. The fleet row's session name — one step under
         /// `headline`, so a band of rows reads as a list rather than as titles.

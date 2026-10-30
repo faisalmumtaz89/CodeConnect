@@ -1273,49 +1273,23 @@ struct BlockedCard: Equatable {
 /// one decision — a third line has to carry something the two above it do not.
 // MARK: - The three views that are allowed to read the clock
 
-/// **The computer a project is on, and whether it is answering.**
-///
-/// A green dot is a live link and says nothing more: a healthy link is not news.
-/// Anything else is said in a word beside the name — the dot alone would be a
-/// colour asked to carry a fact. The link is that computer's own, and the label
-/// reads it itself because the link is derived from the clock, and read from
-/// `FleetView.body` that second was charged to the whole list. Nothing when the
-/// computer has no name — nothing is paired and no daemon has named one, the
-/// sample fleet among them, whose dot would report a link that does not exist.
+/// **The computer a project is on, and whether it is answering** — the shared
+/// `CCMachineLabel`, reading that computer's own link here because the link is
+/// derived from the clock, and read from `FleetView.body` that second was charged
+/// to the whole list. Nothing when the computer has no name — nothing is paired
+/// and no daemon has named one, the sample fleet among them, whose dot would
+/// report a link that does not exist.
 private struct MachineLabel: View {
     @Environment(Machines.self) private var machines
     let machineID: String?
     let name: String?
-    /// Half the footnote's cap height, so the dot sits on the first line's
-    /// middle however many lines the name wraps to.
-    @ScaledMetric(relativeTo: .footnote) private var capMiddle: CGFloat = 4.5
 
     var body: some View {
         if let name, let model = machines.model(for: machineID) {
-            let state = Self.state(model.linkHealth.level)
-            HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-                CCStatusDot(color: state.dot, size: CC.size.dotSm, isHollow: state.hollow)
-                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + capMiddle }
-                // One run of text, so it wraps rather than truncates: half a
-                // computer's name names none.
-                (Text(verbatim: name).foregroundStyle(CC.text.secondary)
-                    + Text(state.word.map { " · \($0)" } ?? "").foregroundStyle(CC.text.primary))
-                    .ccType(CC.type.footnote)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("On \(name), \(state.word ?? "connected")")
-        }
-    }
-
-    private static func state(_ level: LinkHealth.Level) -> (dot: Color, hollow: Bool, word: String?) {
-        switch level {
-        case .live: return (CC.color.success, false, nil)
-        case .lagging: return (CC.color.warning, false, nil)
-        case .stale: return (CC.color.danger, false, "Stale")
-        case .connecting: return (CC.color.info, false, "Connecting")
-        case .offline: return (CC.text.tertiary, true, "Offline")
-        case .rejected: return (CC.color.danger, false, "Not paired")
+            let level = model.linkHealth.level
+            CCMachineLabel(name: name, level: level)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("On \(name), \(level.machineMark.word ?? "connected")")
         }
     }
 }

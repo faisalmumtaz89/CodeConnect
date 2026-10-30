@@ -1,10 +1,10 @@
 import SwiftUI
 
 // =============================================================================
-//  CCBadge / CCTag / CCStatusDot / CCFreshnessPill — how state gets on screen.
+//  CCBadge / CCTag / CCStatusDot — how state gets on screen.
 //
 //  "Status is one dot + one word. Never a coloured pill *and* a rail *and* an
-//  icon." These four are the entire vocabulary; a screen that needs a fifth
+//  icon." These three are the entire vocabulary; a screen that needs a fourth
 //  needs a conversation, not a one-off.
 // =============================================================================
 
@@ -433,90 +433,5 @@ struct CCStatusDot: View {
     private var pulseAnimation: Animation? {
         guard pulses, !reduceMotion else { return nil }
         return .easeInOut(duration: 1.6).repeatForever(autoreverses: true)
-    }
-}
-
-// MARK: - Freshness pill
-
-/// Dot plus a monospace age. Always visible, always both halves: a state
-/// without an age is a claim the app cannot back up.
-///
-/// Driven by a single freshness table — see `CCFreshnessPill.init(health:action:)`
-/// in CCDomain.swift, which is the only place that table is written down.
-struct CCFreshnessPill: View {
-    /// Already formatted — `0.4s`, `18s`, `offline`. Monospace, so a ticking
-    /// number does not shuffle the layout on every tick.
-    let age: String
-    /// What `age` is the age of — `link` — set as prose before it. Nil where
-    /// `age` is already a word (`offline`).
-    var prefix: String?
-    var dotColor: Color = CC.color.success
-    var labelColor: Color = CC.text.tertiary
-    var isHollow: Bool = false
-    var pulses: Bool = false
-    var accessibilityLabelText: String = "Link health"
-    var accessibilityValueText: String?
-    var accessibilityHintText: String?
-    var action: (() -> Void)?
-
-    var body: some View {
-        Group {
-            if let action {
-                Button {
-                    CCHaptic.light.fire()
-                    action()
-                } label: { pill }
-                .buttonStyle(CCFreshnessPillStyle())
-            } else {
-                pill
-            }
-        }
-        // Toolbars compress custom content to its minimum width, which silently
-        // collapsed the age to nothing — and an age you cannot read is the one
-        // thing this pill exists for. Measured; do not remove.
-        .fixedSize()
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityLabelText)
-        .accessibilityValue(accessibilityValueText ?? age)
-        .accessibilityHint(accessibilityHintText ?? "")
-        .accessibilityAddTraits(action != nil ? .isButton : [])
-    }
-
-    private var pill: some View {
-        HStack(spacing: CC.space.xxs + 1) {
-            CCStatusDot(
-                color: dotColor, size: CC.size.dotSm, isHollow: isHollow, pulses: pulses)
-            if let prefix {
-                Text(prefix)
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(labelColor)
-                    .fixedSize()
-            }
-            Text(age)
-                .ccType(CC.type.monoSmall)
-                .foregroundStyle(labelColor)
-                .fixedSize()
-        }
-        .padding(.horizontal, CC.space.sm)
-        .padding(.vertical, CC.space.xxs + 1)
-        // **36pt of drawn pill**, the toolbar row's height, applied before the
-        // capsule so the capsule takes it. It shipped as the height of its own
-        // content — measured **22.33pt** beside a 36pt bordered circle on the
-        // same baseline, which read as two controls from two different systems
-        // rather than as one toolbar.
-        .frame(minHeight: CC.size.controlSm)
-        .background(CC.color.surfaceRaised, in: Capsule())
-        .overlay { Capsule().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
-        // 36pt of chrome, 44pt of finger — and the 44 is the button's real
-        // frame, not a `contentShape` reaching outside one.
-        .frame(minHeight: CC.size.hitTarget)
-        .contentShape(Rectangle())
-    }
-}
-
-private struct CCFreshnessPillStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .ccPressScale(configuration.isPressed, scale: 0.96)
     }
 }
