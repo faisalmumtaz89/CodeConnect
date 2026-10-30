@@ -15,7 +15,7 @@ harness that is not shipped.
 ## Run it
 
 This builds from source. To install the signed release instead, follow
-[Getting started](../README.md#getting-started) in the top-level README.
+[Install](../README.md#install) in the top-level README.
 
 ```sh
 ./install.sh                      # build + install to ~/.codeconnect/bin
@@ -32,6 +32,11 @@ system tmux.
 
 `codeconnect claude` passes every argument through to the real `claude`, so
 `codeconnect claude --permission-mode default --resume` works exactly as expected.
+With no terminal to show a session in — a script, a pipe, `ssh` without `-t` — it hosts
+nothing and runs the `claude` it would have hosted directly, so its output and exit
+status are Claude Code's. A hosted session's `codeconnect claude` or `codeconnect codex`
+exits 0 whatever the agent exited with; a script that needs that status runs the agent
+directly.
 
 Claude and Codex sessions get the environment of the shell that launched them — API
 keys, a virtualenv or direnv `PATH` — not the one the tmux server was started with.
@@ -1366,6 +1371,14 @@ fails the suite instead of failing silently in production.
 
 ## Known limits
 
+* **A re-attached tab gets back only what tmux tracks.** `codeconnect attach`
+  repaints the session from tmux's record of it, and tmux does not track kitty
+  keyboard flags or focus reporting: an agent that turned them on when it started
+  (Codex and Claude Code push kitty flags) gets the terminal's default key encoding
+  and no focus events in a re-attached tab. tmux's device-attributes answer also
+  arrives before the terminal's answer to kitty's keyboard query, the order agents
+  read as "no kitty keyboard support". Two tabs on one session share one size: tmux
+  sizes the session for the tab used most recently.
 * **Which transport carries a push is decided at boot, from the config file
   alone.** `push_enabled: false` is off. Any one of `apns_key_path`,
   `apns_key_id`, `apns_team_id` or `apns_topic` is a request for direct

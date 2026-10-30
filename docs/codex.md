@@ -35,8 +35,8 @@ sent again after `fg`, it goes through once. A link the daemon opens meanwhile i
 answered the same way, its `initialize` included, and connects once Codex runs again. An approval answered on the phone
 meanwhile is not a request: it is passed to Codex, which acts on it after `fg`.
 Closing the tab, `exit` or `kill %1` while it is stopped ends the session, as they end
-a stopped `codex`. The phone's Terminal tab never keeps a stopped Codex held: a Ctrl+Z
-typed there with no terminal at the Mac attached is let go at once.
+a stopped `codex`. The phone cannot open a terminal on a Codex session: the daemon
+refuses it, as the terminal is a Claude feature.
 A Ctrl+C pressed while the session is still starting is held until your terminal is
 attached, then reaches Codex, so the launch quits as `codex` does rather than leaving a
 session running unseen.
