@@ -17,6 +17,9 @@ User-facing changes, newest first. Mac releases are cut per
   line, and turned to landscape the Terminal tab fills the screen. The key row is one row with Paste
   and Hide keyboard, and a tap on a web link opens a sheet with the whole address, Open in Safari
   and Copy link.
+- On iOS 27, "Show all" on a long output keeps your place, as it does on iOS 26: the lines you were
+  reading stay where they were, the Latest button offers the way back, and events that arrive are
+  counted ("1 new") instead of scrolling you on.
 
 ## CodeConnect runs on Linux
 
