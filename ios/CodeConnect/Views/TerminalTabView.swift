@@ -115,6 +115,9 @@ struct TerminalTabView: View {
             // arriving at it. The view outlives the visit now, so `onAppear`
             // alone would only ever fire for the first one.
             guard showing else { return }
+            // Still attached from the last visit: the phone is the screen in
+            // use again, so the agent redraws for it.
+            if case .mine = standing { session.claim() }
             connectIfPossible()
         }
         .onChange(of: scenePhase) { _, phase in

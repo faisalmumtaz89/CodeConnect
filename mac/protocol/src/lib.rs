@@ -584,7 +584,17 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         daemon's home ([`machine_id_path`]) and the same on every handshake.
 ///
 ///     A client that gets none tells machines apart by address, as before.
-pub const PROTOCOL_MINOR: u32 = 26;
+///   * `27` — **The screen in use sets the terminal's size.**
+///
+///     A supervisor at this minor runs with a Mac viewer that marks its terminal
+///     as the screen in use when it is typed into or resized, and a job control
+///     that tells the phone's tmux client by its `TERM`. For such a session the
+///     daemon attaches the phone's client without `ignore-size` and marks it in
+///     use when the phone opens, sizes or types into the terminal, so the agent
+///     is drawn for whichever screen was used last. A session whose supervisor
+///     speaks an earlier minor keeps the Mac's size, as before. Nothing changes
+///     on the wire for phones.
+pub const PROTOCOL_MINOR: u32 = 27;
 
 #[cfg(test)]
 mod ledger_tests {

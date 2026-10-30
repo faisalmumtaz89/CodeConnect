@@ -1131,7 +1131,7 @@ fn a_stopped_codex_stops_its_app_server_and_refuses_the_phone() {
     let run = sb.expected_run_dir(uid);
     let mut coord = sb.spawn_coordinator(uid);
     assert!(wait_until(Duration::from_secs(30), || sb.has_session("cc-1")));
-    // The viewer at the Mac: a control client that is not the phone's (`ignore-size`).
+    // The viewer at the Mac: a control client that is not the phone's.
     let mut viewer = Command::new(&sb.tmux)
         .args([
             "-S",

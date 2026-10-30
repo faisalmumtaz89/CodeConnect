@@ -930,12 +930,18 @@ impl View {
         if !matches!(self.phase, Phase::Streaming) {
             return Ok(());
         }
-        if std::mem::take(&mut self.resized) {
+        let resized = std::mem::take(&mut self.resized);
+        if resized {
             if let Some((cols, rows)) = crate::tmux::terminal_size() {
                 self.send(protocol::tmux::resize_line(cols, rows).as_bytes())?;
             }
         }
         let typed = std::mem::take(&mut self.typed);
+        // This terminal is the screen in use: the window takes its size again
+        // if the phone had it, before the keys land.
+        if resized || !typed.is_empty() {
+            self.send(protocol::tmux::in_use_line(&self.session).as_bytes())?;
+        }
         for chunk in typed.chunks(SEND_KEYS_CHUNK) {
             self.send(send_keys_line(&self.pane, chunk).as_bytes())?;
         }

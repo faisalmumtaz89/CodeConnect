@@ -272,13 +272,24 @@ fn exited(agent: libc::pid_t) -> bool {
 
 /// How many viewers at the Mac the pane's session has, if its tmux server answers:
 /// `None` once the session or the server is gone. The phone's terminal is attached as
-/// a client too, flagged `ignore-size`; it is not a viewer, since nobody can `fg` from it.
+/// a client too — named by its `TERM`, or flagged `ignore-size` by a daemon older than
+/// this build — and it is not a viewer, since nobody can `fg` from it.
 fn viewers() -> Option<usize> {
-    let answer = tmux(&["list-clients", "-t", &pane(), "-F", "#{client_flags}"])?;
+    let answer = tmux(&[
+        "list-clients",
+        "-t",
+        &pane(),
+        "-F",
+        "#{client_termname} #{client_flags}",
+    ])?;
     Some(
         answer
             .lines()
-            .filter(|flags| !flags.split(',').any(|flag| flag == "ignore-size"))
+            .filter(|client| {
+                let (term, flags) = client.split_once(' ').unwrap_or((client, ""));
+                term != protocol::tmux::PHONE_CLIENT_TERM
+                    && !flags.split(',').any(|flag| flag == "ignore-size")
+            })
             .count(),
     )
 }

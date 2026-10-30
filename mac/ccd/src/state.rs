@@ -91,6 +91,9 @@ const SUPERVISOR_MINOR_QUESTION_TIMEOUT: u32 = 21;
 const SUPERVISOR_MINOR_COMPOSER_RECOVERY: u32 = 9;
 /// The supervisor build that can *complete* a view instead of dismissing it.
 const SUPERVISOR_MINOR_CONFIRM_VIEW: u32 = 10;
+/// The supervisor build whose Mac viewer wins the window back when it is used
+/// and whose job control tells the phone's client by `TERM`.
+const SUPERVISOR_MINOR_SCREEN_IN_USE: u32 = 27;
 
 /// How long a single `tmux has-session` may take before the sweep gives up on
 /// it. A client that reaches a live server answers in single-digit
@@ -7002,6 +7005,16 @@ impl Daemon {
             .supervisors
             .get(session_uid)
             .map(|handle| handle.protocol_minor)
+    }
+
+    /// Whether the phone's terminal on this run may take the window while it is
+    /// the screen in use. Only when the run's supervisor is a build whose Mac
+    /// viewer wins it back: a session started before `codeconnect update` keeps
+    /// its viewer and supervisor, and with them the Mac's size, until it ends.
+    pub async fn screen_in_use(&self, session_uid: &str) -> bool {
+        self.supervisor_minor(session_uid)
+            .await
+            .is_some_and(|minor| minor >= SUPERVISOR_MINOR_SCREEN_IN_USE)
     }
 
     /// Resolve configured needle overrides into the request itself, so the

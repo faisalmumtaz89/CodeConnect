@@ -2020,16 +2020,15 @@ impl Scratch {
     /// width — the causal signal of a resize, read from the *client* rather than
     /// the window on purpose.
     ///
-    /// Measured on tmux 3.7b: the daemon attaches `-f ignore-size`, and such a
-    /// client governs the window's geometry only while it is the sole client on
-    /// the *whole server*. Any other client anywhere — a different session, any
-    /// size, even smaller — suppresses it entirely and the window keeps its
-    /// created size. That is the "a phone never shrinks the human at the Mac"
-    /// property doing its job, and it is not an edge case here: this gauntlet's
-    /// own target run holds a client on the server for the whole run, so the
-    /// window never follows. An assertion on `#{window_width}` therefore fails
-    /// against a daemon that resized correctly, which is the opposite of what a
-    /// gauntlet is for.
+    /// Whether the window follows depends on the session, not on the resize. For
+    /// a session whose supervisor predates protocol minor 27 the daemon attaches
+    /// `-f ignore-size`, and such a client governs the window only while it is
+    /// the sole client on the *whole server* (measured on tmux 3.7b) — and this
+    /// gauntlet's own target run holds a client on the server for the whole run.
+    /// For a newer session the phone's client takes the window when it is the
+    /// screen in use, and gives it back when a Mac viewer is typed into. An
+    /// assertion on `#{window_width}` would therefore pass or fail by which kind
+    /// of session the gauntlet found, not by whether the daemon resized.
     ///
     /// What the daemon *can* do, and does, is issue `refresh-client -C
     /// {cols}x{rows}`, and that updates the client's own declared width whether
@@ -3088,11 +3087,10 @@ pub async fn terminal_roundtrip(target: &Target) -> Outcome {
     //
     // Read out of band from tmux instead, from the client and not the window —
     // see `wait_for_client_width` for why the window is the wrong instrument
-    // here: the daemon's `-f ignore-size` client governs the window only while
-    // it is the sole client on the whole server, and this gauntlet's own target
-    // run keeps a client on it, so the window deliberately does not follow. The
-    // client's declared width does follow the daemon's `refresh-client -C`, so
-    // it is the fact that separates a forwarded resize from a dropped one.
+    // here: whether it follows depends on the session's supervisor and on which
+    // screen was used last. The client's declared width does follow the daemon's
+    // `refresh-client -C`, so it is the fact that separates a forwarded resize
+    // from a dropped one.
     //
     // The baseline is genuine and read, not assumed — the pane is created 80x24
     // and the attach asks for 80x24, so the client starts at 80 and 100 is a
@@ -3115,14 +3113,14 @@ pub async fn terminal_roundtrip(target: &Target) -> Outcome {
         scratch.close();
         return Outcome::failed(format!(
             "the resize never reached the daemon's client: {complaint} — the daemon issues \
-             `refresh-client -C` on the resize, which moves its client's declared width even \
-             when `ignore-size` keeps the window from following"
+             `refresh-client -C` on the resize, which moves its client's declared width \
+             whether or not the window follows"
         ))
         .with_notes(notes);
     }
     notes.push(
         "the daemon's client widened to 100 columns after the resize (the window itself follows \
-         only while that client is sole on the server, so a phone never resizes a human's view)"
+         it only while the phone is the screen in use, for a session at minor 27 or later)"
             .into(),
     );
     // And the stream is neither closed nor wedged by it, which the absence of a

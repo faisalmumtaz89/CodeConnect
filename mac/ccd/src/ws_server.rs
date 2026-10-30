@@ -2219,6 +2219,7 @@ where
                 let session_uid = session_uid.clone();
                 let credit = Arc::clone(&credit);
                 tokio::spawn(async move {
+                    let screen_in_use = daemon.screen_in_use(&session_uid).await;
                     let opened = tokio::time::timeout(
                         attach_deadline(),
                         crate::terminal::TerminalHandle::open(
@@ -2230,6 +2231,7 @@ where
                             credit,
                             chunks,
                             acks_tx,
+                            screen_in_use,
                         ),
                     )
                     .await;

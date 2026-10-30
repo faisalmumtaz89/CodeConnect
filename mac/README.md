@@ -1377,8 +1377,10 @@ fails the suite instead of failing silently in production.
   (Codex and Claude Code push kitty flags) gets the terminal's default key encoding
   and no focus events in a re-attached tab. tmux's device-attributes answer also
   arrives before the terminal's answer to kitty's keyboard query, the order agents
-  read as "no kitty keyboard support". Two tabs on one session share one size: tmux
-  sizes the session for the tab used most recently.
+  read as "no kitty keyboard support". Tabs on one session share one size with each
+  other and with the phone's terminal: the session takes the size of whichever was
+  last typed into or resized, and the phone also when its terminal opens or comes
+  back on screen. Focus alone does not count, since a tab gets no focus events.
 * **Which transport carries a push is decided at boot, from the config file
   alone.** `push_enabled: false` is off. Any one of `apns_key_path`,
   `apns_key_id`, `apns_team_id` or `apns_topic` is a request for direct

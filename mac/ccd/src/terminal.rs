@@ -41,7 +41,8 @@
 //! Everything that could attach to the *wrong* session is settled before a byte
 //! flows. The `session_uid` is resolved to one live session pinned to its
 //! server epoch ([`protocol::tmux::resolve_owned_session`]); the client is
-//! spawned with `-N -C -E -f ignore-size` against that session's internal id;
+//! spawned with `-N -C -E` against that session's internal id (see
+//! [`protocol::tmux::daemon_attach_argv`] for when it is also `-f ignore-size`);
 //! the client's own `%session-changed` must name that same id; and the attach
 //! is re-verified by the spawned client's pid
 //! ([`protocol::tmux::reverify_owned_client`]) before the handle is returned.
@@ -1383,6 +1384,7 @@ impl TerminalHandle {
         output_credit: Arc<Semaphore>,
         chunks: OutputSender,
         input_written: mpsc::UnboundedSender<u32>,
+        screen_in_use: bool,
     ) -> Result<TerminalHandle, OpenError> {
         // (A test may hold every attach here, to act inside the window this
         // spends resolving, spawning and waiting for a client to bind.)
@@ -1414,15 +1416,17 @@ impl TerminalHandle {
 
         let bin = tmux::tmux_bin()
             .ok_or_else(|| OpenError::Unavailable("tmux is not installed".to_string()))?;
-        let argv = tmux::daemon_attach_argv(socket, &owned.session_id)
+        let argv = tmux::daemon_attach_argv(socket, &owned.session_id, screen_in_use)
             .ok_or_else(|| OpenError::Unavailable("session is not addressable".to_string()))?;
 
         // Plain pipes: control mode is a text protocol, not a screen. The
         // client finds the server from the argv, so the environment carries
-        // nothing; `TMUX`/`TMUX_PANE` are removed so it never believes it is
+        // nothing but `TERM`, the name that tells this client from a Mac
+        // viewer; `TMUX`/`TMUX_PANE` are removed so it never believes it is
         // nested. `kill_on_drop` is the last-resort backstop under the reaper.
         let mut child = tokio::process::Command::new(&bin)
             .args(&argv)
+            .env("TERM", tmux::PHONE_CLIENT_TERM)
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .stdin(std::process::Stdio::piped())
@@ -1483,6 +1487,7 @@ impl TerminalHandle {
             input_written,
             close.clone(),
             closed.clone(),
+            screen_in_use,
         ));
         // The reaper owns the child and the leases: whatever ends the carrier,
         // the client is waited on and the slot frees only after; and a client
@@ -3209,6 +3214,7 @@ async fn write_client(
     input_written: mpsc::UnboundedSender<u32>,
     close: watch::Sender<bool>,
     mut closed: watch::Receiver<bool>,
+    screen_in_use: bool,
 ) {
     let mut stdin = stdin;
 
@@ -3241,6 +3247,18 @@ async fn write_client(
             &mut closed,
         )
         .await;
+        // Opening the terminal is using it.
+        if ok && screen_in_use {
+            let claim = tmux::in_use_line(&session_id).into_bytes();
+            ok = write_command(
+                &mut stdin,
+                &replies,
+                ExpectedReply::Empty,
+                &claim,
+                &mut closed,
+            )
+            .await;
+        }
     }
     'outer: while ok {
         tokio::select! {
@@ -3252,6 +3270,15 @@ async fn write_client(
                 // attach gate confirmed the seed — but a missing binding is
                 // dropped rather than guessed.
                 let Some(dest) = target.borrow().as_ref().map(|bound| bound.dest.clone()) else { continue };
+                // Typing on the phone makes it the screen in use, before the
+                // keys land, so they reach an agent drawn for the phone.
+                if screen_in_use {
+                    let claim = tmux::in_use_line(&session_id).into_bytes();
+                    ok = write_command(&mut stdin, &replies, ExpectedReply::Empty, &claim, &mut closed).await;
+                    if !ok {
+                        break 'outer;
+                    }
+                }
                 // Split across commands: tmux parses each argument onto a yacc
                 // stack, and one maximal 16 KiB chunk as a single command
                 // overflows it (measured: `parse error: yacc stack overflow`).
@@ -3304,6 +3331,12 @@ async fn write_client(
                 let (cols, rows) = *resize.borrow_and_update();
                 let line = tmux::resize_line(cols, rows).into_bytes();
                 ok = write_command(&mut stdin, &replies, ExpectedReply::Empty, &line, &mut closed).await;
+                // A phone that sizes its view is the screen in use (the app
+                // re-sends its size when the terminal comes on screen).
+                if ok && screen_in_use {
+                    let claim = tmux::in_use_line(&session_id).into_bytes();
+                    ok = write_command(&mut stdin, &replies, ExpectedReply::Empty, &claim, &mut closed).await;
+                }
             }
             _ = closed.changed() => break,
         }
@@ -3574,6 +3607,7 @@ pub(crate) mod tests {
             Arc::clone(&sem),
             tx,
             acks_tx,
+            true,
         )
         .await
         .expect("the stamped session accepts a terminal");
@@ -4142,7 +4176,7 @@ pub(crate) mod tests {
         let (tx, _rx) = output_channel(4);
         let (acks_tx, _acks_rx) = mpsc::unbounded_channel();
         let result =
-            TerminalHandle::open(&leases, &fx.sock, &fx.uid, 80, 24, sem, tx, acks_tx).await;
+            TerminalHandle::open(&leases, &fx.sock, &fx.uid, 80, 24, sem, tx, acks_tx, true).await;
         drop(suppressed);
         assert!(
             matches!(result, Err(OpenError::Unavailable(_))),
@@ -4157,7 +4191,9 @@ pub(crate) mod tests {
             let sem = Arc::new(Semaphore::new(64 * 1024));
             let (tx, _rx) = output_channel(4);
             let (acks_tx, _acks_rx) = mpsc::unbounded_channel();
-            match TerminalHandle::open(&leases, &fx.sock, &fx.uid, 80, 24, sem, tx, acks_tx).await {
+            match TerminalHandle::open(&leases, &fx.sock, &fx.uid, 80, 24, sem, tx, acks_tx, true)
+                .await
+            {
                 Ok(again) => {
                     reattached = Some(again);
                     break;
@@ -6555,9 +6591,10 @@ pub(crate) mod tests {
         let sem = Arc::new(Semaphore::new(64 * 1024));
         let (tx, _rx2) = output_channel(4);
         let (acks_tx, _acks_rx) = mpsc::unbounded_channel();
-        let again = TerminalHandle::open(&leases, &fx.sock, &fx.uid, 80, 24, sem, tx, acks_tx)
-            .await
-            .expect("the leases came back after teardown");
+        let again =
+            TerminalHandle::open(&leases, &fx.sock, &fx.uid, 80, 24, sem, tx, acks_tx, true)
+                .await
+                .expect("the leases came back after teardown");
         assert!(
             process_gone(pid),
             "the starved client was killed and reaped"

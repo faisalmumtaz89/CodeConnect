@@ -457,9 +457,17 @@ final class TerminalCarrier {
         send(ArraySlice(Array(text.utf8)))
     }
 
+    /// The terminal is on screen again. Its size is sent even though it has not
+    /// changed: the daemon takes any size from the phone as the phone being the
+    /// screen in use, so the agent draws for it rather than for the Mac.
+    func claim() {
+        guard phase.isAttached, let id = attachmentID else { return }
+        submit(.terminalResize(attachmentID: id, cols: lastSize.cols, rows: lastSize.rows), for: id)
+    }
+
     /// The emulator resized. Tell the daemon, or the agent's TUI will draw for
-    /// the wrong window. Applied to the daemon's own client only, so a human at
-    /// the Mac is never resized by this phone.
+    /// the wrong window. The window takes this size while the phone is the
+    /// screen in use.
     func resize(cols: Int, rows: Int) {
         let size = Self.clampSize(cols: cols, rows: rows)
         guard lastSize != size else { return }

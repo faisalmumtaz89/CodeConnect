@@ -340,8 +340,10 @@ pub enum ClientMessage {
         /// base64 of the raw bytes.
         data: String,
     },
-    /// This device's viewport changed. The daemon applies it to its own
-    /// disposable client only; a human at the Mac is never resized by it.
+    /// This device's viewport changed, or its terminal came back on screen. The
+    /// daemon sizes its own client to it and, for a session whose supervisor is
+    /// minor 27 or later, marks the phone as the screen in use: the window takes
+    /// this size until the Mac's terminal is typed into or resized.
     TerminalResize {
         attachment_id: String,
         cols: u16,
@@ -1723,10 +1725,15 @@ mod tests {
             crate::PROTOCOL_MINOR >= 26,
             "`machine_id` on `hello_ack` is minor 26"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 27,
+            "the phone's terminal sizing the window while it is the screen in use, \
+             for a session whose supervisor is minor 27, is minor 27"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 26);
+        assert_eq!(crate::PROTOCOL_MINOR, 27);
     }
 
     /// **The tags, pinned on this side too.**

@@ -1152,6 +1152,29 @@ final class TerminalCarrierTests: XCTestCase {
         XCTAssertEqual(rows, 50)
     }
 
+    /// Coming back on screen sends the phone's size again although it has not
+    /// changed — the daemon takes it as the phone being the screen in use — and
+    /// a carrier that is not attached sends nothing.
+    @MainActor
+    func testClaimResendsTheUnchangedSizeOnlyWhileAttached() async throws {
+        let (carrier, connection) = try await attached(to: "A")
+        carrier.resize(cols: 50, rows: 37)
+        carrier.claim()
+        await carrier.settleForTesting()
+        let resizes = connection.sent.compactMap { message -> String? in
+            guard case .terminalResize(_, let cols, let rows) = message else { return nil }
+            return "\(cols)x\(rows)"
+        }
+        XCTAssertEqual(resizes, ["50x37", "50x37"])
+
+        carrier.detach(reason: "Backgrounded.")
+        await carrier.settleForTesting()
+        let written = connection.sent.count
+        carrier.claim()
+        await carrier.settleForTesting()
+        XCTAssertEqual(connection.sent.count, written, "a detached carrier claimed the window")
+    }
+
     // MARK: What an attach may throw away
 
     /// A reattach the daemon refuses must not cost the reader the screen they

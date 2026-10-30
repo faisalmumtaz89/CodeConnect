@@ -3,6 +3,13 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## The terminal fits the screen you are using
+
+- The phone's Terminal tab is drawn for the phone, even while the session is open in a terminal at
+  the computer: opening the tab, rotating the phone or typing on it sizes Claude Code for the
+  phone, and typing in (or resizing) the terminal at the computer sizes it back. Nothing typed on
+  either side is lost. Sessions started before this update keep the computer's size until they end.
+
 ## Codex hears about updates, and the terminal takes the screen
 
 - `codeconnect daemon status | head -3` and the other commands that print and exit end quietly when

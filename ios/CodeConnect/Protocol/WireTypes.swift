@@ -1806,8 +1806,8 @@ enum ClientMessage: Sendable {
         attachmentID: String, sessionUID: String, cols: Int, rows: Int, outputCredit: UInt32)
     /// Keystrokes for the pane, base64 of the raw bytes. Spends input credit.
     case terminalInput(attachmentID: String, base64: String)
-    /// This phone's viewport changed. Applied to the daemon's own disposable
-    /// client only, so a human at the Mac is never resized by it.
+    /// This phone's viewport changed, or its terminal came back on screen. The
+    /// session takes this size while the phone is the screen in use (minor 27).
     case terminalResize(attachmentID: String, cols: Int, rows: Int)
     /// `bytes` of output have been consumed; grant that much more.
     case terminalCredit(attachmentID: String, bytes: UInt32)

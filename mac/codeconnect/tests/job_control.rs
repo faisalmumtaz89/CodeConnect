@@ -2,7 +2,7 @@
 //! stops itself is really stopped, held while a viewer at the Mac is attached, continued
 //! by the viewer's SIGUSR1, hung up when the last viewer or the session goes, ended with
 //! the session when it dies stopped, and let go when no viewer at the Mac holds it. The
-//! phone's terminal client (`ignore-size`) is never a viewer.
+//! phone's terminal client (named by its `TERM`) is never a viewer.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -93,27 +93,41 @@ impl Pane {
 
     /// A control-mode client, as the viewer is; its output is collected until it ends.
     fn viewer(&self) -> Viewer {
-        self.client(&["-C", "attach", "-t", "j"])
+        self.client(&["-C", "attach", "-t", "j"], None)
     }
 
-    /// The client ccd attaches for the phone's terminal tab.
+    /// The client ccd attaches for the phone's terminal tab, named by its `TERM`.
     fn phone(&self) -> Viewer {
-        self.client(&[
-            "-N",
-            "-C",
-            "attach-session",
-            "-E",
-            "-f",
-            "ignore-size",
-            "-t",
-            "j",
-        ])
+        self.client(
+            &["-N", "-C", "attach-session", "-E", "-t", "j"],
+            Some(protocol::tmux::PHONE_CLIENT_TERM),
+        )
     }
 
-    fn client(&self, args: &[&str]) -> Viewer {
+    /// The phone's client as a daemon older than this build attaches it.
+    fn older_daemons_phone(&self) -> Viewer {
+        self.client(
+            &[
+                "-N",
+                "-C",
+                "attach-session",
+                "-E",
+                "-f",
+                "ignore-size",
+                "-t",
+                "j",
+            ],
+            None,
+        )
+    }
+
+    fn client(&self, args: &[&str], term: Option<&str>) -> Viewer {
         let before = self.ask("#{session_attached}");
-        let mut child = self
-            .command()
+        let mut command = self.command();
+        if let Some(term) = term {
+            command.env("TERM", term);
+        }
+        let mut child = command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -284,6 +298,21 @@ fn a_stop_nobody_holds_is_dropped() {
     wait_for("the agent to go on", || pane.file("after") == "resumed\n");
     assert!(!state(agent).starts_with('T'));
     assert_eq!(pane.stopped_flag(), "");
+    phone.leave();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(pane.alive(), "the phone's client leaving ends nothing");
+}
+
+/// The daemon is replaced by `codeconnect update` only when it is managed; one started by
+/// hand keeps running the older build under sessions this build starts.
+#[test]
+fn a_stop_with_an_older_daemons_phone_attached_is_dropped() {
+    let pane = Pane::start(STOPS_ON_GO);
+    let phone = pane.older_daemons_phone();
+    let agent = pane.agent();
+    pane.touch("go");
+    wait_for("the agent to go on", || pane.file("after") == "resumed\n");
+    assert!(!state(agent).starts_with('T'));
     phone.leave();
     std::thread::sleep(Duration::from_millis(1500));
     assert!(pane.alive(), "the phone's client leaving ends nothing");

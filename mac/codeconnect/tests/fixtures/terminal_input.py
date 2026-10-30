@@ -226,8 +226,8 @@ def check(root):
 
         # The phone's client, attached beside this one, sees the pane and never sizes it.
         phone = subprocess.Popen(
-            [tmux, "-S", str(socket), "-N", "-C", "attach-session", "-E", "-f", "ignore-size", "-t", "=cc-1"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            [tmux, "-S", str(socket), "-N", "-C", "attach-session", "-E", "-t", "=cc-1"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, env={**os.environ, "TERM": "codeconnect-phone"},
         )
         end = time.monotonic() + 3
         while len(tmux_run("list-clients", "-t", "=cc-1").splitlines()) < 2 and time.monotonic() < end:

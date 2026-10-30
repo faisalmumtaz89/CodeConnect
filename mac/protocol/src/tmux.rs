@@ -621,28 +621,40 @@ fn parse_epoch_row_structural(line: &str) -> Option<(String, String, i64, i64, i
 ///     `send-keys`, which reaches the pane program only — a phone's keystrokes
 ///     can never become tmux commands (no prefix key, no `kill-server`, no
 ///     switching into another session).
-///   * `-E` — do not push this client's environment into the session.
-///   * `-f ignore-size` — this client's size never governs the shared window,
-///     so a small phone cannot shrink a human at the Mac. (When it is the only
-///     client, its size governs, which is correct.)
+///   * `-E` — do not push this client's environment into the session; the
+///     client runs with `TERM` set to [`PHONE_CLIENT_TERM`], which is how a
+///     Mac viewer is told from it.
 ///   * the target is the internal `session_id` (`$N`), never the reused name.
-pub fn daemon_attach_argv(socket: &str, session_id: &str) -> Option<Vec<String>> {
+///
+/// With `screen_in_use`, the window takes the size of the screen in use:
+/// opening, sizing or typing on the phone makes this client tmux's latest
+/// ([`in_use_line`]), and the Mac viewer does the same when its terminal is
+/// used. Without it — a session whose Mac side predates that, and so can
+/// neither win the window back nor tell this client from a viewer by `TERM` —
+/// the client is `-f ignore-size` and never governs the window while a Mac
+/// viewer is attached.
+pub fn daemon_attach_argv(
+    socket: &str,
+    session_id: &str,
+    screen_in_use: bool,
+) -> Option<Vec<String>> {
     if session_id.is_empty() {
         return None;
     }
     let [flag, value] = server_args(socket)?;
-    Some(vec![
+    let mut argv = vec![
         "-N".to_string(),
         "-C".to_string(),
         flag,
         value,
         "attach-session".to_string(),
         "-E".to_string(),
-        "-f".to_string(),
-        "ignore-size".to_string(),
-        "-t".to_string(),
-        session_id.to_string(),
-    ])
+    ];
+    if !screen_in_use {
+        argv.extend(["-f".to_string(), "ignore-size".to_string()]);
+    }
+    argv.extend(["-t".to_string(), session_id.to_string()]);
+    Some(argv)
 }
 
 /// One line of the control-mode conversation, classified as far as the carrier
@@ -880,10 +892,23 @@ pub fn send_keys_line(target: &str, bytes: &[u8]) -> String {
     line
 }
 
-/// The control-mode command that sizes this client's viewport. Under
-/// `ignore-size` it governs the window only while it is the sole client.
+/// The control-mode command that declares this client's size. tmux sizes the
+/// window for its latest client ([`in_use_line`]); an `ignore-size` client's
+/// size counts only while no client without that flag is attached.
 pub fn resize_line(cols: u16, rows: u16) -> String {
     format!("refresh-client -C {cols}x{rows}\n")
+}
+
+/// The `TERM` the daemon's tmux client runs with: `#{client_termname}` names
+/// the phone's client among a session's clients.
+pub const PHONE_CLIENT_TERM: &str = "codeconnect-phone";
+
+/// The control-mode command that marks the screen behind this client as the
+/// one in use: `select-window` makes its client tmux's latest
+/// (`cmd-select-window.c`), and under the default `window-size latest` the
+/// window takes that client's size. Typing through `send-keys` never does.
+pub fn in_use_line(session_id: &str) -> String {
+    format!("select-window -t {session_id}\n")
 }
 
 /// The control-mode command that ends the client and leaves the session alive.
@@ -2481,21 +2506,28 @@ mod tests {
 
     #[test]
     fn the_daemon_attach_argv_is_the_disposable_viewport_shape() {
-        let argv = daemon_attach_argv("codeconnect", "$0").expect("addressable");
+        let argv = daemon_attach_argv("codeconnect", "$0", true).expect("addressable");
         // -N so a phone attaching to a dead session cannot spin up a server.
         assert_eq!(argv[0], "-N");
         // -C: control mode, so keystrokes are data for the pane and can never
         // become tmux commands.
         assert_eq!(argv[1], "-C");
-        // -E (no env push) and -f ignore-size (never resize a human at the Mac).
+        // -E (no env push); no flags: the window takes the size of the screen in use.
         assert!(argv.contains(&"-E".to_string()));
-        let pos = argv.iter().position(|a| a == "-f").expect("-f");
-        assert_eq!(argv[pos + 1], "ignore-size");
+        assert!(!argv.contains(&"-f".to_string()));
         // Targeted by internal id, never a reused name.
         let t = argv.iter().position(|a| a == "-t").expect("-t");
         assert_eq!(argv[t + 1], "$0");
-        assert_eq!(daemon_attach_argv("codeconnect", ""), None);
-        assert_eq!(daemon_attach_argv("relative/path", "$0"), None);
+        // A session whose Mac side predates the screen in use: never sizes the window.
+        let older = daemon_attach_argv("codeconnect", "$0", false).expect("addressable");
+        let f = older.iter().position(|a| a == "-f").expect("-f");
+        assert_eq!(older[f + 1], "ignore-size");
+        assert_eq!(
+            older[older.iter().position(|a| a == "-t").expect("-t") + 1],
+            "$0"
+        );
+        assert_eq!(daemon_attach_argv("codeconnect", "", true), None);
+        assert_eq!(daemon_attach_argv("relative/path", "$0", true), None);
     }
 
     #[test]
