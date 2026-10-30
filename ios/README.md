@@ -70,6 +70,13 @@ Pair by scanning the QR that `codeconnect pair` prints on the Mac. Manual entry
 takes either the eight-character code from the same output or the static
 `codeconnect token`.
 
+With nothing paired, the pairing screen also offers "New here? Look around with
+sample data", for someone without a computer to pair with. It opens a **sample
+fleet**: recorded frames replayed through the real decoders, labelled "Sample fleet"
+where they appear, and connected to nothing. It takes an explicit tap, creates no
+pairing and opens no socket, and nothing in it reports a link
+(`AppModel.startSampleFleet`).
+
 ## Layout
 
 | Path | What it is |

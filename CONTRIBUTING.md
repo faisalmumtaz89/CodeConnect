@@ -11,7 +11,16 @@ Open an issue first. Much of this codebase is the way it is because of something
 ```sh
 cd mac && cargo test --workspace     # daemon, shim, protocol
 cd mac && ./install.sh               # build and install to ~/.codeconnect/bin
+cd mac && ./soak/run.sh              # chaos gauntlet against a real session
 ```
+
+The Rust workspace is in `mac/`, the app in `ios/`, design notes in `docs/`, and the
+recorded hook payloads and transcripts the tests replay in `fixtures/`. The soak is
+described in [mac/README.md](mac/README.md#soaking-it).
+
+Building needs Rust 1.85 or later and Xcode 26 or newer. The app deploys to iOS 17, but
+one navigation-chrome call is guarded with `if #available(iOS 26, *)`, and `#available`
+is a runtime check, so the symbol still has to exist in the SDK to compile.
 
 The iOS app is an Xcode project in `ios/`; open `ios/CodeConnect.xcodeproj`. Unit tests need no daemon. The suites named `*LiveUITests` do — they drive the real app against a running `ccd` and skip cleanly when one is not reachable.
 
