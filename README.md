@@ -68,15 +68,15 @@ You need an iPhone on iOS 17 or later, and a Mac on macOS 13 or later (Apple sil
 2. On your Mac:
 
 ```sh
-curl -fsSL https://codeconnect.sh | sh   # asks to start the daemon and shows a code to scan
+curl -fsSL https://codeconnect.sh | sh   # connects Tailscale, starts the daemon, shows a code to scan
 
 codeconnect claude             # in a new terminal, from your project's folder
 codeconnect codex              # the same, for Codex
 ```
 
-The installer asks before each step — adding CodeConnect to your `PATH`, starting the daemon
-(`codeconnect daemon install`), and pairing (`codeconnect pair`) — and run again, asks only for
-what is still missing.
+After one question, the installer does whatever is still missing, in order: it connects Tailscale,
+starts the daemon (`codeconnect daemon install`), shows the pairing code (`codeconnect pair`), and
+runs Claude Code's and Codex's own sign-ins. Run again, it picks up where it stopped.
 
 When the session ends, `codeconnect claude` and `codeconnect codex` exit with status 0,
 whatever status the agent itself exited with; a script that needs that status should
@@ -88,8 +88,9 @@ The installer downloads the latest release, verifies its signature before
 installing anything — the Developer ID signature on macOS, CodeConnect's release
 key on Linux — and installs it with CodeConnect's own
 tmux, so a Mac needs neither Homebrew nor tmux. It asks once before adding
-`~/.codeconnect/bin` to your `PATH` — one marked block in your shell's startup
-file, which you can delete to undo — never uses sudo, and enables nothing without asking.
+`~/.codeconnect/bin` to your `PATH` — a marked block in your shell's startup
+file (two files for bash), which you can delete to undo — uses sudo only on Linux, for `tailscale up --qr` and, where
+systemd refuses it, `loginctl enable-linger`, and enables nothing without asking.
 Prefer to read it first? It is plain text at
 [codeconnect.sh](https://codeconnect.sh). Building from source instead (macOS) is
 `cd mac && ./install.sh` from a clone — the same script contributors use; a

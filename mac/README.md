@@ -586,9 +586,9 @@ put it. An address `tailscale ip` names counts only while this machine can bind 
 `tailscale down` the CLI still prints the node's addresses while the interface no longer carries
 them, so the daemon stays on loopback and moves onto the tailnet when the tunnel is back, instead of
 failing to bind on every start. `tailscale up` is refused to a normal user unless they are
-Tailscale's operator, so the notes say `sudo tailscale up --qr` on Linux: it prints a QR code that
-you scan with your phone, signed in to Tailscale, and approve there, so a computer with no screen or
-browser signs in from the phone.
+Tailscale's operator, so on Linux the installer runs `sudo tailscale up --qr`, and the notes name the
+same line: it prints a QR code that you scan with your phone, signed in to Tailscale, and approve
+there, so a computer with no screen or browser signs in from the phone.
 
 **The machine's name** on the phone is its hostname — the kernel's, the one `hostname` prints —
 read on every handshake, so a rename shows on the next connection.
@@ -613,23 +613,13 @@ useradd -m -s /bin/bash dev    # the installer does not run as root
 su - dev
 ```
 
-Then, as that user:
+Then, as that user, `curl -fsSL https://codeconnect.sh | sh`: with no systemd, its setup starts
+`ccd` by hand once Tailscale is connected, shows the pairing code, and prints the line that starts
+`ccd` again.
 
-```sh
-curl -fsSL https://codeconnect.sh | sh
-mkdir -p ~/.codeconnect/logs && nohup ~/.codeconnect/bin/ccd >>~/.codeconnect/logs/ccd.out.log 2>>~/.codeconnect/logs/ccd.err.log </dev/null &
-```
-
-Once it has started, a second later, show the pairing code:
-
-```sh
-~/.codeconnect/bin/codeconnect pair
-```
-
-Start `ccd` after `tailscale up`. One started before stays on loopback and says in its log when the
-address appears; restart it by stopping it (`codeconnect daemon status` shows its pid) and running
-the same line again. Nothing starts tailscaled or `ccd` again after either stops or the machine
-restarts.
+A `ccd` started before `tailscale up` stays on loopback and says in its log when the address
+appears; restart it by stopping it (`codeconnect daemon status` shows its pid) and running that
+line again. Nothing starts tailscaled or `ccd` again after either stops or the machine restarts.
 
 ## Soaking it
 
