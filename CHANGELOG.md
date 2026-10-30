@@ -3,6 +3,21 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Codex hears about updates, and the terminal takes the screen
+
+- `codeconnect daemon status | head -3` and the other commands that print and exit end quietly when
+  the reader goes away, instead of panicking with "Broken pipe".
+- On Linux without systemd, `codeconnect daemon uninstall` says there is no CodeConnect service to
+  remove and changes nothing, instead of failing with a raw `systemctl` error; `codeconnect daemon
+  status` shows the pid of a daemon you started by hand.
+- `codeconnect codex` shows the notes `codeconnect claude` shows before a session — a newer release,
+  a phone that cannot reach the computer — with the same 10-second pause to read them, and runs the
+  same once-a-day update check.
+- On the iPhone the terminal gets the screen: while it has the keyboard the header shrinks to one
+  line, and turned to landscape the Terminal tab fills the screen. The key row is one row with Paste
+  and Hide keyboard, and a tap on a web link opens a sheet with the whole address, Open in Safari
+  and Copy link.
+
 ## CodeConnect runs on Linux
 
 - The same command installs it on Linux (x86_64 or arm64): `curl -fsSL https://codeconnect.sh | sh`.
