@@ -182,9 +182,18 @@ private struct TailObserver: UIViewRepresentable {
         /// The collection view's move of the offset for a row the reader
         /// opened, to be given back from `layoutSubviews`. See `read`.
         private var giveBack: (scrollView: UIScrollView, dy: CGFloat)?
+        /// The opened row's growth has landed; the opening ends with this
+        /// layout pass rather than at the growth, because the collection
+        /// view's move can come before the growth (iOS 26) or after it
+        /// (iOS 27), in the same pass.
+        private var openingLanded = false
 
         override func layoutSubviews() {
             super.layoutSubviews()
+            if openingLanded {
+                openingLanded = false
+                watch.opening = false
+            }
             guard let giveBack else { return }
             self.giveBack = nil
             giveBack.scrollView.contentOffset.y -= giveBack.dy
@@ -261,12 +270,15 @@ private struct TailObserver: UIViewRepresentable {
                     watch.opening = false
                     giveBack = nil
                 } else {
-                    if grown > 0.5 { watch.opening = false }
+                    if grown > 0.5 {
+                        openingLanded = true
+                        setNeedsLayout()
+                    }
                     if dy > 0.5 {
                         giveBack = (scrollView, (giveBack?.dy ?? 0) + dy)
                         setNeedsLayout()
                     }
-                    if watch.opening || giveBack != nil { return }
+                    if (watch.opening && !openingLanded) || giveBack != nil { return }
                 }
             }
             // Content shorter than the viewport has no "away" to be.
