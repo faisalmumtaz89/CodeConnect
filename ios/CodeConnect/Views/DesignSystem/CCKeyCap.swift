@@ -26,6 +26,9 @@ struct CCKeyCap: View {
     var symbol: String?
     /// `ctrl` is held down. The only latching key in the row.
     var isLatched: Bool = false
+    /// Shares the row's width with its siblings instead of claiming 44pt, the
+    /// way the system keyboard's own keys do. Height stays 44pt.
+    var fills = false
     /// What VoiceOver says. Required: `^C` read aloud is not a control anyone
     /// can identify.
     let spokenLabel: String
@@ -65,6 +68,10 @@ struct CCKeyCap: View {
         }
         .buttonStyle(CCKeyCapStyle(isLatched: isLatched))
         .accessibilityLabel(spokenLabel)
+        .accessibilityShowsLargeContentViewer {
+            if let symbol { Image(systemName: symbol) }
+            Text(label ?? spokenLabel)
+        }
         .accessibilityAddTraits(isLatched ? [.isButton, .isSelected] : .isButton)
     }
 
@@ -76,13 +83,14 @@ struct CCKeyCap: View {
                 Text(label)
                     .ccType(CC.type.mono.weight(.medium))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.6)
             }
         }
         .foregroundStyle(isLatched ? CC.text.onAccent : CC.text.primary)
-        .padding(.horizontal, CC.space.sm)
+        .padding(.horizontal, fills ? CC.space.xxs : CC.space.sm)
         // 40pt of cap inside 44pt of hit area. `minHeight` rather than
         // a fixed height so a legend at AX5 grows the key instead of clipping.
-        .frame(minWidth: CC.size.hitTarget, minHeight: capHeight)
+        .frame(minWidth: fills ? nil : CC.size.hitTarget, maxWidth: fills ? .infinity : nil, minHeight: capHeight)
         .ccSurface(
             fill: isLatched ? CC.color.accent : CC.color.surfaceOverlay,
             radius: CC.radius.sm,
