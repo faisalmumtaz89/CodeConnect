@@ -35,7 +35,7 @@ Run the same command as your own user, not as root. On a machine where you have 
 
 ## Updating
 
-`codeconnect update` downloads the latest release, verifies its signature the same way the installer does, and replaces all three binaries and CodeConnect's tmux in one step — a machine that loses power mid-update comes back with the complete old set or the complete new one, never a mixture. A running daemon is restarted automatically, and sessions survive the restart. `codeconnect claude` mentions at launch when a newer release exists, and `codeconnect --version` always tells you exactly what is installed, down to the commit it was built from.
+`codeconnect update` downloads the latest release, verifies its signature the same way the installer does, and replaces all three binaries and CodeConnect's tmux in one step — a machine that loses power mid-update comes back with the complete old set or the complete new one, never a mixture. A running daemon is restarted automatically, and sessions survive the restart. `codeconnect claude` and `codeconnect codex` mention at launch when a newer release exists, and `codeconnect --version` always tells you exactly what is installed, down to the commit it was built from.
 
 The iPhone app updates from the App Store. When the app and a computer cannot understand each other, the app says which one to update: "Update CodeConnect on the computer" (run `codeconnect update` there) or "Update CodeConnect on this iPhone". This page describes CodeConnect 0.15.0, installer 1.7.0 and the iPhone app 1.1.11.
 

@@ -399,7 +399,7 @@ codeconnect 0.3.0 (build unknown)        # built outside a git checkout
 ```
 
 `daemon status` shows the running daemon's build the same way. On every
-`codeconnect claude` launch, the installed version is compared against the
+`codeconnect claude` or `codeconnect codex` launch, the installed version is compared against the
 newest GitHub Release, and one line can appear:
 
 ```
