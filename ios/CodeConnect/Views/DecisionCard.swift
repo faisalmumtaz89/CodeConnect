@@ -662,29 +662,19 @@ struct DecisionCardView: View {
         }
     }
 
-    /// Absent from the previous build: the consequence of saying no, stated
-    /// beside the consequence of saying yes.
+    /// The consequence of saying no, stated beside the consequence of saying yes.
+    ///
+    /// **Only what is true wherever the call came from.** A deny stops the main
+    /// conversation's turn, which then waits for you; inside a background agent
+    /// it ends that agent and the main turn goes on. The card cannot tell the two
+    /// apart, so it states only what both share.
     private var ifYouDenyBlock: some View {
         VStack(alignment: .leading, spacing: CC.rhythm.textSurface) {
             CCSectionHeader("If you deny")
-            Text(denyConsequence)
+            Text("This call does not run, and Claude is told you said no.")
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    /// **Never invent a consequence.** Where the tool is unrecognised, the
-    /// honest third string says only what is certain.
-    private var denyConsequence: String {
-        switch approval.card.toolName {
-        case "Bash", "Write", "Edit", "NotebookEdit", "Read", "Glob", "Grep":
-            return
-                "Claude receives \"denied\" and picks another approach. Nothing is lost and the session keeps running."
-        case "WebFetch", "WebSearch":
-            return "The request is skipped. Claude will report what it could not do."
-        default:
-            return "Claude receives \"denied\". What it does next is up to it."
         }
     }
 

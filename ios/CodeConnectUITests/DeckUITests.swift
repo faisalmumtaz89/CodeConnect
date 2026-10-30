@@ -174,6 +174,24 @@ final class DeckUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Fleet clear"].firstMatch.exists)
     }
 
+    /// **The card says only what a deny is measured to do.** Denied on the main
+    /// thread, Claude's turn stops and waits; denied inside a background agent,
+    /// that agent ends and the main turn goes on. Neither picks another approach
+    /// and keeps running, and the card cannot tell the two apart.
+    func testTheCardSaysOnlyWhatADenyIsMeasuredToDo() {
+        let app = launch(openingCard: "toolu_fixture_high")
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label ==[c] 'If you deny'")).firstMatch
+                .waitForExistence(timeout: 25))
+
+        let unmeasured = app.staticTexts.matching(
+            NSPredicate(
+                format: "label CONTAINS[c] 'picks another approach' OR label CONTAINS[c] 'keeps running'"))
+        XCTAssertEqual(unmeasured.count, 0, "a consequence nobody measured")
+        XCTAssertTrue(
+            app.staticTexts["This call does not run, and Claude is told you said no."].exists)
+    }
+
     // MARK: The read-before-you-decide gate
 
     /// **The gate is a viewport test.**
