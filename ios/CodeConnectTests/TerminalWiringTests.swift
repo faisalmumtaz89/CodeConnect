@@ -50,7 +50,7 @@ final class TerminalWiringTests: XCTestCase {
         func row(_ isControlActive: @escaping () -> Bool) -> TerminalKeyRow {
             TerminalKeyRow(
                 onEscape: {}, onTab: {}, onControl: {}, onInterrupt: {}, onArrow: { _ in },
-                isControlActive: isControlActive)
+                onPaste: { _ in }, onHideKeyboard: {}, isControlActive: isControlActive)
         }
         let held = Host(row { true }, scene: scene, size: size)
         let cleared = Host(row { false }, scene: scene, size: size)

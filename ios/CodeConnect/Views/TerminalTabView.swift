@@ -51,6 +51,9 @@ struct TerminalTabView: View {
     /// not hold the keyboard, and coming back to one is the moment to try the
     /// connection again.
     var onScreen = true
+    /// The pane took or gave back the keyboard — the screen collapses its
+    /// header around it, as it does for the composer.
+    var onKeyboard: (Bool) -> Void = { _ in }
 
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
@@ -64,6 +67,8 @@ struct TerminalTabView: View {
     /// the reader.
     @State private var startedAt: Date?
     @State private var showPairing = false
+    /// A link the reader tapped in the pane, on offer in a sheet.
+    @State private var linkToOpen: TerminalLink?
     /// Whether *this tab's emulator* was handed a buffer that had already lost
     /// its head to the cap.
     ///
@@ -143,6 +148,9 @@ struct TerminalTabView: View {
         // drawing for the sake of a clock that shows whole seconds.
         .sheet(isPresented: $showPairing) {
             PairingView().environment(model)
+        }
+        .sheet(item: $linkToOpen) { link in
+            TerminalLinkSheet(link: link)
         }
         // Leaving the tab is deliberately *not* leaving the terminal: the
         // carrier lives on the model, so switching to the timeline and back
@@ -745,6 +753,8 @@ struct TerminalTabView: View {
             SwiftTermView(
                 session: session, sessionUID: sessionUID, acceptsInput: live && onScreen,
                 fontSize: model.settings.terminalFontSize,
+                onLink: { linkToOpen = $0 },
+                onKeyboard: onKeyboard,
                 seeded: { fromTrimmedBuffer in
                     // Off the update pass. Seeding happens inside
                     // `makeUIView`/`updateUIView`, and writing view state from
@@ -1090,9 +1100,95 @@ final class TerminalPaneView: TerminalView {
         }
     }
 
-    override var canBecomeFirstResponder: Bool { acceptsInput }
+    override var canBecomeFirstResponder: Bool { acceptsInput && linkUnderTouch == nil }
 
     override var canBecomeFocused: Bool { acceptsInput }
+
+    /// Where a tapped link goes: the tab's link sheet.
+    var onLink: ((TerminalLink) -> Void)?
+    /// Whether this pane holds the keyboard, for the screen's chrome.
+    var onKeyboard: ((Bool) -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onKeyboard?(true) }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onKeyboard?(false) }
+        return resigned
+    }
+
+    /// The link under the finger of the current tap.
+    ///
+    /// SwiftTerm opens a link only once a pointer has hovered it, which a touch
+    /// never does, and with the keyboard down it spends the tap on becoming
+    /// first responder. So the pane finds the link itself, and refuses first
+    /// responder for exactly that tap so the same tap opens the link instead.
+    private var linkUnderTouch: TerminalLink?
+    private lazy var linkTap = LinkTap(pane: self)
+
+    func installLinkTap() {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(openTouchedLink))
+        tap.delegate = linkTap
+        addGestureRecognizer(tap)
+    }
+
+    @objc private func openTouchedLink() {
+        // Not cleared here: SwiftTerm's own single tap waits for its double
+        // tap to fail and so fires after this one, and must still be refused
+        // the keyboard. The next touch on the pane asks again.
+        if let link = linkUnderTouch { onLink?(link) }
+    }
+
+    /// The link at a point in the pane, found the way SwiftTerm finds one: the
+    /// explicit OSC 8 target first, then a URL in the text, across soft wraps.
+    /// Only a web link counts: SwiftTerm also finds file paths, slash commands
+    /// and schemes inside words, and a tap on one of those raises the keyboard
+    /// like a tap anywhere else.
+    fileprivate func noteTouch(at point: CGPoint) -> Bool {
+        // SwiftTerm's cell, which it snaps to the pixel grid.
+        let scale = traitCollection.displayScale
+        let cellWidth = ceil(("W" as NSString).size(withAttributes: [.font: font]).width * scale) / scale
+        let cellHeight = ceil((font.ascender - font.descender + font.leading) * lineSpacing)
+        let terminal = getTerminal()
+        let position = Position(
+            col: min(max(0, Int(point.x / cellWidth)), terminal.cols - 1),
+            row: max(0, Int(point.y / cellHeight)))
+        linkUnderTouch = terminal.link(at: .buffer(position), mode: .explicitAndImplicit)
+            .flatMap(TerminalLink.init)
+        return linkUnderTouch != nil
+    }
+
+    /// A separate delegate: the pane is a `UIScrollView`, and answering for its
+    /// own pan recognisers would change how it scrolls.
+    private final class LinkTap: NSObject, UIGestureRecognizerDelegate {
+        weak var pane: TerminalPaneView?
+        init(pane: TerminalPaneView) { self.pane = pane }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch
+        ) -> Bool {
+            guard let pane else { return false }
+            return pane.noteTouch(at: touch.location(in: pane))
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+        ) -> Bool { true }
+
+        /// A double or triple tap on a link selects its text, as SwiftTerm's own
+        /// single tap waits to make sure of.
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRequireFailureOf other: UIGestureRecognizer
+        ) -> Bool {
+            (other as? UITapGestureRecognizer).map { $0.numberOfTapsRequired > 1 } ?? false
+        }
+    }
 }
 
 /// Hosts SwiftTerm's `TerminalView` and wires it to the terminal carrier.
@@ -1112,6 +1208,10 @@ struct SwiftTermView: UIViewRepresentable {
     /// is updated with rather than expressed as a second view.
     let acceptsInput: Bool
     let fontSize: Double
+    /// A link the reader tapped, whole — the OSC 8 target or the URL across
+    /// its wraps — for the tab to offer.
+    let onLink: (TerminalLink) -> Void
+    let onKeyboard: (Bool) -> Void
     /// Called once for every emulator this view builds, with whether the bytes
     /// it was seeded with had already lost their head to the carrier's cap.
     ///
@@ -1154,6 +1254,9 @@ struct SwiftTermView: UIViewRepresentable {
             CC.ansi.table.map { Color(red: $0.red, green: $0.green, blue: $0.blue) })
         view.inputAccessoryView = context.coordinator.makeAccessory(for: view)
         view.acceptsInput = acceptsInput
+        view.onLink = onLink
+        view.onKeyboard = onKeyboard
+        view.installLinkTap()
         context.coordinator.attach(
             view: view, session: session, sessionUID: sessionUID, seeded: seeded)
         return view
@@ -1164,6 +1267,8 @@ struct SwiftTermView: UIViewRepresentable {
             view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         }
         view.acceptsInput = acceptsInput
+        view.onLink = onLink
+        view.onKeyboard = onKeyboard
         context.coordinator.attach(
             view: view, session: session, sessionUID: sessionUID, seeded: seeded)
     }
@@ -1241,6 +1346,8 @@ struct SwiftTermView: UIViewRepresentable {
                 onControl: { [weak self] in self?.toggleControl() },
                 onInterrupt: { [weak self] in self?.sendKey([0x03]) },
                 onArrow: { [weak self] direction in self?.sendArrow(direction) },
+                onPaste: { [weak self] text in self?.paste(text) },
+                onHideKeyboard: { [weak view] in _ = view?.resignFirstResponder() },
                 // The view in hand, not the one stored on this coordinator:
                 // `attach` sets that a line later than this is built, and a cap
                 // reading a modifier off `nil` is dark while Control is held.
@@ -1251,7 +1358,7 @@ struct SwiftTermView: UIViewRepresentable {
             // keyboard. 40pt of key cap inside 44pt of hit area plus 8pt of
             // padding each side is 60; `UIFontMetrics` keeps the row usable at
             // large Dynamic Type sizes instead of clipping the legends.
-            let height = min(UIFontMetrics.default.scaledValue(for: 60), 120)
+            let height = min(UIFontMetrics.default.scaledValue(for: 60), 68)
             controller.view.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: height)
             controller.view.autoresizingMask = [.flexibleWidth]
             accessory = controller
@@ -1283,6 +1390,18 @@ struct SwiftTermView: UIViewRepresentable {
             let application = view.getTerminal().applicationCursor
             let prefix: [UInt8] = application ? [0x1b, 0x4f] : [0x1b, 0x5b]
             sendKey(prefix + [direction.finalByte])
+        }
+
+        /// What the system Paste button handed over, sent the way SwiftTerm's
+        /// own `paste(_:)` sends the pasteboard: bracketed when the far end
+        /// asked for bracketed paste.
+        @MainActor
+        private func paste(_ text: String) {
+            guard let view else { return }
+            let bracketed = view.getTerminal().bracketedPasteMode
+            sendKey(
+                (bracketed ? EscapeSequences.bracketedPasteStart : []) + Array(text.utf8)
+                    + (bracketed ? EscapeSequences.bracketedPasteEnd : []))
         }
 
         // MARK: TerminalViewDelegate
@@ -1356,6 +1475,8 @@ struct TerminalKeyRow: View {
     let onControl: () -> Void
     let onInterrupt: () -> Void
     let onArrow: (Arrow) -> Void
+    let onPaste: (String) -> Void
+    let onHideKeyboard: () -> Void
     let isControlActive: () -> Bool
 
     /// Whether the ctrl cap is lit. SwiftTerm owns the modifier itself and
@@ -1363,28 +1484,53 @@ struct TerminalKeyRow: View {
     /// never written from a guess about what it holds — only re-read from it.
     @State private var controlOn = false
 
+    private func key(_ cap: CCKeyCap) -> CCKeyCap {
+        var cap = cap
+        cap.fills = true
+        return cap
+    }
+
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: CC.space.xs) {
-                CCKeyCap("esc", spokenLabel: "Escape", action: onEscape)
-                CCKeyCap("tab", spokenLabel: "Tab", action: onTab)
-                CCKeyCap(
-                    "ctrl", spokenLabel: controlOn ? "Control, on" : "Control",
-                    isLatched: controlOn
-                ) {
-                    onControl()
-                    controlOn = isControlActive()
-                }
-                CCKeyCap("^C", spokenLabel: "Control C, interrupt", action: onInterrupt)
-                CCKeyCapDivider()
+        // One row, every key on screen: ten keys share the width the way the
+        // system keyboard's ten letters do. The arrows sit together in the
+        // middle, tighter than the rest, so they read as one cluster.
+        HStack(spacing: CC.space.xxs) {
+            key(CCKeyCap("esc", spokenLabel: "Escape", action: onEscape))
+            key(CCKeyCap("tab", spokenLabel: "Tab", action: onTab))
+            key(CCKeyCap(
+                "ctrl", spokenLabel: controlOn ? "Control, on" : "Control",
+                isLatched: controlOn
+            ) {
+                onControl()
+                controlOn = isControlActive()
+            })
+            key(CCKeyCap("^C", spokenLabel: "Control C, interrupt", action: onInterrupt))
+            HStack(spacing: 2) {
                 ForEach(Arrow.allCases, id: \.self) { arrow in
-                    CCKeyCap(symbol: arrow.symbol, spokenLabel: arrow.label) { onArrow(arrow) }
+                    key(CCKeyCap(symbol: arrow.symbol, spokenLabel: arrow.label) { onArrow(arrow) })
                 }
             }
-            .padding(.horizontal, CC.space.sm)
-            .padding(.vertical, CC.space.xs)
+            .padding(.horizontal, CC.space.xxs)
+            // The system's own Paste button, not a key cap: text another app
+            // copied reaches this app only through it. A cap reading the
+            // pasteboard itself is handed nil, measured on iOS 27.
+            PasteButton(payloadType: String.self) { strings in
+                DispatchQueue.main.async { onPaste(strings.joined()) }
+            }
+            .labelStyle(.iconOnly)
+            .buttonBorderShape(.roundedRectangle(radius: CC.radius.sm))
+            .tint(CC.color.surfaceOverlay)
+            .frame(maxWidth: .infinity)
+            key(CCKeyCap(
+                symbol: "keyboard.chevron.compact.down", spokenLabel: "Hide keyboard",
+                action: onHideKeyboard))
         }
-        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        .padding(.horizontal, CC.space.xs)
+        .padding(.vertical, CC.space.xs)
+        // The system keyboard below does not grow with Dynamic Type, and this
+        // row sits on it: capped two sizes above the default, with each key's
+        // legend shown large on a long press instead.
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
         // `surfaceRaised` + a 1pt rule, never `.bar`: a blurred UIKit material
         // over #000 resolves to a flat mid-grey that belongs to no palette.
         .background(CC.color.surfaceRaised)

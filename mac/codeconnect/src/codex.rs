@@ -213,7 +213,7 @@ pub fn start(passthrough: &[String]) -> Result<()> {
         &protocol::agent::AgentKind::Codex,
     ))?;
 
-    launch(&resolved, &folder, &argv.normalized)
+    launch(&resolved, &folder, &argv.normalized, &config)
 }
 
 /// Refuse the launch when the daemon that is running cannot host Codex.
@@ -274,7 +274,12 @@ const RECORD_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// its session, and the host starts the TUI once that attach has reported the
 /// terminal's colors. The launcher keeps watching the durable outcome while it
 /// shows the session.
-fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Result<()> {
+fn launch(
+    resolved: &ResolvedCodex,
+    folder: &Path,
+    passthrough: &[String],
+    config: &Config,
+) -> Result<()> {
     // The folder is passed RAW, and that is not an oversight. The chain has exactly
     // one canonicalization, in the coordinator
     // (`codex_coordinator::canonical_launch_cwd`), and every later hop carries its
@@ -303,6 +308,11 @@ fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String]) -> Re
     // and wrong for a machine that runs more than one.)
     #[cfg(target_os = "macos")]
     crate::update_check::ensure_tmux()?;
+    // The advisories `codeconnect claude` shows before its attach, shown here before
+    // anything of the session exists: codex starts once this terminal attaches, or
+    // after the host's 5 s wait for it (`codex_host::wait_for_terminal`) without this
+    // terminal's colors, so a hold after the spawn would change the session.
+    crate::advise_before_attach(config);
     let session_name = crate::tmux::next_session_name()?;
     // Minted here, once, before anything else knows the session exists — the same
     // rule and the same minter as the Claude path. The tmux name is reused as soon
@@ -2064,13 +2074,40 @@ mod tests {
 
         // And the other half: the minters really are in `launch`, so the assertion
         // above is about where they are rather than about a spelling that vanished.
-        let launch_body =
-            body("fn launch(resolved: &ResolvedCodex, folder: &Path, passthrough: &[String])");
+        let launch_body = body(LAUNCH);
         for minter in ["uid::new(", "next_session_name("] {
             assert!(
                 launch_body.contains(minter),
                 "{minter} is no longer in launch(), so this test guards nothing"
             );
+        }
+    }
+
+    const LAUNCH: &str = "fn launch(\n    resolved: &ResolvedCodex,";
+
+    /// `codeconnect codex` shows the advisories `codeconnect claude` shows — through
+    /// the same function, so the notes, the hold and the update check cannot drift
+    /// apart — after every refusal of its own and before anything of the session
+    /// exists. A source read, for the reason the preflight test above gives: the
+    /// order of side effects inside a launch that needs a live tmux and a live codex.
+    #[test]
+    fn the_advisories_show_after_the_refusals_and_before_the_session_exists() {
+        let launch = production_fn(LAUNCH);
+        let advise = launch
+            .find("crate::advise_before_attach(config)")
+            .expect("launch must show the advisories `codeconnect claude` shows");
+        for refusal in ["stdout().is_terminal()", "terminal_size()", "ensure_tmux()"] {
+            let at = launch.find(refusal).expect("the refusal is in launch()");
+            assert!(
+                at < advise,
+                "{refusal} must refuse before the advisories show"
+            );
+        }
+        for created in ["next_session_name(", "uid::new(", "spawn_coordinator("] {
+            let at = launch
+                .find(created)
+                .expect("the session is created in launch()");
+            assert!(advise < at, "{created} must come after the advisories");
         }
     }
 

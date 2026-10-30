@@ -1,6 +1,6 @@
 # Release checklist
 
-Cutting a release is what makes the update notice in `codeconnect claude`
+Cutting a release is what makes the update notice in `codeconnect claude` and `codeconnect codex`
 ring on other machines, so the steps below are a contract, not a
 convention: the checker compares GitHub's **latest published Release tag**
 against each binary's built-in version, and every step exists to keep that

@@ -975,9 +975,10 @@ enum AnswerDecision: Sendable, Hashable {
     /// (minor 21). The daemon builds Claude's answer from the question it
     /// stored and these indices; nothing is typed.
     case answers([QuestionAnswer])
-    /// Decline an `AskUserQuestion` (minor 21), as Escape at its dialog does:
-    /// the main conversation's turn stops, and a background agent's question
-    /// is denied while the agent carries on.
+    /// Decline an `AskUserQuestion` (minor 21): the daemon denies it through
+    /// its held hook. The main conversation's question is denied with an
+    /// interrupt, so the turn stops as Escape at its dialog does; a background
+    /// agent's is denied without one.
     case decline
     /// A decision kind a newer daemon knows about and this build does not.
     /// Never sent — only received, inside a recorded outcome. Throwing here

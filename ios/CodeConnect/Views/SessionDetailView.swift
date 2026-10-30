@@ -947,6 +947,16 @@ struct SessionDetailView: View {
     /// screen's chrome collapses around the keyboard, and only the screen can
     /// do the collapsing.
     @FocusState private var composerFocused: Bool
+    /// The terminal pane holds the keyboard. Collapses the same chrome the
+    /// composer does: typing at the TTY needs the rows more than the header.
+    @State private var terminalTyping = false
+    private var typing: Bool { composerFocused || (terminalTyping && surface == .terminal) }
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    /// Landscape on the terminal: the screen is the terminal's. Turning back
+    /// to portrait is how the reader leaves, the way a video player works.
+    private var terminalFillsScreen: Bool {
+        verticalSizeClass == .compact && surface == .terminal
+    }
 
     /// The run this screen is about. Everything on it — the timeline, the
     /// compose bar, the diff, the terminal — is scoped to this one key, so a
@@ -965,7 +975,9 @@ struct SessionDetailView: View {
             // it: the identity collapses to one line and the surface picker —
             // an intent nobody has mid-sentence — steps aside, so the freed
             // ~150pt goes to the conversation being typed at.
-            if composerFocused {
+            if terminalFillsScreen {
+                EmptyView()
+            } else if typing {
                 compactIdentityLine
             } else {
                 identityBlock
@@ -980,7 +992,7 @@ struct SessionDetailView: View {
             // With the picker gone the timeline default is the only surface,
             // so the tab that would answer in pairing vocabulary cannot be
             // reached at all — offered nothing, not offered a dead end.
-            if !composerFocused && !model.sampleFleetActive {
+            if !typing && !terminalFillsScreen && !model.sampleFleetActive {
                 CCSegmented(
                     selection: surfaceBinding,
                     options: Surface.allCases.map { CCSegmentedOption($0, title: $0.label) },
@@ -1033,7 +1045,10 @@ struct SessionDetailView: View {
                         tmuxName: model.tmuxName(for: key),
                         unhosted: model.shownSummary(for: key)?.tmuxSession.isEmpty == true,
                         runLabel: label.spoken,
-                        onScreen: surface == .terminal
+                        onScreen: surface == .terminal,
+                        // Off the update pass: a pane whose session ends gives
+                        // the keyboard back from inside `updateUIView`.
+                        onKeyboard: { typing in DispatchQueue.main.async { terminalTyping = typing } }
                     )
                     .opacity(surface == .terminal ? 1 : 0)
                     // A hidden pane takes no taps and is not read out. The
@@ -1052,12 +1067,14 @@ struct SessionDetailView: View {
         .onChange(of: surface, initial: true) { _, new in
             if new == .terminal { terminalHasBeenOpened = true }
         }
-        .ccAnimation(CC.motion.small, value: composerFocused)
+        .ccAnimation(CC.motion.small, value: typing)
         .ccNavigationChrome()
         // Empty on purpose. The header below carries the project, at a width
         // the bar could never give it.
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(terminalFillsScreen ? .hidden : .automatic, for: .navigationBar)
+        .statusBarHidden(terminalFillsScreen)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { diffControl }
                 .ccPlainToolbarItem()

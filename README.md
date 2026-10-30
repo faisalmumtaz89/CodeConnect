@@ -90,7 +90,7 @@ iPhone ──── WebSocket over your tailnet ────▶ ccd, the daemon 
 
 - Sessions go directly between your computer and your phone, over Tailscale by default; no CodeConnect server sees them.
 - A notification passes through Apple and, unless your daemon has its own Apple push key, CodeConnect's push relay, which receives no session content.
-- After `codeconnect claude` starts a session, CodeConnect asks GitHub for a newer release at most once a day; `"update_check": false` in `~/.codeconnect/config.json` turns that off.
+- When `codeconnect claude` or `codeconnect codex` starts a session, CodeConnect asks GitHub for a newer release at most once a day; `"update_check": false` in `~/.codeconnect/config.json` turns that off.
 - A paired phone can type into your sessions. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
 
 ## Documentation

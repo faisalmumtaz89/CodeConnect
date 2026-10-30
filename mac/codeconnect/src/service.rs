@@ -269,6 +269,18 @@ fn install(args: &[String]) -> Result<()> {
 }
 
 fn uninstall() -> Result<()> {
+    // With no systemd manager there is no unit to remove, and a daemon started by
+    // hand is not this command's to stop. A unit file present means a manager this
+    // shell cannot reach (`su`, `sudo -u`): removal below says so.
+    #[cfg(target_os = "linux")]
+    if let Some(reason) = no_systemd().filter(|_| !definition_path().exists()) {
+        bail!(
+            "this computer has no systemd user manager (`systemctl --user` failed: {reason}), \
+             so there is no CodeConnect service to remove; nothing was changed.\n\n  \
+             To stop a daemon you started yourself, stop it: `codeconnect daemon status` \
+             shows its pid."
+        );
+    }
     let plist = definition_path();
     stop_for_removal(&plist)?;
 

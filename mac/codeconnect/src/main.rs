@@ -83,6 +83,30 @@ fn main() -> Result<()> {
         explain_retired(retired);
     }
 
+    // A command that prints and exits ends quietly when its reader goes away —
+    // `codeconnect daemon status | head -3` — as other command-line tools do;
+    // with SIGPIPE ignored, Rust panics at the next print instead. The session
+    // roles keep it ignored: they handle a closed pipe themselves. `update` and
+    // `install-staged` keep it too, so a reader going away never ends an install
+    // partway through.
+    if matches!(
+        command,
+        "ls" | "list"
+            | "sessions"
+            | "token"
+            | "pair"
+            | "devices"
+            | "revoke"
+            | "daemon"
+            | "--version"
+            | "version"
+            | "--tmux-version"
+    ) {
+        // SAFETY: called before any thread is spawned; restores the default
+        // disposition of one signal.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
+
     match command {
         "claude" => start_claude(rest),
         "codex" => codex::start(rest),
@@ -569,56 +593,61 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
 
     spawn_supervisor(&session_id, &session_uid, &cwd, &plan.binary, &launched)?;
 
-    // After the session and supervisor exist, before the attach:
-    // the hold below delays only the *display*, never the session it is
-    // promising is unaffected — Claude is already running while this is
-    // read. One hold however many notes apply; reachability first, because
-    // a phone that cannot connect at all outranks a version it would fetch.
-    // Styling answers for stderr — this envelope's stream — and the whole
-    // group shares one decision. Reachability first: a phone that cannot
-    // connect at all outranks a version it would fetch.
-    {
-        use std::io::IsTerminal;
-        let style = update_check::style_for_stream(std::io::stderr().is_terminal());
-        let reachability = phone_unreachable_note(crate::pair::configured_ws_bind(&config), style);
-        // One update slot: the release advisory, behind the `update_check`
-        // switch. `codeconnect update` is what resolves it.
-        let update = config
-            .update_check
-            .then(|| update_check::select_update_note(update_check::cached_advisory(), style))
-            .flatten();
-        if let Some(group) = advisory_envelope(reachability, update) {
-            eprint!("{group}");
-            // The hold exists for a reader: only a real person at a real
-            // terminal gets one, and it is a countdown — not a spinner,
-            // because nothing is working; the session already exists and
-            // the pause is for reading. Return skips it.
-            if hold_permitted(
-                std::io::stderr().is_terminal(),
-                std::io::stdin().is_terminal(),
-                std::env::var("TERM").ok().as_deref(),
-            ) {
-                update_check::hold_for_reading(
-                    std::time::Duration::from_secs(10),
-                    |wait| update_check::returned_within(libc::STDIN_FILENO, wait),
-                    &mut std::io::stderr(),
-                    std::time::Instant::now,
-                );
-            }
-        }
-    }
-    // Fire-and-forget, after the notices so its spawn cost cannot delay
-    // them. The network belongs entirely to the detached child, so the
-    // attach below proceeds without waiting on it.
-    if config.update_check {
-        update_check::spawn_checker_if_due();
-    }
+    // After the session and supervisor exist, before the attach: Claude is
+    // already running while the advisories are read.
+    advise_before_attach(&config);
 
     // **Nothing is printed here.** Anything printed would be product output on a
     // command whose whole promise is that the session is unchanged.
     // `codeconnect --help` carries `attach`, which is where a durable answer
     // belongs.
     tmux::attach_launched(&launched, early)
+}
+
+/// The launch advisories, then the once-a-day update check: what
+/// `codeconnect claude` and `codeconnect codex` both do just before they
+/// attach. One hold however many notes apply. The hold delays only when the
+/// session is shown, never what it does: a Claude session is already running
+/// while this is read, and a Codex session starts right after it (see
+/// `codex::launch`).
+fn advise_before_attach(config: &Config) {
+    use std::io::IsTerminal;
+    // Styling answers for stderr — this envelope's stream — and the whole
+    // group shares one decision. Reachability first: a phone that cannot
+    // connect at all outranks a version it would fetch.
+    let style = update_check::style_for_stream(std::io::stderr().is_terminal());
+    let reachability = phone_unreachable_note(crate::pair::configured_ws_bind(config), style);
+    // One update slot: the release advisory, behind the `update_check`
+    // switch. `codeconnect update` is what resolves it.
+    let update = config
+        .update_check
+        .then(|| update_check::select_update_note(update_check::cached_advisory(), style))
+        .flatten();
+    if let Some(group) = advisory_envelope(reachability, update) {
+        eprint!("{group}");
+        // The hold exists for a reader: only a real person at a real
+        // terminal gets one, and it is a countdown — not a spinner,
+        // because nothing is working; the pause is for reading. Return
+        // skips it.
+        if hold_permitted(
+            std::io::stderr().is_terminal(),
+            std::io::stdin().is_terminal(),
+            std::env::var("TERM").ok().as_deref(),
+        ) {
+            update_check::hold_for_reading(
+                std::time::Duration::from_secs(10),
+                |wait| update_check::returned_within(libc::STDIN_FILENO, wait),
+                &mut std::io::stderr(),
+                std::time::Instant::now,
+            );
+        }
+    }
+    // Fire-and-forget, after the notices so its spawn cost cannot delay
+    // them. The network belongs entirely to the detached child, so the
+    // attach that follows proceeds without waiting on it.
+    if config.update_check {
+        update_check::spawn_checker_if_due();
+    }
 }
 
 /// How to turn Tailscale on, in the words of the system it runs on: the menu
@@ -643,7 +672,7 @@ const TAILSCALE_UP: &str = "sudo tailscale up --qr";
 /// says it cannot — for a daemon address, the same fact the app shows as its
 /// "Connect Tailscale" banner, told in the same words at the other keyboard;
 /// for a missing daemon, that the session is out of the phone's sight until
-/// one runs. Printed by `start_agent` in the
+/// one runs. Printed by `advise_before_attach` in the
 /// shared pre-attach advisory slot (one 10-second countdown however many
 /// notes apply).
 ///
@@ -666,10 +695,9 @@ const TAILSCALE_UP: &str = "sudo tailscale up --qr";
 /// A probe that *fails* (tailscale wedged, output unreadable) stays silent:
 /// "Tailscale is off" is a categorical claim, and an error is not evidence.
 ///
-/// The session itself is untouched: it is already running when this prints,
-/// and the hold delays only the attach. A warning
-/// with no pause is a warning nobody has ever seen — the attach paints the
-/// session over the terminal's rows microseconds later.
+/// The session itself is untouched: the hold delays only when it is shown. A
+/// warning with no pause is a warning nobody has ever seen — the attach paints
+/// the session over the terminal's rows microseconds later.
 fn phone_unreachable_note(
     ws_bind: Option<std::net::IpAddr>,
     style: update_check::Style,
@@ -743,7 +771,7 @@ fn daemon_down_note(style: update_check::Style) -> String {
             "Start it:\n\n{}",
             emphasized("codeconnect daemon install", style)
         ),
-        "This session is unaffected \u{2014} it is already running.\n\
+        "This session is unaffected \u{2014} it runs either way.\n\
          Once the daemon runs, the phone catches up as soon as it can reach\n\
          this computer.",
         style,
@@ -868,7 +896,7 @@ fn phone_reachability_note(
     // isolated on its own line), a blank line, the assurance. Bold yellow on
     // the heading — this one *is* a current impairment, which is exactly
     // what the app's amber means — and bold alone on an isolated command.
-    let assurance = "This session is unaffected \u{2014} it is already running and recording.\n\
+    let assurance = "This session is unaffected \u{2014} it runs and records either way.\n\
                      The phone catches up as soon as it can reach this computer.";
 
     let (explanation, remedy) =
@@ -1806,7 +1834,7 @@ mod tests {
             note.contains("\n\ncodeconnect daemon install\n\n"),
             "{note}"
         );
-        assert!(note.contains("already running"), "{note}");
+        assert!(note.contains("runs either way"), "{note}");
         let styled = daemon_down_note(Style::Styled);
         assert!(styled.starts_with("\u{1b}[1;33mPhone unreachable\u{1b}[0m\n"));
         assert!(styled.contains("\u{1b}[1mcodeconnect daemon install\u{1b}[0m"));
