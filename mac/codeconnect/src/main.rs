@@ -83,6 +83,30 @@ fn main() -> Result<()> {
         explain_retired(retired);
     }
 
+    // A command that prints and exits ends quietly when its reader goes away —
+    // `codeconnect daemon status | head -3` — as other command-line tools do;
+    // with SIGPIPE ignored, Rust panics at the next print instead. The session
+    // roles keep it ignored: they handle a closed pipe themselves. `update` and
+    // `install-staged` keep it too, so a reader going away never ends an install
+    // partway through.
+    if matches!(
+        command,
+        "ls" | "list"
+            | "sessions"
+            | "token"
+            | "pair"
+            | "devices"
+            | "revoke"
+            | "daemon"
+            | "--version"
+            | "version"
+            | "--tmux-version"
+    ) {
+        // SAFETY: called before any thread is spawned; restores the default
+        // disposition of one signal.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
+
     match command {
         "claude" => start_claude(rest),
         "codex" => codex::start(rest),
