@@ -406,9 +406,10 @@ pub struct Config {
     #[serde(default = "default_tmux_history_limit")]
     pub tmux_history_limit: u32,
 
-    /// Whether `codeconnect claude` may check GitHub's public Releases API
-    /// (in a detached background child, at most once per 24 hours) for a
-    /// newer CodeConnect version, and show the cached answer at launch.
+    /// Whether `codeconnect claude` and `codeconnect codex` may check GitHub's
+    /// public Releases API (in a detached background child, at most once per
+    /// 24 hours) for a newer CodeConnect version, and show the cached answer
+    /// at launch.
     /// `false` disables both the network attempt and the cached notice.
     /// The daemon never phones home either way — this belongs to the CLI a
     /// human just invoked. See the README's privacy note.
