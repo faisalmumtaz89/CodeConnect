@@ -10732,8 +10732,7 @@ const ANSWERED_ONLY_AT_THE_MAC: [&str; 2] = ["ShowOnboardingRolePicker", "OfferC
 const EXIT_PLAN_MODE: &str = "ExitPlanMode";
 
 /// What a background agent is told when its call is denied, in Claude 2.1.290's
-/// own words for an Escape at that agent's dialog, so it carries on exactly as
-/// it would have.
+/// own words for an Escape at that agent's dialog.
 const BACKGROUND_DENIAL: &str = "Permission for this tool use was denied. The tool use was \
                                  rejected (eg. if it was a file edit, the new_string was NOT \
                                  written to the file). Try a different approach or report the \
@@ -10791,16 +10790,15 @@ fn hook_decision(
                 .then(|| entry.card.tool_input.clone()),
             ..HookDecision::passthrough()
         }),
-        // As Escape at the dialog: the main conversation's turn stops, and a
-        // background agent is denied the call and carries on.
+        // The main conversation's turn stops, as Escape at the dialog does; a
+        // background agent's call is denied without an interrupt.
         AnswerDecision::Deny => Ok(HookDecision {
             decision: Decision::Deny,
             reason: Some(BACKGROUND_DENIAL.into()),
             interrupt: !entry.fork,
             ..HookDecision::passthrough()
         }),
-        // A denial with a reason goes to the agent that asked, which carries on
-        // with it.
+        // A denial with a reason goes to the agent that asked.
         AnswerDecision::Text { text } => Ok(HookDecision {
             decision: Decision::Deny,
             reason: Some(format!("{DENIAL_WITH_REASON}{text}")),
@@ -10844,8 +10842,8 @@ fn question_hook_decision(
                 })
                 .map_err(|reason| format!("{reason}. Nothing was sent."))
         }
-        // Escape at the main conversation's dialog interrupts the turn; at a
-        // background agent's it denies the question and the agent carries on.
+        // The main conversation's question is denied with an interrupt, as Escape
+        // at its dialog does; a background agent's is denied without one.
         _ => Ok(HookDecision {
             interrupt: !entry.fork,
             decision: Decision::Deny,
@@ -14594,7 +14592,7 @@ mod tests {
     /// own held hook, in the shape Claude takes from its own dialog, and nothing
     /// is ever typed: allow (and the first option), deny (which stops the main
     /// conversation's turn, as Escape does), and a denial with a reason (which
-    /// the agent reads and carries on). Any other option is refused before
+    /// goes to the agent that asked). Any other option is refused before
     /// anything is claimed, and the hook stays held.
     #[tokio::test]
     async fn a_phone_decision_reaches_only_its_own_calls_hook_and_nothing_is_typed() {
@@ -14715,7 +14713,7 @@ mod tests {
         assert!(matches!(result, AnswerResult::Applied { .. }), "{result:?}");
         let handed = returned(newer).await;
         assert_eq!(handed.decision, Decision::Deny);
-        assert!(!handed.interrupt, "a background agent carries on");
+        assert!(!handed.interrupt, "a background agent is not interrupted");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!older.is_finished(), "the other agent's call was answered");
         let result = daemon
@@ -31822,11 +31820,10 @@ mod tests {
         }
     }
 
-    /// A background agent's question declined from the phone is denied the way
-    /// Escape at its dialog denies it, without an interrupt: an interrupt stops
-    /// the agent and leaves it waiting on a tool result forever.
+    /// A background agent's question declined from the phone is denied without
+    /// an interrupt.
     #[tokio::test]
-    async fn a_background_agent_s_decline_lets_the_agent_carry_on() {
+    async fn a_background_agent_s_decline_is_denied_without_an_interrupt() {
         let daemon = test_daemon();
         let uid = TEST_UID;
         let _supervisor = attach(&daemon, "cc-1", uid, QUESTION_PANE, "").await;

@@ -690,9 +690,9 @@ falls back to the approval layout, read-only):
   monospace block under it and offers **Notes** — no other question does — and,
   as the Mac's preview layout has no "Type something", no Other;
 * **Submit** (live only when every question has an answer, which a neutral line under
-  the buttons says; it keeps its place once met, so the bar does not move) and **Decline** (as
-  Escape at the Mac: the main conversation's turn stops; a background agent's
-  question is denied and the agent carries on). A HIGH card's Submit takes Face ID,
+  the buttons says; it keeps its place once met, so the bar does not move) and **Decline** (the
+  main conversation's turn stops, as Escape at the Mac does; a background agent's
+  question is denied). A HIGH card's Submit takes Face ID,
   as Allow does.
 
 The answer is option **indices**, never labels: `{"type":"answers","answers":
