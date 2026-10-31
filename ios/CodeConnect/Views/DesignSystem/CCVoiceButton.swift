@@ -21,13 +21,12 @@ enum CCVoiceButtonPhase: Equatable {
     case sent
 }
 
-/// A 44pt circle whose face *is* the state: mic, arrow, stop, spinner, check.
+/// A circle whose face *is* the state: mic, arrow, stop, spinner, check.
 ///
-/// One control in one position doing the compose bar's whole job, so the row
-/// never grows a second button for the thumb to arbitrate at 2am. 44pt of
-/// *visible* cap — the hit-target floor as the drawn control, not as an
-/// invisible halo around something smaller — because this is the most-used
-/// button in the product.
+/// One control in one position doing the compose bar's whole job, so the pill
+/// never grows a second button for the thumb to arbitrate at 2am. The disc is
+/// drawn at 36pt so it sits inside the 44pt pill, and the button still answers
+/// to the full 44pt circle around it.
 ///
 /// The face is `accent` in every live phase, the kit's primary signature.
 /// Blocked (`blockedReason` set, and the phase is one that acts on the daemon)
@@ -75,24 +74,29 @@ struct CCVoiceButton: View {
         }
         // Fixed like every control height in the kit: the circle grows only
         // if its content demands it, which a glyph never does.
-        .frame(width: CC.size.hitTarget, height: CC.size.hitTarget)
+        .frame(width: CC.size.controlSm, height: CC.size.controlSm)
         .overlay {
             if phase == .stop {
                 recordingRing
             }
         }
+        .frame(width: CC.size.hitTarget, height: CC.size.hitTarget)
         .contentShape(Circle())
         .ccAnimation(CC.motion.micro, value: phase)
         .ccAnimation(CC.motion.micro, value: isBlocked)
     }
 
-    /// Optically tuned for this one 44pt disc, deliberately off the token
-    /// ramp: at the kit's `iconLg` (20) the glyphs crowded the circle's face,
-    /// and the owner sized them down ~13% by eye. Local constants rather than
-    /// new tokens — the ramp stays closed, and these numbers mean nothing
-    /// outside this circle.
-    private static let faceGlyph: CGFloat = 17
-    private static let stopGlyph: CGFloat = 14
+    /// Optically tuned for this one disc, deliberately off the token ramp: on
+    /// the 44pt disc it used to be, the kit's `iconLg` (20) crowded the face
+    /// and the owner sized the glyphs down to 17 and 14 by eye; these are those,
+    /// scaled with the disc to 36pt. Local constants rather than new tokens —
+    /// the ramp stays closed, and these numbers mean nothing outside this
+    /// circle.
+    private static let faceGlyph: CGFloat = 14
+    private static let stopGlyph: CGFloat = 11.5
+    /// A fixed disc cannot grow with Dynamic Type, so its glyphs stop at half
+    /// of it.
+    private static let glyphCap: CGFloat = CC.size.controlSm / 2
 
     @ViewBuilder
     private var glyph: some View {
@@ -102,17 +106,25 @@ struct CCVoiceButton: View {
             // dictation surfaces draw now, and it says "speech becomes text"
             // rather than "this records audio" — which is exactly the promise
             // (nothing is kept, the transcript is staged for review).
-            CCIcon("waveform", size: Self.faceGlyph, weight: .semibold, relativeTo: .body)
+            CCIcon(
+                "waveform", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
+                maxSize: Self.glyphCap)
         case .send:
-            CCIcon("arrow.up", size: Self.faceGlyph, weight: .semibold, relativeTo: .body)
+            CCIcon(
+                "arrow.up", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
+                maxSize: Self.glyphCap)
         case .stop:
-            CCIcon("stop.fill", size: Self.stopGlyph, weight: .semibold, relativeTo: .body)
+            CCIcon(
+                "stop.fill", size: Self.stopGlyph, weight: .semibold, relativeTo: .body,
+                maxSize: Self.glyphCap)
         case .sending:
             // Inherits `onAccent`, so the ring is black on the white face
             // without being told — same contract as CCButton's spinner.
-            CCProgressRing(inheritingSize: 16)
+            CCProgressRing(inheritingSize: 13)
         case .sent:
-            CCIcon("checkmark", size: Self.faceGlyph, weight: .semibold, relativeTo: .body)
+            CCIcon(
+                "checkmark", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
+                maxSize: Self.glyphCap)
         }
     }
 
@@ -158,7 +170,7 @@ struct CCVoiceButton: View {
     }
 }
 
-/// The keycap's press feel, not the row's: a 44pt disc needs real travel to
+/// The keycap's press feel, not the row's: a disc this size needs real travel to
 /// read as pressed on a surface this dark.
 private struct CCVoiceButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {

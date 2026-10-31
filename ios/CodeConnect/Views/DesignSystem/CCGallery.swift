@@ -1070,7 +1070,7 @@ import SwiftUI
             section("CCVoiceButton") {
                 VStack(alignment: .leading, spacing: CC.space.md) {
                     Text(
-                        "The compose bar's one control: a 44pt circle whose face is the state. Mic on an empty field, send once a character exists, stop while recording — a stray tap can end a recording but can never send one."
+                        "The compose bar's one control: a 36pt circle inside the pill, 44pt to the touch, whose face is the state. Mic on an empty field, send once a character exists, stop while recording — a stray tap can end a recording but can never send one."
                     )
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
