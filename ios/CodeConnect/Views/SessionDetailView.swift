@@ -2230,8 +2230,9 @@ private struct SessionBanner: View {
 
 /// **The compose bar, clocked by itself.**
 ///
-/// `surfaceRaised` and a 1pt top rule — never `.bar`, whose material over `#000`
-/// resolves to a flat mid-grey smear belonging to no palette.
+/// A pill floating on the conversation, on the page's own ground — no slab, no
+/// rule, and never `.bar`, whose material over `#000` resolves to a flat
+/// mid-grey smear belonging to no palette.
 ///
 /// It owns the `linkHealth` read for the same reason the banner does, and this
 /// one is a safety property rather than a cosmetic one: **a link that has gone
@@ -2267,20 +2268,20 @@ private struct SessionComposeBar: View {
     @State private var stoppedAt: Date?
 
     var body: some View {
-        VStack(spacing: 0) {
-            CCHairline()
-            VStack(alignment: .leading, spacing: CC.space.sm) {
-                // The reason goes *above* the composer and is visible text, not
-                // an accessibility hint — that rule made concrete in the app's
-                // highest-traffic control.
-                standingNote
-                composer
-            }
-            .padding(.horizontal, CC.space.md)
-            .padding(.top, CC.space.sm)
-            .padding(.bottom, CC.space.sm)
+        VStack(alignment: .leading, spacing: CC.space.xs) {
+            // The reason goes *above* the composer and is visible text, not
+            // an accessibility hint — that rule made concrete in the app's
+            // highest-traffic control.
+            standingNote
+            byteCounter
+            composer
         }
-        .background(CC.color.surfaceRaised)
+        .padding(.horizontal, CC.space.md)
+        .padding(.top, CC.space.xs)
+        // At rest the pill sits on the safe-area line, just above the home
+        // indicator; over the keyboard it keeps 8pt of air.
+        .padding(.bottom, focused.wrappedValue ? CC.space.xs : 0)
+        .background { ground }
         .onChange(of: result) { _, newValue in
             guard case .sent = newValue else { return }
             sentFlash = true
@@ -2296,43 +2297,88 @@ private struct SessionComposeBar: View {
         .onDisappear { dictation.cancel() }
     }
 
-    // MARK: The one card
+    /// The page's own ground, faded in over the top padding: a row scrolled
+    /// under the bar ends softly instead of at a slab's edge, and the note line
+    /// always reads on solid ground.
+    private var ground: some View {
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: [CC.color.bg.opacity(0), CC.color.bg],
+                startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: CC.space.xs)
+            CC.color.bg
+        }
+        .ignoresSafeArea(.container, edges: .bottom)
+    }
 
-    /// One `surface` card, input on top, controls along the bottom edge. The
-    /// focus ring wraps the whole instrument — and so does recording, because
-    /// while the mic is hot the card *is* the transcript.
+    // MARK: The pill
+
+    /// One pill: the field, and the circle inside its trailing end, where the
+    /// thumb finishing a line finds it. The focus ring wraps the whole pill —
+    /// and so does recording, because while the mic is hot the pill *is* the
+    /// transcript.
     ///
-    /// One 44pt circle does the whole job — mic when the field is empty, send
-    /// once a single character exists — so the row never grows a second button
-    /// for a thumb to arbitrate at 2am. At AX sizes nothing here stacks: the
-    /// circle is fixed and the field already owns the full measure.
+    /// One circle does the whole job — mic when the field is empty, send once a
+    /// single character exists — so the pill never grows a second button for a
+    /// thumb to arbitrate at 2am. In the bottom corner, so the circle stays at
+    /// the end of the last line as the field grows.
+    ///
+    /// **An overlay over room the field leaves, not an `HStack` beside it.**
+    /// Measured: as a row sibling of the circle, the field lost its own scroll
+    /// position after a paste past the line limit — the last line, and the
+    /// caret on it, sat below the field's bottom edge, at L and at AX5 — while
+    /// the same field with the circle overlaid kept the caret in view. The
+    /// overlay also means nothing the field holds (at AX5 the placeholder alone
+    /// is wider than the pill) can push the circle out.
     private var composer: some View {
-        VStack(alignment: .leading, spacing: CC.space.xs) {
+        Group {
             if dictation.isRecording {
                 transcript
             } else {
                 field
             }
-            HStack(alignment: .center, spacing: CC.space.xs) {
-                // While the mic is hot the row carries no meters or clocks:
-                // the live transcript above is proof the mic hears you, and
-                // the button's stop face is the recording state. Chrome that
+        }
+        .padding(.leading, CC.space.md)
+        .padding(
+            .trailing,
+            dictation.isRecording ? 2 * CC.size.hitTarget + CC.space.xxs : CC.size.hitTarget)
+        .padding(.vertical, CC.space.xs)
+        .frame(minHeight: CC.size.hitTarget)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Read first: VoiceOver orders by position, and on one line the
+        // circle's 44pt frame starts above the field's.
+        .accessibilitySortPriority(1)
+        .overlay(alignment: .bottomTrailing) {
+            HStack(spacing: CC.space.xxs) {
+                // While the mic is hot the pill carries no meters or clocks:
+                // the live transcript is proof the mic hears you, and the
+                // button's stop face is the recording state. Chrome that
                 // restates both was removed at the owner's call.
-                Spacer(minLength: 0)
-                byteCounter
                 if dictation.isRecording {
                     cancelButton
                 }
                 CCVoiceButton(phase: phase, blockedReason: sendBlockedReason) { act() }
             }
         }
-        .padding(CC.space.sm)
-        .ccSurface(
-            fill: CC.color.surface, radius: CC.radius.xl,
-            border: (focused.wrappedValue || dictation.isRecording)
-                ? CC.color.borderFocus : CC.color.border)
+        .background(CC.color.surfaceRaised, in: pillShape)
+        .overlay {
+            pillShape.strokeBorder(
+                (focused.wrappedValue || dictation.isRecording)
+                    ? CC.color.borderFocus : CC.color.border,
+                lineWidth: CC.stroke.hairline)
+        }
+        // The sort priority above ranks within the pill alone.
+        .accessibilityElement(children: .contain)
         .ccAnimation(CC.motion.micro, value: focused.wrappedValue)
         .ccAnimation(CC.motion.small, value: dictation.isRecording)
+    }
+
+    /// Half the 44pt one-line height: a capsule at one line, and a corner that
+    /// stays concentric with the circle in it at every size. Not clipped, so
+    /// the recording ring may cross the edge.
+    private var pillShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: CC.size.hitTarget / 2, style: .continuous)
     }
 
     private var field: some View {
@@ -2425,8 +2471,13 @@ private struct SessionComposeBar: View {
             // user to ignore the haptic that matters.
             dictation.cancel()
         } label: {
-            CCIcon("xmark", size: CC.size.iconSm, weight: .semibold, relativeTo: .body)
-                .foregroundStyle(CC.text.secondary)
+            // Capped at half the circle, like the voice button's glyphs: a
+            // fixed circle cannot grow with Dynamic Type.
+            CCIcon(
+                "xmark", size: CC.size.iconSm, weight: .semibold, relativeTo: .body,
+                maxSize: CC.size.controlSm / 2
+            )
+            .foregroundStyle(CC.text.secondary)
                 .frame(width: CC.size.controlSm, height: CC.size.controlSm)
                 .background {
                     Circle().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
@@ -2508,6 +2559,9 @@ private struct SessionComposeBar: View {
     /// **The byte counter**, appearing only as the 8192-byte ceiling comes into
     /// view. Bytes, not characters: the Mac measures `text.len()`, and a
     /// message of accented characters is twice the length it looks.
+    ///
+    /// Its own line above the pill, trailing, so the field keeps the pill's
+    /// width however wide the count sets at large type sizes.
     @ViewBuilder
     private var byteCounter: some View {
         let draft = ComposeDraft(text: text)
@@ -2516,6 +2570,7 @@ private struct SessionComposeBar: View {
                 .ccType(CC.type.monoSmall)
                 .foregroundStyle(draft.isOverCeiling ? CC.color.danger : CC.text.tertiary)
                 .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .trailing)
                 .accessibilityLabel(
                     draft.isOverCeiling
                         ? "Too long. \(counter)." : "\(counter).")

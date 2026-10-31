@@ -8,6 +8,9 @@ User-facing changes, newest first. Mac releases are cut per
 - On iOS 27, "Show all" on a long output keeps your place, as it does on iOS 26: the lines you were
   reading stay where they were, the Latest button offers the way back, and events that arrive are
   counted ("1 new") instead of scrolling you on.
+- The iPhone's message box is one pill resting just above the bottom edge, with the send and
+  dictation button inside it, so the conversation gets more of the screen: about 70 points more when
+  the box is empty. It still grows to five lines (three at the largest text sizes) and then scrolls.
 
 ## Codex hears about updates, and the terminal takes the screen
 
