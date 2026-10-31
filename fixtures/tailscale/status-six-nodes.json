@@ -1,0 +1,78 @@
+{
+  "Version": "1.104.2",
+  "TUN": true,
+  "BackendState": "Running",
+  "TailscaleIPs": [
+    "100.64.0.1",
+    "fd7a:115c:a1e0::1"
+  ],
+  "Self": {
+    "HostName": "studio",
+    "DNSName": "studio.tail0000.ts.net.",
+    "OS": "macOS",
+    "UserID": 1234567890123456,
+    "TailscaleIPs": [
+      "100.64.0.1",
+      "fd7a:115c:a1e0::1"
+    ],
+    "Online": true
+  },
+  "MagicDNSSuffix": "tail0000.ts.net",
+  "Peer": {
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000002": {
+      "HostName": "desktop",
+      "DNSName": "desktop.tail0000.ts.net.",
+      "OS": "windows",
+      "UserID": 1234567890123456,
+      "TailscaleIPs": [
+        "100.64.0.2",
+        "fd7a:115c:a1e0::2"
+      ],
+      "Online": true
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000003": {
+      "HostName": "linux-box",
+      "DNSName": "linux-box.tail0000.ts.net.",
+      "OS": "linux",
+      "UserID": 1234567890123456,
+      "TailscaleIPs": [
+        "100.64.0.3",
+        "fd7a:115c:a1e0::3"
+      ],
+      "Online": false
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000004": {
+      "HostName": "phone",
+      "DNSName": "phone.tail0000.ts.net.",
+      "OS": "iOS",
+      "UserID": 1234567890123456,
+      "TailscaleIPs": [
+        "100.64.0.4",
+        "fd7a:115c:a1e0::4"
+      ],
+      "Online": true
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000005": {
+      "HostName": "tablet",
+      "DNSName": "tablet.tail0000.ts.net.",
+      "OS": "iOS",
+      "UserID": 1234567890123456,
+      "TailscaleIPs": [
+        "100.64.0.5",
+        "fd7a:115c:a1e0::5"
+      ],
+      "Online": false
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000006": {
+      "HostName": "laptop",
+      "DNSName": "laptop.tail0000.ts.net.",
+      "OS": "macOS",
+      "UserID": 1234567890123456,
+      "TailscaleIPs": [
+        "100.64.0.6",
+        "fd7a:115c:a1e0::6"
+      ],
+      "Online": true
+    }
+  }
+}

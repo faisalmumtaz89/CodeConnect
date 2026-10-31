@@ -33,6 +33,7 @@ pub mod proc;
 pub mod proc_identity;
 pub mod risk;
 pub mod secret;
+pub mod tailnet;
 pub mod time;
 pub mod tmux;
 pub mod uid;
