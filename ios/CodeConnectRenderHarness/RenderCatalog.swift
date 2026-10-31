@@ -471,7 +471,7 @@ enum RenderCatalog {
     /// Ordered the way a reader meets them: the fleet, the decision, the
     /// session, the diff, the terminal, the trust screen, then the kit's own
     /// gallery — which is the only reachable render several components have.
-    static let all: [RenderScenario] = product + codex + questions + gallery
+    static let all: [RenderScenario] = product + codex + questions + mail + gallery
 
     static let product: [RenderScenario] = [
         // The first screen, launched unpaired with no arguments, exactly as the
@@ -1709,6 +1709,41 @@ enum RenderCatalog {
             try tapQuestion(app, driver, "question-next")
         }
     }
+
+    // =========================================================================
+    //  Other agents' messages — a Claude session handed them.
+    //
+    //  Seeded through `-CC_MAIL on`: the recorded Claude Code 2.1.316 session in
+    //  `transcript-agent-messages-wire.json`, its sender and its first message
+    //  lengthened to the worst case (`AgentMailFixtures`).
+    // =========================================================================
+
+    static let mail: [RenderScenario] = [
+        RenderScenario(
+            name: "session-agent-message-fed",
+            purpose:
+                "two messages handed to a working Claude at its turn's end, under who sent them, "
+                + "between its answer and its answer to them",
+            arguments: ["-CC_MAIL", "on", "-CC_DEEPLINK", "codeconnect://session/01K1B3XQ8ZC0DE5FGH7JKMNPQR"],
+            reach: { app, driver in
+                // The two messages are above the tail the timeline opens on.
+                let timeline = try driver.require(
+                    app.collectionViews["session-timeline"], "the session timeline"
+                ).frame
+                try driver.requireEarlier(
+                    driver.element(containing: "Then also reply with the word BETA", in: app),
+                    "the second message handed at the turn's end", inside: timeline)
+            }),
+        RenderScenario(
+            name: "session-agent-message-typed",
+            purpose: "a message typed into the idle box: the same row, never the person's words",
+            arguments: ["-CC_MAIL", "on", "-CC_DEEPLINK", "codeconnect://session/01K1B3XQ8ZC0DE5FGH7JKMNPQR"],
+            reach: { app, driver in
+                try driver.require(
+                    driver.text(containing: "Reply with the word GAMMA", in: app),
+                    "the typed message's words")
+            }),
+    ]
 
     static let questions: [RenderScenario] = [
         questionScenario(

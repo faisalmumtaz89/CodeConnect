@@ -605,6 +605,50 @@ fn derived_interrupts_wire() -> serde_json::Value {
     serde_json::Value::Object(runs)
 }
 
+/// **Other agents' messages reaching a Claude session, as this build emits them.**
+/// Recorded from Claude Code 2.1.316 hosted by CodeConnect
+/// (`transcript/agent-messages-2.1.316.jsonl`, trimmed to its conversation and
+/// hook lines): a turn running a tool takes two messages at its end through the
+/// Stop hook, in one `hook_additional_context` attachment after its answer, and
+/// answers them in the same turn; then a message typed into the idle box is a
+/// prompt of its own. Every event, serialised as a phone is sent it; the phone's
+/// timeline tests read the copy under `ios/` (byte-identical, by
+/// `fixtures/check-duplicated-fixtures.sh`).
+#[test]
+fn the_agent_messages_wire_fixture_is_what_this_build_emits() {
+    const FIXTURE: &str =
+        include_str!("../../../fixtures/claude/transcript-agent-messages-wire.json");
+    let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    assert_eq!(
+        derived_agent_messages_wire(),
+        committed,
+        "the committed agent-messages wire no longer matches what this build emits. \
+         Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+         regenerate_the_agent_messages_wire_fixture, then copy it over its copy under \
+         ios/ (fixtures/check-duplicated-fixtures.sh names it)"
+    );
+}
+
+/// Rewrite `fixtures/claude/transcript-agent-messages-wire.json` with what this
+/// build emits.
+#[test]
+#[ignore = "generator, not a gate"]
+fn regenerate_the_agent_messages_wire_fixture() {
+    let wire = serde_json::to_string_pretty(&derived_agent_messages_wire()).unwrap();
+    std::fs::write(
+        fixture("claude/transcript-agent-messages-wire.json"),
+        wire + "\n",
+    )
+    .unwrap();
+}
+
+fn derived_agent_messages_wire() -> serde_json::Value {
+    serde_json::Value::Array(emitted_wire(
+        "transcript/agent-messages-2.1.316.jsonl",
+        "2026-10-31T17:20:00.000Z",
+    ))
+}
+
 /// **A scheduled prompt, as this build emits it.** Recorded from Claude Code
 /// 2.1.305 against a fake model (`transcript/scheduled-prompt-2.1.305.jsonl`):
 /// a typed prompt that schedules a one-shot prompt with `CronCreate`, the

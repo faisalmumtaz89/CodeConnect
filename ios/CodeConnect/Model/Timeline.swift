@@ -128,6 +128,9 @@ enum NoticeKind: Sendable, Hashable {
     /// without being delivered (`queueTranscriptOnly`) is `.other`: it starts
     /// nothing.
     case taskReport
+    /// Another agent's message handed to this one (`AgentMail`): the agent takes
+    /// it up, so it is activity, and never a boundary.
+    case messageFromAgent
     /// Observation-about-our-observation; never evidence about the agent.
     case link
     case failure
@@ -448,7 +451,14 @@ enum TimelineBuilder {
                                         severity: notification.severity))))
                     }
                 } else if event.isPersonsWords, let text = event.userText {
-                    items.append(event.item(.userMessage(text)))
+                    // Another agent's message typed into an idle box is not the
+                    // person's words, though it arrives the way theirs do.
+                    let mail = AgentMail.parse(text)
+                    if mail.isEmpty {
+                        items.append(event.item(.userMessage(text)))
+                    } else {
+                        items.append(contentsOf: mailRows(mail, of: event))
+                    }
                 }
 
             case .agentMessage:
@@ -623,7 +633,10 @@ enum TimelineBuilder {
                                     ?? event.payload.prettyJSONString,
                                 severity: .failure))))
 
-            case .resync, .usage, .reasoning, .questionHold, .other:
+            case .other:
+                items.append(contentsOf: mailRows(event.stopFedAgentMail, of: event))
+
+            case .resync, .usage, .reasoning, .questionHold:
                 // resync is a banner, not a row; usage/reasoning are noise; a
                 // question hold is shown on the card it is about
                 break
@@ -633,6 +646,21 @@ enum TimelineBuilder {
         }
 
         return items
+    }
+
+    /// One row per message another agent sent, who sent it over what it says.
+    private static func mailRows(_ mail: [AgentMail], of event: Event) -> [TimelineItem] {
+        mail.enumerated().map { index, message in
+            event.item(
+                .notice(
+                    NoticeItem(
+                        kind: .messageFromAgent,
+                        symbol: "envelope",
+                        title: "Message from \(message.from)",
+                        detail: message.text,
+                        severity: .info)),
+                suffix: "#mail\(index)")
+        }
     }
 
     /// What a start that draws a row says, by what Claude Code reports started

@@ -1076,7 +1076,10 @@ means an incompatible peer cannot use the handshake to probe credentials.
   from the transcript alone, after the turn's last reply. The Stop hook arrives
   before that reply is on disk (up to 100 ms), so filing the end from the hook put
   it above the reply. When the Stop hooks end a turn, Claude writes a
-  `stop_hook_summary` line after the reply, and that line is the end. Every user
+  `stop_hook_summary` line after the reply, and that line is the end. A summary
+  whose hooks handed Claude more to read (other agents' messages, in
+  `hookAdditionalContext`) ends nothing: Claude answers them in the same turn, and
+  the summary after that answer is the end. Every user
   turn that finishes also gets a `turn_duration` line. It is the end when a tool
   ended the turn (an MCP result's `claude/endTurn`, a `/loop` wakeup), which runs
   the Stop hook but writes no summary, and when an API error ended it: Claude

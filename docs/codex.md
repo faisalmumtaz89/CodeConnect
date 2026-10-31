@@ -130,6 +130,10 @@ is offline, cannot be reached, or runs an older CodeConnect is refused with that
 whose computer took it but did not answer within 20 seconds is reported as unknown and is not
 sent again.
 
+On the iPhone (the app release after 1.1.12), each message is a "Message from cc-2@studio" row
+with what the agent wrote, whichever way it arrived; an earlier app shows a typed message as your
+words and does not show one handed to a working Claude Code session.
+
 A message to a Claude Code session that is working reaches it when its turn ends: Claude reads
 it as "Stop hook feedback" once its own answer is done and answers it in the same turn, and your
 draft is not touched. A message to an idle Claude Code session is typed into its message box and
