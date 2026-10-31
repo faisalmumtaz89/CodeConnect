@@ -3170,6 +3170,16 @@ impl Daemon {
                     self.ingest(hook_event(&session, &event_name, &post.payload, &input))
                         .await?;
                 }
+                // A hook that waits for the answer is one that can carry other
+                // agents' messages back; a background agent's Stop is not the
+                // run's turn ending. One that has already given up on this
+                // daemon (its reply bound passed while this was stalled) takes
+                // nothing, so the messages wait for the next turn's end.
+                if post.wait && main_thread(&post.payload) && !hook_has_left(gone).await {
+                    if let Some(text) = self.agent_messages_at_turn_end(&session.uid).await {
+                        return Ok(HookDecision::stop_context(text));
+                    }
+                }
             }
             _ => {
                 self.ingest(hook_event(&session, &event_name, &post.payload, &input))
@@ -10884,6 +10894,12 @@ fn request_event_source(agent: &protocol::agent::AgentKind) -> Source {
 }
 
 /// A hook from the main conversation rather than a background agent.
+/// Whether a waiting hook has already hung up: its connection has closed.
+/// Looked at once, without waiting.
+async fn hook_has_left(gone: &mut (dyn std::future::Future<Output = ()> + Send + Unpin)) -> bool {
+    tokio::time::timeout(Duration::ZERO, gone).await.is_ok()
+}
+
 fn main_thread(payload: &serde_json::Value) -> bool {
     payload
         .get("agent_id")
@@ -25811,6 +25827,81 @@ mod tests {
             SUPERVISOR_PREDATES_AGENT_MESSAGES
         );
         assert!(old.typed().is_empty());
+    }
+
+    /// **A busy Claude is handed its held messages at its turn's end**, through the
+    /// Stop hook that waits for the answer: oldest first, as one text, each once.
+    /// A background agent's Stop and a Stop that does not wait hand out nothing.
+    #[tokio::test]
+    async fn a_busy_claude_takes_its_held_messages_at_its_turns_end() {
+        const EMPTY: &str = "─────\n❯ \n─────\n  ? for shortcuts";
+        let daemon = test_daemon();
+        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let claude = attach(&daemon, "cc-1", TEST_UID, EMPTY, "").await;
+        transcript_line(&daemon, &restamped_prompt(false, "p1")).await;
+        for text in ["first", "second"] {
+            let outcome = daemon
+                .send_agent_message_on(Some(&tailnet), &sender, "cc-1@studio", text)
+                .await;
+            assert!(
+                matches!(outcome, protocol::ipc::AgentMessageOutcome::Held { .. }),
+                "{outcome:?}"
+            );
+        }
+        let stop = |wait: bool, agent_id: Option<&str>| {
+            let mut payload =
+                json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"});
+            if let Some(agent) = agent_id {
+                payload["agent_id"] = json!(agent);
+            }
+            HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(TEST_UID.to_string()),
+                event: "Stop".into(),
+                payload,
+                wait,
+                holds_questions: false,
+                holds_approvals: false,
+            }
+        };
+        for (wait, agent) in [(true, Some("a1b2")), (false, None)] {
+            assert_eq!(
+                daemon.handle_hook(stop(wait, agent)).await,
+                HookDecision::passthrough()
+            );
+        }
+        // A hook that gave up before the daemon read its Stop (a stalled daemon)
+        // takes nothing.
+        assert_eq!(
+            daemon
+                .handle_hook_held(stop(true, None), &mut std::future::ready(()))
+                .await,
+            HookDecision::passthrough()
+        );
+        assert_eq!(daemon.store.held_agent_messages(TEST_UID).unwrap().len(), 2);
+
+        let header = "[CodeConnect] Message from cc-2@studio (Codex · project tmp). Reply with \
+                      send_message to cc-2@studio.\n\n";
+        assert_eq!(
+            daemon.handle_hook(stop(true, None)).await,
+            HookDecision::stop_context(format!("{header}first\n\n{header}second"))
+        );
+        assert!(daemon
+            .store
+            .held_agent_messages(TEST_UID)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            daemon.handle_hook(stop(true, None)).await,
+            HookDecision::passthrough(),
+            "a message is handed out once"
+        );
+        assert!(claude.typed().is_empty(), "nothing was typed into the box");
     }
 
     /// **The agents a session can message**: every other running session on this

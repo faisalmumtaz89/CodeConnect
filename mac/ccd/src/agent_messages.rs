@@ -13,8 +13,10 @@
 //! [`crate::store::Store::recover_agent_messages`]), when it waits again.
 //!
 //! **How each agent is given one.** Codex: as a turn started through the app-server
-//! link, once its thread has been idle for a second. Claude: typed into its message
-//! box and submitted, only while its transcript shows no turn open
+//! link, once its thread has been idle for a second. Claude, busy: at its turn's
+//! end, all held at once, through its `Stop` hook ([`Daemon::agent_messages_at_turn_end`]).
+//! Claude, idle: typed into its message box and submitted, only while its
+//! transcript shows no turn open
 //! ([`ClaudeTurn`]) and, read by its supervisor immediately before the keys, no
 //! turn is running on screen and the box is empty
 //! ([`protocol::ipc::composer_is_free`]).
@@ -289,11 +291,7 @@ impl Daemon {
     /// waits for that turn's end like any other. Returns why the messages left wait,
     /// or `None` when none is left.
     pub(crate) async fn hand_out_agent_messages(&self, session_uid: &str) -> Option<String> {
-        let gate = {
-            let mut gates = self.agent_message_gates.lock().await;
-            gates.retain(|_, gate| Arc::strong_count(gate) > 1);
-            Arc::clone(gates.entry(session_uid.to_string()).or_default())
-        };
+        let gate = self.agent_message_gate(session_uid).await;
         let _one_pass = gate.lock().await;
 
         let held = match self.db.held_agent_messages(session_uid.to_string()).await {
@@ -362,6 +360,55 @@ impl Daemon {
             }
         }
         None
+    }
+
+    /// **Hand a busy Claude its held messages at its turn's end**, oldest first, as
+    /// one text for its `Stop` hook to print: Claude takes them up after its own
+    /// answer, in a continuation of that turn. Each is claimed before it is handed
+    /// over and recorded delivered with it, so it goes at most once. A hook Claude
+    /// cancels after this (its own timeout) loses them, and this daemon cannot
+    /// tell.
+    pub(crate) async fn agent_messages_at_turn_end(&self, session_uid: &str) -> Option<String> {
+        let gate = self.agent_message_gate(session_uid).await;
+        let _one_pass = gate.lock().await;
+        let held = match self.db.held_agent_messages(session_uid.to_string()).await {
+            Ok(held) => held,
+            Err(err) => {
+                crate::log_error!("agent messages for {session_uid}: could not read them: {err:#}");
+                return None;
+            }
+        };
+        let mut handed = Vec::new();
+        for row in held {
+            match self.db.claim_agent_message(row.id).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(err) => {
+                    crate::log_error!("agent message {}: could not mark it: {err:#}", row.id);
+                    break;
+                }
+            }
+            if let Err(err) = self
+                .db
+                .settle_agent_message(row.id, "delivered", protocol::time::now_rfc3339())
+                .await
+            {
+                crate::log_error!(
+                    "agent message {}: could not record delivered: {err:#}",
+                    row.id
+                );
+            }
+            handed.push(row.message);
+        }
+        (!handed.is_empty()).then(|| handed.join("\n\n"))
+    }
+
+    /// The lock one run's hand-outs take, so a turn's end and the retry loop never
+    /// hand out the same run's messages at once.
+    async fn agent_message_gate(&self, session_uid: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.agent_message_gates.lock().await;
+        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+        Arc::clone(gates.entry(session_uid.to_string()).or_default())
     }
 
     /// Give a Claude run one message by typing it into its composer, and say what

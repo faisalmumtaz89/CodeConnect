@@ -39,6 +39,11 @@ const OBSERVE_EVENTS: &[&str] = &[
     "Stop",
 ];
 
+/// How long the `Stop` hook waits for the daemon to hand it other agents'
+/// messages. The daemon's own work is a read and a write; this bounds a stalled
+/// daemon, and the turn ends without them, which then wait for the next.
+const STOP_REPLY_MS: u64 = 2_000;
+
 pub struct SettingsPlan {
     pub path: PathBuf,
     /// The session's `--mcp-config`: the `codeconnect` tool, run for this session.
@@ -209,7 +214,7 @@ fn observe_command(
     config: &Config,
     hook_bin: &Path,
 ) -> String {
-    [
+    let mut parts = vec![
         shell_quote(&hook_bin.to_string_lossy()),
         "--session".into(),
         shell_quote(session_id),
@@ -219,8 +224,13 @@ fn observe_command(
         shell_quote(event),
         "--connect-timeout-ms".into(),
         config.connect_timeout_ms.to_string(),
-    ]
-    .join(" ")
+    ];
+    // The one observer that waits: the daemon may answer a turn's end with other
+    // agents' messages for Claude to take up.
+    if event == "Stop" {
+        parts.extend(["--reply-ms".into(), STOP_REPLY_MS.to_string()]);
+    }
+    parts.join(" ")
 }
 
 /// Single-quote for `/bin/sh`. Claude runs hook commands through a shell, and
@@ -273,6 +283,26 @@ mod tests {
             !observe.contains("--gate"),
             "PreToolUse must never block the agent: {observe}"
         );
+    }
+
+    /// The Stop hook asks for the daemon's reply, bounded well inside Claude's own
+    /// timeout for it; no other observer waits.
+    #[test]
+    fn only_the_stop_hook_waits_for_a_reply_and_briefly() {
+        let document = plan(&Config::default());
+        let stop = &document["hooks"]["Stop"][0]["hooks"][0];
+        let command = stop["command"].as_str().unwrap();
+        assert!(
+            command.ends_with(&format!("--reply-ms {STOP_REPLY_MS}")),
+            "{command}"
+        );
+        assert!(STOP_REPLY_MS < stop["timeout"].as_u64().unwrap() * 1000);
+        for event in OBSERVE_EVENTS.iter().filter(|event| **event != "Stop") {
+            let command = document["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
+            assert!(!command.contains("--reply-ms"), "{event}: {command}");
+        }
     }
 
     #[test]

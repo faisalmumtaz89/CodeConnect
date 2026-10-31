@@ -594,6 +594,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         supervisor types only into a Claude composer with no turn running and
 ///         nothing in the box ([`ipc::composer_is_free`]), read in the same request.
 ///         A supervisor below 27 would drop it, so the daemon never sends it one.
+///       - [`hook::HookDecision`]'s `additional_context` — the daemon's answer to a
+///         `Stop` hook that waits for one (`cc-hook --reply-ms`), printed for
+///         Claude as Stop hook feedback. A session started before 27 has no such
+///         hook; it takes messages once restarted.
 pub const PROTOCOL_MINOR: u32 = 27;
 
 #[cfg(test)]
