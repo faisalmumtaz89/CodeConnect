@@ -10893,13 +10893,13 @@ fn request_event_source(agent: &protocol::agent::AgentKind) -> Source {
     }
 }
 
-/// A hook from the main conversation rather than a background agent.
 /// Whether a waiting hook has already hung up: its connection has closed.
 /// Looked at once, without waiting.
 async fn hook_has_left(gone: &mut (dyn std::future::Future<Output = ()> + Send + Unpin)) -> bool {
     tokio::time::timeout(Duration::ZERO, gone).await.is_ok()
 }
 
+/// A hook from the main conversation rather than a background agent.
 fn main_thread(payload: &serde_json::Value) -> bool {
     payload
         .get("agent_id")
@@ -25683,7 +25683,6 @@ mod tests {
         assert!(refused(send("cc-1@studio", "a\u{1b}[2Jb").await).contains("control"));
         assert!(refused(send("cc-1@nowhere", "hi").await).contains("not a computer"));
         assert!(refused(send("cc-1@linux-box", "hi").await).contains("offline"));
-        assert!(refused(send("cc-1@desktop", "hi").await).contains("other computers"));
         assert!(refused(send("cc-9@studio", "hi").await).contains("not a running session"));
         // An ended run under the name is not a target, however recent.
         let mut ended = daemon.store.get_session(&codex).unwrap().unwrap();
@@ -25904,6 +25903,99 @@ mod tests {
         assert!(claude.typed().is_empty(), "nothing was typed into the box");
     }
 
+    /// **Another computer's daemon is served only when it is one of the owner's
+    /// computers**, read from this computer's own tailnet: its message is taken as a
+    /// local one is, headed with the name this computer knows it by, and anything
+    /// else is refused.
+    #[tokio::test]
+    async fn another_computers_daemon_is_served_only_from_the_owners_computers() {
+        use protocol::peer::{PeerReply, PeerRequest};
+        let daemon = test_daemon();
+        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        let codex = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &codex, "cc-1").await;
+        let desktop: std::net::IpAddr = "100.64.0.2".parse().unwrap();
+        let message = |from: &str, to: &str, text: &str| PeerRequest::PeerAgentMessage {
+            from: from.into(),
+            agent: "Codex".into(),
+            project: "api".into(),
+            to: to.into(),
+            text: text.into(),
+        };
+        let serve = |source: std::net::IpAddr, request: PeerRequest| {
+            let daemon = Arc::clone(&daemon);
+            let tailnet = tailnet.clone();
+            async move { daemon.serve_peer_on(Some(&tailnet), source, request).await }
+        };
+        let refused = |reply: PeerReply| match reply {
+            PeerReply::PeerRefused { reason } => reason,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+
+        assert!(
+            refused(serve("127.0.0.1".parse().unwrap(), message("cc-7", "cc-1", "hi")).await)
+                .contains("one of your computers")
+        );
+        assert!(
+            refused(serve("100.99.0.9".parse().unwrap(), PeerRequest::PeerListAgents).await)
+                .contains("one of your computers")
+        );
+        assert!(refused(serve(desktop, message("cc-7@x", "cc-1", "hi")).await).contains("not one"));
+        assert!(refused(
+            daemon
+                .serve_peer_on(None, desktop, PeerRequest::PeerListAgents)
+                .await
+        )
+        .contains("Tailscale"));
+
+        assert_eq!(
+            serve(desktop, PeerRequest::PeerListAgents).await,
+            PeerReply::PeerAgents {
+                agents: vec![protocol::ipc::AgentEntry {
+                    address: "cc-1@studio".into(),
+                    agent: "Codex".into(),
+                    project: "tmp".into(),
+                }]
+            }
+        );
+        let outcome = |reply: PeerReply| match reply {
+            PeerReply::PeerAgentMessageResult { outcome } => outcome,
+            other => panic!("expected an outcome, got {other:?}"),
+        };
+        assert!(matches!(
+            outcome(serve(desktop, message("cc-7", "cc-1", "please review")).await),
+            protocol::ipc::AgentMessageOutcome::Held { .. }
+        ));
+        assert_eq!(
+            outcome(serve(desktop, message("cc-7", "cc-1", "please review")).await),
+            protocol::ipc::AgentMessageOutcome::Duplicate
+        );
+        assert!(matches!(
+            outcome(serve(desktop, message("cc-7", "cc-9", "hi")).await),
+            protocol::ipc::AgentMessageOutcome::Refused { reason } if reason.contains("not a running session")
+        ));
+        assert!(matches!(
+            outcome(serve(desktop, message("cc-7", "cc-1", "a\u{1b}[2Jb")).await),
+            protocol::ipc::AgentMessageOutcome::Refused { reason } if reason.contains("control")
+        ));
+        assert_eq!(
+            daemon
+                .store
+                .held_agent_messages(&codex)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.message)
+                .collect::<Vec<_>>(),
+            [
+                "[CodeConnect] Message from cc-7@desktop (Codex · project api). Reply with \
+              send_message to cc-7@desktop.\n\nplease review"
+            ]
+        );
+    }
+
     /// **The agents a session can message**: every other running session on this
     /// computer, addressed by the tailnet's name for it, and never itself.
     #[tokio::test]
@@ -25917,7 +26009,10 @@ mod tests {
         register_codex_session(&daemon, &asker, "cc-2").await;
         register_codex_session(&daemon, &codex, "cc-1").await;
         register(&daemon, "cc-3", None).await;
-        let (you, agents) = daemon.list_agents_on(Some(&tailnet), &asker).await.unwrap();
+        let (you, agents) = daemon
+            .list_agents_on(Some(&tailnet), &asker, Vec::new())
+            .await
+            .unwrap();
         assert_eq!(you, "cc-2@studio", "the asker is told its own address");
         let listed: Vec<(String, String)> =
             agents.into_iter().map(|a| (a.address, a.agent)).collect();
@@ -25929,7 +26024,7 @@ mod tests {
             ]
         );
         assert!(daemon
-            .list_agents_on(None, &asker)
+            .list_agents_on(None, &asker, Vec::new())
             .await
             .unwrap_err()
             .contains("Tailscale"));

@@ -29,6 +29,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use protocol::event::{Event, EventKind, Source};
+use protocol::peer::PeerRequest;
 use protocol::secret::Redacted;
 use protocol::ws::{
     AnswerPath, Capabilities, ClientMessage, ServerMessage, MAX_CLIENT_MESSAGE_BYTES,
@@ -236,7 +237,7 @@ async fn accept_loop(
                 tokio::spawn(async move {
                     // Released when this task ends, whatever ended it.
                     let _permit = permit;
-                    if let Err(err) = accept(daemon, stream, token, tls, trust).await {
+                    if let Err(err) = accept(daemon, stream, peer.ip(), token, tls, trust).await {
                         crate::log_debug!("ws {peer} ended: {err:#}");
                     }
                 });
@@ -340,6 +341,7 @@ impl Drop for ConnectionPermit {
 async fn accept(
     daemon: Arc<Daemon>,
     stream: TcpStream,
+    peer: IpAddr,
     token: Arc<String>,
     tls: Option<TlsAcceptor>,
     trust: PlaintextTrust,
@@ -360,7 +362,7 @@ async fn accept(
             // address can keep private, and what `capabilities.tls` reports.
             anyhow::bail!("plaintext is refused on this listener and no certificate is available");
         }
-        return handle_client(daemon, stream, token, false, trust).await;
+        return handle_client(daemon, stream, peer, token, false, trust).await;
     };
 
     // `peek` reads without consuming, so the byte is still there for the TLS
@@ -379,14 +381,14 @@ async fn accept(
             .await
             .context("tls handshake timed out")?
             .context("tls handshake failed")?;
-        return handle_client(daemon, stream, token, true, trust).await;
+        return handle_client(daemon, stream, peer, token, true, trust).await;
     }
 
     if plaintext_refused {
         crate::log_warn!("ws: refused a plaintext connection (wss is required on this listener)");
         return Ok(());
     }
-    handle_client(daemon, stream, token, false, trust).await
+    handle_client(daemon, stream, peer, token, false, trust).await
 }
 
 /// `0x16` is the TLS `handshake` content type. No HTTP request method begins
@@ -421,6 +423,9 @@ fn tmux_socket() -> String {
 async fn handle_client<S>(
     daemon: Arc<Daemon>,
     stream: S,
+    // Where the connection came from: the one thing another computer's daemon is
+    // known by (`protocol::peer`).
+    peer: IpAddr,
     token: Arc<String>,
     tls_active: bool,
     trust: PlaintextTrust,
@@ -540,6 +545,16 @@ where
                 let parsed: ClientMessage = match serde_json::from_str(&text) {
                     Ok(parsed) => parsed,
                     Err(err) => {
+                        // Not a phone message: before a phone's hello it may be
+                        // another computer's daemon asking one thing, answered once.
+                        if !authed {
+                            if let Ok(request) = serde_json::from_str::<PeerRequest>(&text) {
+                                let reply = daemon.serve_peer(peer, request).await;
+                                sink.send(Message::Text(serde_json::to_string(&reply)?)).await?;
+                                let _ = sink.close().await;
+                                return Ok(());
+                            }
+                        }
                         send(&mut sink, &ServerMessage::Error {
                             code: "bad_request".into(),
                             message: format!("undecodable message: {err}"),
@@ -3574,6 +3589,111 @@ mod tests {
             Frame::Json(value) => Some(value),
             Frame::Closed | Frame::Silent => None,
         }
+    }
+
+    /// A Codex run registered the way its coordinator registers it, on a daemon a
+    /// test drives; its link reaches no app-server, so a message to it waits.
+    async fn codex_run(daemon: &Arc<Daemon>, uid: &str, name: &str) {
+        let (tx, rx) =
+            tokio::sync::mpsc::channel(protocol::config::Config::default().ipc_write_queue);
+        Box::leak(Box::new(rx));
+        daemon
+            .register_supervisor(
+                protocol::ipc::RegisterSession {
+                    session_id: name.into(),
+                    session_uid: Some(uid.into()),
+                    tmux_session: name.into(),
+                    tmux_socket: protocol::TMUX_SOCKET_NAME.into(),
+                    cwd: "/tmp".into(),
+                    supervisor_pid: 4242,
+                    claude_bin: None,
+                    agent: protocol::agent::AgentKind::Codex,
+                    agent_bin: None,
+                    codex_thread_id: None,
+                    codex_socket: Some(
+                        std::env::temp_dir()
+                            .join(format!("ccd-peer-{uid}-nothing-listens.sock"))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    codex_generation: Some(1),
+                    started_at: protocol::time::now_rfc3339(),
+                    protocol_minor: protocol::PROTOCOL_MINOR,
+                    exit_replay: false,
+                },
+                tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+            )
+            .await
+            .expect("a Codex registration is accepted");
+    }
+
+    /// **One computer's agent messages another computer's, over the real
+    /// listener.** The sending daemon dials the receiver's port at the address its
+    /// tailnet gives the receiving computer; the receiver serves the connection
+    /// because its own tailnet says that address is one of the owner's computers,
+    /// and heads the message with the name it knows that computer by. A peer
+    /// request on a phone's connection after its hello is a bad request, as before.
+    #[tokio::test]
+    async fn an_agent_messages_an_agent_on_another_computer() {
+        // Both daemons run here: "desktop" is this test's loopback.
+        let tailnet = protocol::tailnet::Tailnet::parse(
+            &include_str!("../../../fixtures/tailscale/status-six-nodes.json")
+                .replace("100.64.0.2", "127.0.0.1"),
+        )
+        .unwrap();
+        *crate::agent_messages::TEST_TAILNET
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(tailnet.clone());
+        let (receiver, _device) = live_server(protocol::config::Config::default()).await;
+        let target = protocol::uid::new().unwrap();
+        codex_run(&receiver.daemon, &target, "cc-1").await;
+        let (sender, _, _, _) = daemon_with_a_device_pushing(
+            protocol::config::Config {
+                ws_port: receiver.addr.port(),
+                ..protocol::config::Config::default()
+            },
+            Arc::new(crate::apns::LoggingPushSender::new()),
+        );
+        let from = protocol::uid::new().unwrap();
+        codex_run(&sender, &from, "cc-2").await;
+
+        let outcome = sender
+            .send_agent_message_on(Some(&tailnet), &from, "cc-1@desktop", "please review")
+            .await;
+        assert!(
+            matches!(outcome, protocol::ipc::AgentMessageOutcome::Held { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            receiver
+                .store
+                .held_agent_messages(&target)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.message)
+                .collect::<Vec<_>>(),
+            [
+                "[CodeConnect] Message from cc-2@desktop (Codex · project tmp). Reply with \
+              send_message to cc-2@desktop.\n\nplease review"
+            ]
+        );
+        let refused = sender
+            .send_agent_message_on(Some(&tailnet), &from, "cc-9@desktop", "hi")
+            .await;
+        assert!(
+            matches!(&refused, protocol::ipc::AgentMessageOutcome::Refused { reason } if reason.contains("not a running session")),
+            "{refused:?}"
+        );
+
+        let (mut phone, ack) = receiver.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["type"], "hello_ack", "{ack}");
+        phone
+            .send(Message::Text(r#"{"type":"peer_list_agents"}"#.into()))
+            .await
+            .unwrap();
+        let answer = next_json(&mut phone).await.unwrap();
+        assert_eq!(answer["code"], "bad_request", "{answer}");
     }
 
     fn daemon_with_a_device_pushing(

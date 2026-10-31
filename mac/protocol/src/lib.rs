@@ -29,6 +29,7 @@ pub mod hash;
 pub mod hook;
 pub mod ipc;
 pub mod pairing;
+pub mod peer;
 pub mod proc;
 pub mod proc_identity;
 pub mod risk;
@@ -598,6 +599,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         `Stop` hook that waits for one (`cc-hook --reply-ms`), printed for
 ///         Claude as Stop hook feedback. A session started before 27 has no such
 ///         hook; it takes messages once restarted.
+///       - [`peer`] — one daemon asking another: a frame that is not a phone
+///         message, before any phone hello, may be a [`peer::PeerRequest`], answered by one
+///         [`peer::PeerReply`] and the connection closed. A daemon below 27
+///         answers `bad_request`, which the sender reads as "older CodeConnect".
 pub const PROTOCOL_MINOR: u32 = 27;
 
 #[cfg(test)]

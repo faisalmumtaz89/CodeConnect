@@ -113,8 +113,9 @@ one a launch would use. Use `codeconnect --help` for the launcher's own commands
 
 Every hosted session — Codex and Claude Code alike — has one MCP server of CodeConnect's
 own, `codeconnect`, with two tools: `list_agents` tells the session its own address and
-names the other running sessions on this computer, each as `cc-N@<computer>`, and
-`send_message` sends one of them a message. In a Codex
+names the other running sessions on this computer and on your other computers on Tailscale
+(the same Tailscale user, not tagged, online, running CodeConnect on the same port), each as
+`cc-N@<computer>`, and `send_message` sends one of them a message. In a Codex
 session the tool is pre-approved (`default_tools_approval_mode = "approve"`, set on the
 session's app server only), because Codex asks for MCP tool approval only at the computer's
 keyboard and a send would otherwise wait there.
@@ -124,7 +125,10 @@ A message to a Codex session reaches it as a turn of its own, headed
 running: it waits until the session has been idle for a second, so your own queued message
 goes first, and after you stop a turn with Esc it waits until your next turn ends. The sender
 is told whether it was delivered, held until the session is free, or refused. A held message
-survives a daemon restart and is handed over at most once.
+survives a daemon restart and is handed over at most once. A message to another computer that
+is offline, cannot be reached, or runs an older CodeConnect is refused with that reason; one
+whose computer took it but did not answer within 20 seconds is reported as unknown and is not
+sent again.
 
 A message to a Claude Code session that is working reaches it when its turn ends: Claude reads
 it as "Stop hook feedback" once its own answer is done and answers it in the same turn, and your
