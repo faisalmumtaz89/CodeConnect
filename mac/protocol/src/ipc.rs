@@ -493,6 +493,15 @@ pub enum SupervisorRequest {
         /// simply does not run — the behaviour that shipped.
         #[serde(default)]
         targets_composer: bool,
+        /// The session's Claude transcript, beside which Claude records the
+        /// name it draws into a named session's message box
+        /// ([`composer_is_drawn_as`]). The supervisor reads that name at every
+        /// look rather than taking one here, so a `/rename` typed by this very
+        /// request is seen by its own recovery. Absent from an older daemon, and
+        /// ignored by an older supervisor: either way a named session's box is
+        /// not recognised and the send is refused, as it was before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
         /// Send Enter after the text. False lets the phone stage a draft.
         #[serde(default = "default_true")]
         submit: bool,
@@ -772,6 +781,20 @@ fn is_rule_row(line: &str) -> bool {
     !row.is_empty() && row.chars().all(|c| RULE_GLYPHS.contains(&c))
 }
 
+/// The label a rule carries drawn whole: glyphs from column zero, a space, the
+/// label, a space, glyphs — `──── myjob ─`, which is how Claude draws a named
+/// session's name (2.1.316, measured). A label too long for the pane is cut
+/// with `…` and loses its leading glyphs, and is no label here.
+fn rule_label(line: &str) -> Option<&str> {
+    let row = line.trim_end();
+    let opened = row.trim_start_matches(RULE_GLYPHS);
+    let body = opened.trim_end_matches(RULE_GLYPHS);
+    if opened.len() == row.len() || body.len() == opened.len() {
+        return None;
+    }
+    body.strip_prefix(' ')?.strip_suffix(' ')
+}
+
 /// A row that opens at column zero with the prompt marker standing alone:
 /// what follows it is the no-break space Claude pads the caret with, an
 /// ordinary space, or nothing at all.
@@ -811,9 +834,28 @@ fn is_prompt_row(line: &str) -> bool {
 /// stands behind it: see `authorise` in the supervisor, which asks tmux who
 /// holds the keyboard before anything is typed.
 pub fn composer_is_drawn(pane_text: &str) -> bool {
+    composer_is_drawn_as(pane_text, None)
+}
+
+/// [`composer_is_drawn`] for a session whose own name is known: a rule
+/// carrying exactly that name ([`rule_label`]) opens its box as a plain rule
+/// does.
+///
+/// **The name is the proof, and nothing else on screen is.** A background
+/// agent's box, while the person views that agent, opens with a rule carrying
+/// the agent's task in the same place, and the keys typed there reach that
+/// agent. Its contents cannot tell it from the session's: one typed space
+/// leaves its prompt row byte-for-byte an empty one, and the agent list that
+/// says `◯ main` is dropped once the fullscreen renderer runs out of rows
+/// (2.1.316, measured). So a label counts only when it is the session's own
+/// recorded name, whole; a cut-off label, an unknown name, or any other label
+/// is no composer, which is what every named session got before.
+pub fn composer_is_drawn_as(pane_text: &str, own_name: Option<&str>) -> bool {
     let mut above = "";
     for row in pane_text.lines() {
-        if is_prompt_row(row) && is_rule_row(above) {
+        if is_prompt_row(row)
+            && (is_rule_row(above) || own_name.is_some_and(|name| rule_label(above) == Some(name)))
+        {
             return true;
         }
         above = row;
@@ -856,13 +898,26 @@ impl PromptPresence {
     /// What authorised the send: the needle that matched, or `"composer"` where
     /// the composer was recognised by its shape and no text was matched at all.
     pub fn find_match(&self, pane_text: &str, overrides: Option<&[String]>) -> Option<String> {
+        self.find_match_as(pane_text, overrides, None)
+    }
+
+    /// [`find_match`](Self::find_match) for a session whose own recorded name
+    /// is `own_name`: the composer is then also recognised under a rule
+    /// carrying that name ([`composer_is_drawn_as`]). Every other mode, and an
+    /// operator's needles, are unchanged by it.
+    pub fn find_match_as(
+        &self,
+        pane_text: &str,
+        overrides: Option<&[String]>,
+        own_name: Option<&str>,
+    ) -> Option<String> {
         let needles: Vec<String> = match overrides {
             Some(list) if !list.is_empty() => list.iter().map(|n| normalize_for_match(n)).collect(),
             // Nothing configured, so the composer is judged on its shape.
             // An override is still honoured above: it is the one place an
             // operator can teach this check a screen it cannot see.
             _ if matches!(self, PromptPresence::InputBox) => {
-                return composer_is_drawn(pane_text).then(|| COMPOSER.to_string());
+                return composer_is_drawn_as(pane_text, own_name).then(|| COMPOSER.to_string());
             }
             _ => self.default_needles(),
         };
@@ -1169,6 +1224,136 @@ mod tests {
         assert!(PromptPresence::InputBox.find_match(PANE, None).is_none());
     }
 
+    /// Named sessions' own boxes, from Claude Code 2.1.316 against a fake
+    /// model, with the name each session recorded: empty after six turns
+    /// (classic renderer), empty at 13 rows with a background agent running
+    /// (fullscreen), holding a draft, and showing the dim queued-message hint
+    /// during a busy turn.
+    const OWN_NAMED_BOXES: [(&str, &str, &str); 4] = [
+        (
+            "named-after-turns",
+            "named-cc-1",
+            include_str!("../../../fixtures/panes/named/named-after-turns.txt"),
+        ),
+        (
+            "named-fullscreen-short",
+            "fsjob",
+            include_str!("../../../fixtures/panes/named/named-fullscreen-short.txt"),
+        ),
+        (
+            "named-holding-a-draft",
+            "fsjob",
+            include_str!("../../../fixtures/panes/named/named-holding-a-draft.txt"),
+        ),
+        (
+            "named-queued-hint",
+            "named-cc-1",
+            include_str!("../../../fixtures/panes/named/named-queued-hint.txt"),
+        ),
+    ];
+
+    /// A background agent's box while the person views it, from the same
+    /// runs: its rule carries the agent's task, `bgtask`. Empty; three rows of
+    /// draft in a 17-row pane and a draft that opens with a newline in a 13-row
+    /// one, both with the agent list dropped; and one typed space, in both
+    /// renderers, which leaves the prompt row byte for byte an empty one.
+    const VIEWED_AGENT_BOXES: [(&str, &str); 5] = [
+        (
+            "agent-viewed-empty",
+            include_str!("../../../fixtures/panes/named/agent-viewed-empty.txt"),
+        ),
+        (
+            "agent-viewed-draft-list-dropped",
+            include_str!("../../../fixtures/panes/named/agent-viewed-draft-list-dropped.txt"),
+        ),
+        (
+            "agent-viewed-leading-newline",
+            include_str!("../../../fixtures/panes/named/agent-viewed-leading-newline.txt"),
+        ),
+        (
+            "agent-viewed-space-classic",
+            include_str!("../../../fixtures/panes/named/agent-viewed-space-classic.txt"),
+        ),
+        (
+            "agent-viewed-space-fs13",
+            include_str!("../../../fixtures/panes/named/agent-viewed-space-fs13.txt"),
+        ),
+    ];
+
+    /// A rule carrying the session's own recorded name opens its composer,
+    /// whatever the box holds. Without the name it is no composer, as before,
+    /// and under any other name neither.
+    #[test]
+    fn a_rule_carrying_the_sessions_own_name_opens_its_composer() {
+        for (fixture, own_name, pane) in OWN_NAMED_BOXES {
+            let input_box = PromptPresence::InputBox;
+            assert_eq!(
+                input_box
+                    .find_match_as(pane, None, Some(own_name))
+                    .as_deref(),
+                Some("composer"),
+                "{fixture} is {own_name}'s own box"
+            );
+            assert!(
+                input_box.find_match(pane, None).is_none(),
+                "{fixture} without a name"
+            );
+            assert!(
+                input_box.find_match_as(pane, None, Some("other")).is_none(),
+                "{fixture} under another name"
+            );
+        }
+    }
+
+    /// A viewed agent's box is refused under the session's name. Its label is
+    /// the agent's task, so a session given exactly that name would pass here:
+    /// asserted, because that is why the supervisor refuses a name that is also
+    /// an agent's task before it ever asks this.
+    #[test]
+    fn a_viewed_agents_box_is_refused_under_the_sessions_name() {
+        for (fixture, pane) in VIEWED_AGENT_BOXES {
+            let input_box = PromptPresence::InputBox;
+            assert!(
+                input_box.find_match_as(pane, None, Some("fsjob")).is_none(),
+                "{fixture} is the agent's box"
+            );
+            assert!(
+                input_box.find_match(pane, None).is_none(),
+                "{fixture} without a name"
+            );
+            assert!(
+                input_box
+                    .find_match_as(pane, None, Some("bgtask"))
+                    .is_some(),
+                "{fixture} carries the agent's task as its label"
+            );
+        }
+    }
+
+    /// Labels as Claude draws them (2.1.316, measured; the leading run of
+    /// glyphs shortened): whole while the name fits — spaces, unicode and a
+    /// collision suffix included — and cut with `…`, its leading glyphs gone,
+    /// once it does not, at 40, 20 and 8 columns.
+    #[test]
+    fn a_label_counts_only_drawn_whole() {
+        for (row, label) in [
+            ("──── myjob ─", Some("myjob")),
+            ("──── my job ☕ café ─", Some("my job ☕ café")),
+            (
+                "──── a-rather-long-session-name-for-width-tests-shimmering-riddle ─",
+                Some("a-rather-long-session-name-for-width-tests-shimmering-riddle"),
+            ),
+            (" a-rather-long-session-name-for-width… ─", None),
+            (" a-rather-long-se… ─", None),
+            (" a-ra… ─", None),
+            ("────────", None),
+            ("──── myjob", None),
+            ("myjob ─", None),
+        ] {
+            assert_eq!(rule_label(row), label, "{row:?}");
+        }
+    }
+
     /// The operator's escape hatch, on both routes it arrives by: handed to
     /// `find_match` directly, and — the way the daemon does it — as the
     /// `AnyOf` that replaces the variant outright.
@@ -1391,6 +1576,7 @@ mod tests {
             require: PromptPresence::PermissionPrompt,
             asking: None,
             targets_composer: false,
+            transcript_path: None,
             submit: true,
             expect: prompt_fingerprint(PERMISSION_PANE, "doyouwanttoproceed"),
             recover_composer: false,
@@ -1424,6 +1610,33 @@ mod tests {
                 assert!(!recover_composer);
                 assert!(!capture_recovered);
             }
+            other => panic!("wrong request: {other:?}"),
+        }
+    }
+
+    /// The transcript path is additive both ways. A daemon that predates it
+    /// sends none, which decodes as `None` — no name, so a named session stays
+    /// refused. A supervisor that predates it never declared the field, and a
+    /// key it does not know decodes all the same (stood in for here by one
+    /// this build does not know either), so it too keeps refusing rather than
+    /// failing the frame.
+    #[test]
+    fn the_transcript_path_is_optional_in_both_directions() {
+        let from_an_older_daemon = r#"{"kind":"send_text","text":"hi","require":{"mode":"input_box"},
+                                       "targets_composer":true}"#;
+        match serde_json::from_str::<SupervisorRequest>(from_an_older_daemon).unwrap() {
+            SupervisorRequest::SendText {
+                transcript_path, ..
+            } => assert_eq!(transcript_path, None),
+            other => panic!("wrong request: {other:?}"),
+        }
+        let with_a_key_unknown_to_the_reader = r#"{"kind":"send_text","text":"hi",
+            "require":{"mode":"input_box"},"targets_composer":true,
+            "transcript_path":"/scratch/2f0c.jsonl","a_later_field":1}"#;
+        match serde_json::from_str::<SupervisorRequest>(with_a_key_unknown_to_the_reader).unwrap() {
+            SupervisorRequest::SendText {
+                transcript_path, ..
+            } => assert_eq!(transcript_path.as_deref(), Some("/scratch/2f0c.jsonl")),
             other => panic!("wrong request: {other:?}"),
         }
     }

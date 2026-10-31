@@ -29,6 +29,7 @@ mod home_guard;
 mod job;
 mod pair;
 mod service;
+mod session_name;
 mod sessions;
 mod settings;
 mod supervisor;

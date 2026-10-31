@@ -230,6 +230,26 @@ submitted prompt and marks the selected row of every menu — and only under a
 rule does it mean "type here". The captures both halves are measured against
 are in `fixtures/panes/`.
 
+A named session (after `/rename`) carries its name in that rule, `──── myjob ─`,
+and the same place in a background agent's box, while the person at the computer
+views that agent, carries the agent's task — keys typed there reach the agent,
+and nothing in the box tells the two apart. So a labelled rule counts only when
+its label, drawn whole, is the session's own name **as Claude recorded it**: the
+`custom-title.json` Claude keeps beside the session's transcript (with the
+suffix Claude adds when another session already holds the name), read by the
+supervisor at every look. A name that equals any Claude agent task recorded on
+this computer — what an agent's box draws in the same place: its task, or `@name`
+for a named agent, as Claude records each agent in
+`~/.claude/projects/*/*/subagents/*.meta.json`, nested agents included and
+wherever the session has since moved with `/clear`, `/branch` or `/resume` —
+proves nothing and counts as no name. No name, an unreadable or stale one, or a
+label cut short with `…` because the pane is too narrow, and the phone is
+refused, as it was before named sessions were recognised. Reading every agent
+record means a phone message into a renamed session can take a moment longer
+(about half a second with 7,508 records on the computer it was measured on);
+other sessions are not affected. Measured on Claude Code 2.1.316; a name Claude
+gives a session by itself was not reproduced.
+
 **A drawn composer is not a live one.** Since `protocol_minor` 9 the presence
 check has a second half: the composer counts as ready only if its box is on
 screen *and* tmux says the keyboard reaches the program. That is three fields
@@ -1208,7 +1228,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `ws_loopback` | `true` | Also listen on `127.0.0.1`, for tools on this Mac. The token is still required. |
 | `gate_hook` | `"PermissionRequest"` | Which hook waits for the daemon. `"PreToolUse"` or `"none"` also valid. |
 | `unreachable_ask` | `false` | When the daemon is unreachable, make PreToolUse return `ask` with our reason. Renders the reason to the operator, at the cost of prompting on every tool call. |
-| `input_box_needles` | the composer's box | Whitespace-insensitive needles proving the composer is ready, replacing the shape check. By default the composer is recognised by the box Claude draws it in — its `❯` prompt row directly under a rule of box-drawing horizontals — because the footer hints are dropped as soon as the mode hint or a subagent count needs the room. |
+| `input_box_needles` | the composer's box | Whitespace-insensitive needles proving the composer is ready, replacing the shape check. By default the composer is recognised by the box Claude draws it in — its `❯` prompt row directly under a rule of box-drawing horizontals, or under a rule carrying the session's own recorded name — because the footer hints are dropped as soon as the mode hint or a subagent count needs the room. |
 | `permission_prompt_needles` | built-in | Needles proving a permission prompt is on screen. |
 | `send_keys_delay_ms` | `120` | Pause between typing text and pressing Enter. |
 | `tmux_status` | `false` | Turns tmux's status bar on for new Claude and Codex sessions. Only an ordinary tmux client draws it; `codeconnect`'s own view does not. |
