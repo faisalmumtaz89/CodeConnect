@@ -1139,6 +1139,17 @@ phone already out there. No `terminal_output` exceeds `max_chunk_bytes` decoded 
 including the screen an attach paints, which is one chunk the forwarder splits at
 the bound rather than a frame the phone's grant happened to size.
 
+**A paint states the pane's size.** The carrier's tmux client is
+`ignore-size`, so a phone never resizes the window a Mac viewer is looking at,
+and while one is attached the pane keeps the viewer's size. Each paint — the
+attach, a focus change, and a `%layout-change` of the bound window — opens with
+xterm's window resize, `CSI 8 ; rows ; cols t`, carrying the pane's size from
+the same `display-message` that reads the cursor; a paint whose cursor query is
+not answered for its pane goes without both, and the phone keeps its grid. The iPhone app draws the paint
+and every byte after it on a grid of that size. An app that ignores the sequence
+draws as it did before, so the change needs no protocol minor. The phone's
+`resize` is still its own size, which the window takes once no viewer is left.
+
 **A terminal needs a private transport.** `terminal_pty` is advertised only to a
 paired device on a connection that is `wss://`, loopback, or this Mac's own
 tailnet address, and `terminal_attach` enforces the same rule independently of

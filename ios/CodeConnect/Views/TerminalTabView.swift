@@ -755,6 +755,7 @@ struct TerminalTabView: View {
                 fontSize: model.settings.terminalFontSize,
                 onLink: { linkToOpen = $0 },
                 onKeyboard: onKeyboard,
+                onZooms: { zooms in DispatchQueue.main.async { paneZooms = zooms } },
                 seeded: { fromTrimmedBuffer in
                     // Off the update pass. Seeding happens inside
                     // `makeUIView`/`updateUIView`, and writing view state from
@@ -770,8 +771,14 @@ struct TerminalTabView: View {
                 .accessibilityLabel(paneLabel(live: live))
                 // Pinch to scale, the same preference the diff surface has.
                 // `simultaneousGesture` so the emulator keeps its own selection
-                // and scroll gestures.
-                .simultaneousGesture(pinch)
+                // and scroll gestures. Not while the pane is drawn wider than
+                // the tab: there the pinch zooms the view onto it, out to the
+                // whole width, and leaves the font alone. A pinch already
+                // changing the font keeps it to the end: a larger font makes
+                // the pane wider than the tab until the daemon repaints it at
+                // the phone's new size.
+                .simultaneousGesture(
+                    pinch, including: paneZooms && pinchBase == nil ? .subviews : .all)
         }
     }
 
@@ -810,6 +817,8 @@ struct TerminalTabView: View {
     }
 
     @State private var pinchBase: Double?
+    /// Whether the pane is drawn wider than the tab, so a pinch zooms the view.
+    @State private var paneZooms = false
 
     // MARK: - Target
 
@@ -1108,6 +1117,69 @@ final class TerminalPaneView: TerminalView {
     var onLink: ((TerminalLink) -> Void)?
     /// Whether this pane holds the keyboard, for the screen's chrome.
     var onKeyboard: ((Bool) -> Void)?
+    /// The pane's own size, once the daemon has stated it. `nil` until then —
+    /// and for good from a daemon that never does — while the emulator takes
+    /// its size from this view's bounds, as SwiftTerm always has.
+    private(set) var paneSize: PaneSize?
+    /// The pane's size was stated, for the scroll view around the pane.
+    var onPaneSize: ((PaneSize) -> Void)?
+    /// A key was typed into this pane.
+    var onTyped: (() -> Void)?
+
+    /// Take the pane's own size. The emulator's grid changes at once, so every
+    /// byte after the size is parsed on it.
+    func takePaneSize(_ size: PaneSize) {
+        paneSize = size
+        getTerminal().resize(cols: size.cols, rows: size.rows)
+        onPaneSize?(size)
+    }
+
+    /// xterm's window resize, `CSI 8 ; rows ; cols t`, which the daemon puts
+    /// ahead of every paint. SwiftTerm hands the two numbers on in the order
+    /// they arrive — rows first — under the labels `cols` and `rows`.
+    override func windowCommand(
+        source: Terminal, command: Terminal.WindowManipulationCommand
+    ) -> [UInt8]? {
+        guard case .resizeTerminal(let rows, let cols) = command else {
+            return super.windowCommand(source: source, command: command)
+        }
+        takePaneSize(PaneSize(cols: cols, rows: rows))
+        return nil
+    }
+
+    /// SwiftTerm adds a pan recogniser to the pane whenever the program turns
+    /// mouse tracking on — Claude Code does, at every start — and with mouse
+    /// reporting declined (`allowMouseReporting`) that recogniser sends nothing:
+    /// all it does is take the one-finger drag the scroll views need. It is never
+    /// added.
+    override func mouseModeChanged(source: Terminal) {}
+
+    override func insertText(_ text: String) {
+        super.insertText(text)
+        onTyped?()
+    }
+
+    override func deleteBackward() {
+        super.deleteBackward()
+        onTyped?()
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        super.pressesBegan(presses, with: event)
+        onTyped?()
+    }
+
+    /// SwiftTerm's cell: the advance of "W", and the line height rounded up to
+    /// a whole point, each then snapped to the pixel grid. Its own formula, so a
+    /// grid laid out from this is the grid SwiftTerm derives back from those
+    /// bounds.
+    var cellSize: CGSize {
+        let scale = traitCollection.displayScale
+        let width = ("W" as NSString).size(withAttributes: [.font: font]).width
+        let height = ceil((font.ascender - font.descender + font.leading) * lineSpacing)
+        return CGSize(
+            width: max(1, ceil(width * scale) / scale), height: max(1, ceil(height * scale) / scale))
+    }
 
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()
@@ -1149,14 +1221,11 @@ final class TerminalPaneView: TerminalView {
     /// and schemes inside words, and a tap on one of those raises the keyboard
     /// like a tap anywhere else.
     fileprivate func noteTouch(at point: CGPoint) -> Bool {
-        // SwiftTerm's cell, which it snaps to the pixel grid.
-        let scale = traitCollection.displayScale
-        let cellWidth = ceil(("W" as NSString).size(withAttributes: [.font: font]).width * scale) / scale
-        let cellHeight = ceil((font.ascender - font.descender + font.leading) * lineSpacing)
+        let cell = cellSize
         let terminal = getTerminal()
         let position = Position(
-            col: min(max(0, Int(point.x / cellWidth)), terminal.cols - 1),
-            row: max(0, Int(point.y / cellHeight)))
+            col: min(max(0, Int(point.x / cell.width)), terminal.cols - 1),
+            row: max(0, Int(point.y / cell.height)))
         linkUnderTouch = terminal.link(at: .buffer(position), mode: .explicitAndImplicit)
             .flatMap(TerminalLink.init)
         return linkUnderTouch != nil
@@ -1191,6 +1260,165 @@ final class TerminalPaneView: TerminalView {
     }
 }
 
+/// A pane's size in cells, as the daemon states it.
+struct PaneSize: Equatable {
+    let cols: Int
+    let rows: Int
+}
+
+/// The terminal pane, and the view onto it once it is drawn at its own size.
+///
+/// While a Mac viewer is attached the tmux window keeps the viewer's size — the
+/// phone's client is `ignore-size` — so the phone is sent bytes drawn for, say,
+/// 160 columns, and only a 160-column grid shows them as they are. The daemon
+/// puts that size ahead of every paint; from then on the pane holds it, laid
+/// out at the terminal font, and this view slides around it, follows the
+/// cursor, and pinches out as far as the whole width.
+///
+/// Until a size arrives — a daemon from before it, or before the first paint —
+/// the pane fills this view exactly as it always has, and SwiftTerm sizes the
+/// emulator from it.
+final class TerminalPaneScroller: UIScrollView, UIScrollViewDelegate {
+    let pane = TerminalPaneView(frame: .zero)
+    /// What zooms: a plain view around the pane, so the pane keeps an identity
+    /// transform. SwiftTerm draws, selects and resizes from its own `frame`,
+    /// which a zoom transform would scale.
+    private let zoomed = UIView()
+    /// What fits this view at the terminal font, in cells: the phone's size,
+    /// for the daemon, once the emulator is holding the pane's instead.
+    var onViewport: ((_ cols: Int, _ rows: Int) -> Void)?
+    /// The pane's size was stated in the stream.
+    var onPaneSize: ((PaneSize) -> Void)?
+    /// Whether a pinch zooms this view (the pane is wider than the view) rather
+    /// than changing the terminal font, reported when it changes.
+    var onZooms: ((Bool) -> Void)?
+    private var zooms = false
+    /// Whether the view keeps the cursor in sight: from every paint and every
+    /// key typed here, until the reader slides or pinches.
+    private var following = true
+    /// What the last layout was for. A scroll view is laid out on every scroll,
+    /// and only a change of these is worth acting on.
+    private var laidOut: Geometry?
+
+    private struct Geometry: Equatable {
+        let viewport: CGSize
+        let size: PaneSize?
+        let cell: CGSize
+    }
+
+    init() {
+        super.init(frame: .zero)
+        delegate = self
+        contentInsetAdjustmentBehavior = .never
+        addSubview(zoomed)
+        zoomed.addSubview(pane)
+        pane.onPaneSize = { [weak self] size in
+            self?.following = true
+            self?.setNeedsLayout()
+            self?.onPaneSize?(size)
+        }
+        pane.onTyped = { [weak self] in
+            self?.following = true
+            self?.showCursor()
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    /// New bytes were drawn.
+    func outputArrived() { showCursor() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let geometry = Geometry(viewport: bounds.size, size: pane.paneSize, cell: pane.cellSize)
+        guard geometry != laidOut else { return }
+        let regrid = geometry.size != laidOut?.size || geometry.cell != laidOut?.cell
+        laidOut = geometry
+        guard let size = geometry.size else {
+            zoomed.frame = CGRect(origin: .zero, size: bounds.size)
+            pane.frame = zoomed.bounds
+            contentSize = bounds.size
+            isScrollEnabled = false
+            return
+        }
+        let zoom = zoomScale
+        if regrid {
+            // At zoom 1, so the frames set here are untransformed.
+            setZoomScale(1, animated: false)
+            zoomed.frame = CGRect(origin: .zero, size: Self.grid(size, geometry.cell))
+            pane.frame = zoomed.bounds
+            contentSize = zoomed.frame.size
+        }
+        // Out to the whole width, only for a pane wider than the view. One no
+        // wider keeps the pinch for the terminal font, as it always had it.
+        let wider = zoomed.bounds.width > bounds.width + 1
+        minimumZoomScale = wider ? bounds.width / zoomed.bounds.width : 1
+        setZoomScale(min(1, max(minimumZoomScale, zoom)), animated: false)
+        if wider != zooms {
+            zooms = wider
+            onZooms?(wider)
+        }
+        onViewport?(Int(bounds.width / geometry.cell.width), Int(bounds.height / geometry.cell.height))
+        updateScrolling()
+        showCursor()
+    }
+
+    /// The pane's grid in points. Half a point over the cells themselves, so
+    /// SwiftTerm's floor division gives back exactly these cells.
+    private static func grid(_ size: PaneSize, _ cell: CGSize) -> CGSize {
+        CGSize(
+            width: CGFloat(size.cols) * cell.width + 0.5,
+            height: CGFloat(size.rows) * cell.height + 0.5)
+    }
+
+    /// One of the two scrolls, never both. While the grid is larger than this
+    /// view the reader moves around the screen, and the pane's own scrollback
+    /// stays at the live screen; once the grid fits — pinched out, or a pane no
+    /// larger than the phone — the pane scrolls its scrollback as it always has.
+    /// Handing the scroll back to this view takes the pane back to its live
+    /// screen: a pane left in its history would show old lines that no drag here
+    /// can move.
+    private func updateScrolling() {
+        let fits = zoomed.frame.width <= bounds.width + 1 && zoomed.frame.height <= bounds.height + 1
+        if !fits && pane.isScrollEnabled { pane.scroll(toPosition: 1) }
+        isScrollEnabled = !fits
+        pane.isScrollEnabled = fits
+    }
+
+    /// While following: the bottom of the text — the cursor's row, or a later
+    /// row with something on it — at the bottom of the view, or the grid's top
+    /// when all of it fits above that; and the cursor's cell within the width.
+    private func showCursor() {
+        guard following, isScrollEnabled, let cell = laidOut?.cell else { return }
+        let terminal = pane.getTerminal()
+        let cursor = terminal.getCursorLocation()
+        let lastText =
+            (cursor.y + 1..<terminal.rows).last { row in
+                !(terminal.getLine(row: row)?.translateToString(trimRight: true).isEmpty ?? true)
+            } ?? cursor.y
+        let bottom = CGFloat(lastText + 1) * cell.height * zoomScale
+        let right = CGFloat(cursor.x + 1) * cell.width * zoomScale
+        let offset = CGPoint(
+            x: min(max(0, right - bounds.width), max(0, contentSize.width - bounds.width)),
+            y: min(max(0, bottom - bounds.height), max(0, contentSize.height - bounds.height)))
+        if offset != contentOffset { setContentOffset(offset, animated: false) }
+    }
+
+    // MARK: UIScrollViewDelegate
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        pane.paneSize == nil ? nil : zoomed
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { following = false }
+
+    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+        following = false
+    }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) { updateScrolling() }
+}
+
 /// Hosts SwiftTerm's `TerminalView` and wires it to the terminal carrier.
 ///
 /// Bytes flow one way through the emulator and one way back out; nothing in this
@@ -1212,6 +1440,9 @@ struct SwiftTermView: UIViewRepresentable {
     /// its wraps — for the tab to offer.
     let onLink: (TerminalLink) -> Void
     let onKeyboard: (Bool) -> Void
+    /// Whether a pinch zooms the view onto a pane wider than it, rather than
+    /// changing the terminal font.
+    let onZooms: (Bool) -> Void
     /// Called once for every emulator this view builds, with whether the bytes
     /// it was seeded with had already lost their head to the carrier's cap.
     ///
@@ -1225,8 +1456,9 @@ struct SwiftTermView: UIViewRepresentable {
     /// seeded from the daemon's repaint and must stop claiming any gap at all.
     let seeded: (_ fromTrimmedBuffer: Bool) -> Void
 
-    func makeUIView(context: Context) -> TerminalPaneView {
-        let view = TerminalPaneView(frame: .zero)
+    func makeUIView(context: Context) -> TerminalPaneScroller {
+        let scroller = TerminalPaneScroller()
+        let view = scroller.pane
         view.terminalDelegate = context.coordinator
         // The hosted tmux server runs `mouse on` (that is what makes wheel
         // scrolling work at the Mac), so it advertises mouse tracking to every
@@ -1258,22 +1490,27 @@ struct SwiftTermView: UIViewRepresentable {
         view.onKeyboard = onKeyboard
         view.installLinkTap()
         context.coordinator.attach(
-            view: view, session: session, sessionUID: sessionUID, seeded: seeded)
-        return view
+            scroller: scroller, session: session, sessionUID: sessionUID,
+            onZooms: onZooms, seeded: seeded)
+        return scroller
     }
 
-    func updateUIView(_ view: TerminalPaneView, context: Context) {
+    func updateUIView(_ scroller: TerminalPaneScroller, context: Context) {
+        let view = scroller.pane
         if abs(view.font.pointSize - fontSize) > 0.5 {
             view.font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+            // A new cell is a new grid in points, and a new count of what fits.
+            scroller.setNeedsLayout()
         }
         view.acceptsInput = acceptsInput
         view.onLink = onLink
         view.onKeyboard = onKeyboard
         context.coordinator.attach(
-            view: view, session: session, sessionUID: sessionUID, seeded: seeded)
+            scroller: scroller, session: session, sessionUID: sessionUID,
+            onZooms: onZooms, seeded: seeded)
     }
 
-    static func dismantleUIView(_ view: TerminalPaneView, coordinator: Coordinator) {
+    static func dismantleUIView(_ scroller: TerminalPaneScroller, coordinator: Coordinator) {
         coordinator.detach()
     }
 
@@ -1299,13 +1536,23 @@ struct SwiftTermView: UIViewRepresentable {
 
         @MainActor
         func attach(
-            view: TerminalView, session: TerminalCarrier, sessionUID: String,
-            seeded: (_ fromTrimmedBuffer: Bool) -> Void
+            scroller: TerminalPaneScroller, session: TerminalCarrier, sessionUID: String,
+            onZooms: @escaping (Bool) -> Void, seeded: (_ fromTrimmedBuffer: Bool) -> Void
         ) {
+            let view = scroller.pane
             self.view = view
             self.session = session
+            scroller.onViewport = { [weak self] cols, rows in
+                self?.session?.resize(cols: cols, rows: rows)
+            }
+            scroller.onPaneSize = { [weak self] size in self?.session?.paneSize = size }
+            scroller.onZooms = onZooms
             guard replayedRun != sessionUID else { return }
             replayedRun = sessionUID
+            // Ahead of the replay, the pane's size as the stream last stated
+            // it: the tail about to be replayed was drawn on that grid, and a
+            // trimmed one may no longer contain the paint that said so.
+            if let size = session.paneSize { view.takePaneSize(size) }
             // Replay what already arrived, so switching tabs or rotating does
             // not show an empty terminal for a live session. Asked for by run:
             // the carrier is shared, and what it holds may be another run's.
@@ -1322,8 +1569,9 @@ struct SwiftTermView: UIViewRepresentable {
             // that reader something is missing would be the lie in the other
             // direction.
             seeded(!transcript.isEmpty && session.transcriptIsTruncated)
-            session.deliverOutput(to: self) { [weak view] bytes in
-                view?.feed(byteArray: bytes)
+            session.deliverOutput(to: self) { [weak scroller] bytes in
+                scroller?.pane.feed(byteArray: bytes)
+                scroller?.outputArrived()
             }
         }
 
@@ -1368,6 +1616,7 @@ struct SwiftTermView: UIViewRepresentable {
         @MainActor
         private func sendKey(_ bytes: [UInt8]) {
             view?.send(bytes)
+            (view as? TerminalPaneView)?.onTyped?()
         }
 
         @MainActor
@@ -1410,8 +1659,15 @@ struct SwiftTermView: UIViewRepresentable {
             MainActor.assumeIsolated { session?.send(data) }
         }
 
+        /// The emulator's own size, which is the phone's only until the pane's
+        /// size is known. From then on the emulator holds the pane's — which
+        /// SwiftTerm still reports, after every font change — and the phone's
+        /// is what fits the view around it (`onViewport`).
         nonisolated func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            MainActor.assumeIsolated { session?.resize(cols: newCols, rows: newRows) }
+            MainActor.assumeIsolated {
+                guard (source as? TerminalPaneView)?.paneSize == nil else { return }
+                session?.resize(cols: newCols, rows: newRows)
+            }
         }
 
         nonisolated func setTerminalTitle(source: TerminalView, title: String) {}
