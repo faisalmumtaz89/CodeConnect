@@ -12,12 +12,20 @@
 //! again — unless the store can show nothing reached the agent (see
 //! [`crate::store::Store::recover_agent_messages`]), when it waits again.
 //!
-//! This build delivers to Codex sessions on this computer.
+//! **How each agent is given one.** Codex: as a turn started through the app-server
+//! link, once its thread has been idle for a second. Claude: typed into its message
+//! box and submitted, only while its transcript shows no turn open
+//! ([`ClaudeTurn`]) and, read by its supervisor immediately before the keys, no
+//! turn is running on screen and the box is empty
+//! ([`protocol::ipc::composer_is_free`]).
+//!
+//! This build delivers to Claude and Codex sessions on this computer.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use protocol::agent::AgentKind;
+use protocol::event::{Event, EventKind};
 use protocol::ipc::{AgentEntry, AgentMessageOutcome};
 use protocol::tailnet::{Place, Refusal, Tailnet};
 
@@ -35,6 +43,11 @@ pub(crate) const HELD_AFTER_INTERRUPT: &str =
 /// start a turn (still connecting, reconnecting, or not yet watching the thread).
 const HELD_NOT_READY: &str =
     "the agent's session is not ready to take a message yet; it gets it when it is";
+/// Why a message waits: Claude's screen shows a turn running, or its message box
+/// holds a draft, a menu or a view.
+pub(crate) const HELD_COMPOSER_BUSY: &str =
+    "the agent's message box is in use or a turn is running; it gets the message when the \
+     box is free and empty";
 
 /// The same words from the same agent inside this window are a repeat.
 const REPEAT_WINDOW_MS: i64 = 10 * 60 * 1000;
@@ -120,11 +133,8 @@ impl Daemon {
         if target.session_uid == from_uid {
             return refuse(format!("{to} is this session's own address"));
         }
-        if target.agent != AgentKind::Codex {
-            return refuse(format!(
-                "{to} runs {}, and delivery to it is not built in this build",
-                agent_name(&target.agent)
-            ));
+        if let AgentKind::Unsupported(agent) = &target.agent {
+            return refuse(format!("{to} runs {agent}, which takes no messages"));
         }
 
         let from = format!("{}@{}", sender.session_id, tailnet.name());
@@ -278,7 +288,7 @@ impl Daemon {
     /// One per pass: a message that starts a turn makes the agent busy, and the next
     /// waits for that turn's end like any other. Returns why the messages left wait,
     /// or `None` when none is left.
-    async fn hand_out_agent_messages(&self, session_uid: &str) -> Option<String> {
+    pub(crate) async fn hand_out_agent_messages(&self, session_uid: &str) -> Option<String> {
         let gate = {
             let mut gates = self.agent_message_gates.lock().await;
             gates.retain(|_, gate| Arc::strong_count(gate) > 1);
@@ -293,6 +303,30 @@ impl Daemon {
                 return Some(HELD_WORKING.to_string());
             }
         };
+        if held.is_empty() {
+            return None;
+        }
+        let claude = match self.db.get_session(session_uid.to_string()).await {
+            Ok(Some(row)) => row.agent == AgentKind::Claude,
+            Ok(None) => return Some(HELD_NOT_READY.to_string()),
+            Err(err) => {
+                crate::log_error!(
+                    "agent messages for {session_uid}: session lookup failed: {err:#}"
+                );
+                return Some(HELD_NOT_READY.to_string());
+            }
+        };
+        if claude {
+            match self.db.claude_turn(session_uid.to_string()).await {
+                Ok(ClaudeTurn::Free) => {}
+                Ok(ClaudeTurn::Running) => return Some(HELD_WORKING.to_string()),
+                Ok(ClaudeTurn::Interrupted) => return Some(HELD_AFTER_INTERRUPT.to_string()),
+                Err(err) => {
+                    crate::log_error!("agent messages for {session_uid}: turn unreadable: {err:#}");
+                    return Some(HELD_WORKING.to_string());
+                }
+            }
+        }
         let count = held.len();
         for (index, row) in held.into_iter().enumerate() {
             match self.db.claim_agent_message(row.id).await {
@@ -303,41 +337,12 @@ impl Daemon {
                     return Some(HELD_WORKING.to_string());
                 }
             }
-            let hash = protocol::hash::compose_hash(session_uid, &row.message);
-            let result = self
-                .compose_as(
-                    session_uid,
-                    &format!("{}{}", crate::store::AGENT_MESSAGE_REQUEST_PREFIX, row.id),
-                    row.message,
-                    &hash,
-                    true,
-                )
-                .await;
-            let (status, waits) = match result {
-                protocol::ws::ComposeResult::Started { .. }
-                | protocol::ws::ComposeResult::Steered { .. }
-                | protocol::ws::ComposeResult::Duplicate { .. } => ("delivered", None),
-                protocol::ws::ComposeResult::Indeterminate { reason } => {
-                    crate::log_warn!(
-                        "agent message {} to {session_uid}: outcome unknown ({reason})",
-                        row.id
-                    );
-                    ("unknown", None)
-                }
-                // The link's own sentences about its state are written for a phone
-                // ("nothing was sent"); the sender is told the message waits.
-                protocol::ws::ComposeResult::Rejected { reason } => {
-                    let why = if reason == HELD_WORKING || reason == HELD_AFTER_INTERRUPT {
-                        reason
-                    } else {
-                        crate::log_info!(
-                            "agent message {} to {session_uid} waits: {reason}",
-                            row.id
-                        );
-                        HELD_NOT_READY.to_string()
-                    };
-                    ("held", Some(why))
-                }
+            let (status, waits) = if claude {
+                self.type_agent_message_into(session_uid, row.id, row.message)
+                    .await
+            } else {
+                self.compose_agent_message(session_uid, row.id, row.message)
+                    .await
             };
             if let Err(err) = self
                 .db
@@ -357,6 +362,74 @@ impl Daemon {
             }
         }
         None
+    }
+
+    /// Give a Claude run one message by typing it into its composer, and say what
+    /// became of it: its new status, and why it waits if it does.
+    async fn type_agent_message_into(
+        &self,
+        session_uid: &str,
+        id: i64,
+        message: String,
+    ) -> (&'static str, Option<String>) {
+        match self.type_agent_message(session_uid, message).await {
+            protocol::ws::SendTextResult::Sent { .. } => ("delivered", None),
+            protocol::ws::SendTextResult::Refused { reason } => {
+                crate::log_info!("agent message {id} to {session_uid} waits: {reason}");
+                let why = if reason == crate::state::SUPERVISOR_PREDATES_AGENT_MESSAGES {
+                    reason
+                } else {
+                    HELD_COMPOSER_BUSY.to_string()
+                };
+                ("held", Some(why))
+            }
+            other => {
+                crate::log_warn!(
+                    "agent message {id} to {session_uid}: outcome unknown ({other:?})"
+                );
+                ("unknown", None)
+            }
+        }
+    }
+
+    /// Give a Codex run one message as a turn of its own, and say what became of it:
+    /// its new status, and why it waits if it does.
+    async fn compose_agent_message(
+        &self,
+        session_uid: &str,
+        id: i64,
+        message: String,
+    ) -> (&'static str, Option<String>) {
+        let hash = protocol::hash::compose_hash(session_uid, &message);
+        let result = self
+            .compose_as(
+                session_uid,
+                &format!("{}{id}", crate::store::AGENT_MESSAGE_REQUEST_PREFIX),
+                message,
+                &hash,
+                true,
+            )
+            .await;
+        match result {
+            protocol::ws::ComposeResult::Started { .. }
+            | protocol::ws::ComposeResult::Steered { .. }
+            | protocol::ws::ComposeResult::Duplicate { .. } => ("delivered", None),
+            protocol::ws::ComposeResult::Indeterminate { reason } => {
+                crate::log_warn!("agent message {id} to {session_uid}: outcome unknown ({reason})");
+                ("unknown", None)
+            }
+            // The link's own sentences about its state are written for a phone
+            // ("nothing was sent"); the sender is told the message waits.
+            protocol::ws::ComposeResult::Rejected { reason } => {
+                let why = if reason == HELD_WORKING || reason == HELD_AFTER_INTERRUPT {
+                    reason
+                } else {
+                    crate::log_info!("agent message {id} to {session_uid} waits: {reason}");
+                    HELD_NOT_READY.to_string()
+                };
+                ("held", Some(why))
+            }
+        }
     }
 }
 
@@ -384,6 +457,63 @@ fn refusal_sentence(refusal: Refusal, computer: &str) -> String {
         }
         Refusal::Offline => format!("{computer} is offline"),
     }
+}
+
+/// **Where a Claude run's turns stand**, by its transcript as the log holds it.
+///
+/// A turn opens on a line Claude Code hands to the agent as a prompt
+/// ([`crate::state::delivers_prompt_line`]); `/compact` writes none (2.1.314,
+/// measured). It closes at a turn end the tailer files: a `stop_hook_summary`, or
+/// a `turn_duration` that ends its turn, which covers an API error. Claude's
+/// interrupt marker, written on Esc and on "No" at a tool's prompt, leaves the run
+/// interrupted until a later prompt's turn ends: Claude is asking the person what
+/// to do instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeTurn {
+    /// No turn open, and the last one was not stopped by the person.
+    Free,
+    /// A prompt was handed over and its turn has not ended.
+    Running,
+    /// The person stopped the last turn.
+    Interrupted,
+}
+
+impl ClaudeTurn {
+    /// What `event`, read newest first, settles, or `None` to read on. `ended` says
+    /// whether a turn end newer than it has been read.
+    pub(crate) fn settled_by(event: &Event, ended: &mut bool) -> Option<ClaudeTurn> {
+        if event.kind == EventKind::TurnComplete {
+            *ended = true;
+            return None;
+        }
+        if is_interrupt_marker(event) {
+            return Some(ClaudeTurn::Interrupted);
+        }
+        crate::state::delivers_prompt_line(&event.kind, &event.payload).then_some(if *ended {
+            ClaudeTurn::Free
+        } else {
+            ClaudeTurn::Running
+        })
+    }
+}
+
+/// Claude Code's own record that the person stopped the turn: an unstamped,
+/// non-meta user line whose content is exactly one text block reading
+/// `[Request interrupted by user]` or `[Request interrupted by user for tool use]`.
+/// The phone's `isClaudeInterrupt`, the same test.
+fn is_interrupt_marker(event: &Event) -> bool {
+    let line = &event.payload;
+    if event.kind != EventKind::UserMessage || line["isMeta"] == true || !line["origin"].is_null() {
+        return false;
+    }
+    let Some([block]) = line["message"]["content"].as_array().map(Vec::as_slice) else {
+        return false;
+    };
+    block["type"] == "text"
+        && matches!(
+            block["text"].as_str(),
+            Some("[Request interrupted by user]" | "[Request interrupted by user for tool use]")
+        )
 }
 
 fn agent_name(agent: &AgentKind) -> &str {

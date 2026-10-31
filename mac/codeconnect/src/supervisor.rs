@@ -683,6 +683,7 @@ fn handle_request(
             capture_recovered,
             confirm_view,
             respond_by_monotonic_ms,
+            require_free_composer,
         } => send_text(
             args,
             config,
@@ -691,6 +692,7 @@ fn handle_request(
                 submit,
                 expect: expect.as_ref(),
                 respond_by_monotonic_ms,
+                require_free_composer,
             },
             Target {
                 presence: &require,
@@ -826,13 +828,15 @@ fn look_at_pane(session: &str) -> Result<(String, tmux::Keyboard)> {
 }
 
 /// One send as the daemon asked for it: the keys, whether they are
-/// submitted, the prompt identity they may be bound to, and when the daemon
-/// stops listening for the answer.
+/// submitted, the prompt identity they may be bound to, when the daemon
+/// stops listening for the answer, and whether the composer must be free.
 struct SendPlan<'a> {
     text: &'a str,
     submit: bool,
     expect: Option<&'a PromptFingerprint>,
     respond_by_monotonic_ms: Option<u64>,
+    /// An agent's message: see `SupervisorRequest::SendText::require_free_composer`.
+    require_free_composer: bool,
 }
 
 fn send_text(
@@ -847,6 +851,7 @@ fn send_text(
         submit,
         expect,
         respond_by_monotonic_ms,
+        require_free_composer,
     } = plan;
     // The whole request answers by this moment or the daemon stops
     // listening; every deliberate wait below spends against it. The daemon
@@ -964,14 +969,22 @@ fn send_text(
 
     // Read after the look it is judged against, like everything else here.
     let own_name = target.name_to_type_under();
-    let matched = match authorise(
-        &pane,
-        require,
-        own_name.as_deref(),
-        expect,
-        target.is_composer,
-        keyboard,
-    ) {
+    // An agent's message is held to the box `composer_is_free` reads just below,
+    // which knows a named session's top rule and a viewed background agent's box;
+    // here it needs only the keyboard.
+    let authorised = if require_free_composer {
+        composer_has_the_keyboard(keyboard).map(|()| "composer".to_string())
+    } else {
+        authorise(
+            &pane,
+            require,
+            own_name.as_deref(),
+            expect,
+            target.is_composer,
+            keyboard,
+        )
+    };
+    let matched = match authorised {
         Ok(matched) => matched,
         Err(reason) => {
             log_line(
@@ -981,6 +994,22 @@ fn send_text(
             return SupervisorResult::Refused { reason };
         }
     };
+
+    // The last look before the keys, for an agent's message: the turn and the
+    // box read here, where the phone's request served just before this one has
+    // already landed, not by the daemon before this was queued.
+    if require_free_composer {
+        let free = tmux::capture_visible_pane_styled(&args.tmux_session)
+            .map_err(|err| format!("could not read the pane: {err:#}"))
+            .and_then(|styled| {
+                protocol::ipc::composer_is_free(&styled, own_name.as_deref())
+                    .map_err(|why| format!("{why} at the computer; nothing was typed"))
+            });
+        if let Err(reason) = free {
+            log_line(args, &format!("refused: {reason}"));
+            return SupervisorResult::Refused { reason };
+        }
+    }
 
     // Affordable *before* the first keystroke goes out: there is deliberately
     // no stop between typing and Enter — stopping there strands staged text —
@@ -1020,6 +1049,8 @@ fn send_text(
         &|| {
             if text == "\u{1b}" {
                 tmux::send_key(&session, "Escape")
+            } else if require_free_composer {
+                tmux::send_lines(protocol::TMUX_SOCKET_NAME, &session, text)
             } else {
                 tmux::send_literal(protocol::TMUX_SOCKET_NAME, &session, text)
             }
@@ -1587,7 +1618,8 @@ fn look_the_gates_run_on(
 ///
 /// Split out from the injection so it can be exercised against real captured
 /// panes: everything it depends on is text, and it is the single point where
-/// "may these keys be sent?" is decided.
+/// "may these keys be sent?" is decided — except for an agent's message, whose
+/// box `protocol::ipc::composer_is_free` reads instead (see `send_text`).
 fn authorise(
     pane: &str,
     require: &PromptPresence,
@@ -1612,38 +1644,8 @@ fn authorise(
     // cursor exactly as the others do — and answering one is the whole point
     // of this path, so the keyboard question is asked only where a *drawn*
     // target can turn out to be a dead one.
-    //
-    // The two ways of losing it are told apart because they need different
-    // things: a view is dismissed, and a mode is left.
     if targets_composer {
-        match keyboard {
-            tmux::Keyboard::Program => {}
-            tmux::Keyboard::View => {
-                return Err(
-                    "a menu or view at the computer has the keyboard, so the message box takes \
-                     no keys"
-                        .into(),
-                );
-            }
-            // Whatever tmux is still holding at this point is the person at
-            // the Mac's to let go of. A bare scroll position may already have
-            // been left by [`may_leave_copy_mode`] — but this is also where
-            // one arrives that was never eligible for that, that the clock
-            // left no room for, that did not clear, or that was re-entered
-            // while this was being decided.
-            //
-            // The wording names the mode and not the scroll, because most of
-            // what reaches here is a clock face, a `choose-tree` or a
-            // `customize-mode`, and none of those is scrolled anywhere; and
-            // `q` leaves one mode per press, so a stack takes one each.
-            tmux::Keyboard::Scrollback(_) => {
-                return Err(
-                    "tmux has the keyboard at the computer: the session is in one of tmux's own \
-                     modes, so the message box takes no keys — press q there until it clears"
-                        .into(),
-                );
-            }
-        }
+        composer_has_the_keyboard(keyboard)?;
     }
     if let Some(expect) = expect {
         if !expect.still_on_screen(pane) {
@@ -1654,6 +1656,35 @@ fn authorise(
         }
     }
     Ok(matched)
+}
+
+/// Whether the composer has the keyboard, or why not. The two ways of losing it
+/// are told apart because they need different things: a view is dismissed, and
+/// a mode is left.
+fn composer_has_the_keyboard(keyboard: tmux::Keyboard) -> std::result::Result<(), String> {
+    match keyboard {
+        tmux::Keyboard::Program => Ok(()),
+        tmux::Keyboard::View => Err(
+            "a menu or view at the computer has the keyboard, so the message box takes no keys"
+                .into(),
+        ),
+        // Whatever tmux is still holding at this point is the person at
+        // the Mac's to let go of. A bare scroll position may already have
+        // been left by [`may_leave_copy_mode`] — but this is also where
+        // one arrives that was never eligible for that, that the clock
+        // left no room for, that did not clear, or that was re-entered
+        // while this was being decided.
+        //
+        // The wording names the mode and not the scroll, because most of
+        // what reaches here is a clock face, a `choose-tree` or a
+        // `customize-mode`, and none of those is scrolled anywhere; and
+        // `q` leaves one mode per press, so a stack takes one each.
+        tmux::Keyboard::Scrollback(_) => Err(
+            "tmux has the keyboard at the computer: the session is in one of tmux's own modes, \
+             so the message box takes no keys — press q there until it clears"
+                .into(),
+        ),
+    }
 }
 
 /// Tell the daemon this run has ended.
@@ -2868,6 +2899,7 @@ mod tests {
                 confirm_view: None,
                 // A monotonic stamp of 1ms: hours behind any live reading.
                 respond_by_monotonic_ms: Some(1),
+                require_free_composer: false,
             },
         };
         let mut line = serde_json::to_vec(&expired).unwrap();
@@ -2954,6 +2986,7 @@ mod tests {
                 capture_recovered: false,
                 confirm_view: None,
                 respond_by_monotonic_ms: None,
+                require_free_composer: false,
             },
         };
         let ping = DaemonFrame::SupervisorRequest {

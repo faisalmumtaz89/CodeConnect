@@ -91,6 +91,15 @@ const SUPERVISOR_MINOR_QUESTION_TIMEOUT: u32 = 21;
 const SUPERVISOR_MINOR_COMPOSER_RECOVERY: u32 = 9;
 /// The supervisor build that can *complete* a view instead of dismissing it.
 const SUPERVISOR_MINOR_CONFIRM_VIEW: u32 = 10;
+/// The supervisor build that reads the composer free before typing an agent's
+/// message. An older one drops `require_free_composer` and would type into the
+/// person's draft or a running turn.
+const SUPERVISOR_MINOR_FREE_COMPOSER: u32 = 27;
+/// Why an agent's message waits for a session whose supervisor predates
+/// [`SUPERVISOR_MINOR_FREE_COMPOSER`].
+pub(crate) const SUPERVISOR_PREDATES_AGENT_MESSAGES: &str =
+    "the agent's session started before this CodeConnect, which can give it messages only \
+     once it is restarted";
 
 /// How long a single `tmux has-session` may take before the sweep gives up on
 /// it. A client that reaches a live server answers in single-digit
@@ -1817,8 +1826,12 @@ struct CardKey(String);
 /// (`isSidechain`), which is not a turn of the run, as with the tailer's turn
 /// ends.
 fn delivers_prompt(pending: &PendingEvent) -> bool {
-    let line = &pending.payload;
-    pending.kind == EventKind::UserMessage
+    delivers_prompt_line(&pending.kind, &pending.payload)
+}
+
+/// [`delivers_prompt`] over a line's kind and payload, as the log holds them.
+pub(crate) fn delivers_prompt_line(kind: &EventKind, line: &serde_json::Value) -> bool {
+    *kind == EventKind::UserMessage
         && line["queueTranscriptOnly"] != true
         && line["isSidechain"] != true
         && (line["promptSource"]
@@ -7287,6 +7300,7 @@ impl Daemon {
                         // clock that actually matters — including whatever time
                         // this request spends queued before it is read.
                         respond_by_monotonic_ms: Some(respond_by),
+                        require_free_composer: false,
                     },
                 )
                 .await
@@ -7343,6 +7357,51 @@ impl Daemon {
             }
         }
         result
+    }
+
+    /// **Type an agent's message into a Claude run's composer**, and submit it, only
+    /// while the composer is free: the supervisor reads the turn and the box in the
+    /// same request, immediately before the keys (`require_free_composer`). Answered
+    /// as the phone's text is, and `Refused` likewise means nothing was typed.
+    pub(crate) async fn type_agent_message(
+        &self,
+        session_uid: &str,
+        text: String,
+    ) -> SendTextResult {
+        let transcript_path = match self.db.get_session(session_uid.to_string()).await {
+            Ok(row) => row.and_then(|row| row.transcript_path),
+            Err(err) => {
+                return SendTextResult::Refused {
+                    reason: format!("could not read the session: {err:#}; nothing was typed"),
+                }
+            }
+        };
+        let outcome = match respond_by_stamp(self.config.supervisor_timeout_ms) {
+            Err(refused) => Err(refused),
+            Ok(respond_by) => {
+                self.supervisor_request(
+                    session_uid,
+                    SupervisorRequest::SendText {
+                        text,
+                        require: self.with_needle_overrides(PromptPresence::InputBox),
+                        targets_composer: true,
+                        // Where Claude records the session's own name, which a
+                        // named session's message box carries in its top rule.
+                        transcript_path,
+                        asking: None,
+                        submit: true,
+                        expect: None,
+                        recover_composer: false,
+                        capture_recovered: false,
+                        confirm_view: None,
+                        respond_by_monotonic_ms: Some(respond_by),
+                        require_free_composer: true,
+                    },
+                )
+                .await
+            }
+        };
+        send_text_result_of(outcome)
     }
 
     pub async fn capture(&self, session_ref: &str, lines: u32) -> Result<String> {
@@ -8969,6 +9028,13 @@ impl Daemon {
                 ..
             }
         );
+        let needs_free_composer = matches!(
+            &request,
+            SupervisorRequest::SendText {
+                require_free_composer: true,
+                ..
+            }
+        );
         let (slot, tx, rx) = {
             let inner = self.inner.lock().await;
             let Some(handle) = inner.supervisors.get(session_uid) else {
@@ -8981,6 +9047,11 @@ impl Daemon {
                     "this session cannot recover slash-command views safely yet. Restart it \
                      after updating CodeConnect, or use Terminal."
                         .into(),
+                ));
+            }
+            if needs_free_composer && handle.protocol_minor < SUPERVISOR_MINOR_FREE_COMPOSER {
+                return Err(SupervisorFailure::NotSent(
+                    SUPERVISOR_PREDATES_AGENT_MESSAGES.into(),
                 ));
             }
             // Completing a view is decided against **this** handle for the same
@@ -13473,6 +13544,14 @@ mod tests {
                         } if silent.load(std::sync::atomic::Ordering::SeqCst) => {
                             let _ = (text, require, expect);
                             continue;
+                        }
+                        SupervisorRequest::SendText {
+                            require_free_composer: true,
+                            ..
+                        } if protocol::ipc::composer_is_free(&on_screen, None).is_err() => {
+                            SupervisorResult::Refused {
+                                reason: "the composer is not free".into(),
+                            }
                         }
                         SupervisorRequest::SendText {
                             text,
@@ -25601,7 +25680,6 @@ mod tests {
             .unwrap()
             .assert_present();
         assert!(refused(send("cc-5@studio", "hi").await).contains("not a running session"));
-        assert!(refused(send("cc-3@studio", "hi").await).contains("Claude"));
         assert!(refused(send("cc-2@studio", "hi").await).contains("own address"));
         assert!(refused(
             daemon
@@ -25647,6 +25725,92 @@ mod tests {
                  send_message to cc-2@studio.\n\nand this",
             ]
         );
+    }
+
+    /// **An agent's message reaches a Claude run only between turns, into an empty
+    /// box.** Held while a prompt's turn runs, while the box holds a draft, and after
+    /// the person stops a turn until a later prompt's turn ends; typed once when the
+    /// run is free. A supervisor from before agent messages is never asked to type.
+    #[tokio::test]
+    async fn an_agents_message_reaches_claude_between_turns_into_an_empty_box() {
+        use crate::agent_messages::{HELD_AFTER_INTERRUPT, HELD_COMPOSER_BUSY, HELD_WORKING};
+        const EMPTY: &str = "─────\n❯ \n─────\n  ? for shortcuts";
+        const DRAFT: &str = "─────\n❯ my own words\n─────\n  ? for shortcuts";
+        let daemon = test_daemon();
+        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let claude = attach(&daemon, "cc-1", TEST_UID, EMPTY, "").await;
+        let send = |to: &'static str, text: &'static str| {
+            let daemon = Arc::clone(&daemon);
+            let tailnet = tailnet.clone();
+            let sender = sender.clone();
+            async move {
+                daemon
+                    .send_agent_message_on(Some(&tailnet), &sender, to, text)
+                    .await
+            }
+        };
+        let held = |outcome: protocol::ipc::AgentMessageOutcome| match outcome {
+            protocol::ipc::AgentMessageOutcome::Held { reason } => reason,
+            other => panic!("expected it held, got {other:?}"),
+        };
+        let end = |uuid: &str| {
+            json!({"type": "system", "subtype": "stop_hook_summary",
+                                      "isSidechain": false, "uuid": uuid})
+        };
+        let header = "[CodeConnect] Message from cc-2@studio (Codex · project tmp). Reply with \
+                      send_message to cc-2@studio.\n\n";
+
+        transcript_line(&daemon, &restamped_prompt(false, "p1")).await;
+        assert_eq!(held(send("cc-1@studio", "first").await), HELD_WORKING);
+        transcript_line(&daemon, &end("s1")).await;
+        claude.show(DRAFT);
+        assert_eq!(
+            daemon.hand_out_agent_messages(TEST_UID).await.as_deref(),
+            Some(HELD_COMPOSER_BUSY)
+        );
+        assert!(
+            claude.typed().is_empty(),
+            "nothing joins the person's draft"
+        );
+        claude.show(EMPTY);
+        assert_eq!(daemon.hand_out_agent_messages(TEST_UID).await, None);
+        assert_eq!(claude.typed(), [format!("{header}first")]);
+
+        transcript_line(&daemon, &restamped_prompt(false, "p2")).await;
+        transcript_line(
+            &daemon,
+            &json!({"type": "user", "uuid": "m2", "message": {"role": "user",
+                    "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}),
+        )
+        .await;
+        assert_eq!(
+            held(send("cc-1@studio", "second").await),
+            HELD_AFTER_INTERRUPT
+        );
+        transcript_line(&daemon, &restamped_prompt(false, "p3")).await;
+        assert_eq!(
+            daemon.hand_out_agent_messages(TEST_UID).await.as_deref(),
+            Some(HELD_WORKING)
+        );
+        transcript_line(&daemon, &end("s3")).await;
+        assert_eq!(daemon.hand_out_agent_messages(TEST_UID).await, None);
+        assert_eq!(
+            claude.typed(),
+            [format!("{header}first"), format!("{header}second")]
+        );
+
+        let old_uid = protocol::uid::new().unwrap();
+        let old = attach_speaking(&daemon, "cc-4", &old_uid, EMPTY, "", 26).await;
+        assert_eq!(
+            held(send("cc-4@studio", "third").await),
+            SUPERVISOR_PREDATES_AGENT_MESSAGES
+        );
+        assert!(old.typed().is_empty());
     }
 
     /// **The agents a session can message**: every other running session on this

@@ -104,7 +104,7 @@ Both kinds of session get one MCP server of CodeConnect's own, `codeconnect`
 (`--mcp-config` before `--settings` for Claude Code; `-c mcp_servers.codeconnect.…` on
 Codex's app server), with which an agent lists the other running sessions and sends one a
 message. `ccd` keeps the message until the receiving session is free and starts it as a turn
-of its own; this build delivers to Codex sessions on the same computer. See
+of its own; this build delivers to Claude Code and Codex sessions on the same computer. See
 [docs/codex.md](../docs/codex.md#messages-from-other-agents).
 
 Your arguments reach `codex` as native `codex` would read them — the sandbox, approval

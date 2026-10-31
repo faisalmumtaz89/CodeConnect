@@ -1703,6 +1703,24 @@ impl Store {
         })
     }
 
+    /// Where a Claude run's turns stand, read off its log newest first and
+    /// stopped at the line that settles it ([`crate::agent_messages::ClaudeTurn`]).
+    pub fn claude_turn(&self, session_uid: &str) -> Result<crate::agent_messages::ClaudeTurn> {
+        let conn = self.read();
+        let mut ended = false;
+        Ok(newest_decided(
+            &conn,
+            session_uid,
+            "kind IN (?2, ?3)",
+            &[
+                EventKind::UserMessage.as_str(),
+                EventKind::TurnComplete.as_str(),
+            ],
+            |event| crate::agent_messages::ClaudeTurn::settled_by(event, &mut ended),
+        )?
+        .unwrap_or(crate::agent_messages::ClaudeTurn::Free))
+    }
+
     /// Write or update one session row — unless its uid has been deliberately
     /// deleted, in which case nothing is written and the caller is told.
     ///
@@ -6036,7 +6054,7 @@ fn newest_decided<T>(
     session_uid: &str,
     filter: &str,
     bind: &[&str],
-    decide: fn(&Event) -> Option<T>,
+    mut decide: impl FnMut(&Event) -> Option<T>,
 ) -> Result<Option<T>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT seq, session_id, ts, kind, payload, source, source_event_id, turn_id, item_id

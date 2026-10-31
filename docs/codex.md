@@ -126,6 +126,13 @@ goes first, and after you stop a turn with Esc it waits until your next turn end
 is told whether it was delivered, held until the session is free, or refused. A held message
 survives a daemon restart and is handed over at most once.
 
+A message to a Claude Code session is typed into its message box and submitted, the same way
+as text from your phone, but only while no turn is running and the box is empty: a draft of
+yours holds it until you send or clear it, and after you stop a turn with Esc (or answer "No"
+at a tool's prompt) it waits until your next turn ends. The box is read immediately before the
+keys, so keys you press in that instant can still join the message. A Claude Code session
+started before CodeConnect 0.15.2 takes messages once it is restarted.
+
 ## What your phone can do
 
 ### Answer an approval

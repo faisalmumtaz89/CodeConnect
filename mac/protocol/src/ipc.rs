@@ -603,6 +603,14 @@ pub enum SupervisorRequest {
         /// config. (Minor 12.)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         respond_by_monotonic_ms: Option<u64>,
+        /// Type only into a composer that is free: no turn running and nothing in
+        /// the box ([`composer_is_free`]), read by the supervisor in the same request,
+        /// immediately before the keys. Set for an agent's message, which must never
+        /// join a turn or the person's draft; a check made by the daemon before the
+        /// request is queued is stale once the supervisor has served the phone's
+        /// request first. The phone's own text leaves it unset. (Minor 27.)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        require_free_composer: bool,
     },
     /// Text snapshot of the pane. Presence checks and mirroring only. The
     /// composer is read as a shape — the rows of its box, and nothing else
@@ -902,14 +910,148 @@ pub fn composer_is_drawn(pane_text: &str) -> bool {
 pub fn composer_is_drawn_as(pane_text: &str, own_name: Option<&str>) -> bool {
     let mut above = "";
     for row in pane_text.lines() {
-        if is_prompt_row(row)
-            && (is_rule_row(above) || own_name.is_some_and(|name| rule_label(above) == Some(name)))
-        {
+        if is_prompt_row(row) && opens_own_box(above, own_name) {
             return true;
         }
         above = row;
     }
     false
+}
+
+/// The row above a prompt row that makes it the session's own box: a plain
+/// rule, or one carrying the session's own name whole.
+fn opens_own_box(above: &str, own_name: Option<&str>) -> bool {
+    is_rule_row(above) || own_name.is_some_and(|name| rule_label(above) == Some(name))
+}
+
+/// Whether the box on screen is a background agent's the person is viewing,
+/// rather than the session's own. Its task then stands in the top rule where a
+/// session's name would, and keys typed into it reach that agent. Two things
+/// say so (2.1.316, measured): the agent list Claude draws below the box shows
+/// the main agent unselected, `◯ main`; and, when the pane is too short for
+/// that list, the box's own placeholder names the agent, `Message @…`.
+fn another_agent_is_viewed(prompt_row: &str, below: &[impl AsRef<str>]) -> bool {
+    prompt_row
+        .trim_start_matches(PROMPT_GLYPH)
+        .trim_start()
+        .starts_with("Message @")
+        || below
+            .iter()
+            .any(|row| row.as_ref().trim_start().starts_with("◯ main"))
+}
+
+/// Whether Claude's composer would take an agent's message now, on a pane
+/// captured with its styles (`capture-pane -e`): `Err` says why not.
+///
+/// Free means three things, all read off this one look (measured on Claude Code
+/// 2.1.314):
+///
+/// * **No `esc to interrupt` anywhere on screen.** Claude shows it while a turn
+///   or `/compact` runs, and at no other time.
+/// * **The box is the session's own**, not a background agent's the person is
+///   viewing (`another_agent_is_viewed`). Its top rule is plain or carries
+///   `own_name` whole, as [`composer_is_drawn_as`] reads it: a background
+///   agent's box carries its task in the same place.
+/// * **The box is one row.** The composer's prompt row has a rule directly above
+///   it and directly below it. A draft that spans lines, starts with a newline or
+///   is scrolled makes the box taller, whichever row the caret is on.
+/// * **That row holds nothing after `❯` but blanks and dim text.** The
+///   placeholder ("Try …") is drawn dim (SGR 2) and a draft is not.
+///
+/// The style is carried across rows, as tmux writes it: the reset that ends the
+/// placeholder's dim run opens the row below.
+pub fn composer_is_free(styled_pane: &str, own_name: Option<&str>) -> Result<(), &'static str> {
+    let rows = styled_rows(styled_pane);
+    let plain: Vec<String> = rows
+        .iter()
+        .map(|row| row.iter().map(|&(c, _)| c).collect())
+        .collect();
+    if plain
+        .iter()
+        .any(|row| normalize_for_match(row).contains("esctointerrupt"))
+    {
+        return Err("a turn is running");
+    }
+    let Some(prompt) = (1..plain.len())
+        .rev()
+        .find(|&i| is_prompt_row(&plain[i]) && opens_own_box(&plain[i - 1], own_name))
+    else {
+        return Err("the message box is not on screen");
+    };
+    if another_agent_is_viewed(&plain[prompt], &plain[prompt + 1..]) {
+        return Err("the person is viewing a background agent");
+    }
+    if !plain.get(prompt + 1).is_some_and(|row| is_rule_row(row)) {
+        return Err("the message box holds a draft");
+    }
+    // Past the `❯` itself, which `is_prompt_row` put first.
+    if rows[prompt][1..]
+        .iter()
+        .any(|&(c, dim)| !c.is_whitespace() && !dim)
+    {
+        return Err("the message box holds a draft");
+    }
+    Ok(())
+}
+
+/// A styled capture as rows of characters, each with whether it is drawn dim.
+/// Only SGR changes the style; any other escape sequence is skipped.
+fn styled_rows(styled: &str) -> Vec<Vec<(char, bool)>> {
+    let mut rows = vec![Vec::new()];
+    let mut dim = false;
+    let mut chars = styled.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => rows.push(Vec::new()),
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    let mut params = String::new();
+                    for c in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            if c == 'm' {
+                                dim = dim_after(&params, dim);
+                            }
+                            break;
+                        }
+                        params.push(c);
+                    }
+                }
+                // An operating-system command (a hyperlink), to its BEL or ST.
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            c => rows.last_mut().expect("never empty").push((c, dim)),
+        }
+    }
+    rows
+}
+
+/// Whether text is dim after one SGR sequence's parameters. A colour's own
+/// numbers are not attributes: `38;2;r;g;b` holds a 2 that is not dim.
+fn dim_after(params: &str, mut dim: bool) -> bool {
+    let mut params = params.split(';');
+    while let Some(param) = params.next() {
+        match param {
+            "" | "0" | "22" => dim = false,
+            "2" => dim = true,
+            "38" | "48" | "58" => {
+                let skip = match params.next() {
+                    Some("5") => 1,
+                    Some("2") => 3,
+                    _ => 0,
+                };
+                params.by_ref().take(skip).for_each(drop);
+            }
+            _ => {}
+        }
+    }
+    dim
 }
 
 impl PromptPresence {
@@ -1632,6 +1774,7 @@ mod tests {
             capture_recovered: false,
             confirm_view: None,
             respond_by_monotonic_ms: None,
+            require_free_composer: false,
         };
         let line = serde_json::to_string(&request).unwrap();
         assert!(line.contains("\"expect\""), "{line}");
@@ -1898,8 +2041,161 @@ mod tests {
         )
         .unwrap();
         match req {
-            SupervisorRequest::SendText { submit, .. } => assert!(submit),
+            SupervisorRequest::SendText {
+                submit,
+                require_free_composer,
+                ..
+            } => {
+                assert!(submit);
+                assert!(!require_free_composer, "the phone's text is not held back");
+            }
             other => panic!("wrong request: {other:?}"),
         }
+    }
+
+    /// The rows of Claude Code 2.1.314's composer as `capture-pane -p -e -J`
+    /// gives them, the rules cut short (a rule's length is not part of any test).
+    const RULE: &str = "\u{1b}[38;2;136;136;136m────────────────────";
+    const FOOTER: &str =
+        "\u{1b}[39m  \u{1b}[38;2;255;193;7m⏵⏵ auto mode on\u{1b}[38;2;153;153;153m \
+                          (shift+tab to cycle)\u{1b}[39m      ";
+
+    fn boxed(rows: &[&str], footer: &str) -> String {
+        let mut pane = vec!["\u{1b}[39m✻ Cooked for 5s · done 2:24 PM", RULE];
+        pane.extend_from_slice(rows);
+        pane.extend([RULE, footer, ""]);
+        pane.join("\n")
+    }
+
+    /// **The box is free only when it is one row holding nothing but its dim
+    /// placeholder or blanks, with no turn running.** Every pane here is a real
+    /// capture: the placeholder's reset opens the rule below it, and the colours
+    /// are `38;2;r;g;b`, whose 2 is not dim.
+    #[test]
+    fn the_composer_is_free_only_when_empty_and_no_turn_runs() {
+        let placeholder = boxed(
+            &["\u{1b}[39m❯\u{a0}\u{1b}[2mTry \"refactor <filepath>\""],
+            FOOTER,
+        )
+        .replace(
+            &format!("\n{RULE}\n\u{1b}[39m  "),
+            &format!("\n\u{1b}[0m{RULE}\n\u{1b}[39m  "),
+        );
+        assert_eq!(composer_is_free(&placeholder, None), Ok(()));
+        let blank = boxed(&["\u{1b}[39m❯\u{a0}                    "], FOOTER);
+        assert_eq!(composer_is_free(&blank, None), Ok(()));
+
+        let draft = "the message box holds a draft";
+        let one_line = boxed(&["\u{1b}[39m❯\u{a0}a short draft         "], FOOTER);
+        assert_eq!(composer_is_free(&one_line, None), Err(draft));
+        let leading_newline = boxed(
+            &[
+                "\u{1b}[39m❯\u{a0}              ",
+                "  second line holds the text",
+            ],
+            FOOTER,
+        );
+        assert_eq!(composer_is_free(&leading_newline, None), Err(draft));
+        // Ten paragraphs, the caret moved up eight: the `❯` row is a blank line.
+        let mut scrolled = vec!["\u{1b}[39m❯\u{a0}              "];
+        for step in ["  Step 3: do the thing number 3.", "                "].repeat(4) {
+            scrolled.push(step);
+        }
+        assert_eq!(composer_is_free(&boxed(&scrolled, FOOTER), None), Err(draft));
+
+        let running = boxed(
+            &["\u{1b}[38;2;153;153;153m❯\u{a0}\u{1b}[39m                "],
+            "\u{1b}[39m  \u{1b}[38;2;255;193;7m⏵⏵ auto mode on\u{1b}[38;2;153;153;153m \
+             (shift+tab to cycle) · esc to interrupt",
+        );
+        assert_eq!(composer_is_free(&running, None), Err("a turn is running"));
+        // A recalled prompt (Up) labels the top rule, with no session's name.
+        let history = boxed(&["\u{1b}[39m❯\u{a0}Count slowly from 1 to 30."], FOOTER).replacen(
+            RULE,
+            "\u{1b}[38;2;136;136;136m───\u{1b}[39m \u{1b}[2mHistory 1/1\u{1b}[0m \u{1b}[38;2;136;136;136m───",
+            1,
+        );
+        assert_eq!(
+            composer_is_free(&history, Some("myjob")),
+            Err("the message box is not on screen")
+        );
+        // A named session (`/rename myjob`) carries its name in the top rule, and
+        // its empty box is free, by that name whole and by no other.
+        let named = boxed(&["\u{1b}[39m❯\u{a0}                     "], FOOTER).replacen(
+            RULE,
+            "\u{1b}[38;2;136;136;136m──────────────────── myjob ─",
+            1,
+        );
+        assert_eq!(composer_is_free(&named, Some("myjob")), Ok(()));
+        let absent = Err("the message box is not on screen");
+        assert_eq!(composer_is_free(&named, None), absent);
+        assert_eq!(composer_is_free(&named, Some("myjo")), absent);
+    }
+
+    /// **A background agent's box is not the session's.** Real 2.1.316 rows (rules
+    /// cut short): the session's box with the agent list below it (`⏺ main`), and
+    /// the same session while the person views its running background agent
+    /// (`◯ main`), whose task stands in the top rule where a name would.
+    #[test]
+    fn the_box_of_a_viewed_background_agent_is_not_the_sessions() {
+        const MAIN: &str = "\u{1b}[38;2;136;136;136m────────────────────\n\
+            \u{1b}[39m❯\u{a0}                    \n\
+            \u{1b}[38;2;136;136;136m────────────────────\n\
+            \u{1b}[39m  \u{1b}[38;2;255;193;7m⏵⏵ auto mode on\u{1b}[38;2;153;153;153m (shift+tab to cycle) · ↓ to manage\u{1b}[39m\n\
+            \u{1b}[1m  ⏺ main\u{1b}[0m\n\
+            \u{1b}[38;2;153;153;153m  ◯ general-purpose\u{1b}[39m  \u{1b}[38;2;153;153;153mSleep 100 then reply done\u{1b}[39m\n";
+        const VIEWING: &str = "\u{1b}[38;2;8;145;178m────────────\u{1b}[38;2;0;0;0m\u{1b}[48;2;8;145;178m Sleep 100 then reply done \u{1b}[38;2;8;145;178m\u{1b}[49m─\n\
+            \u{1b}[39m❯\u{a0}\u{1b}[2mMessage @general-purpose…\u{1b}[0m          \n\
+            \u{1b}[38;2;8;145;178m────────────────────\n\
+            \u{1b}[39m  \u{1b}[38;2;255;193;7m⏵⏵ auto mode on\u{1b}[38;2;153;153;153m · \u{1b}[38;2;0;204;204m1 shell\u{1b}[38;2;153;153;153m · ↓ to manage\u{1b}[39m\n\
+            \u{1b}[38;2;153;153;153m  ◯ main\u{1b}[39m\n\
+            \u{1b}[1m  ⏺ general-purpose\u{1b}[0m  \u{1b}[1mSleep 100 then reply done\u{1b}[0m\n";
+        let plain = |styled: &str| -> String {
+            styled_rows(styled)
+                .iter()
+                .map(|row| row.iter().map(|&(c, _)| c).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let absent = Err("the message box is not on screen");
+        assert_eq!(composer_is_free(MAIN, Some("myjob")), Ok(()));
+        assert!(composer_is_drawn(&plain(MAIN)));
+        // The agent's task in the top rule is not the session's name.
+        assert_eq!(composer_is_free(VIEWING, Some("myjob")), absent);
+        assert!(!composer_is_drawn(&plain(VIEWING)));
+        // A pane too short for the agent list (13 rows or fewer): the box's own
+        // placeholder names the agent.
+        let short = VIEWING.lines().take(4).collect::<Vec<_>>().join("\n");
+        assert_eq!(composer_is_free(&short, Some("myjob")), absent);
+        assert!(!composer_is_drawn(&plain(&short)));
+        // The same short pane with the person's own text in the agent's box: no
+        // placeholder and no list, so the phone's check refuses the labelled rule
+        // itself.
+        assert!(!composer_is_drawn(
+            "──────────── Sleep 900 then reply done ─\n❯\u{a0}check the logs when done\n\
+             ────────────────────\n  ⏵⏵ auto mode on · 1 shell"
+        ));
+        // One typed space in the agent's box: no placeholder, no list, and a row
+        // of blanks, as an empty box of the session's own would show (2.1.316).
+        assert_eq!(
+            composer_is_free(
+                "──────────── Sleep 900 then reply done ─\n❯\u{a0} \n\
+                 ────────────────────\n  ⏵⏵ auto mode on · 1 shell",
+                Some("myjob")
+            ),
+            absent
+        );
+    }
+
+    /// A colour's numbers are not attributes, and dim ends at a reset or at 22.
+    #[test]
+    fn dim_is_read_from_attributes_only() {
+        assert!(!dim_after("38;2;136;136;136", false));
+        assert!(!dim_after("48;5;2", false));
+        assert!(dim_after("38;2;1;2;3;2", false));
+        assert!(dim_after("2", false));
+        assert!(!dim_after("22", true));
+        assert!(!dim_after("", true));
+        assert!(dim_after("39", true));
     }
 }

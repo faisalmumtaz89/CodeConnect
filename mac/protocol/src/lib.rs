@@ -585,7 +585,16 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         daemon's home ([`machine_id_path`]) and the same on every handshake.
 ///
 ///     A client that gets none tells machines apart by address, as before.
-pub const PROTOCOL_MINOR: u32 = 26;
+///   * `27` — **Agents message each other.**
+///
+///     A hosted agent can send another a message, which its computer's daemon
+///     gives it as a turn of its own once it is free. Between this computer's own
+///     processes, and nothing a phone sends or reads changes:
+///       - [`ipc::SupervisorRequest::SendText`]'s `require_free_composer` — the
+///         supervisor types only into a Claude composer with no turn running and
+///         nothing in the box ([`ipc::composer_is_free`]), read in the same request.
+///         A supervisor below 27 would drop it, so the daemon never sends it one.
+pub const PROTOCOL_MINOR: u32 = 27;
 
 #[cfg(test)]
 mod ledger_tests {

@@ -111,6 +111,7 @@ db_ops! {
     fn hook_event_seq(session_uid: String, source_event_id: String) -> Option<u64>;
     fn filed_event(session_uid: String, source: Source, source_event_id: String) -> Option<(u64, Option<String>)>;
     fn session_facts(session_uid: String) -> protocol::facts::SessionFacts;
+    fn claude_turn(session_uid: String) -> crate::agent_messages::ClaudeTurn;
     fn load_cursor(session_uid: String) -> Option<crate::store::TailCursor>;
     fn upsert_session(row: SessionRow) -> crate::store::SessionUpsert;
     fn get_session(session_uid: String) -> Option<SessionRow>;

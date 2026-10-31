@@ -367,6 +367,69 @@ fn every_recorded_api_error_turn_ends_once_however_the_file_is_read() {
     );
 }
 
+/// **Where a Claude run's turns stand, line by line**, on recorded transcripts. An
+/// Esc or a "No" at a tool's prompt leaves the run interrupted, the refusal's own
+/// `turn_duration` frees nothing, and only a later prompt's turn ending frees it.
+/// Turns an API error ended free the run like any other.
+#[test]
+fn claude_turns_stand_as_the_recorded_transcripts_say() {
+    use crate::agent_messages::ClaudeTurn::{self, Free, Interrupted, Running};
+    let interrupted = [Free, Running, Interrupted, Running, Free];
+    let mut free_between_seven = vec![Free];
+    for _ in 0..7 {
+        free_between_seven.extend([Running, Free]);
+    }
+    for (relative, expected) in [
+        (
+            "transcript/interrupts-2.1.304/esc-mid-reply.jsonl",
+            interrupted.to_vec(),
+        ),
+        (
+            "transcript/interrupts-2.1.304/esc-during-tool.jsonl",
+            interrupted.to_vec(),
+        ),
+        (
+            "transcript/interrupts-2.1.304/refuse-tool.jsonl",
+            interrupted.to_vec(),
+        ),
+        (
+            "transcript/interrupts-2.1.304/resume-after-esc.jsonl",
+            interrupted.to_vec(),
+        ),
+        ("transcript/api-errors-2.1.305.jsonl", free_between_seven),
+    ] {
+        let store = temp_store();
+        let run = run();
+        seed_session(&store, &run);
+        let path = std::env::temp_dir().join(format!(
+            "ccd-claude-turn-{}-{}-{}.jsonl",
+            relative.replace('/', "_"),
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let mut seen: Vec<ClaudeTurn> = vec![store.claude_turn(&run.uid).unwrap()];
+        let mut written = String::new();
+        for line in std::fs::read_to_string(fixture(relative)).unwrap().lines() {
+            written.push_str(line);
+            written.push('\n');
+            std::fs::write(&path, &written).unwrap();
+            if let Some(scan) =
+                crate::tailer::scan_file(&store, &run, path.to_str().unwrap()).unwrap()
+            {
+                store
+                    .append_batch_with_cursor(&run.uid, &scan.events, &scan.cursor)
+                    .unwrap();
+            }
+            let now = store.claude_turn(&run.uid).unwrap();
+            if seen.last() != Some(&now) {
+                seen.push(now);
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(seen, expected, "{relative}");
+    }
+}
+
 /// Read in one scan, as a resumed transcript is, or one line per scan, so no
 /// answer depends on what an earlier scan saw.
 fn each_turn_ends_once_however_the_file_is_read(relative: &str, expected: &[&str]) {

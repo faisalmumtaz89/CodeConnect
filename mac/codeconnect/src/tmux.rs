@@ -742,6 +742,14 @@ pub fn capture_visible_pane(name: &str) -> Result<String> {
     out.ok_or_else(|| anyhow::anyhow!("capture-pane failed for {name}"))
 }
 
+/// [`capture_visible_pane`] with each cell's style as SGR sequences (`-e`), for
+/// a decision that turns on how text is drawn: a placeholder is dim, a draft is
+/// not.
+pub fn capture_visible_pane_styled(name: &str) -> Result<String> {
+    let out = run(&["capture-pane", "-p", "-e", "-J", "-t", &target_pane(name)])?;
+    out.ok_or_else(|| anyhow::anyhow!("capture-pane failed for {name}"))
+}
+
 /// Who a pane's keystrokes reach.
 ///
 /// Three states rather than a bool, because the two ways of losing the
@@ -970,15 +978,14 @@ pub fn send_literal(socket: &str, name: &str, text: &str) -> Result<(), TmuxErro
         let left = OPERATION_DEADLINE.saturating_sub(started.elapsed());
         run_tmux(&mut command, left, "send-keys").map(|_| ())
     };
-    let body = text.trim_end_matches(';');
+    let (body, semicolons) = split_trailing_semicolons(text);
     if !body.is_empty() {
         send_keys(&["-l", "--", body])?;
     }
-    let semicolons = vec!["3b"; text.len() - body.len()];
     if semicolons.is_empty() {
         return Ok(());
     }
-    send_keys(&[&["-H"][..], &semicolons].concat()).map_err(|source| {
+    send_keys(&semicolons).map_err(|source| {
         if body.is_empty() {
             source
         } else {
@@ -989,6 +996,78 @@ pub fn send_literal(socket: &str, name: &str, text: &str) -> Result<(), TmuxErro
             }
         }
     })
+}
+
+/// `text` split for typing as itself: the part `-l` types, and the `-H` key
+/// codes (`3b`) of its trailing run of `;`, which tmux would otherwise read as
+/// the end of the command ([`send_literal`]). The codes are empty when there is
+/// no trailing `;`.
+fn split_trailing_semicolons(text: &str) -> (&str, Vec<&'static str>) {
+    let body = text.trim_end_matches(';');
+    let codes = text.len() - body.len();
+    if codes == 0 {
+        return (body, Vec::new());
+    }
+    (body, [&["-H"][..], &vec!["3b"; codes]].concat())
+}
+
+/// Type text that may hold newlines into Claude's composer, in one tmux call and
+/// with the same error contract as [`send_literal`].
+///
+/// Measured on Claude Code 2.1.314 and tmux 3.7b, three characters cannot be
+/// typed as themselves:
+///
+/// * a newline: Claude drops it (`a\nb` arrives as `ab`), so each one is
+///   `M-Enter`, the key Claude reads as a new line in the box;
+/// * a tab: Claude takes it as a key, dropping it or reordering what follows,
+///   so each one is four spaces;
+/// * a `;` ending a line: typed as [`send_literal`] types it, and here the lines
+///   are also one command list with `;` between commands.
+///
+/// One call, so the message lands whole or not at all within the one deadline
+/// the supervisor budgets for typing.
+pub fn send_lines(socket: &str, name: &str, text: &str) -> Result<(), TmuxError> {
+    let mut command = Command::new(tmux_bin().map_err(|err| TmuxError::Spawn {
+        what: "send-keys".into(),
+        source: std::io::Error::other(err.to_string()),
+    })?);
+    command
+        .args(server_flag(socket))
+        .args(send_lines_args(&target_pane(name), text));
+    run_tmux(&mut command, OPERATION_DEADLINE, "send-keys").map(|_| ())
+}
+
+/// [`send_lines`]'s arguments.
+pub(crate) fn send_lines_args(target: &str, text: &str) -> Vec<String> {
+    let mut commands: Vec<Vec<String>> = Vec::new();
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            commands.push(
+                ["send-keys", "-t", target, "M-Enter"]
+                    .map(String::from)
+                    .to_vec(),
+            );
+        }
+        let line = line.replace('\t', "    ");
+        let (head, semicolons) = split_trailing_semicolons(&line);
+        if !head.is_empty() {
+            commands.push(
+                ["send-keys", "-t", target, "-l", "--", head]
+                    .map(String::from)
+                    .to_vec(),
+            );
+        }
+        if !semicolons.is_empty() {
+            commands.push(
+                ["send-keys", "-t", target]
+                    .into_iter()
+                    .chain(semicolons)
+                    .map(String::from)
+                    .collect(),
+            );
+        }
+    }
+    commands.join(&";".to_string())
 }
 
 /// Send a named key (`Enter`, `Escape`, ...). Same error contract as
@@ -1232,6 +1311,85 @@ pub fn terminal_size() -> Option<(u16, u16)> {
 mod tests {
     use super::*;
     use protocol::tmux::target_session;
+
+    /// Each newline is `M-Enter`, an empty line is only that, a tab is four
+    /// spaces, and a line's trailing `;`s go by their code.
+    #[test]
+    fn lines_are_typed_with_claudes_newline_key_and_keep_a_trailing_semicolon() {
+        let text = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            send_lines_args("p", "head\n\nlet x = 1;"),
+            text(&[
+                "send-keys",
+                "-t",
+                "p",
+                "-l",
+                "--",
+                "head",
+                ";",
+                "send-keys",
+                "-t",
+                "p",
+                "M-Enter",
+                ";",
+                "send-keys",
+                "-t",
+                "p",
+                "M-Enter",
+                ";",
+                "send-keys",
+                "-t",
+                "p",
+                "-l",
+                "--",
+                "let x = 1",
+                ";",
+                "send-keys",
+                "-t",
+                "p",
+                "-H",
+                "3b",
+            ])
+        );
+        assert_eq!(
+            send_lines_args("p", "\tx;;"),
+            text(&[
+                "send-keys",
+                "-t",
+                "p",
+                "-l",
+                "--",
+                "    x",
+                ";",
+                "send-keys",
+                "-t",
+                "p",
+                "-H",
+                "3b",
+                "3b"
+            ])
+        );
+        assert_eq!(
+            send_lines_args("p", ";"),
+            text(&["send-keys", "-t", "p", "-H", "3b"])
+        );
+        assert_eq!(
+            send_lines_args("p", "\nx"),
+            text(&[
+                "send-keys",
+                "-t",
+                "p",
+                "M-Enter",
+                ";",
+                "send-keys",
+                "-t",
+                "p",
+                "-l",
+                "--",
+                "x"
+            ])
+        );
+    }
 
     #[test]
     fn the_shim_and_the_daemon_read_tmux_through_the_same_classifier() {
