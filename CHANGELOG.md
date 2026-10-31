@@ -3,12 +3,15 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
-## The terminal fits the screen you are using
+## The terminal fits the screen you are using, and "Show all" keeps your place on iOS 27
 
 - The phone's Terminal tab is drawn for the phone, even while the session is open in a terminal at
   the computer: opening the tab, rotating the phone or typing on it sizes Claude Code for the
   phone, and typing in (or resizing) the terminal at the computer sizes it back. Nothing typed on
   either side is lost. Sessions started before this update keep the computer's size until they end.
+- On iOS 27, "Show all" on a long output keeps your place, as it does on iOS 26: the lines you were
+  reading stay where they were, the Latest button offers the way back, and events that arrive are
+  counted ("1 new") instead of scrolling you on.
 
 ## Codex hears about updates, and the terminal takes the screen
 
@@ -24,9 +27,6 @@ User-facing changes, newest first. Mac releases are cut per
   line, and turned to landscape the Terminal tab fills the screen. The key row is one row with Paste
   and Hide keyboard, and a tap on a web link opens a sheet with the whole address, Open in Safari
   and Copy link.
-- On iOS 27, "Show all" on a long output keeps your place, as it does on iOS 26: the lines you were
-  reading stay where they were, the Latest button offers the way back, and events that arrive are
-  counted ("1 new") instead of scrolling you on.
 
 ## CodeConnect runs on Linux
 
