@@ -6,6 +6,7 @@
 //! nothing but a reconnect, which is why every piece of session state either
 //! lives in SQLite or is re-derived when a supervisor re-registers.
 
+mod agent_messages;
 mod apns;
 mod apns_sender;
 mod catalog;

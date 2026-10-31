@@ -507,6 +507,7 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "text_mutations",
     "mutation_ledger",
     "tail_cursors",
+    "agent_messages",
 ];
 
 /// One run removed by `codeconnect sessions prune`, and what went with it.
@@ -523,6 +524,25 @@ pub struct PrunedSession {
     pub created_at: String,
     pub updated_at: String,
     pub events: u64,
+}
+
+/// What filing an agent's message found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentMessageFiling {
+    /// Kept, under this id. Ids only grow, so they are also the delivery order.
+    Held(i64),
+    /// The same words from the same sender to the same run were filed inside
+    /// the window, so nothing was kept.
+    Duplicate,
+    /// The run has no session row.
+    NoSession,
+}
+
+/// One message waiting for its run, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldAgentMessage {
+    pub id: i64,
+    pub message: String,
 }
 
 /// What claiming a `send_text` mutation found.
@@ -737,6 +757,10 @@ pub const OPERATION_INTERRUPT: &str = "interrupt";
 /// words would be said twice. One kind with the route in the immutable material is the
 /// shape where a retry replays what actually happened.
 pub const OPERATION_COMPOSE: &str = "compose";
+
+/// The compose request id an agent's message is handed to Codex under:
+/// this prefix and the message's id.
+pub const AGENT_MESSAGE_REQUEST_PREFIX: &str = "agent-message-";
 
 /// A compose that began a turn on an idle thread.
 pub const COMPOSE_ROUTE_START: &str = "turn_start";
@@ -3546,6 +3570,144 @@ impl Store {
         Ok(changed)
     }
 
+    // -------------------------------------------------------- agent messages
+
+    /// Keep one agent's message for `session_uid`, unless the same sender sent
+    /// the same words to the same run at or after `repeat_since`.
+    ///
+    /// Settled rows older than `repeat_since` are dropped in the same
+    /// transaction: past the window they answer no question.
+    pub fn file_agent_message(
+        &self,
+        session_uid: &str,
+        sender: &str,
+        text_hash: &str,
+        message: &str,
+        now: &str,
+        repeat_since: &str,
+    ) -> Result<AgentMessageFiling> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM agent_messages
+              WHERE status IN ('delivered', 'unknown') AND created_at < ?1",
+            params![repeat_since],
+        )?;
+        let repeat = tx
+            .query_row(
+                "SELECT 1 FROM agent_messages
+                  WHERE session_uid = ?1 AND sender = ?2 AND text_hash = ?3
+                    AND created_at >= ?4",
+                params![session_uid, sender, text_hash, repeat_since],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let filing = if repeat {
+            AgentMessageFiling::Duplicate
+        } else {
+            let inserted = tx.execute(
+                "INSERT INTO agent_messages(session_uid, sender, text_hash, message, status,
+                                            created_at, settled_at)
+                 SELECT ?1, ?2, ?3, ?4, 'held', ?5, NULL
+                  WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
+                params![session_uid, sender, text_hash, message, now],
+            )?;
+            if inserted == 1 {
+                AgentMessageFiling::Held(tx.last_insert_rowid())
+            } else {
+                AgentMessageFiling::NoSession
+            }
+        };
+        tx.commit()?;
+        Ok(filing)
+    }
+
+    /// Every message still waiting for `session_uid`, oldest first.
+    pub fn held_agent_messages(&self, session_uid: &str) -> Result<Vec<HeldAgentMessage>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT id, message FROM agent_messages
+              WHERE session_uid = ?1 AND status = 'held' ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![session_uid], |row| {
+            Ok(HeldAgentMessage {
+                id: row.get(0)?,
+                message: row.get(1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Mark a held message as being handed to its agent, committed before it
+    /// is. False when it was not held.
+    pub fn claim_agent_message(&self, id: i64) -> Result<bool> {
+        let conn = self.write();
+        let claimed = conn.execute(
+            "UPDATE agent_messages SET status = 'handing_out'
+              WHERE id = ?1 AND status = 'held'",
+            params![id],
+        )?;
+        Ok(claimed == 1)
+    }
+
+    /// What became of a message being handed out: `held` again when nothing
+    /// reached the agent, `delivered` or `unknown` otherwise.
+    pub fn settle_agent_message(&self, id: i64, status: &str, at: &str) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE agent_messages SET status = ?2, settled_at = ?3
+              WHERE id = ?1 AND status = 'handing_out'",
+            params![id, status, at],
+        )?;
+        Ok(())
+    }
+
+    pub fn agent_message_status(&self, id: i64) -> Result<Option<String>> {
+        let conn = self.read();
+        let status = conn
+            .query_row(
+                "SELECT status FROM agent_messages WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(status)
+    }
+
+    /// Every message a stopped daemon was handing out becomes `unknown`: it
+    /// may have reached its agent, so it is never handed out again.
+    ///
+    /// Except a Codex message whose compose was never claimed. The link claims
+    /// it in `mutation_ledger` before it writes a byte to Codex, so with no claim
+    /// nothing was written — the hand-out was refused or never asked — and the
+    /// message waits again.
+    pub fn recover_agent_messages(&self, at: &str) -> Result<usize> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE agent_messages SET status = 'held'
+              WHERE status = 'handing_out'
+                AND session_uid IN (SELECT session_uid FROM codex_sessions)
+                AND NOT EXISTS (SELECT 1 FROM mutation_ledger AS m
+                                 WHERE m.operation_kind = ?1
+                                   AND m.session_uid = agent_messages.session_uid
+                                   AND m.client_request_id = ?2 || agent_messages.id)",
+            params![OPERATION_COMPOSE, AGENT_MESSAGE_REQUEST_PREFIX],
+        )?;
+        let changed = tx.execute(
+            "UPDATE agent_messages SET status = 'unknown', settled_at = ?1
+              WHERE status = 'handing_out'",
+            params![at],
+        )?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
     // ---------------------------------------------------- generalized ledger
     //
     // The generalized mutation ledger, keyed `(operation_kind, session_uid,
@@ -4591,6 +4753,24 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             started_at   TEXT NOT NULL,
             settled_at   TEXT,
             PRIMARY KEY(session_uid, request_id)
+        );
+
+        -- Messages from other agents, kept until their run is free. A row is
+        -- `handing_out` from just before it is given to the agent until that
+        -- answers, so one found at start-up was perhaps delivered and is never
+        -- given again: it becomes `unknown`, unless nothing can have reached the
+        -- agent (`recover_agent_messages`). Settled rows stay ten minutes so the
+        -- same words sent again are recognised as a repeat.
+        CREATE TABLE IF NOT EXISTS agent_messages(
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_uid TEXT NOT NULL,
+            sender      TEXT NOT NULL,
+            text_hash   TEXT NOT NULL,
+            message     TEXT NOT NULL,
+            -- held | handing_out | delivered | unknown
+            status      TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            settled_at  TEXT
         );
 
         -- The generalized mutation ledger. `text_mutations` above is the proven
@@ -9660,6 +9840,167 @@ mod tests {
                 .unwrap();
             assert_eq!(left, 0, "{table} kept rows for a run that was removed");
         }
+    }
+
+    /// **Agents' messages: kept in order, a repeat recognised for ten minutes, handed
+    /// out at most once.** A message being handed out when the daemon stops is
+    /// `unknown` afterwards and is never offered again.
+    #[test]
+    fn agent_messages_keep_order_refuse_repeats_and_are_handed_out_at_most_once() {
+        let (store, path) = temp_store();
+        let session = key("AM", "cc-1");
+        store
+            .upsert_session(&session_row(&session))
+            .unwrap()
+            .assert_present();
+        let file = |sender: &str, text: &str, at: &str, since: &str| {
+            store
+                .file_agent_message(&session.uid, sender, &format!("h-{text}"), text, at, since)
+                .unwrap()
+        };
+        let t0 = "2026-10-31T10:00:00.000Z";
+        let t1 = "2026-10-31T10:05:00.000Z";
+        let first = file("cc-2@studio", "one", t0, "2026-10-31T09:50:00.000Z");
+        let second = file("cc-2@studio", "two", t1, "2026-10-31T09:55:00.000Z");
+        let (AgentMessageFiling::Held(a), AgentMessageFiling::Held(b)) = (first, second) else {
+            panic!("both kept");
+        };
+        assert!(a < b);
+        assert_eq!(
+            file("cc-2@studio", "one", t1, "2026-10-31T09:55:00.000Z"),
+            AgentMessageFiling::Duplicate,
+            "the same words from the same sender inside ten minutes"
+        );
+        assert!(
+            matches!(
+                file("cc-3@studio", "one", t1, "2026-10-31T09:55:00.000Z"),
+                AgentMessageFiling::Held(_)
+            ),
+            "another sender's same words are a different message"
+        );
+        assert_eq!(
+            store
+                .file_agent_message(&uid("ZZ"), "cc-2@studio", "h", "x", t1, t0)
+                .unwrap(),
+            AgentMessageFiling::NoSession
+        );
+        let held: Vec<i64> = store
+            .held_agent_messages(&session.uid)
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(held[..2], [a, b], "oldest first");
+
+        assert!(store.claim_agent_message(a).unwrap());
+        assert!(!store.claim_agent_message(a).unwrap(), "claimed once");
+        store.settle_agent_message(a, "delivered", t1).unwrap();
+        assert!(store.claim_agent_message(b).unwrap());
+        // The daemon stops here, with `b` handed to its agent and nothing recorded.
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.recover_agent_messages(t1).unwrap(), 1);
+        assert_eq!(
+            store.agent_message_status(b).unwrap().as_deref(),
+            Some("unknown")
+        );
+        assert!(
+            !store.claim_agent_message(b).unwrap(),
+            "never offered again"
+        );
+        assert!(store
+            .held_agent_messages(&session.uid)
+            .unwrap()
+            .iter()
+            .all(|m| m.id != a && m.id != b));
+
+        // Past the window, the first message is no longer a reason to refuse it again.
+        assert!(matches!(
+            store
+                .file_agent_message(
+                    &session.uid,
+                    "cc-2@studio",
+                    "h-one",
+                    "one",
+                    "2026-10-31T10:11:00.000Z",
+                    "2026-10-31T10:01:00.000Z",
+                )
+                .unwrap(),
+            AgentMessageFiling::Held(_)
+        ));
+        assert_eq!(
+            store.agent_message_status(a).unwrap(),
+            None,
+            "dropped past the window"
+        );
+    }
+
+    /// **A Codex hand-out the link never claimed did not reach Codex.** The link
+    /// claims the compose before it writes a byte, so a daemon that stopped with
+    /// no claim gives the message back to the queue; one with a claim may have
+    /// reached Codex, and stays unknown.
+    #[test]
+    fn a_stopped_codex_hand_out_waits_again_unless_its_compose_was_claimed() {
+        let (store, _path) = temp_store();
+        let session = key("CX", "cc-1");
+        store
+            .upsert_session(&codex_session_row(&session))
+            .unwrap()
+            .assert_present();
+        let now = "2026-10-31T10:00:00.000Z";
+        let file = |text: &str| match store
+            .file_agent_message(
+                &session.uid,
+                "cc-2@studio",
+                text,
+                text,
+                now,
+                "2026-10-31T09:50:00.000Z",
+            )
+            .unwrap()
+        {
+            AgentMessageFiling::Held(id) => id,
+            other => panic!("{other:?}"),
+        };
+        let (refused, written) = (file("refused"), file("written"));
+        assert!(store.claim_agent_message(refused).unwrap());
+        assert!(store.claim_agent_message(written).unwrap());
+        let claimed = ClaimedMaterial {
+            thread_id: "th_ABC123".into(),
+            generation: 1,
+            route: COMPOSE_ROUTE_START.into(),
+            target_turn_id: None,
+            claimed_hash: "hash".into(),
+        };
+        assert!(matches!(
+            store
+                .claim_mutation(
+                    OPERATION_COMPOSE,
+                    &session.uid,
+                    &format!("{AGENT_MESSAGE_REQUEST_PREFIX}{written}"),
+                    &claimed,
+                    now,
+                )
+                .unwrap(),
+            MutationClaim::Claimed
+        ));
+        // The daemon stops here.
+        assert_eq!(store.recover_agent_messages(now).unwrap(), 1);
+        assert_eq!(
+            store.agent_message_status(refused).unwrap().as_deref(),
+            Some("held")
+        );
+        assert_eq!(
+            store.agent_message_status(written).unwrap().as_deref(),
+            Some("unknown")
+        );
+        let held: Vec<i64> = store
+            .held_agent_messages(&session.uid)
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(held, [refused]);
     }
 
     #[test]

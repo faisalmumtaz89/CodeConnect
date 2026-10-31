@@ -213,6 +213,9 @@ async fn read_loop(
                     .await
                 {
                     Ok(registration) => {
+                        // Messages other agents left for this run while it had no
+                        // supervisor — a daemon restart, a reconnect — go out now.
+                        daemon.retry_agent_messages(&registration.session.uid).await;
                         *registered = Some(registration);
                         let _ = tx.send(DaemonFrame::Ack).await;
                     }
@@ -481,6 +484,10 @@ async fn read_loop(
             }
             ClientFrame::DaemonInfo => {
                 let _ = tx.send(DaemonFrame::Daemon(daemon.info().await)).await;
+            }
+            ClientFrame::SendAgentMessage { from_uid, to, text } => {
+                let outcome = daemon.send_agent_message(&from_uid, &to, &text).await;
+                let _ = tx.send(DaemonFrame::AgentMessageResult { outcome }).await;
             }
         }
     }

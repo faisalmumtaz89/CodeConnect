@@ -146,6 +146,16 @@ db_ops! {
     /// the whole fleet.
     fn push_target_for(device_id: String) -> Option<crate::store::PushRegistration>;
     fn recover_text_mutations(at: String) -> usize;
+    fn file_agent_message(
+        session_uid: String,
+        sender: String,
+        text_hash: String,
+        message: String,
+        now: String,
+        repeat_since: String,
+    ) -> crate::store::AgentMessageFiling;
+    fn held_agent_messages(session_uid: String) -> Vec<crate::store::HeldAgentMessage>;
+    fn recover_agent_messages(at: String) -> usize;
     fn orphan_event_count() -> u64;
 }
 
@@ -404,6 +414,26 @@ impl Db {
             )
         })
         .await
+    }
+
+    /// Hand-written for the reason [`Db::upsert_session_at_generation`] is: the
+    /// message id is a scalar the store takes by value.
+    pub async fn claim_agent_message(&self, id: i64) -> Result<bool> {
+        self.run(move |store| store.claim_agent_message(id)).await
+    }
+
+    pub async fn settle_agent_message(
+        &self,
+        id: i64,
+        status: &'static str,
+        at: String,
+    ) -> Result<()> {
+        self.run(move |store| store.settle_agent_message(id, status, &at))
+            .await
+    }
+
+    pub async fn agent_message_status(&self, id: i64) -> Result<Option<String>> {
+        self.run(move |store| store.agent_message_status(id)).await
     }
 
     /// Give back a claim whose write was refused before it did anything. `false` when

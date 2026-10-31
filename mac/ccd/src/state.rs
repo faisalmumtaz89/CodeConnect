@@ -306,6 +306,12 @@ pub struct Daemon {
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
+    /// One per run with messages from other agents: held while they are handed out,
+    /// so two passes never overlap and the oldest message always goes first.
+    pub(crate) agent_message_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// The runs whose held messages are being retried. See
+    /// [`crate::agent_messages`].
+    pub(crate) agent_message_retries: Mutex<HashSet<String>>,
 }
 
 /// **What the Claude-only gate found**, for the callers that must tell two refusals
@@ -1926,6 +1932,8 @@ impl Daemon {
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
+            agent_message_gates: Mutex::new(HashMap::new()),
+            agent_message_retries: Mutex::new(HashSet::new()),
         })
     }
 
@@ -2066,6 +2074,15 @@ impl Daemon {
                  unknown; a retry will be told so rather than typing again"
             ),
             Err(err) => crate::log_error!("recovery: could not settle send_text claims: {err:#}"),
+        }
+
+        match self.db.recover_agent_messages(now.clone()).await {
+            Ok(0) => {}
+            Ok(count) => crate::log_warn!(
+                "recovery: {count} message(s) from other agents were being handed out and \
+                 their outcome is unknown; they are not handed out again"
+            ),
+            Err(err) => crate::log_error!("recovery: could not settle agent messages: {err:#}"),
         }
 
         // **Whether the cards are back, which is what the answer recovery below depends
@@ -5128,20 +5145,34 @@ impl Daemon {
                 return Ok(Some(row));
             }
         }
-        let attached: Option<SessionRow> = {
-            let inner = self.inner.lock().await;
-            self.store
-                .list_sessions()?
-                .into_iter()
-                .filter(|row| {
-                    row.session_id == reference && inner.supervisors.contains_key(&row.session_uid)
-                })
-                .max_by(|a, b| a.session_uid.cmp(&b.session_uid))
-        };
+        let attached = self.attached_run(reference).await?;
         if attached.is_some() {
             return Ok(attached);
         }
         self.store.find_session(reference)
+    }
+
+    /// The newest run named `name` whose supervisor is attached now, and never an
+    /// ended one.
+    pub(crate) async fn attached_run(&self, name: &str) -> Result<Option<SessionRow>> {
+        let inner = self.inner.lock().await;
+        Ok(self
+            .store
+            .list_sessions()?
+            .into_iter()
+            .filter(|row| {
+                row.session_id == name && inner.supervisors.contains_key(&row.session_uid)
+            })
+            .max_by(|a, b| a.session_uid.cmp(&b.session_uid)))
+    }
+
+    /// Whether the run's supervisor is attached now.
+    pub(crate) async fn is_attached(&self, session_uid: &str) -> bool {
+        self.inner
+            .lock()
+            .await
+            .supervisors
+            .contains_key(session_uid)
     }
 
     // --------------------------------------------------------------- answers
@@ -5767,6 +5798,21 @@ impl Daemon {
         text: String,
         payload_hash: &str,
     ) -> protocol::ws::ComposeResult {
+        self.compose_as(session_ref, request_id, text, payload_hash, false)
+            .await
+    }
+
+    /// [`Daemon::compose`], or with `agent_message` another agent's message, which the
+    /// link only ever starts a turn with and only when the thread is free (see
+    /// [`crate::codex_link::agent_message_hold`]).
+    pub(crate) async fn compose_as(
+        &self,
+        session_ref: &str,
+        request_id: &str,
+        text: String,
+        payload_hash: &str,
+        agent_message: bool,
+    ) -> protocol::ws::ComposeResult {
         use protocol::ws::ComposeResult;
 
         let refuse = |reason: String| ComposeResult::Rejected { reason };
@@ -5969,6 +6015,7 @@ impl Daemon {
                         claimed_hash,
                         visit.upstream_epoch,
                         admitted,
+                        agent_message,
                     )
                     .await
             }
@@ -25495,6 +25542,101 @@ mod tests {
             protocol::agent::AgentKind::Codex,
             "a registered Codex run must read back as one, or every gate below is \
              being handed a Claude row and passing for the wrong reason"
+        );
+    }
+
+    /// **What an agent's message is told, case by case**, on this computer as the
+    /// recorded tailnet names it (`studio`; `desktop` online, `linux-box` offline).
+    #[tokio::test]
+    async fn an_agents_message_is_refused_held_or_recognised_as_a_repeat() {
+        let daemon = test_daemon();
+        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        let sender = protocol::uid::new().unwrap();
+        let codex = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        register_codex_session(&daemon, &codex, "cc-1").await;
+        register(&daemon, "cc-3", None).await;
+        let send = |to: &'static str, text: &'static str| {
+            let daemon = Arc::clone(&daemon);
+            let tailnet = tailnet.clone();
+            let sender = sender.clone();
+            async move {
+                daemon
+                    .send_agent_message_on(Some(&tailnet), &sender, to, text)
+                    .await
+            }
+        };
+        let refused = |outcome: protocol::ipc::AgentMessageOutcome| match outcome {
+            protocol::ipc::AgentMessageOutcome::Refused { reason } => reason,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+
+        assert!(refused(send("cc-1", "hi").await).contains("cc-N@computer"));
+        assert!(refused(send("cc-1@", "hi").await).contains("cc-N@computer"));
+        assert!(refused(send("cc-1@studio", "").await).contains("empty"));
+        assert!(refused(send("cc-1@studio", "a\u{1b}[2Jb").await).contains("control"));
+        assert!(refused(send("cc-1@nowhere", "hi").await).contains("not a computer"));
+        assert!(refused(send("cc-1@linux-box", "hi").await).contains("offline"));
+        assert!(refused(send("cc-1@desktop", "hi").await).contains("other computers"));
+        assert!(refused(send("cc-9@studio", "hi").await).contains("not a running session"));
+        // An ended run under the name is not a target, however recent.
+        let mut ended = daemon.store.get_session(&codex).unwrap().unwrap();
+        ended.session_uid = protocol::uid::new().unwrap();
+        ended.session_id = "cc-5".into();
+        ended.lifecycle = protocol::event::Lifecycle::Exited;
+        daemon
+            .store
+            .upsert_session(&ended)
+            .unwrap()
+            .assert_present();
+        assert!(refused(send("cc-5@studio", "hi").await).contains("not a running session"));
+        assert!(refused(send("cc-3@studio", "hi").await).contains("Claude"));
+        assert!(refused(
+            daemon
+                .send_agent_message_on(None, &sender, "cc-1@studio", "hi")
+                .await
+        )
+        .contains("Tailscale"));
+        assert!(refused(
+            daemon
+                .send_agent_message_on(Some(&tailnet), "nobody", "cc-1@studio", "hi")
+                .await
+        )
+        .contains("not known"));
+
+        // cc-1's link reaches no app-server, so the message is kept and waits.
+        let first = send("cc-1@studio", "please review").await;
+        assert!(
+            matches!(first, protocol::ipc::AgentMessageOutcome::Held { .. }),
+            "{first:?}"
+        );
+        assert_eq!(
+            send("cc-1@studio", "please review").await,
+            protocol::ipc::AgentMessageOutcome::Duplicate
+        );
+        let second = send("cc-1@Studio", "and this").await;
+        assert!(
+            matches!(second, protocol::ipc::AgentMessageOutcome::Held { .. }),
+            "{second:?}"
+        );
+        let held: Vec<String> = daemon
+            .store
+            .held_agent_messages(&codex)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.message)
+            .collect();
+        assert_eq!(
+            held,
+            [
+                "[CodeConnect] Message from cc-2@studio (Codex · project tmp). Reply with \
+                 send_message to cc-2@studio.\n\nplease review",
+                "[CodeConnect] Message from cc-2@studio (Codex · project tmp). Reply with \
+                 send_message to cc-2@studio.\n\nand this",
+            ]
         );
     }
 

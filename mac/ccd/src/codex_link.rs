@@ -2331,6 +2331,10 @@ pub(crate) struct ComposeRequest {
     /// The actuation gate's read guard, travelling with the ask. See
     /// [`InterruptRequest::gate`].
     pub(crate) gate: tokio::sync::OwnedRwLockReadGuard<()>,
+    /// Another agent's message rather than a person's words: it only ever starts a
+    /// turn, and only once the thread has been idle for [`AGENT_MESSAGE_GRACE`] after a
+    /// turn that was not interrupted. See [`agent_message_hold`].
+    pub(crate) agent_message: bool,
 }
 
 /// The daemon's end of [`ComposeRequest`].
@@ -2365,6 +2369,7 @@ impl LinkComposes {
         claimed_hash: String,
         upstream_epoch: u64,
         gate: tokio::sync::OwnedRwLockReadGuard<()>,
+        agent_message: bool,
     ) -> ComposeReport {
         let (reply, answer) = tokio::sync::oneshot::channel();
         let ask = ComposeRequest {
@@ -2376,6 +2381,7 @@ impl LinkComposes {
             claimed_hash,
             reply,
             gate,
+            agent_message,
         };
         if self.0.send(ask).is_err() {
             return ComposeReport::NotApplied(crate::codex_refusals::COMPOSE_LINK_WENT_AWAY.into());
@@ -2756,6 +2762,7 @@ pub(crate) fn insert_pending_compose_for_tests(
             deadline: tokio::time::Instant::now() + COMPOSE_BUDGET,
             replies: vec![reply],
             _gates: vec![gate],
+            agent_message: false,
             #[cfg(test)]
             told: None,
         },
@@ -3661,6 +3668,7 @@ async fn serve_connection(
         open_interrupts: Arc::clone(open_interrupts),
         open_composes: Arc::clone(open_composes),
         running_turn: None,
+        last_turn_end: TurnEnd::now(),
         swept_generation: None,
         registered_generation: link.generation,
         recorded_thread: None,
@@ -4635,6 +4643,8 @@ struct Connection<'a> {
     /// The broker's own running-turn gate is the second lock behind this one, so being
     /// out of date here costs a refusal rather than a stray interrupt.
     running_turn: Option<RunningTurn>,
+    /// When this connection last saw a turn end, for [`agent_message_hold`].
+    last_turn_end: TurnEnd,
     /// The visit generation the superseded sweep last ran at.
     ///
     /// `None` until the first idle moment, so a connection that comes up on a
@@ -4757,6 +4767,8 @@ pub(crate) struct PendingCompose {
     replies: Vec<tokio::sync::oneshot::Sender<ComposeReport>>,
     /// One actuation-gate read guard per waiter. See [`PendingInterrupt::_gates`].
     _gates: Vec<tokio::sync::OwnedRwLockReadGuard<()>>,
+    /// Another agent's message. See [`ComposeRequest::agent_message`].
+    agent_message: bool,
     /// **Test-only.** The last thing [`PendingCompose::tell`] said, so a test can assert
     /// on the SENTENCE without standing up a waiter for it.
     #[cfg(test)]
@@ -4783,6 +4795,7 @@ impl PendingCompose {
             deadline: tokio::time::Instant::now() + COMPOSE_BUDGET,
             replies: Vec::new(),
             _gates: Vec::new(),
+            agent_message: false,
             #[cfg(test)]
             told: None,
         }
@@ -5034,6 +5047,51 @@ fn compose_route(
         }
         _ => Ok(crate::store::COMPOSE_ROUTE_START),
     }
+}
+
+/// How long a thread must have been idle before an agent's message starts a turn on it.
+///
+/// Codex's own terminal sends the person's queued follow-up 45 to 88 ms after a turn
+/// ends (measured on 0.164.0), and a turn started first would take that follow-up in as
+/// a steer. A second is more than ten times that.
+pub(crate) const AGENT_MESSAGE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// When a connection last saw a turn end, and whether it was interrupted.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TurnEnd {
+    at: std::time::Instant,
+    interrupted: bool,
+}
+
+impl TurnEnd {
+    /// A connection that has seen no turn end counts its own start as one.
+    pub(crate) fn now() -> TurnEnd {
+        TurnEnd {
+            at: std::time::Instant::now(),
+            interrupted: false,
+        }
+    }
+}
+
+/// **Why an agent's message may not start a turn now**, or `None` when it may.
+///
+/// Never into a running turn: that would be a steer, and the words would join work
+/// somebody else asked for. Not within [`AGENT_MESSAGE_GRACE`] of a turn's end, so the
+/// person's own queued message goes first. And not after an interrupted turn until a
+/// later one ends: the person stopped the agent to say something, and is owed the next
+/// turn.
+pub(crate) fn agent_message_hold(
+    turn_running: bool,
+    last_end: TurnEnd,
+    now: std::time::Instant,
+) -> Option<&'static str> {
+    if last_end.interrupted {
+        return Some(crate::agent_messages::HELD_AFTER_INTERRUPT);
+    }
+    if turn_running || now.saturating_duration_since(last_end.at) < AGENT_MESSAGE_GRACE {
+        return Some(crate::agent_messages::HELD_WORKING);
+    }
+    None
 }
 
 /// **The material one compose is claimed with**, built from the route this link just
@@ -5950,6 +6008,17 @@ impl Connection<'_> {
             }
         }
         self.seed_running_turn(&seed, thread).await;
+        // A link that was not watching saw no turn end, so it counts this attach as one,
+        // and knows from the answer whether the person stopped the last turn. An answer
+        // that still shows a turn running says nothing about its end: a live one holds
+        // messages as the running turn, and a stale one must not erase an end this link
+        // already watched.
+        if seed.running_turn_ids().is_empty() {
+            self.last_turn_end = TurnEnd {
+                at: std::time::Instant::now(),
+                interrupted: seed.last_turn_interrupted(),
+            };
+        }
         crate::log_info!(
             "codex link for {}: attached to thread {thread} by resume. The answer \
              described {described} turn(s) ({terminal} finished, {running} still \
@@ -6795,6 +6864,16 @@ impl Connection<'_> {
             let _ = ask.reply.send(recorded);
             return Ok(());
         }
+        if ask.agent_message {
+            if let Some(why) = agent_message_hold(
+                self.running_turn.is_some(),
+                self.last_turn_end,
+                std::time::Instant::now(),
+            ) {
+                refuse(ask, why);
+                return Ok(());
+            }
+        }
         // **The connection's own not-ready proof, read once**: `compose_route` reads it to
         // make the START route provable, and the write below spends it.
         let addressee = self.addressee();
@@ -6917,6 +6996,7 @@ impl Connection<'_> {
                 // The write is happening now; the guard moves from the ask to the
                 // pending entry and is released only when it is drained.
                 _gates: vec![ask.gate],
+                agent_message: ask.agent_message,
                 #[cfg(test)]
                 told: None,
             },
@@ -7067,11 +7147,22 @@ impl Connection<'_> {
             // Restored only for the route and the thread it was spent on, and only while
             // it is still this connection's — the same comparison every other reader of
             // this pair makes. See [`CodexAddressee::StartInFlight`].
+            //
+            // **Except for another agent's message, which is refused here when the person's
+            // own first turn is running** — the broker's running-turn gate — on a thread
+            // this link cannot watch until it is subscribed. That refusal is the evidence
+            // that the thread has a rollout now, so the proof is not given back: the attach
+            // is asked again at once, and a not-ready answer to it restores the proof from
+            // an observation. Until then no agent's message is written.
             if held.route == crate::store::COMPOSE_ROUTE_START
                 && self.start_in_flight_target() == Some(held.thread_id.as_str())
             {
                 self.start_in_flight = None;
-                self.not_ready_thread = Some(held.thread_id.clone());
+                if held.agent_message {
+                    self.resume_due_now = true;
+                } else {
+                    self.not_ready_thread = Some(held.thread_id.clone());
+                }
             }
             let settlement = self.release_compose_claim(&held).await;
             let ordinary = ComposeReport::NotApplied(if refusal == WireRefusal::Paused {
@@ -7957,12 +8048,20 @@ impl Connection<'_> {
         // **Matched on the thread as well as the turn**, for the reason
         // `settle_interrupts_for_turn` matches on both: a turn id names a turn only
         // inside a thread, and a terminal for another thread's turn is not this one's.
+        //
+        // With no running turn on record — a link that came up after the turn began and
+        // was given no seed — the terminal is still the end of a turn, and an agent's
+        // message waits out its grace from here.
         if self
             .running_turn
             .as_ref()
-            .is_some_and(|running| running.thread_id == thread_id && running.turn_id == turn_id)
+            .is_none_or(|running| running.thread_id == thread_id && running.turn_id == turn_id)
         {
             self.running_turn = None;
+            self.last_turn_end = TurnEnd {
+                at: std::time::Instant::now(),
+                interrupted: status == TURN_INTERRUPTED,
+            };
         }
         self.retire_codex_cards(protocol::ws::CodexResolution::Cleared { cause }, |row| {
             row.thread_id == thread_id && row.turn_id == turn_id
@@ -8865,6 +8964,7 @@ impl Connection<'_> {
         self.visit.generation += 1;
         self.visit.thread_id = Some(thread.to_string());
         self.running_turn = None;
+        self.last_turn_end = TurnEnd::now();
     }
 
     fn apply_switch_candidate(&mut self) -> Option<String> {
@@ -12939,6 +13039,7 @@ mod tests {
         text: &str,
         again: Option<&str>,
         settle: Duration,
+        agent_message: bool,
     ) -> (
         ComposeReport,
         Option<ComposeReport>,
@@ -13018,6 +13119,7 @@ mod tests {
                         protocol::hash::compose_hash(&session.uid, text),
                         visit.upstream_epoch,
                         gate,
+                        agent_message,
                     )
                     .await
             }
@@ -13061,6 +13163,7 @@ mod tests {
                                     protocol::hash::compose_hash(&session.uid, text),
                                     visit.upstream_epoch,
                                     gate,
+                                    false,
                                 )
                                 .await,
                         )
@@ -14045,6 +14148,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -14094,6 +14198,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -15083,6 +15188,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: generation,
             recorded_thread: None,
@@ -15299,6 +15405,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -15381,6 +15488,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -16300,6 +16408,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -16441,6 +16550,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -16548,6 +16658,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -16671,6 +16782,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -16792,6 +16904,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -16960,6 +17073,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -17147,6 +17261,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -17364,6 +17479,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -17476,6 +17592,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -18700,6 +18817,7 @@ mod tests {
             start_in_flight: None,
             resume_due_now: false,
             running_turn: None,
+            last_turn_end: TurnEnd::now(),
             swept_generation: None,
             registered_generation: 1,
             recorded_thread: None,
@@ -20978,6 +21096,7 @@ mod tests {
                 claimed_hash: "hash-of-req-race".into(),
                 reply,
                 gate: a_gate_guard().await,
+                agent_message: false,
             })
             .is_none());
         // A claim taken while the row is still the refused attempt's writes nothing.
@@ -21514,6 +21633,7 @@ mod tests {
             "Reply with the single word amber and nothing else.",
             Some("And now say sienna."),
             Duration::from_secs(30),
+            false,
         )
         .await;
 
@@ -21605,6 +21725,58 @@ mod tests {
         );
     }
 
+    /// **Another agent's message starts the first turn of a fresh session**, the same
+    /// way a phone's words do, and is never a steer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_agents_message_starts_the_first_turn_of_a_fresh_session() {
+        let (report, _, frames, _, _) = drive_composing(
+            ResumeAnswer::NoRolloutUntilAFirstTurn,
+            protocol::event::CodexLink::BoundNotStarted,
+            5,
+            "[CodeConnect] Message from cc-2@studio (Codex · project api).\n\nhello",
+            None,
+            Duration::from_secs(30),
+            true,
+        )
+        .await;
+        assert_eq!(
+            report,
+            ComposeReport::Started {
+                turn_id: FIRST_TURN_FROM_BOUND.to_string()
+            },
+            "{frames:?}"
+        );
+        assert!(frames.iter().any(|f| f["method"] == "turn/start"));
+        assert!(!frames.iter().any(|f| f["method"] == "turn/steer"));
+    }
+
+    /// **When an agent's message may start a turn.** Never while one runs, not within a
+    /// second of one ending, and not after an interrupted turn until a later one ends.
+    #[test]
+    fn an_agents_message_waits_for_a_free_thread() {
+        let now = std::time::Instant::now();
+        let ended = |ago_ms: u64, interrupted: bool| TurnEnd {
+            at: now - Duration::from_millis(ago_ms),
+            interrupted,
+        };
+        assert_eq!(agent_message_hold(false, ended(1_500, false), now), None);
+        assert_eq!(
+            agent_message_hold(true, ended(1_500, false), now),
+            Some(crate::agent_messages::HELD_WORKING),
+            "a running turn"
+        );
+        assert_eq!(
+            agent_message_hold(false, ended(900, false), now),
+            Some(crate::agent_messages::HELD_WORKING),
+            "inside the grace, where the person's queued message goes first"
+        );
+        assert_eq!(
+            agent_message_hold(false, ended(60_000, true), now),
+            Some(crate::agent_messages::HELD_AFTER_INTERRUPT),
+            "the person stopped the last turn"
+        );
+    }
+
     /// **TWO COMPOSES, ONE PROOF: THE SECOND IS REFUSED RATHER THAN WRITTEN.**
     ///
     /// The defect this pins is a window, not a state, so the script is built around the
@@ -21678,6 +21850,7 @@ mod tests {
                         protocol::hash::compose_hash(&session.uid, text),
                         visit.upstream_epoch,
                         gate,
+                        false,
                     )
                     .await
             }
@@ -22143,6 +22316,7 @@ mod tests {
                 protocol::hash::compose_hash(&session.uid, text),
                 visit.upstream_epoch,
                 gate,
+                false,
             )
             .await;
 
@@ -23217,6 +23391,11 @@ mod tests {
             let mut adapter = CodexAdapter::new(session.clone());
             let mut amend = AmendThrottle::default();
             let mut conn = attaching(&daemon, &session, &mut adapter, &mut amend);
+            // As if the person had stopped that turn and this link had watched it.
+            conn.last_turn_end = TurnEnd {
+                at: std::time::Instant::now() - Duration::from_secs(5),
+                interrupted: true,
+            };
             let stale = lifecycle_answer_in_progress(4, LIFECYCLE_THREAD);
             let seed = conn
                 .adapter
@@ -23228,6 +23407,11 @@ mod tests {
                 None,
                 "this daemon watched that turn finish, so the answer is stale rather \
                  than a report that it is running"
+            );
+            assert_eq!(
+                agent_message_hold(false, conn.last_turn_end, std::time::Instant::now()),
+                Some(crate::agent_messages::HELD_AFTER_INTERRUPT),
+                "a stale answer must not erase the interrupt this link watched"
             );
         }
     }

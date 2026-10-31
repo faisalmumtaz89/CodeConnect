@@ -125,6 +125,14 @@ pub enum ClientFrame {
     /// outlive its process and name a pid that now belongs to something else,
     /// and `codeconnect daemon install` uses this answer to send a signal.
     DaemonInfo,
+    /// One hosted agent's message to another, `to` being `cc-N@<computer>`.
+    /// `from_uid` is the sending run; its name and project go in the header the
+    /// receiving agent reads. Answered with [`DaemonFrame::AgentMessageResult`].
+    SendAgentMessage {
+        from_uid: String,
+        to: String,
+        text: String,
+    },
 }
 
 impl ClientFrame {
@@ -279,6 +287,26 @@ pub enum DaemonFrame {
         ssh_key_removed: AlwaysFalse,
     },
     Daemon(DaemonInfo),
+    AgentMessageResult {
+        outcome: AgentMessageOutcome,
+    },
+}
+
+/// What became of one agent's message, as the sending agent is told it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum AgentMessageOutcome {
+    /// The receiving agent has it: a turn began with it.
+    Delivered,
+    /// Kept on the receiving computer, and delivered once the agent is free.
+    Held { reason: String },
+    /// The same words from the same agent were already held or delivered in the
+    /// last ten minutes, so these were not kept again.
+    Duplicate,
+    /// Not kept, and never will be.
+    Refused { reason: String },
+    /// Handed to the agent, and whether it arrived is not known. Never re-sent.
+    Indeterminate { reason: String },
 }
 
 /// One run that `codeconnect sessions prune` removed, and what went with it.
