@@ -2375,8 +2375,7 @@ private struct SessionComposeBar: View {
     }
 
     /// Half the 44pt one-line height: a capsule at one line, and a corner that
-    /// stays concentric with the circle in it at every size. Not clipped, so
-    /// the recording ring may cross the edge.
+    /// stays concentric with the circle in it at every size.
     private var pillShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: CC.size.hitTarget / 2, style: .continuous)
     }
