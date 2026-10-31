@@ -1,0 +1,13 @@
+ ▝▝   ▝▝   /scratch/work
+
+
+❯ STALLAGENT keep working                                                                                               
+
+✢ Razzle-dazzling… (20s)
+  ⎿  Tip: Running multiple Claude sessions? Use /color and /rename to tell them apart at a glance.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────── bgtask ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on
+

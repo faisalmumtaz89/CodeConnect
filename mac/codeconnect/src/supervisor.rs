@@ -675,6 +675,7 @@ fn handle_request(
             text,
             require,
             targets_composer,
+            transcript_path,
             submit,
             expect,
             asking,
@@ -694,6 +695,7 @@ fn handle_request(
             Target {
                 presence: &require,
                 is_composer: targets_composer,
+                transcript: transcript_path.as_deref().map(std::path::Path::new),
             },
             Recovery {
                 enabled: recover_composer,
@@ -785,6 +787,34 @@ const CONFIRM_VERIFY_WINDOW: Duration = Duration::from_millis(1_500);
 struct Target<'a> {
     presence: &'a PromptPresence,
     is_composer: bool,
+    /// The session's Claude transcript, beside which Claude records the
+    /// session's own name ([`crate::session_name`]). `None` from a daemon too
+    /// old to send it, and a named session's box is then not recognised.
+    transcript: Option<&'a std::path::Path>,
+}
+
+impl Target<'_> {
+    /// The session's own name as recorded at this moment — read at every look
+    /// rather than once, so a `/rename` this very send typed is seen by what
+    /// comes after it.
+    fn own_name(&self) -> Option<String> {
+        self.transcript.and_then(crate::session_name::recorded)
+    }
+
+    /// The name a send may type under: the recorded one, unless the box of an
+    /// agent this session started draws the same words, when a rule bearing
+    /// them may be that agent's box.
+    fn name_to_type_under(&self) -> Option<String> {
+        let transcript = self.transcript?;
+        self.own_name()
+            .filter(|name| !crate::session_name::names_an_agent(transcript, name))
+    }
+
+    /// Is this target drawn on `pane`, by the session's name as recorded now.
+    fn find(&self, pane: &str) -> Option<String> {
+        self.presence
+            .find_match_as(pane, None, self.own_name().as_deref())
+    }
 }
 
 /// The pane and who has its keyboard, read together.
@@ -932,7 +962,16 @@ fn send_text(
         }
     };
 
-    let matched = match authorise(&pane, require, expect, target.is_composer, keyboard) {
+    // Read after the look it is judged against, like everything else here.
+    let own_name = target.name_to_type_under();
+    let matched = match authorise(
+        &pane,
+        require,
+        own_name.as_deref(),
+        expect,
+        target.is_composer,
+        keyboard,
+    ) {
         Ok(matched) => matched,
         Err(reason) => {
             log_line(
@@ -1003,7 +1042,7 @@ fn send_text(
         &format!("typed {} byte(s) after matching {matched:?}", text.len()),
     );
     if recovery.enabled && submit {
-        return recover_composer(args, answer_by, require, &recovery, text, matched);
+        return recover_composer(args, answer_by, &target, &recovery, text, matched);
     }
     SupervisorResult::Sent { matched }
 }
@@ -1082,7 +1121,7 @@ fn actuate_with(
 fn recover_composer(
     args: &SupervisorArgs,
     answer_by: std::time::Instant,
-    composer: &PromptPresence,
+    composer: &Target<'_>,
     recovery: &Recovery,
     text: &str,
     matched: String,
@@ -1095,13 +1134,14 @@ fn recover_composer(
             matched,
             capture: recovery.capture,
             confirm: recovery.confirm.clone(),
+            transcript: composer.transcript.map(std::path::Path::to_path_buf),
         },
         // One look is a pane *and* the cursor, taken together: apart, they
         // can describe two different moments, and the whole question is
         // whether this drawn composer has the keyboard.
         &|| look_at_pane(&session),
         &|key| tmux::send_key(&session, key).map_err(anyhow::Error::from),
-        composer,
+        composer.presence,
     );
     match &outcome {
         SupervisorResult::ComposerRecovered { .. } => log_line(
@@ -1157,6 +1197,10 @@ struct RecoveryPass {
     /// moved since it appeared. When it cannot, the ordinary rescue runs
     /// instead.
     confirm: Option<String>,
+    /// The session's transcript, so the composer is looked for under the
+    /// session's name as recorded at each look: a `/rename` this send typed
+    /// changes the rule the composer comes back under.
+    transcript: Option<std::path::PathBuf>,
 }
 
 fn recover_composer_with(
@@ -1179,6 +1223,7 @@ fn recover_composer_with(
         matched,
         capture,
         confirm,
+        transcript,
     } = pass;
     // "Ready" means able to take keys, not merely drawn: a view rendered above
     // a live-looking composer is the measured lockout this postcondition
@@ -1200,7 +1245,13 @@ fn recover_composer_with(
     // and an Escape is what the drawn-but-dead composer needs; the send
     // path's narrower act is [`may_leave_copy_mode`].
     let ready = |pane: &str, keyboard: tmux::Keyboard| {
-        composer.find_match(pane, None).is_some() && keyboard.reaches_the_program()
+        let own_name = transcript
+            .as_deref()
+            .and_then(crate::session_name::recorded);
+        composer
+            .find_match_as(pane, None, own_name.as_deref())
+            .is_some()
+            && keyboard.reaches_the_program()
     };
     // Nothing was observed yet, so nothing may be claimed. Every early exit
     // below says which look failed, and the daemon turns that into the
@@ -1499,7 +1550,7 @@ fn may_leave_copy_mode(target: &Target<'_>, pane: &str, keyboard: tmux::Keyboard
             keyboard,
             tmux::Keyboard::Scrollback(tmux::TmuxMode::CopyMode)
         )
-        && target.presence.find_match(pane, None).is_some()
+        && target.find(pane).is_some()
 }
 
 /// The look the gates are then run against: the first one, or — where a bare
@@ -1540,6 +1591,8 @@ fn look_the_gates_run_on(
 fn authorise(
     pane: &str,
     require: &PromptPresence,
+    // The session's own name, when a rule carrying it may open its composer.
+    own_name: Option<&str>,
     expect: Option<&PromptFingerprint>,
     // Whether `require` names the composer. Carried rather than inferred from
     // the enum: a configured needle override arrives as `AnyOf`, and reading
@@ -1548,7 +1601,7 @@ fn authorise(
     targets_composer: bool,
     keyboard: tmux::Keyboard,
 ) -> std::result::Result<String, String> {
-    let Some(matched) = require.find_match(pane, None) else {
+    let Some(matched) = require.find_match_as(pane, None, own_name) else {
         return Err(if targets_composer {
             "the message box is not on screen at the computer".into()
         } else {
@@ -2680,6 +2733,7 @@ mod tests {
                 matched: "composer".into(),
                 capture: false,
                 confirm: None,
+                transcript: None,
             },
             &|| {
                 looked.set(true);
@@ -2716,6 +2770,7 @@ mod tests {
                 matched: "composer".into(),
                 capture: false,
                 confirm: None,
+                transcript: None,
             },
             &|| Ok(("composer > for shortcuts".into(), Keyboard::Program)),
             &|_| Ok(()),
@@ -2770,6 +2825,7 @@ mod tests {
                 require: PromptPresence::InputBox,
                 asking: None,
                 targets_composer: true,
+                transcript_path: None,
                 submit: true,
                 expect: None,
                 recover_composer: false,
@@ -2856,6 +2912,7 @@ mod tests {
                 require: PromptPresence::InputBox,
                 asking: None,
                 targets_composer: true,
+                transcript_path: None,
                 submit: true,
                 expect: None,
                 recover_composer: false,
@@ -3371,6 +3428,7 @@ done
                 matched: "composer".to_string(),
                 capture,
                 confirm: None,
+                transcript: None,
             },
             &|| Ok((tui.pane(), tui.keyboard())),
             &|key| {
@@ -3420,6 +3478,7 @@ means the full history gets re-read on your next message.
                 matched: "composer".to_string(),
                 capture: false,
                 confirm: Some(SONNET_NEEDLE.to_string()),
+                transcript: None,
             },
             &|| {
                 let mut i = index.lock().unwrap();
@@ -3435,6 +3494,55 @@ means the full history gets re-read on your next message.
         );
         let keys = sent.lock().unwrap().clone();
         (outcome, keys)
+    }
+
+    /// A `/rename` typed from the phone renames the session it was typed into,
+    /// so the composer recovery waits for comes back under the new name. Read
+    /// once, before the keys, the name would be the old one: the box would
+    /// never be found, and recovery would Escape a healthy composer and report
+    /// it lost. Claude writes the new name before it draws it, which is what a
+    /// look reading the name afresh relies on.
+    #[test]
+    fn recovery_looks_for_the_composer_under_the_name_it_was_just_given() {
+        const RENAMED: &str = include_str!("../../../fixtures/panes/named/named-after-turns.txt");
+        let dir = std::env::temp_dir().join(format!(
+            "cc-rename-recovery-{}",
+            protocol::uid::new().unwrap()
+        ));
+        std::fs::create_dir_all(dir.join("2f0c")).unwrap();
+        let transcript = dir.join("2f0c.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        let sidecar = dir.join("2f0c/custom-title.json");
+        std::fs::write(&sidecar, r#"{"customTitle":"before"}"#).unwrap();
+        let sent: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let outcome = recover_composer_with(
+            RecoveryPass {
+                answer_by: std::time::Instant::now() + Duration::from_secs(60),
+                asking: None,
+                matched: "composer".to_string(),
+                capture: false,
+                confirm: None,
+                transcript: Some(transcript.clone()),
+            },
+            &|| {
+                std::fs::write(&sidecar, r#"{"customTitle":"named-cc-1"}"#)?;
+                Ok((RENAMED.to_string(), Keyboard::Program))
+            },
+            &|key| {
+                sent.lock().unwrap().push(key.to_string());
+                Ok(())
+            },
+            &PromptPresence::InputBox,
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            sent.lock().unwrap().is_empty(),
+            "no Escape at a healthy composer"
+        );
+        assert!(
+            matches!(outcome, SupervisorResult::Sent { .. }),
+            "{outcome:?}"
+        );
     }
 
     /// The dialog is up and unmoved, but it is about a different model than the
@@ -3501,6 +3609,7 @@ means the full history gets re-read on your next message.
                 matched: "composer".to_string(),
                 capture: false,
                 confirm: None,
+                transcript: None,
             },
             &|| Ok(("some view".to_string(), Keyboard::View)),
             &|key| {
@@ -3539,6 +3648,7 @@ means the full history gets re-read on your next message.
                 matched: "composer".to_string(),
                 capture: false,
                 confirm: Some("❯1.yes,switchtosonnet5".to_string()),
+                transcript: None,
             },
             &|| {
                 // The dialog at every look until the one taken immediately
@@ -3614,6 +3724,7 @@ means the full history gets re-read on your next message.
                 matched: "composer".to_string(),
                 capture: false,
                 confirm: Some("❯1.yes,switchtosonnet5".to_string()),
+                transcript: None,
             },
             &|| {
                 // The same dialog, unmoved, at every look; the composer is back
@@ -3733,6 +3844,7 @@ means the full history gets re-read on your next message.
                 matched: "composer".to_string(),
                 capture: false,
                 confirm: None,
+                transcript: None,
             },
             &|| {
                 // Present at the first look so typing is authorised, then
@@ -3817,6 +3929,7 @@ means the full history gets re-read on your next message.
                 matched: "composer".to_string(),
                 capture: false,
                 confirm: None,
+                transcript: None,
             },
             &|| match LOOKS.fetch_add(1, Ordering::SeqCst) {
                 // The two checks see a view and no question…
@@ -3864,6 +3977,7 @@ means the full history gets re-read on your next message.
                 matched: "composer".to_string(),
                 capture: false,
                 confirm: None,
+                transcript: None,
             },
             &|| Ok(("Shall I go ahead with this?".to_string(), Keyboard::View)),
             &|_| {
@@ -3929,6 +4043,7 @@ means the full history gets re-read on your next message.
         Target {
             presence: &PromptPresence::InputBox,
             is_composer: true,
+            transcript: None,
         }
     }
 
@@ -3952,7 +4067,14 @@ means the full history gets re-read on your next message.
             tui.leave_copy_mode();
             (pane, keyboard) = (tui.pane(), tui.keyboard());
         }
-        let matched = authorise(&pane, target.presence, None, target.is_composer, keyboard)?;
+        let matched = authorise(
+            &pane,
+            target.presence,
+            None,
+            None,
+            target.is_composer,
+            keyboard,
+        )?;
         tui.type_line(text);
         Ok(matched)
     }
@@ -4336,6 +4458,7 @@ means the full history gets re-read on your next message.
         let prompt_target = Target {
             presence: &PromptPresence::PermissionPrompt,
             is_composer: false,
+            transcript: None,
         };
         for (keyboard, may) in [
             (Keyboard::Program, false),
@@ -4395,6 +4518,7 @@ means the full history gets re-read on your next message.
             authorise(
                 &mine,
                 &PromptPresence::PermissionPrompt,
+                None,
                 Some(&expect),
                 false,
                 Keyboard::View
@@ -4414,6 +4538,7 @@ means the full history gets re-read on your next message.
         let refused = authorise(
             &theirs,
             &PromptPresence::PermissionPrompt,
+            None,
             Some(&expect),
             false,
             Keyboard::View,
@@ -4430,6 +4555,7 @@ means the full history gets re-read on your next message.
             assert!(authorise(
                 pane,
                 &PromptPresence::PermissionPrompt,
+                None,
                 Some(&expect),
                 false,
                 Keyboard::View
@@ -4439,11 +4565,88 @@ means the full history gets re-read on your next message.
                 pane,
                 &PromptPresence::PermissionPrompt,
                 None,
+                None,
                 false,
                 Keyboard::View
             )
             .is_err());
         }
+    }
+
+    /// A named session is typed into under the name Claude recorded for it,
+    /// and under no name an agent of the session was started with.
+    ///
+    /// The screen is the one nothing else can tell apart: the person views a
+    /// background agent whose task is `bgtask` and has typed one space, so the
+    /// box's rule reads `bgtask` and its prompt row is byte for byte an empty
+    /// one. Renamed `fsjob`, the session's own box (a capture of it) is typed
+    /// into and this screen is refused; renamed `bgtask` — the agent's task,
+    /// word for word — both are refused, because the name no longer proves
+    /// whose box it is.
+    #[test]
+    fn a_named_session_is_typed_into_under_its_own_name_only() {
+        const AGENTS_BOX: &str =
+            include_str!("../../../fixtures/panes/named/agent-viewed-space-classic.txt");
+        const OWN_BOX: &str =
+            include_str!("../../../fixtures/panes/named/named-fullscreen-short.txt");
+        const AGENT: &str = include_str!(
+            "../../../fixtures/claude/subagents-2.1.316/agent-a617e437af2276c7a.meta.json"
+        );
+        // Claude's layout, `<projects>/<project>/<session>`, in a projects
+        // directory of its own: every agent record under it counts.
+        let projects =
+            std::env::temp_dir().join(format!("cc-named-send-{}", protocol::uid::new().unwrap()));
+        let dir = projects.join("proj");
+        std::fs::create_dir_all(dir.join("2f0c")).unwrap();
+        let transcript = dir.join("2f0c.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        std::fs::create_dir(dir.join("2f0c/subagents")).unwrap();
+        std::fs::write(
+            dir.join("2f0c/subagents/agent-a617e437af2276c7a.meta.json"),
+            AGENT,
+        )
+        .unwrap();
+        let rename = |name: &str| {
+            std::fs::write(
+                dir.join("2f0c/custom-title.json"),
+                format!(r#"{{"customTitle":"{name}"}}"#),
+            )
+            .unwrap()
+        };
+        let target = Target {
+            presence: &PromptPresence::InputBox,
+            is_composer: true,
+            transcript: Some(&transcript),
+        };
+        let send = |pane: &str| {
+            authorise(
+                pane,
+                target.presence,
+                target.name_to_type_under().as_deref(),
+                None,
+                target.is_composer,
+                Keyboard::Program,
+            )
+        };
+
+        rename("fsjob");
+        assert_eq!(send(OWN_BOX).as_deref(), Ok("composer"));
+        assert!(
+            send(AGENTS_BOX).is_err(),
+            "the agent's box under the session's name"
+        );
+
+        rename("bgtask");
+        assert_eq!(
+            target.own_name().as_deref(),
+            Some("bgtask"),
+            "the name is recorded"
+        );
+        assert!(
+            send(AGENTS_BOX).is_err(),
+            "the agent's box under its own task"
+        );
+        std::fs::remove_dir_all(projects).unwrap();
     }
 
     #[test]
@@ -4455,6 +4658,7 @@ means the full history gets re-read on your next message.
             IDLE_PANE,
             &PromptPresence::InputBox,
             None,
+            None,
             true,
             Keyboard::Program
         )
@@ -4462,6 +4666,7 @@ means the full history gets re-read on your next message.
         assert!(authorise(
             &permission_pane("touch /private/tmp/a.txt"),
             &PromptPresence::InputBox,
+            None,
             None,
             true,
             Keyboard::View
@@ -4484,6 +4689,7 @@ means the full history gets re-read on your next message.
         let refused = authorise(
             VIEW_ABOVE_COMPOSER_PANE,
             &PromptPresence::InputBox,
+            None,
             None,
             true,
             Keyboard::View,
@@ -4516,6 +4722,7 @@ means the full history gets re-read on your next message.
                 IDLE_PANE,
                 &PromptPresence::InputBox,
                 None,
+                None,
                 true,
                 Keyboard::Scrollback(mode),
             )
@@ -4539,6 +4746,7 @@ means the full history gets re-read on your next message.
             MID_TURN_PANE,
             &PromptPresence::InputBox,
             None,
+            None,
             true,
             Keyboard::Program
         )
@@ -4555,6 +4763,7 @@ means the full history gets re-read on your next message.
             authorise(
                 &agent_wrote_it,
                 &PromptPresence::InputBox,
+                None,
                 None,
                 true,
                 Keyboard::Program
@@ -4573,6 +4782,7 @@ means the full history gets re-read on your next message.
         assert!(authorise(
             prompt,
             &PromptPresence::PermissionPrompt,
+            None,
             None,
             false,
             Keyboard::View

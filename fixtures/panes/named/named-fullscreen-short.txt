@@ -1,0 +1,13 @@
+
+⏺ Agent(bgtask)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+⏺ stub answer 19
+
+✻ Waiting for 1 background agent to finish
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────── fsjob ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ↓ to manage
+

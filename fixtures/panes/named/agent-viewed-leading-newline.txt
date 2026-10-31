@@ -1,0 +1,13 @@
+ ▝▝   ▝▝   /scratch/work
+
+
+❯ STALLAGENT keep working                                                                                               
+
+✳ Befuddling… (4m 13s)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
+                                                                                             ctrl+g to edit in VS Code
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────── bgtask ─
+❯ 
+  second line
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on

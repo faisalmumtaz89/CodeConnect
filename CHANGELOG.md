@@ -3,6 +3,15 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## The phone types into a renamed session
+
+- A Claude session renamed with `/rename` takes the phone's messages again, instead of refusing them
+  with "the message box is not on screen at the computer". The phone knows the session's box by the
+  name Claude recorded for it, so a background agent being viewed at the computer, whose box looks
+  the same, is still refused. If that name cannot be read, equals any agent task recorded on this
+  computer, or is cut short in a narrow window, the phone is refused as before. A message into a
+  renamed session can take a moment longer to arrive, while those records are read.
+
 ## "Show all" keeps your place on iOS 27
 
 - On iOS 27, "Show all" on a long output keeps your place, as it does on iOS 26: the lines you were

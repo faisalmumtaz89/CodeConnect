@@ -7068,7 +7068,7 @@ impl Daemon {
                 ),
             };
         }
-        let session_uid = match self.resolve(session_ref).await {
+        let (session_uid, transcript_path) = match self.resolve(session_ref).await {
             // **Refused here, on the row the resolver already read.** See
             // [`Daemon::shared_ledgers_admit`] for what a rolled-back daemon does
             // to a `text_mutations` row it finds. The position is the whole
@@ -7088,7 +7088,7 @@ impl Daemon {
                     ),
                 }
             }
-            Ok(row) => row.session_uid,
+            Ok(row) => (row.session_uid, row.transcript_path),
             Err(err) => {
                 return SendTextResult::Refused {
                     reason: format!("{err}"),
@@ -7210,6 +7210,9 @@ impl Daemon {
                         // operator configured for finding it — so the supervisor
                         // may ask whether the composer has the keyboard.
                         targets_composer: true,
+                        // Where Claude records the session's own name, which a
+                        // named session's message box carries in its top rule.
+                        transcript_path,
                         // And whatever they configured for recognising a prompt,
                         // so recovery's "never Escape a screen that is asking"
                         // guard sees the prompts they taught us to see. `None`

@@ -1,0 +1,40 @@
+❯ turn 3 please                                                                                                         
+
+⏺ stub answer 5
+
+✻ Churned for 0s · done 7:20 PM
+
+❯ /rename named-cc-1 
+  ⎿  Session renamed to: named-cc-1
+
+❯ turn 4 please                                                                                                         
+
+⏺ stub answer 7
+
+✻ Cogitated for 0s · done 7:20 PM
+
+❯ turn 5 please                                                                                                         
+
+⏺ stub answer 9                                                                                                         
+
+✻ Sautéed for 0s · done 7:20 PM     
+
+❯ turn 6 please                                                                                                         
+
+⏺ stub answer 11                                                                                                        
+                                                                                                                        
+✻ Crunched for 0s · done 7:20 PM      
+
+❯ STALLAGENT main turn                                                                                                  
+
+❯ queued one                                                                                                            
+  ctrl+x ctrl+s to send now                                                                                             
+
+✽ Razzmatazzing…                                                                                                        
+  ⎿  Tip: Try setting environment variable COLORTERM=truecolor for richer colors
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────── named-cc-1 ─
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · esc to interrupt
+
