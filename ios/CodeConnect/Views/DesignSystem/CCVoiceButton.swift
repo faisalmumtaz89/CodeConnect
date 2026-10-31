@@ -131,14 +131,16 @@ struct CCVoiceButton: View {
     /// The one universal meaning of a red ring around a control: the mic is
     /// hot. Same breathing rhythm as a live `CCStatusDot` (1.6s, ease-in-out),
     /// collapsing to a steady ring under Reduce Motion — the *presence* of the
-    /// ring carries the fact; the breathing is only emphasis.
+    /// ring carries the fact; the breathing is only emphasis. It runs in the
+    /// 4pt between the 36pt disc and the 44pt end of the pill, 1pt clear of
+    /// each, so it never crosses the pill's edge.
     private var recordingRing: some View {
         Circle()
             .stroke(
                 CC.color.danger.opacity(ringDimmed ? 0.16 : CC.opacity.pulse),
-                lineWidth: 4
+                lineWidth: 2
             )
-            .padding(-4)
+            .padding(-2)
             .onAppear {
                 guard !reduceMotion else { return }
                 withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
