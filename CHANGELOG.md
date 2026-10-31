@@ -3,6 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## The phone's terminal shows the computer's screen as it is
+
+- While the computer also shows a session, the iPhone's Terminal tab draws the screen at the
+  computer's size instead of garbling it: it opens at the prompt in readable text, slides sideways
+  for long lines, and pinches out to show the whole screen. The computer's own window is unchanged.
+
 ## "Show all" keeps your place on iOS 27
 
 - On iOS 27, "Show all" on a long output keeps your place, as it does on iOS 26: the lines you were

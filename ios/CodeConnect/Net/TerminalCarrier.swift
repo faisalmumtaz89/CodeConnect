@@ -176,6 +176,16 @@ final class TerminalCarrier {
     /// wants this number for a *count* may still read it; what it must not do is
     /// depend on being told when it changes.
     @ObservationIgnored private(set) var totalOutputBytes: Int = 0
+    /// The pane's own size, as the daemon last stated it in the stream
+    /// (`CSI 8 ; rows ; cols t` ahead of each paint), for an emulator built
+    /// after it went by.
+    ///
+    /// The transcript cannot be trusted to carry it: a trim cuts an arbitrary
+    /// head off, and the size is said once per paint, so a rebuilt pane replays
+    /// a tail drawn for a grid it would otherwise not know. Written by the pane
+    /// that parsed it, emptied with the transcript it belongs to — a new run,
+    /// or a confirmed attach, whose repaint states it again.
+    @ObservationIgnored var paneSize: PaneSize?
     /// When output last arrived, sampled at most once a second.
     ///
     /// The freshness fact every liveness surface renders, and the reason it is
@@ -974,6 +984,7 @@ final class TerminalCarrier {
     private func clearTranscript() {
         transcript.removeAll(keepingCapacity: true)
         transcriptIsTruncated = false
+        paneSize = nil
     }
 
     /// Keep the tail, and remember that a head was thrown away.
