@@ -133,6 +133,10 @@ pub enum ClientFrame {
         to: String,
         text: String,
     },
+    /// The agents `from_uid` can message, answered with [`DaemonFrame::Agents`].
+    ListAgents {
+        from_uid: String,
+    },
 }
 
 impl ClientFrame {
@@ -290,6 +294,23 @@ pub enum DaemonFrame {
     AgentMessageResult {
         outcome: AgentMessageOutcome,
     },
+    Agents {
+        /// The asker's own address, which it has no other way to learn and must
+        /// give when it asks one agent to answer it through another.
+        you: String,
+        agents: Vec<AgentEntry>,
+    },
+}
+
+/// One agent another can message: its address, which agent it is, and its project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentEntry {
+    /// `cc-N@<computer>`.
+    pub address: String,
+    /// `Claude` or `Codex`.
+    pub agent: String,
+    /// The last component of its working directory.
+    pub project: String,
 }
 
 /// What became of one agent's message, as the sending agent is told it.

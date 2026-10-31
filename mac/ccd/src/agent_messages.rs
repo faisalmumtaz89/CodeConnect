@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use protocol::agent::AgentKind;
-use protocol::ipc::AgentMessageOutcome;
+use protocol::ipc::{AgentEntry, AgentMessageOutcome};
 use protocol::tailnet::{Place, Refusal, Tailnet};
 
 use crate::state::Daemon;
@@ -115,6 +115,11 @@ impl Daemon {
                 return refuse("CodeConnect could not read its sessions".into());
             }
         };
+        // As `list_agents` leaves the asker out: a message to oneself would come back
+        // as a turn whose header asks for a reply to oneself.
+        if target.session_uid == from_uid {
+            return refuse(format!("{to} is this session's own address"));
+        }
         if target.agent != AgentKind::Codex {
             return refuse(format!(
                 "{to} runs {}, and delivery to it is not built in this build",
@@ -173,6 +178,61 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    /// **The agents `from_uid` can message**: the other running sessions on this
+    /// computer, one per name, by name, after the asker's own address. `Err` says
+    /// why there is no list.
+    pub async fn list_agents(&self, from_uid: &str) -> Result<(String, Vec<AgentEntry>), String> {
+        let tailnet = read_tailnet().await;
+        self.list_agents_on(tailnet.as_ref(), from_uid).await
+    }
+
+    /// [`Daemon::list_agents`] against a given reading of the tailnet.
+    pub(crate) async fn list_agents_on(
+        &self,
+        tailnet: Option<&Tailnet>,
+        from_uid: &str,
+    ) -> Result<(String, Vec<AgentEntry>), String> {
+        let Some(tailnet) = tailnet else {
+            return Err(
+                "this computer is not connected to Tailscale, so it has no name to send from"
+                    .into(),
+            );
+        };
+        let unreadable = |err: anyhow::Error| {
+            crate::log_error!("listing agents for {from_uid}: {err:#}");
+            "CodeConnect could not read its sessions".to_string()
+        };
+        let you = match self
+            .db
+            .get_session(from_uid.to_string())
+            .await
+            .map_err(unreadable)?
+        {
+            Some(row) => format!("{}@{}", row.session_id, tailnet.name()),
+            None => return Err("the asking session is not known to CodeConnect".into()),
+        };
+        let runs = self.attached_runs().await.map_err(unreadable)?;
+        let mut newest: std::collections::BTreeMap<String, crate::store::SessionRow> =
+            std::collections::BTreeMap::new();
+        for row in runs.into_iter().filter(|row| row.session_uid != from_uid) {
+            match newest.get(&row.session_id) {
+                Some(kept) if kept.session_uid >= row.session_uid => {}
+                _ => {
+                    newest.insert(row.session_id.clone(), row);
+                }
+            }
+        }
+        let agents = newest
+            .into_values()
+            .map(|row| AgentEntry {
+                address: format!("{}@{}", row.session_id, tailnet.name()),
+                agent: agent_name(&row.agent).to_string(),
+                project: crate::project_label::project_label(&row.cwd),
+            })
+            .collect();
+        Ok((you, agents))
     }
 
     /// Offer a run's held messages again every second until none is left or its

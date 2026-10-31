@@ -27,6 +27,7 @@ mod forked_holder;
 #[cfg(test)]
 mod home_guard;
 mod job;
+mod mcp;
 mod pair;
 mod service;
 mod session_name;
@@ -148,6 +149,9 @@ fn main() -> Result<()> {
         // the interactive TUI against the broker. Machinery, never typed by a
         // human — the coordinator spawns it.
         "internal-codex-host" => codex_host::run_host(rest),
+        // Hidden: the MCP server a hosted agent messages other agents with, started
+        // by the agent itself. Machinery, never typed by a human.
+        "mcp" => mcp::run(rest),
         // Hidden: the detached update checker `codeconnect claude` spawns.
         // Not in --help on purpose — it is machinery, not a command.
         "__update-check" => update_check::run_checker(),
@@ -459,8 +463,13 @@ struct AgentLaunchPlan {
 /// The exact argv and env a Claude session runs — a **pure** function, so the
 /// byte-identical guarantee is testable without touching the filesystem or tmux.
 /// Any change here changes what `claude` itself sees; the launcher test pins it.
+///
+/// `--mcp-config` comes first because it takes several values: placed after the
+/// passthrough it would take the person's prompt as a config file, and before
+/// `--settings` that flag ends it.
 fn claude_argv_and_env(
     binary: &std::path::Path,
+    mcp_config_path: &std::path::Path,
     settings_path: &std::path::Path,
     session_id: &str,
     session_uid: &str,
@@ -468,6 +477,8 @@ fn claude_argv_and_env(
 ) -> (Vec<String>, Vec<(String, String)>) {
     let mut argv = vec![
         binary.to_string_lossy().to_string(),
+        "--mcp-config".to_string(),
+        mcp_config_path.to_string_lossy().to_string(),
         "--settings".to_string(),
         settings_path.to_string_lossy().to_string(),
     ];
@@ -507,8 +518,14 @@ fn plan_claude_launch(
     passthrough: &[String],
 ) -> Result<AgentLaunchPlan> {
     let settings = settings::write_for_session(session_id, session_uid, config)?;
-    let (argv, env) =
-        claude_argv_and_env(binary, &settings.path, session_id, session_uid, passthrough);
+    let (argv, env) = claude_argv_and_env(
+        binary,
+        &settings.mcp_path,
+        &settings.path,
+        session_id,
+        session_uid,
+        passthrough,
+    );
     let session_dir = settings
         .path
         .parent()
@@ -1337,6 +1354,7 @@ mod tests {
     fn the_claude_argv_and_env_are_byte_identical() {
         let (argv, env) = claude_argv_and_env(
             std::path::Path::new("/usr/local/bin/claude"),
+            std::path::Path::new("/home/u/.codeconnect/sessions/cc-1-UID/mcp.json"),
             std::path::Path::new("/home/u/.codeconnect/sessions/cc-1-UID/settings.json"),
             "cc-1",
             "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
@@ -1350,6 +1368,8 @@ mod tests {
             argv,
             vec![
                 "/usr/local/bin/claude",
+                "--mcp-config",
+                "/home/u/.codeconnect/sessions/cc-1-UID/mcp.json",
                 "--settings",
                 "/home/u/.codeconnect/sessions/cc-1-UID/settings.json",
                 "--resume",
@@ -1375,12 +1395,36 @@ mod tests {
         // — never merged, deduplicated or reordered.
         let (bare, _) = claude_argv_and_env(
             std::path::Path::new("claude"),
+            std::path::Path::new("/m.json"),
             std::path::Path::new("/s.json"),
             "cc-2",
             "UID",
             &[],
         );
-        assert_eq!(bare, vec!["claude", "--settings", "/s.json"]);
+        assert_eq!(
+            bare,
+            vec!["claude", "--mcp-config", "/m.json", "--settings", "/s.json"]
+        );
+    }
+
+    /// **A prompt in the passthrough stays the prompt.** `--mcp-config` takes several
+    /// values, so a flag must end it before the passthrough begins; the prompt is the
+    /// first word after the settings document, and nothing after `--mcp-config`'s one
+    /// file is anything but another flag.
+    #[test]
+    fn a_prompt_in_the_passthrough_is_never_taken_as_an_mcp_config() {
+        let (argv, _) = claude_argv_and_env(
+            std::path::Path::new("claude"),
+            std::path::Path::new("/m.json"),
+            std::path::Path::new("/s.json"),
+            "cc-1",
+            "UID",
+            &["review the diff".to_string()],
+        );
+        let mcp = argv.iter().position(|a| a == "--mcp-config").unwrap();
+        assert!(argv[mcp + 2].starts_with("--"), "{argv:?}");
+        assert_eq!(argv.last().unwrap(), "review the diff");
+        assert!(mcp < argv.iter().position(|a| a == "review the diff").unwrap());
     }
 
     /// Whether a bare command name resolves on this machine's `PATH`.

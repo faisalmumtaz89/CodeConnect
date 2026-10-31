@@ -1,4 +1,5 @@
-//! Generated per-session `--settings` that installs the control plane.
+//! Generated per-session `--settings` that installs the control plane, and the
+//! `--mcp-config` that gives the session the `codeconnect` tool ([`crate::mcp`]).
 //!
 //! Two properties matter more than anything else here:
 //!
@@ -40,6 +41,8 @@ const OBSERVE_EVENTS: &[&str] = &[
 
 pub struct SettingsPlan {
     pub path: PathBuf,
+    /// The session's `--mcp-config`: the `codeconnect` tool, run for this session.
+    pub mcp_path: PathBuf,
 }
 
 /// Locate `cc-hook` next to this binary, which is correct for both a cargo
@@ -94,7 +97,29 @@ pub fn write_for_session(
     let document = build(session_id, session_uid, config, &hook_bin);
     let encoded = serde_json::to_string_pretty(&document)?;
     std::fs::write(&path, encoded).with_context(|| format!("writing {}", path.display()))?;
-    Ok(SettingsPlan { path })
+
+    let mcp_path = dir.join("mcp.json");
+    let mcp = mcp_config(
+        &std::env::current_exe().context("locating the codeconnect binary")?,
+        session_uid,
+        &protocol::socket_path(),
+    );
+    std::fs::write(&mcp_path, serde_json::to_string_pretty(&mcp)?)
+        .with_context(|| format!("writing {}", mcp_path.display()))?;
+    Ok(SettingsPlan { path, mcp_path })
+}
+
+/// The `codeconnect` MCP server, as Claude Code's `--mcp-config` names it.
+fn mcp_config(codeconnect: &Path, session_uid: &str, socket: &Path) -> serde_json::Value {
+    json!({
+        "mcpServers": {
+            "codeconnect": {
+                "type": "stdio",
+                "command": codeconnect,
+                "args": crate::mcp::server_args(session_uid, socket),
+            }
+        }
+    })
 }
 
 fn build(

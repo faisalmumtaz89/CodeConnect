@@ -489,6 +489,13 @@ async fn read_loop(
                 let outcome = daemon.send_agent_message(&from_uid, &to, &text).await;
                 let _ = tx.send(DaemonFrame::AgentMessageResult { outcome }).await;
             }
+            ClientFrame::ListAgents { from_uid } => {
+                let frame = match daemon.list_agents(&from_uid).await {
+                    Ok((you, agents)) => DaemonFrame::Agents { you, agents },
+                    Err(message) => DaemonFrame::Error { message },
+                };
+                let _ = tx.send(frame).await;
+            }
         }
     }
 }

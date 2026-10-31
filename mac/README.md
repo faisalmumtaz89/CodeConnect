@@ -100,6 +100,13 @@ safe. From the phone you can answer an approval with Codex's own options, stop a
 turn, and say something — a new turn when the session is idle, joining the running turn
 when it is busy.
 
+Both kinds of session get one MCP server of CodeConnect's own, `codeconnect`
+(`--mcp-config` before `--settings` for Claude Code; `-c mcp_servers.codeconnect.…` on
+Codex's app server), with which an agent lists the other running sessions and sends one a
+message. `ccd` keeps the message until the receiving session is free and starts it as a turn
+of its own; this build delivers to Codex sessions on the same computer. See
+[docs/codex.md](../docs/codex.md#messages-from-other-agents).
+
 Your arguments reach `codex` as native `codex` would read them — the sandbox, approval
 policy and profile included, flags after the prompt and flags this build does not know
 (passed on unchanged) too — and `--cd <dir>` becomes the session's folder. `--help`,

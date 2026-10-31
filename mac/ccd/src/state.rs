@@ -5155,15 +5155,23 @@ impl Daemon {
     /// The newest run named `name` whose supervisor is attached now, and never an
     /// ended one.
     pub(crate) async fn attached_run(&self, name: &str) -> Result<Option<SessionRow>> {
+        Ok(self
+            .attached_runs()
+            .await?
+            .into_iter()
+            .filter(|row| row.session_id == name)
+            .max_by(|a, b| a.session_uid.cmp(&b.session_uid)))
+    }
+
+    /// Every run whose supervisor is attached now.
+    pub(crate) async fn attached_runs(&self) -> Result<Vec<SessionRow>> {
         let inner = self.inner.lock().await;
         Ok(self
             .store
             .list_sessions()?
             .into_iter()
-            .filter(|row| {
-                row.session_id == name && inner.supervisors.contains_key(&row.session_uid)
-            })
-            .max_by(|a, b| a.session_uid.cmp(&b.session_uid)))
+            .filter(|row| inner.supervisors.contains_key(&row.session_uid))
+            .collect())
     }
 
     /// Whether the run's supervisor is attached now.
@@ -25594,6 +25602,7 @@ mod tests {
             .assert_present();
         assert!(refused(send("cc-5@studio", "hi").await).contains("not a running session"));
         assert!(refused(send("cc-3@studio", "hi").await).contains("Claude"));
+        assert!(refused(send("cc-2@studio", "hi").await).contains("own address"));
         assert!(refused(
             daemon
                 .send_agent_message_on(None, &sender, "cc-1@studio", "hi")
@@ -25638,6 +25647,37 @@ mod tests {
                  send_message to cc-2@studio.\n\nand this",
             ]
         );
+    }
+
+    /// **The agents a session can message**: every other running session on this
+    /// computer, addressed by the tailnet's name for it, and never itself.
+    #[tokio::test]
+    async fn an_agent_lists_the_other_running_sessions_on_this_computer() {
+        let daemon = test_daemon();
+        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        let (asker, codex) = (protocol::uid::new().unwrap(), protocol::uid::new().unwrap());
+        register_codex_session(&daemon, &asker, "cc-2").await;
+        register_codex_session(&daemon, &codex, "cc-1").await;
+        register(&daemon, "cc-3", None).await;
+        let (you, agents) = daemon.list_agents_on(Some(&tailnet), &asker).await.unwrap();
+        assert_eq!(you, "cc-2@studio", "the asker is told its own address");
+        let listed: Vec<(String, String)> =
+            agents.into_iter().map(|a| (a.address, a.agent)).collect();
+        assert_eq!(
+            listed,
+            [
+                ("cc-1@studio".to_string(), "Codex".to_string()),
+                ("cc-3@studio".to_string(), "Claude".to_string()),
+            ]
+        );
+        assert!(daemon
+            .list_agents_on(None, &asker)
+            .await
+            .unwrap_err()
+            .contains("Tailscale"));
     }
 
     /// The same frame with the agent swapped, so a test can register the SAME uid

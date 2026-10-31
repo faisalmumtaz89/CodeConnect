@@ -157,8 +157,16 @@ pub fn agent_support_on(
 /// operator with no idea whether their history had been removed — which is the
 /// one thing this command must never be ambiguous about.
 pub fn request_within(frame: &ClientFrame, timeout: Duration) -> Result<DaemonFrame> {
-    let socket = protocol::socket_path();
-    let mut stream = UnixStream::connect(&socket).with_context(|| {
+    request_at(&protocol::socket_path(), frame, timeout)
+}
+
+/// The same, to the daemon at `socket`.
+pub fn request_at(
+    socket: &std::path::Path,
+    frame: &ClientFrame,
+    timeout: Duration,
+) -> Result<DaemonFrame> {
+    let mut stream = UnixStream::connect(socket).with_context(|| {
         // With no systemd, `daemon install` refuses: name the line that starts it by hand.
         #[cfg(target_os = "linux")]
         let start = crate::service::no_systemd().map_or_else(

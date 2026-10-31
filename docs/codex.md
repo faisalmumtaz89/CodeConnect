@@ -109,6 +109,23 @@ what was refused and why:
 `--help resume` shows help, as in Codex), and start no session. The `codex` run is the
 one a launch would use. Use `codeconnect --help` for the launcher's own commands.
 
+## Messages from other agents
+
+Every hosted session — Codex and Claude Code alike — has one MCP server of CodeConnect's
+own, `codeconnect`, with two tools: `list_agents` tells the session its own address and
+names the other running sessions on this computer, each as `cc-N@<computer>`, and
+`send_message` sends one of them a message. In a Codex
+session the tool is pre-approved (`default_tools_approval_mode = "approve"`, set on the
+session's app server only), because Codex asks for MCP tool approval only at the computer's
+keyboard and a send would otherwise wait there.
+
+A message to a Codex session reaches it as a turn of its own, headed
+`[CodeConnect] Message from cc-2@studio (Codex · project api)`, and never joins a turn that is
+running: it waits until the session has been idle for a second, so your own queued message
+goes first, and after you stop a turn with Esc it waits until your next turn ends. The sender
+is told whether it was delivered, held until the session is free, or refused. A held message
+survives a daemon restart and is handed over at most once.
+
 ## What your phone can do
 
 ### Answer an approval
