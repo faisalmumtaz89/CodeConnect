@@ -259,13 +259,13 @@ fn write_server_conf(history_limit: u32) -> Result<PathBuf> {
 ///
 /// Idempotent, and quiet on failure by design: if there is no server yet, the
 /// conf file is about to say all of this better.
-fn ensure_server_options(history_limit: u32) {
+fn ensure_server_options(socket: &str, history_limit: u32) {
     let limit = history_limit.to_string();
     for args in [
         ["set-option", "-g", "history-limit", limit.as_str()],
         ["set-option", "-s", "extended-keys", "on"],
     ] {
-        let _ = run(&args);
+        let _ = run_on(socket, &args);
     }
 }
 
@@ -375,8 +375,8 @@ pub fn next_session_name() -> Result<String> {
     )
 }
 
-/// Create a detached session running `argv` with the caller's environment and
-/// `env` exported into it.
+/// Create a detached session on the server at `socket` running `argv` with the
+/// caller's environment and `env` exported into it.
 ///
 /// The caller's environment reaches the pane through a private file in
 /// `session_dir` (see [`crate::caller_env`]), so the agent sees what it would see
@@ -396,6 +396,7 @@ pub fn next_session_name() -> Result<String> {
 /// [`crate::early_output`]).
 #[allow(clippy::too_many_arguments)]
 pub fn new_session(
+    socket: &str,
     name: &str,
     cwd: &str,
     env: &[(String, String)],
@@ -410,11 +411,11 @@ pub fn new_session(
     // server (options in place before the first pane), and the runtime pass
     // upgrades a server that was already running from an older build.
     let conf = write_server_conf(history_limit)?;
-    ensure_server_options(history_limit);
+    ensure_server_options(socket, history_limit);
     let exe = pane_exe()?;
     let caller = crate::caller_env::write(session_dir, std::env::vars_os(), env)?;
-    let mut command = base()?;
-    command.arg("-f").arg(&conf);
+    let mut command = Command::new(tmux_bin()?);
+    command.args(server_flag(socket)).arg("-f").arg(&conf);
     command.args(["new-session", "-d", "-P", "-F", &identity_format()]);
     command.args(["-s", name, "-c", cwd]);
     if let Some((cols, rows)) = size {
@@ -437,16 +438,12 @@ pub fn new_session(
     // The startup deadline, not the operational one: this command may be the
     // one that forks the server and reads its config.
     let launched = match run_tmux(&mut command, STARTUP_DEADLINE, "new-session") {
-        Ok(printed) => Launched::new(
-            protocol::TMUX_SOCKET_NAME,
-            &String::from_utf8_lossy(&printed),
-            copy.is_some(),
-        )?,
+        Ok(printed) => Launched::new(socket, &String::from_utf8_lossy(&printed), copy.is_some())?,
         // tmux stops a command list at its first failure and reports the list
         // failed, so a copy that could not start leaves this run's session
         // running: it is found by the uid only this launch carries, and goes on
         // without the copy rather than unwatched.
-        Err(err) => match launched_without_copy(name, env, copy.is_some()) {
+        Err(err) => match launched_without_copy(socket, name, env, copy.is_some()) {
             Some(launched) => launched,
             None => {
                 let _ = std::fs::remove_file(&caller);
@@ -581,22 +578,30 @@ impl Launched {
 
 /// The session `name`, if it is this launch's: created, with only the copy
 /// chained after it failing.
-fn launched_without_copy(name: &str, env: &[(String, String)], copied: bool) -> Option<Launched> {
+fn launched_without_copy(
+    socket: &str,
+    name: &str,
+    env: &[(String, String)],
+    copied: bool,
+) -> Option<Launched> {
     if !copied {
         return None;
     }
     let (_, uid) = env
         .iter()
         .find(|(key, _)| key == protocol::ENV_SESSION_UID)?;
-    let said = run(&[
-        "display-message",
-        "-p",
-        "-t",
-        &target_pane(name),
-        &identity_format(),
-    ])
+    let said = run_on(
+        socket,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &target_pane(name),
+            &identity_format(),
+        ],
+    )
     .ok()??;
-    let launched = Launched::new(protocol::TMUX_SOCKET_NAME, &said, false).ok()?;
+    let launched = Launched::new(socket, &said, false).ok()?;
     if launched.pin.uid != *uid {
         return None;
     }
@@ -1624,10 +1629,12 @@ mod tests {
     #[test]
     fn live_tmux_accepts_both_target_forms() {
         // Guards against a tmux release changing the parse. Uses a throwaway
-        // session on the private server so it cannot disturb a real one.
+        // session on a server of its own so it cannot disturb a real one.
+        let server = TestServer::new("forms");
         let name = format!("cctest-{}", std::process::id());
         let session_dir = conf_root().join(&name);
         let created = new_session(
+            &server.socket(),
             &name,
             "/tmp",
             &stamp(),
@@ -1642,19 +1649,40 @@ mod tests {
             50_000,
             None,
         );
-        if created.is_err() {
+        let Ok(launched) = created else {
             return; // no tmux in this environment; the unit test above still holds
-        }
-        assert!(has_session(&name).unwrap(), "session target form broke");
-        assert!(capture_pane(&name, 5).is_ok(), "pane target form broke");
+        };
+        server.pid.set(Some(launched.pin.server_pid as i32));
+        let presence = || protocol::tmux::session_presence_on(&server.socket(), &name);
+        assert_eq!(
+            presence(),
+            SessionPresence::Present,
+            "session target form broke"
+        );
+        let captured = run_on(
+            &server.socket(),
+            &[
+                "capture-pane",
+                "-p",
+                "-J",
+                "-S",
+                "-5",
+                "-t",
+                &target_pane(&name),
+            ],
+        );
+        assert!(captured.unwrap().is_some(), "pane target form broke");
         let handed = session_dir.join("environment");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while handed.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!handed.exists(), "the pane took the caller's environment");
-        assert!(has_session(&name).unwrap(), "the pane command kept running");
-        let _ = run(&["kill-session", "-t", &target_session(&name)]);
+        assert_eq!(
+            presence(),
+            SessionPresence::Present,
+            "the pane command kept running"
+        );
     }
 
     /// What a session prints before anything attaches survives it ending first —
@@ -1664,11 +1692,13 @@ mod tests {
     /// answer echoed by the pane, which is then on the pane's screen like any text.
     #[test]
     fn early_output_outlives_a_session_that_ends_before_the_attach() {
+        let server = TestServer::new("early");
         let name = format!("ccearly-{}", std::process::id());
         let session_dir = conf_root().join(format!("it's 100%d #{{pane_id}} {name}"));
         std::fs::create_dir_all(&session_dir).unwrap();
         let early = crate::early_output::EarlyOutput::create(&session_dir).unwrap();
         let created = new_session(
+            &server.socket(),
             &name,
             "/tmp",
             &stamp(),
@@ -1686,6 +1716,7 @@ mod tests {
         let Ok(launched) = created else {
             return; // no tmux in this environment
         };
+        server.pid.set(Some(launched.pin.server_pid as i32));
         assert!(launched.copying, "the copy started with the session");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while launched.presence() != SessionPresence::Gone {
@@ -1709,11 +1740,13 @@ mod tests {
     /// megabyte shown — the end, where an error is — and no more.
     #[test]
     fn early_output_keeps_the_end_of_a_long_burst() {
+        let server = TestServer::new("burst");
         let name = format!("ccburst-{}", std::process::id());
         let session_dir = conf_root().join(&name);
         std::fs::create_dir_all(&session_dir).unwrap();
         let early = crate::early_output::EarlyOutput::create(&session_dir).unwrap();
         let created = new_session(
+            &server.socket(),
             &name,
             "/tmp",
             &stamp(),
@@ -1731,6 +1764,7 @@ mod tests {
         let Ok(launched) = created else {
             return; // no tmux in this environment
         };
+        server.pid.set(Some(launched.pin.server_pid as i32));
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while launched.presence() != SessionPresence::Gone {
             assert!(

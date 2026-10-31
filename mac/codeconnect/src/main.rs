@@ -578,6 +578,7 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     // first — see [`early_output`].
     let early = early_output::EarlyOutput::create(&plan.session_dir)?;
     let launched = tmux::new_session(
+        protocol::TMUX_SOCKET_NAME,
         &session_id,
         &cwd,
         &plan.env,
