@@ -1774,15 +1774,26 @@ enum Painting {
     Captured(Vec<Vec<u8>>),
 }
 
-/// Synthesise the bytes that paint one captured screen: reset the attributes a
-/// previous pane may have left set, clear, home, the rows exactly as tmux
-/// reported them, then the cursor where the pane has it. Rows are joined with
-/// CRLF because a bare LF only moves down a line, and the cursor address is
-/// 1-based because that is how CUP counts — tmux reports it from zero. A
-/// cursor tmux would not name ends the paint after the last row instead: the
-/// screen is worth painting without it.
-fn paint_snapshot(rows: &[Vec<u8>], cursor: Option<(u16, u16)>) -> Vec<u8> {
-    let mut painted = Vec::with_capacity(rows.iter().map(|row| row.len() + 2).sum::<usize>() + 16);
+/// Synthesise the bytes that paint one captured screen: the pane's size, reset
+/// the attributes a previous pane may have left set, clear, home, the rows
+/// exactly as tmux reported them, then the cursor where the pane has it. Rows
+/// are joined with CRLF because a bare LF only moves down a line, and the
+/// cursor address is 1-based because that is how CUP counts — tmux reports it
+/// from zero. A cursor tmux would not name ends the paint after the last row
+/// instead, with no size ahead of it: the screen is worth painting without
+/// them.
+///
+/// The size is xterm's window resize, `CSI 8 ; rows ; cols t`, in band ahead
+/// of everything it governs. The phone's client is `ignore-size`, so while a
+/// Mac viewer is attached the pane keeps the Mac's size, and the phone draws
+/// this paint and every byte after it on a grid of exactly that size. An
+/// emulator that does not act on the sequence (every iPhone build before it)
+/// ignores it and draws as it always has.
+fn paint_snapshot(rows: &[Vec<u8>], cursor: Option<(u16, u16, u16, u16)>) -> Vec<u8> {
+    let mut painted = Vec::with_capacity(rows.iter().map(|row| row.len() + 2).sum::<usize>() + 32);
+    if let Some((_, _, cols, rows)) = cursor {
+        painted.extend_from_slice(format!("\x1b[8;{rows};{cols}t").as_bytes());
+    }
     painted.extend_from_slice(b"\x1b[0m\x1b[2J\x1b[H");
     for (n, row) in rows.iter().enumerate() {
         if n > 0 {
@@ -1790,7 +1801,7 @@ fn paint_snapshot(rows: &[Vec<u8>], cursor: Option<(u16, u16)>) -> Vec<u8> {
         }
         painted.extend_from_slice(row);
     }
-    if let Some((x, y)) = cursor {
+    if let Some((x, y, _, _)) = cursor {
         let (row, col) = (y.saturating_add(1), x.saturating_add(1));
         painted.extend_from_slice(format!("\x1b[{row};{col}H").as_bytes());
     }
@@ -1871,13 +1882,14 @@ fn note_cause(slot: &std::sync::Mutex<Option<CloseCause>>, cause: CloseCause) {
     slot.get_or_insert(cause);
 }
 
-/// The cursor `captured` should paint with, read from the block that answered
-/// its cursor query: the position tmux reported *for that pane*, or `None` if
-/// the query errored, outgrew the body bound, did not answer with exactly one
-/// parseable position, or answered for some other pane. `None` costs the cursor
-/// and never the screen — the rows are painted without a cursor move behind
-/// them, which leaves the cursor at the end of the last row until the pane
-/// moves it itself.
+/// The cursor `captured` should paint with, and the pane's size, read from the
+/// block that answered its cursor query: what tmux reported *for that pane*
+/// (`x, y, cols, rows`), or `None` if the query errored, outgrew the body
+/// bound, did not answer with exactly one parseable line, or answered for some
+/// other pane. `None` costs the cursor and the size and never the screen — the
+/// rows are painted without a cursor move behind them, which leaves the cursor
+/// at the end of the last row until the pane moves it itself, and the phone
+/// keeps the grid it already has.
 ///
 /// The pane test is the one that is not defensive. A pane can vanish between
 /// its capture being answered and its cursor query running, and measured on
@@ -1893,11 +1905,11 @@ fn cursor_from_reply(
     overflowed: bool,
     body: &[Vec<u8>],
     captured: &str,
-) -> Option<(u16, u16)> {
-    let (pane, x, y) = (!errored && !overflowed && body.len() == 1)
+) -> Option<(u16, u16, u16, u16)> {
+    let (pane, x, y, cols, rows) = (!errored && !overflowed && body.len() == 1)
         .then(|| tmux::parse_cursor_reply(&body[0]))
         .flatten()?;
-    (pane == captured).then_some((x, y))
+    (pane == captured).then_some((x, y, cols, rows))
 }
 
 /// Hold one line of an open reply block against [`REPLY_BODY_BYTES`], charging
@@ -2331,6 +2343,36 @@ async fn read_client(ctx: ReadCtx) {
                 }
                 None => {}
             },
+            // Our window's layout changed: a Mac viewer resized it, the phone's
+            // own size took over once no viewer was left, or it was split.
+            // The bound pane is repainted, the same way a focus move repaints,
+            // because every paint carries the pane's size: the phone draws on
+            // a grid of that size, and a grid of any other size garbles bytes
+            // drawn for this one.
+            //
+            // Not while a snapshot's capture has yet to begin. tmux writes this
+            // client's notifications and replies in the order it acts, so a
+            // change announced before the capture's `%begin` happened before
+            // the capture ran, and that paint already carries it. This is the
+            // attach's own case: the phone's first `refresh-client -C` is
+            // announced as a layout change, even at an unchanged size, while
+            // the attach paint is still being taken.
+            ControlLine::LayoutChanged(w) if window.as_deref() == Some(&w) => {
+                let covered = snapshot
+                    .as_ref()
+                    .is_some_and(|pending| pending.mark.is_none());
+                if let (false, Some(pane)) = (covered, active_pane.clone()) {
+                    publish(
+                        &mut generation,
+                        &mut snapshot,
+                        &target_tx,
+                        &expected_session,
+                        &w,
+                        &pane,
+                    );
+                }
+            }
+            ControlLine::LayoutChanged(_) => {}
             ControlLine::Exit => break,
             ControlLine::Ignored => {}
         }
@@ -3962,17 +4004,20 @@ pub(crate) mod tests {
         // Move focus to the `tr` pane and wait for the carrier to have bound it
         // before typing — input deliberately follows the pane the phone is
         // *shown*, so it must not be sent until the reader has moved its
-        // target. Waiting on the second publish is that fact; a timer would
-        // only hope for it, and would blame the input path when it lost.
+        // target. Waiting on the publish after those already made is that
+        // fact; a timer would only hope for it, and would blame the input path
+        // when it lost. The split's layout change was announced before
+        // `ACTIVE_ONE`, so any repaint it caused is already counted.
         // Send lower-case; only if input reached the `tr` pane AND its output
         // is what is now forwarded does the upper-cased form appear. A
         // regression (input left on the shell, or the shell still followed)
         // would surface the lower-case echo, never this.
+        let published = published_generation();
         assert!(
             fx.tmux(&["select-pane", "-t", &inactive]).status.success(),
             "focus moves to the tr pane"
         );
-        wait_published(2).await;
+        wait_published(published + 1).await;
         handle
             .input(b"followed_marker\n".to_vec())
             .expect("input reaches the writer");
@@ -4454,8 +4499,8 @@ pub(crate) mod tests {
         .await;
 
         assert!(
-            streamed.starts_with(b"\x1b[0m\x1b[2J\x1b[H"),
-            "the first bytes of the attach are a cleared, homed screen, got {:?}",
+            streamed.starts_with(b"\x1b[8;24;80t\x1b[0m\x1b[2J\x1b[H"),
+            "the first bytes of the attach are the pane's size and a cleared, homed screen, got {:?}",
             String::from_utf8_lossy(&streamed)
         );
         assert_eq!(
@@ -4556,6 +4601,61 @@ pub(crate) mod tests {
         assert!(
             text[..at].contains("\u{1b}[2J"),
             "the second pane's marker arrives inside a repaint, got {text:?}"
+        );
+        drop(handle);
+    }
+
+    /// A resized window repaints the bound pane at its new size. While a Mac
+    /// viewer is attached the pane has the viewer's size, not the phone's, so
+    /// when the viewer resizes, the phone must hear the new size and get a
+    /// screen drawn for it, or it keeps drawing on the old grid. The shell
+    /// prints nothing on its own here, so the size can reach the phone only as
+    /// a repaint.
+    #[tokio::test]
+    async fn a_window_resize_repaints_the_pane_at_its_new_size() {
+        let _serial = fixture_test_guard().await;
+        let Some(fx) = Fixture::start() else {
+            eprintln!("skipped: no tmux");
+            return;
+        };
+        let pane = only_pane(&fx);
+        let leases = TerminalLeases::new();
+        let (handle, mut rx, sem) = open_against(&fx, &leases, 64 * 1024).await;
+        let mut attach = stream_until(
+            &mut rx,
+            &sem,
+            "\u{1b}[8;24;80t",
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("the attach paint carries the pane's size");
+        drain_for(
+            &mut rx,
+            &sem,
+            &mut attach,
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+
+        assert!(
+            fx.tmux(&["resize-window", "-t", &pane, "-x", "100", "-y", "30"])
+                .status
+                .success(),
+            "the window resizes"
+        );
+        let resized = stream_until(
+            &mut rx,
+            &sem,
+            "\u{1b}[8;30;100t\u{1b}[0m\u{1b}[2J\u{1b}[H",
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("the new size arrives ahead of a repaint");
+        assert_eq!(
+            occurrences(&resized, "\u{1b}[8;24;80t"),
+            0,
+            "the old size is not sent again after the resize, got {:?}",
+            String::from_utf8_lossy(&resized)
         );
         drop(handle);
     }
@@ -4738,7 +4838,7 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&streamed)
         );
         assert!(
-            streamed.starts_with(b"\x1b[0m\x1b[2J\x1b[H"),
+            streamed.starts_with(b"\x1b[8;24;80t\x1b[0m\x1b[2J\x1b[H"),
             "nothing was streamed ahead of the paint, got {:?}",
             String::from_utf8_lossy(&streamed)
         );
@@ -4923,7 +5023,7 @@ pub(crate) mod tests {
         )
         .await;
         assert!(
-            streamed.starts_with(b"\x1b[0m\x1b[2J\x1b[H"),
+            streamed.starts_with(b"\x1b[8;24;80t\x1b[0m\x1b[2J\x1b[H"),
             "nothing was streamed ahead of the paint, got {:?}",
             String::from_utf8_lossy(&streamed)
         );
@@ -5283,10 +5383,10 @@ pub(crate) mod tests {
     /// screen that is otherwise right.
     #[test]
     fn a_cursor_reply_that_is_not_this_panes_position_yields_none() {
-        let good = vec![b"%3 4 2".to_vec()];
+        let good = vec![b"%3 4 2 160 45".to_vec()];
         assert_eq!(
             super::cursor_from_reply(false, false, &good, "%3"),
-            Some((4, 2))
+            Some((4, 2, 160, 45))
         );
         assert_eq!(
             super::cursor_from_reply(true, false, &good, "%3"),
@@ -5299,9 +5399,9 @@ pub(crate) mod tests {
             "a body that outgrew the bound may be missing the line that mattered"
         );
         // What tmux really answers for a pane it cannot resolve: one line, all
-        // three fields expanded to nothing, and no error.
+        // five fields expanded to nothing, and no error.
         assert_eq!(
-            super::cursor_from_reply(false, false, &[b"  ".to_vec()], "%3"),
+            super::cursor_from_reply(false, false, &[b"    ".to_vec()], "%3"),
             None
         );
         assert_eq!(super::cursor_from_reply(false, false, &[], "%3"), None);
@@ -5309,7 +5409,7 @@ pub(crate) mod tests {
             super::cursor_from_reply(
                 false,
                 false,
-                &[b"%3 4 2".to_vec(), b"%3 4 2".to_vec()],
+                &[b"%3 4 2 160 45".to_vec(), b"%3 4 2 160 45".to_vec()],
                 "%3"
             ),
             None,
@@ -5323,7 +5423,7 @@ pub(crate) mod tests {
         // Prefix equality is not identity: `%3` must not satisfy a query about
         // `%30`, nor the other way round.
         assert_eq!(
-            super::cursor_from_reply(false, false, &[b"%30 4 2".to_vec()], "%3"),
+            super::cursor_from_reply(false, false, &[b"%30 4 2 160 45".to_vec()], "%3"),
             None
         );
         assert_eq!(super::cursor_from_reply(false, false, &good, "%30"), None);
@@ -6747,8 +6847,8 @@ pub(crate) mod tests {
     fn a_snapshot_paints_the_rows_and_places_the_cursor() {
         let rows = vec![b"first".to_vec(), Vec::new(), b"\x1b[31mred".to_vec()];
         assert_eq!(
-            super::paint_snapshot(&rows, Some((4, 2))),
-            b"\x1b[0m\x1b[2J\x1b[Hfirst\r\n\r\n\x1b[31mred\x1b[3;5H".to_vec()
+            super::paint_snapshot(&rows, Some((4, 2, 160, 45))),
+            b"\x1b[8;45;160t\x1b[0m\x1b[2J\x1b[Hfirst\r\n\r\n\x1b[31mred\x1b[3;5H".to_vec()
         );
         assert_eq!(
             super::paint_snapshot(&rows, None),
@@ -6757,8 +6857,8 @@ pub(crate) mod tests {
         // An empty screen still clears: a pane showing nothing must not leave
         // the previous pane's screen on the phone.
         assert_eq!(
-            super::paint_snapshot(&[], Some((0, 0))),
-            b"\x1b[0m\x1b[2J\x1b[H\x1b[1;1H".to_vec()
+            super::paint_snapshot(&[], Some((0, 0, 80, 24))),
+            b"\x1b[8;24;80t\x1b[0m\x1b[2J\x1b[H\x1b[1;1H".to_vec()
         );
     }
 

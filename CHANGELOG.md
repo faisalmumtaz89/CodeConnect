@@ -3,7 +3,7 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
-## The phone types into a renamed session
+## The phone types into a renamed session, and its terminal shows the computer's screen
 
 - A Claude session renamed with `/rename` takes the phone's messages again, instead of refusing them
   with "the message box is not on screen at the computer". The phone knows the session's box by the
@@ -11,6 +11,9 @@ User-facing changes, newest first. Mac releases are cut per
   the same, is still refused. If that name cannot be read, equals any agent task recorded on this
   computer, or is cut short in a narrow window, the phone is refused as before. A message into a
   renamed session can take a moment longer to arrive, while those records are read.
+- While the computer also shows a session, the iPhone's Terminal tab draws the screen at the
+  computer's size instead of garbling it: it opens at the prompt in readable text, slides sideways
+  for long lines, and pinches out to show the whole screen. The computer's own window is unchanged.
 
 ## "Show all" keeps your place on iOS 27
 

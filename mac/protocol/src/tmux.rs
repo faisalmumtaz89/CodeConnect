@@ -673,7 +673,11 @@ pub enum ControlLine {
     SessionChanged(String),
     /// The client is done: `%exit [reason]`. Nothing follows it.
     Exit,
-    /// Every other notification (`%begin`/`%end`, layout and rename chatter):
+    /// Window `@W`'s layout changed: `%layout-change @W <layout> ...`. Its
+    /// size, or its panes. tmux sends it to an `ignore-size` client too, so
+    /// this is how the carrier hears that a Mac viewer resized the window.
+    LayoutChanged(String),
+    /// Every other notification (`%begin`/`%end`, rename chatter):
     /// carried for protocol completeness, not consumed.
     Ignored,
 }
@@ -702,6 +706,12 @@ pub fn parse_control_line(line: &[u8]) -> ControlLine {
     }
     if line == b"%exit" || line.starts_with(b"%exit ") {
         return ControlLine::Exit;
+    }
+    if let Some(rest) = line.strip_prefix(b"%layout-change ") {
+        let window = rest.split(|&b| b == b' ').next().unwrap_or_default();
+        if window.starts_with(b"@") {
+            return ControlLine::LayoutChanged(String::from_utf8_lossy(window).into_owned());
+        }
     }
     if let Some(rest) = line.strip_prefix(b"%window-pane-changed ") {
         // `%window-pane-changed @<win> %<pane>`.
@@ -806,11 +816,12 @@ pub fn capture_line(target: &str) -> String {
     format!("capture-pane -peq -t {target}\n")
 }
 
-/// The control-mode command whose reply is one pane's identity and cursor
-/// position, issued straight after [`capture_line`] for the same target so the
-/// painted screen can leave the cursor where the pane actually has it. The
-/// reply is a single `%<pane> <x> <y>` line — zero-based, measured on 3.7b — in
-/// its own block.
+/// The control-mode command whose reply is one pane's identity, cursor
+/// position and size, issued straight after [`capture_line`] for the same
+/// target so the painted screen can leave the cursor where the pane actually
+/// has it, on a grid of the pane's own size. The reply is a single
+/// `%<pane> <x> <y> <width> <height>` line — the position zero-based, measured
+/// on 3.7b — in its own block.
 ///
 /// The pane id is in the format because the target does not prove which pane
 /// answered. Measured on 3.7b: `display-message -p` against a composite whose
@@ -821,25 +832,30 @@ pub fn capture_line(target: &str) -> String {
 pub fn cursor_query_line(target: &str) -> String {
     // Double-quoted for the same reason as [`seed_query_line`]: tmux, not a
     // shell, parses the quotes, and the spaces inside them cannot split the
-    // format into three arguments.
-    format!("display-message -p -t {target} \"#{{pane_id}} #{{cursor_x}} #{{cursor_y}}\"\n")
+    // format into five arguments.
+    format!(
+        "display-message -p -t {target} \"#{{pane_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}}\"\n"
+    )
 }
 
-/// Parse a cursor reply `%<pane> <x> <y>` into the pane that answered and its
-/// zero-based column and row, or `None` if the line is not exactly that shape.
-/// `u16` because a pane's geometry is; a value that does not fit is not a
-/// position any screen can be painted at.
+/// Parse a cursor reply `%<pane> <x> <y> <width> <height>` into the pane that
+/// answered, its zero-based cursor column and row, and its size in cells, or
+/// `None` if the line is not exactly that shape. `u16` because a pane's
+/// geometry is; a value that does not fit is not a position any screen can be
+/// painted at.
 ///
 /// The pane is returned as it was written, unjudged: the caller's test is
 /// equality with the pane it captured, which is stricter than any shape check
 /// here — no token that is not that pane's id can pass it.
-pub fn parse_cursor_reply(line: &[u8]) -> Option<(&str, u16, u16)> {
+pub fn parse_cursor_reply(line: &[u8]) -> Option<(&str, u16, u16, u16, u16)> {
     let text = std::str::from_utf8(line).ok()?;
     let mut parts = text.split(' ');
     let pane = parts.next()?;
     let x = parts.next()?.parse().ok()?;
     let y = parts.next()?.parse().ok()?;
-    parts.next().is_none().then_some((pane, x, y))
+    let cols = parts.next()?.parse().ok()?;
+    let rows = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((pane, x, y, cols, rows))
 }
 
 /// The three arguments of a `%begin`, if this line opens a command's reply
@@ -2534,11 +2550,16 @@ mod tests {
         );
         assert_eq!(parse_control_line(b"%exit"), ControlLine::Exit);
         assert_eq!(parse_control_line(b"%exit detached"), ControlLine::Exit);
+        // The shape measured on 3.7c when a Mac viewer resizes the window.
+        assert_eq!(
+            parse_control_line(b"%layout-change @0 aa7d,100x40,0,0,0 aa7d,100x40,0,0,0 *"),
+            ControlLine::LayoutChanged("@0".to_string())
+        );
         // Chatter the carrier does not consume.
         for line in [
             b"%begin 1786 285 0".as_slice(),
             b"%end 1786 285 0",
-            b"%layout-change @0 aa7d,100x40,0,0,0 aa7d,100x40,0,0,0 *",
+            b"%layout-change notawindow aa7d,100x40,0,0,0",
             b"%window-renamed @0 bash",
             b"%window-pane-changed @0 notapane",
             b"%window-pane-changed notawindow %0",
@@ -2610,29 +2631,39 @@ mod tests {
         assert_eq!(capture_line("$0:@0.%0"), "capture-pane -peq -t $0:@0.%0\n");
         assert_eq!(
             cursor_query_line("$0:@0.%0"),
-            "display-message -p -t $0:@0.%0 \"#{pane_id} #{cursor_x} #{cursor_y}\"\n"
+            "display-message -p -t $0:@0.%0 \"#{pane_id} #{cursor_x} #{cursor_y} #{pane_width} #{pane_height}\"\n"
         );
         // The exact reply shape measured on tmux 3.7b: the answering pane, then
-        // zero-based x then y.
-        assert_eq!(parse_cursor_reply(b"%0 8 5"), Some(("%0", 8, 5)));
-        assert_eq!(parse_cursor_reply(b"%12 0 0"), Some(("%12", 0, 0)));
+        // zero-based x then y, then the pane's width and height.
+        assert_eq!(
+            parse_cursor_reply(b"%0 8 5 160 45"),
+            Some(("%0", 8, 5, 160, 45))
+        );
+        assert_eq!(
+            parse_cursor_reply(b"%12 0 0 1 1"),
+            Some(("%12", 0, 0, 1, 1))
+        );
         // A reply naming a pane other than the one asked about is still a
         // well-formed reply. Which pane answered is the caller's test — this
         // parser's job is to say what the line means, not whether it is wanted.
-        assert_eq!(parse_cursor_reply(b"%7 1 2"), Some(("%7", 1, 2)));
+        assert_eq!(
+            parse_cursor_reply(b"%7 1 2 80 24"),
+            Some(("%7", 1, 2, 80, 24))
+        );
         // What 3.7b really answers for a bare pane id it cannot resolve: one
-        // line, all three fields expanded to nothing, and no error.
-        assert_eq!(parse_cursor_reply(b"  "), None);
-        // Anything not exactly an id and two numbers is some other command's
-        // reply, or a position no pane can have. Never a guess.
+        // line, all five fields expanded to nothing, and no error.
+        assert_eq!(parse_cursor_reply(b"    "), None);
+        // Anything not exactly an id and four numbers is some other command's
+        // reply, or a geometry no pane can have. Never a guess.
         assert_eq!(parse_cursor_reply(b""), None);
-        assert_eq!(parse_cursor_reply(b"%0 8"), None);
-        assert_eq!(parse_cursor_reply(b"%0 8 5 1"), None);
-        assert_eq!(parse_cursor_reply(b"%0 8  5"), None);
-        assert_eq!(parse_cursor_reply(b"%0 -1 5"), None);
-        assert_eq!(parse_cursor_reply(b"%0 65536 5"), None);
-        assert_eq!(parse_cursor_reply(b"%0 x y"), None);
-        assert_eq!(parse_cursor_reply(b"8 5"), None);
+        assert_eq!(parse_cursor_reply(b"%0 8 5"), None);
+        assert_eq!(parse_cursor_reply(b"%0 8 5 160"), None);
+        assert_eq!(parse_cursor_reply(b"%0 8 5 160 45 1"), None);
+        assert_eq!(parse_cursor_reply(b"%0 8  5 160 45"), None);
+        assert_eq!(parse_cursor_reply(b"%0 -1 5 160 45"), None);
+        assert_eq!(parse_cursor_reply(b"%0 8 5 65536 45"), None);
+        assert_eq!(parse_cursor_reply(b"%0 x y 160 45"), None);
+        assert_eq!(parse_cursor_reply(b"8 5 160 45"), None);
         assert_eq!(parse_cursor_reply(b"can't find pane: %99"), None);
     }
 

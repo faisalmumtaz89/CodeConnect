@@ -490,6 +490,17 @@ is enforced.
   `session_uid` and nothing else; the daemon resolves it to one live pane and
   addresses every write there, so the phone has no way to reach a pane it was
   not shown. Keystrokes are delivered as data, never as tmux commands.
+* **The terminal is drawn at the pane's size, and reports the phone's.** While
+  the Mac also shows a session the pane keeps the Mac's size, so the bytes are
+  drawn for it; the daemon states that size ahead of every paint
+  (`CSI 8 ; rows ; cols t`), and `TerminalPaneView` takes it at once, before the
+  paint is parsed. `TerminalPaneScroller` lays the pane out at that grid, opens
+  at the prompt, slides both ways and, for a pane wider than the tab, pinches
+  out to the whole width (one no wider keeps the pinch for the font), and tells
+  the daemon what fits the phone, never the pane's size — the size the window
+  takes once the Mac viewer leaves. Before any size arrives (an older daemon)
+  the pane fills the tab as it always has. SwiftTerm's mouse-tracking pan is
+  never installed: with mouse reporting declined it would only swallow drags.
 
 ## Transport
 
