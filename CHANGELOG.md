@@ -3,6 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## "Show all" keeps your place on iOS 27
+
+- On iOS 27, "Show all" on a long output keeps your place, as it does on iOS 26: the lines you were
+  reading stay where they were, the Latest button offers the way back, and events that arrive are
+  counted ("1 new") instead of scrolling you on.
+
 ## Codex hears about updates, and the terminal takes the screen
 
 - `codeconnect daemon status | head -3` and the other commands that print and exit end quietly when
