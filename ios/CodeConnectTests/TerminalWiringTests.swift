@@ -773,6 +773,271 @@ final class TerminalWiringTests: XCTestCase {
             panes(in: host.view).count, 1, "the terminal reattached but the tab draws no pane")
     }
 
+    // MARK: - The pane at its own size
+
+    /// **Bytes drawn for the pane are drawn on the pane's grid.** While a Mac
+    /// viewer holds the window at 160 columns the phone is sent a screen drawn
+    /// for 160 columns, and the daemon says so ahead of the paint. A line of
+    /// 123 characters is then one row, where a phone-width grid wraps it into
+    /// three and every row after it lands somewhere else.
+    ///
+    /// And the phone still tells the daemon its own size, never the pane's:
+    /// that is the size the window takes once the Mac viewer leaves.
+    func testAPaneIsDrawnAtTheSizeTheDaemonStates() async throws {
+        let scene = try windowScene()
+        let daemon = StubbedDaemon()
+        try await daemon.attach(to: "A")
+        let host = Host(tab(over: daemon), scene: scene, size: Self.screen)
+        defer { host.dismantle() }
+        await settle()
+        let pane = try XCTUnwrap(panes(in: host.view).first, "the tab drew no pane")
+        let phone = pane.getTerminal().cols
+        XCTAssertLessThan(phone, 123, "the phone's own grid already fits the line")
+
+        try daemon.deliverOutput(paint(cols: 160, rows: 45, lines: [0: wideLine], cursor: (2, 0)))
+        await settle()
+
+        XCTAssertEqual(pane.getTerminal().cols, 160, "the pane is not at the size the daemon stated")
+        XCTAssertEqual(pane.getTerminal().rows, 45, "the pane is not at the size the daemon stated")
+        XCTAssertEqual(
+            row(0, of: pane), wideLine, "the pane's first row was not drawn as one row")
+        XCTAssertEqual(
+            row(1, of: pane), "after", "the row under the wide line moved")
+        let told = try XCTUnwrap(daemon.resizes.last, "the phone never said its size")
+        XCTAssertEqual(told.cols, phone, "the phone told the daemon a size that is not its own")
+        XCTAssertFalse(
+            daemon.resizes.contains(PaneSize(cols: 160, rows: 45)),
+            "the phone told the daemon the pane's size as its own")
+    }
+
+    /// **It opens where the prompt is.** A screen taller and wider than the
+    /// phone opens with the bottom of its text and the cursor in view, not at
+    /// its top-left corner, and keeps the cursor in view as output arrives —
+    /// until the reader moves the view themselves.
+    func testThePaneOpensAtThePromptAndFollowsItUntilTheReaderMoves() async throws {
+        let scene = try windowScene()
+        let daemon = StubbedDaemon()
+        try await daemon.attach(to: "A")
+        let host = Host(tab(over: daemon), scene: scene, size: Self.screen)
+        defer { host.dismantle() }
+        await settle()
+
+        try daemon.deliverOutput(
+            paint(
+                cols: 160, rows: 70, lines: [0: "top", 66: "> prompt", 68: "? for shortcuts"],
+                cursor: (66, 2)))
+        await settle()
+        let scroller = try XCTUnwrap(scroller(in: host.view), "the pane has no view onto it")
+        XCTAssertTrue(
+            scroller.contentSize.height > scroller.bounds.height,
+            "the screen fits the phone, so this test measures nothing")
+        XCTAssertTrue(
+            isShown(row: 68, col: 0, in: scroller),
+            "the text under the prompt is off screen when the pane opens")
+        XCTAssertTrue(
+            isShown(row: 66, col: 2, in: scroller), "the cursor is off screen when the pane opens")
+        XCTAssertEqual(scroller.contentOffset.x, 0, "the pane opened slid sideways")
+
+        // Typing past the right edge brings the view along.
+        try daemon.deliverOutput(Array("\u{1b}[67;150Hx".utf8))
+        await settle()
+        XCTAssertTrue(
+            isShown(row: 66, col: 150, in: scroller), "the view left the cursor behind")
+
+        // The reader slides the view: from then on it stays where they put it.
+        scroller.scrollViewWillBeginDragging(scroller)
+        scroller.setContentOffset(.zero, animated: false)
+        try daemon.deliverOutput(Array("y".utf8))
+        await settle()
+        XCTAssertEqual(scroller.contentOffset, .zero, "output moved a view the reader had moved")
+    }
+
+    /// **A rebuilt pane keeps the grid its trimmed tail no longer states.**
+    /// Out to the fleet and back builds a fresh emulator from the carrier's
+    /// capped buffer, and past the cap the paint that stated the size is gone.
+    /// Replayed on a phone-width grid the tail is the garbage the size exists
+    /// to prevent.
+    func testARebuiltPaneKeepsThePaneSizeItsTrimmedTailLost() async throws {
+        let scene = try windowScene()
+        let daemon = StubbedDaemon()
+        try await daemon.attach(to: "A")
+        let survivor = Host(tab(over: daemon), scene: scene, size: Self.screen)
+        defer { survivor.dismantle() }
+        await settle()
+
+        try daemon.deliverOutput(paint(cols: 160, rows: 45, lines: [0: wideLine], cursor: (2, 0)))
+        var chunk: [UInt8] = []
+        chunk.reserveCapacity(Wire.Terminal.maxChunkBytes)
+        for _ in 0..<(Wire.Terminal.maxChunkBytes / 2) { chunk.append(contentsOf: "\rx".utf8) }
+        for _ in 0..<20 { try daemon.deliverOutput(chunk) }
+        await settle()
+        XCTAssertFalse(
+            String(decoding: daemon.model.terminal.transcript(forRun: "A"), as: UTF8.self)
+                .contains("\u{1b}[8;"),
+            "the transcript still states the size, so this test measures nothing")
+
+        let rebuilt = Host(tab(over: daemon), scene: scene, size: Self.screen)
+        defer { rebuilt.dismantle() }
+        await settle()
+        let pane = try XCTUnwrap(panes(in: rebuilt.view).first, "the rebuild drew no pane")
+        XCTAssertEqual(pane.getTerminal().cols, 160, "the rebuilt pane lost the pane's size")
+        XCTAssertEqual(pane.getTerminal().rows, 45, "the rebuilt pane lost the pane's size")
+    }
+
+    /// **A font change keeps the grid, and reports the phone's new size.**
+    /// SwiftTerm re-derives its grid from its frame when the font changes, and
+    /// reports it; the pane is laid out again at the grid in the new font, and
+    /// the daemon hears what now fits the phone, never the pane's size.
+    func testAFontChangeKeepsThePaneSize() async throws {
+        let scene = try windowScene()
+        let daemon = StubbedDaemon()
+        try await daemon.attach(to: "A")
+        let host = Host(tab(over: daemon), scene: scene, size: Self.screen)
+        defer { host.dismantle() }
+        await settle()
+        try daemon.deliverOutput(paint(cols: 160, rows: 45, lines: [0: wideLine], cursor: (2, 0)))
+        await settle()
+
+        let before = try XCTUnwrap(daemon.resizes.last, "the phone never said its size")
+
+        daemon.model.settings.terminalFontSize += 4
+        await settle()
+        let pane = try XCTUnwrap(panes(in: host.view).first, "the tab drew no pane")
+        XCTAssertEqual(pane.getTerminal().cols, 160, "the font change resized the pane")
+        XCTAssertEqual(pane.getTerminal().rows, 45, "the font change resized the pane")
+        XCTAssertEqual(row(0, of: pane), wideLine, "the font change rewrapped the screen")
+        // The phone holds fewer cells at a larger font, and says so.
+        let after = try XCTUnwrap(daemon.resizes.last, "the phone never said its size")
+        XCTAssertLessThan(after.cols, before.cols, "the phone did not report its new size")
+        XCTAssertFalse(
+            daemon.resizes.contains(PaneSize(cols: 160, rows: 45)),
+            "the font change told the daemon the pane's size as the phone's")
+    }
+
+    /// **A program's mouse tracking does not take the drag.** Claude Code turns
+    /// mouse tracking on at every start, and SwiftTerm answers by adding a pan
+    /// recogniser to the pane. With mouse reporting declined it sends nothing,
+    /// and on the pane it takes every one-finger drag before the view around
+    /// the pane can slide.
+    func testAProgramsMouseTrackingAddsNoDragToThePane() async throws {
+        let scene = try windowScene()
+        let daemon = StubbedDaemon()
+        try await daemon.attach(to: "A")
+        let host = Host(tab(over: daemon), scene: scene, size: Self.screen)
+        defer { host.dismantle() }
+        await settle()
+        try daemon.deliverOutput(paint(cols: 160, rows: 45, lines: [0: wideLine], cursor: (2, 0)))
+        await settle()
+        let pane = try XCTUnwrap(panes(in: host.view).first, "the tab drew no pane")
+        let pans = { (pane.gestureRecognizers ?? []).filter { type(of: $0) == UIPanGestureRecognizer.self }.count }
+        let before = pans()
+
+        // What Claude Code sends: button, drag and any-motion tracking, SGR encoded.
+        try daemon.deliverOutput(Array("\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1003h\u{1b}[?1006h".utf8))
+        await settle()
+        XCTAssertNotEqual(
+            pane.getTerminal().mouseMode, .off, "the emulator ignored the mouse tracking, so this measures nothing")
+        XCTAssertEqual(pans(), before, "mouse tracking added a pan recogniser to the pane")
+    }
+
+    /// **Only a pane wider than the tab zooms.** One no wider — a phone-only
+    /// session, where the window is the phone's own size — keeps the pinch for
+    /// the terminal font, the only way to change it.
+    func testOnlyAPaneWiderThanTheTabZooms() async throws {
+        let scene = try windowScene()
+        let daemon = StubbedDaemon()
+        try await daemon.attach(to: "A")
+        let host = Host(tab(over: daemon), scene: scene, size: Self.screen)
+        defer { host.dismantle() }
+        await settle()
+        let phone = try XCTUnwrap(daemon.resizes.last, "the phone never said its size")
+
+        try daemon.deliverOutput(
+            paint(cols: phone.cols, rows: phone.rows, lines: [0: "phone"], cursor: (2, 0)))
+        await settle()
+        let scroller = try XCTUnwrap(scroller(in: host.view), "the pane has no view onto it")
+        XCTAssertEqual(scroller.pane.getTerminal().cols, phone.cols, "the pane is not at the size stated")
+        XCTAssertEqual(scroller.minimumZoomScale, 1, "a pane the phone's own size zooms out")
+
+        try daemon.deliverOutput(paint(cols: 160, rows: 45, lines: [0: wideLine], cursor: (2, 0)))
+        await settle()
+        XCTAssertLessThan(scroller.minimumZoomScale, 0.5, "a pane wider than the tab does not zoom out to its width")
+    }
+
+    /// **Zooming back in leaves the history.** Pinched out to the whole width
+    /// the pane scrolls its own history; zoomed back in, the view slides around
+    /// the screen instead, and a pane left in its history would show old lines
+    /// no drag can move, with the live output arriving out of sight.
+    func testZoomingBackInReturnsThePaneToItsLiveScreen() async throws {
+        let scene = try windowScene()
+        let daemon = StubbedDaemon()
+        try await daemon.attach(to: "A")
+        let host = Host(tab(over: daemon), scene: scene, size: Self.screen)
+        defer { host.dismantle() }
+        await settle()
+        let history = (1...200).map { "HIST-\($0)" }.joined(separator: "\r\n")
+        try daemon.deliverOutput(
+            paint(cols: 160, rows: 45, lines: [0: wideLine], cursor: (44, 0))
+                + Array("\r\n\(history)\r\n".utf8))
+        await settle()
+        let scroller = try XCTUnwrap(scroller(in: host.view), "the pane has no view onto it")
+        let live = scroller.pane.getTerminal().getTopVisibleRow()
+
+        scroller.setZoomScale(scroller.minimumZoomScale, animated: false)
+        await settle()
+        XCTAssertTrue(scroller.pane.isScrollEnabled, "pinched out, the pane cannot scroll its history")
+        scroller.pane.scroll(toPosition: 0)
+        await settle()
+        XCTAssertLessThan(
+            scroller.pane.getTerminal().getTopVisibleRow(), live, "the pane never left its live screen")
+
+        scroller.setZoomScale(1, animated: false)
+        try daemon.deliverOutput(Array("LIVE-NEW\r\n".utf8))
+        await settle()
+        XCTAssertEqual(
+            scroller.pane.getTerminal().getTopVisibleRow(), live + 1,
+            "zoomed back in, the pane is still showing its history")
+    }
+
+    /// 123 characters: wider than any phone grid, narrower than the pane.
+    private let wideLine = String(repeating: "w", count: 120) + "END"
+
+    /// What the daemon sends for one screen: the pane's size, then the paint
+    /// itself, shaped as `paint_snapshot` shapes it. `lines` are rows by index,
+    /// with "after" under row 0 so a wrap shows; `cursor` is 0-based.
+    private func paint(
+        cols: Int, rows: Int, lines: [Int: String], cursor: (row: Int, col: Int)
+    ) -> [UInt8] {
+        var screen = (0..<rows).map { lines[$0] ?? "" }
+        if lines[1] == nil { screen[1] = "after" }
+        let body = screen.joined(separator: "\r\n")
+        return Array(
+            "\u{1b}[8;\(rows);\(cols)t\u{1b}[0m\u{1b}[2J\u{1b}[H\(body)\u{1b}[\(cursor.row + 1);\(cursor.col + 1)H"
+                .utf8)
+    }
+
+    private func row(_ index: Int, of pane: SwiftTerm.TerminalView) -> String {
+        pane.getTerminal().getLine(row: index)?.translateToString(trimRight: true) ?? ""
+    }
+
+    private func scroller(in view: UIView) -> TerminalPaneScroller? {
+        if let found = view as? TerminalPaneScroller { return found }
+        return view.subviews.lazy.compactMap { self.scroller(in: $0) }.first
+    }
+
+    /// Whether the cell is wholly inside what the scroll view shows. A quarter
+    /// of a point of give: a view that follows the cursor puts its cell flush
+    /// with the edge, and the two sums meet there only to within rounding.
+    private func isShown(row: Int, col: Int, in scroller: TerminalPaneScroller) -> Bool {
+        let cell = scroller.pane.cellSize
+        let zoom = scroller.zoomScale
+        let rect = CGRect(
+            x: CGFloat(col) * cell.width * zoom, y: CGFloat(row) * cell.height * zoom,
+            width: cell.width * zoom, height: cell.height * zoom)
+        return CGRect(origin: scroller.contentOffset, size: scroller.bounds.size)
+            .insetBy(dx: -0.25, dy: -0.25).contains(rect)
+    }
+
     // MARK: - Hosting
 
     private func tab(over daemon: StubbedDaemon, run: String = "A") -> some View {
@@ -948,6 +1213,8 @@ private final class StubbedDaemon {
     /// The id the carrier chose. Every later frame has to carry it, or the
     /// carrier is right to ignore the frame.
     private(set) var attachmentID: String?
+    /// Every size the phone told the daemon it has, in order.
+    private(set) var resizes: [PaneSize] = []
 
     init() {
         // Paired, because that is the only kind of app that can be connected.
@@ -963,6 +1230,9 @@ private final class StubbedDaemon {
         model.connection.simulateCapabilitiesForTesting(
             Capabilities(extra: ["terminal_pty": .bool(true)]), minor: 0)
         model.connection.sendStub = { [weak self] message in
+            if case .terminalResize(_, let cols, let rows) = message {
+                self?.resizes.append(PaneSize(cols: cols, rows: rows))
+            }
             guard case .terminalAttach(let id, _, _, _, _) = message else { return }
             self?.attachmentID = id
             // Answered where the write happens, as the daemon answers it: the
