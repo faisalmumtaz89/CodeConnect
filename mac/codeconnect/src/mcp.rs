@@ -127,22 +127,23 @@ fn tools() -> Value {
         {
             "name": "list_agents",
             "description": "Say your own address, and list the other Claude Code and Codex \
-                sessions you can message, each as its address (cc-N@computer), which agent it \
-                is, and its project. Give your own address when you ask an agent to answer you \
-                through another.",
+                sessions you can message: each by its address (<run id>@computer), then its \
+                label (cc-N@computer, for reading only), which agent it is, and its project. \
+                Give your own address when you ask an agent to answer you through another.",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
             "name": "send_message",
             "description": "Send a message to another Claude Code or Codex session. `to` is its \
-                address, cc-N@computer, as list_agents or a message you read shows it. To \
-                answer a message, also give its id as `reply_to`. The answer gives the \
+                address, <run id>@computer, copied from list_agents or from a message you read; \
+                a cc-N@computer label is not an address. To answer a message, also give its id \
+                as `reply_to`. The answer gives the \
                 message's id and whether it is waiting for that agent, still being sent, or \
                 refused, and why.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "to": {"type": "string", "description": "The address, cc-N@computer."},
+                    "to": {"type": "string", "description": "The address, <run id>@computer, copied from list_agents or a message."},
                     "text": {"type": "string", "description": "The message."},
                     "reply_to": {"type": "string", "description": "The id of the message this answers."},
                 },
@@ -527,5 +528,43 @@ mod tests {
         let down = answer(call, "u", no_daemon).unwrap();
         assert_eq!(down.reply["result"]["isError"], true);
         assert_eq!(down.offer, None, "nothing to confirm");
+    }
+
+    /// **The tools name an address in the one form the daemon takes**,
+    /// `<run id>@computer`; a `cc-N@computer` appears only as a label, which is
+    /// refused as an address.
+    #[test]
+    fn the_tools_describe_addresses_in_the_form_the_daemon_takes() {
+        fn descriptions(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    for (key, inner) in map {
+                        match inner {
+                            Value::String(text) if key == "description" => out.push(text.clone()),
+                            _ => descriptions(inner, out),
+                        }
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|item| descriptions(item, out)),
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        descriptions(&tools(), &mut all);
+        for text in &all {
+            let unlabelled = text
+                .replace("label (cc-N@computer", "")
+                .replace("a cc-N@computer label", "");
+            assert!(!unlabelled.contains("cc-N@computer"), "{text}");
+        }
+        let naming: Vec<_> = all
+            .iter()
+            .filter(|t| t.contains("<run id>@computer"))
+            .collect();
+        assert_eq!(
+            naming.len(),
+            3,
+            "list_agents, send_message and its `to`: {all:#?}"
+        );
     }
 }
