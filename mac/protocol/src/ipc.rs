@@ -2101,7 +2101,10 @@ mod tests {
         for step in ["  Step 3: do the thing number 3.", "                "].repeat(4) {
             scrolled.push(step);
         }
-        assert_eq!(composer_is_free(&boxed(&scrolled, FOOTER), None), Err(draft));
+        assert_eq!(
+            composer_is_free(&boxed(&scrolled, FOOTER), None),
+            Err(draft)
+        );
 
         let running = boxed(
             &["\u{1b}[38;2;153;153;153m❯\u{a0}\u{1b}[39m                "],

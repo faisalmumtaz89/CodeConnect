@@ -141,7 +141,7 @@ submitted, the same way as text from your phone, but only while the box is empty
 yours holds it until you send or clear it, or until a turn ends. After you stop a turn with Esc
 (or answer "No" at a tool's prompt) it waits until your next turn ends. The box is read
 immediately before the keys, so keys you press in that instant can still join the message. A
-Claude Code session started before CodeConnect 0.15.2 takes messages once it is restarted.
+Claude Code session started before CodeConnect 0.15.4 takes messages once it is restarted.
 
 ## What your phone can do
 
