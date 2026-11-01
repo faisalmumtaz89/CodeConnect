@@ -1,8 +1,12 @@
 //! **CodeConnect Mail: messages between hosted agents.**
 //!
-//! An agent names another as `cc-N@<computer>`, the computer being its Tailscale
-//! name ([`protocol::tailnet`]), with the `codeconnect` tool's `send_message`, and
-//! reads its own with `read_messages`. The receiving computer's daemon keeps each
+//! An agent names another by its address, `<run uid>@<computer>`: the run of the
+//! session it means and no other, and the computer that runs it, by its Tailscale
+//! name ([`protocol::tailnet`]). It sends with the `codeconnect` tool's
+//! `send_message` and reads its own with `read_messages`. A session's
+//! `cc-N@<computer>` is its label, for reading only: another run, later, can carry
+//! the same one. Only a run whose supervisor speaks [`MAIL_MINOR`] or later was
+//! launched able to read mail; any other is neither listed nor sent to. The receiving computer's daemon keeps each
 //! message (`mail` in [`crate::store`]) until that session reads it, the session
 //! ends, or a day passes; the sending computer's daemon keeps what its agent sent
 //! (`mail_sent`), written before the message goes anywhere, and what that agent has
@@ -47,6 +51,10 @@ pub(crate) const LIMITS: MailLimits = MailLimits {
     settled_ms: 7 * 24 * 60 * 60 * 1000,
 };
 
+/// The protocol minor whose supervisors launch their agents with the
+/// `codeconnect` tool and its mail.
+const MAIL_MINOR: u32 = 27;
+
 /// How often unread mail is expired, messages no other computer has taken yet are
 /// offered again, and senders on other computers are told what changed.
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
@@ -70,8 +78,10 @@ struct Sender {
     /// Its computer's tailnet name, or empty for this computer.
     computer: String,
     uid: String,
-    /// `cc-N@<computer>`.
+    /// `<run uid>@<computer>`.
     address: String,
+    /// `cc-N@<computer>`.
+    label: String,
     agent: String,
     project: String,
 }
@@ -109,11 +119,14 @@ impl Daemon {
         };
         let refuse = |reason: &str| refused(message_id.clone(), reason);
 
-        let Some((name, computer)) = to
+        let Some((run, computer)) = to
             .rsplit_once('@')
-            .filter(|(n, c)| !n.is_empty() && !c.is_empty())
+            .filter(|(run, c)| protocol::uid::is_well_formed(run) && !c.is_empty())
         else {
-            return refuse("address an agent as cc-N@computer, for example cc-2@studio");
+            return refuse(
+                "address an agent by its address, <run id>@computer, as list_agents or a \
+                 message you read gives it",
+            );
         };
         if let Err(reason) = sendable(text) {
             return refuse(&reason);
@@ -188,13 +201,14 @@ impl Daemon {
                 let from = Sender {
                     computer: String::new(),
                     uid: from_uid.to_string(),
-                    address: format!("{}@{}", sender.session_id, tailnet.name()),
+                    address: format!("{from_uid}@{}", tailnet.name()),
+                    label: format!("{}@{}", sender.session_id, tailnet.name()),
                     agent: agent_name(&sender.agent).to_string(),
                     project: crate::project_label::project_label(&sender.cwd),
                 };
                 self.take(
                     &from,
-                    name,
+                    run,
                     &sent.message_id,
                     &sent.context_id,
                     sent.in_reply_to.as_deref(),
@@ -202,7 +216,7 @@ impl Daemon {
                 )
                 .await
             }
-            Place::Peer { name: peer, ip } => self.carry(&sent, &sender, name, peer, ip).await,
+            Place::Peer { name: peer, ip } => self.carry(&sent, &sender, run, peer, ip).await,
         };
         if let Err(err) = self
             .db
@@ -218,12 +232,13 @@ impl Daemon {
         }
     }
 
-    /// **Take one message for the session named `name` on this computer**: the
-    /// same for a sender here and for one on another computer.
+    /// **Take one message for the run `run` on this computer**: the same for a
+    /// sender here and for one on another computer. Only that run, running now and
+    /// launched with mail, takes it; never another run under the same label.
     async fn take(
         &self,
         from: &Sender,
-        name: &str,
+        run: &str,
         message_id: &str,
         context_id: &str,
         in_reply_to: Option<&str>,
@@ -233,20 +248,34 @@ impl Daemon {
         if let Err(reason) = sendable(text) {
             return refuse(reason);
         }
-        let target = match self.attached_run(name).await {
-            Ok(Some(row)) => row,
-            Ok(None) => return refuse(format!("{name} is not a running session")),
+        let runs = match self.attached_runs().await {
+            Ok(runs) => runs,
             Err(err) => {
-                crate::log_error!("agent message to {name}: session lookup failed: {err:#}");
+                crate::log_error!("agent message to {run}: session lookup failed: {err:#}");
                 return refuse("CodeConnect could not read its sessions".into());
             }
         };
+        let Some((target, minor)) = runs.into_iter().find(|(row, _)| row.session_uid == run) else {
+            return refuse(format!(
+                "{run} is not a running session: it has ended, or never ran here"
+            ));
+        };
+        let label = display(&target.session_id);
         // As `list_agents` leaves the asker out.
         if from.computer.is_empty() && target.session_uid == from.uid {
-            return refuse(format!("{name} is this session's own address"));
+            return refuse("that is this session's own address".into());
+        }
+        if minor < MAIL_MINOR {
+            return refuse(format!(
+                "{label} was started before this computer's CodeConnect could give it messages; \
+                 it can be messaged once it is restarted"
+            ));
         }
         if let AgentKind::Unsupported(agent) = &target.agent {
-            return refuse(format!("{name} runs {agent}, which takes no messages"));
+            return refuse(format!(
+                "{label} runs {}, which takes no messages",
+                display(agent)
+            ));
         }
         let intake = MailIntake {
             message_id: message_id.to_string(),
@@ -256,6 +285,7 @@ impl Daemon {
             sender_computer: from.computer.clone(),
             sender_uid: from.uid.clone(),
             sender: from.address.clone(),
+            sender_label: from.label.clone(),
             sender_agent: from.agent.clone(),
             sender_project: from.project.clone(),
             text: text.to_string(),
@@ -268,13 +298,14 @@ impl Daemon {
             Ok(MailTaken::Kept) => (MailState::Waiting, None),
             Ok(MailTaken::Known(state)) => (state, None),
             Ok(MailTaken::RateLimited) => refuse(format!(
-                "rate limit: {} has left {name} {} messages in the last hour, the most \
+                "rate limit: {} has left {label} {} messages in the last hour, the most \
                  CodeConnect takes from one agent for another; send again later",
-                from.address, LIMITS.per_pair_per_hour
+                display(&from.label),
+                LIMITS.per_pair_per_hour
             )),
-            Ok(MailTaken::NoSession) => refuse(format!("{name} is not a running session")),
+            Ok(MailTaken::NoSession) => refuse(format!("{label} is not a running session")),
             Err(err) => {
-                crate::log_error!("agent message to {name}: could not keep it: {err:#}");
+                crate::log_error!("agent message to {run}: could not keep it: {err:#}");
                 refuse("CodeConnect could not keep the message".into())
             }
         }
@@ -287,7 +318,7 @@ impl Daemon {
         &self,
         mail: &SentMail,
         sender: &crate::store::SessionRow,
-        name: &str,
+        run: &str,
         peer: &str,
         ip: IpAddr,
     ) -> (MailState, Option<String>) {
@@ -299,7 +330,7 @@ impl Daemon {
             from: sender.session_id.clone(),
             agent: agent_name(&sender.agent).to_string(),
             project: crate::project_label::project_label(&sender.cwd),
-            to: name.to_string(),
+            to: run.to_string(),
             text: mail.text.clone(),
         };
         let not_yet = |why: String| {
@@ -424,14 +455,14 @@ impl Daemon {
         let Ok(Place::Peer { name: peer, ip }) = tailnet.locate(&mail.recipient_computer) else {
             return;
         };
-        let Some(name) = mail.recipient.rsplit_once('@').map(|(name, _)| name) else {
+        let Some(run) = mail.recipient.rsplit_once('@').map(|(run, _)| run) else {
             return;
         };
         let sender = match self.db.get_session(mail.session_uid.clone()).await {
             Ok(Some(row)) => row,
             _ => return,
         };
-        let (state, reason) = self.carry(mail, &sender, name, peer, ip).await;
+        let (state, reason) = self.carry(mail, &sender, run, peer, ip).await;
         if state != MailState::Sent {
             if let Err(err) = self
                 .db
@@ -532,21 +563,16 @@ impl Daemon {
                 to,
                 text,
             } => {
-                if [&from, &agent, &project, &from_uid, &message_id, &context_id]
+                // The ids are the sender's daemon's own; its labels are only shown.
+                if ![&from_uid, &message_id, &context_id]
                     .iter()
-                    .any(|label| {
-                        label.is_empty()
-                            || label.contains('@')
-                            || label.chars().any(char::is_control)
-                    })
+                    .all(|id| protocol::uid::is_well_formed(id))
                 {
-                    return refuse(
-                        "the sender's name, agent, project or the message's ids are not ones \
-                         this computer reads",
-                    );
+                    return refuse("the message's ids are not ones this computer reads");
                 }
                 let sender = Sender {
-                    address: format!("{from}@{computer}"),
+                    address: format!("{from_uid}@{computer}"),
+                    label: format!("{from}@{computer}"),
                     computer,
                     uid: from_uid,
                     agent,
@@ -582,7 +608,10 @@ impl Daemon {
     /// **The agents `from_uid` can message**: the other running sessions on this
     /// computer and on the owner's other computers, one per name, after the
     /// asker's own address. `Err` says why there is no list.
-    pub async fn list_agents(&self, from_uid: &str) -> Result<(String, Vec<AgentEntry>), String> {
+    pub async fn list_agents(
+        &self,
+        from_uid: &str,
+    ) -> Result<(AgentEntry, Vec<AgentEntry>), String> {
         let tailnet = read_tailnet().await;
         let mut peers = Vec::new();
         if let Some(tailnet) = &tailnet {
@@ -610,7 +639,7 @@ impl Daemon {
         tailnet: Option<&Tailnet>,
         from_uid: &str,
         peers: Vec<AgentEntry>,
-    ) -> Result<(String, Vec<AgentEntry>), String> {
+    ) -> Result<(AgentEntry, Vec<AgentEntry>), String> {
         let Some(tailnet) = tailnet else {
             return Err(
                 "this computer is not connected to Tailscale, so it has no name to send from"
@@ -627,7 +656,7 @@ impl Daemon {
             .await
             .map_err(unreadable)?
         {
-            Some(row) => format!("{}@{}", row.session_id, tailnet.name()),
+            Some(row) => entry(&row, tailnet.name()),
             None => return Err("the asking session is not known to CodeConnect".into()),
         };
         let mut agents = self
@@ -638,36 +667,45 @@ impl Daemon {
         Ok((you, agents))
     }
 
-    /// This computer's running sessions, one per name (the newest), addressed with
-    /// this computer's name, leaving out `except_uid`.
+    /// This computer's running sessions that were launched with mail, each run
+    /// its own entry, leaving out `except_uid`.
     async fn local_agents(
         &self,
         this_computer: &str,
         except_uid: Option<&str>,
     ) -> anyhow::Result<Vec<AgentEntry>> {
-        let runs = self.attached_runs().await?;
-        let mut newest: std::collections::BTreeMap<String, crate::store::SessionRow> =
-            std::collections::BTreeMap::new();
-        for row in runs
+        Ok(self
+            .attached_runs()
+            .await?
             .into_iter()
-            .filter(|row| Some(row.session_uid.as_str()) != except_uid)
-        {
-            match newest.get(&row.session_id) {
-                Some(kept) if kept.session_uid >= row.session_uid => {}
-                _ => {
-                    newest.insert(row.session_id.clone(), row);
-                }
-            }
-        }
-        Ok(newest
-            .into_values()
-            .map(|row| AgentEntry {
-                address: format!("{}@{this_computer}", row.session_id),
-                agent: agent_name(&row.agent).to_string(),
-                project: crate::project_label::project_label(&row.cwd),
+            .filter(|(row, minor)| {
+                *minor >= MAIL_MINOR
+                    && Some(row.session_uid.as_str()) != except_uid
+                    && !matches!(row.agent, AgentKind::Unsupported(_))
             })
+            .map(|(row, _)| entry(&row, this_computer))
             .collect())
     }
+}
+
+/// A run as `list_agents` gives it.
+fn entry(row: &crate::store::SessionRow, this_computer: &str) -> AgentEntry {
+    AgentEntry {
+        address: format!("{}@{this_computer}", row.session_uid),
+        label: format!("{}@{this_computer}", row.session_id),
+        agent: agent_name(&row.agent).to_string(),
+        project: crate::project_label::project_label(&row.cwd),
+    }
+}
+
+/// A label as it is shown in a sentence: any control character, a newline
+/// included, is a space, so a label is never more than one line of what it is
+/// set in.
+fn display(label: &str) -> String {
+    label
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Whether a message's text may be sent at all: not empty, no longer than

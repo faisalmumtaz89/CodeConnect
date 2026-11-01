@@ -114,9 +114,12 @@ one a launch would use. Use `codeconnect --help` for the launcher's own commands
 Every hosted session — Codex and Claude Code alike — has one MCP server of CodeConnect's
 own, `codeconnect`, with three tools: `list_agents` tells the session its own address and
 names the other running sessions on this computer and on your other computers on Tailscale
-(the same Tailscale user, not tagged, online, running CodeConnect on the same port), each as
-`cc-N@<computer>`; `send_message` sends one of them a message; and `read_messages` reads the
-session's own. In a Codex session the tools are pre-approved (`default_tools_approval_mode =
+(the same Tailscale user, not tagged, online, running CodeConnect on the same port), each by
+its address, `<run id>@<computer>`, with its label `cc-N@<computer>` beside it;
+`send_message` sends one of them a message; and `read_messages` reads the session's own. An
+address names one run of a session: once that run ends, mail to it is refused, even while a
+new session shows the same label. A session started before this CodeConnect could give it
+messages is not listed, and mail to it is refused until it is restarted. In a Codex session the tools are pre-approved (`default_tools_approval_mode =
 "approve"`, set on the session's app server only), because Codex asks for MCP tool approval
 only at the computer's keyboard and a send would otherwise wait there.
 

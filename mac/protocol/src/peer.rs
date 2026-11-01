@@ -33,13 +33,13 @@ pub enum PeerRequest {
         in_reply_to: Option<String>,
         /// The sending run.
         from_uid: String,
-        /// The sending session's name, `cc-N`.
+        /// The sending session's name, `cc-N`, for its label.
         from: String,
         /// `Claude` or `Codex`.
         agent: String,
         /// The sending session's project.
         project: String,
-        /// The receiving session's name, `cc-N`.
+        /// The receiving run.
         to: String,
         text: String,
     },

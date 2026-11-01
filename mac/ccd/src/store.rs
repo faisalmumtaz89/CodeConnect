@@ -538,8 +538,10 @@ pub struct MailIntake {
     /// The sending computer's tailnet name, or empty for this computer.
     pub sender_computer: String,
     pub sender_uid: String,
-    /// `cc-N@<computer>`.
+    /// `<run uid>@<computer>`.
     pub sender: String,
+    /// `cc-N@<computer>`.
+    pub sender_label: String,
     pub sender_agent: String,
     pub sender_project: String,
     pub text: String,
@@ -3680,9 +3682,9 @@ impl Store {
         }
         tx.execute(
             "INSERT INTO mail(message_id, context_id, in_reply_to, session_uid, sender_computer,
-                              sender_uid, sender, sender_agent, sender_project, text,
-                              accepted_ms, expires_ms, state, sender_told)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'waiting', 1)",
+                              sender_uid, sender, sender_label, sender_agent, sender_project,
+                              text, accepted_ms, expires_ms, state, sender_told)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'waiting', 1)",
             params![
                 mail.message_id,
                 mail.context_id,
@@ -3691,6 +3693,7 @@ impl Store {
                 mail.sender_computer,
                 mail.sender_uid,
                 mail.sender,
+                mail.sender_label,
                 mail.sender_agent,
                 mail.sender_project,
                 mail.text,
@@ -3724,8 +3727,8 @@ impl Store {
         let mut unread = Vec::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT seq, message_id, context_id, in_reply_to, sender, sender_agent,
-                        sender_project, text
+                "SELECT seq, message_id, context_id, in_reply_to, sender, sender_label,
+                        sender_agent, sender_project, text
                    FROM mail
                   WHERE session_uid = ?1 AND state = 'waiting' AND expires_ms > ?2
                   ORDER BY seq ASC",
@@ -3738,9 +3741,10 @@ impl Store {
                         context_id: row.get(2)?,
                         in_reply_to: row.get(3)?,
                         from: row.get(4)?,
-                        agent: row.get(5)?,
-                        project: row.get(6)?,
-                        text: row.get(7)?,
+                        label: row.get(5)?,
+                        agent: row.get(6)?,
+                        project: row.get(7)?,
+                        text: row.get(8)?,
                     },
                 ))
             })?;
@@ -5075,6 +5079,7 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             sender_computer TEXT NOT NULL,
             sender_uid      TEXT NOT NULL,
             sender          TEXT NOT NULL,
+            sender_label    TEXT NOT NULL,
             sender_agent    TEXT NOT NULL,
             sender_project  TEXT NOT NULL,
             text            TEXT NOT NULL,
@@ -10255,7 +10260,8 @@ mod tests {
             session_uid: to.uid.clone(),
             sender_computer: computer.into(),
             sender_uid: sender_uid.into(),
-            sender: "cc-2@studio".into(),
+            sender: format!("{sender_uid}@studio"),
+            sender_label: "cc-2@studio".into(),
             sender_agent: "Codex".into(),
             sender_project: "api".into(),
             text: text.into(),

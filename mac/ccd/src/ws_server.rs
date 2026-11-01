@@ -3659,7 +3659,13 @@ mod tests {
         codex_run(&sender, &from, "cc-2").await;
 
         let status = sender
-            .send_agent_message_on(Some(&tailnet), &from, "cc-1@desktop", "please review", None)
+            .send_agent_message_on(
+                Some(&tailnet),
+                &from,
+                &format!("{target}@desktop"),
+                "please review",
+                None,
+            )
             .await;
         assert_eq!(
             status.state,
@@ -3667,7 +3673,13 @@ mod tests {
             "{status:?}"
         );
         let refused = sender
-            .send_agent_message_on(Some(&tailnet), &from, "cc-9@desktop", "hi", None)
+            .send_agent_message_on(
+                Some(&tailnet),
+                &from,
+                &format!("{}@desktop", protocol::uid::new().unwrap()),
+                "hi",
+                None,
+            )
             .await;
         assert!(
             refused.state == protocol::ipc::MailState::Refused
@@ -3685,7 +3697,7 @@ mod tests {
             context_id: protocol::uid::new().unwrap(),
             in_reply_to: None,
             session_uid: from.clone(),
-            recipient: "cc-1@desktop".into(),
+            recipient: format!("{target}@desktop"),
             recipient_computer: "desktop".into(),
             text: "are you there?".into(),
         };
@@ -3701,7 +3713,7 @@ mod tests {
             batch
                 .messages
                 .iter()
-                .map(|m| (m.message_id.as_str(), m.from.as_str(), m.text.as_str()))
+                .map(|m| (m.message_id.as_str(), m.label.as_str(), m.text.as_str()))
                 .collect::<Vec<_>>(),
             [
                 (status.message_id.as_str(), "cc-2@desktop", "please review"),
@@ -3711,6 +3723,13 @@ mod tests {
                     "are you there?"
                 ),
             ]
+        );
+        assert!(
+            batch
+                .messages
+                .iter()
+                .all(|m| m.from == format!("{from}@desktop")),
+            "the sender is a run of the computer the connection came from"
         );
         let (_, mine) = sender.offer_agent_messages(&from).await.unwrap();
         assert_eq!(

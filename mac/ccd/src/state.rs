@@ -5151,18 +5151,24 @@ impl Daemon {
             .attached_runs()
             .await?
             .into_iter()
+            .map(|(row, _)| row)
             .filter(|row| row.session_id == name)
             .max_by(|a, b| a.session_uid.cmp(&b.session_uid)))
     }
 
-    /// Every run whose supervisor is attached now.
-    pub(crate) async fn attached_runs(&self) -> Result<Vec<SessionRow>> {
+    /// Every run whose supervisor is attached now, with the protocol minor that
+    /// supervisor speaks: what the build that launched the run can do, which no
+    /// later daemon changes.
+    pub(crate) async fn attached_runs(&self) -> Result<Vec<(SessionRow, u32)>> {
         let inner = self.inner.lock().await;
         Ok(self
             .store
             .list_sessions()?
             .into_iter()
-            .filter(|row| inner.supervisors.contains_key(&row.session_uid))
+            .filter_map(|row| {
+                let minor = inner.supervisors.get(&row.session_uid)?.protocol_minor;
+                Some((row, minor))
+            })
             .collect())
     }
 
@@ -25549,61 +25555,61 @@ mod tests {
         let codex = protocol::uid::new().unwrap();
         register_codex_session(&daemon, &sender, "cc-2").await;
         register_codex_session(&daemon, &codex, "cc-1").await;
-        register(&daemon, "cc-3", None).await;
-        let send = |to: &'static str, text: String| {
+        let send = |to: String, text: String| {
             let daemon = Arc::clone(&daemon);
             let tailnet = tailnet.clone();
             let sender = sender.clone();
             async move {
                 daemon
-                    .send_agent_message_on(Some(&tailnet), &sender, to, &text, None)
+                    .send_agent_message_on(Some(&tailnet), &sender, &to, &text, None)
                     .await
             }
         };
         let hi = || "hi".to_string();
+        let to = |computer: &str| format!("{codex}@{computer}");
 
-        assert!(refusal(send("cc-1", hi()).await).contains("cc-N@computer"));
-        assert!(refusal(send("cc-1@", hi()).await).contains("cc-N@computer"));
-        assert!(refusal(send("cc-1@studio", String::new()).await).contains("empty"));
-        assert!(refusal(send("cc-1@studio", "a\u{1b}[2Jb".into()).await).contains("control"));
+        assert!(refusal(send("cc-1@studio".into(), hi()).await).contains("<run id>@computer"));
+        assert!(refusal(send(format!("{codex}@"), hi()).await).contains("<run id>@computer"));
+        assert!(refusal(send(to("studio"), String::new()).await).contains("empty"));
+        assert!(refusal(send(to("studio"), "a\u{1b}[2Jb".into()).await).contains("control"));
         let long = "x".repeat(protocol::ipc::MAIL_TEXT_BYTES + 1);
-        assert!(refusal(send("cc-1@studio", long).await).contains("too long"));
-        assert!(refusal(send("cc-1@nowhere", hi()).await).contains("not a computer"));
-        assert!(refusal(send("cc-1@linux-box", hi()).await).contains("offline"));
-        assert!(refusal(send("cc-9@studio", hi()).await).contains("not a running session"));
-        // An ended run under the name is not a target, however recent.
-        let mut ended = daemon.store.get_session(&codex).unwrap().unwrap();
-        ended.session_uid = protocol::uid::new().unwrap();
-        ended.session_id = "cc-5".into();
-        ended.lifecycle = protocol::event::Lifecycle::Exited;
-        daemon
-            .store
-            .upsert_session(&ended)
-            .unwrap()
-            .assert_present();
-        assert!(refusal(send("cc-5@studio", hi()).await).contains("not a running session"));
-        assert!(refusal(send("cc-2@studio", hi()).await).contains("own address"));
+        assert!(refusal(send(to("studio"), long).await).contains("too long"));
+        assert!(refusal(send(to("nowhere"), hi()).await).contains("not a computer"));
+        assert!(refusal(send(to("linux-box"), hi()).await).contains("offline"));
+        let never = protocol::uid::new().unwrap();
+        assert!(
+            refusal(send(format!("{never}@studio"), hi()).await).contains("not a running session")
+        );
+        assert!(
+            refusal(send(format!("{sender}@STUDIO"), hi()).await).contains("own address"),
+            "its own address, whatever the case of the computer's name"
+        );
+        let old = register_speaking(&daemon, "cc-4", None, MAIL_MINOR_BEFORE).await;
+        assert!(
+            refusal(send(format!("{}@studio", old.session.uid), hi()).await).contains("restarted"),
+            "a run launched before mail is told to restart"
+        );
         assert!(refusal(
             daemon
-                .send_agent_message_on(None, &sender, "cc-1@studio", "hi", None)
+                .send_agent_message_on(None, &sender, &to("studio"), "hi", None)
                 .await
         )
         .contains("Tailscale"));
         assert!(refusal(
             daemon
-                .send_agent_message_on(Some(&tailnet), "nobody", "cc-1@studio", "hi", None)
+                .send_agent_message_on(Some(&tailnet), "nobody", &to("studio"), "hi", None)
                 .await
         )
         .contains("not known"));
         assert!(refusal(
             daemon
-                .send_agent_message_on(Some(&tailnet), &sender, "cc-1@studio", "hi", Some("m0"))
+                .send_agent_message_on(Some(&tailnet), &sender, &to("studio"), "hi", Some("m0"))
                 .await
         )
         .contains("not a message you were sent"));
 
         for text in ["please review", "and this"] {
-            let status = send("cc-1@Studio", text.into()).await;
+            let status = send(to("Studio"), text.into()).await;
             assert_eq!(
                 status.state,
                 protocol::ipc::MailState::Waiting,
@@ -25614,17 +25620,99 @@ mod tests {
             .store
             .offer_mail(&codex, "o1", protocol::time::now_unix_ms())
             .unwrap();
-        let read: Vec<(&str, &str)> = offer
+        let from = format!("{sender}@studio");
+        let read: Vec<(&str, &str, &str)> = offer
             .messages
             .iter()
-            .map(|m| (m.from.as_str(), m.text.as_str()))
+            .map(|m| (m.from.as_str(), m.label.as_str(), m.text.as_str()))
             .collect();
         assert_eq!(
             read,
             [
-                ("cc-2@studio", "please review"),
-                ("cc-2@studio", "and this")
+                (from.as_str(), "cc-2@studio", "please review"),
+                (from.as_str(), "cc-2@studio", "and this")
             ]
+        );
+    }
+
+    /// The protocol minor of a supervisor from before mail.
+    const MAIL_MINOR_BEFORE: u32 = 26;
+
+    /// **A run is addressed as itself, never by its label.** Two runs under one
+    /// label are two entries and two mailboxes; once a run is gone, mail to it is
+    /// refused even while another run carries its label, and the other never reads
+    /// what was left for it.
+    #[tokio::test]
+    async fn a_run_is_addressed_as_itself_never_by_its_label() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let first_run = register(&daemon, "cc-1", None).await;
+        let first = first_run.session.uid.clone();
+        let second = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &second, "cc-1").await;
+
+        let (_, agents) = daemon
+            .list_agents_on(Some(&tailnet), &sender, Vec::new())
+            .await
+            .unwrap();
+        let mut listed: Vec<(String, String)> =
+            agents.into_iter().map(|a| (a.address, a.label)).collect();
+        listed.sort();
+        let mut expected = vec![
+            (format!("{first}@studio"), "cc-1@studio".to_string()),
+            (format!("{second}@studio"), "cc-1@studio".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(listed, expected, "two runs, one label, two addresses");
+
+        let send = |run: &str, text: &str| {
+            let daemon = Arc::clone(&daemon);
+            let (tailnet, sender, to, text) = (
+                tailnet.clone(),
+                sender.clone(),
+                format!("{run}@studio"),
+                text.to_string(),
+            );
+            async move {
+                daemon
+                    .send_agent_message_on(Some(&tailnet), &sender, &to, &text, None)
+                    .await
+            }
+        };
+        assert_eq!(
+            send(&first, "for the first").await.state,
+            protocol::ipc::MailState::Waiting
+        );
+        assert_eq!(
+            send(&second, "for the second").await.state,
+            protocol::ipc::MailState::Waiting
+        );
+        let texts = |run: &str| -> Vec<String> {
+            daemon
+                .store
+                .offer_mail(
+                    run,
+                    &protocol::uid::new().unwrap(),
+                    protocol::time::now_unix_ms(),
+                )
+                .unwrap()
+                .messages
+                .into_iter()
+                .map(|m| m.text)
+                .collect()
+        };
+        assert_eq!(texts(&first), ["for the first"]);
+        assert_eq!(texts(&second), ["for the second"]);
+
+        // The first run's supervisor is gone; a new run takes its label.
+        daemon.unregister_supervisor(&first_run).await;
+        let replacement = register(&daemon, "cc-1", None).await.session.uid;
+        assert!(refusal(send(&first, "too late").await).contains("not a running session"));
+        assert!(
+            texts(&replacement).is_empty(),
+            "nothing of the old run's reaches the new one"
         );
     }
 
@@ -25640,20 +25728,26 @@ mod tests {
         register_codex_session(&daemon, &answerer, "cc-1").await;
 
         let question = daemon
-            .send_agent_message_on(Some(&tailnet), &asker, "cc-1@studio", "status?", None)
+            .send_agent_message_on(
+                Some(&tailnet),
+                &asker,
+                &format!("{answerer}@studio"),
+                "status?",
+                None,
+            )
             .await;
         assert_eq!(question.state, protocol::ipc::MailState::Waiting);
         let (offer, batch) = daemon.offer_agent_messages(&answerer).await.unwrap();
         let received = batch.messages[0].clone();
         assert_eq!(received.message_id, question.message_id);
-        assert_eq!(received.from, "cc-2@studio");
+        assert_eq!(received.from, format!("{asker}@studio"));
         daemon.read_offered_mail(&offer).await;
 
         let answer = daemon
             .send_agent_message_on(
                 Some(&tailnet),
                 &answerer,
-                "cc-2@studio",
+                &received.from,
                 "green",
                 Some(&question.message_id),
             )
@@ -25684,8 +25778,9 @@ mod tests {
 
     /// **Another computer's daemon is served only when it is one of the owner's
     /// computers**, read from this computer's own tailnet: its message is taken as a
-    /// local one is, under the name this computer knows it by, once per message id,
-    /// and only the computer a message went to may say where it stands.
+    /// local one is, from a run of the computer the connection came from, once per
+    /// message id, with its labels as data; and only the computer a message went to
+    /// may say where it stands.
     #[tokio::test]
     async fn another_computers_daemon_is_served_only_from_the_owners_computers() {
         use protocol::peer::{PeerReply, PeerRequest};
@@ -25694,17 +25789,24 @@ mod tests {
         let codex = protocol::uid::new().unwrap();
         register_codex_session(&daemon, &codex, "cc-1").await;
         let desktop: std::net::IpAddr = "100.64.0.2".parse().unwrap();
-        let message = |id: &str, from: &str, to: &str, text: &str| PeerRequest::PeerMail {
-            message_id: id.into(),
-            context_id: format!("ctx-{id}"),
-            in_reply_to: None,
-            from_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
-            from: from.into(),
-            agent: "Codex".into(),
-            project: "api".into(),
-            to: to.into(),
-            text: text.into(),
-        };
+        let remote = protocol::uid::new().unwrap();
+        let (m1, m2, m3) = (
+            protocol::uid::new().unwrap(),
+            protocol::uid::new().unwrap(),
+            protocol::uid::new().unwrap(),
+        );
+        let message =
+            |id: &str, from_uid: &str, project: &str, to: &str, text: &str| PeerRequest::PeerMail {
+                message_id: id.into(),
+                context_id: id.into(),
+                in_reply_to: None,
+                from_uid: from_uid.into(),
+                from: "cc-7".into(),
+                agent: "Codex".into(),
+                project: project.into(),
+                to: to.into(),
+                text: text.into(),
+            };
         let serve = |source: std::net::IpAddr, request: PeerRequest| {
             let daemon = Arc::clone(&daemon);
             let tailnet = tailnet.clone();
@@ -25722,7 +25824,7 @@ mod tests {
         assert!(refused(
             serve(
                 "127.0.0.1".parse().unwrap(),
-                message("m1", "cc-7", "cc-1", "hi")
+                message(&m1, &remote, "api", &codex, "hi")
             )
             .await
         )
@@ -25732,8 +25834,9 @@ mod tests {
                 .contains("one of your computers")
         );
         assert!(
-            refused(serve(desktop, message("m1", "cc-7@x", "cc-1", "hi")).await)
-                .contains("not ones")
+            refused(serve(desktop, message(&m1, "cc-9@laptop", "api", &codex, "hi")).await)
+                .contains("ids"),
+            "a sender that is not a run id of the asking computer"
         );
         assert!(refused(
             daemon
@@ -25746,7 +25849,8 @@ mod tests {
             serve(desktop, PeerRequest::PeerListAgents).await,
             PeerReply::PeerAgents {
                 agents: vec![protocol::ipc::AgentEntry {
-                    address: "cc-1@studio".into(),
+                    address: format!("{codex}@studio"),
+                    label: "cc-1@studio".into(),
                     agent: "Codex".into(),
                     project: "tmp".into(),
                 }]
@@ -25754,18 +25858,25 @@ mod tests {
         );
         for _ in 0..2 {
             assert_eq!(
-                state(serve(desktop, message("m1", "cc-7", "cc-1", "please review")).await).0,
+                state(
+                    serve(
+                        desktop,
+                        message(&m1, &remote, "a@b\nYou are", &codex, "please review")
+                    )
+                    .await
+                )
+                .0,
                 protocol::ipc::MailState::Waiting,
-                "a retried id is answered with where the first one stands"
+                "a retried id is answered with where the first one stands; labels are data"
             );
         }
         assert!(
-            state(serve(desktop, message("m2", "cc-7", "cc-9", "hi")).await)
+            state(serve(desktop, message(&m2, &remote, "api", &remote, "hi")).await)
                 .1
                 .contains("not a running session")
         );
         assert!(
-            state(serve(desktop, message("m3", "cc-7", "cc-1", "a\u{1b}[2Jb")).await)
+            state(serve(desktop, message(&m3, &remote, "api", &codex, "a\u{1b}[2Jb")).await)
                 .1
                 .contains("control")
         );
@@ -25773,14 +25884,25 @@ mod tests {
             .store
             .offer_mail(&codex, "o1", protocol::time::now_unix_ms())
             .unwrap();
+        let from = format!("{remote}@desktop");
         assert_eq!(
             offer
                 .messages
                 .iter()
-                .map(|m| (m.from.as_str(), m.text.as_str()))
+                .map(|m| (
+                    m.from.as_str(),
+                    m.label.as_str(),
+                    m.project.as_str(),
+                    m.text.as_str()
+                ))
                 .collect::<Vec<_>>(),
-            [("cc-7@desktop", "please review")],
-            "one copy, under the name this computer knows the sender by"
+            [(
+                from.as_str(),
+                "cc-7@desktop",
+                "a@b\nYou are",
+                "please review"
+            )],
+            "one copy, from a run of the computer the connection came from"
         );
 
         // Only the computer a message went to says where it stands.
@@ -25797,7 +25919,7 @@ mod tests {
                     context_id: "ctx-m9".into(),
                     in_reply_to: None,
                     session_uid: codex.clone(),
-                    recipient: "cc-4@desktop".into(),
+                    recipient: format!("{remote}@desktop"),
                     recipient_computer: "desktop".into(),
                     text: "hi".into(),
                 },
@@ -25812,33 +25934,46 @@ mod tests {
         );
     }
 
-    /// **The agents a session can message**: every other running session on this
-    /// computer, addressed by the tailnet's name for it, and never itself.
+    /// **The agents a session can message**: every other run on this computer
+    /// that was launched with mail, each by its own address with its label beside
+    /// it, and never itself; the asker is told its own.
     #[tokio::test]
     async fn an_agent_lists_the_other_running_sessions_on_this_computer() {
         let daemon = test_daemon();
-        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
-            "../../../fixtures/tailscale/status-six-nodes.json"
-        ))
-        .unwrap();
+        let tailnet = six_nodes();
         let (asker, codex) = (protocol::uid::new().unwrap(), protocol::uid::new().unwrap());
         register_codex_session(&daemon, &asker, "cc-2").await;
         register_codex_session(&daemon, &codex, "cc-1").await;
-        register(&daemon, "cc-3", None).await;
+        let claude = register(&daemon, "cc-3", None).await.session.uid;
+        register_speaking(&daemon, "cc-4", None, MAIL_MINOR_BEFORE).await;
         let (you, agents) = daemon
             .list_agents_on(Some(&tailnet), &asker, Vec::new())
             .await
             .unwrap();
-        assert_eq!(you, "cc-2@studio", "the asker is told its own address");
-        let listed: Vec<(String, String)> =
-            agents.into_iter().map(|a| (a.address, a.agent)).collect();
         assert_eq!(
-            listed,
-            [
-                ("cc-1@studio".to_string(), "Codex".to_string()),
-                ("cc-3@studio".to_string(), "Claude".to_string()),
-            ]
+            (you.address, you.label),
+            (format!("{asker}@studio"), "cc-2@studio".to_string()),
+            "the asker is told its own address"
         );
+        let mut listed: Vec<(String, String, String)> = agents
+            .into_iter()
+            .map(|a| (a.address, a.label, a.agent))
+            .collect();
+        listed.sort();
+        let mut expected = vec![
+            (
+                format!("{codex}@studio"),
+                "cc-1@studio".to_string(),
+                "Codex".to_string(),
+            ),
+            (
+                format!("{claude}@studio"),
+                "cc-3@studio".to_string(),
+                "Claude".to_string(),
+            ),
+        ];
+        expected.sort();
+        assert_eq!(listed, expected, "the run from before mail is not listed");
         assert!(daemon
             .list_agents_on(None, &asker, Vec::new())
             .await

@@ -125,7 +125,8 @@ pub enum ClientFrame {
     /// outlive its process and name a pid that now belongs to something else,
     /// and `codeconnect daemon install` uses this answer to send a signal.
     DaemonInfo,
-    /// One hosted agent's message to another, `to` being `cc-N@<computer>`.
+    /// One hosted agent's message to another, `to` being the receiving run's
+    /// address, `<run uid>@<computer>`.
     /// `from_uid` is the sending run, which the daemon names as the sender.
     /// `reply_to` is the id of a message `from_uid` was sent, which this one
     /// answers. Answered with [`DaemonFrame::AgentMessageResult`].
@@ -314,9 +315,9 @@ pub enum DaemonFrame {
         status: MailStatus,
     },
     Agents {
-        /// The asker's own address, which it has no other way to learn and must
+        /// The asker itself, whose address it has no other way to learn and must
         /// give when it asks one agent to answer it through another.
-        you: String,
+        you: AgentEntry,
         agents: Vec<AgentEntry>,
     },
     AgentMessages {
@@ -410,8 +411,10 @@ pub struct MailEnvelope {
     pub context_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<String>,
-    /// The sender's address, `cc-N@<computer>`, set by the daemons.
+    /// The sender's address, `<run uid>@<computer>`, set by the daemons.
     pub from: String,
+    /// The sender's label, `cc-N@<computer>`.
+    pub label: String,
     /// `Claude` or `Codex`.
     pub agent: String,
     pub project: String,
@@ -429,11 +432,14 @@ pub struct MailUpdate {
     pub reason: Option<String>,
 }
 
-/// One agent another can message: its address, which agent it is, and its project.
+/// One agent another can message: its address, its label, which agent it is, and
+/// its project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentEntry {
-    /// `cc-N@<computer>`.
+    /// `<run uid>@<computer>`: this run of the session, and no other.
     pub address: String,
+    /// `cc-N@<computer>`, for people to read. Another run can carry the same one.
+    pub label: String,
     /// `Claude` or `Codex`.
     pub agent: String,
     /// The last component of its working directory.
