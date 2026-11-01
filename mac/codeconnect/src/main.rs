@@ -27,6 +27,7 @@ mod forked_holder;
 #[cfg(test)]
 mod home_guard;
 mod job;
+mod mail_rule;
 mod mcp;
 mod pair;
 mod service;
@@ -110,8 +111,15 @@ fn main() -> Result<()> {
     }
 
     match command {
-        "claude" => start_claude(rest),
-        "codex" => codex::start(rest),
+        "claude" => {
+            ask_for_the_mail_rule(!claude_asks_help_or_version(rest));
+            start_claude(rest)
+        }
+        "codex" => {
+            ask_for_the_mail_rule(!codex::asks_help_or_version(rest));
+            codex::start(rest)
+        }
+        "mail-rule" => mail_rule::command(rest),
         "attach" => attach(rest),
         "ls" | "list" => no_arguments(rest, "codeconnect ls").and_then(|()| list()),
         "sessions" => sessions::command(rest),
@@ -200,6 +208,23 @@ fn usage() {
     eprintln!("{}", usage_text());
 }
 
+/// The one question a session launch can ask, once per computer, and only when it
+/// starts an agent's session in a terminal a person is at ([`mail_rule`]): never
+/// for an agent's help or version, which only print.
+fn ask_for_the_mail_rule(starts_a_session: bool) {
+    if starts_a_session && crate::attach::Terminal::available() {
+        mail_rule::ask_once();
+    }
+}
+
+/// Whether `codeconnect claude <args>` asks Claude Code only for its help or its
+/// version (`-h`, `--help`, `-v`, `--version`, before any `--`).
+fn claude_asks_help_or_version(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help" | "-v" | "--version"))
+}
+
 /// The banner, as text rather than as a side effect.
 ///
 /// Split out so it can be held to the same bar as the retirement notice. This
@@ -218,6 +243,8 @@ codeconnect — host coding agents your iPhone can see and answer
   codeconnect ls                  list running sessions (works with the daemon down)
   codeconnect sessions            list every session the daemon knows, live or ended
   codeconnect sessions prune      remove ended sessions and their history (--dry-run first)
+
+  codeconnect mail-rule add|remove  let your agents act on each other's messages, or not
 
   codeconnect update              install the latest release (the daemon restarts)
   codeconnect --version           print the installed version
@@ -1344,6 +1371,31 @@ fn is_same_file(candidate: &std::path::Path, current: Option<&std::path::Path>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Asking for Claude Code's help or version is not a session**, so it never
+    /// stops at the mail rule's question: `codeconnect claude --version` in a
+    /// terminal once did, and waited for an answer.
+    #[test]
+    fn only_a_session_start_asks_for_the_mail_rule() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        for asks in [
+            &["--version"][..],
+            &["-v"],
+            &["--help"],
+            &["-h"],
+            &["--model", "x", "-h"],
+        ] {
+            assert!(claude_asks_help_or_version(&args(asks)), "{asks:?}");
+        }
+        for starts in [
+            &[][..],
+            &["fix the tests"],
+            &["--model", "opus"],
+            &["--", "--version"],
+        ] {
+            assert!(!claude_asks_help_or_version(&args(starts)), "{starts:?}");
+        }
+    }
 
     /// **The launcher byte-identical gate.** The agent-parameterised launcher
     /// must leave the `claude` argv and env exactly as they shipped. This pins
