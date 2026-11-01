@@ -569,7 +569,7 @@ impl Daemon {
                     Refusal::OtherUser => "the sending computer belongs to another Tailscale user",
                     Refusal::Tagged => "the sending computer is a tagged device",
                     Refusal::ThisComputerTagged => "the receiving computer is a tagged device",
-                    Refusal::Unknown | Refusal::Offline => {
+                    Refusal::Unknown | Refusal::Offline | Refusal::NoCodeConnect => {
                         "the request did not come from one of your computers on Tailscale"
                     }
                 });
@@ -1057,6 +1057,7 @@ fn refusal_sentence(refusal: Refusal, computer: &str) -> String {
             "this computer is a tagged device, which takes part in no messages".into()
         }
         Refusal::Offline => format!("{computer} is offline"),
+        Refusal::NoCodeConnect => format!("CodeConnect does not run on {computer}"),
     }
 }
 

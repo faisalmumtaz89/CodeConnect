@@ -30,6 +30,8 @@ pub struct Node {
     online: bool,
     user: i64,
     tagged: bool,
+    /// The operating system Tailscale reports (`macOS`, `linux`, `windows`, `iOS`, …).
+    os: String,
 }
 
 /// Why a computer may not message this one, or be messaged from it.
@@ -45,6 +47,9 @@ pub enum Refusal {
     ThisComputerTagged,
     /// The device is on the tailnet but not connected now.
     Offline,
+    /// The device runs an operating system CodeConnect does not run on: a phone, a
+    /// tablet, a Windows PC.
+    NoCodeConnect,
 }
 
 /// Where `cc-N@<computer>` lives.
@@ -109,6 +114,9 @@ impl Tailnet {
             .find(|node| node.name.eq_ignore_ascii_case(computer))
             .ok_or(Refusal::Unknown)?;
         self.trust(node)?;
+        if !node.runs_codeconnect() {
+            return Err(Refusal::NoCodeConnect);
+        }
         if !node.online {
             return Err(Refusal::Offline);
         }
@@ -119,7 +127,7 @@ impl Tailnet {
     pub fn reachable_peers(&self) -> impl Iterator<Item = Place<'_>> {
         self.peers
             .iter()
-            .filter(|node| node.online && self.trust(node).is_ok())
+            .filter(|node| node.online && node.runs_codeconnect() && self.trust(node).is_ok())
             .filter_map(Node::place)
     }
 
@@ -138,6 +146,11 @@ impl Tailnet {
 }
 
 impl Node {
+    /// Whether CodeConnect runs on this device's operating system.
+    fn runs_codeconnect(&self) -> bool {
+        matches!(self.os.as_str(), "macOS" | "linux")
+    }
+
     /// The IPv4 address, because that is the one a daemon binds.
     fn place(&self) -> Option<Place<'_>> {
         let ip = self.ips.iter().copied().find(IpAddr::is_ipv4)?;
@@ -161,6 +174,7 @@ impl From<NodeStatus> for Node {
             online: status.online,
             user: status.user_id,
             tagged: status.tags.is_some_and(|tags| !tags.is_empty()),
+            os: status.os,
         }
     }
 }
@@ -189,6 +203,8 @@ struct NodeStatus {
     tags: Option<Vec<String>>,
     #[serde(rename = "Online", default)]
     online: bool,
+    #[serde(rename = "OS", default)]
+    os: String,
 }
 
 #[cfg(test)]
@@ -291,40 +307,56 @@ mod tests {
         assert_eq!(tailnet.reachable_peers().count(), 0);
     }
 
+    /// A device CodeConnect does not run on (the iPhone, the Windows PC) is never
+    /// dialled, online or not.
     #[test]
     fn a_name_is_located_here_on_a_peer_offline_or_nowhere() {
         let tailnet = recorded();
         assert_eq!(tailnet.locate("studio"), Ok(Place::Here));
         assert_eq!(tailnet.locate("Studio"), Ok(Place::Here));
         assert_eq!(
-            tailnet.locate("desktop"),
+            tailnet.locate("laptop"),
             Ok(Place::Peer {
-                name: "desktop",
-                ip: ip("100.64.0.2")
+                name: "laptop",
+                ip: ip("100.64.0.6")
             })
         );
+        for device in ["phone", "tablet", "desktop"] {
+            assert_eq!(
+                tailnet.locate(device),
+                Err(Refusal::NoCodeConnect),
+                "{device}"
+            );
+        }
         assert_eq!(tailnet.locate("linux-box"), Err(Refusal::Offline));
         assert_eq!(tailnet.locate("nowhere"), Err(Refusal::Unknown));
         assert_eq!(tailnet.locate(""), Err(Refusal::Unknown));
     }
 
+    /// Reachable: online, trusted, and running an OS CodeConnect runs on (round 2,
+    /// R2-3). The online Windows PC and iPhone are never contacted.
     #[test]
-    fn only_online_trusted_peers_are_reachable() {
-        let tailnet = edited(|s| peer(s, "laptop")["UserID"] = 9999.into());
+    fn only_online_trusted_computers_codeconnect_runs_on_are_reachable() {
+        let tailnet = edited(|s| {
+            peer(s, "linux-box")["Online"] = true.into();
+            peer(s, "tablet")["Online"] = true.into();
+        });
         let reachable: Vec<Place> = tailnet.reachable_peers().collect();
         assert_eq!(
             reachable,
             [
                 Place::Peer {
-                    name: "desktop",
-                    ip: ip("100.64.0.2")
+                    name: "laptop",
+                    ip: ip("100.64.0.6")
                 },
                 Place::Peer {
-                    name: "phone",
-                    ip: ip("100.64.0.4")
+                    name: "linux-box",
+                    ip: ip("100.64.0.3")
                 },
             ]
         );
+        let tailnet = edited(|s| peer(s, "laptop")["UserID"] = 9999.into());
+        assert_eq!(tailnet.reachable_peers().count(), 0);
     }
 
     #[test]

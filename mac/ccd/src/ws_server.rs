@@ -3636,10 +3636,10 @@ mod tests {
     /// request on a phone's connection after its hello is a bad request, as before.
     #[tokio::test]
     async fn an_agent_messages_an_agent_on_another_computer() {
-        // Both daemons run here: "desktop" is this test's loopback.
+        // Both daemons run here: "laptop" is this test's loopback.
         let tailnet = protocol::tailnet::Tailnet::parse(
             &include_str!("../../../fixtures/tailscale/status-six-nodes.json")
-                .replace("100.64.0.2", "127.0.0.1"),
+                .replace("100.64.0.6", "127.0.0.1"),
         )
         .unwrap();
         *crate::mail::TEST_TAILNET
@@ -3662,7 +3662,7 @@ mod tests {
             .send_agent_message_on(
                 Some(&tailnet),
                 &from,
-                &format!("{target}@desktop"),
+                &format!("{target}@laptop"),
                 "please review",
                 None,
             )
@@ -3676,7 +3676,7 @@ mod tests {
             .send_agent_message_on(
                 Some(&tailnet),
                 &from,
-                &format!("{}@desktop", protocol::uid::new().unwrap()),
+                &format!("{}@laptop", protocol::uid::new().unwrap()),
                 "hi",
                 None,
             )
@@ -3697,8 +3697,8 @@ mod tests {
             context_id: protocol::uid::new().unwrap(),
             in_reply_to: None,
             session_uid: from.clone(),
-            recipient: format!("{target}@desktop"),
-            recipient_computer: "desktop".into(),
+            recipient: format!("{target}@laptop"),
+            recipient_computer: "laptop".into(),
             text: "are you there?".into(),
         };
         sender
@@ -3716,19 +3716,15 @@ mod tests {
                 .map(|m| (m.message_id.as_str(), m.label.as_str(), m.text.as_str()))
                 .collect::<Vec<_>>(),
             [
-                (status.message_id.as_str(), "cc-2@desktop", "please review"),
-                (
-                    retried.message_id.as_str(),
-                    "cc-2@desktop",
-                    "are you there?"
-                ),
+                (status.message_id.as_str(), "cc-2@laptop", "please review"),
+                (retried.message_id.as_str(), "cc-2@laptop", "are you there?"),
             ]
         );
         assert!(
             batch
                 .messages
                 .iter()
-                .all(|m| m.from == format!("{from}@desktop")),
+                .all(|m| m.from == format!("{from}@laptop")),
             "the sender is a run of the computer the connection came from"
         );
         let (_, mine) = sender.offer_agent_messages(&from).await.unwrap();
@@ -3754,23 +3750,18 @@ mod tests {
         assert_eq!(answer["code"], "bad_request", "{answer}");
     }
 
-    /// **A computer whose agents could not be listed is named** (B-18): the only
-    /// other computer is up on the tailnet but nothing answers on its port, and the
-    /// listing says so rather than leaving it out. Every other peer is offline, so
-    /// nothing is dialled but loopback.
+    /// **A computer whose agents could not be listed is named** (B-18): the Mac
+    /// is up on the tailnet but nothing answers on its port, and the listing says so
+    /// rather than leaving it out. The Windows PC and the iPhone, online too, run no
+    /// CodeConnect: they are not asked, nor named (round 2, R2-3). All three are on
+    /// loopback, so whatever is dialled is dialled here.
     #[tokio::test]
     async fn a_computer_that_does_not_answer_a_listing_is_named() {
-        let mut status: serde_json::Value = serde_json::from_str(
-            &include_str!("../../../fixtures/tailscale/status-six-nodes.json")
-                .replace("100.64.0.2", "127.0.0.1"),
-        )
-        .unwrap();
-        for peer in status["Peer"].as_object_mut().unwrap().values_mut() {
-            if peer["HostName"] != "desktop" {
-                peer["Online"] = serde_json::json!(false);
-            }
-        }
-        let tailnet = protocol::tailnet::Tailnet::parse(&status.to_string()).unwrap();
+        let status = ["100.64.0.2", "100.64.0.4", "100.64.0.6"].iter().fold(
+            include_str!("../../../fixtures/tailscale/status-six-nodes.json").to_string(),
+            |status, ip| status.replace(ip, "127.0.0.1"),
+        );
+        let tailnet = protocol::tailnet::Tailnet::parse(&status).unwrap();
         let closed = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -3786,7 +3777,7 @@ mod tests {
         let (agents, unreachable) = daemon.ask_peers(&tailnet).await;
         assert!(agents.is_empty());
         assert_eq!(unreachable.len(), 1, "{unreachable:?}");
-        assert!(unreachable[0].starts_with("desktop ("), "{unreachable:?}");
+        assert!(unreachable[0].starts_with("laptop ("), "{unreachable:?}");
     }
 
     fn daemon_with_a_device_pushing(

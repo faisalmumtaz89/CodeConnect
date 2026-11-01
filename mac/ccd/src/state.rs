@@ -25606,6 +25606,12 @@ mod tests {
         assert!(refusal(send(to("studio"), long).await).contains("too long"));
         assert!(refusal(send(to("nowhere"), hi()).await).contains("not a computer"));
         assert!(refusal(send(to("linux-box"), hi()).await).contains("offline"));
+        for device in ["phone", "desktop"] {
+            assert!(
+                refusal(send(to(device), hi()).await).contains("CodeConnect does not run on"),
+                "{device}"
+            );
+        }
         let never = protocol::uid::new().unwrap();
         assert!(
             refusal(send(format!("{never}@studio"), hi()).await).contains("not a running session")

@@ -114,11 +114,13 @@ one a launch would use. Use `codeconnect --help` for the launcher's own commands
 Every hosted session — Codex and Claude Code alike — has one MCP server of CodeConnect's
 own, `codeconnect`, with three tools: `list_agents` tells the session its own address and
 names the other running sessions on this computer and on your other computers on Tailscale
-(the same Tailscale user, not tagged, online, running CodeConnect on the same port), each by
-its address, `<run id>@<computer>`, with its label `cc-N@<computer>` beside it;
-`send_message` sends one of them a message; and `read_messages` reads the session's own. An
-address names one run of a session: once that run ends, mail to it is refused, even while a
-new session shows the same label. A session started before this CodeConnect could give it
+(the same Tailscale user, not tagged, online, macOS or Linux, running CodeConnect on the same
+port; a computer among them that does not answer is named as one that could not be listed;
+phones, tablets and Windows PCs are never asked), each by its address,
+`<run id>@<computer>`, with its label `cc-N@<computer>` beside it; `send_message` sends one
+of them a message; and `read_messages` reads the session's own. An address names one run of
+a session: once that run ends, mail to it is refused, even while a new session shows the same
+label. A session started before this CodeConnect could give it
 messages is not listed, and mail to it is refused until it is restarted. In a Codex session the tools are pre-approved (`default_tools_approval_mode =
 "approve"`, set on the session's app server only), because Codex asks for MCP tool approval
 only at the computer's keyboard and a send would otherwise wait there.
@@ -158,7 +160,8 @@ message may have been delivered. A message holds at most 8 KiB, and one agent ma
 another at most 30 messages an hour. A message to another computer is written down before it
 goes anywhere; while that computer cannot be reached it is offered again every 30 seconds
 under the same id, and the receiving computer keeps one copy. A message to a computer that is
-offline or runs an older CodeConnect is refused with that reason.
+offline or runs an older CodeConnect, or to a device CodeConnect does not run on, is refused
+with that reason.
 
 ## What your phone can do
 
