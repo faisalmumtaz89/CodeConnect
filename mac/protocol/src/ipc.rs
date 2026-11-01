@@ -319,6 +319,9 @@ pub enum DaemonFrame {
         /// give when it asks one agent to answer it through another.
         you: AgentEntry,
         agents: Vec<AgentEntry>,
+        /// The computers whose agents could not be listed, each with why.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unreachable: Vec<String>,
     },
     AgentMessages {
         /// Names this batch in [`ClientFrame::MailRead`].

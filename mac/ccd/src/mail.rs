@@ -642,25 +642,48 @@ impl Daemon {
     pub async fn list_agents(
         &self,
         from_uid: &str,
-    ) -> Result<(AgentEntry, Vec<AgentEntry>), String> {
+    ) -> Result<(AgentEntry, Vec<AgentEntry>, Vec<String>), String> {
         let tailnet = read_tailnet().await;
-        let mut peers = Vec::new();
-        if let Some(tailnet) = &tailnet {
-            let asks = tailnet.reachable_peers().filter_map(|place| match place {
-                Place::Peer { ip, .. } => Some(dial_peer(
+        let (peers, unreachable) = match &tailnet {
+            Some(tailnet) => self.ask_peers(tailnet).await,
+            None => (Vec::new(), Vec::new()),
+        };
+        let (you, agents) = self
+            .list_agents_on(tailnet.as_ref(), from_uid, peers)
+            .await?;
+        Ok((you, agents, unreachable))
+    }
+
+    /// The agents on each of this computer's reachable peers, and the computers that
+    /// did not list theirs, each with why.
+    pub(crate) async fn ask_peers(&self, tailnet: &Tailnet) -> (Vec<AgentEntry>, Vec<String>) {
+        let asks = tailnet.reachable_peers().filter_map(|place| match place {
+            Place::Peer { name, ip } => Some(async move {
+                let reply = dial_peer(
                     SocketAddr::new(ip, self.config.ws_port),
                     &PeerRequest::PeerListAgents,
                     PEER_LIST_WAIT,
-                )),
-                Place::Here => None,
-            });
-            for reply in futures_util::future::join_all(asks).await {
-                if let Ok(PeerReply::PeerAgents { agents }) = reply {
-                    peers.extend(agents);
+                )
+                .await;
+                (name.to_string(), reply)
+            }),
+            Place::Here => None,
+        });
+        let (mut agents, mut unreachable) = (Vec::new(), Vec::new());
+        for (name, reply) in futures_util::future::join_all(asks).await {
+            match reply {
+                Ok(PeerReply::PeerAgents { agents: theirs }) => agents.extend(theirs),
+                Ok(PeerReply::PeerRefused { reason }) => {
+                    unreachable.push(format!("{name} ({reason})"))
+                }
+                Ok(_) => unreachable.push(format!("{name} (an answer this build does not read)")),
+                Err(Dial::Older) => unreachable.push(format!("{name} (an older CodeConnect)")),
+                Err(Dial::Unreachable(why) | Dial::NoAnswer(why)) => {
+                    unreachable.push(format!("{name} ({why})"))
                 }
             }
         }
-        self.list_agents_on(tailnet.as_ref(), from_uid, peers).await
+        (agents, unreachable)
     }
 
     /// [`Daemon::list_agents`] against a given reading of the tailnet, and the

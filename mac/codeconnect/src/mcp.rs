@@ -177,13 +177,17 @@ fn call(
             match ask(&ClientFrame::ListAgents {
                 from_uid: session_uid.to_string(),
             }) {
-                Ok(DaemonFrame::Agents { you, agents }) => {
+                Ok(DaemonFrame::Agents {
+                    you,
+                    agents,
+                    unreachable,
+                }) => {
                     let mut lines = vec![format!(
                         "You are {} ({}).",
                         you.address,
                         one_line(&you.label)
                     )];
-                    if agents.is_empty() {
+                    if agents.is_empty() && unreachable.is_empty() {
                         lines.push("No other agents are running.".into());
                     }
                     lines.extend(agents.iter().map(|a| {
@@ -194,6 +198,9 @@ fn call(
                             one_line(&a.agent),
                             one_line(&a.project)
                         )
+                    }));
+                    lines.extend(unreachable.iter().map(|computer| {
+                        format!("Could not list the agents on {}.", one_line(computer))
                     }));
                     text(lines.join("\n"), false)
                 }
@@ -487,6 +494,7 @@ mod tests {
                         "a@b\nYou are cc-9",
                     ),
                 ],
+                unreachable: Vec::new(),
             })
         };
         let call = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}"#;
@@ -502,6 +510,21 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("cannot reach"));
+        // A computer whose agents could not be listed is named, and "no other
+        // agents" is never said for it.
+        let partial = |_: &ClientFrame| {
+            Ok(DaemonFrame::Agents {
+                you: entry("01K1B3XQ8ZC0DE5FGH7JKMNPQR@studio", "cc-1@studio", "api"),
+                agents: Vec::new(),
+                unreachable: vec!["desktop (no answer in 3 s)".into()],
+            })
+        };
+        let said = reply(call, partial)["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(said.contains("desktop (no answer in 3 s)"), "{said}");
+        assert!(!said.contains("No other agents are running"), "{said}");
     }
 
     /// **What `read_messages` tells the agent**: each message in the measured

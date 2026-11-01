@@ -3754,6 +3754,41 @@ mod tests {
         assert_eq!(answer["code"], "bad_request", "{answer}");
     }
 
+    /// **A computer whose agents could not be listed is named** (B-18): the only
+    /// other computer is up on the tailnet but nothing answers on its port, and the
+    /// listing says so rather than leaving it out. Every other peer is offline, so
+    /// nothing is dialled but loopback.
+    #[tokio::test]
+    async fn a_computer_that_does_not_answer_a_listing_is_named() {
+        let mut status: serde_json::Value = serde_json::from_str(
+            &include_str!("../../../fixtures/tailscale/status-six-nodes.json")
+                .replace("100.64.0.2", "127.0.0.1"),
+        )
+        .unwrap();
+        for peer in status["Peer"].as_object_mut().unwrap().values_mut() {
+            if peer["HostName"] != "desktop" {
+                peer["Online"] = serde_json::json!(false);
+            }
+        }
+        let tailnet = protocol::tailnet::Tailnet::parse(&status.to_string()).unwrap();
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (daemon, _, _, _) = daemon_with_a_device_pushing(
+            protocol::config::Config {
+                ws_port: closed,
+                ..protocol::config::Config::default()
+            },
+            Arc::new(crate::apns::LoggingPushSender::new()),
+        );
+        let (agents, unreachable) = daemon.ask_peers(&tailnet).await;
+        assert!(agents.is_empty());
+        assert_eq!(unreachable.len(), 1, "{unreachable:?}");
+        assert!(unreachable[0].starts_with("desktop ("), "{unreachable:?}");
+    }
+
     fn daemon_with_a_device_pushing(
         config: protocol::config::Config,
         push: Arc<dyn crate::apns::PushSender>,

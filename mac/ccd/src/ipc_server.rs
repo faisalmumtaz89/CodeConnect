@@ -556,7 +556,11 @@ async fn read_loop(
             }
             ClientFrame::ListAgents { from_uid } => {
                 let frame = match daemon.list_agents(&from_uid).await {
-                    Ok((you, agents)) => DaemonFrame::Agents { you, agents },
+                    Ok((you, agents, unreachable)) => DaemonFrame::Agents {
+                        you,
+                        agents,
+                        unreachable,
+                    },
                     Err(message) => DaemonFrame::Error { message },
                 };
                 let _ = tx.send(frame).await;
