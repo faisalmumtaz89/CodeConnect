@@ -26125,6 +26125,44 @@ mod tests {
         .contains("not a running session"));
     }
 
+    /// **A message written down before the daemon stopped still goes** (round 1,
+    /// B-38): one to a session on this computer, kept in the outbox and never taken
+    /// because the daemon stopped in between, is taken by the next sweep, once.
+    #[tokio::test]
+    async fn a_local_message_the_daemon_stopped_before_taking_is_taken_by_the_sweep() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let receiver = register(&daemon, "cc-1", None).await.session.uid;
+        let mail = crate::store::SentMail {
+            message_id: protocol::uid::new().unwrap(),
+            context_id: protocol::uid::new().unwrap(),
+            in_reply_to: None,
+            session_uid: sender.clone(),
+            recipient: format!("{receiver}@studio"),
+            recipient_computer: String::new(),
+            text: "written down, then the daemon stopped".into(),
+        };
+        daemon
+            .store
+            .file_sent_mail(&mail, protocol::time::now_unix_ms())
+            .unwrap();
+        for _ in 0..2 {
+            daemon.sweep_mail_on(Some(&tailnet)).await;
+        }
+        let (_, batch) = daemon.offer_agent_messages(&receiver).await.unwrap();
+        assert_eq!(
+            batch
+                .messages
+                .iter()
+                .map(|m| (m.message_id.as_str(), m.from.clone()))
+                .collect::<Vec<_>>(),
+            [(mail.message_id.as_str(), format!("{sender}@studio"))],
+            "taken once, from its sender"
+        );
+    }
+
     /// **A person's prompt with mail waiting is told of it**, in the fixed words
     /// and nothing of the message, and a run with none is told nothing (M-09, M-11).
     #[tokio::test]

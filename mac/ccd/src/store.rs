@@ -4158,14 +4158,14 @@ impl Store {
             .optional()?)
     }
 
-    /// Sent messages no other computer has taken yet, oldest first.
+    /// Sent messages no receiver has taken yet, here or on another computer, oldest
+    /// first.
     pub fn unsent_mail(&self) -> Result<Vec<SentMail>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT message_id, context_id, in_reply_to, session_uid, recipient,
                     recipient_computer, text
-               FROM mail_sent WHERE state = 'sent' AND recipient_computer <> ''
-              ORDER BY created_ms ASC",
+               FROM mail_sent WHERE state = 'sent' ORDER BY created_ms ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(SentMail {

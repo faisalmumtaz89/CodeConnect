@@ -129,7 +129,7 @@ impl Daemon {
         };
         let refuse = |reason: &str| refused(message_id.clone(), reason);
 
-        let Some((run, computer)) = to
+        let Some((_, computer)) = to
             .rsplit_once('@')
             .filter(|(run, c)| protocol::uid::is_well_formed(run) && !c.is_empty())
         else {
@@ -206,33 +206,7 @@ impl Daemon {
             return refuse("CodeConnect could not keep the message");
         }
 
-        let (state, reason) = match place {
-            Place::Here => {
-                let from = Sender {
-                    computer: String::new(),
-                    uid: from_uid.to_string(),
-                    address: format!("{from_uid}@{}", tailnet.name()),
-                    label: format!("{}@{}", sender.session_id, tailnet.name()),
-                    agent: agent_name(&sender.agent).to_string(),
-                    project: crate::project_label::project_label(&sender.cwd),
-                };
-                let taken = self
-                    .take(
-                        &from,
-                        run,
-                        &sent.message_id,
-                        &sent.context_id,
-                        sent.in_reply_to.as_deref(),
-                        text,
-                    )
-                    .await;
-                if taken.0 == MailState::Waiting {
-                    waiter_registered(self, run);
-                }
-                taken
-            }
-            Place::Peer { name: peer, ip } => self.carry(&sent, &sender, run, peer, ip).await,
-        };
+        let (state, reason) = self.dispatch(tailnet, &sent, &sender).await;
         if let Err(err) = self
             .db
             .note_sent_mail(message_id.clone(), state, reason.clone(), true)
@@ -245,6 +219,51 @@ impl Daemon {
             state,
             reason,
         }
+    }
+
+    /// **Hand one message from the outbox to where it is going**: to the receiving
+    /// run when it is on this computer, and otherwise offered to the computer it is
+    /// for. The one way a message leaves the outbox, at its send and at every sweep
+    /// after, so one written down before the daemon stopped still goes; the receiver
+    /// keeps one copy however many times it is handed over.
+    async fn dispatch(
+        self: &Arc<Self>,
+        tailnet: &Tailnet,
+        mail: &SentMail,
+        sender: &crate::store::SessionRow,
+    ) -> (MailState, Option<String>) {
+        let Some(run) = mail.recipient.rsplit_once('@').map(|(run, _)| run) else {
+            return (MailState::Refused, Some("the address names no run".into()));
+        };
+        if !mail.recipient_computer.is_empty() {
+            return match tailnet.locate(&mail.recipient_computer) {
+                Ok(Place::Peer { name: peer, ip }) => self.carry(mail, sender, run, peer, ip).await,
+                // Not reachable this time: still sent, and offered again at the next sweep.
+                Ok(Place::Here) | Err(_) => (MailState::Sent, None),
+            };
+        }
+        let from = Sender {
+            computer: String::new(),
+            uid: mail.session_uid.clone(),
+            address: format!("{}@{}", mail.session_uid, tailnet.name()),
+            label: format!("{}@{}", sender.session_id, tailnet.name()),
+            agent: agent_name(&sender.agent).to_string(),
+            project: crate::project_label::project_label(&sender.cwd),
+        };
+        let taken = self
+            .take(
+                &from,
+                run,
+                &mail.message_id,
+                &mail.context_id,
+                mail.in_reply_to.as_deref(),
+                &mail.text,
+            )
+            .await;
+        if taken.0 == MailState::Waiting {
+            waiter_registered(self, run);
+        }
+        taken
     }
 
     /// **Take one message for the run `run` on this computer**: the same for a
@@ -443,7 +462,7 @@ impl Daemon {
 
     /// **One sweep**: settle what time and ended runs decide, offer again what no
     /// other computer has taken, and tell senders on other computers what changed.
-    pub(crate) async fn sweep_mail_on(&self, tailnet: Option<&Tailnet>) {
+    pub(crate) async fn sweep_mail_on(self: &Arc<Self>, tailnet: Option<&Tailnet>) {
         if let Err(err) = self
             .db
             .sweep_mail(protocol::time::now_unix_ms(), LIMITS)
@@ -465,19 +484,13 @@ impl Daemon {
         self.tell_senders(tailnet).await;
     }
 
-    /// Offer one `sent` message again, and keep where it stands now.
-    async fn carry_again(&self, tailnet: &Tailnet, mail: &SentMail) {
-        let Ok(Place::Peer { name: peer, ip }) = tailnet.locate(&mail.recipient_computer) else {
-            return;
-        };
-        let Some(run) = mail.recipient.rsplit_once('@').map(|(run, _)| run) else {
-            return;
-        };
+    /// Hand one `sent` message over again, and keep where it stands now.
+    async fn carry_again(self: &Arc<Self>, tailnet: &Tailnet, mail: &SentMail) {
         let sender = match self.db.get_session(mail.session_uid.clone()).await {
             Ok(Some(row)) => row,
             _ => return,
         };
-        let (state, reason) = self.carry(mail, &sender, run, peer, ip).await;
+        let (state, reason) = self.dispatch(tailnet, mail, &sender).await;
         if state != MailState::Sent {
             if let Err(err) = self
                 .db
