@@ -26057,8 +26057,9 @@ mod tests {
         assert_eq!(crate::mail::prompt_submitted(&daemon, &claude).await, None);
         leave_mail(&daemon, &claude, "MARKER-7731");
         let told = crate::mail::prompt_submitted(&daemon, &claude).await;
-        assert_eq!(told, Some(protocol::ipc::MAIL_NUDGE));
-        assert!(!protocol::ipc::MAIL_NUDGE.contains("MARKER"));
+        let told = told.expect("told of its mail");
+        assert!(protocol::ipc::is_mail_nudge(told), "{told}");
+        assert!(!told.contains("MARKER"));
     }
 
     /// **A run's mail is ended the moment the run exits** (M23-c), not at the next

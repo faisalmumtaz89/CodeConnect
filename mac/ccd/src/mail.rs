@@ -18,7 +18,7 @@
 //! `ended`. A sender reads the changes in its next `read_messages`, each once.
 //!
 //! **Waking the agent.** The daemon never hands an agent a message: it wakes the
-//! agent with the fixed words [`MAIL_NUDGE`], which carry nothing of any message,
+//! agent with one fixed line ([`nudge`]), which carries nothing of any message,
 //! and the agent calls `read_messages`. Claude is woken by its mail waiter
 //! ([`crate::claude_waiter`]), only between its turns; Codex through its own queue
 //! ([`crate::codex_wake`]). The wake rule ([`Daemon::wake_if_due`]) decides, from
@@ -46,7 +46,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 
 use protocol::agent::AgentKind;
-use protocol::ipc::{AgentEntry, MailState, MailStatus, MAIL_NUDGE, MAIL_TEXT_BYTES};
+use protocol::ipc::{AgentEntry, MailState, MailStatus, MAIL_TEXT_BYTES};
 use protocol::peer::{PeerReply, PeerRequest};
 use protocol::tailnet::{Place, Refusal, Tailnet};
 
@@ -706,6 +706,13 @@ impl Daemon {
     }
 }
 
+/// **The line that wakes an agent for its mail**, by this computer's mail switch,
+/// read afresh for every wake: on, to read and handle each message as its sender
+/// asks; off, or never answered, to read and show them to the person.
+pub(crate) fn nudge() -> &'static str {
+    protocol::ipc::mail_nudge(protocol::ipc::mail_acts(&protocol::root_dir()))
+}
+
 /// A turn may end this many times with woken mail still unread before wakes stop
 /// until a person's turn or new mail.
 const WAKE_MISSES: u32 = 3;
@@ -741,7 +748,7 @@ pub(crate) async fn prompt_submitted(daemon: &Arc<Daemon>, run_uid: &str) -> Opt
         .mail_prompt(run_uid.to_string(), protocol::time::now_unix_ms())
         .await
     {
-        Ok(true) => Some(MAIL_NUDGE),
+        Ok(true) => Some(nudge()),
         Ok(false) => None,
         Err(err) => {
             crate::log_error!("mail for {run_uid}: could not record the prompt: {err:#}");

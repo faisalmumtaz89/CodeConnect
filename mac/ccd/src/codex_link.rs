@@ -8720,7 +8720,8 @@ impl Connection<'_> {
     /// rollout can be resumed). The log keeps one copy of each fact, so each nudge turn
     /// reaches the mailbox's wake rule exactly once.
     ///
-    /// Only a turn one of whose user messages is [`protocol::ipc::MAIL_NUDGE`] counts,
+    /// Only a turn one of whose user messages is a mail wake ([`protocol::ipc::is_mail_nudge`],
+    /// either line, as the switch may change before the wake runs) counts,
     /// interrupted or not, and with a person's message merged into it or not. Codex
     /// runs a queued nudge after a busy turn ends, and after an Esc only once the
     /// person's next turn has ended; either of those turn ends, counted, would let the
@@ -8729,7 +8730,9 @@ impl Connection<'_> {
     async fn note_mail_turn_end(&self, filed: &protocol::event::Event) {
         let ended_now = filed.kind == protocol::event::EventKind::TurnComplete;
         let nudge_now = filed.kind == protocol::event::EventKind::UserMessage
-            && filed.payload["text"] == protocol::ipc::MAIL_NUDGE;
+            && filed.payload["text"]
+                .as_str()
+                .is_some_and(protocol::ipc::is_mail_nudge);
         if !ended_now && !nudge_now {
             return;
         }
@@ -8739,7 +8742,7 @@ impl Connection<'_> {
         match self
             .daemon
             .db
-            .codex_turn_messages(self.session.uid.clone(), turn, protocol::ipc::MAIL_NUDGE)
+            .codex_turn_messages(self.session.uid.clone(), turn)
             .await
         {
             // The end, filed after its nudge; or the turn's one nudge, filed after its end.
@@ -15199,10 +15202,16 @@ mod tests {
 
     /// The captured turn as the nudge's own: its user message is the nudge.
     fn carrying_the_nudge(value: &Value) -> Value {
-        serde_json::from_str(&value.to_string().replace(
-            "reply with the word pong and nothing else",
-            protocol::ipc::MAIL_NUDGE,
-        ))
+        carrying(value, protocol::ipc::MAIL_NUDGE_ACT)
+    }
+
+    /// The captured turn with `line` as its user message.
+    fn carrying(value: &Value, line: &str) -> Value {
+        serde_json::from_str(
+            &value
+                .to_string()
+                .replace("reply with the word pong and nothing else", line),
+        )
         .unwrap()
     }
 
@@ -15316,6 +15325,38 @@ mod tests {
             wake_row(&db, &session),
             (1, 0),
             "the person's busy turn ended, and the nudge queued behind it has not run"
+        );
+    }
+
+    /// **A turn carrying either wake line ends the wake**: the mail switch can change
+    /// between a wake being queued and its turn, and the queued wake keeps its line.
+    ///
+    /// **Mutation:** know only the line the switch picks now. A wake queued with the
+    /// other then ends nothing, and the run is never woken again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_carrying_the_other_wake_line_still_ends_the_wake() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000FLP".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = a_run_with_a_wake_outstanding(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = a_connection_on(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            1,
+            LIFECYCLE_THREAD,
+        );
+        for frame in live_turn(|frame| carrying(frame, protocol::ipc::MAIL_NUDGE_SHOW)) {
+            conn.observe_notification(&frame).await;
+        }
+        assert!(
+            wake_row_reaches(&db, &session, (0, 1)).await,
+            "the turn carrying the other line ended the wake: {:?}",
+            wake_row(&db, &session)
         );
     }
 

@@ -79,7 +79,8 @@ impl Waiters {
 }
 
 /// **Wake the Claude run `run_uid`**: its waiter's hook exits 2 with
-/// [`protocol::ipc::MAIL_NUDGE`]. `false` when no live waiter holds the lease.
+/// the line the mail switch picks ([`crate::mail::nudge`]). `false` when no live
+/// waiter holds the lease.
 pub(crate) fn wake_claude(daemon: &std::sync::Arc<crate::state::Daemon>, run_uid: &str) -> bool {
     daemon.waiters.wake(run_uid)
 }

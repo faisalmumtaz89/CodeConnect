@@ -727,9 +727,8 @@ impl Db {
         &self,
         session_uid: String,
         turn_id: String,
-        text: &'static str,
     ) -> Result<(bool, usize)> {
-        self.run(move |store| store.codex_turn_messages(&session_uid, &turn_id, text))
+        self.run(move |store| store.codex_turn_messages(&session_uid, &turn_id))
             .await
     }
 

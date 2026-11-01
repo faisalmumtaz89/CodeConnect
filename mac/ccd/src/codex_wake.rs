@@ -6,7 +6,8 @@
 //! `codex queue` CLI against the session's upstream app-server (`<run-dir>/as.sock`).
 //! The daemon never writes the queue's wire method itself.
 //!
-//! The words are [`MAIL_NUDGE`]; the phone shows the turn they start as it is.
+//! The words are the line the mail switch picks ([`crate::mail::nudge`]); the phone
+//! shows the turn they start as it is.
 //! Codex's own queue then decides when the nudge runs, exactly as it does for a person:
 //! - at once on an idle thread;
 //! - after the running turn ends on a busy one;
@@ -18,7 +19,6 @@
 
 use crate::state::Daemon;
 use anyhow::{bail, Context, Result};
-use protocol::ipc::MAIL_NUDGE;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ const WAKE_DEADLINE: Duration = Duration::from_secs(10);
 /// How much of `codex queue`'s stderr an error carries.
 const STDERR_TAIL: usize = 400;
 
-/// **Wake the Codex run `run_uid`**: queue [`MAIL_NUDGE`] on the thread its link
+/// **Wake the Codex run `run_uid`**: queue the mail switch's line on the thread its link
 /// adopted, through its app-server (`as.sock`, beside the run's control socket), with
 /// the `codex` it was launched with. `Ok` means Codex accepted the nudge into the
 /// thread's queue, not that a turn has run. An `Err` (no thread yet, no live
@@ -52,14 +52,20 @@ pub(crate) async fn wake_codex(daemon: &Arc<Daemon>, run_uid: &str) -> Result<()
         .await
         .context("the run has no live supervisor")?;
     let as_sock = Path::new(&control).with_file_name("as.sock");
-    wake(Path::new(&codex), &as_sock, &thread).await
+    wake(Path::new(&codex), &as_sock, &thread, crate::mail::nudge()).await
 }
 
-async fn wake(codex: &Path, as_sock: &Path, thread_id: &str) -> Result<()> {
-    queue(codex, as_sock, thread_id, WAKE_DEADLINE).await
+async fn wake(codex: &Path, as_sock: &Path, thread_id: &str, nudge: &str) -> Result<()> {
+    queue(codex, as_sock, thread_id, nudge, WAKE_DEADLINE).await
 }
 
-async fn queue(codex: &Path, as_sock: &Path, thread_id: &str, deadline: Duration) -> Result<()> {
+async fn queue(
+    codex: &Path,
+    as_sock: &Path,
+    thread_id: &str,
+    nudge: &str,
+    deadline: Duration,
+) -> Result<()> {
     let output = tokio::process::Command::new(codex)
         .arg("queue")
         .arg("--remote")
@@ -67,7 +73,7 @@ async fn queue(codex: &Path, as_sock: &Path, thread_id: &str, deadline: Duration
         .arg("--thread")
         .arg(thread_id)
         .arg("--message")
-        .arg(MAIL_NUDGE)
+        .arg(nudge)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -127,6 +133,7 @@ mod tests {
             &bin,
             Path::new("/tmp/cch.x/as.sock"),
             "01a197a7-7ac3-7ed1-ac9e-888bf77b95a4",
+            protocol::ipc::MAIL_NUDGE_ACT,
         )
         .await
         .unwrap();
@@ -140,7 +147,7 @@ mod tests {
                 "--thread",
                 "01a197a7-7ac3-7ed1-ac9e-888bf77b95a4",
                 "--message",
-                MAIL_NUDGE,
+                protocol::ipc::MAIL_NUDGE_ACT,
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -152,9 +159,14 @@ mod tests {
             "refused",
             "echo 'Error: thread not found: 01a1' >&2\nexit 1",
         );
-        let err = wake(&bin, Path::new("/tmp/cch.x/as.sock"), "01a1")
-            .await
-            .unwrap_err();
+        let err = wake(
+            &bin,
+            Path::new("/tmp/cch.x/as.sock"),
+            "01a1",
+            protocol::ipc::MAIL_NUDGE_SHOW,
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.to_string().contains("thread not found: 01a1"),
             "{err:#}"
@@ -176,6 +188,7 @@ mod tests {
             &bin,
             Path::new("/tmp/cch.x/as.sock"),
             "01a1",
+            protocol::ipc::MAIL_NUDGE_SHOW,
             Duration::from_millis(500),
         )
         .await

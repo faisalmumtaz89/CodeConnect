@@ -30,7 +30,7 @@ use std::thread;
 use std::time::Duration;
 
 use protocol::hook::{HookDecision, HookEventName, HookInput};
-use protocol::ipc::{ClientFrame, DaemonFrame, HookPost, MAIL_NUDGE, MAX_FRAME_BYTES};
+use protocol::ipc::{ClientFrame, DaemonFrame, HookPost, MAX_FRAME_BYTES};
 
 const UNREACHABLE_REASON: &str = "CodeConnect: daemon unreachable, deferring to local operator";
 const TIMEOUT_REASON: &str =
@@ -332,7 +332,7 @@ fn post_to_daemon(
 const WAITER_RETRY: Duration = Duration::from_secs(2);
 
 /// **The mail waiter**: wait on the daemon until it has mail for this run, then
-/// print [`MAIL_NUDGE`] for Claude and return 2, which wakes it. Returns 0 when a
+/// print the line it sends for Claude and return 2, which wakes it. Returns 0 when a
 /// newer waiter took over. Claude's own timeout on the hook is the bound; a daemon
 /// that goes away is reached again, so a restart costs no wake.
 fn wait_for_mail(args: &Args, session_uid: &str) -> i32 {
@@ -352,8 +352,8 @@ fn wait_for_mail(args: &Args, session_uid: &str) -> i32 {
                 let mut reply = String::new();
                 if BufReader::new(stream).read_line(&mut reply).is_ok() {
                     match serde_json::from_str::<DaemonFrame>(reply.trim()) {
-                        Ok(DaemonFrame::MailWake) => {
-                            eprintln!("{MAIL_NUDGE}");
+                        Ok(DaemonFrame::MailWake { nudge }) => {
+                            eprintln!("{nudge}");
                             return 2;
                         }
                         // A daemon that refuses the waiter will refuse it again.
@@ -505,7 +505,10 @@ mod tests {
     /// as the wake. It sends its own run's uid.
     #[test]
     fn the_mail_waiter_exits_2_on_a_wake_and_0_when_superseded() {
-        for (reply, code) in [(DaemonFrame::MailWake, 2), (DaemonFrame::MailSuperseded, 0)] {
+        let wake = DaemonFrame::MailWake {
+            nudge: protocol::ipc::MAIL_NUDGE_SHOW.into(),
+        };
+        for (reply, code) in [(wake, 2), (DaemonFrame::MailSuperseded, 0)] {
             let socket = std::env::temp_dir()
                 .join(format!("cc-hook-waiter-{}-{code}.sock", std::process::id()));
             let _ = std::fs::remove_file(&socket);

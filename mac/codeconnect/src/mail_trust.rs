@@ -18,13 +18,7 @@ use anyhow::{bail, Context, Result};
 
 /// The answer's file, in CodeConnect's folder `root`.
 fn answer_path(root: &Path) -> PathBuf {
-    root.join("mail-trust")
-}
-
-/// **Whether agents on this computer act on their messages**, by the answer kept in
-/// `root`: only an answer of on says they do.
-pub fn acts(root: &Path) -> bool {
-    std::fs::read_to_string(answer_path(root)).is_ok_and(|answer| answer.trim() == "on")
+    root.join(protocol::ipc::MAIL_TRUST_FILE)
 }
 
 /// **Ask once per computer**, in this terminal, before a session starts. Nothing is
@@ -91,6 +85,7 @@ mod tests {
             std::process::id(),
             protocol::time::now_unix_ms()
         ));
+        let acts = protocol::ipc::mail_acts;
         assert!(!acts(&root), "never asked");
         keep(true, &root).unwrap();
         assert!(acts(&root));

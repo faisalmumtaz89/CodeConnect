@@ -1587,13 +1587,9 @@ impl Store {
     }
 
     /// What the log holds of the Codex turn `turn_id` of this run: whether its end is
-    /// filed, and how many of its user messages are exactly `text`.
-    pub fn codex_turn_messages(
-        &self,
-        session_uid: &str,
-        turn_id: &str,
-        text: &str,
-    ) -> Result<(bool, usize)> {
+    /// filed, and how many of its user messages are a mail wake
+    /// ([`protocol::ipc::is_mail_nudge`]).
+    pub fn codex_turn_messages(&self, session_uid: &str, turn_id: &str) -> Result<(bool, usize)> {
         let conn = self.read();
         let mut stmt = conn.prepare(
             "SELECT kind, payload FROM events
@@ -1618,8 +1614,11 @@ impl Store {
             .iter()
             .filter(|(kind, payload)| {
                 kind == protocol::event::EventKind::UserMessage.as_str()
-                    && serde_json::from_str::<serde_json::Value>(payload)
-                        .is_ok_and(|payload| payload["text"] == text)
+                    && serde_json::from_str::<serde_json::Value>(payload).is_ok_and(|payload| {
+                        payload["text"]
+                            .as_str()
+                            .is_some_and(protocol::ipc::is_mail_nudge)
+                    })
             })
             .count();
         Ok((ended, matching))

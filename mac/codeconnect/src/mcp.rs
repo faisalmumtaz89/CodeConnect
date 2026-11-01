@@ -41,7 +41,7 @@ pub fn run(args: &[String]) -> Result<()> {
             reply
         };
         // Read at every call, so a changed answer reaches agents already running.
-        let acts = crate::mail_trust::acts(socket.parent().unwrap_or(&socket));
+        let acts = protocol::ipc::mail_acts(socket.parent().unwrap_or(&socket));
         if let Some(Answer { reply, offer }) = answer(&line, &session_uid, acts, ask) {
             serde_json::to_writer(&mut stdout, &reply)?;
             stdout.write_all(b"\n")?;

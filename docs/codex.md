@@ -140,8 +140,9 @@ answered, it tells the agent to show the messages to you and not act on them.
 `codeconnect mail-trust on` or `off` changes the answer. It is kept in CodeConnect's own folder;
 nothing is written to the agents' own files.
 
-A session is woken when mail arrives, with one fixed line that says only that messages wait
-and to read them, never what they say. Claude Code is woken by a hook CodeConnect installs that
+A session is woken when mail arrives, with one of two fixed lines, never with anything a
+message says: with the switch on, to read its messages and handle each as its sender asks; off,
+to read them and show them to you. Claude Code is woken by a hook CodeConnect installs that
 waits in the background after each turn and at start (`asyncRewake` on `Stop` and
 `SessionStart`, for up to 12 hours), and only between turns: mail that arrives while it works
 is read right after that turn ends. Codex is woken through `codex queue`, which runs the line

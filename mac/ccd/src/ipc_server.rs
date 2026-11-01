@@ -542,7 +542,9 @@ async fn read_loop(
                 tokio::select! {
                     Ok(outcome) = outcome => {
                         let frame = match outcome {
-                            crate::claude_waiter::WaiterOutcome::Wake => DaemonFrame::MailWake,
+                            crate::claude_waiter::WaiterOutcome::Wake => DaemonFrame::MailWake {
+                                nudge: crate::mail::nudge().into(),
+                            },
                             crate::claude_waiter::WaiterOutcome::Superseded => DaemonFrame::MailSuperseded,
                         };
                         let _ = tx.send(frame).await;
