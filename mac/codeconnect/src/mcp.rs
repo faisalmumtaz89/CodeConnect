@@ -231,6 +231,14 @@ fn call(
                     text(status_sentence(&status, to), false)
                 }
                 Ok(other) => text(unexpected(&other), true),
+                Err(err) if err.is::<crate::daemon::NoAnswer>() => text(
+                    format!(
+                        "{err:#}, so the message may have been delivered. Before sending it \
+                         again, call read_messages: it says where the message stands once \
+                         that changes."
+                    ),
+                    true,
+                ),
                 Err(err) => text(format!("{err:#}"), true),
             }
         }
@@ -471,6 +479,43 @@ mod tests {
             daemon,
         );
         assert_eq!(missing["result"]["isError"], true);
+    }
+
+    /// **A send the daemon took and never answered may have been delivered** (round
+    /// 2, R2-2): ccd closing after the message was written to it, as a restart does,
+    /// is told as that, so the agent looks before sending it again. A daemon that
+    /// could not be reached took nothing, and is not told so.
+    #[test]
+    fn a_send_cut_off_after_it_reached_the_daemon_may_have_been_delivered() {
+        let send = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_message","arguments":{"to":"cc-2@studio","text":"hi"}}}"#;
+        let socket = std::env::temp_dir().join(format!(
+            "cc-mcp-cut-{}-{}.sock",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let daemon = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut asked = String::new();
+            std::io::BufReader::new(stream)
+                .read_line(&mut asked)
+                .unwrap();
+            asked
+        });
+        let link = |frame: &ClientFrame| {
+            crate::daemon::DaemonLink::connect(&socket, Duration::from_secs(5))?.request(frame)
+        };
+        let cut = reply(send, link);
+        assert!(daemon.join().unwrap().contains("send_agent_message"));
+        let said = cut["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(said.contains("may have been delivered"), "{said}");
+        assert_eq!(cut["result"]["isError"], true);
+        let _ = std::fs::remove_file(&socket);
+
+        let unreached = reply(send, link);
+        let said = unreached["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!said.contains("may have been delivered"), "{said}");
     }
 
     /// **A listing gives each run's address with its label beside it**, the

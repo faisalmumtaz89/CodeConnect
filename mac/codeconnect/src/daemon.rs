@@ -172,6 +172,19 @@ pub fn request_at(
 /// One connection to the daemon, for an exchange of more than one frame: the
 /// `codeconnect` tool's `read_messages` confirms on the same connection that the
 /// agent was given what it read.
+/// **ccd took a frame and no reply came back**: it closed, or stopped answering,
+/// after the frame was written to it, so what the frame asked may have been done.
+#[derive(Debug)]
+pub struct NoAnswer(String);
+
+impl std::fmt::Display for NoAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoAnswer {}
+
 pub struct DaemonLink {
     stream: BufReader<UnixStream>,
 }
@@ -212,9 +225,9 @@ impl DaemonLink {
         let read = self
             .stream
             .read_line(&mut response)
-            .context("reading ccd's reply")?;
+            .map_err(|err| NoAnswer(format!("reading ccd's reply: {err}")))?;
         if read == 0 {
-            bail!("ccd closed the connection without replying");
+            return Err(NoAnswer("ccd closed the connection without replying".into()).into());
         }
 
         match serde_json::from_str::<DaemonFrame>(response.trim())? {

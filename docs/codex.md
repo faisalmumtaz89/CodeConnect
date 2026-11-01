@@ -153,7 +153,8 @@ hours idle, or after three woken turns that left it unread — waits for your ne
 is told of it.
 
 `send_message` answers with the message's id and where it stands: waiting for that session,
-still being sent, or refused, and why. A message holds at most 8 KiB, and one agent may leave
+still being sent, or refused, and why; when CodeConnect stops before answering, it says the
+message may have been delivered. A message holds at most 8 KiB, and one agent may leave
 another at most 30 messages an hour. A message to another computer is written down before it
 goes anywhere; while that computer cannot be reached it is offered again every 30 seconds
 under the same id, and the receiving computer keeps one copy. A message to a computer that is
