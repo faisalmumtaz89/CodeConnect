@@ -27,7 +27,7 @@ mod forked_holder;
 #[cfg(test)]
 mod home_guard;
 mod job;
-mod mail_rule;
+mod mail_trust;
 mod mcp;
 mod pair;
 mod service;
@@ -112,14 +112,14 @@ fn main() -> Result<()> {
 
     match command {
         "claude" => {
-            ask_for_the_mail_rule(!claude_asks_help_or_version(rest));
+            ask_about_mail(!claude_asks_help_or_version(rest));
             start_claude(rest)
         }
         "codex" => {
-            ask_for_the_mail_rule(!codex::asks_help_or_version(rest));
+            ask_about_mail(!codex::asks_help_or_version(rest));
             codex::start(rest)
         }
-        "mail-rule" => mail_rule::command(rest),
+        "mail-trust" => mail_trust::command(rest),
         "attach" => attach(rest),
         "ls" | "list" => no_arguments(rest, "codeconnect ls").and_then(|()| list()),
         "sessions" => sessions::command(rest),
@@ -209,11 +209,11 @@ fn usage() {
 }
 
 /// The one question a session launch can ask, once per computer, and only when it
-/// starts an agent's session in a terminal a person is at ([`mail_rule`]): never
+/// starts an agent's session in a terminal a person is at ([`mail_trust`]): never
 /// for an agent's help or version, which only print.
-fn ask_for_the_mail_rule(starts_a_session: bool) {
+fn ask_about_mail(starts_a_session: bool) {
     if starts_a_session && crate::attach::Terminal::available() {
-        mail_rule::ask_once();
+        mail_trust::ask_once();
     }
 }
 
@@ -244,7 +244,7 @@ codeconnect — host coding agents your iPhone can see and answer
   codeconnect sessions            list every session the daemon knows, live or ended
   codeconnect sessions prune      remove ended sessions and their history (--dry-run first)
 
-  codeconnect mail-rule add|remove  let your agents act on each other's messages, or not
+  codeconnect mail-trust on|off    let your agents act on each other's messages, or not
 
   codeconnect update              install the latest release (the daemon restarts)
   codeconnect --version           print the installed version
@@ -1373,10 +1373,10 @@ mod tests {
     use super::*;
 
     /// **Asking for Claude Code's help or version is not a session**, so it never
-    /// stops at the mail rule's question: `codeconnect claude --version` in a
+    /// stops at the mail question: `codeconnect claude --version` in a
     /// terminal once did, and waited for an answer.
     #[test]
-    fn only_a_session_start_asks_for_the_mail_rule() {
+    fn only_a_session_start_asks_about_mail() {
         let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
         for asks in [
             &["--version"][..],

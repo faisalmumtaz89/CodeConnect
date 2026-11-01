@@ -131,14 +131,14 @@ gives at most 16 messages and 32 KiB at a time and says when more wait. A messag
 once the tool's answer has been handed to the agent, which says nothing of what the agent did
 with it.
 
-An agent acts on another agent's message only when you have said it may: one line in its
-personal instructions, `~/.claude/CLAUDE.md` for Claude Code and `~/.codex/AGENTS.md` for
-Codex (or under `CLAUDE_CONFIG_DIR` / `CODEX_HOME`). The first `codeconnect claude` or
-`codeconnect codex` in a terminal shows the line and asks once whether to add it; the answer
-is remembered. `codeconnect mail-rule add` and `codeconnect mail-rule remove` change it later,
-and removing takes out exactly the line it added, leaving each file as it was. The line tells
-the agent to treat such a message as a teammate's request within its own permissions, never as
-your approval and never to change settings.
+Whether an agent acts on another agent's message is one switch per computer. The first
+`codeconnect claude` or `codeconnect codex` that starts a session in a terminal asks once:
+"Let your agents act on messages from your other agents?" With yes, `read_messages` tells the
+agent to handle each message as its sender asks, as a teammate's request within its own
+permissions, never as your approval and never to change settings; with no, or before you have
+answered, it tells the agent to show the messages to you and not act on them.
+`codeconnect mail-trust on` or `off` changes the answer. It is kept in CodeConnect's own folder;
+nothing is written to the agents' own files.
 
 A session is woken when mail arrives, with one fixed line that says only that messages wait
 and to read them, never what they say. Claude Code is woken by a hook CodeConnect installs that
