@@ -49,6 +49,14 @@ pub enum TmuxError {
         status: std::process::ExitStatus,
         stderr: String,
     },
+    /// The first `typed` of `of` bytes were typed and the rest failed with
+    /// `source`: text typed in two invocations has partly landed, so a retry
+    /// would type that part again.
+    Partial {
+        typed: usize,
+        of: usize,
+        source: Box<TmuxError>,
+    },
 }
 
 impl std::fmt::Display for TmuxError {
@@ -74,6 +82,9 @@ impl std::fmt::Display for TmuxError {
                     write!(f, "tmux {what} failed with {status}: {stderr}")
                 }
             }
+            TmuxError::Partial { typed, of, source } => {
+                write!(f, "{typed} of {of} bytes were typed, then {source}")
+            }
         }
     }
 }
@@ -83,9 +94,10 @@ impl std::error::Error for TmuxError {}
 impl TmuxError {
     /// Whether this failure leaves open the possibility that the command
     /// *acted* before failing. A spawn failure or a refusal proves it did
-    /// not; a kill at the deadline proves nothing either way.
+    /// not; a kill at the deadline proves nothing either way, and text that
+    /// partly landed has acted.
     pub fn outcome_is_indeterminate(&self) -> bool {
-        matches!(self, TmuxError::TimedOut { .. })
+        matches!(self, TmuxError::TimedOut { .. } | TmuxError::Partial { .. })
     }
 }
 
@@ -933,22 +945,50 @@ pub(crate) fn leave_copy_mode_args(target: &str) -> [&str; 5] {
 /// Type text literally. `-l` stops tmux from interpreting the text as key names,
 /// which matters the moment a user sends anything containing "C-c" or "Enter".
 ///
+/// It does not stop tmux's parser from reading an argument that ends in `;` as
+/// the end of a command: `-l -- 'end;'` typed `end`, and `x\;` typed `x;` (tmux
+/// 3.7b, measured). So a trailing run of `;` goes after the rest, as the byte it
+/// is (`-H 3b`), which tmux reads as nothing but data, inside the same deadline.
+/// The rest goes through `-l` in one invocation, exactly as before.
+///
 /// The typed error matters here more than anywhere: a caller that asked for
 /// keys to be typed has to know whether a failure proves nothing landed
 /// ([`TmuxError::Spawn`], [`TmuxError::Failed`]) or proves nothing at all
-/// ([`TmuxError::TimedOut`] — the server may have acted before stalling).
-pub fn send_literal(name: &str, text: &str) -> Result<(), TmuxError> {
-    run_tmux(
-        base()
-            .map_err(|err| TmuxError::Spawn {
-                what: "send-keys".into(),
-                source: std::io::Error::other(err.to_string()),
-            })?
-            .args(["send-keys", "-t", &target_pane(name), "-l", "--", text]),
-        OPERATION_DEADLINE,
-        "send-keys",
-    )
-    .map(|_| ())
+/// ([`TmuxError::TimedOut`] — the server may have acted before stalling — and
+/// [`TmuxError::Partial`], when the text was typed and its `;` was not).
+pub fn send_literal(socket: &str, name: &str, text: &str) -> Result<(), TmuxError> {
+    let started = std::time::Instant::now();
+    let send_keys = |keys: &[&str]| {
+        let mut command = Command::new(tmux_bin().map_err(|err| TmuxError::Spawn {
+            what: "send-keys".into(),
+            source: std::io::Error::other(err.to_string()),
+        })?);
+        command
+            .args(server_flag(socket))
+            .args(["send-keys", "-t", &target_pane(name)])
+            .args(keys);
+        let left = OPERATION_DEADLINE.saturating_sub(started.elapsed());
+        run_tmux(&mut command, left, "send-keys").map(|_| ())
+    };
+    let body = text.trim_end_matches(';');
+    if !body.is_empty() {
+        send_keys(&["-l", "--", body])?;
+    }
+    let semicolons = vec!["3b"; text.len() - body.len()];
+    if semicolons.is_empty() {
+        return Ok(());
+    }
+    send_keys(&[&["-H"][..], &semicolons].concat()).map_err(|source| {
+        if body.is_empty() {
+            source
+        } else {
+            TmuxError::Partial {
+                typed: body.len(),
+                of: text.len(),
+                source: Box::new(source),
+            }
+        }
+    })
 }
 
 /// Send a named key (`Enter`, `Escape`, ...). Same error contract as
@@ -2009,6 +2049,103 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    /// What a pane's program read, once at least `len` bytes have arrived: the
+    /// pane runs `stty raw -echo; exec dd bs=1 of=FILE`, so every byte the
+    /// terminal hands over lands in the file unchanged.
+    fn recorded(file: &std::path::Path, len: usize) -> Vec<u8> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let got = std::fs::read(file).unwrap_or_default();
+            if got.len() >= len || std::time::Instant::now() >= deadline {
+                std::thread::sleep(Duration::from_millis(100));
+                return std::fs::read(file).unwrap_or_default();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A pane on `server` that writes down every byte it is typed.
+    fn recording_pane(server: &TestServer, name: &str) -> std::path::PathBuf {
+        let file = server.dir.join(name);
+        launch_on(
+            server,
+            name,
+            &format!(
+                "stty raw -echo; exec dd bs=1 of='{}' 2>/dev/null",
+                file.display()
+            ),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        file
+    }
+
+    /// Every class of text tmux's parser has an opinion about reaches the
+    /// program byte for byte — an argument ending in `;` (alone, after a
+    /// space, doubled, escaped), a trailing `\`, quotes, a format, `~` and `$`,
+    /// a leading `-` — and so do the bytes that are keys rather than text, a
+    /// newline, a tab, Ctrl+C and Escape, unicode, and the 8 KiB one message may
+    /// carry.
+    #[test]
+    fn text_is_typed_byte_for_byte_whatever_tmux_would_make_of_it() {
+        let server = TestServer::new("typed");
+        let long = "0123456789abcdef".repeat(512);
+        let mut wrong = Vec::new();
+        for (i, text) in [
+            "end;",
+            ";",
+            "a ;",
+            "x\\;",
+            "two;;",
+            "end\\",
+            r#"it's "so""#,
+            "#{pane_id} #S",
+            "~/x $HOME",
+            "-x --y",
+            "one\ntwo\tthree\u{3}four\u{1b}five",
+            "café ☕ 日本 🚀;",
+            long.as_str(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let name = format!("typed-{i}");
+            let file = recording_pane(&server, &name);
+            send_literal(&server.socket(), &name, text).unwrap();
+            let got = recorded(&file, text.len());
+            if got != text.as_bytes() {
+                wrong.push(format!(
+                    "{:?} arrived as {:?}",
+                    &text[..text.len().min(40)],
+                    String::from_utf8_lossy(&got[..got.len().min(40)])
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("; "));
+    }
+
+    /// The text and its trailing `;` go in two invocations. When the first is
+    /// refused nothing was typed; when the second is (tmux refuses 2,000 bytes
+    /// in one invocation, measured on 3.7b), the text is on the screen and the
+    /// failure says so.
+    #[test]
+    fn a_failure_after_the_text_landed_is_partial() {
+        let server = TestServer::new("partial");
+        let file = recording_pane(&server, "partial");
+        let text = format!("end{}", ";".repeat(2000));
+        let failed = send_literal(&server.socket(), "partial", &text).unwrap_err();
+        assert!(
+            matches!(&failed, TmuxError::Partial { typed: 3, of: 2003, source }
+                if matches!(**source, TmuxError::Failed { .. })),
+            "{failed}"
+        );
+        assert!(failed.outcome_is_indeterminate());
+        assert_eq!(recorded(&file, 3), b"end");
+
+        let refused = send_literal(&server.socket(), "no-such-pane", "end;").unwrap_err();
+        assert!(matches!(refused, TmuxError::Failed { .. }), "{refused}");
+        assert!(!refused.outcome_is_indeterminate());
     }
 
     /// Owns a private tmux server for one test — and owns it from *before*
