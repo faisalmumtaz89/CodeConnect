@@ -164,7 +164,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_queue_that_never_answers_is_killed_at_the_deadline() {
-        let (dir, bin) = fake_codex("hang", r#"echo $$ > "$(dirname "$0")/pid"; exec sleep 30"#);
+        // Hung for 30 s at most, so a build without the kill leaves nothing behind for long.
+        // It is found by its own path, which also finds it if the deadline came before it
+        // ever ran.
+        let (dir, bin) = fake_codex(
+            "hang",
+            "i=0; while [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done",
+        );
         let started = std::time::Instant::now();
         let err = queue(
             &bin,
@@ -180,23 +186,26 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        let pid: i32 = std::fs::read_to_string(dir.join("pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        // Polled on the runtime, so its child reaper runs and a killed pid does not linger
-        // as a zombie that signal 0 still finds.
+        // Polled on the runtime, so its child reaper runs and a killed child does not
+        // linger as a zombie.
+        let alive = || {
+            std::process::Command::new("pgrep")
+                .arg("-f")
+                .arg(&bin)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
         let mut gone = false;
-        for _ in 0..100 {
-            // SAFETY: signal 0 only asks whether the pid exists.
-            if unsafe { libc::kill(pid, 0) } != 0 {
+        for _ in 0..250 {
+            if !alive() {
                 gone = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(gone, "the hung codex {pid} outlived the deadline");
+        assert!(gone, "the hung codex outlived the deadline");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
