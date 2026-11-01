@@ -26061,6 +26061,38 @@ mod tests {
         assert!(!protocol::ipc::MAIL_NUDGE.contains("MARKER"));
     }
 
+    /// **A run's mail is ended the moment the run exits** (M23-c), not at the next
+    /// sweep: its sender reads `ended` at once.
+    #[tokio::test]
+    async fn a_runs_unread_mail_is_ended_the_moment_it_exits() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let run = register(&daemon, "cc-1", None).await;
+        let status = daemon
+            .send_agent_message_on(
+                Some(&tailnet),
+                &sender,
+                &format!("{}@studio", run.session.uid),
+                "hi",
+                None,
+            )
+            .await;
+        assert_eq!(status.state, protocol::ipc::MailState::Waiting);
+        daemon
+            .session_exited("cc-1", Some(&run.session.uid), Some(0), None, Some(&run))
+            .await;
+        let (_, mine) = daemon.offer_agent_messages(&sender).await.unwrap();
+        assert_eq!(
+            mine.updates
+                .iter()
+                .map(|u| (u.message_id.as_str(), u.state))
+                .collect::<Vec<_>>(),
+            [(status.message_id.as_str(), protocol::ipc::MailState::Ended)]
+        );
+    }
+
     /// **The agents a session can message**: every other run on this computer
     /// that was launched with mail, each by its own address with its label beside
     /// it, and never itself; the asker is told its own.

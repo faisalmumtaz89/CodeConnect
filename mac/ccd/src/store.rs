@@ -10909,6 +10909,101 @@ mod tests {
         );
     }
 
+    /// **Start-up recovery gives back only what was mid-read** (B38-a): a message
+    /// already read stays read.
+    #[test]
+    fn recovery_never_makes_read_mail_unread() {
+        let (store, path, receiver, sender) = mail_store();
+        let now = 1_000_000_000;
+        for id in ["m1", "m2"] {
+            store
+                .take_mail(
+                    &intake(id, &receiver, "", &sender.uid, "hi"),
+                    now,
+                    MAIL_LIMITS,
+                )
+                .unwrap();
+            store
+                .offer_mail(&receiver.uid, &format!("o-{id}"), now)
+                .unwrap();
+        }
+        store.read_mail("o-m1").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.recover_mail().unwrap(), 1);
+        assert_eq!(
+            offered_ids(&store.offer_mail(&receiver.uid, "o3", now).unwrap()),
+            ["m2"]
+        );
+    }
+
+    /// **The receiver's own expiry tells the sender** (M23-b, M23-e), for a
+    /// sender told `waiting` when it sent, as a real local send is; and at the day
+    /// itself, not after it.
+    #[test]
+    fn receiver_side_expiry_tells_a_sender_that_was_told_waiting() {
+        let (store, _path, receiver, sender) = mail_store();
+        let t0 = 1_000_000_000;
+        store.file_sent_mail(&sent("m1", &sender), t0).unwrap();
+        store
+            .take_mail(
+                &intake("m1", &receiver, "", &sender.uid, "hi"),
+                t0,
+                MAIL_LIMITS,
+            )
+            .unwrap();
+        store
+            .note_sent_mail("m1", protocol::ipc::MailState::Waiting, None, true)
+            .unwrap();
+        store
+            .sweep_mail(t0 + MAIL_LIMITS.unread_ms, MAIL_LIMITS)
+            .unwrap();
+        let updates = store
+            .offer_mail(&sender.uid, "o1", t0 + MAIL_LIMITS.unread_ms)
+            .unwrap()
+            .updates;
+        assert_eq!(
+            updates
+                .iter()
+                .map(|u| (u.message_id.as_str(), u.state))
+                .collect::<Vec<_>>(),
+            [("m1", protocol::ipc::MailState::Expired)]
+        );
+    }
+
+    /// **Settled mail is dropped a week on, and not before** (B20-a), on both sides.
+    #[test]
+    fn settled_mail_is_dropped_a_week_on() {
+        let (store, _path, receiver, sender) = mail_store();
+        let t0 = 1_000_000_000;
+        store.file_sent_mail(&sent("m1", &sender), t0).unwrap();
+        store
+            .take_mail(
+                &intake("m1", &receiver, "", &sender.uid, "hi"),
+                t0,
+                MAIL_LIMITS,
+            )
+            .unwrap();
+        store.offer_mail(&receiver.uid, "o1", t0).unwrap();
+        store.read_mail("o1").unwrap();
+        store.offer_mail(&sender.uid, "o2", t0).unwrap();
+        store.read_mail("o2").unwrap();
+        let kept = |store: &Store| {
+            (
+                store.mail_context(&receiver.uid, "m1").unwrap().is_some(),
+                store.sent_mail_computer("m1").unwrap().is_some(),
+            )
+        };
+        store
+            .sweep_mail(t0 + MAIL_LIMITS.settled_ms - 1, MAIL_LIMITS)
+            .unwrap();
+        assert_eq!(kept(&store), (true, true), "kept until the week is up");
+        store
+            .sweep_mail(t0 + MAIL_LIMITS.settled_ms, MAIL_LIMITS)
+            .unwrap();
+        assert_eq!(kept(&store), (false, false), "dropped once it is");
+    }
+
     #[test]
     fn every_session_scoped_table_is_named_in_the_prune_list() {
         // Read back off the schema, so a table added later cannot silently
