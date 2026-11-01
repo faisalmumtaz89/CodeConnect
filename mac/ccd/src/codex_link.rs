@@ -8727,12 +8727,24 @@ impl Connection<'_> {
     /// person's next turn has ended; either of those turn ends, counted, would let the
     /// rule queue a second nudge behind the first (measured at 5d42ce3). A nudge Codex
     /// never runs leaves the wake outstanding.
+    ///
+    /// Any other user message is the person's own turn, which the mailbox hears of as
+    /// it hears of Claude's prompts.
     async fn note_mail_turn_end(&self, filed: &protocol::event::Event) {
         let ended_now = filed.kind == protocol::event::EventKind::TurnComplete;
-        let nudge_now = filed.kind == protocol::event::EventKind::UserMessage
+        let message_now = filed.kind == protocol::event::EventKind::UserMessage;
+        let nudge_now = message_now
             && filed.payload["text"]
                 .as_str()
                 .is_some_and(protocol::ipc::is_mail_nudge);
+        // A message the person sent is their turn, as Claude's prompt is: wakes that had
+        // stopped start again, and the rule decides at once; Codex's own queue holds a
+        // wake until that turn ends.
+        if message_now && !nudge_now {
+            crate::mail::prompt_submitted(self.daemon, &self.session.uid).await;
+            crate::mail::waiter_registered(self.daemon, &self.session.uid);
+            return;
+        }
         if !ended_now && !nudge_now {
             return;
         }
@@ -15325,6 +15337,55 @@ mod tests {
             wake_row(&db, &session),
             (1, 0),
             "the person's busy turn ended, and the nudge queued behind it has not run"
+        );
+    }
+
+    /// **The person's own Codex turn resumes wakes that had stopped** (M-08): after
+    /// three woken turns left the mail unread, a turn the person starts counts as theirs
+    /// (its message is no wake line) and wakes start again, as a prompt does for Claude.
+    ///
+    /// **Mutation:** pass the person's message to nothing. The misses stay at three and
+    /// the mail is never woken for again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_persons_codex_turn_resumes_wakes_that_had_stopped() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000HUM".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = a_run_with_a_wake_outstanding(&session);
+        let store = crate::store::Store::open(db.path()).unwrap();
+        for miss in 1..=3 {
+            if miss > 1 {
+                assert!(store
+                    .claim_mail_wake(&session.uid, protocol::time::now_unix_ms(), false)
+                    .unwrap());
+            }
+            store
+                .mail_turn_ended(&session.uid, protocol::time::now_unix_ms(), 3)
+                .unwrap();
+        }
+        assert_eq!(
+            wake_row(&db, &session),
+            (0, 3),
+            "the premise: wakes have stopped"
+        );
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = a_connection_on(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            1,
+            LIFECYCLE_THREAD,
+        );
+        for frame in live_turn(Value::clone) {
+            conn.observe_notification(&frame).await;
+        }
+        assert!(
+            wake_row_reaches(&db, &session, (0, 0)).await,
+            "the person's turn resumed wakes: {:?}",
+            wake_row(&db, &session)
         );
     }
 
