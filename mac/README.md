@@ -103,9 +103,8 @@ when it is busy.
 Both kinds of session get one MCP server of CodeConnect's own, `codeconnect`
 (`--mcp-config` before `--settings` for Claude Code; `-c mcp_servers.codeconnect.…` on
 Codex's app server), with which an agent lists the other running sessions and sends one a
-message. `ccd` keeps the message until the receiving session is free and starts it as a turn
-of its own, on this computer or, carried over Tailscale to that computer's `ccd`, on another
-of the same Tailscale user's computers. See
+message. `ccd` keeps the message for the receiving session, on this computer or, carried over
+Tailscale to that computer's `ccd`, on another of the same Tailscale user's computers. See
 [docs/codex.md](../docs/codex.md#messages-from-other-agents).
 
 Your arguments reach `codex` as native `codex` would read them — the sandbox, approval
@@ -1076,10 +1075,7 @@ means an incompatible peer cannot use the handshake to probe credentials.
   from the transcript alone, after the turn's last reply. The Stop hook arrives
   before that reply is on disk (up to 100 ms), so filing the end from the hook put
   it above the reply. When the Stop hooks end a turn, Claude writes a
-  `stop_hook_summary` line after the reply, and that line is the end. A summary
-  whose hooks handed Claude more to read (other agents' messages, in
-  `hookAdditionalContext`) ends nothing: Claude answers them in the same turn, and
-  the summary after that answer is the end. Every user
+  `stop_hook_summary` line after the reply, and that line is the end. Every user
   turn that finishes also gets a `turn_duration` line. It is the end when a tool
   ended the turn (an MCP result's `claude/endTurn`, a `/loop` wakeup), which runs
   the Stop hook but writes no summary, and when an API error ended it: Claude

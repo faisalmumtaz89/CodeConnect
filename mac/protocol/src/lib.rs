@@ -588,17 +588,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     A client that gets none tells machines apart by address, as before.
 ///   * `27` — **Agents message each other.**
 ///
-///     A hosted agent can send another a message, which its computer's daemon
-///     gives it as a turn of its own once it is free. Between this computer's own
-///     processes, and nothing a phone sends or reads changes:
-///       - [`ipc::SupervisorRequest::SendText`]'s `require_free_composer` — the
-///         supervisor types only into a Claude composer with no turn running and
-///         nothing in the box ([`ipc::composer_is_free`]), read in the same request.
-///         A supervisor below 27 would drop it, so the daemon never sends it one.
-///       - [`hook::HookDecision`]'s `additional_context` — the daemon's answer to a
-///         `Stop` hook that waits for one (`cc-hook --reply-ms`), printed for
-///         Claude as Stop hook feedback. A session started before 27 has no such
-///         hook; it takes messages once restarted.
+///     A hosted agent can send another a message, which the receiving computer's
+///     daemon keeps for that agent. Between this computer's own processes, and
+///     nothing a phone sends or reads changes:
+///       - [`ipc::ClientFrame::SendAgentMessage`] and [`ipc::ClientFrame::ListAgents`]
+///         — the `codeconnect` tool's requests.
 ///       - [`peer`] — one daemon asking another: a frame that is not a phone
 ///         message, before any phone hello, may be a [`peer::PeerRequest`], answered by one
 ///         [`peer::PeerReply`] and the connection closed. A daemon below 27

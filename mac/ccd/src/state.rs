@@ -91,15 +91,6 @@ const SUPERVISOR_MINOR_QUESTION_TIMEOUT: u32 = 21;
 const SUPERVISOR_MINOR_COMPOSER_RECOVERY: u32 = 9;
 /// The supervisor build that can *complete* a view instead of dismissing it.
 const SUPERVISOR_MINOR_CONFIRM_VIEW: u32 = 10;
-/// The supervisor build that reads the composer free before typing an agent's
-/// message. An older one drops `require_free_composer` and would type into the
-/// person's draft or a running turn.
-const SUPERVISOR_MINOR_FREE_COMPOSER: u32 = 27;
-/// Why an agent's message waits for a session whose supervisor predates
-/// [`SUPERVISOR_MINOR_FREE_COMPOSER`].
-pub(crate) const SUPERVISOR_PREDATES_AGENT_MESSAGES: &str =
-    "the agent's session started before this CodeConnect, which can give it messages only \
-     once it is restarted";
 
 /// How long a single `tmux has-session` may take before the sweep gives up on
 /// it. A client that reaches a live server answers in single-digit
@@ -315,12 +306,6 @@ pub struct Daemon {
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
-    /// One per run with messages from other agents: held while they are handed out,
-    /// so two passes never overlap and the oldest message always goes first.
-    pub(crate) agent_message_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// The runs whose held messages are being retried. See
-    /// [`crate::agent_messages`].
-    pub(crate) agent_message_retries: Mutex<HashSet<String>>,
 }
 
 /// **What the Claude-only gate found**, for the callers that must tell two refusals
@@ -1826,12 +1811,8 @@ struct CardKey(String);
 /// (`isSidechain`), which is not a turn of the run, as with the tailer's turn
 /// ends.
 fn delivers_prompt(pending: &PendingEvent) -> bool {
-    delivers_prompt_line(&pending.kind, &pending.payload)
-}
-
-/// [`delivers_prompt`] over a line's kind and payload, as the log holds them.
-pub(crate) fn delivers_prompt_line(kind: &EventKind, line: &serde_json::Value) -> bool {
-    *kind == EventKind::UserMessage
+    let line = &pending.payload;
+    pending.kind == EventKind::UserMessage
         && line["queueTranscriptOnly"] != true
         && line["isSidechain"] != true
         && (line["promptSource"]
@@ -1945,8 +1926,6 @@ impl Daemon {
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
-            agent_message_gates: Mutex::new(HashMap::new()),
-            agent_message_retries: Mutex::new(HashSet::new()),
         })
     }
 
@@ -2087,15 +2066,6 @@ impl Daemon {
                  unknown; a retry will be told so rather than typing again"
             ),
             Err(err) => crate::log_error!("recovery: could not settle send_text claims: {err:#}"),
-        }
-
-        match self.db.recover_agent_messages(now.clone()).await {
-            Ok(0) => {}
-            Ok(count) => crate::log_warn!(
-                "recovery: {count} message(s) from other agents were being handed out and \
-                 their outcome is unknown; they are not handed out again"
-            ),
-            Err(err) => crate::log_error!("recovery: could not settle agent messages: {err:#}"),
         }
 
         // **Whether the cards are back, which is what the answer recovery below depends
@@ -3169,16 +3139,6 @@ impl Daemon {
                 if absent && self.db.load_cursor(session.uid.clone()).await?.is_none() {
                     self.ingest(hook_event(&session, &event_name, &post.payload, &input))
                         .await?;
-                }
-                // A hook that waits for the answer is one that can carry other
-                // agents' messages back; a background agent's Stop is not the
-                // run's turn ending. One that has already given up on this
-                // daemon (its reply bound passed while this was stalled) takes
-                // nothing, so the messages wait for the next turn's end.
-                if post.wait && main_thread(&post.payload) && !hook_has_left(gone).await {
-                    if let Some(text) = self.agent_messages_at_turn_end(&session.uid).await {
-                        return Ok(HookDecision::stop_context(text));
-                    }
                 }
             }
             _ => {
@@ -5197,15 +5157,6 @@ impl Daemon {
             .collect())
     }
 
-    /// Whether the run's supervisor is attached now.
-    pub(crate) async fn is_attached(&self, session_uid: &str) -> bool {
-        self.inner
-            .lock()
-            .await
-            .supervisors
-            .contains_key(session_uid)
-    }
-
     // --------------------------------------------------------------- answers
 
     /// Which run an answer is for.
@@ -5829,21 +5780,6 @@ impl Daemon {
         text: String,
         payload_hash: &str,
     ) -> protocol::ws::ComposeResult {
-        self.compose_as(session_ref, request_id, text, payload_hash, false)
-            .await
-    }
-
-    /// [`Daemon::compose`], or with `agent_message` another agent's message, which the
-    /// link only ever starts a turn with and only when the thread is free (see
-    /// [`crate::codex_link::agent_message_hold`]).
-    pub(crate) async fn compose_as(
-        &self,
-        session_ref: &str,
-        request_id: &str,
-        text: String,
-        payload_hash: &str,
-        agent_message: bool,
-    ) -> protocol::ws::ComposeResult {
         use protocol::ws::ComposeResult;
 
         let refuse = |reason: String| ComposeResult::Rejected { reason };
@@ -6046,7 +5982,6 @@ impl Daemon {
                         claimed_hash,
                         visit.upstream_epoch,
                         admitted,
-                        agent_message,
                     )
                     .await
             }
@@ -7310,7 +7245,6 @@ impl Daemon {
                         // clock that actually matters — including whatever time
                         // this request spends queued before it is read.
                         respond_by_monotonic_ms: Some(respond_by),
-                        require_free_composer: false,
                     },
                 )
                 .await
@@ -7367,51 +7301,6 @@ impl Daemon {
             }
         }
         result
-    }
-
-    /// **Type an agent's message into a Claude run's composer**, and submit it, only
-    /// while the composer is free: the supervisor reads the turn and the box in the
-    /// same request, immediately before the keys (`require_free_composer`). Answered
-    /// as the phone's text is, and `Refused` likewise means nothing was typed.
-    pub(crate) async fn type_agent_message(
-        &self,
-        session_uid: &str,
-        text: String,
-    ) -> SendTextResult {
-        let transcript_path = match self.db.get_session(session_uid.to_string()).await {
-            Ok(row) => row.and_then(|row| row.transcript_path),
-            Err(err) => {
-                return SendTextResult::Refused {
-                    reason: format!("could not read the session: {err:#}; nothing was typed"),
-                }
-            }
-        };
-        let outcome = match respond_by_stamp(self.config.supervisor_timeout_ms) {
-            Err(refused) => Err(refused),
-            Ok(respond_by) => {
-                self.supervisor_request(
-                    session_uid,
-                    SupervisorRequest::SendText {
-                        text,
-                        require: self.with_needle_overrides(PromptPresence::InputBox),
-                        targets_composer: true,
-                        // Where Claude records the session's own name, which a
-                        // named session's message box carries in its top rule.
-                        transcript_path,
-                        asking: None,
-                        submit: true,
-                        expect: None,
-                        recover_composer: false,
-                        capture_recovered: false,
-                        confirm_view: None,
-                        respond_by_monotonic_ms: Some(respond_by),
-                        require_free_composer: true,
-                    },
-                )
-                .await
-            }
-        };
-        send_text_result_of(outcome)
     }
 
     pub async fn capture(&self, session_ref: &str, lines: u32) -> Result<String> {
@@ -9038,13 +8927,6 @@ impl Daemon {
                 ..
             }
         );
-        let needs_free_composer = matches!(
-            &request,
-            SupervisorRequest::SendText {
-                require_free_composer: true,
-                ..
-            }
-        );
         let (slot, tx, rx) = {
             let inner = self.inner.lock().await;
             let Some(handle) = inner.supervisors.get(session_uid) else {
@@ -9057,11 +8939,6 @@ impl Daemon {
                     "this session cannot recover slash-command views safely yet. Restart it \
                      after updating CodeConnect, or use Terminal."
                         .into(),
-                ));
-            }
-            if needs_free_composer && handle.protocol_minor < SUPERVISOR_MINOR_FREE_COMPOSER {
-                return Err(SupervisorFailure::NotSent(
-                    SUPERVISOR_PREDATES_AGENT_MESSAGES.into(),
                 ));
             }
             // Completing a view is decided against **this** handle for the same
@@ -10891,12 +10768,6 @@ fn request_event_source(agent: &protocol::agent::AgentKind) -> Source {
         protocol::agent::AgentKind::Codex => Source::Daemon,
         _ => Source::Hook,
     }
-}
-
-/// Whether a waiting hook has already hung up: its connection has closed.
-/// Looked at once, without waiting.
-async fn hook_has_left(gone: &mut (dyn std::future::Future<Output = ()> + Send + Unpin)) -> bool {
-    tokio::time::timeout(Duration::ZERO, gone).await.is_ok()
 }
 
 /// A hook from the main conversation rather than a background agent.
@@ -13560,14 +13431,6 @@ mod tests {
                         } if silent.load(std::sync::atomic::Ordering::SeqCst) => {
                             let _ = (text, require, expect);
                             continue;
-                        }
-                        SupervisorRequest::SendText {
-                            require_free_composer: true,
-                            ..
-                        } if protocol::ipc::composer_is_free(&on_screen, None).is_err() => {
-                            SupervisorResult::Refused {
-                                reason: "the composer is not free".into(),
-                            }
                         }
                         SupervisorRequest::SendText {
                             text,
@@ -25651,7 +25514,7 @@ mod tests {
     /// **What an agent's message is told, case by case**, on this computer as the
     /// recorded tailnet names it (`studio`; `desktop` online, `linux-box` offline).
     #[tokio::test]
-    async fn an_agents_message_is_refused_held_or_recognised_as_a_repeat() {
+    async fn an_agents_message_is_refused_or_held() {
         let daemon = test_daemon();
         let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
             "../../../fixtures/tailscale/status-six-nodes.json"
@@ -25715,10 +25578,6 @@ mod tests {
             matches!(first, protocol::ipc::AgentMessageOutcome::Held { .. }),
             "{first:?}"
         );
-        assert_eq!(
-            send("cc-1@studio", "please review").await,
-            protocol::ipc::AgentMessageOutcome::Duplicate
-        );
         let second = send("cc-1@Studio", "and this").await;
         assert!(
             matches!(second, protocol::ipc::AgentMessageOutcome::Held { .. }),
@@ -25740,167 +25599,6 @@ mod tests {
                  send_message to cc-2@studio.\n\nand this",
             ]
         );
-    }
-
-    /// **An agent's message reaches a Claude run only between turns, into an empty
-    /// box.** Held while a prompt's turn runs, while the box holds a draft, and after
-    /// the person stops a turn until a later prompt's turn ends; typed once when the
-    /// run is free. A supervisor from before agent messages is never asked to type.
-    #[tokio::test]
-    async fn an_agents_message_reaches_claude_between_turns_into_an_empty_box() {
-        use crate::agent_messages::{HELD_AFTER_INTERRUPT, HELD_COMPOSER_BUSY, HELD_WORKING};
-        const EMPTY: &str = "─────\n❯ \n─────\n  ? for shortcuts";
-        const DRAFT: &str = "─────\n❯ my own words\n─────\n  ? for shortcuts";
-        let daemon = test_daemon();
-        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
-            "../../../fixtures/tailscale/status-six-nodes.json"
-        ))
-        .unwrap();
-        let sender = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &sender, "cc-2").await;
-        let claude = attach(&daemon, "cc-1", TEST_UID, EMPTY, "").await;
-        let send = |to: &'static str, text: &'static str| {
-            let daemon = Arc::clone(&daemon);
-            let tailnet = tailnet.clone();
-            let sender = sender.clone();
-            async move {
-                daemon
-                    .send_agent_message_on(Some(&tailnet), &sender, to, text)
-                    .await
-            }
-        };
-        let held = |outcome: protocol::ipc::AgentMessageOutcome| match outcome {
-            protocol::ipc::AgentMessageOutcome::Held { reason } => reason,
-            other => panic!("expected it held, got {other:?}"),
-        };
-        let end = |uuid: &str| {
-            json!({"type": "system", "subtype": "stop_hook_summary",
-                                      "isSidechain": false, "uuid": uuid})
-        };
-        let header = "[CodeConnect] Message from cc-2@studio (Codex · project tmp). Reply with \
-                      send_message to cc-2@studio.\n\n";
-
-        transcript_line(&daemon, &restamped_prompt(false, "p1")).await;
-        assert_eq!(held(send("cc-1@studio", "first").await), HELD_WORKING);
-        transcript_line(&daemon, &end("s1")).await;
-        claude.show(DRAFT);
-        assert_eq!(
-            daemon.hand_out_agent_messages(TEST_UID).await.as_deref(),
-            Some(HELD_COMPOSER_BUSY)
-        );
-        assert!(
-            claude.typed().is_empty(),
-            "nothing joins the person's draft"
-        );
-        claude.show(EMPTY);
-        assert_eq!(daemon.hand_out_agent_messages(TEST_UID).await, None);
-        assert_eq!(claude.typed(), [format!("{header}first")]);
-
-        transcript_line(&daemon, &restamped_prompt(false, "p2")).await;
-        transcript_line(
-            &daemon,
-            &json!({"type": "user", "uuid": "m2", "message": {"role": "user",
-                    "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}),
-        )
-        .await;
-        assert_eq!(
-            held(send("cc-1@studio", "second").await),
-            HELD_AFTER_INTERRUPT
-        );
-        transcript_line(&daemon, &restamped_prompt(false, "p3")).await;
-        assert_eq!(
-            daemon.hand_out_agent_messages(TEST_UID).await.as_deref(),
-            Some(HELD_WORKING)
-        );
-        transcript_line(&daemon, &end("s3")).await;
-        assert_eq!(daemon.hand_out_agent_messages(TEST_UID).await, None);
-        assert_eq!(
-            claude.typed(),
-            [format!("{header}first"), format!("{header}second")]
-        );
-
-        let old_uid = protocol::uid::new().unwrap();
-        let old = attach_speaking(&daemon, "cc-4", &old_uid, EMPTY, "", 26).await;
-        assert_eq!(
-            held(send("cc-4@studio", "third").await),
-            SUPERVISOR_PREDATES_AGENT_MESSAGES
-        );
-        assert!(old.typed().is_empty());
-    }
-
-    /// **A busy Claude is handed its held messages at its turn's end**, through the
-    /// Stop hook that waits for the answer: oldest first, as one text, each once.
-    /// A background agent's Stop and a Stop that does not wait hand out nothing.
-    #[tokio::test]
-    async fn a_busy_claude_takes_its_held_messages_at_its_turns_end() {
-        const EMPTY: &str = "─────\n❯ \n─────\n  ? for shortcuts";
-        let daemon = test_daemon();
-        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
-            "../../../fixtures/tailscale/status-six-nodes.json"
-        ))
-        .unwrap();
-        let sender = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &sender, "cc-2").await;
-        let claude = attach(&daemon, "cc-1", TEST_UID, EMPTY, "").await;
-        transcript_line(&daemon, &restamped_prompt(false, "p1")).await;
-        for text in ["first", "second"] {
-            let outcome = daemon
-                .send_agent_message_on(Some(&tailnet), &sender, "cc-1@studio", text)
-                .await;
-            assert!(
-                matches!(outcome, protocol::ipc::AgentMessageOutcome::Held { .. }),
-                "{outcome:?}"
-            );
-        }
-        let stop = |wait: bool, agent_id: Option<&str>| {
-            let mut payload =
-                json!({"hook_event_name": "Stop", "session_id": "uuid", "cwd": "/tmp"});
-            if let Some(agent) = agent_id {
-                payload["agent_id"] = json!(agent);
-            }
-            HookPost {
-                session_id: "cc-1".into(),
-                session_uid: Some(TEST_UID.to_string()),
-                event: "Stop".into(),
-                payload,
-                wait,
-                holds_questions: false,
-                holds_approvals: false,
-            }
-        };
-        for (wait, agent) in [(true, Some("a1b2")), (false, None)] {
-            assert_eq!(
-                daemon.handle_hook(stop(wait, agent)).await,
-                HookDecision::passthrough()
-            );
-        }
-        // A hook that gave up before the daemon read its Stop (a stalled daemon)
-        // takes nothing.
-        assert_eq!(
-            daemon
-                .handle_hook_held(stop(true, None), &mut std::future::ready(()))
-                .await,
-            HookDecision::passthrough()
-        );
-        assert_eq!(daemon.store.held_agent_messages(TEST_UID).unwrap().len(), 2);
-
-        let header = "[CodeConnect] Message from cc-2@studio (Codex · project tmp). Reply with \
-                      send_message to cc-2@studio.\n\n";
-        assert_eq!(
-            daemon.handle_hook(stop(true, None)).await,
-            HookDecision::stop_context(format!("{header}first\n\n{header}second"))
-        );
-        assert!(daemon
-            .store
-            .held_agent_messages(TEST_UID)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            daemon.handle_hook(stop(true, None)).await,
-            HookDecision::passthrough(),
-            "a message is handed out once"
-        );
-        assert!(claude.typed().is_empty(), "nothing was typed into the box");
     }
 
     /// **Another computer's daemon is served only when it is one of the owner's
@@ -25969,10 +25667,6 @@ mod tests {
             outcome(serve(desktop, message("cc-7", "cc-1", "please review")).await),
             protocol::ipc::AgentMessageOutcome::Held { .. }
         ));
-        assert_eq!(
-            outcome(serve(desktop, message("cc-7", "cc-1", "please review")).await),
-            protocol::ipc::AgentMessageOutcome::Duplicate
-        );
         assert!(matches!(
             outcome(serve(desktop, message("cc-7", "cc-9", "hi")).await),
             protocol::ipc::AgentMessageOutcome::Refused { reason } if reason.contains("not a running session")

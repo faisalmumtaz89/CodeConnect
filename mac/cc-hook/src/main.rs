@@ -8,8 +8,7 @@
 //!    which is behaviourally identical to the hook not being installed at all.
 //! 2. **Never block longer than promised.** Reaching the daemon is bounded by
 //!    `--connect-timeout-ms` (default 200ms) and waiting for a decision by
-//!    `--gate-timeout-ms`, and a `Stop` asked for its reply by `--reply-ms`.
-//!    Other observability events do not wait at all. The one
+//!    `--gate-timeout-ms`. Observability events do not wait at all. The one
 //!    exception is `PermissionRequest`: its answer comes from the phone through
 //!    this hook, so it is held for as long as Claude waits on it: Claude's
 //!    hook timeout is the bound. It ends sooner when its parent changes (Claude,
@@ -40,9 +39,6 @@ struct Args {
     event: Option<String>,
     gate: bool,
     gate_timeout: Duration,
-    /// Wait this long for the daemon's reply to an event that is not the gate:
-    /// the `Stop` that hands a busy Claude other agents' messages.
-    reply: Option<Duration>,
     connect_timeout: Duration,
     unreachable_ask: bool,
     socket: PathBuf,
@@ -56,7 +52,6 @@ impl Default for Args {
             event: None,
             gate: false,
             gate_timeout: Duration::from_secs(120),
-            reply: None,
             connect_timeout: Duration::from_millis(200),
             unreachable_ask: false,
             socket: protocol::socket_path(),
@@ -81,11 +76,6 @@ fn parse_args<I: Iterator<Item = String>>(mut it: I) -> Args {
             "--connect-timeout-ms" => {
                 if let Some(ms) = it.next().and_then(|v| v.parse::<u64>().ok()) {
                     args.connect_timeout = Duration::from_millis(ms);
-                }
-            }
-            "--reply-ms" => {
-                if let Some(ms) = it.next().and_then(|v| v.parse::<u64>().ok()) {
-                    args.reply = Some(Duration::from_millis(ms));
                 }
             }
             "--socket" => {
@@ -157,7 +147,7 @@ fn run() {
         session_uid: resolve_session_uid(&args),
         event: event_name.as_str().to_string(),
         payload,
-        wait: args.gate || args.reply.is_some(),
+        wait: args.gate,
         holds_questions: args.gate,
         holds_approvals: args.gate,
     };
@@ -279,17 +269,13 @@ fn post_to_daemon(
         .and_then(|()| stream.write_all(b"\n"))
         .and_then(|()| stream.flush())
         .map_err(|err| format!("write: {err}"))?;
-    if !post.wait {
+    if !args.gate {
         // Half-close so the daemon sees a clean end-of-request even if it reads to EOF.
         let _ = stream.shutdown(Shutdown::Write);
         return Ok(HookDecision::passthrough());
     }
 
-    let _ = stream.set_read_timeout(match (held, args.gate) {
-        (true, _) => None,
-        (false, true) => Some(args.gate_timeout),
-        (false, false) => args.reply,
-    });
+    let _ = stream.set_read_timeout((!held).then_some(args.gate_timeout));
     if held {
         exit_when_orphaned(parent);
     }
@@ -431,19 +417,6 @@ mod tests {
         let args = args_from(&["--session", "cc-1", "--event", "PreToolUse"]);
         assert_eq!(args.session_uid, None);
         assert_eq!(args.session.as_deref(), Some("cc-1"));
-    }
-
-    /// A Stop asked for its reply waits for it, bounded; one from a settings file
-    /// that does not ask stays fire-and-forget, and an unreachable daemon prints
-    /// nothing either way.
-    #[test]
-    fn a_stop_asked_for_its_reply_waits_a_bounded_time() {
-        let asked = args_from(&["--event", "Stop", "--reply-ms", "2000"]);
-        assert_eq!(asked.reply, Some(Duration::from_millis(2000)));
-        assert!(!asked.gate);
-        assert_eq!(args_from(&["--event", "Stop"]).reply, None);
-        let silent = fallback_decision(&asked, &HookEventName::Stop, "timeout");
-        assert_eq!(silent.render(&HookEventName::Stop), None);
     }
 
     #[test]

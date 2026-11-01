@@ -234,21 +234,6 @@ extension Event {
         return LocalCommandLine.parse(content)
     }
 
-    /// Other agents' messages a working Claude was handed at its turn's end: the
-    /// Stop hook's `hook_additional_context` attachment, which Claude Code writes
-    /// after the turn's answer and before the answer to the messages (2.1.316,
-    /// recorded). Empty for every other line, and for a block that is not
-    /// CodeConnect's.
-    var stopFedAgentMail: [AgentMail] {
-        guard kind == .other("transcript_attachment"),
-            let attachment = payload["attachment"],
-            attachment["type"]?.stringValue == "hook_additional_context",
-            attachment["hookEvent"]?.stringValue == "Stop",
-            let content = attachment["content"]?.arrayValue
-        else { return [] }
-        return content.compactMap(\.stringValue).flatMap(AgentMail.parse)
-    }
-
     /// The background-task report this user line is — see `TaskNotification`.
     /// Claude Code stamps one `origin.kind: "task-notification"`; a line with
     /// no origin at all is still read by its shape, as the TUI reads it, and a

@@ -1725,8 +1725,8 @@ mod tests {
         );
         const _: () = assert!(
             crate::PROTOCOL_MINOR >= 27,
-            "`require_free_composer` on a supervisor's `send_text`, for an agent's \
-             message, is minor 27"
+            "agents' messages (`send_agent_message`, `list_agents`, `protocol::peer`) are \
+             minor 27"
         );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it

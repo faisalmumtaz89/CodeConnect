@@ -184,11 +184,6 @@ pub struct HookDecision {
     /// dialog does (measured on 2.1.286: same text, no model request, no Stop).
     #[serde(default, skip_serializing_if = "is_false")]
     pub interrupt: bool,
-    /// On a `Stop`: text Claude reads once its turn's own answer is done, and
-    /// answers in a continuation of that turn ("Stop hook feedback"). Other
-    /// agents' messages reach a busy Claude this way (minor 27).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_context: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -217,15 +212,6 @@ impl HookDecision {
             reason: None,
             updated_input: None,
             interrupt: false,
-            additional_context: None,
-        }
-    }
-
-    /// A `Stop` hook's text for Claude to answer before its turn ends.
-    pub fn stop_context(text: impl Into<String>) -> Self {
-        HookDecision {
-            additional_context: Some(text.into()),
-            ..HookDecision::passthrough()
         }
     }
 
@@ -244,14 +230,6 @@ impl HookDecision {
     /// than to an invalid shape, because an invalid shape voids the whole
     /// output — a strictly worse failure than staying silent.
     pub fn render(&self, event: &HookEventName) -> Option<String> {
-        if let (HookEventName::Stop, Some(context)) = (event, &self.additional_context) {
-            return Some(
-                serde_json::json!({
-                    "hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": context}
-                })
-                .to_string(),
-            );
-        }
         match (event, self.decision) {
             (_, Decision::Passthrough) => None,
 
@@ -333,25 +311,6 @@ impl HookDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The shape Claude Code 2.1.314 read as Stop hook feedback and answered after
-    /// the turn's own answer (5/5); on any other event the text is not printed.
-    #[test]
-    fn a_stop_context_prints_as_additional_context_on_stop_only() {
-        let decision = HookDecision::stop_context("[CodeConnect] Message from cc-2@studio\n\nhi");
-        let printed: serde_json::Value =
-            serde_json::from_str(&decision.render(&HookEventName::Stop).unwrap()).unwrap();
-        assert_eq!(
-            printed,
-            serde_json::json!({"hookSpecificOutput": {"hookEventName": "Stop",
-                "additionalContext": "[CodeConnect] Message from cc-2@studio\n\nhi"}})
-        );
-        assert_eq!(decision.render(&HookEventName::PostToolUse), None);
-        assert_eq!(
-            HookDecision::passthrough().render(&HookEventName::Stop),
-            None
-        );
-    }
 
     #[test]
     fn passthrough_prints_nothing_for_every_event() {

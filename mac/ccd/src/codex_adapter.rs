@@ -408,8 +408,6 @@ pub struct ResumeSeed {
     /// placeholder ids — a turn read through the live TUI's app-server before a later
     /// turn has run. Its ids settle once a later turn runs (measured on codex 0.164.0).
     unsettled_turn: Option<String>,
-    /// Whether the answer's last turn was interrupted.
-    last_turn_interrupted: bool,
     /// The `(thread, turn)` usage totals held for turns the answer reports finished.
     /// They are **dropped** by the rebuild, never emitted — see the note on discarding
     /// a held usage total in [`CodexAdapter::plan_resume_seed`]: a total held for a turn
@@ -459,12 +457,6 @@ impl ResumeSeed {
     /// completes after it: see [`crate::codex_link`]'s follow-up attach.
     pub fn unsettled_turn_id(&self) -> Option<&str> {
         self.unsettled_turn.as_deref()
-    }
-
-    /// Whether the answer's last turn was interrupted: the person stopped the agent,
-    /// and is owed the next turn.
-    pub fn last_turn_interrupted(&self) -> bool {
-        self.last_turn_interrupted
     }
 }
 
@@ -707,7 +699,6 @@ impl CodexAdapter {
         let mut events = Vec::new();
         let mut running_turns = Vec::new();
         let mut unsettled_turn = None;
-        let mut last_turn_interrupted = false;
         let mut discarded_usage = Vec::new();
         let mut terminal_turns = 0;
         // The finished-turn items this build does not read, counted by why and by type.
@@ -773,9 +764,8 @@ impl CodexAdapter {
             // follow-up resume when it finishes, as for any turn the link attached to
             // while it ran.
 
-            // Overwritten by every turn, so after the loop they describe the last one.
+            // Overwritten by every turn, so after the loop it describes the last one.
             unsettled_turn = None;
-            last_turn_interrupted = status == RESUME_TURN_INTERRUPTED;
             match status {
                 // Alive: the answer confirms the turn is running and nothing more.
                 // Its items are never read.
@@ -911,7 +901,6 @@ impl CodexAdapter {
             terminal_turns,
             running_turns,
             unsettled_turn,
-            last_turn_interrupted,
             discarded_usage,
         })
     }
@@ -2930,14 +2919,6 @@ mod tests {
         let stopped_mid_reply = captured(include_str!(
             "../../../fixtures/codex/resume-interrupted-turn-0.164.0.json"
         ));
-        let result = &stopped_mid_reply["answer"]["result"];
-        assert!(
-            CodexAdapter::new(key())
-                .plan_resume_seed(result, result["thread"]["id"].as_str().expect("a thread"))
-                .expect("a captured answer this build reads")
-                .last_turn_interrupted(),
-            "the person stopped the last turn"
-        );
         assert_eq!(
             unsettled(&stopped_mid_reply["answer"]),
             last_turn(&stopped_mid_reply["answer"]),

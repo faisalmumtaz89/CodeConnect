@@ -902,17 +902,6 @@ final class AppModel {
                 applyCodexFixture(state)
                 return
             }
-            // `-CC_MAIL on` stages one Claude session handed other agents'
-            // messages, for the same reason.
-            if UserDefaults.standard.string(forKey: "CC_MAIL") == "on" {
-                fixturesActive = true
-                connection.simulateConnectedForTesting()
-                for message in AgentMailFixtures.frames() {
-                    connection.injectForTesting(message)
-                }
-                keepFixtureLinkFresh()
-                return
-            }
             // `-CC_QUESTION <state>` stages one Claude question card, for the
             // same reason: a state of one session and its daemon's age, not a
             // shape of fleet. Answers resolve locally, as under `-CC_FIXTURE`.

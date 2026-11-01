@@ -376,7 +376,7 @@ enum FleetStatusRule {
             // finished session back to Running a minute later.
             case .link, .sessionStart, .other, .failure, .agentIdle: return false
             case .turnComplete, .turnInterrupted, .sessionEnded, .agentWaiting, .agentFinished,
-                .taskReport, .messageFromAgent:
+                .taskReport:
                 return true
             }
         }

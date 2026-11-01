@@ -120,28 +120,10 @@ session the tool is pre-approved (`default_tools_approval_mode = "approve"`, set
 session's app server only), because Codex asks for MCP tool approval only at the computer's
 keyboard and a send would otherwise wait there.
 
-A message to a Codex session reaches it as a turn of its own, headed
-`[CodeConnect] Message from cc-2@studio (Codex · project api)`, and never joins a turn that is
-running: it waits until the session has been idle for a second, so your own queued message
-goes first, and after you stop a turn with Esc it waits until your next turn ends. The sender
-is told whether it was delivered, held until the session is free, or refused. A held message
-survives a daemon restart and is handed over at most once. A message to another computer that
-is offline, cannot be reached, or runs an older CodeConnect is refused with that reason; one
-whose computer took it but did not answer within 20 seconds is reported as unknown and is not
-sent again.
-
-On the iPhone (the app release after 1.1.12), each message is a "Message from cc-2@studio" row
-with what the agent wrote, whichever way it arrived; an earlier app shows a typed message as your
-words and does not show one handed to a working Claude Code session.
-
-A message to a Claude Code session that is working reaches it when its turn ends: Claude reads
-it as "Stop hook feedback" once its own answer is done and answers it in the same turn, and your
-draft is not touched. A message to an idle Claude Code session is typed into its message box and
-submitted, the same way as text from your phone, but only while the box is empty: a draft of
-yours holds it until you send or clear it, or until a turn ends. After you stop a turn with Esc
-(or answer "No" at a tool's prompt) it waits until your next turn ends. The box is read
-immediately before the keys, so keys you press in that instant can still join the message. A
-Claude Code session started before CodeConnect 0.15.4 takes messages once it is restarted.
+The receiving computer's `ccd` keeps the message for that session, and the sender is told
+whether it was kept or refused, and why. A message to another computer that is offline, cannot
+be reached, or runs an older CodeConnect is refused with that reason; one whose computer took it
+but did not answer within 20 seconds is reported as unknown and is not sent again.
 
 ## What your phone can do
 

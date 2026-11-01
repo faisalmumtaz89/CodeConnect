@@ -367,69 +367,6 @@ fn every_recorded_api_error_turn_ends_once_however_the_file_is_read() {
     );
 }
 
-/// **Where a Claude run's turns stand, line by line**, on recorded transcripts. An
-/// Esc or a "No" at a tool's prompt leaves the run interrupted, the refusal's own
-/// `turn_duration` frees nothing, and only a later prompt's turn ending frees it.
-/// Turns an API error ended free the run like any other.
-#[test]
-fn claude_turns_stand_as_the_recorded_transcripts_say() {
-    use crate::agent_messages::ClaudeTurn::{self, Free, Interrupted, Running};
-    let interrupted = [Free, Running, Interrupted, Running, Free];
-    let mut free_between_seven = vec![Free];
-    for _ in 0..7 {
-        free_between_seven.extend([Running, Free]);
-    }
-    for (relative, expected) in [
-        (
-            "transcript/interrupts-2.1.304/esc-mid-reply.jsonl",
-            interrupted.to_vec(),
-        ),
-        (
-            "transcript/interrupts-2.1.304/esc-during-tool.jsonl",
-            interrupted.to_vec(),
-        ),
-        (
-            "transcript/interrupts-2.1.304/refuse-tool.jsonl",
-            interrupted.to_vec(),
-        ),
-        (
-            "transcript/interrupts-2.1.304/resume-after-esc.jsonl",
-            interrupted.to_vec(),
-        ),
-        ("transcript/api-errors-2.1.305.jsonl", free_between_seven),
-    ] {
-        let store = temp_store();
-        let run = run();
-        seed_session(&store, &run);
-        let path = std::env::temp_dir().join(format!(
-            "ccd-claude-turn-{}-{}-{}.jsonl",
-            relative.replace('/', "_"),
-            std::process::id(),
-            protocol::time::now_unix_ms()
-        ));
-        let mut seen: Vec<ClaudeTurn> = vec![store.claude_turn(&run.uid).unwrap()];
-        let mut written = String::new();
-        for line in std::fs::read_to_string(fixture(relative)).unwrap().lines() {
-            written.push_str(line);
-            written.push('\n');
-            std::fs::write(&path, &written).unwrap();
-            if let Some(scan) =
-                crate::tailer::scan_file(&store, &run, path.to_str().unwrap()).unwrap()
-            {
-                store
-                    .append_batch_with_cursor(&run.uid, &scan.events, &scan.cursor)
-                    .unwrap();
-            }
-            let now = store.claude_turn(&run.uid).unwrap();
-            if seen.last() != Some(&now) {
-                seen.push(now);
-            }
-        }
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(seen, expected, "{relative}");
-    }
-}
-
 /// Read in one scan, as a resumed transcript is, or one line per scan, so no
 /// answer depends on what an earlier scan saw.
 fn each_turn_ends_once_however_the_file_is_read(relative: &str, expected: &[&str]) {
@@ -603,50 +540,6 @@ fn derived_interrupts_wire() -> serde_json::Value {
         runs.insert(name.to_string(), serde_json::Value::Array(events));
     }
     serde_json::Value::Object(runs)
-}
-
-/// **Other agents' messages reaching a Claude session, as this build emits them.**
-/// Recorded from Claude Code 2.1.316 hosted by CodeConnect
-/// (`transcript/agent-messages-2.1.316.jsonl`, trimmed to its conversation and
-/// hook lines): a turn running a tool takes two messages at its end through the
-/// Stop hook, in one `hook_additional_context` attachment after its answer, and
-/// answers them in the same turn; then a message typed into the idle box is a
-/// prompt of its own. Every event, serialised as a phone is sent it; the phone's
-/// timeline tests read the copy under `ios/` (byte-identical, by
-/// `fixtures/check-duplicated-fixtures.sh`).
-#[test]
-fn the_agent_messages_wire_fixture_is_what_this_build_emits() {
-    const FIXTURE: &str =
-        include_str!("../../../fixtures/claude/transcript-agent-messages-wire.json");
-    let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-    assert_eq!(
-        derived_agent_messages_wire(),
-        committed,
-        "the committed agent-messages wire no longer matches what this build emits. \
-         Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
-         regenerate_the_agent_messages_wire_fixture, then copy it over its copy under \
-         ios/ (fixtures/check-duplicated-fixtures.sh names it)"
-    );
-}
-
-/// Rewrite `fixtures/claude/transcript-agent-messages-wire.json` with what this
-/// build emits.
-#[test]
-#[ignore = "generator, not a gate"]
-fn regenerate_the_agent_messages_wire_fixture() {
-    let wire = serde_json::to_string_pretty(&derived_agent_messages_wire()).unwrap();
-    std::fs::write(
-        fixture("claude/transcript-agent-messages-wire.json"),
-        wire + "\n",
-    )
-    .unwrap();
-}
-
-fn derived_agent_messages_wire() -> serde_json::Value {
-    serde_json::Value::Array(emitted_wire(
-        "transcript/agent-messages-2.1.316.jsonl",
-        "2026-10-31T17:20:00.000Z",
-    ))
 }
 
 /// **A scheduled prompt, as this build emits it.** Recorded from Claude Code

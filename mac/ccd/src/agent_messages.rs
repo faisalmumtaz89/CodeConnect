@@ -2,24 +2,7 @@
 //!
 //! An agent names another as `cc-N@<computer>`, the computer being its Tailscale
 //! name ([`protocol::tailnet`]). The daemon of the computer the receiving agent runs
-//! on keeps the message (`agent_messages` in [`crate::store`]) until that agent is
-//! free, then gives it to the agent as a turn of its own: never into a turn that is
-//! running, and never into the person's draft.
-//!
-//! A message is handed out at most once. Its row is marked `handing_out` and
-//! committed before the agent is given it, and a daemon that stops in between finds
-//! the row at start-up and records the outcome as unknown rather than giving it
-//! again — unless the store can show nothing reached the agent (see
-//! [`crate::store::Store::recover_agent_messages`]), when it waits again.
-//!
-//! **How each agent is given one.** Codex: as a turn started through the app-server
-//! link, once its thread has been idle for a second. Claude, busy: at its turn's
-//! end, all held at once, through its `Stop` hook ([`Daemon::agent_messages_at_turn_end`]).
-//! Claude, idle: typed into its message box and submitted, only while its
-//! transcript shows no turn open
-//! ([`ClaudeTurn`]) and, read by its supervisor immediately before the keys, no
-//! turn is running on screen and the box is empty
-//! ([`protocol::ipc::composer_is_free`]).
+//! on keeps the message (`agent_messages` in [`crate::store`]) for that agent.
 //!
 //! **Across computers.** A message to `cc-N@<another computer>` is carried by this
 //! daemon to that computer's, over its WebSocket listener on the tailnet, as one
@@ -35,7 +18,6 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 
 use protocol::agent::AgentKind;
-use protocol::event::{Event, EventKind};
 use protocol::ipc::{AgentEntry, AgentMessageOutcome};
 use protocol::peer::{PeerReply, PeerRequest};
 use protocol::tailnet::{Place, Refusal, Tailnet};
@@ -43,28 +25,8 @@ use protocol::tailnet::{Place, Refusal, Tailnet};
 use crate::state::Daemon;
 use crate::store::AgentMessageFiling;
 
-/// Why a message waits: its agent has a turn running, or one ended under a second
-/// ago (see [`crate::codex_link::agent_message_hold`]).
-pub(crate) const HELD_WORKING: &str =
-    "the agent is working; it gets the message when its turn ends";
-/// Why a message waits: the person stopped the agent's last turn.
-pub(crate) const HELD_AFTER_INTERRUPT: &str =
-    "the person stopped the agent's last turn; it gets the message after their next turn ends";
-/// Why a message waits: this daemon's link to the agent's session is not ready to
-/// start a turn (still connecting, reconnecting, or not yet watching the thread).
-const HELD_NOT_READY: &str =
-    "the agent's session is not ready to take a message yet; it gets it when it is";
-/// Why a message waits: Claude's screen shows a turn running, or its message box
-/// holds a draft, a menu or a view.
-pub(crate) const HELD_COMPOSER_BUSY: &str =
-    "the agent's message box is in use or a turn is running; it gets the message when the \
-     box is free and empty";
-
-/// The same words from the same agent inside this window are a repeat.
-const REPEAT_WINDOW_MS: i64 = 10 * 60 * 1000;
-
-/// How often a run's held messages are offered again.
-const RETRY_EVERY: Duration = Duration::from_secs(1);
+/// What a kept message is told.
+const HELD: &str = "kept for the agent";
 
 /// How long `tailscale status` gets to answer.
 const TAILSCALE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -73,9 +35,7 @@ const TAILSCALE_TIMEOUT: Duration = Duration::from_secs(3);
 /// sent: a computer that is up answers a connection in milliseconds.
 const PEER_CONNECT_WAIT: Duration = Duration::from_secs(3);
 
-/// How long another computer's daemon gets to say what became of a message:
-/// longer than the receiving agent's own hand-out, a supervisor round trip
-/// included, so its answer is what the sender is told.
+/// How long another computer's daemon gets to say what became of a message.
 const PEER_MESSAGE_WAIT: Duration = Duration::from_secs(20);
 
 /// How long another computer gets to list its agents before `list_agents` goes on
@@ -176,9 +136,9 @@ impl Daemon {
         }
     }
 
-    /// **Keep one message for an agent on this computer** and hand it out if the
-    /// agent is free: the same for a sender here and for one on another computer
-    /// (`from_uid` is the sender's run when it is here).
+    /// **Keep one message for an agent on this computer**: the same for a sender
+    /// here and for one on another computer (`from_uid` is the sender's run when it
+    /// is here).
     async fn take_agent_message(
         self: &Arc<Self>,
         from: &str,
@@ -221,41 +181,23 @@ impl Daemon {
             ));
         }
 
-        let now_ms = protocol::time::now_unix_ms();
         let filing = self
             .db
             .file_agent_message(
                 target.session_uid.clone(),
                 from.to_string(),
-                protocol::hash::sha256_hex(text.as_bytes()),
                 message,
-                protocol::time::rfc3339_from_unix_ms(now_ms),
-                protocol::time::rfc3339_from_unix_ms(now_ms - REPEAT_WINDOW_MS),
+                protocol::time::now_rfc3339(),
             )
             .await;
-        let id = match filing {
-            Ok(AgentMessageFiling::Held(id)) => id,
-            Ok(AgentMessageFiling::Duplicate) => return AgentMessageOutcome::Duplicate,
-            Ok(AgentMessageFiling::NoSession) => {
-                return refuse(format!("{name} is not a running session"))
-            }
+        match filing {
+            Ok(AgentMessageFiling::Held) => AgentMessageOutcome::Held {
+                reason: HELD.to_string(),
+            },
+            Ok(AgentMessageFiling::NoSession) => refuse(format!("{name} is not a running session")),
             Err(err) => {
                 crate::log_error!("agent message to {name}: could not keep it: {err:#}");
-                return refuse("CodeConnect could not keep the message".into());
-            }
-        };
-
-        let held = self.hand_out_agent_messages(&target.session_uid).await;
-        match self.db.agent_message_status(id).await {
-            Ok(Some(status)) if status == "delivered" => AgentMessageOutcome::Delivered,
-            Ok(Some(status)) if status == "unknown" => AgentMessageOutcome::Indeterminate {
-                reason: "it was handed to the agent and whether it arrived is not known".into(),
-            },
-            Ok(_) | Err(_) => {
-                self.retry_agent_messages(&target.session_uid).await;
-                AgentMessageOutcome::Held {
-                    reason: held.unwrap_or_else(|| HELD_WORKING.to_string()),
-                }
+                refuse("CodeConnect could not keep the message".into())
             }
         }
     }
@@ -423,238 +365,6 @@ impl Daemon {
             })
             .collect())
     }
-
-    /// Offer a run's held messages again every second until none is left or its
-    /// supervisor is gone. A supervisor that registers again starts this anew.
-    pub async fn retry_agent_messages(self: &Arc<Self>, session_uid: &str) {
-        if !self
-            .agent_message_retries
-            .lock()
-            .await
-            .insert(session_uid.to_string())
-        {
-            return;
-        }
-        let daemon = Arc::clone(self);
-        let session_uid = session_uid.to_string();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(RETRY_EVERY).await;
-                let attached = daemon.is_attached(&session_uid).await;
-                if attached {
-                    daemon.hand_out_agent_messages(&session_uid).await;
-                }
-                // Decided under the set's lock: a sender that finds this run in the set
-                // leaves its message to this loop, so the loop may only leave once it has
-                // seen that nothing is held.
-                let mut retries = daemon.agent_message_retries.lock().await;
-                let waiting = attached
-                    && daemon
-                        .db
-                        .held_agent_messages(session_uid.clone())
-                        .await
-                        .map_or(true, |held| !held.is_empty());
-                if !waiting {
-                    retries.remove(&session_uid);
-                    return;
-                }
-            }
-        });
-    }
-
-    /// **Hand out a run's oldest held message**, if its agent is free.
-    ///
-    /// One per pass: a message that starts a turn makes the agent busy, and the next
-    /// waits for that turn's end like any other. Returns why the messages left wait,
-    /// or `None` when none is left.
-    pub(crate) async fn hand_out_agent_messages(&self, session_uid: &str) -> Option<String> {
-        let gate = self.agent_message_gate(session_uid).await;
-        let _one_pass = gate.lock().await;
-
-        let held = match self.db.held_agent_messages(session_uid.to_string()).await {
-            Ok(held) => held,
-            Err(err) => {
-                crate::log_error!("agent messages for {session_uid}: could not read them: {err:#}");
-                return Some(HELD_WORKING.to_string());
-            }
-        };
-        if held.is_empty() {
-            return None;
-        }
-        let claude = match self.db.get_session(session_uid.to_string()).await {
-            Ok(Some(row)) => row.agent == AgentKind::Claude,
-            Ok(None) => return Some(HELD_NOT_READY.to_string()),
-            Err(err) => {
-                crate::log_error!(
-                    "agent messages for {session_uid}: session lookup failed: {err:#}"
-                );
-                return Some(HELD_NOT_READY.to_string());
-            }
-        };
-        if claude {
-            match self.db.claude_turn(session_uid.to_string()).await {
-                Ok(ClaudeTurn::Free) => {}
-                Ok(ClaudeTurn::Running) => return Some(HELD_WORKING.to_string()),
-                Ok(ClaudeTurn::Interrupted) => return Some(HELD_AFTER_INTERRUPT.to_string()),
-                Err(err) => {
-                    crate::log_error!("agent messages for {session_uid}: turn unreadable: {err:#}");
-                    return Some(HELD_WORKING.to_string());
-                }
-            }
-        }
-        let count = held.len();
-        for (index, row) in held.into_iter().enumerate() {
-            match self.db.claim_agent_message(row.id).await {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(err) => {
-                    crate::log_error!("agent message {}: could not mark it: {err:#}", row.id);
-                    return Some(HELD_WORKING.to_string());
-                }
-            }
-            let (status, waits) = if claude {
-                self.type_agent_message_into(session_uid, row.id, row.message)
-                    .await
-            } else {
-                self.compose_agent_message(session_uid, row.id, row.message)
-                    .await
-            };
-            if let Err(err) = self
-                .db
-                .settle_agent_message(row.id, status, protocol::time::now_rfc3339())
-                .await
-            {
-                crate::log_error!(
-                    "agent message {}: could not record {status}: {err:#}",
-                    row.id
-                );
-            }
-            if waits.is_some() {
-                return waits;
-            }
-            if status == "delivered" {
-                return (index + 1 < count).then(|| HELD_WORKING.to_string());
-            }
-        }
-        None
-    }
-
-    /// **Hand a busy Claude its held messages at its turn's end**, oldest first, as
-    /// one text for its `Stop` hook to print: Claude takes them up after its own
-    /// answer, in a continuation of that turn. Each is claimed before it is handed
-    /// over and recorded delivered with it, so it goes at most once. A hook Claude
-    /// cancels after this (its own timeout) loses them, and this daemon cannot
-    /// tell.
-    pub(crate) async fn agent_messages_at_turn_end(&self, session_uid: &str) -> Option<String> {
-        let gate = self.agent_message_gate(session_uid).await;
-        let _one_pass = gate.lock().await;
-        let held = match self.db.held_agent_messages(session_uid.to_string()).await {
-            Ok(held) => held,
-            Err(err) => {
-                crate::log_error!("agent messages for {session_uid}: could not read them: {err:#}");
-                return None;
-            }
-        };
-        let mut handed = Vec::new();
-        for row in held {
-            match self.db.claim_agent_message(row.id).await {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(err) => {
-                    crate::log_error!("agent message {}: could not mark it: {err:#}", row.id);
-                    break;
-                }
-            }
-            if let Err(err) = self
-                .db
-                .settle_agent_message(row.id, "delivered", protocol::time::now_rfc3339())
-                .await
-            {
-                crate::log_error!(
-                    "agent message {}: could not record delivered: {err:#}",
-                    row.id
-                );
-            }
-            handed.push(row.message);
-        }
-        (!handed.is_empty()).then(|| handed.join("\n\n"))
-    }
-
-    /// The lock one run's hand-outs take, so a turn's end and the retry loop never
-    /// hand out the same run's messages at once.
-    async fn agent_message_gate(&self, session_uid: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut gates = self.agent_message_gates.lock().await;
-        gates.retain(|_, gate| Arc::strong_count(gate) > 1);
-        Arc::clone(gates.entry(session_uid.to_string()).or_default())
-    }
-
-    /// Give a Claude run one message by typing it into its composer, and say what
-    /// became of it: its new status, and why it waits if it does.
-    async fn type_agent_message_into(
-        &self,
-        session_uid: &str,
-        id: i64,
-        message: String,
-    ) -> (&'static str, Option<String>) {
-        match self.type_agent_message(session_uid, message).await {
-            protocol::ws::SendTextResult::Sent { .. } => ("delivered", None),
-            protocol::ws::SendTextResult::Refused { reason } => {
-                crate::log_info!("agent message {id} to {session_uid} waits: {reason}");
-                let why = if reason == crate::state::SUPERVISOR_PREDATES_AGENT_MESSAGES {
-                    reason
-                } else {
-                    HELD_COMPOSER_BUSY.to_string()
-                };
-                ("held", Some(why))
-            }
-            other => {
-                crate::log_warn!(
-                    "agent message {id} to {session_uid}: outcome unknown ({other:?})"
-                );
-                ("unknown", None)
-            }
-        }
-    }
-
-    /// Give a Codex run one message as a turn of its own, and say what became of it:
-    /// its new status, and why it waits if it does.
-    async fn compose_agent_message(
-        &self,
-        session_uid: &str,
-        id: i64,
-        message: String,
-    ) -> (&'static str, Option<String>) {
-        let hash = protocol::hash::compose_hash(session_uid, &message);
-        let result = self
-            .compose_as(
-                session_uid,
-                &format!("{}{id}", crate::store::AGENT_MESSAGE_REQUEST_PREFIX),
-                message,
-                &hash,
-                true,
-            )
-            .await;
-        match result {
-            protocol::ws::ComposeResult::Started { .. }
-            | protocol::ws::ComposeResult::Steered { .. }
-            | protocol::ws::ComposeResult::Duplicate { .. } => ("delivered", None),
-            protocol::ws::ComposeResult::Indeterminate { reason } => {
-                crate::log_warn!("agent message {id} to {session_uid}: outcome unknown ({reason})");
-                ("unknown", None)
-            }
-            // The link's own sentences about its state are written for a phone
-            // ("nothing was sent"); the sender is told the message waits.
-            protocol::ws::ComposeResult::Rejected { reason } => {
-                let why = if reason == HELD_WORKING || reason == HELD_AFTER_INTERRUPT {
-                    reason
-                } else {
-                    crate::log_info!("agent message {id} to {session_uid} waits: {reason}");
-                    HELD_NOT_READY.to_string()
-                };
-                ("held", Some(why))
-            }
-        }
-    }
 }
 
 /// Whether a message's text may be sent at all: not empty, and no control
@@ -782,63 +492,6 @@ fn refusal_sentence(refusal: Refusal, computer: &str) -> String {
     }
 }
 
-/// **Where a Claude run's turns stand**, by its transcript as the log holds it.
-///
-/// A turn opens on a line Claude Code hands to the agent as a prompt
-/// ([`crate::state::delivers_prompt_line`]); `/compact` writes none (2.1.314,
-/// measured). It closes at a turn end the tailer files: a `stop_hook_summary`, or
-/// a `turn_duration` that ends its turn, which covers an API error. Claude's
-/// interrupt marker, written on Esc and on "No" at a tool's prompt, leaves the run
-/// interrupted until a later prompt's turn ends: Claude is asking the person what
-/// to do instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaudeTurn {
-    /// No turn open, and the last one was not stopped by the person.
-    Free,
-    /// A prompt was handed over and its turn has not ended.
-    Running,
-    /// The person stopped the last turn.
-    Interrupted,
-}
-
-impl ClaudeTurn {
-    /// What `event`, read newest first, settles, or `None` to read on. `ended` says
-    /// whether a turn end newer than it has been read.
-    pub(crate) fn settled_by(event: &Event, ended: &mut bool) -> Option<ClaudeTurn> {
-        if event.kind == EventKind::TurnComplete {
-            *ended = true;
-            return None;
-        }
-        if is_interrupt_marker(event) {
-            return Some(ClaudeTurn::Interrupted);
-        }
-        crate::state::delivers_prompt_line(&event.kind, &event.payload).then_some(if *ended {
-            ClaudeTurn::Free
-        } else {
-            ClaudeTurn::Running
-        })
-    }
-}
-
-/// Claude Code's own record that the person stopped the turn: an unstamped,
-/// non-meta user line whose content is exactly one text block reading
-/// `[Request interrupted by user]` or `[Request interrupted by user for tool use]`.
-/// The phone's `isClaudeInterrupt`, the same test.
-fn is_interrupt_marker(event: &Event) -> bool {
-    let line = &event.payload;
-    if event.kind != EventKind::UserMessage || line["isMeta"] == true || !line["origin"].is_null() {
-        return false;
-    }
-    let Some([block]) = line["message"]["content"].as_array().map(Vec::as_slice) else {
-        return false;
-    };
-    block["type"] == "text"
-        && matches!(
-            block["text"].as_str(),
-            Some("[Request interrupted by user]" | "[Request interrupted by user for tool use]")
-        )
-}
-
 fn agent_name(agent: &AgentKind) -> &str {
     match agent {
         AgentKind::Claude => "Claude",
@@ -880,7 +533,9 @@ mod tests {
     async fn a_peer_is_read_as_answered_older_silent_or_unreachable() {
         let wait = Duration::from_millis(500);
         let delivered = PeerReply::PeerAgentMessageResult {
-            outcome: AgentMessageOutcome::Delivered,
+            outcome: AgentMessageOutcome::Held {
+                reason: HELD.to_string(),
+            },
         };
         let addr = fake_daemon(Some(serde_json::to_string(&delivered).unwrap())).await;
         assert_eq!(

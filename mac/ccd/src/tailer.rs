@@ -782,18 +782,8 @@ fn transcript_event(
         }
         "assistant" => EventKind::AgentMessage,
         // Written once the turn's Stop hooks have run, after the turn's last
-        // reply, so the end of the turn is filed after everything it said. One
-        // whose hooks handed Claude more to read (another agent's messages,
-        // `hookAdditionalContext`) is not an end: Claude answers in the same
-        // turn, and the summary after that answer is (2.1.316, recorded).
-        "system"
-            if is_main(value, "stop_hook_summary")
-                && !object.contains_key("hookLabel")
-                && object
-                    .get("hookAdditionalContext")
-                    .and_then(|v| v.as_array())
-                    .is_none_or(Vec::is_empty) =>
-        {
+        // reply, so the end of the turn is filed after everything it said.
+        "system" if is_main(value, "stop_hook_summary") && !object.contains_key("hookLabel") => {
             EventKind::TurnComplete
         }
         "" => EventKind::Other("transcript_entry".to_string()),
@@ -1126,20 +1116,11 @@ mod tests {
 
         // The main conversation's Stop hooks have run: its turn is over. A
         // background agent's, an older Claude's summary of other hooks (it
-        // carries a `hookLabel`), one whose hooks handed Claude more to answer,
-        // or any other system entry, is not.
+        // carries a `hookLabel`), or any other system entry, is not.
         for (line, kind) in [
             (
                 &br#"{"type":"system","subtype":"stop_hook_summary","isSidechain":false}"#[..],
                 EventKind::TurnComplete,
-            ),
-            (
-                br#"{"type":"system","subtype":"stop_hook_summary","hookAdditionalContext":[]}"#,
-                EventKind::TurnComplete,
-            ),
-            (
-                br#"{"type":"system","subtype":"stop_hook_summary","hookAdditionalContext":["m"]}"#,
-                EventKind::Other("transcript_system".into()),
             ),
             (
                 br#"{"type":"system","subtype":"stop_hook_summary","isSidechain":true}"#,

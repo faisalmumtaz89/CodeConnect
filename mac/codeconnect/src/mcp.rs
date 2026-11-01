@@ -108,10 +108,8 @@ fn tools() -> Value {
         {
             "name": "send_message",
             "description": "Send a message to another Claude Code or Codex session. `to` is its \
-                address, cc-N@computer, as list_agents shows it. The message reaches that agent \
-                as a prompt of its own when it is free, never in the middle of its work. The \
-                answer says whether it was delivered, held until the agent is free, or refused, \
-                and why.",
+                address, cc-N@computer, as list_agents shows it. The answer says whether it \
+                was kept for that agent or refused, and why.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -177,11 +175,7 @@ fn call(
 
 fn outcome_sentence(outcome: &AgentMessageOutcome) -> String {
     match outcome {
-        AgentMessageOutcome::Delivered => "delivered".into(),
         AgentMessageOutcome::Held { reason } => format!("held: {reason}"),
-        AgentMessageOutcome::Duplicate => "not sent again: the same message went to that agent \
-            in the last ten minutes"
-            .into(),
         AgentMessageOutcome::Refused { reason } => format!("refused: {reason}"),
         AgentMessageOutcome::Indeterminate { reason } => format!("indeterminate: {reason}"),
     }
