@@ -155,6 +155,7 @@ db_ops! {
     fn unsent_mail() -> Vec<crate::store::SentMail>;
     fn untold_mail() -> Vec<crate::store::UntoldMail>;
     fn release_mail_wake(session_uid: String) -> ();
+    fn mail_runs() -> Vec<(SessionRow, u32)>;
     fn orphan_event_count() -> u64;
 }
 
@@ -456,6 +457,11 @@ impl Db {
         told: bool,
     ) -> Result<()> {
         self.run(move |store| store.note_sent_mail(&message_id, state, reason.as_deref(), told))
+            .await
+    }
+
+    pub async fn note_mail_minor(&self, session_uid: String, minor: u32) -> Result<()> {
+        self.run(move |store| store.note_mail_minor(&session_uid, minor))
             .await
     }
 

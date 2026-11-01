@@ -263,7 +263,7 @@ impl Daemon {
         if let Err(reason) = sendable(text) {
             return refuse(reason);
         }
-        let runs = match self.attached_runs().await {
+        let runs = match self.db.mail_runs().await {
             Ok(runs) => runs,
             Err(err) => {
                 crate::log_error!("agent message to {run}: session lookup failed: {err:#}");
@@ -685,15 +685,16 @@ impl Daemon {
         Ok((you, agents))
     }
 
-    /// This computer's running sessions that were launched with mail, each run
-    /// its own entry, leaving out `except_uid`.
+    /// This computer's runs that have not ended and were launched with mail, each
+    /// run its own entry, leaving out `except_uid`.
     async fn local_agents(
         &self,
         this_computer: &str,
         except_uid: Option<&str>,
     ) -> anyhow::Result<Vec<AgentEntry>> {
         Ok(self
-            .attached_runs()
+            .db
+            .mail_runs()
             .await?
             .into_iter()
             .filter(|(row, minor)| {

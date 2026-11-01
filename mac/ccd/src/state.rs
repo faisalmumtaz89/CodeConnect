@@ -5169,7 +5169,6 @@ impl Daemon {
             .attached_runs()
             .await?
             .into_iter()
-            .map(|(row, _)| row)
             .filter(|row| row.session_id == name)
             .max_by(|a, b| a.session_uid.cmp(&b.session_uid)))
     }
@@ -5180,19 +5179,14 @@ impl Daemon {
         inner.supervisors.get(run_uid)?.agent_bin.clone()
     }
 
-    /// Every run whose supervisor is attached now, with the protocol minor that
-    /// supervisor speaks: what the build that launched the run can do, which no
-    /// later daemon changes.
-    pub(crate) async fn attached_runs(&self) -> Result<Vec<(SessionRow, u32)>> {
+    /// Every run whose supervisor is attached now.
+    pub(crate) async fn attached_runs(&self) -> Result<Vec<SessionRow>> {
         let inner = self.inner.lock().await;
         Ok(self
             .store
             .list_sessions()?
             .into_iter()
-            .filter_map(|row| {
-                let minor = inner.supervisors.get(&row.session_uid)?.protocol_minor;
-                Some((row, minor))
-            })
+            .filter(|row| inner.supervisors.contains_key(&row.session_uid))
             .collect())
     }
 
@@ -8263,6 +8257,15 @@ impl Daemon {
             // very epoch under the lock before it builds anything. The two are
             // deliberately NOT one step — the link's lifecycle needs awaits (a
             // bounded join) that must not run under `inner`.
+        }
+        // What this run can do with mail, kept with it: a restarted daemon lists it
+        // and takes its mail before its supervisor has registered again.
+        if let Err(err) = self
+            .db
+            .note_mail_minor(session.uid.clone(), info.protocol_minor)
+            .await
+        {
+            crate::log_error!("could not keep {}'s mail capability: {err:#}", session.name);
         }
 
         // **The control link's whole lifecycle.** Join any parked corpse, take the
@@ -25733,8 +25736,10 @@ mod tests {
         assert_eq!(texts(&first), ["for the first"]);
         assert_eq!(texts(&second), ["for the second"]);
 
-        // The first run's supervisor is gone; a new run takes its label.
-        daemon.unregister_supervisor(&first_run).await;
+        // The first run ends; a new run takes its label.
+        daemon
+            .session_exited("cc-1", Some(&first), Some(0), None, Some(&first_run))
+            .await;
         let replacement = register(&daemon, "cc-1", None).await.session.uid;
         assert!(refusal(send(&first, "too late").await).contains("not a running session"));
         assert!(
@@ -26078,6 +26083,46 @@ mod tests {
                 "{run} can be woken after the restart"
             );
         }
+    }
+
+    /// **A run whose supervisor has not come back yet still takes mail** (round 1,
+    /// R1-2): after a restart, a run is listed and sent to by its saved row and the
+    /// mail it was launched able to take, not by whether its supervisor has registered
+    /// again; one that ended is still refused.
+    #[tokio::test]
+    async fn a_run_takes_mail_before_its_supervisor_registers_again() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let run = register(&daemon, "cc-1", None).await;
+        // A restart, as far as this run goes: its supervisor is not here.
+        daemon.unregister_supervisor(&run).await;
+        let to = format!("{}@studio", run.session.uid);
+        let status = daemon
+            .send_agent_message_on(Some(&tailnet), &sender, &to, "hi", None)
+            .await;
+        assert_eq!(
+            status.state,
+            protocol::ipc::MailState::Waiting,
+            "{status:?}"
+        );
+        let (_, agents) = daemon
+            .list_agents_on(Some(&tailnet), &sender, Vec::new())
+            .await
+            .unwrap();
+        assert!(agents.iter().any(|a| a.address == to), "{agents:?}");
+
+        daemon
+            .store
+            .set_lifecycle(&run.session.uid, protocol::event::Lifecycle::Exited)
+            .unwrap();
+        assert!(refusal(
+            daemon
+                .send_agent_message_on(Some(&tailnet), &sender, &to, "again", None)
+                .await
+        )
+        .contains("not a running session"));
     }
 
     /// **A person's prompt with mail waiting is told of it**, in the fixed words

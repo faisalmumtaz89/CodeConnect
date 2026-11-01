@@ -510,6 +510,7 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "mail",
     "mail_sent",
     "mail_wake",
+    "mail_runs",
 ];
 
 /// One run removed by `codeconnect sessions prune`, and what went with it.
@@ -3848,6 +3849,40 @@ impl Store {
         Ok(tell)
     }
 
+    /// Keep the protocol minor the run's supervisor speaks: what the build that
+    /// launched it can do with mail, kept so a restarted daemon knows it before that
+    /// supervisor registers again.
+    pub fn note_mail_minor(&self, session_uid: &str, minor: u32) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "INSERT INTO mail_runs(session_uid, minor) VALUES (?1, ?2)
+             ON CONFLICT(session_uid) DO UPDATE SET minor = excluded.minor",
+            params![session_uid, minor],
+        )?;
+        Ok(())
+    }
+
+    /// **Every run that has not ended**, with the protocol minor its supervisor last
+    /// registered with: the runs mail can be for, whether or not their supervisor is
+    /// attached at this moment.
+    pub fn mail_runs(&self) -> Result<Vec<(SessionRow, u32)>> {
+        let minors: std::collections::HashMap<String, u32> = {
+            let conn = self.read();
+            let mut stmt = conn.prepare("SELECT session_uid, minor FROM mail_runs")?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        Ok(self
+            .list_sessions()?
+            .into_iter()
+            .filter(|row| row.lifecycle != Lifecycle::Exited)
+            .filter_map(|row| {
+                let minor = *minors.get(&row.session_uid)?;
+                Some((row, minor))
+            })
+            .collect())
+    }
+
     /// Every run with unread mail.
     pub fn runs_with_unread_mail(&self, now_ms: i64) -> Result<Vec<String>> {
         let conn = self.read();
@@ -5254,6 +5289,13 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             sender_told     INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS mail_by_session ON mail(session_uid, state, seq);
+
+        -- The protocol minor each run's supervisor registered with, kept so a
+        -- restarted daemon knows which runs take mail before they register again.
+        CREATE TABLE IF NOT EXISTS mail_runs(
+            session_uid TEXT PRIMARY KEY,
+            minor       INTEGER NOT NULL
+        );
 
         -- Where waking each run for its mail stands (`crate::mail`'s wake rule): a
         -- wake issued whose turn has not ended, the turn ends since with mail still
