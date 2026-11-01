@@ -490,6 +490,11 @@ impl Db {
             .await
     }
 
+    pub async fn mail_idle_since(&self, session_uid: String, since_ms: i64) -> Result<()> {
+        self.run(move |store| store.mail_idle_since(&session_uid, since_ms))
+            .await
+    }
+
     pub async fn runs_with_unread_mail(&self, now_ms: i64) -> Result<Vec<String>> {
         self.run(move |store| store.runs_with_unread_mail(now_ms))
             .await

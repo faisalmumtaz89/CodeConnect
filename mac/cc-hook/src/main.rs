@@ -130,6 +130,7 @@ fn run() {
     }
 
     let args = parse_args(std::env::args().skip(1));
+    let started_ms = protocol::time::now_unix_ms();
 
     let mut stdin_bytes = Vec::new();
     if std::io::stdin()
@@ -143,8 +144,10 @@ fn run() {
 
     if args.mail_waiter {
         if let Some(uid) = resolve_session_uid(&args) {
+            let input: HookInput = serde_json::from_slice(&stdin_bytes).unwrap_or_default();
+            let idle_since_ms = starts_between_turns(&args, &input).then_some(started_ms);
             exit_when_orphaned(parent);
-            std::process::exit(wait_for_mail(&args, &uid));
+            std::process::exit(wait_for_mail(&args, &uid, idle_since_ms));
         }
         return;
     }
@@ -331,13 +334,26 @@ fn post_to_daemon(
 /// away (a restart, an update) or could not be reached.
 const WAITER_RETRY: Duration = Duration::from_secs(2);
 
+/// Whether the hook a mail waiter runs as starts with no turn running: a `Stop`, or
+/// a session start that is not a compaction, which can come in the middle of a turn.
+fn starts_between_turns(args: &Args, input: &HookInput) -> bool {
+    match resolve_event(args, input) {
+        HookEventName::Stop => true,
+        HookEventName::SessionStart => input.source.as_deref() != Some("compact"),
+        _ => false,
+    }
+}
+
 /// **The mail waiter**: wait on the daemon until it has mail for this run, then
 /// print the line it sends for Claude and return 2, which wakes it. Returns 0 when a
 /// newer waiter took over. Claude's own timeout on the hook is the bound; a daemon
-/// that goes away is reached again, so a restart costs no wake.
-fn wait_for_mail(args: &Args, session_uid: &str) -> i32 {
+/// that goes away is reached again, so a restart costs no wake. `idle_since_ms` is
+/// when it started, if no turn was running then: the same each time it reaches the
+/// daemon.
+fn wait_for_mail(args: &Args, session_uid: &str, idle_since_ms: Option<i64>) -> i32 {
     let frame = ClientFrame::MailWaiter {
         session_uid: session_uid.to_string(),
+        idle_since_ms,
     };
     let Ok(line) = serde_json::to_string(&frame) else {
         return 0;
@@ -529,14 +545,41 @@ mod tests {
                 socket: socket.clone(),
                 ..args_from(&["--mail-waiter"])
             };
-            assert_eq!(wait_for_mail(&args, "01K1B3XQ8ZC0DE5FGH7JKMNPQR"), code);
+            assert_eq!(
+                wait_for_mail(&args, "01K1B3XQ8ZC0DE5FGH7JKMNPQR", Some(1_800_000_000_000)),
+                code
+            );
             let asked: ClientFrame = serde_json::from_str(daemon.join().unwrap().trim()).unwrap();
             assert!(matches!(
                 asked,
-                ClientFrame::MailWaiter { session_uid } if session_uid == "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
+                ClientFrame::MailWaiter { session_uid, idle_since_ms: Some(1_800_000_000_000) }
+                    if session_uid == "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
             ));
             let _ = std::fs::remove_file(&socket);
         }
+    }
+
+    /// **A waiter vouches for no turn running only when its hook says so**: a `Stop`,
+    /// or a session start that is not a compaction, which can run in the middle of a
+    /// turn. The waiter's command names its event; the payload's own name wins.
+    #[test]
+    fn a_waiter_starts_between_turns_at_a_stop_or_a_session_start_but_not_a_compaction() {
+        let input = |raw: &str| serde_json::from_str::<HookInput>(raw).unwrap();
+        let stop = args_from(&["--event", "Stop", "--mail-waiter"]);
+        let start = args_from(&["--event", "SessionStart", "--mail-waiter"]);
+        assert!(starts_between_turns(&stop, &input("{}")));
+        for source in ["startup", "resume", "clear"] {
+            let raw = format!(r#"{{"hook_event_name":"SessionStart","source":"{source}"}}"#);
+            assert!(starts_between_turns(&start, &input(&raw)), "{source}");
+        }
+        assert!(!starts_between_turns(
+            &start,
+            &input(r#"{"hook_event_name":"SessionStart","source":"compact"}"#)
+        ));
+        assert!(!starts_between_turns(
+            &stop,
+            &input(r#"{"hook_event_name":"UserPromptSubmit"}"#)
+        ));
     }
 
     #[test]

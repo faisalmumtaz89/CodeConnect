@@ -3838,15 +3838,26 @@ impl Store {
         )?;
         tx.execute(
             "UPDATE mail_wake
-                SET running = 1,
+                SET running = ?3,
                     misses = CASE WHEN ?2 THEN misses ELSE 0 END,
                     degraded = CASE WHEN ?2 THEN degraded ELSE 0 END
               WHERE session_uid = ?1",
-            params![session_uid, woken],
+            params![session_uid, woken, now_ms],
         )?;
         let tell = !woken && unread_mail(&tx, session_uid, now_ms)?;
         tx.commit()?;
         Ok(tell)
+    }
+
+    /// **No turn of `session_uid` has run since `since_ms`**: a turn whose prompt came
+    /// before then has ended, whether or not its end was seen.
+    pub fn mail_idle_since(&self, session_uid: &str, since_ms: i64) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE mail_wake SET running = 0 WHERE session_uid = ?1 AND running < ?2",
+            params![session_uid, since_ms],
+        )?;
+        Ok(())
     }
 
     /// Keep the protocol minor the run's supervisor speaks: what the build that
@@ -4031,8 +4042,8 @@ impl Store {
         Ok(())
     }
 
-    /// At start-up, no offer is in flight: every one is unread again; and no turn is
-    /// known to be running nor any wake outstanding.
+    /// At start-up, no offer is in flight: every one is unread again; and no Claude
+    /// wake is outstanding.
     pub fn recover_mail(&self) -> Result<usize> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -4044,10 +4055,17 @@ impl Store {
             "UPDATE mail_sent SET offer = NULL, offer_state = NULL WHERE offer IS NOT NULL",
             [],
         )?;
-        // A turn that ended, or a wake whose turn ran, while no daemon was listening
-        // left nothing behind: no turn is running and no wake outstanding, and the wake
-        // rule decides again from the mailbox. At most one wake more than needed.
-        tx.execute("UPDATE mail_wake SET running = 0, outstanding = 0", [])?;
+        // A Claude wake whose turn ran while no daemon was listening left nothing
+        // behind, its Stop hook having found no daemon, so none is outstanding. A Codex
+        // wake stays outstanding: the link files the turn that carried it when it
+        // attaches again, and that ends it, while a wake still held in Codex's queue
+        // must not be queued twice. A running turn stays running until its end is seen
+        // or a waiter armed after its prompt shows it (`mail_idle_since`).
+        tx.execute(
+            "UPDATE mail_wake SET outstanding = 0
+              WHERE session_uid NOT IN (SELECT session_uid FROM codex_sessions)",
+            [],
+        )?;
         tx.commit()?;
         Ok(released)
     }
@@ -5299,8 +5317,8 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
 
         -- Where waking each run for its mail stands (`crate::mail`'s wake rule): a
         -- wake issued whose turn has not ended, the turn ends since with mail still
-        -- unread, wakes stopped until a human turn or new mail, and a Claude turn
-        -- running (from its prompt to its Stop).
+        -- unread, wakes stopped until a human turn or new mail, and when the Claude
+        -- turn running was prompted (from its prompt to its end; 0 for none).
         CREATE TABLE IF NOT EXISTS mail_wake(
             session_uid TEXT PRIMARY KEY,
             outstanding INTEGER NOT NULL DEFAULT 0,

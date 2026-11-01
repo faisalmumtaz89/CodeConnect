@@ -26053,36 +26053,66 @@ mod tests {
         assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
     }
 
-    /// **A restart forgets what it could not have seen** (round 1, R1-1): a turn
-    /// that ended, or a wake whose turn ended, while the daemon was down left no event
-    /// behind, so the daemon starts with no turn running and no wake outstanding, and
-    /// the rule decides from the mailbox. Variant B: a turn left running. Variant W: a
-    /// wake left outstanding.
+    /// **A restart keeps a running turn running until a waiter shows it ended**
+    /// (round 2, R2-1). A turn running when the daemon stopped is still taken for
+    /// running: the waiter armed before its prompt, or one that says nothing of when
+    /// it was armed, does not wake it mid-turn (shape M). The waiter its `Stop` armed
+    /// after the prompt shows the turn ended unseen, and wakes it (round 1, variant
+    /// B). A Claude wake whose Stop found no daemon is dropped (variant W); a Codex
+    /// wake, which may still be held in Codex's queue, is not queued twice.
     #[tokio::test]
-    async fn a_restart_starts_with_no_turn_running_and_no_wake_outstanding() {
+    async fn a_restart_keeps_a_running_turn_running_until_a_waiter_shows_it_ended() {
         let daemon = test_daemon();
         let busy = register(&daemon, "cc-1", None).await.session.uid;
         let woken = register(&daemon, "cc-2", None).await.session.uid;
+        let codex = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &codex, "cc-3").await;
+        let armed_before_the_prompt = protocol::time::now_unix_ms();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         assert_eq!(crate::mail::prompt_submitted(&daemon, &busy).await, None);
-        leave_mail(&daemon, &busy, "while the daemon was down");
-        leave_mail(&daemon, &woken, "hi");
+        for run in [&busy, &woken, &codex] {
+            leave_mail(&daemon, run, "hi");
+        }
         let now = protocol::time::now_unix_ms();
         assert!(daemon.store.claim_mail_wake(&woken, now, true).unwrap());
-        assert!(
-            !daemon.store.claim_mail_wake(&busy, now, true).unwrap(),
-            "the premise: its turn is running"
-        );
+        assert!(daemon.store.claim_mail_wake(&codex, now, false).unwrap());
 
         daemon.recover().await;
-        for run in [&busy, &woken] {
-            assert!(
-                daemon
-                    .store
-                    .claim_mail_wake(run, protocol::time::now_unix_ms(), true)
-                    .unwrap(),
-                "{run} can be woken after the restart"
-            );
-        }
+        let now = protocol::time::now_unix_ms();
+        assert!(
+            daemon.store.claim_mail_wake(&woken, now, true).unwrap(),
+            "variant W: the Claude wake whose Stop found no daemon is gone"
+        );
+        assert!(
+            !daemon.store.claim_mail_wake(&codex, now, false).unwrap(),
+            "the held Codex wake is still outstanding, so no second one is queued"
+        );
+
+        let (_, mut outcome) = daemon.waiters.register(&busy);
+        crate::mail::claude_waiter_registered(&daemon, &busy, Some(armed_before_the_prompt));
+        crate::mail::claude_waiter_registered(&daemon, &busy, None);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), &mut outcome)
+                .await
+                .is_err(),
+            "shape M: not woken mid-turn"
+        );
+        assert!(
+            !daemon
+                .store
+                .claim_mail_wake(&busy, protocol::time::now_unix_ms(), true)
+                .unwrap(),
+            "shape M: the turn is still taken for running"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let stopped = protocol::time::now_unix_ms();
+        crate::mail::claude_waiter_registered(&daemon, &busy, Some(stopped));
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), outcome)
+            .await
+            .expect("variant B: woken by the waiter its Stop armed")
+            .unwrap();
+        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
     }
 
     /// **A run whose supervisor has not come back yet still takes mail** (round 1,
