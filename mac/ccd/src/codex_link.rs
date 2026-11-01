@@ -5895,13 +5895,16 @@ impl Connection<'_> {
         self.place_read_back_items(&mut events, thread).await?;
         let recorded = events.len();
         for pending in events {
-            self.daemon.ingest(pending).await.with_context(|| {
+            let filed = self.daemon.ingest(pending).await.with_context(|| {
                 format!(
                     "recording a fact the thread/resume answer for {thread} described \
                      (the attach fails rather than rebuilding state around a fact that \
                      was never written)"
                 )
             })?;
+            if let Some(event) = &filed {
+                self.note_mail_turn_end(event);
+            }
         }
         self.adapter.apply_resume_seed(&seed);
         // The attach was ACCEPTED, so whatever adoption budget an earlier switch spent is
@@ -6229,9 +6232,6 @@ impl Connection<'_> {
         if frame.get("method").and_then(Value::as_str) == Some("turn/completed") {
             self.ingest_frame(frame).await;
             self.observe_approval(frame).await;
-            // The visited thread's turn ended, interrupted or not: the mailbox's
-            // wake rule decides from here whether this run is owed a wake.
-            crate::mail::turn_ended(self.daemon, &self.session.uid);
             return;
         }
         self.observe_approval(frame).await;
@@ -8701,13 +8701,26 @@ impl Connection<'_> {
         pending: protocol::event::PendingEvent,
     ) -> Result<Option<protocol::event::Event>> {
         let filed = self.daemon.ingest(pending).await;
-        if let Err(err) = &filed {
-            crate::log_error!(
+        match &filed {
+            Ok(Some(event)) => self.note_mail_turn_end(event),
+            Ok(None) => {}
+            Err(err) => crate::log_error!(
                 "codex link for {}: could not record a fact: {err:#}",
                 self.session.name
-            );
+            ),
         }
         filed
+    }
+
+    /// **A turn end the log holds for the first time**, however this link learned of it:
+    /// a live `turn/completed`, or a resume answer describing a turn it did not watch
+    /// (the first turn of a new thread ends before its rollout can be resumed). The log
+    /// keeps one copy of each fact, so every turn end reaches the mailbox's wake rule
+    /// exactly once.
+    fn note_mail_turn_end(&self, filed: &protocol::event::Event) {
+        if filed.kind == protocol::event::EventKind::TurnComplete {
+            crate::mail::turn_ended(self.daemon, &self.session.uid);
+        }
     }
 
     /// Bind this connection to a thread from the **`thread/started` it watched
@@ -15094,6 +15107,119 @@ mod tests {
             recorded_thread: None,
             thread_record_retry_at: None,
         }
+    }
+
+    /// **A turn end the link learns from a resume answer ends the outstanding wake, and
+    /// the live frame for the same turn counts nothing more.** The first turn of a new
+    /// thread ends before its rollout can be resumed, so the link attaches afterwards
+    /// and learns of that turn only from the answer (measured on the rig at 19244c6: a
+    /// woken Codex was never woken again).
+    ///
+    /// **Mutation:** feed the wake rule from the live `turn/completed` frame only, as
+    /// before. The resume answer then ends nothing, and `misses` stays 0.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_end_described_by_a_resume_answer_ends_the_outstanding_wake_once() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000WAK".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = linked_daemon(&session);
+        let store = crate::store::Store::open(db.path()).unwrap();
+        register_at(&store, &session, 1);
+        let now = protocol::time::now_unix_ms();
+        store
+            .take_mail(
+                &crate::store::MailIntake {
+                    message_id: "m1".into(),
+                    context_id: "ctx-m1".into(),
+                    in_reply_to: None,
+                    session_uid: session.uid.clone(),
+                    sender_computer: String::new(),
+                    sender_uid: "01JQXV9K7B0000000000000SND".into(),
+                    sender: "01JQXV9K7B0000000000000SND@studio".into(),
+                    sender_label: "cc-2@studio".into(),
+                    sender_agent: "Codex".into(),
+                    sender_project: "api".into(),
+                    text: "hi".into(),
+                },
+                now,
+                crate::mail::LIMITS,
+            )
+            .unwrap();
+        assert!(
+            store.claim_mail_wake(&session.uid, now, false).unwrap(),
+            "the premise: a wake is outstanding for unread mail"
+        );
+        let wake_row = || -> (i64, i64) {
+            rusqlite::Connection::open(db.path())
+                .unwrap()
+                .query_row(
+                    "SELECT outstanding, misses FROM mail_wake WHERE session_uid = ?1",
+                    [&session.uid],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap()
+        };
+        let row_reaches = |want: (i64, i64)| async move {
+            for _ in 0..250 {
+                if wake_row() == want {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            false
+        };
+
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = a_connection_on(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            1,
+            LIFECYCLE_THREAD,
+        );
+        let answer = lifecycle_answer(1, LIFECYCLE_THREAD, |_| {});
+        let seed = conn
+            .adapter
+            .plan_resume_seed(&answer["result"], LIFECYCLE_THREAD)
+            .expect("a readable answer");
+        conn.attach_from_seed(seed, LIFECYCLE_THREAD).await.unwrap();
+        // One miss, and the rule's re-wake, which cannot be issued here (no supervisor),
+        // is released again.
+        assert!(
+            row_reaches((0, 1)).await,
+            "the described turn end reached the wake rule: {:?}",
+            wake_row()
+        );
+
+        // A wake outstanding again, so that a second turn end would show as a miss. The
+        // rule's own re-wake may still hold the claim for a moment, so it is taken once
+        // that is released.
+        let mut claimed = false;
+        for _ in 0..250 {
+            claimed = store
+                .claim_mail_wake(&session.uid, protocol::time::now_unix_ms(), false)
+                .unwrap();
+            if claimed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(claimed, "a wake outstanding again: {:?}", wake_row());
+        let live_end: Value = lifecycle_frames()
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|frame| frame["method"] == "turn/completed")
+            .expect("the capture completes a turn");
+        conn.observe_notification(&live_end).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            wake_row(),
+            (1, 1),
+            "the live frame for a turn the log already holds is no second turn end"
+        );
     }
 
     /// Put the session's row at `generation`, which is what a registration does and
