@@ -3,6 +3,12 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A message from the phone that ends in `;` arrives whole
+
+- A message from the phone that ends in `;` arrives with it. tmux read a trailing `;` as the end of a
+  command, so `end;` arrived as `end`, `x\;` as `x;`, and a message that was only `;` as nothing.
+  Everything else is typed exactly as before.
+
 ## The phone types into a renamed session, and its terminal shows the computer's screen
 
 - A Claude session renamed with `/rename` takes the phone's messages again, instead of refusing them

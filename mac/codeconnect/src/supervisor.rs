@@ -1021,7 +1021,7 @@ fn send_text(
             if text == "\u{1b}" {
                 tmux::send_key(&session, "Escape")
             } else {
-                tmux::send_literal(&session, text)
+                tmux::send_literal(protocol::TMUX_SOCKET_NAME, &session, text)
             }
         },
         &|| tmux::send_key(&session, "Enter"),
@@ -2677,6 +2677,41 @@ mod tests {
                 );
             }
             other => panic!("a deadline kill may have typed; got {other:?}"),
+        }
+    }
+
+    /// Text typed in two invocations whose second was refused: the refusal is
+    /// provable for that part alone, and the text before it is on the screen,
+    /// so it is never "nothing was typed".
+    #[test]
+    fn text_that_partly_landed_is_indeterminate_and_enter_is_never_pressed() {
+        let entered = std::cell::Cell::new(false);
+        let failure = actuate_with(
+            &|| {
+                Err(tmux::TmuxError::Partial {
+                    typed: 3,
+                    of: 4,
+                    source: Box::new(refused_by_tmux()),
+                })
+            },
+            &|| {
+                entered.set(true);
+                Ok(())
+            },
+            true,
+            Duration::ZERO,
+        )
+        .expect_err("the typing failure must surface");
+        assert!(
+            !entered.get(),
+            "Enter after part of a message submits part of it"
+        );
+        match failure.result() {
+            SupervisorResult::Error { message } => {
+                assert!(message.contains("3 of 4 bytes were typed"), "{message}");
+                assert!(message.contains("will not be sent again"), "{message}");
+            }
+            other => panic!("part of the text landed; got {other:?}"),
         }
     }
 
