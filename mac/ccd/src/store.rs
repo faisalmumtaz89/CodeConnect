@@ -1586,6 +1586,36 @@ impl Store {
         Ok(filed)
     }
 
+    /// Whether one of the user messages filed for the Codex turn `turn_id` of this run
+    /// is exactly `text`.
+    pub fn codex_turn_has_user_message(
+        &self,
+        session_uid: &str,
+        turn_id: &str,
+        text: &str,
+    ) -> Result<bool> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT payload FROM events
+              WHERE session_uid = ?1 AND source = ?2 AND turn_id = ?3 AND kind = ?4",
+        )?;
+        let payloads = stmt
+            .query_map(
+                params![
+                    session_uid,
+                    protocol::event::Source::Codex.as_str(),
+                    turn_id,
+                    protocol::event::EventKind::UserMessage.as_str()
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(payloads.iter().any(|payload| {
+            serde_json::from_str::<serde_json::Value>(payload)
+                .is_ok_and(|payload| payload["text"] == text)
+        }))
+    }
+
     /// The `source_event_id` of every Codex fact filed for this run: the dedup keys
     /// a fact read from a `thread/resume` answer would collide with.
     pub fn codex_source_event_ids(

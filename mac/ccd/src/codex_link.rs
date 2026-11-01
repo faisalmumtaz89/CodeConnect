@@ -5903,7 +5903,7 @@ impl Connection<'_> {
                 )
             })?;
             if let Some(event) = &filed {
-                self.note_mail_turn_end(event);
+                self.note_mail_turn_end(event).await;
             }
         }
         self.adapter.apply_resume_seed(&seed);
@@ -8702,7 +8702,7 @@ impl Connection<'_> {
     ) -> Result<Option<protocol::event::Event>> {
         let filed = self.daemon.ingest(pending).await;
         match &filed {
-            Ok(Some(event)) => self.note_mail_turn_end(event),
+            Ok(Some(event)) => self.note_mail_turn_end(event).await,
             Ok(None) => {}
             Err(err) => crate::log_error!(
                 "codex link for {}: could not record a fact: {err:#}",
@@ -8712,14 +8712,38 @@ impl Connection<'_> {
         filed
     }
 
-    /// **A turn end the log holds for the first time**, however this link learned of it:
-    /// a live `turn/completed`, or a resume answer describing a turn it did not watch
-    /// (the first turn of a new thread ends before its rollout can be resumed). The log
-    /// keeps one copy of each fact, so every turn end reaches the mailbox's wake rule
-    /// exactly once.
-    fn note_mail_turn_end(&self, filed: &protocol::event::Event) {
-        if filed.kind == protocol::event::EventKind::TurnComplete {
-            crate::mail::turn_ended(self.daemon, &self.session.uid);
+    /// **The end of a turn that carried the mail nudge**, the first time the log holds
+    /// it, however this link learned of it: a live `turn/completed`, or a resume answer
+    /// describing a turn it did not watch (the first turn of a new thread ends before
+    /// its rollout can be resumed). The log keeps one copy of each fact, so each such
+    /// turn end reaches the mailbox's wake rule exactly once.
+    ///
+    /// Only a turn one of whose user messages is [`protocol::ipc::MAIL_NUDGE`] counts,
+    /// interrupted or not, and with a person's message merged into it or not. Codex
+    /// runs a queued nudge after a busy turn ends, and after an Esc only once the
+    /// person's next turn has ended; either of those turn ends, counted, would let the
+    /// rule queue a second nudge behind the first (measured at 5d42ce3). Read from the
+    /// log, so a reconnect between the nudge turn's start and its end loses nothing.
+    /// A nudge Codex never runs leaves the wake outstanding.
+    async fn note_mail_turn_end(&self, filed: &protocol::event::Event) {
+        if filed.kind != protocol::event::EventKind::TurnComplete {
+            return;
+        }
+        let Some(turn) = filed.turn_id.clone() else {
+            return;
+        };
+        match self
+            .daemon
+            .db
+            .codex_turn_has_user_message(self.session.uid.clone(), turn, protocol::ipc::MAIL_NUDGE)
+            .await
+        {
+            Ok(true) => crate::mail::turn_ended(self.daemon, &self.session.uid),
+            Ok(false) => {}
+            Err(err) => crate::log_error!(
+                "codex link for {}: could not read whether a turn carried the mail nudge: {err:#}",
+                self.session.name
+            ),
         }
     }
 
@@ -15109,23 +15133,12 @@ mod tests {
         }
     }
 
-    /// **A turn end the link learns from a resume answer ends the outstanding wake, and
-    /// the live frame for the same turn counts nothing more.** The first turn of a new
-    /// thread ends before its rollout can be resumed, so the link attaches afterwards
-    /// and learns of that turn only from the answer (measured on the rig at 19244c6: a
-    /// woken Codex was never woken again).
-    ///
-    /// **Mutation:** feed the wake rule from the live `turn/completed` frame only, as
-    /// before. The resume answer then ends nothing, and `misses` stays 0.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_turn_end_described_by_a_resume_answer_ends_the_outstanding_wake_once() {
-        let session = SessionKey {
-            uid: "01JQXV9K7B0000000000000WAK".into(),
-            name: "cc-1".into(),
-        };
-        let (daemon, db) = linked_daemon(&session);
+    /// A run with unread mail and a wake outstanding for it, as the mailbox leaves
+    /// them once it has queued a Codex nudge.
+    fn a_run_with_a_wake_outstanding(session: &SessionKey) -> (Arc<Daemon>, TempDb) {
+        let (daemon, db) = linked_daemon(session);
         let store = crate::store::Store::open(db.path()).unwrap();
-        register_at(&store, &session, 1);
+        register_at(&store, session, 1);
         let now = protocol::time::now_unix_ms();
         store
             .take_mail(
@@ -15150,26 +15163,66 @@ mod tests {
             store.claim_mail_wake(&session.uid, now, false).unwrap(),
             "the premise: a wake is outstanding for unread mail"
         );
-        let wake_row = || -> (i64, i64) {
-            rusqlite::Connection::open(db.path())
-                .unwrap()
-                .query_row(
-                    "SELECT outstanding, misses FROM mail_wake WHERE session_uid = ?1",
-                    [&session.uid],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap()
-        };
-        let row_reaches = |want: (i64, i64)| async move {
-            for _ in 0..250 {
-                if wake_row() == want {
-                    return true;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            false
-        };
+        (daemon, db)
+    }
 
+    /// The run's `(outstanding, misses)` in the mailbox's wake table.
+    fn wake_row(db: &TempDb, session: &SessionKey) -> (i64, i64) {
+        rusqlite::Connection::open(db.path())
+            .unwrap()
+            .query_row(
+                "SELECT outstanding, misses FROM mail_wake WHERE session_uid = ?1",
+                [&session.uid],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    /// Whether the wake table reaches `want` within a few seconds: the rule runs on a
+    /// task of its own.
+    async fn wake_row_reaches(db: &TempDb, session: &SessionKey, want: (i64, i64)) -> bool {
+        for _ in 0..250 {
+            if wake_row(db, session) == want {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    /// The captured turn as the nudge's own: its user message is the nudge.
+    fn carrying_the_nudge(value: &Value) -> Value {
+        serde_json::from_str(&value.to_string().replace(
+            "reply with the word pong and nothing else",
+            protocol::ipc::MAIL_NUDGE,
+        ))
+        .unwrap()
+    }
+
+    /// The captured turn's live frames, each passed through `edit`.
+    fn live_turn(edit: impl Fn(&Value) -> Value) -> Vec<Value> {
+        lifecycle_frames()
+            .iter()
+            .map(|line| edit(&serde_json::from_str::<Value>(line).unwrap()))
+            .collect()
+    }
+
+    /// **The nudge turn's end, learned from a resume answer, ends the outstanding wake,
+    /// and the live frame for the same turn counts nothing more.** The first turn of a
+    /// new thread ends before its rollout can be resumed, so the link attaches
+    /// afterwards and learns of that turn only from the answer (measured on the rig at
+    /// 19244c6: a woken Codex was never woken again).
+    ///
+    /// **Mutation:** feed the wake rule from the live `turn/completed` frame only. The
+    /// resume answer then ends nothing, and `misses` stays 0.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_nudge_turn_described_by_a_resume_answer_ends_the_outstanding_wake_once() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000WAK".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = a_run_with_a_wake_outstanding(&session);
+        let store = crate::store::Store::open(db.path()).unwrap();
         let mut adapter = CodexAdapter::new(session.clone());
         let mut amend = AmendThrottle::default();
         let mut conn = a_connection_on(
@@ -15180,7 +15233,7 @@ mod tests {
             1,
             LIFECYCLE_THREAD,
         );
-        let answer = lifecycle_answer(1, LIFECYCLE_THREAD, |_| {});
+        let answer = carrying_the_nudge(&lifecycle_answer(1, LIFECYCLE_THREAD, |_| {}));
         let seed = conn
             .adapter
             .plan_resume_seed(&answer["result"], LIFECYCLE_THREAD)
@@ -15189,9 +15242,9 @@ mod tests {
         // One miss, and the rule's re-wake, which cannot be issued here (no supervisor),
         // is released again.
         assert!(
-            row_reaches((0, 1)).await,
-            "the described turn end reached the wake rule: {:?}",
-            wake_row()
+            wake_row_reaches(&db, &session, (0, 1)).await,
+            "the described nudge turn's end reached the wake rule: {:?}",
+            wake_row(&db, &session)
         );
 
         // A wake outstanding again, so that a second turn end would show as a miss. The
@@ -15207,18 +15260,94 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(claimed, "a wake outstanding again: {:?}", wake_row());
-        let live_end: Value = lifecycle_frames()
-            .iter()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        assert!(
+            claimed,
+            "a wake outstanding again: {:?}",
+            wake_row(&db, &session)
+        );
+        let live_end = live_turn(carrying_the_nudge)
+            .into_iter()
             .find(|frame| frame["method"] == "turn/completed")
             .expect("the capture completes a turn");
         conn.observe_notification(&live_end).await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(
-            wake_row(),
+            wake_row(&db, &session),
             (1, 1),
             "the live frame for a turn the log already holds is no second turn end"
+        );
+    }
+
+    /// **A turn that did not carry the nudge leaves the wake outstanding** (M-07). Codex
+    /// runs a nudge queued during a busy turn only after that turn ends; counting the
+    /// busy turn's end queued a second nudge, whose turn read "No new messages"
+    /// (measured at 5d42ce3).
+    ///
+    /// **Mutation:** count every turn end. The busy turn then clears the wake.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_that_did_not_carry_the_nudge_leaves_the_wake_outstanding() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000BSY".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = a_run_with_a_wake_outstanding(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = a_connection_on(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            1,
+            LIFECYCLE_THREAD,
+        );
+        for frame in live_turn(Value::clone) {
+            conn.observe_notification(&frame).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            wake_row(&db, &session),
+            (1, 0),
+            "the person's busy turn ended, and the nudge queued behind it has not run"
+        );
+    }
+
+    /// **A nudge turn stopped with Esc still ends the wake**, so the rule queues the
+    /// next one, which Codex holds until the person's next turn ends.
+    ///
+    /// **Mutation:** count only completed turns. The interrupted nudge turn then ends
+    /// nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_interrupted_nudge_turn_still_ends_the_wake() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000ESC".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = a_run_with_a_wake_outstanding(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = a_connection_on(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            1,
+            LIFECYCLE_THREAD,
+        );
+        let interrupted = |frame: &Value| {
+            let mut frame = carrying_the_nudge(frame);
+            if frame["method"] == "turn/completed" {
+                frame["params"]["turn"]["status"] = json!("interrupted");
+            }
+            frame
+        };
+        for frame in live_turn(interrupted) {
+            conn.observe_notification(&frame).await;
+        }
+        assert!(
+            wake_row_reaches(&db, &session, (0, 1)).await,
+            "the interrupted nudge turn's end reached the wake rule: {:?}",
+            wake_row(&db, &session)
         );
     }
 

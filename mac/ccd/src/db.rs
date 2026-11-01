@@ -722,6 +722,17 @@ impl Db {
             .await
     }
 
+    /// See [`crate::store::Store::codex_turn_has_user_message`].
+    pub async fn codex_turn_has_user_message(
+        &self,
+        session_uid: String,
+        turn_id: String,
+        text: &'static str,
+    ) -> Result<bool> {
+        self.run(move |store| store.codex_turn_has_user_message(&session_uid, &turn_id, text))
+            .await
+    }
+
     /// See [`crate::store::Store::codex_source_event_ids`].
     pub async fn codex_source_event_ids(
         &self,
