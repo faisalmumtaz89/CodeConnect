@@ -126,16 +126,35 @@ pub enum ClientFrame {
     /// and `codeconnect daemon install` uses this answer to send a signal.
     DaemonInfo,
     /// One hosted agent's message to another, `to` being `cc-N@<computer>`.
-    /// `from_uid` is the sending run; its name and project go in the header the
-    /// receiving agent reads. Answered with [`DaemonFrame::AgentMessageResult`].
+    /// `from_uid` is the sending run, which the daemon names as the sender.
+    /// `reply_to` is the id of a message `from_uid` was sent, which this one
+    /// answers. Answered with [`DaemonFrame::AgentMessageResult`].
     SendAgentMessage {
         from_uid: String,
         to: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
     },
     /// The agents `from_uid` can message, answered with [`DaemonFrame::Agents`].
     ListAgents {
         from_uid: String,
+    },
+    /// `from_uid`'s unread messages, and the changes in where its own sent
+    /// messages stand: answered with [`DaemonFrame::AgentMessages`], which offers
+    /// them under an id. They are read once [`ClientFrame::MailRead`] names that id
+    /// on the same connection; a connection that closes first leaves them unread.
+    ReadAgentMessages {
+        from_uid: String,
+    },
+    /// The offer was handed to the agent. Answered with [`DaemonFrame::Ack`].
+    MailRead {
+        offer: String,
+    },
+    /// A Claude session's mail waiter, which stays connected until it is woken
+    /// ([`DaemonFrame::MailWake`]) or replaced ([`DaemonFrame::MailSuperseded`]).
+    MailWaiter {
+        session_uid: String,
     },
 }
 
@@ -292,7 +311,7 @@ pub enum DaemonFrame {
     },
     Daemon(DaemonInfo),
     AgentMessageResult {
-        outcome: AgentMessageOutcome,
+        status: MailStatus,
     },
     Agents {
         /// The asker's own address, which it has no other way to learn and must
@@ -300,6 +319,114 @@ pub enum DaemonFrame {
         you: String,
         agents: Vec<AgentEntry>,
     },
+    AgentMessages {
+        /// Names this batch in [`ClientFrame::MailRead`].
+        offer: String,
+        /// Oldest first, at most [`MAIL_BATCH_MESSAGES`] and [`MAIL_BATCH_BYTES`] of text.
+        messages: Vec<MailEnvelope>,
+        /// Changes in where the reader's own sent messages stand, each given once.
+        updates: Vec<MailUpdate>,
+        /// More unread messages wait than this batch holds.
+        more_pending: bool,
+    },
+    /// The waiting session has unread mail: its waiter wakes it with [`MAIL_NUDGE`].
+    MailWake,
+    /// A newer waiter holds this session's lease.
+    MailSuperseded,
+}
+
+/// The fixed words that wake an agent for its mail. They carry nothing of any
+/// message.
+pub const MAIL_NUDGE: &str = "[CodeConnect] Other agents have sent you messages. Call the \
+     codeconnect read_messages tool, then handle each message as its sender asks.";
+
+/// The most a message's text may hold, in bytes.
+pub const MAIL_TEXT_BYTES: usize = 8 * 1024;
+/// The most messages one `read_messages` returns.
+pub const MAIL_BATCH_MESSAGES: usize = 16;
+/// The most text, in bytes, one `read_messages` returns.
+pub const MAIL_BATCH_BYTES: usize = 32 * 1024;
+
+/// Where one agent's message stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailState {
+    /// Accepted by the sender's computer; the receiver's has not taken it yet.
+    Sent,
+    /// Kept for the receiving session, which has not read it.
+    Waiting,
+    /// Fetched by the receiving session's own `read_messages`. That says nothing of
+    /// what the agent did with it.
+    Read,
+    /// Not kept, and never will be.
+    Refused,
+    /// Unread when it expired.
+    Expired,
+    /// The receiving session ended before it read it.
+    Ended,
+}
+
+impl MailState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MailState::Sent => "sent",
+            MailState::Waiting => "waiting",
+            MailState::Read => "read",
+            MailState::Refused => "refused",
+            MailState::Expired => "expired",
+            MailState::Ended => "ended",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<MailState> {
+        [
+            MailState::Sent,
+            MailState::Waiting,
+            MailState::Read,
+            MailState::Refused,
+            MailState::Expired,
+            MailState::Ended,
+        ]
+        .into_iter()
+        .find(|state| state.as_str() == text)
+    }
+}
+
+/// What `send_message` is answered: the message's id, where it stands, and why
+/// when it was refused or is not yet taken.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailStatus {
+    pub message_id: String,
+    pub state: MailState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// One message as the receiving agent reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailEnvelope {
+    pub message_id: String,
+    /// The conversation it belongs to: a reply carries its original's.
+    pub context_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
+    /// The sender's address, `cc-N@<computer>`, set by the daemons.
+    pub from: String,
+    /// `Claude` or `Codex`.
+    pub agent: String,
+    pub project: String,
+    pub text: String,
+}
+
+/// A change in where one of the reader's own sent messages stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailUpdate {
+    pub message_id: String,
+    /// The address it was sent to.
+    pub to: String,
+    pub state: MailState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// One agent another can message: its address, which agent it is, and its project.
@@ -311,18 +438,6 @@ pub struct AgentEntry {
     pub agent: String,
     /// The last component of its working directory.
     pub project: String,
-}
-
-/// What became of one agent's message, as the sending agent is told it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum AgentMessageOutcome {
-    /// Kept on the receiving computer for the agent.
-    Held { reason: String },
-    /// Not kept, and never will be.
-    Refused { reason: String },
-    /// Sent to another computer, which did not say what became of it. Never re-sent.
-    Indeterminate { reason: String },
 }
 
 /// One run that `codeconnect sessions prune` removed, and what went with it.

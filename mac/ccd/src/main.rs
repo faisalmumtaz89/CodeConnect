@@ -6,7 +6,6 @@
 //! nothing but a reconnect, which is why every piece of session state either
 //! lives in SQLite or is re-derived when a supervisor re-registers.
 
-mod agent_messages;
 mod apns;
 mod apns_sender;
 mod catalog;
@@ -28,6 +27,7 @@ mod liveness;
 mod log;
 mod logrotate;
 mod machine;
+mod mail;
 mod presence;
 mod project_label;
 mod push_gate;
@@ -361,6 +361,7 @@ async fn main() -> Result<()> {
     // second probe budget exists to refuse. On two of its three paths it never
     // completes at all.
     let tailnet_watch = tokio::spawn(watch_for_tailnet(plan.watch_tailnet));
+    let mail_sweep = tokio::spawn(mail::run_mail_sweeps(Arc::clone(&daemon)));
 
     // Every one of these is meant to run for the life of the process. A task
     // *returning* is therefore a failure, whatever it returned — and it has to
@@ -378,6 +379,7 @@ async fn main() -> Result<()> {
         result = codex_recovery => Stop::Task(format!("codex link recovery exited: {result:?}")),
         result = codex_sweep => Stop::Task(format!("codex recovery sweeper exited: {result:?}")),
         result = rotate => Stop::Task(format!("log rotator exited: {result:?}")),
+        result = mail_sweep => Stop::Task(format!("mail sweeper exited: {result:?}")),
         // The one arm that is a deliberate exit rather than a failure: a
         // tailnet address turned up after this daemon had already fallen back
         // to loopback, and only a fresh process can probe for it again, bind it

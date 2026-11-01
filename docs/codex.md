@@ -112,18 +112,28 @@ one a launch would use. Use `codeconnect --help` for the launcher's own commands
 ## Messages from other agents
 
 Every hosted session — Codex and Claude Code alike — has one MCP server of CodeConnect's
-own, `codeconnect`, with two tools: `list_agents` tells the session its own address and
+own, `codeconnect`, with three tools: `list_agents` tells the session its own address and
 names the other running sessions on this computer and on your other computers on Tailscale
 (the same Tailscale user, not tagged, online, running CodeConnect on the same port), each as
-`cc-N@<computer>`, and `send_message` sends one of them a message. In a Codex
-session the tool is pre-approved (`default_tools_approval_mode = "approve"`, set on the
-session's app server only), because Codex asks for MCP tool approval only at the computer's
-keyboard and a send would otherwise wait there.
+`cc-N@<computer>`; `send_message` sends one of them a message; and `read_messages` reads the
+session's own. In a Codex session the tools are pre-approved (`default_tools_approval_mode =
+"approve"`, set on the session's app server only), because Codex asks for MCP tool approval
+only at the computer's keyboard and a send would otherwise wait there.
 
-The receiving computer's `ccd` keeps the message for that session, and the sender is told
-whether it was kept or refused, and why. A message to another computer that is offline, cannot
-be reached, or runs an older CodeConnect is refused with that reason; one whose computer took it
-but did not answer within 20 seconds is reported as unknown and is not sent again.
+The receiving computer's `ccd` keeps a message until that session reads it, for a day at most.
+`read_messages` gives each message with its id, who sent it, and the exact `send_message`
+call that answers it (`reply_to` set to its id, which keeps the answer in the same
+conversation), then what became of the session's own sent messages, each change once. It
+gives at most 16 messages and 32 KiB at a time and says when more wait. A message is read
+once the tool's answer has been handed to the agent, which says nothing of what the agent did
+with it.
+
+`send_message` answers with the message's id and where it stands: waiting for that session,
+still being sent, or refused, and why. A message holds at most 8 KiB, and one agent may leave
+another at most 30 messages an hour. A message to another computer is written down before it
+goes anywhere; while that computer cannot be reached it is offered again every 30 seconds
+under the same id, and the receiving computer keeps one copy. A message to a computer that is
+offline or runs an older CodeConnect is refused with that reason.
 
 ## What your phone can do
 

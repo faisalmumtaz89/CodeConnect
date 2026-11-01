@@ -146,12 +146,14 @@ db_ops! {
     /// the whole fleet.
     fn push_target_for(device_id: String) -> Option<crate::store::PushRegistration>;
     fn recover_text_mutations(at: String) -> usize;
-    fn file_agent_message(
-        session_uid: String,
-        sender: String,
-        message: String,
-        now: String,
-    ) -> crate::store::AgentMessageFiling;
+    fn mail_context(session_uid: String, message_id: String) -> Option<String>;
+    fn read_mail(offer: String) -> usize;
+    fn release_mail(offer: String) -> ();
+    fn recover_mail() -> usize;
+    fn end_mail(session_uid: String) -> usize;
+    fn sent_mail_computer(message_id: String) -> Option<String>;
+    fn unsent_mail() -> Vec<crate::store::SentMail>;
+    fn untold_mail() -> Vec<crate::store::UntoldMail>;
     fn orphan_event_count() -> u64;
 }
 
@@ -410,6 +412,59 @@ impl Db {
             )
         })
         .await
+    }
+
+    // Hand-written for the reason [`Db::upsert_session_at_generation`] is: these
+    // take scalars and a state by value.
+
+    pub async fn take_mail(
+        &self,
+        mail: crate::store::MailIntake,
+        now_ms: i64,
+        limits: crate::store::MailLimits,
+    ) -> Result<crate::store::MailTaken> {
+        self.run(move |store| store.take_mail(&mail, now_ms, limits))
+            .await
+    }
+
+    pub async fn offer_mail(
+        &self,
+        session_uid: String,
+        offer: String,
+        now_ms: i64,
+    ) -> Result<crate::store::MailOffer> {
+        self.run(move |store| store.offer_mail(&session_uid, &offer, now_ms))
+            .await
+    }
+
+    pub async fn sweep_mail(&self, now_ms: i64, limits: crate::store::MailLimits) -> Result<()> {
+        self.run(move |store| store.sweep_mail(now_ms, limits))
+            .await
+    }
+
+    pub async fn file_sent_mail(&self, mail: crate::store::SentMail, now_ms: i64) -> Result<()> {
+        self.run(move |store| store.file_sent_mail(&mail, now_ms))
+            .await
+    }
+
+    pub async fn note_sent_mail(
+        &self,
+        message_id: String,
+        state: protocol::ipc::MailState,
+        reason: Option<String>,
+        told: bool,
+    ) -> Result<()> {
+        self.run(move |store| store.note_sent_mail(&message_id, state, reason.as_deref(), told))
+            .await
+    }
+
+    pub async fn told_mail(
+        &self,
+        message_id: String,
+        state: protocol::ipc::MailState,
+    ) -> Result<()> {
+        self.run(move |store| store.told_mail(&message_id, state))
+            .await
     }
 
     /// Give back a claim whose write was refused before it did anything. `false` when

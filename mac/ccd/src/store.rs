@@ -507,7 +507,8 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "text_mutations",
     "mutation_ledger",
     "tail_cursors",
-    "agent_messages",
+    "mail",
+    "mail_sent",
 ];
 
 /// One run removed by `codeconnect sessions prune`, and what went with it.
@@ -526,20 +527,79 @@ pub struct PrunedSession {
     pub events: u64,
 }
 
-/// What filing an agent's message found.
+/// One message for a session on this computer, as its receiver's daemon takes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentMessageFiling {
-    /// Kept.
-    Held,
-    /// The run has no session row.
+pub struct MailIntake {
+    pub message_id: String,
+    pub context_id: String,
+    pub in_reply_to: Option<String>,
+    /// The receiving run.
+    pub session_uid: String,
+    /// The sending computer's tailnet name, or empty for this computer.
+    pub sender_computer: String,
+    pub sender_uid: String,
+    /// `cc-N@<computer>`.
+    pub sender: String,
+    pub sender_agent: String,
+    pub sender_project: String,
+    pub text: String,
+}
+
+/// What taking a message found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MailTaken {
+    /// Kept, unread.
+    Kept,
+    /// A message with this id was taken before: where it stands now. Nothing was kept.
+    Known(protocol::ipc::MailState),
+    /// The sender has sent this receiver [`MailLimits::per_pair_per_hour`] messages
+    /// in the last hour.
+    RateLimited,
+    /// The receiving run has no session row.
     NoSession,
 }
 
-/// One message kept for its run, oldest first.
+/// The bounds the daemon puts on mail, passed in so tests can name them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailLimits {
+    /// How long an unread message is kept.
+    pub unread_ms: i64,
+    /// How many messages one sender may leave one receiver in an hour.
+    pub per_pair_per_hour: u32,
+    /// How long a settled message is kept before it is dropped.
+    pub settled_ms: i64,
+}
+
+/// A batch offered to a reader: its messages, and the changes in where its own
+/// sent messages stand.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeldAgentMessage {
-    pub id: i64,
-    pub message: String,
+pub struct MailOffer {
+    pub messages: Vec<protocol::ipc::MailEnvelope>,
+    pub updates: Vec<protocol::ipc::MailUpdate>,
+    pub more_pending: bool,
+}
+
+/// One message this computer's agent sent, kept before it goes anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentMail {
+    pub message_id: String,
+    pub context_id: String,
+    pub in_reply_to: Option<String>,
+    /// The sending run.
+    pub session_uid: String,
+    /// The address it was sent to, `cc-N@<computer>`.
+    pub recipient: String,
+    /// The receiving computer's tailnet name, or empty for this computer.
+    pub recipient_computer: String,
+    pub text: String,
+}
+
+/// A state change a sender on another computer has not been told yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UntoldMail {
+    pub message_id: String,
+    pub sender_computer: String,
+    pub state: protocol::ipc::MailState,
 }
 
 /// What claiming a `send_text` mutation found.
@@ -3563,40 +3623,357 @@ impl Store {
         Ok(changed)
     }
 
-    // -------------------------------------------------------- agent messages
+    // ------------------------------------------------------------------- mail
+    //
+    // `mail` is the receiver's side: one row per message for a session on this
+    // computer, keyed by the sender's `message_id`. `mail_sent` is the sender's
+    // side: one row per message this computer's agents sent, written before it goes
+    // anywhere, and what the sender has been told of it. A message between two
+    // sessions on this computer has a row in each.
 
-    /// Keep one agent's message for `session_uid`.
-    pub fn file_agent_message(
+    /// **Take one message for a session on this computer.** A `message_id` taken
+    /// before keeps nothing new and says where that one stands, so a sender's
+    /// retries leave one copy.
+    pub fn take_mail(
         &self,
-        session_uid: &str,
-        sender: &str,
-        message: &str,
-        now: &str,
-    ) -> Result<AgentMessageFiling> {
-        let conn = self.write();
-        let inserted = conn.execute(
-            "INSERT INTO agent_messages(session_uid, sender, message, created_at)
-             SELECT ?1, ?2, ?3, ?4
-              WHERE EXISTS (SELECT 1 FROM all_sessions WHERE session_uid = ?1)",
-            params![session_uid, sender, message, now],
+        mail: &MailIntake,
+        now_ms: i64,
+        limits: MailLimits,
+    ) -> Result<MailTaken> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let known: Option<String> = tx
+            .query_row(
+                "SELECT state FROM mail WHERE message_id = ?1",
+                params![mail.message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(state) = known {
+            return Ok(MailTaken::Known(mail_state(&state)));
+        }
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM all_sessions WHERE session_uid = ?1",
+                params![mail.session_uid],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Ok(MailTaken::NoSession);
+        }
+        let last_hour: u32 = tx.query_row(
+            "SELECT COUNT(*) FROM mail
+              WHERE session_uid = ?1 AND sender_computer = ?2 AND sender_uid = ?3
+                AND accepted_ms > ?4",
+            params![
+                mail.session_uid,
+                mail.sender_computer,
+                mail.sender_uid,
+                now_ms - HOUR_MS
+            ],
+            |row| row.get(0),
         )?;
-        Ok(if inserted == 1 {
-            AgentMessageFiling::Held
-        } else {
-            AgentMessageFiling::NoSession
+        if last_hour >= limits.per_pair_per_hour {
+            return Ok(MailTaken::RateLimited);
+        }
+        tx.execute(
+            "INSERT INTO mail(message_id, context_id, in_reply_to, session_uid, sender_computer,
+                              sender_uid, sender, sender_agent, sender_project, text,
+                              accepted_ms, expires_ms, state, sender_told)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'waiting', 1)",
+            params![
+                mail.message_id,
+                mail.context_id,
+                mail.in_reply_to,
+                mail.session_uid,
+                mail.sender_computer,
+                mail.sender_uid,
+                mail.sender,
+                mail.sender_agent,
+                mail.sender_project,
+                mail.text,
+                now_ms,
+                now_ms + limits.unread_ms
+            ],
+        )?;
+        tx.commit()?;
+        Ok(MailTaken::Kept)
+    }
+
+    /// The conversation of a message `session_uid` was sent, to reply in.
+    pub fn mail_context(&self, session_uid: &str, message_id: &str) -> Result<Option<String>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT context_id FROM mail WHERE session_uid = ?1 AND message_id = ?2",
+                params![session_uid, message_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// **Offer `session_uid` its unread messages**, oldest first and within the
+    /// batch bounds, and the changes in where its own sent messages stand, under
+    /// `offer`. Nothing offered is read until [`Store::read_mail`]; another reader
+    /// is offered none of it meanwhile.
+    pub fn offer_mail(&self, session_uid: &str, offer: &str, now_ms: i64) -> Result<MailOffer> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut unread = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT seq, message_id, context_id, in_reply_to, sender, sender_agent,
+                        sender_project, text
+                   FROM mail
+                  WHERE session_uid = ?1 AND state = 'waiting' AND expires_ms > ?2
+                  ORDER BY seq ASC",
+            )?;
+            let rows = stmt.query_map(params![session_uid, now_ms], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    protocol::ipc::MailEnvelope {
+                        message_id: row.get(1)?,
+                        context_id: row.get(2)?,
+                        in_reply_to: row.get(3)?,
+                        from: row.get(4)?,
+                        agent: row.get(5)?,
+                        project: row.get(6)?,
+                        text: row.get(7)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                unread.push(row?);
+            }
+        }
+        let mut messages = Vec::new();
+        let mut bytes = 0;
+        for (seq, envelope) in &unread {
+            let full = messages.len() == protocol::ipc::MAIL_BATCH_MESSAGES
+                || (!messages.is_empty()
+                    && bytes + envelope.text.len() > protocol::ipc::MAIL_BATCH_BYTES);
+            if full {
+                break;
+            }
+            bytes += envelope.text.len();
+            tx.execute(
+                "UPDATE mail SET state = 'offered', offer = ?2 WHERE seq = ?1",
+                params![seq, offer],
+            )?;
+            messages.push(envelope.clone());
+        }
+        let more_pending = unread.len() > messages.len();
+        tx.execute(
+            "UPDATE mail_sent SET offer = ?2, offer_state = state
+              WHERE session_uid = ?1 AND offer IS NULL AND state <> told_state",
+            params![session_uid, offer],
+        )?;
+        let mut updates = Vec::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT message_id, recipient, offer_state, reason FROM mail_sent
+                  WHERE offer = ?1 ORDER BY created_ms ASC",
+            )?;
+            let rows = stmt.query_map(params![offer], |row| {
+                Ok(protocol::ipc::MailUpdate {
+                    message_id: row.get(0)?,
+                    to: row.get(1)?,
+                    state: mail_state(&row.get::<_, String>(2)?),
+                    reason: row.get(3)?,
+                })
+            })?;
+            for row in rows {
+                updates.push(row?);
+            }
+        }
+        tx.commit()?;
+        Ok(MailOffer {
+            messages,
+            updates,
+            more_pending,
         })
     }
 
-    /// Every message kept for `session_uid`, oldest first.
-    pub fn held_agent_messages(&self, session_uid: &str) -> Result<Vec<HeldAgentMessage>> {
+    /// **The offer reached its agent:** its messages are read, and the sender of
+    /// each is told — here at once, on another computer through
+    /// [`Store::untold_mail`] — and the updates it carried are given. Returns how many
+    /// messages were read.
+    pub fn read_mail(&self, offer: &str) -> Result<usize> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let read = settle_mail(
+            &tx,
+            "offer = ?1 AND state = 'offered'",
+            params![offer],
+            "read",
+        )?;
+        tx.execute(
+            "UPDATE mail_sent SET told_state = offer_state, offer = NULL, offer_state = NULL
+              WHERE offer = ?1",
+            params![offer],
+        )?;
+        tx.commit()?;
+        Ok(read)
+    }
+
+    /// The offer did not reach its agent: everything in it is unread again.
+    pub fn release_mail(&self, offer: &str) -> Result<()> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE mail SET state = 'waiting', offer = NULL WHERE offer = ?1 AND state = 'offered'",
+            params![offer],
+        )?;
+        tx.execute(
+            "UPDATE mail_sent SET offer = NULL, offer_state = NULL WHERE offer = ?1",
+            params![offer],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// At start-up, no offer is in flight: every one is unread again.
+    pub fn recover_mail(&self) -> Result<usize> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let released = tx.execute(
+            "UPDATE mail SET state = 'waiting', offer = NULL WHERE state = 'offered'",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE mail_sent SET offer = NULL, offer_state = NULL WHERE offer IS NOT NULL",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(released)
+    }
+
+    /// **Settle what time and ended sessions decide:** unread messages past their
+    /// expiry are expired, those for a run that has ended are ended, a sent
+    /// message no computer took within the unread time is expired, and settled
+    /// rows older than [`MailLimits::settled_ms`] are dropped.
+    pub fn sweep_mail(&self, now_ms: i64, limits: MailLimits) -> Result<()> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        settle_mail(
+            &tx,
+            "state = 'waiting' AND expires_ms <= ?1",
+            params![now_ms],
+            "expired",
+        )?;
+        settle_mail(
+            &tx,
+            "state IN ('waiting', 'offered')
+             AND session_uid IN (SELECT session_uid FROM all_sessions WHERE lifecycle = ?1)",
+            params![lifecycle_str(Lifecycle::Exited)],
+            "ended",
+        )?;
+        tx.execute(
+            "UPDATE mail_sent SET state = 'expired' WHERE state = 'sent' AND created_ms <= ?1",
+            params![now_ms - limits.unread_ms],
+        )?;
+        let settled = now_ms - limits.settled_ms;
+        tx.execute(
+            "DELETE FROM mail WHERE state IN ('read', 'expired', 'ended')
+                AND accepted_ms <= ?1 AND sender_told = 1",
+            params![settled],
+        )?;
+        tx.execute(
+            "DELETE FROM mail_sent WHERE state <> 'sent' AND state = told_state AND created_ms <= ?1",
+            params![settled],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A run ended: its unread messages are ended now.
+    pub fn end_mail(&self, session_uid: &str) -> Result<usize> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let ended = settle_mail(
+            &tx,
+            "session_uid = ?1 AND state IN ('waiting', 'offered')",
+            params![session_uid],
+            "ended",
+        )?;
+        tx.commit()?;
+        Ok(ended)
+    }
+
+    /// Keep a message this computer's agent sent, before it goes anywhere.
+    pub fn file_sent_mail(&self, mail: &SentMail, now_ms: i64) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "INSERT INTO mail_sent(message_id, context_id, in_reply_to, session_uid, recipient,
+                                   recipient_computer, text, created_ms, state, told_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'sent', 'sent')",
+            params![
+                mail.message_id,
+                mail.context_id,
+                mail.in_reply_to,
+                mail.session_uid,
+                mail.recipient,
+                mail.recipient_computer,
+                mail.text,
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// **Where a sent message stands now**, from the receiver. A state only moves
+    /// forward: an answer that arrives after a later one changes nothing. `told`
+    /// says the sender was just told this state itself.
+    pub fn note_sent_mail(
+        &self,
+        message_id: &str,
+        state: protocol::ipc::MailState,
+        reason: Option<&str>,
+        told: bool,
+    ) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE mail_sent
+                SET state = ?2, reason = ?3, told_state = CASE WHEN ?4 THEN ?2 ELSE told_state END
+              WHERE message_id = ?1 AND state IN ('sent', 'waiting') AND state <> ?2",
+            params![message_id, state.as_str(), reason, told],
+        )?;
+        Ok(())
+    }
+
+    /// The computer a sent message went to, empty for this one, or `None` when
+    /// this computer sent no such message.
+    pub fn sent_mail_computer(&self, message_id: &str) -> Result<Option<String>> {
+        let conn = self.read();
+        Ok(conn
+            .query_row(
+                "SELECT recipient_computer FROM mail_sent WHERE message_id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Sent messages no other computer has taken yet, oldest first.
+    pub fn unsent_mail(&self) -> Result<Vec<SentMail>> {
         let conn = self.read();
         let mut stmt = conn.prepare(
-            "SELECT id, message FROM agent_messages WHERE session_uid = ?1 ORDER BY id ASC",
+            "SELECT message_id, context_id, in_reply_to, session_uid, recipient,
+                    recipient_computer, text
+               FROM mail_sent WHERE state = 'sent' AND recipient_computer <> ''
+              ORDER BY created_ms ASC",
         )?;
-        let rows = stmt.query_map(params![session_uid], |row| {
-            Ok(HeldAgentMessage {
-                id: row.get(0)?,
-                message: row.get(1)?,
+        let rows = stmt.query_map([], |row| {
+            Ok(SentMail {
+                message_id: row.get(0)?,
+                context_id: row.get(1)?,
+                in_reply_to: row.get(2)?,
+                session_uid: row.get(3)?,
+                recipient: row.get(4)?,
+                recipient_computer: row.get(5)?,
+                text: row.get(6)?,
             })
         })?;
         let mut out = Vec::new();
@@ -3606,7 +3983,38 @@ impl Store {
         Ok(out)
     }
 
-    // ---------------------------------------------------- generalized ledger
+    /// State changes the senders on other computers have not been told yet.
+    pub fn untold_mail(&self) -> Result<Vec<UntoldMail>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT message_id, sender_computer, state FROM mail WHERE sender_told = 0
+              ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(UntoldMail {
+                message_id: row.get(0)?,
+                sender_computer: row.get(1)?,
+                state: mail_state(&row.get::<_, String>(2)?),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// The sender of `message_id` was told it stands at `state`.
+    pub fn told_mail(&self, message_id: &str, state: protocol::ipc::MailState) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE mail SET sender_told = 1 WHERE message_id = ?1 AND state = ?2",
+            params![message_id, state.as_str()],
+        )?;
+        Ok(())
+    }
+
+    // ---------------------------------------------------- generalized ledger    // ---------------------------------------------------- generalized ledger
     //
     // The generalized mutation ledger, keyed `(operation_kind, session_uid,
     // client_request_id)`. It is the same claim-before-write, lookup-then-
@@ -4653,13 +5061,50 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             PRIMARY KEY(session_uid, request_id)
         );
 
-        -- Messages from other agents, kept for their run.
-        CREATE TABLE IF NOT EXISTS agent_messages(
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_uid TEXT NOT NULL,
-            sender      TEXT NOT NULL,
-            message     TEXT NOT NULL,
-            created_at  TEXT NOT NULL
+        -- Messages from other agents for a session on this computer (the receiver's
+        -- side), one per sender's `message_id`, in the order they were taken (`seq`).
+        -- `offered` while a `read_messages` answer is on its way to the agent; any
+        -- found at start-up are `waiting` again. `sender_told` is 0 while a sender on
+        -- another computer has not been told the state.
+        CREATE TABLE IF NOT EXISTS mail(
+            seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id      TEXT NOT NULL UNIQUE,
+            context_id      TEXT NOT NULL,
+            in_reply_to     TEXT,
+            session_uid     TEXT NOT NULL,
+            sender_computer TEXT NOT NULL,
+            sender_uid      TEXT NOT NULL,
+            sender          TEXT NOT NULL,
+            sender_agent    TEXT NOT NULL,
+            sender_project  TEXT NOT NULL,
+            text            TEXT NOT NULL,
+            accepted_ms     INTEGER NOT NULL,
+            expires_ms      INTEGER NOT NULL,
+            -- waiting | offered | read | expired | ended
+            state           TEXT NOT NULL,
+            offer           TEXT,
+            sender_told     INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS mail_by_session ON mail(session_uid, state, seq);
+
+        -- Messages this computer's agents sent (the sender's side), written before
+        -- they go anywhere. `told_state` is the state the sender last read; an offer
+        -- of the change in flight is `offer` / `offer_state`.
+        CREATE TABLE IF NOT EXISTS mail_sent(
+            message_id         TEXT PRIMARY KEY,
+            context_id         TEXT NOT NULL,
+            in_reply_to        TEXT,
+            session_uid        TEXT NOT NULL,
+            recipient          TEXT NOT NULL,
+            recipient_computer TEXT NOT NULL,
+            text               TEXT NOT NULL,
+            created_ms         INTEGER NOT NULL,
+            -- sent | waiting | read | refused | expired | ended
+            state              TEXT NOT NULL,
+            reason             TEXT,
+            told_state         TEXT NOT NULL,
+            offer              TEXT,
+            offer_state        TEXT
         );
 
         -- The generalized mutation ledger. `text_mutations` above is the proven
@@ -5915,6 +6360,51 @@ fn parse_source(value: &str) -> Source {
         // must not out-rank a real hook or transcript fact in dedup.
         _ => Source::Unknown,
     }
+}
+
+const HOUR_MS: i64 = 60 * 60 * 1000;
+
+/// A `mail` or `mail_sent` state as stored. Only this file writes them.
+fn mail_state(text: &str) -> protocol::ipc::MailState {
+    protocol::ipc::MailState::parse(text).unwrap_or(protocol::ipc::MailState::Waiting)
+}
+
+/// **Settle the `mail` rows `filter` picks at `state`**, and tell each sender: one
+/// on this computer at once, in its `mail_sent` row, and one on another computer
+/// by marking the row untold. `filter` binds `?1` onwards to `bind`. Returns how
+/// many rows were settled.
+fn settle_mail(
+    tx: &rusqlite::Transaction<'_>,
+    filter: &str,
+    bind: impl rusqlite::Params,
+    state: &str,
+) -> Result<usize> {
+    let ids: Vec<(String, bool)> = {
+        // `filter` is a literal in this file; nothing a caller supplies reaches it.
+        let mut stmt = tx.prepare(&format!(
+            "SELECT message_id, sender_computer = '' FROM mail WHERE {filter}"
+        ))?;
+        let rows = stmt.query_map(bind, |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        ids
+    };
+    for (message_id, here) in &ids {
+        tx.execute(
+            "UPDATE mail SET state = ?2, offer = NULL, sender_told = ?3 WHERE message_id = ?1",
+            params![message_id, state, *here],
+        )?;
+        if *here {
+            tx.execute(
+                "UPDATE mail_sent SET state = ?2
+                  WHERE message_id = ?1 AND state IN ('sent', 'waiting')",
+                params![message_id, state],
+            )?;
+        }
+    }
+    Ok(ids.len())
 }
 
 /// What the newest of a run's events matching `filter` decides, walking them
@@ -9731,37 +10221,405 @@ mod tests {
         }
     }
 
-    /// **Agents' messages are kept in order**, and only for a run that has a row.
+    const MAIL_LIMITS: MailLimits = MailLimits {
+        unread_ms: 24 * HOUR_MS,
+        per_pair_per_hour: 3,
+        settled_ms: 7 * 24 * HOUR_MS,
+    };
+
+    /// A store with two runs, `R` (cc-1) and `S` (cc-2), on this computer.
+    fn mail_store() -> (Store, std::path::PathBuf, SessionKey, SessionKey) {
+        let (store, path) = temp_store();
+        let (receiver, sender) = (key("R1", "cc-1"), key("S1", "cc-2"));
+        for session in [&receiver, &sender] {
+            store
+                .upsert_session(&session_row(session))
+                .unwrap()
+                .assert_present();
+        }
+        (store, path, receiver, sender)
+    }
+
+    /// One message `id` from `sender_uid` on `computer` (empty: this one) to `to`.
+    fn intake(
+        id: &str,
+        to: &SessionKey,
+        computer: &str,
+        sender_uid: &str,
+        text: &str,
+    ) -> MailIntake {
+        MailIntake {
+            message_id: id.into(),
+            context_id: format!("ctx-{id}"),
+            in_reply_to: None,
+            session_uid: to.uid.clone(),
+            sender_computer: computer.into(),
+            sender_uid: sender_uid.into(),
+            sender: "cc-2@studio".into(),
+            sender_agent: "Codex".into(),
+            sender_project: "api".into(),
+            text: text.into(),
+        }
+    }
+
+    /// The `mail_sent` row of a message `sender` sent to cc-1 on this computer.
+    fn sent(id: &str, sender: &SessionKey) -> SentMail {
+        SentMail {
+            message_id: id.into(),
+            context_id: format!("ctx-{id}"),
+            in_reply_to: None,
+            session_uid: sender.uid.clone(),
+            recipient: "cc-1@studio".into(),
+            recipient_computer: String::new(),
+            text: "hi".into(),
+        }
+    }
+
+    fn offered_ids(offer: &MailOffer) -> Vec<String> {
+        offer
+            .messages
+            .iter()
+            .map(|m| m.message_id.clone())
+            .collect()
+    }
+
+    /// **One copy per message id, and a bounded number per sender and receiver.**
+    /// A retried id keeps nothing new and says where the first one stands; the
+    /// fourth message in an hour from one sender to one receiver is refused, while
+    /// another sender, another receiver and the same pair an hour later are not.
     #[test]
-    fn agent_messages_are_kept_in_order_for_a_known_run() {
-        let (store, _path) = temp_store();
-        let session = key("AM", "cc-1");
+    fn mail_is_kept_once_per_id_and_limited_per_pair() {
+        let (store, _path, receiver, sender) = mail_store();
+        let other = key("R2", "cc-3");
         store
-            .upsert_session(&session_row(&session))
+            .upsert_session(&session_row(&other))
             .unwrap()
             .assert_present();
-        let at = "2026-10-31T10:00:00.000Z";
-        for text in ["one", "two"] {
-            assert_eq!(
-                store
-                    .file_agent_message(&session.uid, "cc-2@studio", text, at)
-                    .unwrap(),
-                AgentMessageFiling::Held
-            );
+        let t0 = 1_000_000_000;
+        let take = |id: &str, to: &SessionKey, computer: &str, from: &str, at: i64| {
+            store
+                .take_mail(&intake(id, to, computer, from, "hi"), at, MAIL_LIMITS)
+                .unwrap()
+        };
+        for id in ["m1", "m2", "m3"] {
+            assert_eq!(take(id, &receiver, "", &sender.uid, t0), MailTaken::Kept);
         }
         assert_eq!(
-            store
-                .file_agent_message(&uid("ZZ"), "cc-2@studio", "x", at)
-                .unwrap(),
-            AgentMessageFiling::NoSession
+            take("m1", &receiver, "", &sender.uid, t0),
+            MailTaken::Known(protocol::ipc::MailState::Waiting),
+            "a retried id keeps nothing new"
         );
-        let held: Vec<String> = store
-            .held_agent_messages(&session.uid)
+        assert_eq!(
+            take("m4", &receiver, "", &sender.uid, t0 + 1),
+            MailTaken::RateLimited
+        );
+        assert_eq!(
+            take("m5", &receiver, "desktop", &sender.uid, t0 + 1),
+            MailTaken::Kept,
+            "the same uid on another computer is another sender"
+        );
+        assert_eq!(take("m6", &other, "", &sender.uid, t0 + 1), MailTaken::Kept);
+        assert_eq!(
+            take("m7", &receiver, "", &sender.uid, t0 + HOUR_MS),
+            MailTaken::Kept,
+            "the limit frees up an hour on"
+        );
+        assert_eq!(
+            take("m8", &key("ZZ", "cc-9"), "", &sender.uid, t0),
+            MailTaken::NoSession
+        );
+    }
+
+    /// **Offered is not read.** Messages offered to one call are offered to no
+    /// other; an offer that never reached its agent is unread again, and so is
+    /// every offer found at start-up; a confirmed offer is read, and its local
+    /// sender sees that once, in the next offer it is given.
+    #[test]
+    fn offered_mail_is_read_only_once_its_offer_is_confirmed() {
+        let (store, path, receiver, sender) = mail_store();
+        let now = 1_000_000_000;
+        for id in ["m1", "m2"] {
+            store.file_sent_mail(&sent(id, &sender), now).unwrap();
+            store
+                .take_mail(
+                    &intake(id, &receiver, "", &sender.uid, "hi"),
+                    now,
+                    MAIL_LIMITS,
+                )
+                .unwrap();
+            store
+                .note_sent_mail(id, protocol::ipc::MailState::Waiting, None, true)
+                .unwrap();
+        }
+        let first = store.offer_mail(&receiver.uid, "o1", now).unwrap();
+        assert_eq!(offered_ids(&first), ["m1", "m2"], "oldest first");
+        assert!(!first.more_pending);
+        assert!(
+            store
+                .offer_mail(&receiver.uid, "o2", now)
+                .unwrap()
+                .messages
+                .is_empty(),
+            "a second call at the same time is offered none of them"
+        );
+        store.release_mail("o1").unwrap();
+        assert_eq!(
+            offered_ids(&store.offer_mail(&receiver.uid, "o3", now).unwrap()),
+            ["m1", "m2"],
+            "an offer that never reached its agent is unread again"
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.recover_mail().unwrap(), 2);
+        assert_eq!(
+            store.read_mail("o3").unwrap(),
+            0,
+            "a recovered offer reads nothing"
+        );
+        assert_eq!(
+            offered_ids(&store.offer_mail(&receiver.uid, "o4", now).unwrap()),
+            ["m1", "m2"]
+        );
+        assert_eq!(store.read_mail("o4").unwrap(), 2);
+        assert!(store
+            .offer_mail(&receiver.uid, "o5", now)
             .unwrap()
-            .into_iter()
-            .map(|m| m.message)
+            .messages
+            .is_empty());
+
+        let told = store.offer_mail(&sender.uid, "o6", now).unwrap();
+        let states: Vec<_> = told
+            .updates
+            .iter()
+            .map(|u| (u.message_id.as_str(), u.state))
             .collect();
-        assert_eq!(held, ["one", "two"], "oldest first");
+        assert_eq!(
+            states,
+            [
+                ("m1", protocol::ipc::MailState::Read),
+                ("m2", protocol::ipc::MailState::Read)
+            ]
+        );
+        store.release_mail("o6").unwrap();
+        assert_eq!(
+            store
+                .offer_mail(&sender.uid, "o7", now)
+                .unwrap()
+                .updates
+                .len(),
+            2,
+            "an update offered but not confirmed is given again"
+        );
+        store.read_mail("o7").unwrap();
+        assert!(
+            store
+                .offer_mail(&sender.uid, "o8", now)
+                .unwrap()
+                .updates
+                .is_empty(),
+            "each change is given once"
+        );
+    }
+
+    /// **A batch holds at most 16 messages and 32 KiB of text**, and says when
+    /// more wait.
+    #[test]
+    fn an_offer_is_bounded_and_says_more_wait() {
+        let (store, _path, receiver, _sender) = mail_store();
+        let now = 1_000_000_000;
+        let limits = MailLimits {
+            per_pair_per_hour: 100,
+            ..MAIL_LIMITS
+        };
+        for n in 0..17 {
+            store
+                .take_mail(
+                    &intake(
+                        &format!("s{n:02}"),
+                        &receiver,
+                        "",
+                        &format!("sender{n}"),
+                        "hi",
+                    ),
+                    now,
+                    limits,
+                )
+                .unwrap();
+        }
+        let offer = store.offer_mail(&receiver.uid, "o1", now).unwrap();
+        assert_eq!(offer.messages.len(), protocol::ipc::MAIL_BATCH_MESSAGES);
+        assert!(offer.more_pending);
+        store.read_mail("o1").unwrap();
+        let rest = store.offer_mail(&receiver.uid, "o2", now).unwrap();
+        assert_eq!(offered_ids(&rest), ["s16"]);
+        assert!(!rest.more_pending);
+        store.read_mail("o2").unwrap();
+
+        let full = "x".repeat(protocol::ipc::MAIL_TEXT_BYTES);
+        for n in 0..5 {
+            store
+                .take_mail(
+                    &intake(&format!("b{n}"), &receiver, "", "big", &full),
+                    now,
+                    limits,
+                )
+                .unwrap();
+        }
+        let offer = store.offer_mail(&receiver.uid, "o3", now).unwrap();
+        assert_eq!(
+            offer.messages.len(),
+            protocol::ipc::MAIL_BATCH_BYTES / protocol::ipc::MAIL_TEXT_BYTES
+        );
+        assert!(offer.more_pending);
+    }
+
+    /// **Unread mail expires a day after it was taken, and not before**, and is
+    /// never offered once expired; mail for a run that ended is ended. The sender
+    /// on this computer sees both.
+    #[test]
+    fn unread_mail_expires_after_a_day_and_ends_with_its_run() {
+        let (store, _path, receiver, sender) = mail_store();
+        let t0 = 1_000_000_000;
+        for id in ["m1", "m2"] {
+            store.file_sent_mail(&sent(id, &sender), t0).unwrap();
+            store
+                .take_mail(
+                    &intake(id, &receiver, "", &sender.uid, "hi"),
+                    t0,
+                    MAIL_LIMITS,
+                )
+                .unwrap();
+        }
+        let day = MAIL_LIMITS.unread_ms;
+        assert_eq!(
+            store
+                .offer_mail(&receiver.uid, "o1", t0 + day - 1)
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+        store.release_mail("o1").unwrap();
+        assert!(
+            store
+                .offer_mail(&receiver.uid, "o2", t0 + day)
+                .unwrap()
+                .messages
+                .is_empty(),
+            "not offered at the day itself"
+        );
+        store.sweep_mail(t0 + day - 1, MAIL_LIMITS).unwrap();
+        assert_eq!(
+            store
+                .offer_mail(&receiver.uid, "o3", t0 + day - 1)
+                .unwrap()
+                .messages
+                .len(),
+            2,
+            "a second before the day, still unread"
+        );
+        store.release_mail("o3").unwrap();
+        let other = key("R3", "cc-4");
+        store
+            .upsert_session(&session_row(&other))
+            .unwrap()
+            .assert_present();
+        store
+            .take_mail(
+                &intake("m3", &other, "", &sender.uid, "hi"),
+                t0,
+                MAIL_LIMITS,
+            )
+            .unwrap();
+        store.file_sent_mail(&sent("m3", &sender), t0).unwrap();
+        assert_eq!(store.end_mail(&other.uid).unwrap(), 1);
+        store.sweep_mail(t0 + day, MAIL_LIMITS).unwrap();
+        let states: Vec<_> = store
+            .offer_mail(&sender.uid, "o4", t0 + day)
+            .unwrap()
+            .updates
+            .into_iter()
+            .map(|u| (u.message_id, u.state))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("m1".to_string(), protocol::ipc::MailState::Expired),
+                ("m2".to_string(), protocol::ipc::MailState::Expired),
+                ("m3".to_string(), protocol::ipc::MailState::Ended),
+            ]
+        );
+        store
+            .set_lifecycle(&receiver.uid, Lifecycle::Exited)
+            .unwrap();
+        store
+            .take_mail(
+                &intake("m4", &receiver, "", "late", "hi"),
+                t0 + day,
+                MAIL_LIMITS,
+            )
+            .unwrap();
+        store.sweep_mail(t0 + day, MAIL_LIMITS).unwrap();
+        assert!(
+            store.untold_mail().unwrap().is_empty(),
+            "a sender on this computer is told at once"
+        );
+        assert_eq!(
+            store
+                .offer_mail(&receiver.uid, "o5", t0 + day)
+                .unwrap()
+                .messages
+                .len(),
+            0,
+            "an ended run's mail is never offered"
+        );
+    }
+
+    /// **A sender on another computer is told each change until it takes it**, and
+    /// a sent message's state only moves forward.
+    #[test]
+    fn a_remote_sender_is_told_each_change_and_states_only_move_forward() {
+        let (store, _path, receiver, sender) = mail_store();
+        let now = 1_000_000_000;
+        store
+            .take_mail(
+                &intake("m1", &receiver, "desktop", "remote-uid", "hi"),
+                now,
+                MAIL_LIMITS,
+            )
+            .unwrap();
+        assert!(
+            store.untold_mail().unwrap().is_empty(),
+            "waiting was its answer"
+        );
+        store.offer_mail(&receiver.uid, "o1", now).unwrap();
+        store.read_mail("o1").unwrap();
+        let untold = store.untold_mail().unwrap();
+        assert_eq!(
+            untold,
+            [UntoldMail {
+                message_id: "m1".into(),
+                sender_computer: "desktop".into(),
+                state: protocol::ipc::MailState::Read,
+            }]
+        );
+        store
+            .told_mail("m1", protocol::ipc::MailState::Read)
+            .unwrap();
+        assert!(store.untold_mail().unwrap().is_empty());
+
+        store.file_sent_mail(&sent("m2", &sender), now).unwrap();
+        store
+            .note_sent_mail("m2", protocol::ipc::MailState::Read, None, false)
+            .unwrap();
+        store
+            .note_sent_mail("m2", protocol::ipc::MailState::Waiting, None, false)
+            .unwrap();
+        assert_eq!(
+            store.offer_mail(&sender.uid, "o2", now).unwrap().updates[0].state,
+            protocol::ipc::MailState::Read,
+            "a late answer does not move it back"
+        );
     }
 
     #[test]

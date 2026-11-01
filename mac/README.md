@@ -102,9 +102,10 @@ when it is busy.
 
 Both kinds of session get one MCP server of CodeConnect's own, `codeconnect`
 (`--mcp-config` before `--settings` for Claude Code; `-c mcp_servers.codeconnect.…` on
-Codex's app server), with which an agent lists the other running sessions and sends one a
-message. `ccd` keeps the message for the receiving session, on this computer or, carried over
-Tailscale to that computer's `ccd`, on another of the same Tailscale user's computers. See
+Codex's app server), with which an agent lists the other running sessions, sends one a
+message, and reads its own. `ccd` keeps a message until the receiving session reads it, on
+this computer or, carried over Tailscale to that computer's `ccd`, on another of the same
+Tailscale user's computers. See
 [docs/codex.md](../docs/codex.md#messages-from-other-agents).
 
 Your arguments reach `codex` as native `codex` would read them — the sandbox, approval

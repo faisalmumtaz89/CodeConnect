@@ -3642,7 +3642,7 @@ mod tests {
                 .replace("100.64.0.2", "127.0.0.1"),
         )
         .unwrap();
-        *crate::agent_messages::TEST_TAILNET
+        *crate::mail::TEST_TAILNET
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Some(tailnet.clone());
         let (receiver, _device) = live_server(protocol::config::Config::default()).await;
@@ -3658,32 +3658,71 @@ mod tests {
         let from = protocol::uid::new().unwrap();
         codex_run(&sender, &from, "cc-2").await;
 
-        let outcome = sender
-            .send_agent_message_on(Some(&tailnet), &from, "cc-1@desktop", "please review")
+        let status = sender
+            .send_agent_message_on(Some(&tailnet), &from, "cc-1@desktop", "please review", None)
             .await;
-        assert!(
-            matches!(outcome, protocol::ipc::AgentMessageOutcome::Held { .. }),
-            "{outcome:?}"
-        );
         assert_eq!(
-            receiver
-                .store
-                .held_agent_messages(&target)
-                .unwrap()
-                .into_iter()
-                .map(|m| m.message)
-                .collect::<Vec<_>>(),
-            [
-                "[CodeConnect] Message from cc-2@desktop (Codex · project tmp). Reply with \
-              send_message to cc-2@desktop.\n\nplease review"
-            ]
+            status.state,
+            protocol::ipc::MailState::Waiting,
+            "{status:?}"
         );
         let refused = sender
-            .send_agent_message_on(Some(&tailnet), &from, "cc-9@desktop", "hi")
+            .send_agent_message_on(Some(&tailnet), &from, "cc-9@desktop", "hi", None)
             .await;
         assert!(
-            matches!(&refused, protocol::ipc::AgentMessageOutcome::Refused { reason } if reason.contains("not a running session")),
+            refused.state == protocol::ipc::MailState::Refused
+                && refused
+                    .reason
+                    .as_deref()
+                    .is_some_and(|r| r.contains("not a running session")),
             "{refused:?}"
+        );
+
+        // A message the receiver never answered is still `sent`, and the sweep
+        // offers it again under its own id; the receiver keeps one copy.
+        let retried = crate::store::SentMail {
+            message_id: protocol::uid::new().unwrap(),
+            context_id: protocol::uid::new().unwrap(),
+            in_reply_to: None,
+            session_uid: from.clone(),
+            recipient: "cc-1@desktop".into(),
+            recipient_computer: "desktop".into(),
+            text: "are you there?".into(),
+        };
+        sender
+            .store
+            .file_sent_mail(&retried, protocol::time::now_unix_ms())
+            .unwrap();
+        for _ in 0..2 {
+            sender.sweep_mail_on(Some(&tailnet)).await;
+        }
+        let (_, batch) = receiver.daemon.offer_agent_messages(&target).await.unwrap();
+        assert_eq!(
+            batch
+                .messages
+                .iter()
+                .map(|m| (m.message_id.as_str(), m.from.as_str(), m.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (status.message_id.as_str(), "cc-2@desktop", "please review"),
+                (
+                    retried.message_id.as_str(),
+                    "cc-2@desktop",
+                    "are you there?"
+                ),
+            ]
+        );
+        let (_, mine) = sender.offer_agent_messages(&from).await.unwrap();
+        assert_eq!(
+            mine.updates
+                .iter()
+                .map(|u| (u.message_id.as_str(), u.state))
+                .collect::<Vec<_>>(),
+            [(
+                retried.message_id.as_str(),
+                protocol::ipc::MailState::Waiting
+            )],
+            "the sender is told the retry was taken"
         );
 
         let (mut phone, ack) = receiver.hello(protocol::PROTOCOL_VERSION, None).await;

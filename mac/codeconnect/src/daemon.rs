@@ -166,41 +166,62 @@ pub fn request_at(
     frame: &ClientFrame,
     timeout: Duration,
 ) -> Result<DaemonFrame> {
-    let mut stream = UnixStream::connect(socket).with_context(|| {
-        // With no systemd, `daemon install` refuses: name the line that starts it by hand.
-        #[cfg(target_os = "linux")]
-        let start = crate::service::no_systemd().map_or_else(
-            || "codeconnect daemon install".to_string(),
-            |_| crate::service::hand_run_line(),
-        );
-        #[cfg(not(target_os = "linux"))]
-        let start = "codeconnect daemon install";
-        format!(
-            "cannot reach the CodeConnect daemon at {}: start it with \
-             `{start}`, or check it with `codeconnect daemon status`",
-            socket.display()
-        )
-    })?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    DaemonLink::connect(socket, timeout)?.request(frame)
+}
 
-    let mut line = serde_json::to_vec(frame)?;
-    line.push(b'\n');
-    stream.write_all(&line).context("writing to ccd")?;
-    stream.flush().context("flushing to ccd")?;
+/// One connection to the daemon, for an exchange of more than one frame: the
+/// `codeconnect` tool's `read_messages` confirms on the same connection that the
+/// agent was given what it read.
+pub struct DaemonLink {
+    stream: BufReader<UnixStream>,
+}
 
-    let mut response = String::new();
-    let read = BufReader::new(stream)
-        .read_line(&mut response)
-        .context("reading ccd's reply")?;
-    if read == 0 {
-        bail!("ccd closed the connection without replying");
+impl DaemonLink {
+    pub fn connect(socket: &std::path::Path, timeout: Duration) -> Result<DaemonLink> {
+        let stream = UnixStream::connect(socket).with_context(|| {
+            // With no systemd, `daemon install` refuses: name the line that starts it by hand.
+            #[cfg(target_os = "linux")]
+            let start = crate::service::no_systemd().map_or_else(
+                || "codeconnect daemon install".to_string(),
+                |_| crate::service::hand_run_line(),
+            );
+            #[cfg(not(target_os = "linux"))]
+            let start = "codeconnect daemon install";
+            format!(
+                "cannot reach the CodeConnect daemon at {}: start it with \
+                 `{start}`, or check it with `codeconnect daemon status`",
+                socket.display()
+            )
+        })?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        Ok(DaemonLink {
+            stream: BufReader::new(stream),
+        })
     }
 
-    match serde_json::from_str::<DaemonFrame>(response.trim())? {
-        // Surfaced here so no caller has to remember to check for it.
-        DaemonFrame::Error { message } => bail!("{message}"),
-        frame => Ok(frame),
+    /// Send one frame and read the daemon's one reply.
+    pub fn request(&mut self, frame: &ClientFrame) -> Result<DaemonFrame> {
+        let mut line = serde_json::to_vec(frame)?;
+        line.push(b'\n');
+        let stream = self.stream.get_mut();
+        stream.write_all(&line).context("writing to ccd")?;
+        stream.flush().context("flushing to ccd")?;
+
+        let mut response = String::new();
+        let read = self
+            .stream
+            .read_line(&mut response)
+            .context("reading ccd's reply")?;
+        if read == 0 {
+            bail!("ccd closed the connection without replying");
+        }
+
+        match serde_json::from_str::<DaemonFrame>(response.trim())? {
+            // Surfaced here so no caller has to remember to check for it.
+            DaemonFrame::Error { message } => bail!("{message}"),
+            frame => Ok(frame),
+        }
     }
 }
 

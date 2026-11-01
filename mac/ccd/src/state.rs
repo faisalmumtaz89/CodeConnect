@@ -2059,6 +2059,15 @@ impl Daemon {
             Err(err) => crate::log_error!("recovery: could not read answer claims: {err:#}"),
         }
 
+        match self.db.recover_mail().await {
+            Ok(0) => {}
+            Ok(count) => crate::log_info!(
+                "recovery: {count} message(s) from other agents were being read when the daemon \
+                 stopped; they are unread again"
+            ),
+            Err(err) => crate::log_error!("recovery: could not release offered mail: {err:#}"),
+        }
+
         match self.db.recover_text_mutations(now.clone()).await {
             Ok(0) => {}
             Ok(count) => crate::log_warn!(
@@ -8863,6 +8872,7 @@ impl Daemon {
         {
             crate::log_error!("failed to mark {} exited: {err:#}", session.name);
         }
+        self.end_mail(&session.uid).await;
         // The row's third writer counts its write like the other two, under the same
         // gate — so "every writer bumps this" is a property of the type rather than a
         // habit two of them happen to share. See [`Inner::row_writes`].
@@ -25511,42 +25521,56 @@ mod tests {
         );
     }
 
+    fn six_nodes() -> protocol::tailnet::Tailnet {
+        protocol::tailnet::Tailnet::parse(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap()
+    }
+
+    fn refusal(status: protocol::ipc::MailStatus) -> String {
+        match status {
+            protocol::ipc::MailStatus {
+                state: protocol::ipc::MailState::Refused,
+                reason: Some(reason),
+                ..
+            } => reason,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
     /// **What an agent's message is told, case by case**, on this computer as the
     /// recorded tailnet names it (`studio`; `desktop` online, `linux-box` offline).
     #[tokio::test]
-    async fn an_agents_message_is_refused_or_held() {
+    async fn an_agents_message_is_refused_or_waits() {
         let daemon = test_daemon();
-        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
-            "../../../fixtures/tailscale/status-six-nodes.json"
-        ))
-        .unwrap();
+        let tailnet = six_nodes();
         let sender = protocol::uid::new().unwrap();
         let codex = protocol::uid::new().unwrap();
         register_codex_session(&daemon, &sender, "cc-2").await;
         register_codex_session(&daemon, &codex, "cc-1").await;
         register(&daemon, "cc-3", None).await;
-        let send = |to: &'static str, text: &'static str| {
+        let send = |to: &'static str, text: String| {
             let daemon = Arc::clone(&daemon);
             let tailnet = tailnet.clone();
             let sender = sender.clone();
             async move {
                 daemon
-                    .send_agent_message_on(Some(&tailnet), &sender, to, text)
+                    .send_agent_message_on(Some(&tailnet), &sender, to, &text, None)
                     .await
             }
         };
-        let refused = |outcome: protocol::ipc::AgentMessageOutcome| match outcome {
-            protocol::ipc::AgentMessageOutcome::Refused { reason } => reason,
-            other => panic!("expected a refusal, got {other:?}"),
-        };
+        let hi = || "hi".to_string();
 
-        assert!(refused(send("cc-1", "hi").await).contains("cc-N@computer"));
-        assert!(refused(send("cc-1@", "hi").await).contains("cc-N@computer"));
-        assert!(refused(send("cc-1@studio", "").await).contains("empty"));
-        assert!(refused(send("cc-1@studio", "a\u{1b}[2Jb").await).contains("control"));
-        assert!(refused(send("cc-1@nowhere", "hi").await).contains("not a computer"));
-        assert!(refused(send("cc-1@linux-box", "hi").await).contains("offline"));
-        assert!(refused(send("cc-9@studio", "hi").await).contains("not a running session"));
+        assert!(refusal(send("cc-1", hi()).await).contains("cc-N@computer"));
+        assert!(refusal(send("cc-1@", hi()).await).contains("cc-N@computer"));
+        assert!(refusal(send("cc-1@studio", String::new()).await).contains("empty"));
+        assert!(refusal(send("cc-1@studio", "a\u{1b}[2Jb".into()).await).contains("control"));
+        let long = "x".repeat(protocol::ipc::MAIL_TEXT_BYTES + 1);
+        assert!(refusal(send("cc-1@studio", long).await).contains("too long"));
+        assert!(refusal(send("cc-1@nowhere", hi()).await).contains("not a computer"));
+        assert!(refusal(send("cc-1@linux-box", hi()).await).contains("offline"));
+        assert!(refusal(send("cc-9@studio", hi()).await).contains("not a running session"));
         // An ended run under the name is not a target, however recent.
         let mut ended = daemon.store.get_session(&codex).unwrap().unwrap();
         ended.session_uid = protocol::uid::new().unwrap();
@@ -25557,66 +25581,124 @@ mod tests {
             .upsert_session(&ended)
             .unwrap()
             .assert_present();
-        assert!(refused(send("cc-5@studio", "hi").await).contains("not a running session"));
-        assert!(refused(send("cc-2@studio", "hi").await).contains("own address"));
-        assert!(refused(
+        assert!(refusal(send("cc-5@studio", hi()).await).contains("not a running session"));
+        assert!(refusal(send("cc-2@studio", hi()).await).contains("own address"));
+        assert!(refusal(
             daemon
-                .send_agent_message_on(None, &sender, "cc-1@studio", "hi")
+                .send_agent_message_on(None, &sender, "cc-1@studio", "hi", None)
                 .await
         )
         .contains("Tailscale"));
-        assert!(refused(
+        assert!(refusal(
             daemon
-                .send_agent_message_on(Some(&tailnet), "nobody", "cc-1@studio", "hi")
+                .send_agent_message_on(Some(&tailnet), "nobody", "cc-1@studio", "hi", None)
                 .await
         )
         .contains("not known"));
+        assert!(refusal(
+            daemon
+                .send_agent_message_on(Some(&tailnet), &sender, "cc-1@studio", "hi", Some("m0"))
+                .await
+        )
+        .contains("not a message you were sent"));
 
-        // cc-1's link reaches no app-server, so the message is kept and waits.
-        let first = send("cc-1@studio", "please review").await;
-        assert!(
-            matches!(first, protocol::ipc::AgentMessageOutcome::Held { .. }),
-            "{first:?}"
-        );
-        let second = send("cc-1@Studio", "and this").await;
-        assert!(
-            matches!(second, protocol::ipc::AgentMessageOutcome::Held { .. }),
-            "{second:?}"
-        );
-        let held: Vec<String> = daemon
+        for text in ["please review", "and this"] {
+            let status = send("cc-1@Studio", text.into()).await;
+            assert_eq!(
+                status.state,
+                protocol::ipc::MailState::Waiting,
+                "{status:?}"
+            );
+        }
+        let offer = daemon
             .store
-            .held_agent_messages(&codex)
-            .unwrap()
-            .into_iter()
-            .map(|m| m.message)
+            .offer_mail(&codex, "o1", protocol::time::now_unix_ms())
+            .unwrap();
+        let read: Vec<(&str, &str)> = offer
+            .messages
+            .iter()
+            .map(|m| (m.from.as_str(), m.text.as_str()))
             .collect();
         assert_eq!(
-            held,
+            read,
             [
-                "[CodeConnect] Message from cc-2@studio (Codex · project tmp). Reply with \
-                 send_message to cc-2@studio.\n\nplease review",
-                "[CodeConnect] Message from cc-2@studio (Codex · project tmp). Reply with \
-                 send_message to cc-2@studio.\n\nand this",
+                ("cc-2@studio", "please review"),
+                ("cc-2@studio", "and this")
             ]
         );
     }
 
+    /// **A reply stays in its conversation, and each sender sees its own message
+    /// read**, once, in its next `read_messages`, by way of the offer its agent was
+    /// given.
+    #[tokio::test]
+    async fn a_reply_keeps_its_conversation_and_the_sender_sees_its_message_read() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let (asker, answerer) = (protocol::uid::new().unwrap(), protocol::uid::new().unwrap());
+        register_codex_session(&daemon, &asker, "cc-2").await;
+        register_codex_session(&daemon, &answerer, "cc-1").await;
+
+        let question = daemon
+            .send_agent_message_on(Some(&tailnet), &asker, "cc-1@studio", "status?", None)
+            .await;
+        assert_eq!(question.state, protocol::ipc::MailState::Waiting);
+        let (offer, batch) = daemon.offer_agent_messages(&answerer).await.unwrap();
+        let received = batch.messages[0].clone();
+        assert_eq!(received.message_id, question.message_id);
+        assert_eq!(received.from, "cc-2@studio");
+        daemon.read_offered_mail(&offer).await;
+
+        let answer = daemon
+            .send_agent_message_on(
+                Some(&tailnet),
+                &answerer,
+                "cc-2@studio",
+                "green",
+                Some(&question.message_id),
+            )
+            .await;
+        assert_eq!(answer.state, protocol::ipc::MailState::Waiting);
+        let (offer, batch) = daemon.offer_agent_messages(&asker).await.unwrap();
+        let reply = &batch.messages[0];
+        assert_eq!(
+            reply.context_id, received.context_id,
+            "the same conversation"
+        );
+        assert_eq!(
+            reply.in_reply_to.as_deref(),
+            Some(question.message_id.as_str())
+        );
+        assert_eq!(
+            batch
+                .updates
+                .iter()
+                .map(|u| (u.message_id.as_str(), u.state))
+                .collect::<Vec<_>>(),
+            [(question.message_id.as_str(), protocol::ipc::MailState::Read)]
+        );
+        daemon.read_offered_mail(&offer).await;
+        let (_, again) = daemon.offer_agent_messages(&asker).await.unwrap();
+        assert!(again.messages.is_empty() && again.updates.is_empty());
+    }
+
     /// **Another computer's daemon is served only when it is one of the owner's
     /// computers**, read from this computer's own tailnet: its message is taken as a
-    /// local one is, headed with the name this computer knows it by, and anything
-    /// else is refused.
+    /// local one is, under the name this computer knows it by, once per message id,
+    /// and only the computer a message went to may say where it stands.
     #[tokio::test]
     async fn another_computers_daemon_is_served_only_from_the_owners_computers() {
         use protocol::peer::{PeerReply, PeerRequest};
         let daemon = test_daemon();
-        let tailnet = protocol::tailnet::Tailnet::parse(include_str!(
-            "../../../fixtures/tailscale/status-six-nodes.json"
-        ))
-        .unwrap();
+        let tailnet = six_nodes();
         let codex = protocol::uid::new().unwrap();
         register_codex_session(&daemon, &codex, "cc-1").await;
         let desktop: std::net::IpAddr = "100.64.0.2".parse().unwrap();
-        let message = |from: &str, to: &str, text: &str| PeerRequest::PeerAgentMessage {
+        let message = |id: &str, from: &str, to: &str, text: &str| PeerRequest::PeerMail {
+            message_id: id.into(),
+            context_id: format!("ctx-{id}"),
+            in_reply_to: None,
+            from_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
             from: from.into(),
             agent: "Codex".into(),
             project: "api".into(),
@@ -25632,16 +25714,27 @@ mod tests {
             PeerReply::PeerRefused { reason } => reason,
             other => panic!("expected a refusal, got {other:?}"),
         };
+        let state = |reply: PeerReply| match reply {
+            PeerReply::PeerMailResult { state, reason } => (state, reason.unwrap_or_default()),
+            other => panic!("expected a state, got {other:?}"),
+        };
 
-        assert!(
-            refused(serve("127.0.0.1".parse().unwrap(), message("cc-7", "cc-1", "hi")).await)
-                .contains("one of your computers")
-        );
+        assert!(refused(
+            serve(
+                "127.0.0.1".parse().unwrap(),
+                message("m1", "cc-7", "cc-1", "hi")
+            )
+            .await
+        )
+        .contains("one of your computers"));
         assert!(
             refused(serve("100.99.0.9".parse().unwrap(), PeerRequest::PeerListAgents).await)
                 .contains("one of your computers")
         );
-        assert!(refused(serve(desktop, message("cc-7@x", "cc-1", "hi")).await).contains("not one"));
+        assert!(
+            refused(serve(desktop, message("m1", "cc-7@x", "cc-1", "hi")).await)
+                .contains("not ones")
+        );
         assert!(refused(
             daemon
                 .serve_peer_on(None, desktop, PeerRequest::PeerListAgents)
@@ -25659,34 +25752,63 @@ mod tests {
                 }]
             }
         );
-        let outcome = |reply: PeerReply| match reply {
-            PeerReply::PeerAgentMessageResult { outcome } => outcome,
-            other => panic!("expected an outcome, got {other:?}"),
-        };
-        assert!(matches!(
-            outcome(serve(desktop, message("cc-7", "cc-1", "please review")).await),
-            protocol::ipc::AgentMessageOutcome::Held { .. }
-        ));
-        assert!(matches!(
-            outcome(serve(desktop, message("cc-7", "cc-9", "hi")).await),
-            protocol::ipc::AgentMessageOutcome::Refused { reason } if reason.contains("not a running session")
-        ));
-        assert!(matches!(
-            outcome(serve(desktop, message("cc-7", "cc-1", "a\u{1b}[2Jb")).await),
-            protocol::ipc::AgentMessageOutcome::Refused { reason } if reason.contains("control")
-        ));
+        for _ in 0..2 {
+            assert_eq!(
+                state(serve(desktop, message("m1", "cc-7", "cc-1", "please review")).await).0,
+                protocol::ipc::MailState::Waiting,
+                "a retried id is answered with where the first one stands"
+            );
+        }
+        assert!(
+            state(serve(desktop, message("m2", "cc-7", "cc-9", "hi")).await)
+                .1
+                .contains("not a running session")
+        );
+        assert!(
+            state(serve(desktop, message("m3", "cc-7", "cc-1", "a\u{1b}[2Jb")).await)
+                .1
+                .contains("control")
+        );
+        let offer = daemon
+            .store
+            .offer_mail(&codex, "o1", protocol::time::now_unix_ms())
+            .unwrap();
         assert_eq!(
-            daemon
-                .store
-                .held_agent_messages(&codex)
-                .unwrap()
-                .into_iter()
-                .map(|m| m.message)
+            offer
+                .messages
+                .iter()
+                .map(|m| (m.from.as_str(), m.text.as_str()))
                 .collect::<Vec<_>>(),
-            [
-                "[CodeConnect] Message from cc-7@desktop (Codex · project api). Reply with \
-              send_message to cc-7@desktop.\n\nplease review"
-            ]
+            [("cc-7@desktop", "please review")],
+            "one copy, under the name this computer knows the sender by"
+        );
+
+        // Only the computer a message went to says where it stands.
+        let told = |id: &str| PeerRequest::PeerMailState {
+            message_id: id.into(),
+            state: protocol::ipc::MailState::Read,
+        };
+        assert!(refused(serve(desktop, told("m9")).await).contains("no such message"));
+        daemon
+            .store
+            .file_sent_mail(
+                &crate::store::SentMail {
+                    message_id: "m9".into(),
+                    context_id: "ctx-m9".into(),
+                    in_reply_to: None,
+                    session_uid: codex.clone(),
+                    recipient: "cc-4@desktop".into(),
+                    recipient_computer: "desktop".into(),
+                    text: "hi".into(),
+                },
+                protocol::time::now_unix_ms(),
+            )
+            .unwrap();
+        let laptop: std::net::IpAddr = "100.64.0.6".parse().unwrap();
+        assert!(refused(serve(laptop, told("m9")).await).contains("no such message"));
+        assert_eq!(
+            serve(desktop, told("m9")).await,
+            PeerReply::PeerMailStateTaken
         );
     }
 

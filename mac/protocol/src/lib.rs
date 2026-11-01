@@ -589,10 +589,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///   * `27` — **Agents message each other.**
 ///
 ///     A hosted agent can send another a message, which the receiving computer's
-///     daemon keeps for that agent. Between this computer's own processes, and
-///     nothing a phone sends or reads changes:
-///       - [`ipc::ClientFrame::SendAgentMessage`] and [`ipc::ClientFrame::ListAgents`]
+///     daemon keeps until that agent reads it. Between this computer's own
+///     processes, and nothing a phone sends or reads changes:
+///       - [`ipc::ClientFrame::SendAgentMessage`], [`ipc::ClientFrame::ListAgents`],
+///         [`ipc::ClientFrame::ReadAgentMessages`] and [`ipc::ClientFrame::MailRead`]
 ///         — the `codeconnect` tool's requests.
+///       - [`ipc::ClientFrame::MailWaiter`] — a Claude session's mail waiter.
 ///       - [`peer`] — one daemon asking another: a frame that is not a phone
 ///         message, before any phone hello, may be a [`peer::PeerRequest`], answered by one
 ///         [`peer::PeerReply`] and the connection closed. A daemon below 27
