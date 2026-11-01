@@ -337,9 +337,9 @@ pub enum DaemonFrame {
 }
 
 /// The fixed words that wake an agent for its mail. They carry nothing of any
-/// message.
-pub const MAIL_NUDGE: &str = "[CodeConnect] Other agents have sent you messages. Call the \
-     codeconnect read_messages tool, then handle each message as its sender asks.";
+/// message, and say only to read it: what to do with what it reads is in the
+/// `read_messages` result, which the computer's mail switch decides.
+pub const MAIL_NUDGE: &str = "You have CodeConnect mail: call the codeconnect read_messages tool.";
 
 /// The most a message's text may hold, in bytes.
 pub const MAIL_TEXT_BYTES: usize = 8 * 1024;
@@ -1095,6 +1095,25 @@ impl PromptPresence {
 
 #[cfg(test)]
 mod tests {
+    /// **The wake says only to read**: whether to act on what is read is the mail
+    /// switch's, in the `read_messages` result, and a wake that asked the agent to
+    /// act would overrule a switch that is off.
+    #[test]
+    fn the_wake_says_only_to_read() {
+        assert!(MAIL_NUDGE.contains("read_messages"));
+        let words = MAIL_NUDGE.to_ascii_lowercase();
+        for asking in [
+            "handle",
+            "act",
+            "do ",
+            "answer",
+            "reply",
+            "as its sender asks",
+        ] {
+            assert!(!words.contains(asking), "{asking:?} in {MAIL_NUDGE:?}");
+        }
+    }
+
     use super::*;
 
     /// A supervisor predating the agent seam sends no `agent`; a daemon must
