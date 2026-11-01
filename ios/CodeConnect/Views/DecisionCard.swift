@@ -388,13 +388,19 @@ struct DecisionCardView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
+            // The tag goes under the name at accessibility sizes, as on the
+            // timeline's approval row. Beside it at AX5 the name had half the
+            // card, and a name a whole line holds broke mid-word.
+            CCAdaptiveStack(
+                horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs,
+                verticalAlignment: .firstTextBaseline
+            ) {
                 // Its own accessibility element, deliberately: "Bash" is the
                 // first thing a reader — human or automated — looks for.
                 Text(approval.card.toolName)
                     .ccType(CC.type.title)
                     .foregroundStyle(CC.text.primary)
-                Spacer(minLength: CC.space.xs)
+                CCAdaptiveSpacer(minLength: CC.space.xs)
                 CCRiskTag(risk)
                     // A tag is a piece of text that happens to have a border.
                     // `CCRiskTag` publishes the spelled-out class ("Risk HIGH.

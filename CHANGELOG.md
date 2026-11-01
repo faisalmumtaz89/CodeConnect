@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Names stay whole at the largest text sizes
+
+- At the largest accessibility text sizes on the iPhone, a timeline notice puts its time under its
+  words, a tool call puts its command under the tool's name, and an approval card puts its risk tag
+  under the tool's name. Each gets the whole width, so a name such as `build-server-linux-01` or
+  `mcp__github__get_issue` is no longer broken mid-word. A single word longer than a whole line
+  still wraps.
+
 ## A message from the phone that ends in `;` arrives whole
 
 - A message from the phone that ends in `;` arrives with it. tmux read a trailing `;` as the end of a
