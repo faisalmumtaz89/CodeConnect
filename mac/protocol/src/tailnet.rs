@@ -94,8 +94,12 @@ impl Tailnet {
         Ok(node)
     }
 
-    /// Where the computer named `computer` is, if this one may message it now.
+    /// Where the computer named `computer` is, if this one may message it now. A
+    /// tagged computer takes part in no messages, its own sessions' included.
     pub fn locate(&self, computer: &str) -> Result<Place<'_>, Refusal> {
+        if self.me.tagged {
+            return Err(Refusal::ThisComputerTagged);
+        }
         if self.me.name.eq_ignore_ascii_case(computer) {
             return Ok(Place::Here);
         }
@@ -279,6 +283,11 @@ mod tests {
             Err(Refusal::ThisComputerTagged)
         );
         assert_eq!(tailnet.locate("desktop"), Err(Refusal::ThisComputerTagged));
+        assert_eq!(
+            tailnet.locate("studio"),
+            Err(Refusal::ThisComputerTagged),
+            "nor between its own sessions"
+        );
         assert_eq!(tailnet.reachable_peers().count(), 0);
     }
 

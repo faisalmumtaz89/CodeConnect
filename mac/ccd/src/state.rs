@@ -26254,6 +26254,32 @@ mod tests {
             .await
             .unwrap_err()
             .contains("Tailscale"));
+        let mut status: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        status["Self"]["Tags"] = serde_json::json!(["tag:server"]);
+        let tagged = protocol::tailnet::Tailnet::parse(&status.to_string()).unwrap();
+        assert!(
+            daemon
+                .list_agents_on(Some(&tagged), &asker, Vec::new())
+                .await
+                .unwrap_err()
+                .contains("tagged"),
+            "a tagged computer lists no one"
+        );
+        assert!(refusal(
+            daemon
+                .send_agent_message_on(
+                    Some(&tagged),
+                    &asker,
+                    &format!("{codex}@studio"),
+                    "hi",
+                    None
+                )
+                .await
+        )
+        .contains("tagged"));
     }
 
     /// The same frame with the agent swapped, so a test can register the SAME uid

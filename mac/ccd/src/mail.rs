@@ -677,6 +677,10 @@ impl Daemon {
                     .into(),
             );
         };
+        // As for a send: a computer that takes part in no messages lists no one.
+        if let Err(refusal) = tailnet.locate(tailnet.name()) {
+            return Err(refusal_sentence(refusal, tailnet.name()));
+        }
         let unreadable = |err: anyhow::Error| {
             crate::log_error!("listing agents for {from_uid}: {err:#}");
             "CodeConnect could not read its sessions".to_string()
