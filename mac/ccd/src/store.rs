@@ -3996,7 +3996,8 @@ impl Store {
         Ok(())
     }
 
-    /// At start-up, no offer is in flight: every one is unread again.
+    /// At start-up, no offer is in flight: every one is unread again; and no turn is
+    /// known to be running nor any wake outstanding.
     pub fn recover_mail(&self) -> Result<usize> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -4008,6 +4009,10 @@ impl Store {
             "UPDATE mail_sent SET offer = NULL, offer_state = NULL WHERE offer IS NOT NULL",
             [],
         )?;
+        // A turn that ended, or a wake whose turn ran, while no daemon was listening
+        // left nothing behind: no turn is running and no wake outstanding, and the wake
+        // rule decides again from the mailbox. At most one wake more than needed.
+        tx.execute("UPDATE mail_wake SET running = 0, outstanding = 0", [])?;
         tx.commit()?;
         Ok(released)
     }

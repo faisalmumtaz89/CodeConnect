@@ -26048,6 +26048,38 @@ mod tests {
         assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
     }
 
+    /// **A restart forgets what it could not have seen** (round 1, R1-1): a turn
+    /// that ended, or a wake whose turn ended, while the daemon was down left no event
+    /// behind, so the daemon starts with no turn running and no wake outstanding, and
+    /// the rule decides from the mailbox. Variant B: a turn left running. Variant W: a
+    /// wake left outstanding.
+    #[tokio::test]
+    async fn a_restart_starts_with_no_turn_running_and_no_wake_outstanding() {
+        let daemon = test_daemon();
+        let busy = register(&daemon, "cc-1", None).await.session.uid;
+        let woken = register(&daemon, "cc-2", None).await.session.uid;
+        assert_eq!(crate::mail::prompt_submitted(&daemon, &busy).await, None);
+        leave_mail(&daemon, &busy, "while the daemon was down");
+        leave_mail(&daemon, &woken, "hi");
+        let now = protocol::time::now_unix_ms();
+        assert!(daemon.store.claim_mail_wake(&woken, now, true).unwrap());
+        assert!(
+            !daemon.store.claim_mail_wake(&busy, now, true).unwrap(),
+            "the premise: its turn is running"
+        );
+
+        daemon.recover().await;
+        for run in [&busy, &woken] {
+            assert!(
+                daemon
+                    .store
+                    .claim_mail_wake(run, protocol::time::now_unix_ms(), true)
+                    .unwrap(),
+                "{run} can be woken after the restart"
+            );
+        }
+    }
+
     /// **A person's prompt with mail waiting is told of it**, in the fixed words
     /// and nothing of the message, and a run with none is told nothing (M-09, M-11).
     #[tokio::test]
