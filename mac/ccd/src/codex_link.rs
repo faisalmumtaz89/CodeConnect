@@ -8712,21 +8712,25 @@ impl Connection<'_> {
         filed
     }
 
-    /// **The end of a turn that carried the mail nudge**, the first time the log holds
-    /// it, however this link learned of it: a live `turn/completed`, or a resume answer
-    /// describing a turn it did not watch (the first turn of a new thread ends before
-    /// its rollout can be resumed). The log keeps one copy of each fact, so each such
-    /// turn end reaches the mailbox's wake rule exactly once.
+    /// **The end of a turn that carried the mail nudge**, counted once, when the log
+    /// holds both of its facts: the turn's end and its nudge message. Whichever of the
+    /// two is filed second counts it, however this link learned of them: live frames,
+    /// or a resume answer describing a turn it did not watch, whose user message may be
+    /// read back only after its end (the first turn of a new thread ends before its
+    /// rollout can be resumed). The log keeps one copy of each fact, so each nudge turn
+    /// reaches the mailbox's wake rule exactly once.
     ///
     /// Only a turn one of whose user messages is [`protocol::ipc::MAIL_NUDGE`] counts,
     /// interrupted or not, and with a person's message merged into it or not. Codex
     /// runs a queued nudge after a busy turn ends, and after an Esc only once the
     /// person's next turn has ended; either of those turn ends, counted, would let the
-    /// rule queue a second nudge behind the first (measured at 5d42ce3). Read from the
-    /// log, so a reconnect between the nudge turn's start and its end loses nothing.
-    /// A nudge Codex never runs leaves the wake outstanding.
+    /// rule queue a second nudge behind the first (measured at 5d42ce3). A nudge Codex
+    /// never runs leaves the wake outstanding.
     async fn note_mail_turn_end(&self, filed: &protocol::event::Event) {
-        if filed.kind != protocol::event::EventKind::TurnComplete {
+        let ended_now = filed.kind == protocol::event::EventKind::TurnComplete;
+        let nudge_now = filed.kind == protocol::event::EventKind::UserMessage
+            && filed.payload["text"] == protocol::ipc::MAIL_NUDGE;
+        if !ended_now && !nudge_now {
             return;
         }
         let Some(turn) = filed.turn_id.clone() else {
@@ -8735,11 +8739,14 @@ impl Connection<'_> {
         match self
             .daemon
             .db
-            .codex_turn_has_user_message(self.session.uid.clone(), turn, protocol::ipc::MAIL_NUDGE)
+            .codex_turn_messages(self.session.uid.clone(), turn, protocol::ipc::MAIL_NUDGE)
             .await
         {
-            Ok(true) => crate::mail::turn_ended(self.daemon, &self.session.uid),
-            Ok(false) => {}
+            // The end, filed after its nudge; or the turn's one nudge, filed after its end.
+            Ok((true, nudges)) if (ended_now && nudges > 0) || (nudge_now && nudges == 1) => {
+                crate::mail::turn_ended(self.daemon, &self.session.uid)
+            }
+            Ok(_) => {}
             Err(err) => crate::log_error!(
                 "codex link for {}: could not read whether a turn carried the mail nudge: {err:#}",
                 self.session.name
@@ -15309,6 +15316,52 @@ mod tests {
             wake_row(&db, &session),
             (1, 0),
             "the person's busy turn ended, and the nudge queued behind it has not run"
+        );
+    }
+
+    /// **A nudge turn whose end is filed before its nudge message still ends the wake,
+    /// once.** A link that attaches during a turn (the first turn of a new thread always)
+    /// files the turn's end and only then reads back the items it missed, the nudge's
+    /// user message among them (measured on the rig at 679fe04: every woken Codex was
+    /// never woken again).
+    ///
+    /// **Mutation:** count a nudge turn only when its end is filed. The end then finds no
+    /// nudge yet, the message after it counts nothing, and the wake stays outstanding.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_nudge_message_filed_after_its_turn_end_still_ends_the_wake_once() {
+        let session = SessionKey {
+            uid: "01JQXV9K7B0000000000000REV".into(),
+            name: "cc-1".into(),
+        };
+        let (daemon, db) = a_run_with_a_wake_outstanding(&session);
+        let mut adapter = CodexAdapter::new(session.clone());
+        let mut amend = AmendThrottle::default();
+        let mut conn = a_connection_on(
+            &daemon,
+            &session,
+            &mut adapter,
+            &mut amend,
+            1,
+            LIFECYCLE_THREAD,
+        );
+        let frames = live_turn(carrying_the_nudge);
+        let is_nudge = |frame: &Value| frame["params"]["item"]["type"] == "userMessage";
+        for frame in frames.iter().filter(|frame| !is_nudge(frame)) {
+            conn.observe_notification(frame).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            wake_row(&db, &session),
+            (1, 0),
+            "the premise: the end is filed and the nudge it carried is not yet"
+        );
+        for frame in frames.iter().filter(|frame| is_nudge(frame)) {
+            conn.observe_notification(frame).await;
+        }
+        assert!(
+            wake_row_reaches(&db, &session, (0, 1)).await,
+            "the nudge message, filed after its turn's end, ended the wake: {:?}",
+            wake_row(&db, &session)
         );
     }
 
