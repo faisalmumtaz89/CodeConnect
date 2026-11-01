@@ -448,7 +448,12 @@ struct ToolRow: View {
 
     private var summaryLine: some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
-            HStack(spacing: TimelineSpine.gap) {
+            // Top at accessibility sizes, where the pair below stacks: centred,
+            // the glyph sat beside the command instead of the tool's name.
+            HStack(
+                alignment: typeSize.isAccessibilitySize ? .top : .center,
+                spacing: TimelineSpine.gap
+            ) {
                 CCIcon(
                     ToolSummary.symbol(tool: tool.name), size: CC.size.icon, weight: .medium,
                     maxSize: CCColumn.markMaxSize)
@@ -460,10 +465,12 @@ struct ToolRow: View {
                 // The glyph above is already pinned to the gutter so a column of
                 // tool rows lines up; this is the same argument applied to the
                 // name, so the commands beside them line up too. See
-                // `CCToolColumn`.
+                // `CCToolColumn`. Stacked at accessibility sizes, like the
+                // approval row's pair: side by side at AX5 the command got a
+                // column a third of the row wide and read `run.…ss 8`.
                 let pair =
                     typeSize.isAccessibilitySize
-                    ? AnyLayout(HStackLayout(spacing: CCToolColumn.argumentGap))
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: CC.space.xxs))
                     : AnyLayout(CCToolPairLayout(labels: toolLabelWidths))
                 pair {
                     Text(tool.name)
@@ -991,30 +998,38 @@ struct NoticeRow: View {
                 .ccGutterMark()
                 .padding(.top, 1)
 
-            VStack(alignment: .leading, spacing: CC.space.xxs) {
-                Text(notice.title)
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let detail = notice.detail, !detail.isEmpty {
-                    // Inline-parsed like the prose it previews — asterisks in a
-                    // summary are the same artifact as asterisks in the body.
-                    // Never clamped: a notice's detail is the whole of what the
-                    // reader gets. (Turn-complete used to preview the agent's
-                    // message here, clamped, directly above the message row —
-                    // which read as a duplicate; its detail is now nil at the
-                    // builder, so the boundary is a boundary.)
-                    Text(AgentProse.inline(detail))
+            // The time goes under the words at accessibility sizes. Beside
+            // them at AX5 it took a third of the row, and a computer's name
+            // broke mid-word in what was left: `cc-12@bui` / `ld-server-`.
+            CCAdaptiveStack(
+                horizontalSpacing: TimelineSpine.gap, verticalSpacing: CC.space.xxs,
+                verticalAlignment: .top
+            ) {
+                VStack(alignment: .leading, spacing: CC.space.xxs) {
+                    Text(notice.title)
                         .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.secondary)
+                        .foregroundStyle(CC.text.primary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let detail = notice.detail, !detail.isEmpty {
+                        // Inline-parsed like the prose it previews — asterisks in a
+                        // summary are the same artifact as asterisks in the body.
+                        // Never clamped: a notice's detail is the whole of what the
+                        // reader gets. (Turn-complete used to preview the agent's
+                        // message here, clamped, directly above the message row —
+                        // which read as a duplicate; its detail is now nil at the
+                        // builder, so the boundary is a boundary.)
+                        Text(AgentProse.inline(detail))
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(date, format: .dateTime.hour().minute())
-                .ccType(CC.type.monoSmall)
-                .foregroundStyle(CC.text.tertiary)
+                Text(date, format: .dateTime.hour().minute())
+                    .ccType(CC.type.monoSmall)
+                    .foregroundStyle(CC.text.tertiary)
+            }
         }
         .frame(minHeight: 28)
         .accessibilityElement(children: .combine)
