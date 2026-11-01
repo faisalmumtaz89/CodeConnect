@@ -306,6 +306,8 @@ pub struct Daemon {
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
+    /// Each Claude run's mail waiter: the one hook that can wake it.
+    pub(crate) waiters: crate::claude_waiter::Waiters,
 }
 
 /// **What the Claude-only gate found**, for the callers that must tell two refusals
@@ -1364,6 +1366,9 @@ pub struct SupervisorHandle {
     /// straddle an upgrade, and the phone's palette must describe the one it
     /// is typing into.
     claude_bin: Option<String>,
+    /// The agent executable a Codex run was launched with (`agent_bin`): the
+    /// `codex` its wake is queued through, so the CLI matches its app-server.
+    agent_bin: Option<String>,
     /// Which registration this handle belongs to. A supervisor that reconnects
     /// registers again under the same uid, so "remove the entry for this uid" is
     /// not the same question as "remove *my* entry".
@@ -1926,6 +1931,7 @@ impl Daemon {
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
+            waiters: crate::claude_waiter::Waiters::default(),
         })
     }
 
@@ -3077,6 +3083,18 @@ impl Daemon {
                 .entry(session.uid.clone())
                 .or_default() += 1;
             self.main_thread_moved(&session).await;
+            crate::mail::turn_ended(self, &session.uid);
+        }
+
+        // The person's prompt is never filed: this hook only reminds Claude of mail
+        // waiting for it.
+        if event_name == HookEventName::UserPromptSubmit {
+            return Ok(
+                match crate::mail::prompt_submitted(self, &session.uid).await {
+                    Some(nudge) => HookDecision::prompt_context(nudge),
+                    None => HookDecision::passthrough(),
+                },
+            );
         }
 
         match &event_name {
@@ -5154,6 +5172,12 @@ impl Daemon {
             .map(|(row, _)| row)
             .filter(|row| row.session_id == name)
             .max_by(|a, b| a.session_uid.cmp(&b.session_uid)))
+    }
+
+    /// The agent executable the live supervisor of `run_uid` reported, if any.
+    pub(crate) async fn agent_bin(&self, run_uid: &str) -> Option<String> {
+        let inner = self.inner.lock().await;
+        inner.supervisors.get(run_uid)?.agent_bin.clone()
     }
 
     /// Every run whose supervisor is attached now, with the protocol minor that
@@ -8227,6 +8251,7 @@ impl Daemon {
                     epoch,
                     protocol_minor: info.protocol_minor,
                     claude_bin: info.claude_bin.clone(),
+                    agent_bin: info.agent_bin.clone(),
                     codex_generation: info.codex_generation,
                 },
             );
@@ -20628,6 +20653,7 @@ mod tests {
                 epoch: owning_epoch,
                 protocol_minor: protocol::PROTOCOL_MINOR,
                 claude_bin: None,
+                agent_bin: None,
                 codex_generation: Some(1),
             },
         );
@@ -22340,6 +22366,7 @@ mod tests {
                     epoch,
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     claude_bin: None,
+                    agent_bin: None,
                     codex_generation: None,
                 },
             );
@@ -25932,6 +25959,106 @@ mod tests {
             serve(desktop, told("m9")).await,
             PeerReply::PeerMailStateTaken
         );
+    }
+
+    /// Leave one message for `run` straight in the mailbox, with none of the wake
+    /// checks a send starts on its own, so a test decides when the rule runs.
+    fn leave_mail(daemon: &Arc<Daemon>, run: &str, text: &str) {
+        let taken = daemon
+            .store
+            .take_mail(
+                &crate::store::MailIntake {
+                    message_id: protocol::uid::new().unwrap(),
+                    context_id: protocol::uid::new().unwrap(),
+                    in_reply_to: None,
+                    session_uid: run.to_string(),
+                    sender_computer: String::new(),
+                    sender_uid: "sender".into(),
+                    sender: "sender@studio".into(),
+                    sender_label: "cc-2@studio".into(),
+                    sender_agent: "Codex".into(),
+                    sender_project: "api".into(),
+                    text: text.into(),
+                },
+                protocol::time::now_unix_ms(),
+                crate::mail::LIMITS,
+            )
+            .unwrap();
+        assert_eq!(taken, crate::store::MailTaken::Kept);
+    }
+
+    /// **Claude is woken for its mail through its waiter, and only between its
+    /// turns** (M-01, M-02 and the T5 rule): mail taken while a turn runs wakes no
+    /// one until that turn's Stop, and the turn the wake starts is not told again.
+    #[tokio::test]
+    async fn a_claude_run_is_woken_for_its_mail_only_between_its_turns() {
+        let daemon = test_daemon();
+        let claude = register(&daemon, "cc-1", None).await.session.uid;
+        let (_, mut woken) = daemon.waiters.register(&claude);
+
+        // The person's prompt starts a turn, with no mail yet.
+        assert_eq!(crate::mail::prompt_submitted(&daemon, &claude).await, None);
+        leave_mail(&daemon, &claude, "hi");
+        daemon.wake_if_due(&claude).await;
+        assert!(woken.try_recv().is_err(), "no wake while the turn runs");
+
+        // Its Stop ends the turn: the waiter is woken.
+        crate::mail::turn_ended(&daemon, &claude);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut woken)
+            .await
+            .expect("woken at the turn's end")
+            .unwrap();
+        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
+        assert_eq!(
+            crate::mail::prompt_submitted(&daemon, &claude).await,
+            None,
+            "the wake's own turn is not told again"
+        );
+    }
+
+    /// **A wake that cannot be issued leaves the mail waiting and nothing
+    /// outstanding** (M-12): a Codex run whose `codex` cannot be run, and a Claude
+    /// run with no waiter, are tried again at the next trigger, never handed the
+    /// mail any other way.
+    #[tokio::test]
+    async fn a_wake_that_cannot_be_issued_leaves_nothing_outstanding() {
+        let daemon = test_daemon();
+        let codex = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &codex, "cc-1").await;
+        let claude = register(&daemon, "cc-3", None).await.session.uid;
+        for run in [&codex, &claude] {
+            leave_mail(&daemon, run, "hi");
+            daemon.wake_if_due(run).await;
+            assert!(
+                daemon
+                    .store
+                    .claim_mail_wake(run, protocol::time::now_unix_ms(), false)
+                    .unwrap(),
+                "no wake left outstanding for {run}"
+            );
+            daemon.store.release_mail_wake(run).unwrap();
+        }
+        // The waiter that registers later is woken at once.
+        let (_, woken) = daemon.waiters.register(&claude);
+        crate::mail::waiter_registered(&daemon, &claude);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+            .await
+            .expect("woken when its waiter registers")
+            .unwrap();
+        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
+    }
+
+    /// **A person's prompt with mail waiting is told of it**, in the fixed words
+    /// and nothing of the message, and a run with none is told nothing (M-09, M-11).
+    #[tokio::test]
+    async fn a_persons_prompt_is_told_of_waiting_mail_in_the_fixed_words() {
+        let daemon = test_daemon();
+        let claude = register(&daemon, "cc-1", None).await.session.uid;
+        assert_eq!(crate::mail::prompt_submitted(&daemon, &claude).await, None);
+        leave_mail(&daemon, &claude, "MARKER-7731");
+        let told = crate::mail::prompt_submitted(&daemon, &claude).await;
+        assert_eq!(told, Some(protocol::ipc::MAIL_NUDGE));
+        assert!(!protocol::ipc::MAIL_NUDGE.contains("MARKER"));
     }
 
     /// **The agents a session can message**: every other run on this computer

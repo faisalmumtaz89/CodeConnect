@@ -509,6 +509,7 @@ const SESSION_SCOPED_TABLES: &[&str] = &[
     "tail_cursors",
     "mail",
     "mail_sent",
+    "mail_wake",
 ];
 
 /// One run removed by `codeconnect sessions prune`, and what went with it.
@@ -3680,6 +3681,11 @@ impl Store {
         if last_hour >= limits.per_pair_per_hour {
             return Ok(MailTaken::RateLimited);
         }
+        // New mail resumes wakes that had stopped.
+        tx.execute(
+            "UPDATE mail_wake SET degraded = 0, misses = 0 WHERE session_uid = ?1",
+            params![mail.session_uid],
+        )?;
         tx.execute(
             "INSERT INTO mail(message_id, context_id, in_reply_to, session_uid, sender_computer,
                               sender_uid, sender, sender_label, sender_agent, sender_project,
@@ -3703,6 +3709,120 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(MailTaken::Kept)
+    }
+
+    /// **The wake rule's one decision: wake `session_uid` now?** Yes — and from here
+    /// the wake is outstanding — when unread mail waits for it, no wake is
+    /// outstanding, wakes have not stopped, and, for an agent that is woken only
+    /// `between_turns`, no turn of it is running. One transaction, so two callers
+    /// never both wake one run.
+    pub fn claim_mail_wake(
+        &self,
+        session_uid: &str,
+        now_ms: i64,
+        between_turns: bool,
+    ) -> Result<bool> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !unread_mail(&tx, session_uid, now_ms)? {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO mail_wake(session_uid) VALUES (?1)",
+            params![session_uid],
+        )?;
+        let claimed = tx.execute(
+            "UPDATE mail_wake SET outstanding = 1
+              WHERE session_uid = ?1 AND outstanding = 0 AND degraded = 0
+                AND (?2 = 0 OR running = 0)",
+            params![session_uid, between_turns],
+        )? == 1;
+        tx.commit()?;
+        Ok(claimed)
+    }
+
+    /// The claimed wake could not be issued: none is outstanding.
+    pub fn release_mail_wake(&self, session_uid: &str) -> Result<()> {
+        let conn = self.write();
+        conn.execute(
+            "UPDATE mail_wake SET outstanding = 0 WHERE session_uid = ?1",
+            params![session_uid],
+        )?;
+        Ok(())
+    }
+
+    /// **A turn of `session_uid` ended.** The wake it answered, if any, is no longer
+    /// outstanding; if mail is still unread after it, that is one more miss, and at
+    /// `misses_allowed` misses wakes stop until a human turn or new mail.
+    pub fn mail_turn_ended(
+        &self,
+        session_uid: &str,
+        now_ms: i64,
+        misses_allowed: u32,
+    ) -> Result<()> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let unread = unread_mail(&tx, session_uid, now_ms)?;
+        tx.execute(
+            "UPDATE mail_wake
+                SET misses = CASE WHEN NOT ?2 THEN 0
+                                  WHEN outstanding = 1 THEN misses + 1
+                                  ELSE misses END,
+                    outstanding = 0,
+                    running = 0
+              WHERE session_uid = ?1",
+            params![session_uid, unread],
+        )?;
+        tx.execute(
+            "UPDATE mail_wake SET degraded = 1 WHERE session_uid = ?1 AND misses >= ?2",
+            params![session_uid, misses_allowed],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// **A prompt of `session_uid` started a turn.** With a wake outstanding it is
+    /// that wake's own turn. Otherwise it is the person's, which resumes wakes that
+    /// had stopped. Returns whether it is the person's turn with unread mail
+    /// waiting, which that turn is then told of.
+    pub fn mail_prompt(&self, session_uid: &str, now_ms: i64) -> Result<bool> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO mail_wake(session_uid) VALUES (?1)",
+            params![session_uid],
+        )?;
+        let woken: bool = tx.query_row(
+            "SELECT outstanding = 1 FROM mail_wake WHERE session_uid = ?1",
+            params![session_uid],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "UPDATE mail_wake
+                SET running = 1,
+                    misses = CASE WHEN ?2 THEN misses ELSE 0 END,
+                    degraded = CASE WHEN ?2 THEN degraded ELSE 0 END
+              WHERE session_uid = ?1",
+            params![session_uid, woken],
+        )?;
+        let tell = !woken && unread_mail(&tx, session_uid, now_ms)?;
+        tx.commit()?;
+        Ok(tell)
+    }
+
+    /// Every run with unread mail.
+    pub fn runs_with_unread_mail(&self, now_ms: i64) -> Result<Vec<String>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT session_uid FROM mail
+              WHERE state = 'waiting' AND expires_ms > ?1 ORDER BY session_uid",
+        )?;
+        let rows = stmt.query_map(params![now_ms], |row| row.get(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// The conversation of a message `session_uid` was sent, to reply in.
@@ -5092,6 +5212,18 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
         );
         CREATE INDEX IF NOT EXISTS mail_by_session ON mail(session_uid, state, seq);
 
+        -- Where waking each run for its mail stands (`crate::mail`'s wake rule): a
+        -- wake issued whose turn has not ended, the turn ends since with mail still
+        -- unread, wakes stopped until a human turn or new mail, and a Claude turn
+        -- running (from its prompt to its Stop).
+        CREATE TABLE IF NOT EXISTS mail_wake(
+            session_uid TEXT PRIMARY KEY,
+            outstanding INTEGER NOT NULL DEFAULT 0,
+            misses      INTEGER NOT NULL DEFAULT 0,
+            degraded    INTEGER NOT NULL DEFAULT 0,
+            running     INTEGER NOT NULL DEFAULT 0
+        );
+
         -- Messages this computer's agents sent (the sender's side), written before
         -- they go anywhere. `told_state` is the state the sender last read; an offer
         -- of the change in flight is `offer` / `offer_state`.
@@ -6368,6 +6500,19 @@ fn parse_source(value: &str) -> Source {
 }
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
+
+/// Whether unread mail waits for `session_uid`.
+fn unread_mail(tx: &rusqlite::Transaction<'_>, session_uid: &str, now_ms: i64) -> Result<bool> {
+    Ok(tx
+        .query_row(
+            "SELECT 1 FROM mail WHERE session_uid = ?1 AND state = 'waiting' AND expires_ms > ?2
+              LIMIT 1",
+            params![session_uid, now_ms],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
 
 /// A `mail` or `mail_sent` state as stored. Only this file writes them.
 fn mail_state(text: &str) -> protocol::ipc::MailState {
@@ -10625,6 +10770,142 @@ mod tests {
             store.offer_mail(&sender.uid, "o2", now).unwrap().updates[0].state,
             protocol::ipc::MailState::Read,
             "a late answer does not move it back"
+        );
+    }
+
+    /// **At most one wake at a time, and only for unread mail** (M-07). More mail
+    /// while a wake is outstanding adds none; a turn end clears it; a wake that could
+    /// not be issued is released; read mail asks for none.
+    #[test]
+    fn one_wake_is_outstanding_at_a_time_and_only_for_unread_mail() {
+        let (store, _path, receiver, sender) = mail_store();
+        let now = 1_000_000_000;
+        let uid = receiver.uid.as_str();
+        assert!(
+            !store.claim_mail_wake(uid, now, false).unwrap(),
+            "no mail, no wake"
+        );
+        let take = |id: &str| {
+            store
+                .take_mail(
+                    &intake(id, &receiver, "", &sender.uid, "hi"),
+                    now,
+                    MAIL_LIMITS,
+                )
+                .unwrap()
+        };
+        take("m1");
+        assert!(store.claim_mail_wake(uid, now, false).unwrap());
+        take("m2");
+        assert!(
+            !store.claim_mail_wake(uid, now, false).unwrap(),
+            "one is outstanding"
+        );
+        store.release_mail_wake(uid).unwrap();
+        assert!(
+            store.claim_mail_wake(uid, now, false).unwrap(),
+            "a released wake is gone"
+        );
+        store.offer_mail(uid, "o1", now).unwrap();
+        assert!(
+            !store.claim_mail_wake(uid, now, false).unwrap(),
+            "mail being read is not unread"
+        );
+        store.read_mail("o1").unwrap();
+        store.mail_turn_ended(uid, now, 3).unwrap();
+        assert!(!store.claim_mail_wake(uid, now, false).unwrap(), "all read");
+        assert!(store.runs_with_unread_mail(now).unwrap().is_empty());
+        take("m3");
+        assert_eq!(store.runs_with_unread_mail(now).unwrap(), [uid]);
+        assert!(store.claim_mail_wake(uid, now, false).unwrap());
+    }
+
+    /// **Three turn ends that leave woken mail unread stop the wakes** (M-08), and a
+    /// person's turn or new mail starts them again. A turn the person starts while
+    /// mail waits is told of it.
+    #[test]
+    fn wakes_stop_after_three_unanswered_turns_until_a_person_or_new_mail() {
+        let (store, _path, receiver, sender) = mail_store();
+        let now = 1_000_000_000;
+        let uid = receiver.uid.as_str();
+        let limits = MailLimits {
+            per_pair_per_hour: 100,
+            ..MAIL_LIMITS
+        };
+        store
+            .take_mail(&intake("m1", &receiver, "", &sender.uid, "hi"), now, limits)
+            .unwrap();
+        for _ in 0..3 {
+            assert!(store.claim_mail_wake(uid, now, false).unwrap());
+            store.mail_turn_ended(uid, now, 3).unwrap();
+        }
+        assert!(
+            !store.claim_mail_wake(uid, now, false).unwrap(),
+            "no fourth wake for the same unread mail"
+        );
+        assert!(
+            store.mail_prompt(uid, now).unwrap(),
+            "the person's turn is told of it"
+        );
+        store.mail_turn_ended(uid, now, 3).unwrap();
+        assert!(
+            store.claim_mail_wake(uid, now, false).unwrap(),
+            "a person's turn resumes them"
+        );
+        for _ in 0..3 {
+            store.mail_turn_ended(uid, now, 3).unwrap();
+            store.claim_mail_wake(uid, now, false).unwrap();
+        }
+        store.release_mail_wake(uid).unwrap();
+        assert!(
+            !store.claim_mail_wake(uid, now, false).unwrap(),
+            "stopped again"
+        );
+        store
+            .take_mail(&intake("m2", &receiver, "", &sender.uid, "hi"), now, limits)
+            .unwrap();
+        assert!(
+            store.claim_mail_wake(uid, now, false).unwrap(),
+            "new mail resumes them"
+        );
+    }
+
+    /// **A Claude turn holds its wake until it ends** (the T5 rule): mail taken while
+    /// a turn runs wakes no one until its Stop. The turn a wake starts is that wake's
+    /// own: it resumes nothing and is not told again.
+    #[test]
+    fn a_running_claude_turn_holds_its_wake_until_the_turn_ends() {
+        let (store, _path, receiver, sender) = mail_store();
+        let now = 1_000_000_000;
+        let uid = receiver.uid.as_str();
+        assert!(
+            !store.mail_prompt(uid, now).unwrap(),
+            "no mail to be told of"
+        );
+        store
+            .take_mail(
+                &intake("m1", &receiver, "", &sender.uid, "hi"),
+                now,
+                MAIL_LIMITS,
+            )
+            .unwrap();
+        assert!(
+            !store.claim_mail_wake(uid, now, true).unwrap(),
+            "the turn is running"
+        );
+        store.mail_turn_ended(uid, now, 3).unwrap();
+        assert!(
+            store.claim_mail_wake(uid, now, true).unwrap(),
+            "woken at its Stop"
+        );
+        assert!(
+            !store.mail_prompt(uid, now).unwrap(),
+            "the wake's own turn is not told again"
+        );
+        store.mail_turn_ended(uid, now, 3).unwrap();
+        assert!(
+            store.claim_mail_wake(uid, now, true).unwrap(),
+            "unread after it: woken again"
         );
     }
 

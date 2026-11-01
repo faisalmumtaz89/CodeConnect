@@ -9,6 +9,7 @@
 mod apns;
 mod apns_sender;
 mod catalog;
+mod claude_waiter;
 mod codex_adapter;
 mod codex_approval;
 mod codex_link;
@@ -17,6 +18,7 @@ mod codex_link;
 #[cfg(test)]
 mod codex_link_live;
 mod codex_refusals;
+mod codex_wake;
 mod db;
 #[cfg(test)]
 mod fixture_replay;

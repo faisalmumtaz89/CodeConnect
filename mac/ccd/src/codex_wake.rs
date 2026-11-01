@@ -1,0 +1,202 @@
+//! **The Codex wake: one content-free nudge into a hosted session's own queue.**
+//!
+//! Mail never travels through here. It waits in the daemon's mailbox, and the agent
+//! takes it with its own `read_messages` call. This only tells an idle (or busy) Codex
+//! that there is something to take, and it does that through the documented, stable
+//! `codex queue` CLI against the session's upstream app-server (`<run-dir>/as.sock`).
+//! The daemon never writes the queue's wire method itself.
+//!
+//! The words are [`MAIL_NUDGE`]; the phone shows the turn they start as it is.
+//! Codex's own queue then decides when the nudge runs, exactly as it does for a person:
+//! - at once on an idle thread;
+//! - after the running turn ends on a busy one;
+//! - held after Esc until the person's next turn ends.
+//!
+//! The session's `CODEX_HOME` is not needed: the queue lives in the app-server, and a
+//! `codex queue --remote` run from an empty `CODEX_HOME` queues the same way (measured,
+//! codex 0.164.0).
+
+use crate::state::Daemon;
+use anyhow::{bail, Context, Result};
+use protocol::ipc::MAIL_NUDGE;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// How long one `codex queue` may take. It answers in well under a second when the
+/// app-server is up; past this the server is wedged, and a wake must not hold the
+/// caller for longer.
+const WAKE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How much of `codex queue`'s stderr an error carries.
+const STDERR_TAIL: usize = 400;
+
+/// **Wake the Codex run `run_uid`**: queue [`MAIL_NUDGE`] on the thread its link
+/// adopted, through its app-server (`as.sock`, beside the run's control socket), with
+/// the `codex` it was launched with. `Ok` means Codex accepted the nudge into the
+/// thread's queue, not that a turn has run. An `Err` (no thread yet, no live
+/// supervisor, the CLI refusing) leaves the wake to the next try.
+pub(crate) async fn wake_codex(daemon: &Arc<Daemon>, run_uid: &str) -> Result<()> {
+    let row = daemon
+        .db
+        .get_session(run_uid.to_string())
+        .await?
+        .context("no such run")?;
+    let thread = crate::codex_link::real_thread_id(row.codex_thread_id.as_deref())
+        .context("the run has no thread yet")?
+        .to_string();
+    let control = row.codex_socket.context("the run has no control socket")?;
+    let codex = daemon
+        .agent_bin(run_uid)
+        .await
+        .context("the run has no live supervisor")?;
+    let as_sock = Path::new(&control).with_file_name("as.sock");
+    wake(Path::new(&codex), &as_sock, &thread).await
+}
+
+async fn wake(codex: &Path, as_sock: &Path, thread_id: &str) -> Result<()> {
+    queue(codex, as_sock, thread_id, WAKE_DEADLINE).await
+}
+
+async fn queue(codex: &Path, as_sock: &Path, thread_id: &str, deadline: Duration) -> Result<()> {
+    let output = tokio::process::Command::new(codex)
+        .arg("queue")
+        .arg("--remote")
+        .arg(format!("unix://{}", as_sock.display()))
+        .arg("--thread")
+        .arg(thread_id)
+        .arg("--message")
+        .arg(MAIL_NUDGE)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        // The deadline drops the future; this makes that a kill rather than a leak.
+        .kill_on_drop(true)
+        .output();
+    let output = match tokio::time::timeout(deadline, output).await {
+        Ok(output) => output.with_context(|| format!("running {} queue", codex.display()))?,
+        Err(_) => bail!("codex queue did not answer within {deadline:?}"),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        let start = stderr
+            .char_indices()
+            .rev()
+            .nth(STDERR_TAIL - 1)
+            .map_or(0, |(at, _)| at);
+        bail!(
+            "codex queue exited with {}: {}",
+            output.status,
+            &stderr[start..]
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A stand-in `codex`: a shell script with `body`, in its own scratch directory.
+    fn fake_codex(tag: &str, body: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "ccd-codex-wake-{tag}-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let bin = dir.join("codex");
+        std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (dir, bin)
+    }
+
+    #[tokio::test]
+    async fn the_nudge_goes_to_the_named_thread_through_codex_queue() {
+        let (dir, bin) = fake_codex(
+            "argv",
+            r#"for a in "$@"; do printf '%s\n' "$a"; done > "$(dirname "$0")/argv""#,
+        );
+        wake(
+            &bin,
+            Path::new("/tmp/cch.x/as.sock"),
+            "01a197a7-7ac3-7ed1-ac9e-888bf77b95a4",
+        )
+        .await
+        .unwrap();
+        let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
+        assert_eq!(
+            argv.lines().collect::<Vec<_>>(),
+            [
+                "queue",
+                "--remote",
+                "unix:///tmp/cch.x/as.sock",
+                "--thread",
+                "01a197a7-7ac3-7ed1-ac9e-888bf77b95a4",
+                "--message",
+                MAIL_NUDGE,
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_refused_queue_is_an_error_carrying_codexs_words() {
+        let (dir, bin) = fake_codex(
+            "refused",
+            "echo 'Error: thread not found: 01a1' >&2\nexit 1",
+        );
+        let err = wake(&bin, Path::new("/tmp/cch.x/as.sock"), "01a1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("thread not found: 01a1"),
+            "{err:#}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_queue_that_never_answers_is_killed_at_the_deadline() {
+        let (dir, bin) = fake_codex("hang", r#"echo $$ > "$(dirname "$0")/pid"; exec sleep 30"#);
+        let started = std::time::Instant::now();
+        let err = queue(
+            &bin,
+            Path::new("/tmp/cch.x/as.sock"),
+            "01a1",
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err:#}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let pid: i32 = std::fs::read_to_string(dir.join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // Polled on the runtime, so its child reaper runs and a killed pid does not linger
+        // as a zombie that signal 0 still finds.
+        let mut gone = false;
+        for _ in 0..100 {
+            // SAFETY: signal 0 only asks whether the pid exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(gone, "the hung codex {pid} outlived the deadline");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

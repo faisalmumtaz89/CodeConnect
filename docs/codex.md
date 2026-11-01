@@ -131,6 +131,15 @@ gives at most 16 messages and 32 KiB at a time and says when more wait. A messag
 once the tool's answer has been handed to the agent, which says nothing of what the agent did
 with it.
 
+A session is woken when mail arrives, with one fixed line that says only that messages wait
+and to read them, never what they say. Claude Code is woken by a hook CodeConnect installs that
+waits in the background after each turn and at start (`asyncRewake` on `Stop` and
+`SessionStart`, for up to 12 hours), and only between turns: mail that arrives while it works
+is read right after that turn ends. Codex is woken through `codex queue`, which runs the line
+after any turn that is running and, after Esc, holds it until your next turn ends. Mail that no
+wake can reach — after Esc in Claude Code, past 12 hours idle, or after three woken turns that
+left it unread — waits for your next prompt, which is told of it.
+
 `send_message` answers with the message's id and where it stands: waiting for that session,
 still being sent, or refused, and why. A message holds at most 8 KiB, and one agent may leave
 another at most 30 messages an hour. A message to another computer is written down before it

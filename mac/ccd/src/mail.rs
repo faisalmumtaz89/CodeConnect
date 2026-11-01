@@ -17,6 +17,16 @@
 //! own `read_messages` answer reached it, and otherwise `refused`, `expired` or
 //! `ended`. A sender reads the changes in its next `read_messages`, each once.
 //!
+//! **Waking the agent.** The daemon never hands an agent a message: it wakes the
+//! agent with the fixed words [`MAIL_NUDGE`], which carry nothing of any message,
+//! and the agent calls `read_messages`. Claude is woken by its mail waiter
+//! ([`crate::claude_waiter`]), only between its turns; Codex through its own queue
+//! ([`crate::codex_wake`]). The wake rule ([`Daemon::wake_if_due`]) decides, from
+//! the mailbox, whenever mail is taken, a turn ends, a waiter registers or a Codex
+//! link adopts its thread, and when the daemon starts: wake iff unread mail waits
+//! and no wake is outstanding. After [`WAKE_MISSES`] turn ends that leave woken mail
+//! unread, wakes stop until the person's next prompt or new mail.
+//!
 //! **Who sent it** is never taken from the agent or the message: here it is the run
 //! the tool was started for, and from another computer it is a session of the
 //! computer the connection came from, by that computer's own account.
@@ -36,7 +46,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 
 use protocol::agent::AgentKind;
-use protocol::ipc::{AgentEntry, MailState, MailStatus, MAIL_TEXT_BYTES};
+use protocol::ipc::{AgentEntry, MailState, MailStatus, MAIL_NUDGE, MAIL_TEXT_BYTES};
 use protocol::peer::{PeerReply, PeerRequest};
 use protocol::tailnet::{Place, Refusal, Tailnet};
 
@@ -206,15 +216,20 @@ impl Daemon {
                     agent: agent_name(&sender.agent).to_string(),
                     project: crate::project_label::project_label(&sender.cwd),
                 };
-                self.take(
-                    &from,
-                    run,
-                    &sent.message_id,
-                    &sent.context_id,
-                    sent.in_reply_to.as_deref(),
-                    text,
-                )
-                .await
+                let taken = self
+                    .take(
+                        &from,
+                        run,
+                        &sent.message_id,
+                        &sent.context_id,
+                        sent.in_reply_to.as_deref(),
+                        text,
+                    )
+                    .await;
+                if taken.0 == MailState::Waiting {
+                    waiter_registered(self, run);
+                }
+                taken
             }
             Place::Peer { name: peer, ip } => self.carry(&sent, &sender, run, peer, ip).await,
         };
@@ -588,6 +603,9 @@ impl Daemon {
                         &text,
                     )
                     .await;
+                if state == MailState::Waiting {
+                    waiter_registered(self, &to);
+                }
                 PeerReply::PeerMailResult { state, reason }
             }
             PeerRequest::PeerMailState { message_id, state } => {
@@ -688,6 +706,118 @@ impl Daemon {
     }
 }
 
+/// A turn may end this many times with woken mail still unread before wakes stop
+/// until a person's turn or new mail.
+const WAKE_MISSES: u32 = 3;
+
+/// **A turn of `run_uid` ended**: Claude's `Stop`, Codex's `turn/completed`. The
+/// wake it answered is no longer outstanding, and the rule decides again.
+pub(crate) fn turn_ended(daemon: &Arc<Daemon>, run_uid: &str) {
+    let (daemon, run_uid) = (Arc::clone(daemon), run_uid.to_string());
+    tokio::spawn(async move {
+        if let Err(err) = daemon
+            .db
+            .mail_turn_ended(run_uid.clone(), protocol::time::now_unix_ms(), WAKE_MISSES)
+            .await
+        {
+            crate::log_error!("mail for {run_uid}: could not record the turn's end: {err:#}");
+        }
+        daemon.wake_if_due(&run_uid).await;
+    });
+}
+
+/// **Decide again whether to wake `run_uid`**: its Claude waiter registered, its
+/// Codex link adopted a thread, or mail was taken for it.
+pub(crate) fn waiter_registered(daemon: &Arc<Daemon>, run_uid: &str) {
+    let (daemon, run_uid) = (Arc::clone(daemon), run_uid.to_string());
+    tokio::spawn(async move { daemon.wake_if_due(&run_uid).await });
+}
+
+/// **A prompt started a turn of `run_uid`**: the fixed nudge when it is a person's
+/// turn and unread mail waits, for that turn to read it.
+pub(crate) async fn prompt_submitted(daemon: &Arc<Daemon>, run_uid: &str) -> Option<&'static str> {
+    match daemon
+        .db
+        .mail_prompt(run_uid.to_string(), protocol::time::now_unix_ms())
+        .await
+    {
+        Ok(true) => Some(MAIL_NUDGE),
+        Ok(false) => None,
+        Err(err) => {
+            crate::log_error!("mail for {run_uid}: could not record the prompt: {err:#}");
+            None
+        }
+    }
+}
+
+impl Daemon {
+    /// **The wake rule.** Wake `run_uid` when unread mail waits, no wake is
+    /// outstanding, wakes have not stopped, and, for Claude, no turn of it runs:
+    /// decided in one store transaction, then issued. A wake that cannot be issued
+    /// is released, and the next trigger decides again; nothing else ever reaches
+    /// the agent. The wake carries nothing of any message.
+    pub(crate) async fn wake_if_due(self: &Arc<Self>, run_uid: &str) {
+        let claude = match self.db.get_session(run_uid.to_string()).await {
+            Ok(Some(row)) => match row.agent {
+                AgentKind::Claude => true,
+                AgentKind::Codex => false,
+                AgentKind::Unsupported(_) => return,
+            },
+            Ok(None) => return,
+            Err(err) => {
+                crate::log_error!("mail for {run_uid}: session lookup failed: {err:#}");
+                return;
+            }
+        };
+        match self
+            .db
+            .claim_mail_wake(run_uid.to_string(), protocol::time::now_unix_ms(), claude)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(err) => {
+                crate::log_error!("mail for {run_uid}: wake decision failed: {err:#}");
+                return;
+            }
+        }
+        let issued = if claude {
+            crate::claude_waiter::wake_claude(self, run_uid)
+        } else {
+            match crate::codex_wake::wake_codex(self, run_uid).await {
+                Ok(()) => true,
+                Err(err) => {
+                    crate::log_warn!("mail for {run_uid}: Codex was not woken: {err:#}");
+                    false
+                }
+            }
+        };
+        if !issued {
+            if let Err(err) = self.db.release_mail_wake(run_uid.to_string()).await {
+                crate::log_error!("mail for {run_uid}: could not release the wake: {err:#}");
+            }
+        }
+    }
+
+    /// Every run with unread mail, as the daemon starts.
+    async fn wake_all_due(self: &Arc<Self>) {
+        match self
+            .db
+            .runs_with_unread_mail(protocol::time::now_unix_ms())
+            .await
+        {
+            Ok(runs) => {
+                for run in runs {
+                    self.wake_if_due(&run).await;
+                }
+            }
+            Err(err) => {
+                crate::log_error!("mail: could not read the runs with unread mail: {err:#}")
+            }
+        }
+    }
+}
+
 /// A run as `list_agents` gives it.
 fn entry(row: &crate::store::SessionRow, this_computer: &str) -> AgentEntry {
     AgentEntry {
@@ -740,8 +870,10 @@ fn refused(message_id: String, reason: &str) -> MailStatus {
     }
 }
 
-/// **Sweep the mail every [`SWEEP_EVERY`]**, for as long as the daemon runs.
+/// **Wake every run with unread mail, then sweep the mail every [`SWEEP_EVERY`]**,
+/// for as long as the daemon runs.
 pub async fn run_mail_sweeps(daemon: Arc<Daemon>) {
+    daemon.wake_all_due().await;
     let mut ticker = tokio::time::interval(SWEEP_EVERY);
     loop {
         ticker.tick().await;

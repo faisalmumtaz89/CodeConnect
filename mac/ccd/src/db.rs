@@ -154,6 +154,7 @@ db_ops! {
     fn sent_mail_computer(message_id: String) -> Option<String>;
     fn unsent_mail() -> Vec<crate::store::SentMail>;
     fn untold_mail() -> Vec<crate::store::UntoldMail>;
+    fn release_mail_wake(session_uid: String) -> ();
     fn orphan_event_count() -> u64;
 }
 
@@ -455,6 +456,36 @@ impl Db {
         told: bool,
     ) -> Result<()> {
         self.run(move |store| store.note_sent_mail(&message_id, state, reason.as_deref(), told))
+            .await
+    }
+
+    pub async fn claim_mail_wake(
+        &self,
+        session_uid: String,
+        now_ms: i64,
+        between_turns: bool,
+    ) -> Result<bool> {
+        self.run(move |store| store.claim_mail_wake(&session_uid, now_ms, between_turns))
+            .await
+    }
+
+    pub async fn mail_turn_ended(
+        &self,
+        session_uid: String,
+        now_ms: i64,
+        misses_allowed: u32,
+    ) -> Result<()> {
+        self.run(move |store| store.mail_turn_ended(&session_uid, now_ms, misses_allowed))
+            .await
+    }
+
+    pub async fn mail_prompt(&self, session_uid: String, now_ms: i64) -> Result<bool> {
+        self.run(move |store| store.mail_prompt(&session_uid, now_ms))
+            .await
+    }
+
+    pub async fn runs_with_unread_mail(&self, now_ms: i64) -> Result<Vec<String>> {
+        self.run(move |store| store.runs_with_unread_mail(now_ms))
             .await
     }
 

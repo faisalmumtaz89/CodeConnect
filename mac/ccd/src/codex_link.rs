@@ -6229,6 +6229,9 @@ impl Connection<'_> {
         if frame.get("method").and_then(Value::as_str) == Some("turn/completed") {
             self.ingest_frame(frame).await;
             self.observe_approval(frame).await;
+            // The visited thread's turn ended, interrupted or not: the mailbox's
+            // wake rule decides from here whether this run is owed a wake.
+            crate::mail::turn_ended(self.daemon, &self.session.uid);
             return;
         }
         self.observe_approval(frame).await;
@@ -8220,6 +8223,9 @@ impl Connection<'_> {
             // not, and memoizing it made one transient lock permanent.
             self.recorded_thread = Some(thread);
             self.thread_record_retry_at = None;
+            // The run can be woken through this thread now: mail that waited for a
+            // thread is decided again.
+            crate::mail::waiter_registered(self.daemon, &self.session.uid);
         } else {
             self.thread_record_retry_at =
                 Some(std::time::Instant::now() + THREAD_RECORD_RETRY_INTERVAL);
