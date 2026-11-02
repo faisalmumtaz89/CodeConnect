@@ -2396,9 +2396,8 @@ private struct SessionComposeBar: View {
     // MARK: The pill
 
     /// One pill: the field, and the circle inside its trailing end, where the
-    /// thumb finishing a line finds it. The focus ring wraps the whole pill —
-    /// and so does recording, because while the mic is hot the pill *is* the
-    /// transcript.
+    /// thumb finishing a line finds it. The pill wears no focus ring: the caret
+    /// and the keyboard say it has focus, and the rim stays as it rests.
     ///
     /// One circle does the whole job — mic when the field is empty, send once a
     /// single character exists — so the pill never grows a second button for a
@@ -2420,12 +2419,15 @@ private struct SessionComposeBar: View {
                 field
             }
         }
-        .padding(.leading, CC.space.md)
+        // 12pt, not 16: the disc's 8pt inset took 4pt from the trailing side,
+        // and the text keeps the width it wraps at.
+        .padding(.leading, CC.space.sm)
         .padding(
             .trailing,
-            dictation.isRecording ? 2 * CC.size.hitTarget + CC.space.xxs : CC.size.hitTarget)
+            dictation.isRecording
+                ? 2 * CC.size.hitTarget + 2 * CC.space.xxs : CC.size.hitTarget + CC.space.xxs)
         .padding(.vertical, CC.space.xs)
-        .frame(minHeight: CC.size.hitTarget)
+        .frame(minHeight: Self.pillHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         // Read first: VoiceOver orders by position, and on one line the
         // circle's 44pt frame starts above the field's.
@@ -2441,24 +2443,46 @@ private struct SessionComposeBar: View {
                 }
                 CCVoiceButton(phase: phase, blockedReason: sendBlockedReason) { act() }
             }
+            // 4pt round the 44pt frame puts the 36pt disc 8pt inside the
+            // pill's bottom and trailing edges.
+            .padding(CC.space.xxs)
         }
-        .background(CC.color.surfaceRaised, in: pillShape)
-        .overlay {
-            pillShape.strokeBorder(
-                (focused.wrappedValue || dictation.isRecording)
-                    ? CC.color.borderFocus : CC.color.border,
-                lineWidth: CC.stroke.hairline)
-        }
+        .background { pillSurface }
         // The sort priority above ranks within the pill alone.
         .accessibilityElement(children: .contain)
-        .ccAnimation(CC.motion.micro, value: focused.wrappedValue)
         .ccAnimation(CC.motion.small, value: dictation.isRecording)
     }
 
-    /// Half the 44pt one-line height: a capsule at one line, and a corner that
+    /// The one-line height: the 36pt disc and 8pt of pill round it.
+    private static let pillHeight = CC.size.controlSm + 2 * CC.space.xs
+
+    /// Half the one-line height: a capsule at one line, and a corner that
     /// stays concentric with the circle in it at every size.
     private var pillShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: CC.size.hitTarget / 2, style: .continuous)
+        RoundedRectangle(cornerRadius: Self.pillHeight / 2, style: .continuous)
+    }
+
+    /// The top of the surface ladder, lit from inside: a hairline rim and a
+    /// soft glow under it, brightest where the edge faces up or down and gone
+    /// by the sides' middle.
+    private var pillSurface: some View {
+        let light = LinearGradient(
+            stops: [
+                .init(color: CC.color.borderFocus, location: 0),
+                .init(color: CC.color.borderFocus.opacity(0), location: 0.3),
+                .init(color: CC.color.borderFocus.opacity(0), location: 0.7),
+                .init(color: CC.color.borderFocus, location: 1),
+            ],
+            startPoint: .top, endPoint: .bottom)
+        return ZStack {
+            pillShape.fill(CC.color.surfaceOverlay)
+            pillShape.strokeBorder(light, lineWidth: 3)
+                .blur(radius: 2)
+                .opacity(0.15)
+                .clipShape(pillShape)
+            pillShape.strokeBorder(light, lineWidth: CC.stroke.hairline)
+                .opacity(0.24)
+        }
     }
 
     private var field: some View {

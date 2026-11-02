@@ -3,6 +3,14 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A softer message box on the iPhone
+
+- The message box in a session is a little taller on one line, 52 points instead of 44, with a
+  lighter fill and a soft light along its top and bottom edges. The send button sits evenly inside
+  it. Tapping into the box no longer turns its edge white; the cursor and the keyboard show where
+  you are typing. The placeholder, the icons and how the box grows with longer messages are
+  unchanged.
+
 ## New icons on the iPhone
 
 - The iPhone app draws its icons from Phosphor, a cleaner, rounder set, in place of Apple's SF

@@ -1166,7 +1166,9 @@ colour this app chooses for its own text.
 1.39:1 on `bg` and `borderStrong` #383838 measures 1.79:1. They are *separation*,
 never the sole identifier of a control: every CC control is identified by its
 label (≥ 4.5:1) and, when focused, by a 2pt `borderFocus` ring at **17.94:1**.
-WCAG 1.4.11 and 2.4.11 are met through the label and the focus ring.
+WCAG 1.4.11 and 2.4.11 are met through the label and the focus ring. The one
+exception is the session composer: it keeps its lit rim when focused, and the
+caret and the keyboard show the focus.
 
 **Dynamic Type** — verified by screenshot at `medium`, `xxxLarge`, and
 `AX5` (`accessibility-extra-extra-extra-large`) on iPhone 17 Pro. Nothing clips
