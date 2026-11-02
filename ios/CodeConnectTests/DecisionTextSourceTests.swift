@@ -57,7 +57,7 @@ final class DecisionTextSourceTests: XCTestCase {
         Rule(pattern: #"\.cwd\b"#, sites: [
             // Copied, never drawn: the daemon's bytes go to the pasteboard.
             ("FleetView.swift", ["CCPasteboard.copy(row.summary.cwd)"]),
-            ("SessionDetailView.swift", [".onLongPressGesture { CCPasteboard.copy(summary.cwd) }"]),
+            ("SessionDetailView.swift", ["if let summary { CCPasteboard.copy(summary.cwd) }"]),
             ("DecisionCard.swift", ["let cwd = CodexCard.cwd(in: approval.card.toolInput)"]),
         ]),
         // The raw tool input of a timeline row: its presence, and its pretty

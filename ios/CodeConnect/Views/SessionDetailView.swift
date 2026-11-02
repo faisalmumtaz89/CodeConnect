@@ -302,8 +302,8 @@ private struct TailObserver: UIViewRepresentable {
                 - scrollView.adjustedContentInset.bottom
             let hand = scrollView.isTracking || scrollView.isDecelerating
             // **A reader at the tail stays there through a change of the
-            // viewport's size** — the keyboard coming or going, the header
-            // folding away or coming back, the compose bar growing or
+            // viewport's size** — the keyboard coming or going, the strip under
+            // the bar appearing or going, the compose bar growing or
             // shrinking. The list keeps its top through such a change, so on
             // its own the newest rows slid under the bar (measured: 295pt as
             // the keyboard rose, 100pt as the header came back) until a re-pin
@@ -323,7 +323,7 @@ private struct TailObserver: UIViewRepresentable {
             } else if hand {
                 // A hand, or its deceleration: up is a departure the reader
                 // chose. The offset alone cannot say this — a viewport that
-                // grows upward (the header folding away for the keyboard)
+                // grows upward (the strip under the bar going away)
                 // moves it up by the same amount with nobody touching it.
                 if dy < -0.5 { watch.leave() } else { watch.depart() }
             } else if dy < -0.5, !resized, abs(grown) < -dy - 0.5 {
@@ -920,10 +920,8 @@ private struct HistoryHead: View {
 /// The semantic timeline for one session, plus the two things you can do to it:
 /// answer a card, or say something.
 ///
-/// The identity block replaces the ambiguity of a bare nav title. The nav bar is
-/// left with nothing but a back chevron on purpose: the pushed screen's own
-/// header carries the project, and a project name is longer than a title bar
-/// can render honestly.
+/// The bar is the header: its title is the project and the path, its one
+/// trailing item the "…" menu with the terminal, the changes and the link.
 /// Handed the model of the machine the session is on, so everything done here
 /// goes to that machine.
 struct SessionDetailView: View {
@@ -1364,8 +1362,8 @@ struct SessionDetailView: View {
 
     // MARK: Stop
 
-    /// **Stop, in the session header**, where the reader is already looking at
-    /// the turn they want to end.
+    /// **Stop, in the strip under the bar**, where the reader is already
+    /// looking at the turn they want to end.
     ///
     /// Absent when the phone holds no turn to name — the one honest hide. There
     /// is no "turn started" fact on the Codex wire at all, so the running turn
