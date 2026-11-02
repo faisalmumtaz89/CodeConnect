@@ -3753,8 +3753,9 @@ impl Store {
     /// **The wake rule's one decision: wake `session_uid` now?** Yes — and from here
     /// the wake is outstanding — when unread mail waits for it, no wake is
     /// outstanding, wakes have not stopped, and, for an agent that is woken only
-    /// `between_turns`, no turn of it is running. One transaction, so two callers
-    /// never both wake one run.
+    /// `between_turns`, no turn of it is running: its newest turn start is not later
+    /// than its newest turn end. One transaction, so two callers never both wake one
+    /// run.
     pub fn claim_mail_wake(
         &self,
         session_uid: &str,
@@ -3773,7 +3774,7 @@ impl Store {
         let claimed = tx.execute(
             "UPDATE mail_wake SET outstanding = 1
               WHERE session_uid = ?1 AND outstanding = 0 AND degraded = 0
-                AND (?2 = 0 OR running = 0)",
+                AND (?2 = 0 OR started_ms <= ended_ms)",
             params![session_uid, between_turns],
         )? == 1;
         tx.commit()?;
@@ -3807,8 +3808,7 @@ impl Store {
                 SET misses = CASE WHEN NOT ?2 THEN 0
                                   WHEN outstanding = 1 THEN misses + 1
                                   ELSE misses END,
-                    outstanding = 0,
-                    running = 0
+                    outstanding = 0
               WHERE session_uid = ?1",
             params![session_uid, unread],
         )?;
@@ -3820,10 +3820,11 @@ impl Store {
         Ok(())
     }
 
-    /// **A prompt of `session_uid` started a turn.** With a wake outstanding it is
-    /// that wake's own turn. Otherwise it is the person's, which resumes wakes that
-    /// had stopped. Returns whether it is the person's turn with unread mail
-    /// waiting, which that turn is then told of.
+    /// **A prompt of `session_uid` was submitted**, which starts a turn or joins the
+    /// one running: a turn start. With a wake outstanding it is that wake's own
+    /// turn. Otherwise it is the person's, which resumes wakes that had stopped.
+    /// Returns whether it is the person's turn with unread mail waiting, which that
+    /// turn is then told of.
     pub fn mail_prompt(&self, session_uid: &str, now_ms: i64) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3838,7 +3839,7 @@ impl Store {
         )?;
         tx.execute(
             "UPDATE mail_wake
-                SET running = ?3,
+                SET started_ms = MAX(started_ms, ?3),
                     misses = CASE WHEN ?2 THEN misses ELSE 0 END,
                     degraded = CASE WHEN ?2 THEN degraded ELSE 0 END
               WHERE session_uid = ?1",
@@ -3849,14 +3850,28 @@ impl Store {
         Ok(tell)
     }
 
-    /// **No turn of `session_uid` has run since `since_ms`**: a turn whose prompt came
-    /// before then has ended, whether or not its end was seen.
-    pub fn mail_idle_since(&self, session_uid: &str, since_ms: i64) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "UPDATE mail_wake SET running = 0 WHERE session_uid = ?1 AND running < ?2",
-            params![session_uid, since_ms],
+    /// **A turn of `session_uid` started, or ended, at these times**, by its
+    /// transcript's own clock. Each mark only ever moves forward, so reading a line
+    /// twice changes nothing.
+    pub fn mail_turn_marks(
+        &self,
+        session_uid: &str,
+        started_ms: Option<i64>,
+        ended_ms: Option<i64>,
+    ) -> Result<()> {
+        let mut conn = self.write();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO mail_wake(session_uid) VALUES (?1)",
+            params![session_uid],
         )?;
+        tx.execute(
+            "UPDATE mail_wake SET started_ms = MAX(started_ms, COALESCE(?2, 0)),
+                                  ended_ms = MAX(ended_ms, COALESCE(?3, 0))
+              WHERE session_uid = ?1",
+            params![session_uid, started_ms, ended_ms],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -4059,8 +4074,8 @@ impl Store {
         // behind, its Stop hook having found no daemon, so none is outstanding. A Codex
         // wake stays outstanding: the link files the turn that carried it when it
         // attaches again, and that ends it, while a wake still held in Codex's queue
-        // must not be queued twice. A running turn stays running until its end is seen
-        // or a waiter armed after its prompt shows it (`mail_idle_since`).
+        // must not be queued twice. Whether a turn runs is read from its transcript,
+        // which the tailer reads on from where it stopped.
         tx.execute(
             "UPDATE mail_wake SET outstanding = 0
               WHERE session_uid NOT IN (SELECT session_uid FROM codex_sessions)",
@@ -5317,14 +5332,15 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
 
         -- Where waking each run for its mail stands (`crate::mail`'s wake rule): a
         -- wake issued whose turn has not ended, the turn ends since with mail still
-        -- unread, wakes stopped until a human turn or new mail, and when the Claude
-        -- turn running was prompted (from its prompt to its end; 0 for none).
+        -- unread, wakes stopped until a human turn or new mail, and the newest start
+        -- and end of a Claude turn (a turn runs while the start is the later).
         CREATE TABLE IF NOT EXISTS mail_wake(
             session_uid TEXT PRIMARY KEY,
             outstanding INTEGER NOT NULL DEFAULT 0,
             misses      INTEGER NOT NULL DEFAULT 0,
             degraded    INTEGER NOT NULL DEFAULT 0,
-            running     INTEGER NOT NULL DEFAULT 0
+            started_ms  INTEGER NOT NULL DEFAULT 0,
+            ended_ms    INTEGER NOT NULL DEFAULT 0
         );
 
         -- Messages this computer's agents sent (the sender's side), written before
@@ -10974,13 +10990,17 @@ mod tests {
     }
 
     /// **A Claude turn holds its wake until it ends** (the T5 rule): mail taken while
-    /// a turn runs wakes no one until its Stop. The turn a wake starts is that wake's
-    /// own: it resumes nothing and is not told again.
+    /// a turn runs wakes no one until the turn's end is read. The turn a wake starts
+    /// is that wake's own: it resumes nothing and is not told again.
     #[test]
     fn a_running_claude_turn_holds_its_wake_until_the_turn_ends() {
         let (store, _path, receiver, sender) = mail_store();
         let now = 1_000_000_000;
         let uid = receiver.uid.as_str();
+        let end = |at: i64| {
+            store.mail_turn_ended(uid, at, 3).unwrap();
+            store.mail_turn_marks(uid, None, Some(at)).unwrap();
+        };
         assert!(
             !store.mail_prompt(uid, now).unwrap(),
             "no mail to be told of"
@@ -10996,18 +11016,18 @@ mod tests {
             !store.claim_mail_wake(uid, now, true).unwrap(),
             "the turn is running"
         );
-        store.mail_turn_ended(uid, now, 3).unwrap();
+        end(now + 1);
         assert!(
-            store.claim_mail_wake(uid, now, true).unwrap(),
-            "woken at its Stop"
+            store.claim_mail_wake(uid, now + 1, true).unwrap(),
+            "woken at its end"
         );
         assert!(
-            !store.mail_prompt(uid, now).unwrap(),
+            !store.mail_prompt(uid, now + 2).unwrap(),
             "the wake's own turn is not told again"
         );
-        store.mail_turn_ended(uid, now, 3).unwrap();
+        end(now + 3);
         assert!(
-            store.claim_mail_wake(uid, now, true).unwrap(),
+            store.claim_mail_wake(uid, now + 3, true).unwrap(),
             "unread after it: woken again"
         );
     }

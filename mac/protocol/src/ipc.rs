@@ -156,11 +156,6 @@ pub enum ClientFrame {
     /// ([`DaemonFrame::MailWake`]) or replaced ([`DaemonFrame::MailSuperseded`]).
     MailWaiter {
         session_uid: String,
-        /// When the waiter's own start showed no turn of the session running (a
-        /// `Stop`, or a session start that was not a compaction): no turn has run
-        /// since. Absent when its start shows nothing.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        idle_since_ms: Option<i64>,
     },
 }
 

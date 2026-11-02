@@ -1826,6 +1826,35 @@ fn delivers_prompt(pending: &PendingEvent) -> bool {
             || line["turnOrigin"].is_string())
 }
 
+/// **When a turn of the run last started and ended in this batch**, by the
+/// transcript's own clock, for the mail wake rule: a turn runs while its newest
+/// start is later than its newest end. A start is a line that hands Claude a prompt
+/// ([`delivers_prompt`]) or a queued one taken off Claude's queue, which is written
+/// ahead of the end of the turn it follows and stamped after it. An end is every
+/// line the tailer reads as a turn's end.
+fn turn_marks(pendings: &[PendingEvent]) -> (Option<i64>, Option<i64>) {
+    let at = |pending: &PendingEvent| {
+        pending.payload["timestamp"]
+            .as_str()
+            .and_then(protocol::time::unix_ms_from_rfc3339)
+    };
+    let dequeued = |pending: &PendingEvent| {
+        matches!(&pending.kind, EventKind::Other(kind) if kind == "transcript_queue-operation")
+            && pending.payload["operation"] == "dequeue"
+    };
+    let started = pendings
+        .iter()
+        .filter(|pending| delivers_prompt(pending) || dequeued(pending))
+        .filter_map(at)
+        .max();
+    let ended = pendings
+        .iter()
+        .filter(|pending| pending.kind == EventKind::TurnComplete)
+        .filter_map(at)
+        .max();
+    (started, ended)
+}
+
 /// Whether this card's dialog is drawn on the run's pane while it waits: every
 /// card not held for the phone, and a main-conversation approval held for it,
 /// which Claude draws at the same time. Not a held question, whose hook says
@@ -2806,7 +2835,7 @@ impl Daemon {
     /// consumed cannot be two separate writes: a crash between them skips those
     /// lines permanently, because the cursor already claims they are done.
     pub async fn ingest_scan(
-        &self,
+        self: &Arc<Self>,
         session_uid: &str,
         pendings: Vec<PendingEvent>,
         cursor: crate::store::TailCursor,
@@ -2825,6 +2854,7 @@ impl Daemon {
             .filter(|pending| delivers_prompt(pending))
             .filter_map(|pending| pending.source_event_id.clone())
             .collect();
+        let (started_ms, ended_ms) = turn_marks(&pendings);
         for pending in &mut pendings {
             self.truncate_payload(pending);
         }
@@ -2884,6 +2914,18 @@ impl Daemon {
         }
         for (tool_use_id, rejected) in ended {
             self.call_ended(session_uid, &tool_use_id, rejected).await;
+        }
+        if started_ms.is_some() || ended_ms.is_some() {
+            if let Err(err) = self
+                .db
+                .mail_turn_marks(session_uid.to_string(), started_ms, ended_ms)
+                .await
+            {
+                crate::log_error!("mail for {session_uid}: could not record a turn: {err:#}");
+            }
+            if ended_ms.is_some() {
+                self.wake_if_due(session_uid).await;
+            }
         }
         Ok(events.len())
     }
@@ -26000,7 +26042,8 @@ mod tests {
 
     /// **Claude is woken for its mail through its waiter, and only between its
     /// turns** (M-01, M-02 and the T5 rule): mail taken while a turn runs wakes no
-    /// one until that turn's Stop, and the turn the wake starts is not told again.
+    /// one until that turn's end is read, and the turn the wake starts is not told
+    /// again.
     #[tokio::test]
     async fn a_claude_run_is_woken_for_its_mail_only_between_its_turns() {
         let daemon = test_daemon();
@@ -26013,8 +26056,14 @@ mod tests {
         daemon.wake_if_due(&claude).await;
         assert!(woken.try_recv().is_err(), "no wake while the turn runs");
 
-        // Its Stop ends the turn: the waiter is woken.
+        // Its Stop, then its end in the transcript: the waiter is woken.
         crate::mail::turn_ended(&daemon, &claude);
+        let mut end: serde_json::Value = serde_json::from_str(&turns(6..7)[0]).unwrap();
+        end["timestamp"] =
+            protocol::time::rfc3339_from_unix_ms(protocol::time::now_unix_ms() + 1).into();
+        Transcript::of(&claude)
+            .read(&daemon, vec![end.to_string()])
+            .await;
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut woken)
             .await
             .expect("woken at the turn's end")
@@ -26059,66 +26108,242 @@ mod tests {
         assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
     }
 
-    /// **A restart keeps a running turn running until a waiter shows it ended**
-    /// (round 2, R2-1). A turn running when the daemon stopped is still taken for
-    /// running: the waiter armed before its prompt, or one that says nothing of when
-    /// it was armed, does not wake it mid-turn (shape M). The waiter its `Stop` armed
-    /// after the prompt shows the turn ended unseen, and wakes it (round 1, variant
-    /// B). A Claude wake whose Stop found no daemon is dropped (variant W); a Codex
-    /// wake, which may still be held in Codex's queue, is not queued twice.
+    /// The turn boundaries of one measured Claude Code 2.1.316 session (round 3,
+    /// R3-1), its paths replaced: a prompt queued while a short turn ran (0–7), one
+    /// typed during a tool call (8–12), Esc (13–14) and the next prompt (15–17), a
+    /// background task's report (18–22), and a manual /compact (23–26).
+    const TURNS: &str =
+        include_str!("../../../fixtures/claude/transcript-turn-boundaries-2.1.316.jsonl");
+
+    /// When the measured session's hooks reached the daemon, by `TURNS`' clock.
+    const fn hook_at(ms: i64) -> i64 {
+        1_793_579_000_000 + ms
+    }
+
+    fn turns(lines: std::ops::Range<usize>) -> Vec<String> {
+        TURNS.lines().map(str::to_string).collect::<Vec<_>>()[lines].to_vec()
+    }
+
+    /// A run's transcript, read by the tailer as Claude Code appends to it.
+    struct Transcript {
+        path: std::path::PathBuf,
+        uid: String,
+    }
+
+    impl Transcript {
+        fn of(uid: &str) -> Transcript {
+            let path =
+                std::env::temp_dir().join(format!("ccd-turns-{}-{uid}.jsonl", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            Transcript {
+                path,
+                uid: uid.to_string(),
+            }
+        }
+
+        /// Append `lines` and read them as one scan.
+        async fn read(&self, daemon: &Arc<Daemon>, lines: Vec<String>) {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .unwrap();
+            for line in lines {
+                writeln!(file, "{line}").unwrap();
+            }
+            let run = SessionKey::new(&self.uid, "cc-1");
+            let scan = crate::tailer::scan_file(&daemon.store, &run, self.path.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            daemon
+                .ingest_scan(&self.uid, scan.events, scan.cursor)
+                .await
+                .unwrap();
+        }
+    }
+
+    impl Drop for Transcript {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// Whether the wake rule would wake `uid` now, between its turns.
+    fn wakeable(daemon: &Arc<Daemon>, uid: &str) -> bool {
+        let claimed = daemon
+            .store
+            .claim_mail_wake(uid, protocol::time::now_unix_ms(), true)
+            .unwrap();
+        if claimed {
+            daemon.store.release_mail_wake(uid).unwrap();
+        }
+        claimed
+    }
+
+    /// **A Claude turn runs from its start to its end as its transcript has them**
+    /// (round 3, R3-1). A prompt queued while a turn runs is submitted before that
+    /// turn's Stop and starts its own turn after it (the attacker's q shape); one
+    /// typed during a tool call joins the turn running, which ends once. Esc ends
+    /// nothing until the next turn ends. A background task's report is a turn. A
+    /// manual /compact starts none. The hooks come at their measured times.
     #[tokio::test]
-    async fn a_restart_keeps_a_running_turn_running_until_a_waiter_shows_it_ended() {
+    async fn a_turn_runs_from_its_start_to_its_end_as_its_transcript_has_them() {
+        let daemon = test_daemon();
+        let uid = register(&daemon, "cc-1", None).await.session.uid;
+        leave_mail(&daemon, &uid, "hi");
+        let transcript = Transcript::of(&uid);
+        let prompt = |ms: i64| daemon.store.mail_prompt(&uid, hook_at(ms)).unwrap();
+        let stop = || {
+            daemon
+                .store
+                .mail_turn_ended(&uid, protocol::time::now_unix_ms(), 3)
+                .unwrap()
+        };
+
+        prompt(124_141);
+        transcript.read(&daemon, turns(0..2)).await;
+        prompt(124_602);
+        stop();
+        assert!(
+            !wakeable(&daemon, &uid),
+            "q: a prompt is queued behind the Stop"
+        );
+        transcript.read(&daemon, turns(2..5)).await;
+        assert!(
+            !wakeable(&daemon, &uid),
+            "q: taken off the queue after the first turn's end, before its own start is read"
+        );
+        transcript.read(&daemon, turns(5..6)).await;
+        assert!(!wakeable(&daemon, &uid), "q: the queued turn runs");
+        stop();
+        transcript.read(&daemon, turns(6..8)).await;
+        assert!(wakeable(&daemon, &uid), "q: the queued turn ended");
+
+        prompt(148_845);
+        transcript.read(&daemon, turns(8..9)).await;
+        prompt(154_897);
+        transcript.read(&daemon, turns(9..11)).await;
+        assert!(!wakeable(&daemon, &uid), "a prompt joined the running turn");
+        stop();
+        transcript.read(&daemon, turns(11..13)).await;
+        assert!(wakeable(&daemon, &uid), "the turn it joined ended once");
+
+        prompt(206_505);
+        transcript.read(&daemon, turns(13..15)).await;
+        assert!(!wakeable(&daemon, &uid), "Esc ends no turn");
+        prompt(216_583);
+        transcript.read(&daemon, turns(15..16)).await;
+        stop();
+        transcript.read(&daemon, turns(16..18)).await;
+        assert!(wakeable(&daemon, &uid), "the next turn ended");
+
+        transcript.read(&daemon, turns(18..19)).await;
+        prompt(224_515);
+        transcript.read(&daemon, turns(19..21)).await;
+        assert!(
+            !wakeable(&daemon, &uid),
+            "a background task's report runs a turn"
+        );
+        stop();
+        transcript.read(&daemon, turns(21..23)).await;
+        assert!(wakeable(&daemon, &uid), "the report's turn ended");
+
+        transcript.read(&daemon, turns(23..27)).await;
+        assert!(wakeable(&daemon, &uid), "a manual /compact starts no turn");
+    }
+
+    /// **A restart reads on from the transcript** (rounds 1–3). A turn running when
+    /// the daemon stopped is still running (shape M); one that ended while it was
+    /// down is read to have ended (variant B). A Claude wake whose Stop found no
+    /// daemon is dropped (variant W); a Codex wake, which may still be held in
+    /// Codex's queue, is not queued twice.
+    #[tokio::test]
+    async fn a_restart_reads_on_from_the_transcript() {
         let daemon = test_daemon();
         let busy = register(&daemon, "cc-1", None).await.session.uid;
-        let woken = register(&daemon, "cc-2", None).await.session.uid;
+        let done = register(&daemon, "cc-2", None).await.session.uid;
+        let woken = register(&daemon, "cc-3", None).await.session.uid;
         let codex = protocol::uid::new().unwrap();
-        register_codex_session(&daemon, &codex, "cc-3").await;
-        let armed_before_the_prompt = protocol::time::now_unix_ms();
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        assert_eq!(crate::mail::prompt_submitted(&daemon, &busy).await, None);
-        for run in [&busy, &woken, &codex] {
+        register_codex_session(&daemon, &codex, "cc-4").await;
+        for run in [&busy, &done, &woken, &codex] {
             leave_mail(&daemon, run, "hi");
         }
+        let (busy_transcript, done_transcript) = (Transcript::of(&busy), Transcript::of(&done));
+        busy_transcript.read(&daemon, turns(8..9)).await;
+        done_transcript.read(&daemon, turns(8..9)).await;
         let now = protocol::time::now_unix_ms();
         assert!(daemon.store.claim_mail_wake(&woken, now, true).unwrap());
         assert!(daemon.store.claim_mail_wake(&codex, now, false).unwrap());
 
         daemon.recover().await;
-        let now = protocol::time::now_unix_ms();
+        assert!(!wakeable(&daemon, &busy), "M: still running");
         assert!(
-            daemon.store.claim_mail_wake(&woken, now, true).unwrap(),
-            "variant W: the Claude wake whose Stop found no daemon is gone"
+            !wakeable(&daemon, &done),
+            "B: running until its end is read"
         );
-        assert!(
-            !daemon.store.claim_mail_wake(&codex, now, false).unwrap(),
-            "the held Codex wake is still outstanding, so no second one is queued"
-        );
-
-        let (_, mut outcome) = daemon.waiters.register(&busy);
-        crate::mail::claude_waiter_registered(&daemon, &busy, Some(armed_before_the_prompt));
-        crate::mail::claude_waiter_registered(&daemon, &busy, None);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(500), &mut outcome)
-                .await
-                .is_err(),
-            "shape M: not woken mid-turn"
-        );
+        let (_, woken_at_its_end) = daemon.waiters.register(&done);
+        done_transcript.read(&daemon, turns(9..13)).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), woken_at_its_end)
+            .await
+            .expect("B: woken once its end, written while ccd was down, is read")
+            .unwrap();
+        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
+        assert!(wakeable(&daemon, &woken), "W: the Claude wake is gone");
         assert!(
             !daemon
                 .store
-                .claim_mail_wake(&busy, protocol::time::now_unix_ms(), true)
+                .claim_mail_wake(&codex, protocol::time::now_unix_ms(), false)
                 .unwrap(),
-            "shape M: the turn is still taken for running"
+            "the held Codex wake is still outstanding"
         );
+    }
 
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let stopped = protocol::time::now_unix_ms();
-        crate::mail::claude_waiter_registered(&daemon, &busy, Some(stopped));
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), outcome)
-            .await
-            .expect("variant B: woken by the waiter its Stop armed")
+    /// **Without the transcript's marks a turn is taken for running, and its mail
+    /// waits for the next prompt** (round 3, R3-1): the safe default should a Claude
+    /// Code update stop writing them. With no turn start in the transcript, the
+    /// UserPromptSubmit hook still marks one, so no turn is woken in; with no turn
+    /// end, the run is not woken, and the person's next prompt is told of the mail.
+    #[tokio::test]
+    async fn without_the_transcripts_marks_a_turn_is_running_and_mail_waits_for_the_next_prompt() {
+        let daemon = test_daemon();
+        let uid = register(&daemon, "cc-1", None).await.session.uid;
+        leave_mail(&daemon, &uid, "hi");
+        let transcript = Transcript::of(&uid);
+        let unmarked = |lines: std::ops::Range<usize>| -> Vec<String> {
+            turns(lines)
+                .into_iter()
+                .filter_map(|line| {
+                    let mut line: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let object = line.as_object_mut().unwrap();
+                    if object["type"] == "queue-operation"
+                        || object
+                            .get("subtype")
+                            .is_some_and(|s| s == "stop_hook_summary")
+                    {
+                        return None;
+                    }
+                    object.remove("promptSource");
+                    object.remove("turnOrigin");
+                    Some(line.to_string())
+                })
+                .collect()
+        };
+
+        daemon.store.mail_prompt(&uid, hook_at(124_141)).unwrap();
+        transcript.read(&daemon, unmarked(0..1)).await;
+        assert!(!wakeable(&daemon, &uid), "the hook marks the start");
+        transcript.read(&daemon, unmarked(1..8)).await;
+        daemon
+            .store
+            .mail_turn_ended(&uid, protocol::time::now_unix_ms(), 3)
             .unwrap();
-        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
+        assert!(!wakeable(&daemon, &uid), "no end seen: still running");
+        assert_eq!(
+            crate::mail::prompt_submitted(&daemon, &uid).await,
+            Some(crate::mail::nudge()),
+            "the next prompt is told of the mail"
+        );
     }
 
     /// **A run whose supervisor has not come back yet still takes mail** (round 1,

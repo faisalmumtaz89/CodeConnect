@@ -490,8 +490,13 @@ impl Db {
             .await
     }
 
-    pub async fn mail_idle_since(&self, session_uid: String, since_ms: i64) -> Result<()> {
-        self.run(move |store| store.mail_idle_since(&session_uid, since_ms))
+    pub async fn mail_turn_marks(
+        &self,
+        session_uid: String,
+        started_ms: Option<i64>,
+        ended_ms: Option<i64>,
+    ) -> Result<()> {
+        self.run(move |store| store.mail_turn_marks(&session_uid, started_ms, ended_ms))
             .await
     }
 

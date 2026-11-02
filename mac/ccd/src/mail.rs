@@ -781,26 +781,6 @@ pub(crate) fn waiter_registered(daemon: &Arc<Daemon>, run_uid: &str) {
     tokio::spawn(async move { daemon.wake_if_due(&run_uid).await });
 }
 
-/// **A Claude waiter of `run_uid` registered.** One whose own start showed no turn
-/// running (`idle_since_ms`: a `Stop`, or a session start that was not a compaction)
-/// shows that a turn prompted before then has ended, its end seen or not; then the
-/// rule decides again.
-pub(crate) fn claude_waiter_registered(
-    daemon: &Arc<Daemon>,
-    run_uid: &str,
-    idle_since_ms: Option<i64>,
-) {
-    let (daemon, run_uid) = (Arc::clone(daemon), run_uid.to_string());
-    tokio::spawn(async move {
-        if let Some(since_ms) = idle_since_ms {
-            if let Err(err) = daemon.db.mail_idle_since(run_uid.clone(), since_ms).await {
-                crate::log_error!("mail for {run_uid}: could not record the turn's end: {err:#}");
-            }
-        }
-        daemon.wake_if_due(&run_uid).await;
-    });
-}
-
 /// **A prompt started a turn of `run_uid`**: the fixed nudge when it is a person's
 /// turn and unread mail waits, for that turn to read it.
 pub(crate) async fn prompt_submitted(daemon: &Arc<Daemon>, run_uid: &str) -> Option<&'static str> {

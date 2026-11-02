@@ -146,9 +146,9 @@ A session is woken when mail arrives, with one of two fixed lines, never with an
 message says: with the switch on, to read its messages and handle each as its sender asks; off,
 to read them and show them to you. Claude Code is woken by a hook CodeConnect installs that
 waits in the background after each turn and at start (`asyncRewake` on `Stop` and
-`SessionStart`, for up to 12 hours), and only between turns: mail that arrives while it works
-is read right after that turn ends, except in a turn you started while CodeConnect was
-restarting, which may read one waiting message before it ends. Codex is woken through
+`SessionStart`, for up to 12 hours), and only between turns, as Claude Code's own transcript
+records them: mail that arrives while it works is read once it is done, after any prompt you
+queued meanwhile. Codex is woken through
 `codex queue`, which runs the line after any turn that is running and, after Esc, holds it
 until your next turn ends. Mail that no wake can reach — after Esc in Claude Code, past 12
 hours idle, or after three woken turns that left it unread — waits for your next prompt, which

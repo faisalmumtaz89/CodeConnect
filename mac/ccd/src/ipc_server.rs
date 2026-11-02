@@ -533,14 +533,11 @@ async fn read_loop(
                     })
                     .await;
             }
-            ClientFrame::MailWaiter {
-                session_uid,
-                idle_since_ms,
-            } => {
+            ClientFrame::MailWaiter { session_uid } => {
                 // A waiter sends this one frame and then only waits, so the next
                 // thing this connection can do is close: the hook has gone.
                 let (generation, outcome) = daemon.waiters.register(&session_uid);
-                crate::mail::claude_waiter_registered(daemon, &session_uid, idle_since_ms);
+                crate::mail::waiter_registered(daemon, &session_uid);
                 let gone = read_line_limited(reader, MAX_FRAME_BYTES);
                 tokio::select! {
                     Ok(outcome) = outcome => {
@@ -830,67 +827,6 @@ mod tests {
             0,
             "a confirmed read leaves nothing unread"
         );
-    }
-
-    /// **A waiter armed after the turn's prompt wakes the run; one that says nothing
-    /// of when it was armed does not.** The arm time crosses the socket; the frame of
-    /// a cc-hook from before it was sent still decodes, and leaves the turn running.
-    #[tokio::test]
-    async fn a_waiter_armed_after_the_prompt_is_woken_and_an_older_one_is_not() {
-        let (daemon, socket) = served_daemon().await;
-        let uid = protocol::uid::new().unwrap();
-        assert!(matches!(
-            exchange(
-                &socket,
-                &register_frame(&uid, "cc-1", protocol::agent::AgentKind::Claude)
-            )
-            .await,
-            DaemonFrame::Ack
-        ));
-        assert_eq!(crate::mail::prompt_submitted(&daemon, &uid).await, None);
-        let stopped = protocol::time::now_unix_ms() + 1;
-        daemon
-            .store
-            .take_mail(
-                &crate::store::MailIntake {
-                    message_id: "m1".into(),
-                    context_id: "c1".into(),
-                    in_reply_to: None,
-                    session_uid: uid.clone(),
-                    sender_computer: String::new(),
-                    sender_uid: "sender".into(),
-                    sender: "sender@studio".into(),
-                    sender_label: "cc-2@studio".into(),
-                    sender_agent: "Codex".into(),
-                    sender_project: "api".into(),
-                    text: "hi".into(),
-                },
-                stopped,
-                crate::mail::LIMITS,
-            )
-            .unwrap();
-
-        let older = serde_json::json!({ "type": "mail_waiter", "session_uid": uid }).to_string();
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                exchange(&socket, &older)
-            )
-            .await
-            .is_err(),
-            "an older waiter is not woken while the turn runs"
-        );
-
-        let armed = serde_json::to_string(&ClientFrame::MailWaiter {
-            session_uid: uid.clone(),
-            idle_since_ms: Some(stopped),
-        })
-        .unwrap();
-        let woken =
-            tokio::time::timeout(std::time::Duration::from_secs(5), exchange(&socket, &armed))
-                .await
-                .expect("the waiter armed after the prompt is woken");
-        assert!(matches!(woken, DaemonFrame::MailWake { .. }), "{woken:?}");
     }
 
     #[tokio::test]
