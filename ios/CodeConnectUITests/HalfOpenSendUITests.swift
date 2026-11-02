@@ -82,9 +82,9 @@ final class HalfOpenSendUITests: XCTestCase {
         field.typeText("B18 probe: sent, then the terminal while the link is down")
         app.buttons["Send"].tap()
         let sentAt = Date()
-        // The picker stands aside while the composer has focus; a tap on the
-        // timeline's upper background gives focus up (the timeline by name: with the
-        // keyboard up, a bare coordinate can land on the keyboard's own bar).
+        // A tap on the timeline's upper background gives focus up (the timeline
+        // by name: with the keyboard up, a bare coordinate can land on the
+        // keyboard's own bar).
         app.collectionViews["session-timeline"].coordinate(
             withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)
         ).tap()

@@ -984,7 +984,7 @@ struct SessionDetailView: View {
     /// tree while the timeline is the one on show.
     @State private var terminalHasBeenOpened = false
     #if DEBUG
-        /// Test seam: drive the picker from outside.
+        /// Test seam: switch between the timeline and the terminal from outside.
         ///
         /// The terminal's emulator has to survive a trip to the timeline and
         /// back, and that is a claim about one `UIView` instance rather than
@@ -993,7 +993,7 @@ struct SessionDetailView: View {
         var surfaceForTesting: Binding<Surface>?
     #endif
 
-    /// The picker's selection: this screen's own, or a test's.
+    /// The surface on show: this screen's own, or a test's.
     private var surfaceBinding: Binding<Surface> {
         #if DEBUG
             if let surfaceForTesting { return surfaceForTesting }
@@ -1031,7 +1031,7 @@ struct SessionDetailView: View {
             sessionNotices
 
             // **Two slots, not two branches.** A `switch` here puts the two
-            // surfaces in one structural position, so flipping the picker
+            // surfaces in one structural position, so switching between them
             // dismantles whichever was showing — and the terminal's emulator
             // is not a view that can be rebuilt from its inputs. It *is* the
             // scrollback: `cargo build` scrolls megabytes through it, the

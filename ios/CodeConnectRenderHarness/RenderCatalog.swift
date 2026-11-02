@@ -642,8 +642,7 @@ enum RenderCatalog {
             }),
 
         // **A conversation, as a new user's first one reads.** Your words and
-        // Claude's on one edge, no "Turn complete" under a reply, and the
-        // computer named in the header.
+        // Claude's on one edge, and no "Turn complete" under a reply.
         RenderScenario(
             name: "session-conversation",
             purpose: "\"hi\" and Claude's answer: one edge, no line under a reply",
@@ -1476,7 +1475,7 @@ enum RenderCatalog {
                     driver.element(containing: "try again shortly", in: app),
                     "the daemon's own sentence, unedited")
             }),
-        // **The session route**, so the header's own Stop control is
+        // **The session route**, so the session screen's own Stop control is
         // photographed too. The other three S-series scenarios drive the fleet
         // row; this one drives the same mutation from the screen a reader is on
         // when they are watching the turn they want to end, and the two draw the
