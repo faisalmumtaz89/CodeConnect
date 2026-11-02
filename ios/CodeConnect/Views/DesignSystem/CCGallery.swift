@@ -200,7 +200,7 @@ import SwiftUI
         }
 
         /// The three syntax roles, on the three backgrounds a diff line
-        /// can actually have: `bg`, the 6% row tint, and the 22% word tint. The
+        /// can actually have: `bg`, the 12% row tint, and the 22% word tint. The
         /// word tint is the dark one and it is the one that decides the values.
         private var syntaxSpecimen: some View {
             VStack(alignment: .leading, spacing: CC.space.xs) {
@@ -218,7 +218,7 @@ import SwiftUI
                 ForEach(
                     [
                         ("on bg", CC.color.bg),
-                        ("on successMuted (6%)", CC.color.successMuted),
+                        ("on successMuted (12%)", CC.color.successMuted),
                         ("on successWord (22%)", CC.color.successWord),
                         ("on dangerWord (22%)", CC.color.dangerWord),
                     ], id: \.0
@@ -1755,7 +1755,7 @@ import SwiftUI
             section("CCDiffRow") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "three parts to the change signal, a 2pt bar, a marker glyph and a **6%** row tint. Not 12%: over a full-bleed mono block a 12% fill reads as a highlighter and after two screens you stop seeing it"
+                        "two parts to the change signal, as in VS Code: a marker glyph, so the kind of change never rests on colour alone, and a **12%** tint across the whole row"
                     )
                     let metrics = CCDiffMetrics(fontSize: 12, availableWidth: 340)
                     let map = CCDiffWordHighlight.map(for: Self.gridLines)

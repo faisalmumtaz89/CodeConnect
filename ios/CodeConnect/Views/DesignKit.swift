@@ -77,10 +77,10 @@ private enum Hex {
 
     // Diff tints, composited once and pinned here as literals so a row tint
     // cannot drift with an opacity change somewhere.
-    // Row tint = semantic @ 6% over `bg`; word tint = semantic @ 22%.
+    // Row tint = semantic @ 12% over `bg`; word tint = semantic @ 22%.
     // `text` on all four measures 12.70:1 or better.
-    static let successMuted: UInt32 = 0x030C08
-    static let dangerMuted: UInt32 = 0x0F0404
+    static let successMuted: UInt32 = 0x071911
+    static let dangerMuted: UInt32 = 0x1F0909
     static let successWord: UInt32 = 0x0D2D1F
     static let dangerWord: UInt32 = 0x381011
 
@@ -195,7 +195,7 @@ extension CC {
         static let dangerWord = Color(cc: Hex.dangerWord)
 
         // Syntax highlighting. Three roles; everything else is `text`.
-        // Measured against every background a diff line can have — `bg`, the 6%
+        // Measured against every background a diff line can have — `bg`, the 12%
         // row tints and the 22% word tints — worst case in brackets:
         //   keyword 8.73 on `bg` (6.18 on `successWord`)
         //   string 15.25 on `bg` (10.80 on `successWord`)

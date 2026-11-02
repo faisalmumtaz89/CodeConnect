@@ -18,12 +18,12 @@ struct DiffRoute: Identifiable, Hashable {
 ///   * **Folded context.** Three lines each side of a change stay; the rest of a
 ///     long unchanged run collapses to one 44pt row. Nothing is hidden that was
 ///     not unchanged.
-///   * **Wrapping you can see.** Long lines soft-wrap with a `↳` on each
-///     continuation, so a wrapped line is never mistaken for two lines. The wrap
-///     is computed from the monospaced advance width, so the glyph lands where
-///     the break actually is.
-///   * **A three-part change signal**: a 2pt change bar, a marker glyph, and a
-///     6% row tint. Never a 12% fill across a full-width mono row.
+///   * **Wrapping as VS Code does it.** Long lines soft-wrap and each
+///     continuation hangs at the line's own indent, with no number of its own,
+///     so a wrapped line is never mistaken for two lines. The wrap is computed
+///     from the monospaced advance width, so it breaks where the column ends.
+///   * **A two-part change signal**: a `+` / `−` marker and a 12% tint across
+///     the whole row.
 ///   * **Word-level highlighting.** Within a deletion/addition pair the changed
 ///     runs take a 22% ground, so a line where one argument moved says *which*.
 ///   * **Pinch to scale.** Type size is a preference, not a constant, and it is
@@ -62,7 +62,7 @@ struct DiffSheet: View {
             // prose. It is also arbitrary text from a filesystem: a directory
             // may legitimately contain backticks or asterisks, and a title
             // rendered as markup would eat them.
-            "Diff · \(model.runLabel(for: key).project)",
+            "Changes · \(model.runLabel(for: key).project)",
             onClose: { dismiss() },
             closeLabel: "Done",
             trailing: { DiffRefreshButton(isLoading: state.isLoading) { start(force: true) } }
@@ -273,8 +273,8 @@ struct DiffSheet: View {
 ///
 /// The grid is the craft centre of the app and it is the one surface that cannot
 /// be put on screen on demand: it needs a daemon, a session, a readable
-/// worktree and uncommitted changes, all at once. Without this, the change bar,
-/// the 6% tint, the word-level highlight, the fold row and the wrap glyph ship
+/// worktree and uncommitted changes, all at once. Without this, the markers,
+/// the row tint, the word-level highlight, the fold row and the hanging wrap ship
 /// having been read but never seen.
 ///
 /// `#if DEBUG` and driven from the launch command line, exactly like the
@@ -310,7 +310,7 @@ enum DiffDesignState {
         /// Deliberately shaped to exercise every part of the grid at once: a
         /// deletion/addition pair that differs by one token (word-level
         /// highlight), a run of context long enough to fold, a line wider than
-        /// the column count (continuation glyph), and a second file so the chip
+        /// the column count (a hanging continuation), and a second file so the chip
         /// row and the sticky file header have something to do.
         private static let unified = """
             diff --git a/ios/CodeConnect/Net/Sender.swift b/ios/CodeConnect/Net/Sender.swift
@@ -453,10 +453,10 @@ private struct DiffRefreshButton: View {
         Button(action: refresh) {
             CCIcon("arrow-clockwise", size: CC.size.icon, weight: .semibold, relativeTo: .footnote)
                 .foregroundStyle(isLoading ? CC.text.disabled : CC.text.primary)
-                .ccGlyphContainer(CC.size.glyph, relativeTo: .footnote)
-                .ccHitTarget()
+                .ccSheetButton()
         }
         .buttonStyle(.plain)
+        .ccSheetButtonSizing()
         .disabled(isLoading || blockedReason != nil)
         .accessibilityLabel("Ask the computer for a fresh diff")
         // The visible reason for this control lives in the content beneath it —
@@ -473,56 +473,32 @@ private struct DiffRefreshButton: View {
     private var blockedReason: String? { model.actionsBlockedReason }
 }
 
-/// **The provenance line, clocked by itself.**
+/// **The capture's age, clocked by itself**: the `3s ago` that ends
+/// `+6 −3 · 2 files · 3s ago`.
 ///
-/// `Captured on the Mac 4m ago · git diff HEAD` is the difference between
-/// reading a diff and reading a *capture of* one, so it has to stay true — and
-/// it turns `danger` on a stale link, which is `linkHealth`, which is derived
-/// from `AppModel.now`. Read from `DiffDocumentView.body`, that put a one-second
-/// heartbeat under the whole document: measured on the sample diff, sitting
-/// untouched, **1.11 document bodies per second**, each of which re-walks every
-/// hunk the sheet is drawing.
+/// The age is the difference between reading a diff and reading a *capture
+/// of* one, so it has to stay true, and it turns `danger` on a stale link,
+/// which is `linkHealth`, which is derived from `AppModel.now`. Read from
+/// `DiffDocumentView.body`, that put a one-second heartbeat under the whole
+/// document: measured on the sample diff, sitting untouched, **1.11 document
+/// bodies per second**, each of which re-walks every hunk the sheet is drawing.
 ///
-/// One line of `monoSmall` ticks now, and the diff behind it does not.
+/// One `Text` ticks now, and the diff behind it does not.
 private struct DiffProvenanceLine: View {
     let capturedAt: Date
 
     @Environment(AppModel.self) private var model
-    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        Text(ageLine)
-            .ccType(CC.type.monoSmall)
+        Text("\(capturedAge) ago")
             // The age turns `danger` on a stale link: the capture is
             // still true, but nothing newer is coming.
             .foregroundStyle(
                 model.linkHealth.level == .stale ? CC.color.danger : CC.text.tertiary)
-            .fixedSize(horizontal: false, vertical: true)
-            // The full sentence is still what is read out; only the
-            // drawn one shortens. See `ageLine`.
-            .accessibilityLabel(DiffDocumentView.fullAgeLine(captured: capturedAge))
+            .accessibilityLabel(DiffDocumentView.ageLabel(captured: capturedAge))
     }
 
     private var capturedAge: String { Format.age(since: capturedAt, now: model.now) }
-
-    /// **The provenance line, shortened at accessibility sizes — not dropped.**
-    ///
-    /// The full sentence is 41 characters, which at AX5 is *three* lines of
-    /// `monoSmall` on a 402pt sheet: 120pt of an 874pt screen spent restating a
-    /// constant. `git diff HEAD` is the same command on every diff this product
-    /// has ever drawn — the loading state says it, the empty states say it, and
-    /// nothing about it varies — while the **age** is the whole reason the line
-    /// exists.
-    ///
-    /// So at accessibility sizes the constant goes and the measurement stays,
-    /// which is the same trade the landscape layout already makes ("the point
-    /// is the code and not the provenance"). VoiceOver is given the full
-    /// sentence either way — a screen reader has no height budget.
-    private var ageLine: String {
-        typeSize.isAccessibilitySize
-            ? "Captured \(capturedAge) ago"
-            : DiffDocumentView.fullAgeLine(captured: capturedAge)
-    }
 }
 
 struct DiffDocumentView: View {
@@ -593,8 +569,8 @@ struct DiffDocumentView: View {
 
     var body: some View {
         // One measurement for the whole document. The wrap column count is
-        // derived from it and handed down, so the text and the `↳` markers can
-        // never be computed from two different widths.
+        // derived from it and handed down, so the text and its continuations
+        // can never be computed from two different widths.
         GeometryReader { proxy in
             let metrics = CCDiffMetrics(
                 fontSize: model.settings.diffFontSize * CCDiffMetrics.typeScale(for: typeSize),
@@ -614,7 +590,9 @@ struct DiffDocumentView: View {
                     stampBand(coverage, within: proxy.size.height)
                     CCHairline()
                 }
-                if !diff.files.isEmpty, !isLandscape { fileChips }
+                if !diff.files.isEmpty, !isLandscape {
+                    fileChips(maxWidth: proxy.size.width - 2 * CC.space.md)
+                }
                 document(metrics: metrics)
             }
             .overlay(alignment: .topTrailing) { pinchBadge }
@@ -765,10 +743,11 @@ struct DiffDocumentView: View {
 
     // MARK: Stamp
 
-    /// `+142 −38 4 files` over `Captured on the Mac 8s ago · git diff HEAD`.
+    /// `+142 −38 · 4 files · 8s ago`, with the truncation banner and the
+    /// daemon's note when there is one.
     ///
-    /// The second line is not decoration: it is the whole difference between
-    /// reading a diff and reading *a capture of* a diff, and the age ticks.
+    /// The age is not decoration: it is the whole difference between reading a
+    /// diff and reading *a capture of* a diff, and it ticks.
     /// The stamp is fixed above the document, so at accessibility sizes it is
     /// capable of taking the whole screen and leaving the diff nowhere to be.
     ///
@@ -830,12 +809,6 @@ struct DiffDocumentView: View {
 
             counts
 
-            // The stamp collapses to one line in landscape, where the point is
-            // the code and not the provenance.
-            if !isLandscape {
-                DiffProvenanceLine(capturedAt: raw.capturedDate ?? fetchedAt)
-            }
-
             // The daemon's own note, verbatim, when it had one and there is a
             // diff for it to qualify. With no files it *is* the content and the
             // empty state renders it instead.
@@ -861,46 +834,45 @@ struct DiffDocumentView: View {
         .accessibilityElement(children: .contain)
     }
 
-    /// `+142 −38 4 files`, and at accessibility sizes **one wrapping run**
-    /// instead of three stacked ones.
+    /// `+142 −38 · 4 files · 8s ago`: the size of the change and how old the
+    /// capture is, on one line. The command is `git diff HEAD` on every diff
+    /// this product draws, so the line does not restate it.
     ///
-    /// Two failures, one line. Side by side and clipped, AX5 drew
-    /// `+2,… −2,… 1 fi…` — three numbers the app has counted exactly, shown as
-    /// ellipses, on the line whose only job is to say how big this change is.
-    /// Stacking them fixed the clipping and cost 135pt: three lines of `mono` at
-    /// AX5, on a screen measured at **~570pt of chrome before the first line of
-    /// code** on an 874pt display.
-    ///
-    /// So at accessibility sizes it is a single `monoSmall` run that *wraps*
-    /// rather than three `mono` lines that cannot. Nothing is truncated, nothing
-    /// is dropped, and the interpunct is what a wrapped line breaks at. The step
-    /// down in size is the same one `CCMonoBlock`'s inline form takes for the
-    /// same reason: a summary that out-weighs the thing it summarises has
-    /// inverted the hierarchy.
-    @ViewBuilder
+    /// At accessibility sizes it is `monoSmall`, the counts **wrap** at the
+    /// interpuncts rather than clipping, and the age takes the next line: side
+    /// by side and clipped, AX5 once drew `+2,… −2,… 1 fi…`, three numbers the
+    /// app has counted exactly shown as ellipses.
     private var counts: some View {
         let files = diff.files.count == 1 ? "1 file" : "\(diff.files.count) files"
-        if typeSize.isAccessibilitySize {
-            (Text("+\(diff.additions)").foregroundStyle(CC.color.success)
-                + Text(" −\(diff.deletions)").foregroundStyle(CC.color.danger)
-                + Text(" · \(files)").foregroundStyle(CC.text.secondary))
+        let size =
+            Text("+\(diff.additions)").foregroundStyle(CC.color.success)
+            + Text(" −\(diff.deletions)").foregroundStyle(CC.color.danger)
+            + Text(" · \(files)\(typeSize.isAccessibilitySize ? "" : " ·")")
+            .foregroundStyle(CC.text.secondary)
+        // Read as "+6 −3 · 2 files, Captured on the computer 3s ago": the
+        // separator before the age is drawn, not spoken.
+        let spokenSize = "+\(diff.additions) −\(diff.deletions) · \(files)"
+        let age = DiffProvenanceLine(capturedAt: raw.capturedDate ?? fetchedAt)
+        return Group {
+            if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 0) {
+                    size.accessibilityLabel(spokenSize)
+                    age
+                }
                 .ccType(CC.type.monoSmall)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
-                Text("+\(diff.additions)")
-                    .foregroundStyle(CC.color.success)
-                Text("−\(diff.deletions)")
-                    .foregroundStyle(CC.color.danger)
-                Text(files)
-                    .foregroundStyle(CC.text.secondary)
-                Spacer(minLength: 0)
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    size.accessibilityLabel(spokenSize)
+                    Text(verbatim: " ").accessibilityHidden(true)
+                    age
+                }
+                .ccType(CC.type.mono)
+                .lineLimit(1)
             }
-            .ccType(CC.type.mono)
-            .lineLimit(1)
-            .fixedSize(horizontal: false, vertical: true)
         }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 
     /// The one sentence at the top that says the reader is not looking at all
@@ -940,27 +912,20 @@ struct DiffDocumentView: View {
         }
     }
 
-    static func fullAgeLine(captured age: String) -> String {
-        "Captured on the computer \(age) ago · git diff HEAD"
+    static func ageLabel(captured age: String) -> String {
+        "Captured on the computer \(age) ago"
     }
 
-    /// The empty state's copy of the same sentence — a different composition
-    /// (centred, never `danger`, no accessibility override) rather than the same
-    /// one restyled, which is why it is not `DiffProvenanceLine`.
-    ///
-    /// It reads the clock directly and keeps ticking, and that is correct here:
-    /// there is no document behind it to pay for the second. This branch draws
-    /// four elements and only exists when the worktree was clean.
+    /// The empty state's age: `Checked 3s ago`, centred under the message,
+    /// never `danger`. It reads the clock directly and keeps ticking, which is
+    /// correct here: there is no document behind it to pay for the second.
     private var ageLine: String {
-        let captured = Format.age(since: raw.capturedDate ?? fetchedAt, now: model.now)
-        return typeSize.isAccessibilitySize
-            ? "Captured \(captured) ago"
-            : Self.fullAgeLine(captured: captured)
+        "Checked \(Format.age(since: raw.capturedDate ?? fetchedAt, now: model.now)) ago"
     }
 
     // MARK: File chips
 
-    private var fileChips: some View {
+    private func fileChips(maxWidth: CGFloat) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             // **Not `LazyHStack`.** Found by rendering: a lazy stack claims the
             // whole height it is offered rather than its content's, so the chip
@@ -969,7 +934,7 @@ struct DiffDocumentView: View {
             // count of a 512KB capture; the height is not negotiable.
             HStack(spacing: CC.space.xs) {
                 ForEach(diff.files) { file in
-                    CCDiffFileChip(file: file) {
+                    CCDiffFileChip(file: file, maxWidth: maxWidth) {
                         scrollTarget = file.id
                     }
                 }

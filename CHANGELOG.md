@@ -3,6 +3,19 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A cleaner Changes screen on the iPhone
+
+- The screen that shows a session's uncommitted changes is called Changes, and it reads like
+  VS Code: whole lines tinted red or green with the changed words stronger, a `+` or `−` beside
+  each changed line, quiet separators between hunks, and long lines that wrap under their own
+  indent. Folded lines are one quiet "⋯ 3 unchanged lines" row; tap it to show them.
+- The line above the diff is one short line, such as `+6 −3 · 2 files · 3s ago`.
+- A new or deleted file is marked with a plain plus or minus, like the pencil on an edited one.
+- At the largest text sizes the folded-lines row stays on one line and a file's chip keeps its
+  counts on screen, shortening a long name in the middle.
+- The refresh and close buttons sit 8 points apart, in the same pills as the session's header,
+  level with the title. Every other sheet's close button uses the same pill.
+
 ## New icons on the iPhone
 
 - The iPhone app draws its icons from Phosphor, a cleaner, rounder set, in place of Apple's SF

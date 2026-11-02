@@ -8,15 +8,15 @@ import UIKit
 //  objective." Everything in this file exists to make a monospace grid readable
 //  on a 393pt screen at 2am, so the rules are tighter than elsewhere:
 //
-//    * The change signal is three parts — a 2pt change bar, a marker glyph and
-//      a **6%** row tint. Not a 12% fill: over a full-width mono block 12% reads
-//      as a highlighter and after two screens you stop seeing it.
+//    * The change signal is two parts, as in VS Code: a `+` / `−` marker
+//      glyph, so the kind of change never rests on red and green alone, and a
+//      **12%** tint across the whole row.
 //    * The *background* carries the word-level diff, never the foreground. Code
 //      must not become harder to read in the act of being highlighted.
 //    * One measurement, handed down. A monospaced font has a single advance, so
 //      the wrap column count is arithmetic rather than a guess — and because
-//      every row shares one `CCDiffMetrics`, the text and its continuation
-//      glyphs can never be laid out against two different widths.
+//      every row shares one `CCDiffMetrics`, the text and its hanging
+//      continuations can never be laid out against two different widths.
 // =============================================================================
 
 // MARK: - Metrics
@@ -206,8 +206,8 @@ enum CCDiffWordHighlight {
 
 // MARK: - Line
 
-/// One diff line: gutter numbers, a change bar, a 6% tint, word-level
-/// highlighting and soft wrapping that says it wrapped.
+/// One diff line: gutter numbers, a marker, a 12% tint, word-level
+/// highlighting, and soft wrapping that hangs at the line's own indent.
 struct CCDiffRow: View {
     let line: UnifiedDiff.Line
     let metrics: CCDiffMetrics
@@ -227,14 +227,6 @@ struct CCDiffRow: View {
                     .foregroundStyle(CC.text.disabled)
                     .frame(width: metrics.gutterWidth, alignment: .trailing)
                     .padding(.trailing, CC.space.xxs)
-
-                // The rule that makes the grid read as a grid. Drawn per row so
-                // it runs unbroken down the whole hunk, including through the
-                // fold rows.
-                Rectangle()
-                    .fill(CC.color.border)
-                    .frame(width: CC.stroke.hairline)
-                    .frame(maxHeight: .infinity)
             }
 
             marker
@@ -257,27 +249,15 @@ struct CCDiffRow: View {
     // MARK: Marker column
 
     private var marker: some View {
-        // `.topLeading`, not `.leading`: the change bar runs the full height of a
-        // wrapped row, and a centred glyph beside it drifts down to sit beside
-        // the *continuation* — measured on a two-line addition, where the `+`
-        // landed next to `↳load, deadline:` and the first line read as context.
-        // The marker belongs to the line, and the line starts at the top.
-        ZStack(alignment: .topLeading) {
-            if let tone = changeTone {
-                // The change bar. 2pt, full row height, and the part that
-                // survives being glanced at.
-                Rectangle()
-                    .fill(tone)
-                    .frame(width: 2)
-                    .frame(maxHeight: .infinity)
-            }
-            Text(markerGlyph)
-                .font(.system(size: fontSize, design: .monospaced))
-                .foregroundStyle(changeTone ?? CC.text.disabled)
-                .frame(maxWidth: .infinity)
-        }
-        .frame(width: metrics.markerWidth)
-        .accessibilityHidden(true)
+        // At the top, not centred: a centred glyph on a wrapped row drifts down
+        // beside the *continuation*, measured on a two-line addition where the
+        // `+` landed next to `load, deadline:` and the first line read as
+        // context. The marker belongs to the line, and the line starts at the top.
+        Text(markerGlyph)
+            .font(.system(size: fontSize, design: .monospaced))
+            .foregroundStyle(changeTone ?? CC.text.disabled)
+            .frame(width: metrics.markerWidth, alignment: .top)
+            .accessibilityHidden(true)
     }
 
     // MARK: Text
@@ -295,7 +275,7 @@ struct CCDiffRow: View {
 
     /// One wrapped run, split into the parts that are drawn in different inks.
     private struct Segment: Identifiable {
-        /// Wrap index. `0` is the first line; every other one wears a `↳`.
+        /// Wrap index. `0` is the first line; every other one hangs.
         let id: Int
         /// The inline line number, when there is one and this is where it fell.
         let prefix: String
@@ -306,7 +286,8 @@ struct CCDiffRow: View {
     }
 
     private var segments: [Segment] {
-        let wrapped = DiffLineWrap.wrap(renderedText, columns: metrics.columns)
+        let wrapped = DiffLineWrap.wrap(
+            renderedText, columns: metrics.columns, continuationIndent: continuationIndent)
         var out: [Segment] = []
         var consumed = 0
         for (index, piece) in wrapped.enumerated() {
@@ -321,6 +302,14 @@ struct CCDiffRow: View {
             consumed += characters.count
         }
         return out
+    }
+
+    /// Columns a continuation gives up: it hangs at the line's own leading
+    /// whitespace, up to half the line, so a wrapped line reads as one
+    /// statement.
+    private var continuationIndent: Int {
+        let leading = line.text.prefix { $0 == " " || $0 == "\t" }.count
+        return min(leading, metrics.columns / 2)
     }
 
     private var gutterText: String {
@@ -347,7 +336,7 @@ struct CCDiffRow: View {
         }
     }
 
-    /// 6% over `bg`, pinned as a literal in DesignKit so a row tint cannot drift
+    /// 12% over `bg`, pinned as a literal in DesignKit so a row tint cannot drift
     /// with an opacity change somewhere.
     private var rowTint: Color {
         switch line.kind {
@@ -379,19 +368,8 @@ struct CCDiffRow: View {
     private func segmentView(_ segment: Segment) -> some View {
         HStack(alignment: .top, spacing: 0) {
             if segment.id > 0 {
-                Text("↳")
-                    .font(mono)
-                    // `textTertiary`, not `textDisabled`. `textDisabled` is
-                    // reserved for genuinely inactive text and the continuation
-                    // mark is not that: a gutter *number* is a coordinate you
-                    // look up, but this glyph is the only thing saying the line
-                    // above did not end where it stopped. At 2.54:1 it was
-                    // dimmer than the code it was qualifying.
-                    .foregroundStyle(CC.text.tertiary)
-                    .fixedSize()
-                    // Exactly one advance, so a wrapped line's code column lines
-                    // up with the column above it.
-                    .frame(width: metrics.advance, alignment: .leading)
+                Color.clear
+                    .frame(width: metrics.advance * CGFloat(continuationIndent), height: 0)
             }
             if !segment.prefix.isEmpty {
                 Text(segment.prefix)
@@ -597,7 +575,7 @@ struct CCHunkHeader<Actions: View>: View {
             if let context = contextPart {
                 Text(context)
                     .font(.system(size: fontSize - 1, design: .monospaced))
-                    .foregroundStyle(CC.text.secondary)
+                    .foregroundStyle(CC.text.tertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -607,7 +585,8 @@ struct CCHunkHeader<Actions: View>: View {
         .padding(.horizontal, CC.space.xs)
         .frame(minHeight: bandHeight, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(CC.color.surfaceRaised)
+        // A separator, not a band: the page's own ground between two hairlines.
+        .overlay(alignment: .top) { CCHairline() }
         .overlay(alignment: .bottom) { CCHairline() }
     }
 
@@ -703,6 +682,9 @@ extension CCHunkHeader where Actions == EmptyView {
 /// signature for controls whose state the app actually knows.
 struct CCDiffFileChip: View {
     let file: UnifiedDiff.FileDiff
+    /// The widest the chip may be: the strip's own width, so the counts stay on
+    /// screen and a long name gives way, from its middle, instead.
+    var maxWidth: CGFloat? = nil
     let action: () -> Void
 
     var body: some View {
@@ -718,14 +700,18 @@ struct CCDiffFileChip: View {
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.secondary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
                 Text("+\(file.additions)")
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.color.success)
+                    .fixedSize()
                 Text("−\(file.deletions)")
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.color.danger)
+                    .fixedSize()
             }
             .padding(.horizontal, CC.space.sm)
+            .frame(maxWidth: maxWidth)
             // The floor is capped (`chipMaxScale`); the content still grows the
             // chip wherever it actually needs to.
             .frame(minHeight: min(chipHeight, CC.size.chip * CC.size.chipMaxScale))
@@ -853,7 +839,8 @@ struct CCDiffFileHeader: View {
 
 // MARK: - Fold row
 
-/// `⋯  6 unchanged lines … Show`. 44pt, not the ~26pt it replaced: this is a
+/// `⋯ 6 unchanged lines`, one quiet row where the code starts. A tap
+/// anywhere on it shows them. 44pt, not the ~26pt it replaced: this is a
 /// control, and a control is 44pt.
 struct CCFoldRow: View {
     let count: Int
@@ -862,47 +849,33 @@ struct CCFoldRow: View {
 
     var body: some View {
         Button(action: expand) {
-            HStack(spacing: 0) {
-                if metrics.gutter != .inline {
-                    Text("⋯")
-                        .font(.system(size: metrics.fontSize, design: .monospaced))
-                        // The fold's own mark, in the gutter but **not** a
-                        // gutter number: it stands in for the lines that are not
-                        // being shown, on a control the reader is meant to find
-                        // and press. `textDisabled` is for line numbers, the cwd
-                        // breadcrumb, the `·` between a project and its start, and disabled-button
-                        // labels — inactive things, which this is not.
-                        .foregroundStyle(CC.text.tertiary)
-                        .frame(width: metrics.gutterWidth, alignment: .trailing)
-                        .padding(.trailing, CC.space.xxs)
-                    // Keeps the grid rule continuous through the fold.
-                    Rectangle()
-                        .fill(CC.color.border)
-                        .frame(width: CC.stroke.hairline)
-                        .frame(maxHeight: .infinity)
-                }
-
-                HStack(spacing: CC.space.xs) {
-                    Text(label)
-                        .ccType(CC.type.monoSmall)
-                        .foregroundStyle(CC.text.tertiary)
-                    Spacer(minLength: CC.space.xs)
-                    Text("Show")
-                        .ccType(CC.type.badgeLabel)
-                        .foregroundStyle(CC.text.secondary)
-                }
-                .padding(.horizontal, CC.space.xs)
-            }
-            .frame(minHeight: CC.size.hitTarget)
-            .contentShape(Rectangle())
+            // The grid's own size, as the hunk header is: the diff does not
+            // ride Dynamic Type, and a label that did stood over the code it
+            // folds, broken into fragments at AX5.
+            Text(label)
+                .font(.system(size: metrics.fontSize - 1, design: .monospaced))
+                .foregroundStyle(CC.text.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, codeInset)
+                .padding(.trailing, CC.space.xs)
+                .padding(.vertical, CC.space.xxs)
+                .frame(minHeight: CC.size.hitTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(CCFoldRowStyle())
         .accessibilityLabel("\(count) unchanged line\(count == 1 ? "" : "s") hidden")
         .accessibilityHint("Shows them")
     }
 
+    /// Where a row's code starts, so the label reads as a line of the file.
+    private var codeInset: CGFloat {
+        let gutter = metrics.gutter == .inline ? 0 : metrics.gutterWidth + CC.space.xxs
+        return gutter + metrics.markerWidth + CC.space.xxs
+    }
+
     private var label: String {
-        count == 1 ? "1 unchanged line" : "\(count) unchanged lines"
+        count == 1 ? "⋯ 1 unchanged line" : "⋯ \(count) unchanged lines"
     }
 }
 
@@ -917,24 +890,24 @@ private struct CCFoldRowStyle: ButtonStyle {
 
 // MARK: - Wrapping
 
-/// Wrapping done here rather than by the layout engine, so the continuation
-/// glyph can be put exactly where the break is. Only correct for a monospaced
+/// Wrapping done here rather than by the layout engine, so a continuation's
+/// indent, or `CCMonoBlock`'s `↳`, can be put exactly where the break is. Only correct for a monospaced
 /// font, which is the only font the grid uses.
 enum DiffLineWrap {
-    static func wrap(_ text: String, columns: Int) -> [String] {
+    static func wrap(_ text: String, columns: Int, continuationIndent: Int = 1) -> [String] {
         guard columns > 1 else { return [text] }
         guard text.count > columns else { return [text.isEmpty ? " " : text] }
         var segments: [String] = []
         var remainder = Substring(text)
-        // The first line gets the full width; continuations lose one column to
-        // the `↳`.
+        // The first line gets the full width; continuations lose the columns
+        // their `↳` or hanging indent takes.
         var width = columns
         while !remainder.isEmpty {
             let take = min(width, remainder.count)
             let index = remainder.index(remainder.startIndex, offsetBy: take)
             segments.append(String(remainder[..<index]))
             remainder = remainder[index...]
-            width = max(1, columns - 1)
+            width = max(1, columns - continuationIndent)
         }
         return segments
     }
