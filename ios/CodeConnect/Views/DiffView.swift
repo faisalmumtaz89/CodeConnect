@@ -1150,9 +1150,9 @@ struct DiffDocumentView: View {
             // The hunk's actions as values. The kit draws the control, owns the
             // 44pt target and carries the long-press — which could never work
             // here, because `.contextMenu` on the hunk loses to the Copy line
-            // menu every diff row carries. Moving the
-            // gesture onto the one band that has no selectable text is what
-            // makes the conflict unconstructible rather than merely lost.
+            // menu every diff row carries. Moving the gesture onto the one band
+            // that is not a row is what makes the conflict unconstructible
+            // rather than merely lost.
             CCHunkHeader(
                 header: hunk.header, fontSize: metrics.fontSize,
                 actions: CCHunkActions(

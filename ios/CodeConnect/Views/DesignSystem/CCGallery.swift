@@ -1906,9 +1906,8 @@ import SwiftUI
                 CCButton("Open sheet", size: .lg) { showing = true }
             }
             .sheet(isPresented: $showing) {
-                // Worth opening at AX5: the close cross and its ring scale
-                // together now, where the ring used to stay at 28pt and the
-                // glyph climbed straight out of it.
+                // Worth opening at AX5: the close button stays the 36pt pill,
+                // its glyph stopping at xxxLarge so it never outgrows it.
                 CCSheetChrome(
                     "Decision",
                     subtitle: "codeconnect · Bash",
