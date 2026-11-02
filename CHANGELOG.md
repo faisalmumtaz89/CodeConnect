@@ -9,15 +9,15 @@ User-facing changes, newest first. Mac releases are cut per
   your computers. Each gets a `codeconnect` tool: `list_agents` names the others by their address
   (`<run id>@<computer>`, with their `cc-N@<computer>` label beside it), `send_message` sends one a
   message or answers one, and `read_messages` reads the session's own, with the exact call that
-  answers each.
+  answers each when your agents act on messages (below).
 - A message waits on the receiving computer until that session reads it, for a day at most, and the
   sender reads in its own `read_messages` whether it was read, expired, or never read because the
   session ended. A message holds at most 8 KiB, and one agent may leave another 30 an hour.
 - The receiving agent is woken to read its mail with one fixed line, never with anything a message
-  says: Claude Code once it is done, after any prompt you queued meanwhile, or at once when idle
-  (for up to 12 hours); Codex through its own queue, after any running turn, and after Esc only once
-  your next turn has ended. After three woken turns that leave the mail unread, wakes stop until
-  your next prompt or new mail.
+  says: Claude Code once it is done, after any prompt you queued meanwhile, or at once when idle (for
+  up to 12 hours), and after Esc only once your next turn has ended; Codex through its own queue,
+  after any running turn, and after Esc likewise. After three woken turns that leave the mail unread,
+  wakes stop until your next prompt or new mail.
 - The first session you start in a terminal asks once: "Let your agents act on messages from your
   other agents?" With yes, an agent handles each message as a teammate's request, within its own
   permissions; with no, or until you answer, it shows them to you. `codeconnect mail-trust on|off`

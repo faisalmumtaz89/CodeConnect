@@ -120,16 +120,17 @@ phones, tablets and Windows PCs are never asked), each by its address,
 `<run id>@<computer>`, with its label `cc-N@<computer>` beside it; `send_message` sends one
 of them a message; and `read_messages` reads the session's own. An address names one run of
 a session: once that run ends, mail to it is refused, even while a new session shows the same
-label. A session started before this CodeConnect could give it
-messages is not listed, and mail to it is refused until it is restarted. In a Codex session the tools are pre-approved (`default_tools_approval_mode =
-"approve"`, set on the session's app server only), because Codex asks for MCP tool approval
-only at the computer's keyboard and a send would otherwise wait there.
+label. A session started before this CodeConnect could give it messages is not listed, and
+mail to it is refused until it is restarted. In a Codex session the tools are pre-approved
+(`default_tools_approval_mode = "approve"`, set on the session's app server only), because
+Codex asks for MCP tool approval only at the computer's keyboard and a send would otherwise
+wait there.
 
 The receiving computer's `ccd` keeps a message until that session reads it, for a day at most.
-`read_messages` gives each message with its id, who sent it, and the exact `send_message`
-call that answers it (`reply_to` set to its id, which keeps the answer in the same
-conversation), then what became of the session's own sent messages, each change once. It
-gives at most 16 messages and 32 KiB at a time and says when more wait. A message is read
+`read_messages` gives each message with its id, who sent it, and, with the switch below on, the
+exact `send_message` call that answers it (`reply_to` set to its id, which keeps the answer in
+the same conversation), then what became of the session's own sent messages, each change once.
+It gives at most 16 messages and 32 KiB at a time and says when more wait. A message is read
 once the tool's answer has been handed to the agent, which says nothing of what the agent did
 with it.
 
@@ -148,11 +149,10 @@ to read them and show them to you. Claude Code is woken by a hook CodeConnect in
 waits in the background after each turn and at start (`asyncRewake` on `Stop` and
 `SessionStart`, for up to 12 hours), and only between turns, as Claude Code's own transcript
 records them: mail that arrives while it works is read once it is done, after any prompt you
-queued meanwhile. Codex is woken through
-`codex queue`, which runs the line after any turn that is running and, after Esc, holds it
-until your next turn ends. Mail that no wake can reach — after Esc in Claude Code, past 12
-hours idle, or after three woken turns that left it unread — waits for your next prompt, and is
-read in that turn or right after it.
+queued meanwhile. Codex is woken through `codex queue`, which runs the line after any turn that
+is running and, after Esc, holds it until your next turn ends. Mail that no wake can reach —
+after Esc in Claude Code, past 12 hours idle, or after three woken turns that left it unread —
+waits for your next prompt, and is read in that turn or right after it.
 
 `send_message` answers with the message's id and where it stands: waiting for that session,
 still being sent, or refused, and why; when CodeConnect stops before answering, it says the
