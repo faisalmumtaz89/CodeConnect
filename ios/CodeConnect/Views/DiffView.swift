@@ -70,6 +70,16 @@ struct DiffSheet: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
+        #if DEBUG
+            // `-cc.debug.lastCopied YES`: the last string the app copied, as an
+            // element a UI test can read. The test runner may not read the
+            // pasteboard itself; the app that wrote it may.
+            .overlay(alignment: .bottomLeading) {
+                if UserDefaults.standard.bool(forKey: "cc.debug.lastCopied") {
+                    DebugLastCopied()
+                }
+            }
+        #endif
         .task {
             if case .idle = state, !cancelled { start(force: false) }
         }
@@ -269,6 +279,24 @@ struct DiffSheet: View {
 
 // MARK: - Design inspection seam
 
+#if DEBUG
+    /// Reads the pasteboard on every change of it, for `-cc.debug.lastCopied`.
+    private struct DebugLastCopied: View {
+        @State private var copied = UIPasteboard.general.string ?? ""
+
+        var body: some View {
+            Text(verbatim: copied)
+                .font(.caption2)
+                .opacity(0.01)
+                .accessibilityIdentifier("debug-last-copied")
+                .accessibilityLabel(copied)
+                .onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in
+                    copied = UIPasteboard.general.string ?? ""
+                }
+        }
+    }
+#endif
+
 /// A diff, for looking at.
 ///
 /// The grid is the craft centre of the app and it is the one surface that cannot
@@ -310,8 +338,9 @@ enum DiffDesignState {
         /// Deliberately shaped to exercise every part of the grid at once: a
         /// deletion/addition pair that differs by one token (word-level
         /// highlight), a run of context long enough to fold, a line wider than
-        /// the column count (a hanging continuation), and a second file so the chip
-        /// row and the sticky file header have something to do.
+        /// the column count (a hanging continuation), a second file so the chip
+        /// row and the sticky file header have something to do, and a Makefile
+        /// whose recipe lines are tab-indented.
         private static let unified = """
             diff --git a/ios/CodeConnect/Net/Sender.swift b/ios/CodeConnect/Net/Sender.swift
             --- a/ios/CodeConnect/Net/Sender.swift
@@ -344,6 +373,14 @@ enum DiffDesignState {
             -        List(rows) { row in
             +        ScrollView { LazyVStack(spacing: 0) { rows } }
                      }
+            diff --git a/Makefile b/Makefile
+            --- a/Makefile
+            +++ b/Makefile
+            @@ -3,3 +3,3 @@ build:
+             test:
+            -\tswift test
+            +\tswift test --parallel
+             \t@echo done
             """
 
         /// **The state that shipped as a blank black rectangle.**
@@ -1112,8 +1149,8 @@ struct DiffDocumentView: View {
         return VStack(alignment: .leading, spacing: 0) {
             // The hunk's actions as values. The kit draws the control, owns the
             // 44pt target and carries the long-press — which could never work
-            // here, because `.contextMenu` on the hunk loses to the
-            // `textSelection(.enabled)` every diff row carries. Moving the
+            // here, because `.contextMenu` on the hunk loses to the Copy line
+            // menu every diff row carries. Moving the
             // gesture onto the one band that has no selectable text is what
             // makes the conflict unconstructible rather than merely lost.
             CCHunkHeader(

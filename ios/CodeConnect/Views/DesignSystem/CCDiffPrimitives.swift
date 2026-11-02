@@ -247,9 +247,17 @@ struct CCDiffRow: View {
         // shape, and inside the hunk's rounded card that rounded every row's
         // ends, a notch at each seam down both edges.
         .background(rowTint, in: Rectangle())
-        .textSelection(.enabled)
+        // The line as it is in the file, real tabs and every wrapped piece,
+        // not as drawn: selecting the drawn text would copy expanded tabs and
+        // only the piece that was pressed.
+        .contextMenu {
+            Button { CCPasteboard.copy(line.text) } label: {
+                Label { Text("Copy line") } icon: { Image("copy") }
+            }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
+        .accessibilityAction(named: "Copy line") { CCPasteboard.copy(line.text) }
     }
 
     // MARK: Marker column
@@ -271,12 +279,12 @@ struct CCDiffRow: View {
     /// What is actually laid out: in `inline` gutter mode the line number is
     /// prefixed into the string so it wraps with it, rather than sitting in a
     /// column that mode exists to delete.
-    private var renderedText: String { numberPrefix + displayText }
+    private var renderedText: String { numberPrefix + drawnText }
 
     /// The line as drawn: tabs at 4-column stops, so the wrap column, the
     /// hanging indent and the word highlights count the columns the reader
     /// sees. Copying a line or a hunk keeps its real tabs.
-    private var displayText: String { DiffLineWrap.expandingTabs(line.text) }
+    private var drawnText: String { DiffLineWrap.expandingTabs(line.text) }
 
     private var numberPrefix: String {
         guard metrics.gutter == .inline else { return "" }
@@ -291,7 +299,7 @@ struct CCDiffRow: View {
         /// The inline line number, when there is one and this is where it fell.
         let prefix: String
         let code: String
-        /// Where `code` starts inside `displayText`, so a word-level highlight
+        /// Where `code` starts inside `drawnText`, so a word-level highlight
         /// computed against the whole line can be placed on this run.
         let codeStart: Int
     }
@@ -319,7 +327,7 @@ struct CCDiffRow: View {
     /// past an inline number and the line's own leading whitespace, up to half
     /// the line, so a wrapped line reads as one statement.
     private var continuationIndent: Int {
-        let leading = displayText.prefix { $0 == " " }.count
+        let leading = drawnText.prefix { $0 == " " }.count
         return min(numberPrefix.count + leading, metrics.columns / 2)
     }
 
@@ -475,20 +483,19 @@ struct CCHunkActions {
 
 // MARK: - Hunk header
 
-/// `@@ -12,7 +12,9 @@ func send(_ text: String)` — 28pt, `surfaceRaised`, a
-/// hairline beneath, and the machine part separated from the human part.
+/// `@@ -12,7 +12,9 @@ func send(_ text: String)` — 28pt, a quiet separator
+/// between two hairlines, and the machine part separated from the human part.
 ///
 /// **The header is the hunk's control, and the gesture lives here because here
 /// is the only place it can survive.** The intended gesture was a 0.4s
 /// long-press anywhere in a hunk — the thesis of the whole Diff surface;
 /// measured, 1.2s presses at three positions inside three hunks at both type
 /// sizes produced no menu and no lift. A `.contextMenu` on the hunk container
-/// cannot win — every `CCDiffRow` inside it carries `.textSelection(.enabled)`,
-/// and text selection owns the long press. That is not a bug to be tuned; it is
-/// two features asking for one gesture on one rectangle.
+/// cannot win — every `CCDiffRow` inside it owns its long press, for Copy line.
+/// That is not a bug to be tuned; it is two features asking for one gesture on
+/// one rectangle.
 ///
-/// So the gesture moved to the one strip of the hunk that has no selectable text
-/// in it. The header carries the actions as a menu — tap or press-and-hold, both
+/// So the gesture moved to the one strip of the hunk that is not a row. The header carries the actions as a menu — tap or press-and-hold, both
 /// open it — which also hands Switch Control and VoiceOver a real button where
 /// before they had a long-press they could not perform.
 ///

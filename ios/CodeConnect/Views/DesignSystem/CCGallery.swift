@@ -1495,7 +1495,7 @@ import SwiftUI
             section("CCHunkHeader") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "a band that carries actions is a control, so it is 44pt, tap or press and hold. The gesture lives here because the hunk's own rows carry `textSelection`, which always wins the long press"
+                        "a band that carries actions is a control, so it is 44pt, tap or press and hold. The gesture lives here because a press on one of the hunk's rows is that row's own Copy line"
                     )
                     VStack(spacing: 0) {
                         CCHunkHeader(

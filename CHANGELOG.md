@@ -11,6 +11,8 @@ User-facing changes, newest first. Mac releases are cut per
   indent. Folded lines are one quiet "⋯ 3 unchanged lines" row; tap it to show them.
 - In tab-indented files, such as Go, the highlighted words and the wrapped lines now line up
   with the code they belong to.
+- Press and hold a line to copy it: Copy line copies the whole line exactly as it is in the file,
+  tabs included.
 - The line above the diff is one short line, such as `+6 −3 · 2 files · 3s ago`.
 - A new or deleted file is marked with a plain plus or minus, like the pencil on an edited one.
 - At the largest text sizes the folded-lines row stays on one line and a file's chip keeps its
