@@ -3,6 +3,13 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## The conversation stays still after you send
+
+- After you send a message from the iPhone, the conversation moves once, to your message, and stays
+  there. A few seconds after a send it used to jump up to an earlier reply and scroll back down;
+  that happened when the "Typed into the session." note under it went away. The note now appears
+  and goes in one step.
+
 ## Names stay whole at the largest text sizes
 
 - At the largest accessibility text sizes on the iPhone, a timeline notice puts its time under its

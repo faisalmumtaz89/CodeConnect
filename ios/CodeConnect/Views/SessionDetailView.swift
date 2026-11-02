@@ -909,6 +909,13 @@ struct SessionDetailView: View {
     @Environment(\.dynamicTypeSize) private var screenTypeSize
     @State private var composeText = ""
     @State private var openApproval: ApprovalItem?
+    /// The note over the composer. **Never set inside `withAnimation`.** It
+    /// changes the compose bar's height, and the bar is the timeline's bottom
+    /// inset: changed inside an animation, the list animates its frame instead
+    /// and, when that ends, puts its inset back without its offset — measured,
+    /// a reader at the newest message thrown up by the whole inset (388pt over
+    /// the keyboard) and scrolled back by the re-pin. Set plainly, the bar and
+    /// the inset change together, in one step.
     @State private var composeResult: ComposeAttempt?
     @State private var showModelSheet = false
     @State private var modelSheetPrefill = ""
@@ -1119,12 +1126,9 @@ struct SessionDetailView: View {
                 .onChange(of: composeText) { _, _ in
                     // Editing is the user's next act; a standing failure
                     // note has been read. Success notes retire themselves.
-                    if case .refused = composeResult {
-                        withAnimation(CC.motion.micro) { composeResult = nil }
-                    } else if case .failed = composeResult {
-                        withAnimation(CC.motion.micro) { composeResult = nil }
-                    } else if case .indeterminate = composeResult {
-                        withAnimation(CC.motion.micro) { composeResult = nil }
+                    switch composeResult {
+                    case .refused, .failed, .indeterminate: composeResult = nil
+                    default: break
                     }
                 }
             }
@@ -1531,14 +1535,14 @@ struct SessionDetailView: View {
     /// changes or another attempt begins. A blocked command's explanation
     /// vanishing mid-read was a shipped defect, not a style choice.
     private func noteComposeResult(_ result: ComposeAttempt) {
-        withAnimation(CC.motion.micro) { composeResult = result }
+        composeResult = result
         composeResultClearTask?.cancel()
         switch result {
         case .sent, .alreadyApplied, .composerRecovered:
             composeResultClearTask = Task {
                 try? await Task.sleep(for: .seconds(4))
                 guard !Task.isCancelled else { return }
-                withAnimation(CC.motion.medium) { composeResult = nil }
+                composeResult = nil
             }
         case .refused, .failed, .indeterminate, .composerLost:
             break
@@ -1684,7 +1688,7 @@ struct SessionDetailView: View {
         Task {
             let result = await model.send(text: text, to: key)
             sending = false
-            withAnimation(CC.motion.micro) { composeResult = result }
+            composeResult = result
             switch result {
             case .sent, .alreadyApplied, .composerRecovered:
                 // Never optimistic: the field clears only on a landed
@@ -1696,7 +1700,7 @@ struct SessionDetailView: View {
                 composeResultClearTask = Task {
                     try? await Task.sleep(for: .seconds(4))
                     guard !Task.isCancelled else { return }
-                    withAnimation(CC.motion.medium) { composeResult = nil }
+                    composeResult = nil
                 }
             case .refused, .failed, .indeterminate, .composerLost:
                 // The text stays — and so does the note. Four seconds is too
@@ -2713,7 +2717,6 @@ private struct ComposeNote: View {
             CCAdaptiveSpacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .transition(.opacity)
         .accessibilityElement(children: .combine)
     }
 }
