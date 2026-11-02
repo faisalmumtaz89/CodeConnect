@@ -93,7 +93,7 @@ iPhone ──── WebSocket over your tailnet ────▶ ccd, the daemon 
 - Sessions go directly between your computer and your phone, over Tailscale by default; no CodeConnect server sees them.
 - A notification passes through Apple and, unless your daemon has its own Apple push key, CodeConnect's push relay, which receives no session content.
 - When `codeconnect claude` or `codeconnect codex` starts a session, CodeConnect asks GitHub for a newer release at most once a day; `"update_check": false` in `~/.codeconnect/config.json` turns that off.
-- Your agents' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user. Whether an agent acts on one is your choice, asked once (`codeconnect mail-trust`); it is guidance to the agent, and its own permission mode still governs what it may do.
+- Your agents' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user; any program on one of those computers can send one, with no further credential. Whether an agent acts on one is your choice, asked once (`codeconnect mail-trust`); it is guidance to the agent, and its own permission mode still governs what it may do.
 - A paired phone can type into your sessions. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
 
 ## Documentation
