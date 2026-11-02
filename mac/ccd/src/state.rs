@@ -26253,6 +26253,34 @@ mod tests {
         assert!(wakeable(&daemon, &uid), "a manual /compact starts no turn");
     }
 
+    /// **Only a prompt that starts a turn with none running is told of mail
+    /// waiting** (final round, F1). A prompt typed while a turn runs joins it, and
+    /// one queued behind it runs right after it: told, either would read the mail
+    /// inside a turn. The wake after that turn reads it instead. So does the one
+    /// after Esc, which ends no turn.
+    #[tokio::test]
+    async fn only_a_prompt_with_no_turn_running_is_told_of_mail() {
+        let daemon = test_daemon();
+        let uid = register(&daemon, "cc-1", None).await.session.uid;
+        leave_mail(&daemon, &uid, "hi");
+        let transcript = Transcript::of(&uid);
+        let told = |ms: i64| daemon.store.mail_prompt(&uid, hook_at(ms)).unwrap();
+
+        assert!(told(124_141), "a prompt with no turn running is told");
+        transcript.read(&daemon, turns(0..2)).await;
+        assert!(!told(124_602), "a prompt queued behind the running turn");
+        transcript.read(&daemon, turns(2..8)).await;
+
+        assert!(told(148_845), "a prompt with no turn running is told");
+        transcript.read(&daemon, turns(8..9)).await;
+        assert!(!told(154_897), "a prompt typed during a tool call");
+        transcript.read(&daemon, turns(9..13)).await;
+
+        assert!(told(206_505), "a prompt with no turn running is told");
+        transcript.read(&daemon, turns(13..15)).await;
+        assert!(!told(216_583), "the prompt after Esc");
+    }
+
     /// **A restart reads on from the transcript** (rounds 1–3). A turn running when
     /// the daemon stopped is still running (shape M); one that ended while it was
     /// down is read to have ended (variant B). A Claude wake whose Stop found no
@@ -26299,13 +26327,12 @@ mod tests {
         );
     }
 
-    /// **Without the transcript's marks a turn is taken for running, and its mail
-    /// waits for the next prompt** (round 3, R3-1): the safe default should a Claude
-    /// Code update stop writing them. With no turn start in the transcript, the
-    /// UserPromptSubmit hook still marks one, so no turn is woken in; with no turn
-    /// end, the run is not woken, and the person's next prompt is told of the mail.
+    /// **Without the transcript's marks a turn is taken for running** (round 3,
+    /// R3-1): the safe default should a Claude Code update stop writing them. With no
+    /// turn start in the transcript, the UserPromptSubmit hook still marks one, so no
+    /// turn is woken in; with no turn end, the run is not woken and its mail waits.
     #[tokio::test]
-    async fn without_the_transcripts_marks_a_turn_is_running_and_mail_waits_for_the_next_prompt() {
+    async fn without_the_transcripts_marks_a_turn_is_taken_for_running() {
         let daemon = test_daemon();
         let uid = register(&daemon, "cc-1", None).await.session.uid;
         leave_mail(&daemon, &uid, "hi");
@@ -26339,11 +26366,6 @@ mod tests {
             .mail_turn_ended(&uid, protocol::time::now_unix_ms(), 3)
             .unwrap();
         assert!(!wakeable(&daemon, &uid), "no end seen: still running");
-        assert_eq!(
-            crate::mail::prompt_submitted(&daemon, &uid).await,
-            Some(crate::mail::nudge()),
-            "the next prompt is told of the mail"
-        );
     }
 
     /// **A run whose supervisor has not come back yet still takes mail** (round 1,
@@ -26431,6 +26453,10 @@ mod tests {
         let daemon = test_daemon();
         let claude = register(&daemon, "cc-1", None).await.session.uid;
         assert_eq!(crate::mail::prompt_submitted(&daemon, &claude).await, None);
+        daemon
+            .store
+            .mail_turn_marks(&claude, None, Some(protocol::time::now_unix_ms()))
+            .unwrap();
         leave_mail(&daemon, &claude, "MARKER-7731");
         let told = crate::mail::prompt_submitted(&daemon, &claude).await;
         let told = told.expect("told of its mail");

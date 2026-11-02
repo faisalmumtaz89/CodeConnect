@@ -151,8 +151,8 @@ records them: mail that arrives while it works is read once it is done, after an
 queued meanwhile. Codex is woken through
 `codex queue`, which runs the line after any turn that is running and, after Esc, holds it
 until your next turn ends. Mail that no wake can reach — after Esc in Claude Code, past 12
-hours idle, or after three woken turns that left it unread — waits for your next prompt, which
-is told of it.
+hours idle, or after three woken turns that left it unread — waits for your next prompt, and is
+read in that turn or right after it.
 
 `send_message` answers with the message's id and where it stands: waiting for that session,
 still being sent, or refused, and why; when CodeConnect stops before answering, it says the

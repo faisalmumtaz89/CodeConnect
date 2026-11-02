@@ -3823,8 +3823,10 @@ impl Store {
     /// **A prompt of `session_uid` was submitted**, which starts a turn or joins the
     /// one running: a turn start. With a wake outstanding it is that wake's own
     /// turn. Otherwise it is the person's, which resumes wakes that had stopped.
-    /// Returns whether it is the person's turn with unread mail waiting, which that
-    /// turn is then told of.
+    /// Returns whether it is the person's, with no turn running and unread mail
+    /// waiting, which its turn is then told of. A prompt that joins a running turn,
+    /// or is queued behind it, is not: told, it would read the mail inside a turn,
+    /// and the wake after that turn reads it.
     pub fn mail_prompt(&self, session_uid: &str, now_ms: i64) -> Result<bool> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3832,10 +3834,10 @@ impl Store {
             "INSERT OR IGNORE INTO mail_wake(session_uid) VALUES (?1)",
             params![session_uid],
         )?;
-        let woken: bool = tx.query_row(
-            "SELECT outstanding = 1 FROM mail_wake WHERE session_uid = ?1",
+        let (woken, running): (bool, bool) = tx.query_row(
+            "SELECT outstanding = 1, started_ms > ended_ms FROM mail_wake WHERE session_uid = ?1",
             params![session_uid],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         tx.execute(
             "UPDATE mail_wake
@@ -3845,7 +3847,7 @@ impl Store {
               WHERE session_uid = ?1",
             params![session_uid, woken, now_ms],
         )?;
-        let tell = !woken && unread_mail(&tx, session_uid, now_ms)?;
+        let tell = !woken && !running && unread_mail(&tx, session_uid, now_ms)?;
         tx.commit()?;
         Ok(tell)
     }
