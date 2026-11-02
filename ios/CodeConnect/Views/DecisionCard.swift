@@ -757,7 +757,7 @@ struct DecisionCardView: View {
     private var foldedChangesControl: some View {
         CCButton(
             "Show \(foldedChangeCount) more file\(foldedChangeCount == 1 ? "" : "s")",
-            icon: "chevron.down", variant: .ghost, size: .sm, fullWidth: true
+            icon: "caret-down", variant: .ghost, size: .sm, fullWidth: true
         ) {
             withAnimation(CC.motion.small) { showAllChanges = true }
         }
@@ -1068,7 +1068,7 @@ struct DecisionCardView: View {
     private var verificationLine: some View {
         if verification.hashMatchesDisplayText {
             HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-                CCIcon("checkmark.shield", size: 14, weight: .semibold, relativeTo: .footnote)
+                CCIcon("shield-check", size: 14, weight: .semibold, relativeTo: .footnote)
                     .foregroundStyle(CC.color.success)
                 // Deliberately its own element rather than combined with the
                 // glyph: this sentence is the one a reader — and the approval
@@ -1209,7 +1209,7 @@ struct DecisionCardView: View {
                 "Hash mismatch",
                 message:
                     "The text on this card does not match its hash. It cannot be answered safely.",
-                tone: .danger, icon: "exclamationmark.shield.fill")
+                tone: .danger, icon: "shield-warning-fill")
         case .resolution(let attempt):
             ResolutionBanner(attempt: attempt)
         case .alreadyResolved(let outcome):
@@ -1231,12 +1231,12 @@ struct DecisionCardView: View {
                 "No longer available",
                 message:
                     "This decision can't be acted on here — the run left the daemon's list or its log was reset.",
-                tone: .warning, icon: "questionmark.circle")
+                tone: .warning, icon: "question")
         case .authRefused(let notice):
             // The gate's own words in the message, never a paraphrase, and never
             // swallowed: a biometric check that failed silently is
             // indistinguishable from a tap that did nothing.
-            CCBanner("Face ID", message: notice, tone: .warning, icon: "faceid")
+            CCBanner("Face ID", message: notice, tone: .warning, icon: "scan-smiley")
         case .sample(let notice):
             // The fleet banner's own title and glyph: this is the same fact,
             // arriving where the reader is looking.
@@ -1269,7 +1269,7 @@ struct DecisionCardView: View {
     /// Never a checkmark for an unconfirmed outcome — the seal *is* the visual
     /// "confirmed" claim this rule exists to prevent.
     static func alreadyResolvedIcon(for outcome: AnswerOutcome) -> String {
-        outcome.indeterminate ? "questionmark.circle" : "checkmark.seal"
+        outcome.indeterminate ? "question" : "seal-check"
     }
 
     // MARK: Actions
@@ -1449,7 +1449,7 @@ struct DecisionCardView: View {
                 // reason.
                 if let comeBackToThis {
                     CCButton(
-                        "Come back to this", icon: "arrow.uturn.down", variant: .ghost,
+                        "Come back to this", icon: "arrow-u-down-left", variant: .ghost,
                         size: .md, fullWidth: true, haptic: nil
                     ) {
                         comeBackToThis()
@@ -1570,7 +1570,7 @@ struct DecisionCardView: View {
         return CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs) {
             HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
                 CCIcon(
-                    "exclamationmark.circle.fill", size: 11, weight: .semibold,
+                    "warning-circle-fill", size: 11, weight: .semibold,
                     relativeTo: .caption
                 )
                 .foregroundStyle(CC.color.warning)
@@ -1609,7 +1609,7 @@ struct DecisionCardView: View {
         VStack(spacing: CC.space.sm) {
             if !showDenyField {
                 CCButton(
-                    "Deny with a reason", icon: "text.bubble", variant: .ghost, size: .md,
+                    "Deny with a reason", icon: "chat-text", variant: .ghost, size: .md,
                     fullWidth: true,
                     disabledReason: CCDisabledReason(denyBlockedReason)
                 ) {
@@ -1618,7 +1618,7 @@ struct DecisionCardView: View {
             }
             if let comeBackToThis {
                 CCButton(
-                    "Come back to this", icon: "arrow.uturn.down", variant: .ghost,
+                    "Come back to this", icon: "arrow-u-down-left", variant: .ghost,
                     size: .md, fullWidth: true, haptic: nil
                 ) {
                     comeBackToThis()

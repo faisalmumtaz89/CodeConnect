@@ -22,7 +22,7 @@ struct CCKeyCap: View {
     /// The printed legend: `esc`, `tab`, `ctrl`, `^C`. Monospace, because it is
     /// a key.
     var label: String?
-    /// An SF Symbol instead of a legend, for the arrows.
+    /// A Phosphor icon instead of a legend, for the arrows.
     var symbol: String?
     /// `ctrl` is held down. The only latching key in the row.
     var isLatched: Bool = false
@@ -69,7 +69,9 @@ struct CCKeyCap: View {
         .buttonStyle(CCKeyCapStyle(isLatched: isLatched))
         .accessibilityLabel(spokenLabel)
         .accessibilityShowsLargeContentViewer {
-            if let symbol { Image(systemName: symbol) }
+            if let symbol {
+                Image(CCIcon.asset(symbol, weight: .semibold)).resizable().scaledToFit()
+            }
             Text(label ?? spokenLabel)
         }
         .accessibilityAddTraits(isLatched ? [.isButton, .isSelected] : .isButton)
@@ -143,8 +145,8 @@ struct CCKeyCapDivider: View {
             CCKeyCap("ctrl", spokenLabel: "Control, on", isLatched: true) {}
             CCKeyCap("^C", spokenLabel: "Control C, interrupt") {}
             CCKeyCapDivider()
-            CCKeyCap(symbol: "arrow.up", spokenLabel: "Up arrow") {}
-            CCKeyCap(symbol: "arrow.down", spokenLabel: "Down arrow") {}
+            CCKeyCap(symbol: "arrow-up", spokenLabel: "Up arrow") {}
+            CCKeyCap(symbol: "arrow-down", spokenLabel: "Down arrow") {}
         }
         .padding(.horizontal, CC.space.sm)
         .padding(.vertical, CC.space.xs)

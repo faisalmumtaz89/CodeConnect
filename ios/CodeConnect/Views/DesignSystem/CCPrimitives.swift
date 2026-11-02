@@ -354,10 +354,14 @@ struct CCHairline: View {
 
 // MARK: - Icon
 
-/// An SF Symbol at a size that tracks Dynamic Type.
+/// A Phosphor icon at a size that tracks Dynamic Type.
 ///
-/// Symbols are `.monochrome` throughout: a hierarchical or multicolour symbol
-/// introduces colour that is not carrying information, and in this product
+/// `name` is Phosphor's own (`check-circle`), from `Assets.xcassets/Phosphor`;
+/// a `-fill` name (`check-circle-fill`) is the filled shape, drawn as it is. A
+/// line icon takes its stroke from `weight`, as text would: semibold and
+/// heavier draw the bold set, light and thinner the light set, regular and
+/// medium the regular one. Every icon is a template, so it takes the
+/// foreground style like text does — one colour, because in this product
 /// colour is information, never decoration.
 struct CCIcon: View {
     let name: String
@@ -387,13 +391,28 @@ struct CCIcon: View {
 
     var body: some View {
         let size = min(scaled, maxSize)
-        Image(systemName: name)
-            .font(.system(size: size, weight: weight))
-            .symbolRenderingMode(.monochrome)
-            // Symbols vary in optical width; a fixed frame keeps a column of
-            // rows aligned no matter which glyph each one uses.
+        // On a text baseline the icon centres on the middle of a capital
+        // letter at its own size — half the system font's cap height above the
+        // baseline — which is where the system's own symbols sit beside words.
+        let lift = UIFont.systemFont(ofSize: size).capHeight / 2
+        Image(Self.asset(name, weight: weight))
+            .resizable()
+            .scaledToFit()
+            .frame(width: size, height: size)
+            // A fixed frame keeps a column of rows aligned no matter which
+            // icon each one uses.
             .frame(width: size * 1.35, alignment: .center)
+            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + lift }
+            .alignmentGuide(.lastTextBaseline) { $0[VerticalAlignment.center] + lift }
             .accessibilityHidden(true)
+    }
+
+    /// The imageset for `name` at `weight` — see the type's comment.
+    static func asset(_ name: String, weight: Font.Weight) -> String {
+        if name.hasSuffix("-fill") { return name }
+        if [.semibold, .bold, .heavy, .black].contains(weight) { return "\(name)-bold" }
+        if [.light, .thin, .ultraLight].contains(weight) { return "\(name)-light" }
+        return name
     }
 }
 
@@ -599,7 +618,7 @@ private struct CCDisabledModifier: ViewModifier {
             if let reason {
                 HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
                     CCIcon(
-                        "exclamationmark.circle.fill", size: 11, weight: .semibold,
+                        "warning-circle-fill", size: 11, weight: .semibold,
                         relativeTo: .caption
                     )
                     .foregroundStyle(CC.color.warning)

@@ -283,7 +283,7 @@ extension LinkHealth {
         case .rejected:
             return CCBannerItem(
                 .rejected, title: "Token rejected", message: detail, tone: .danger,
-                icon: "lock.slash", actionTitle: "Settings", action: onSettings)
+                icon: "lock-open", actionTitle: "Settings", action: onSettings)
         case .offline:
             switch cause {
             case .tailnetHostUnresolvable(let host):
@@ -296,7 +296,7 @@ extension LinkHealth {
                     message:
                         "`\(host)` isn't resolving. Use Tailscale to put this iPhone on the same tailnet as your computer — CodeConnect reconnects on its own.",
                     tone: .neutral,
-                    icon: "bolt.horizontal.circle",
+                    icon: "plugs",
                     actionTitle: TailscaleAssist.isInstallHintNeeded
                         ? "Set up Tailscale" : "Open Tailscale",
                     action: onTailscale ?? onRetry)
@@ -306,26 +306,26 @@ extension LinkHealth {
                     message:
                         "`\(host)` isn't resolving. Check the paired address and this iPhone's network — CodeConnect reconnects on its own.",
                     tone: .neutral,
-                    icon: "bolt.horizontal.circle",
+                    icon: "plugs",
                     actionTitle: "Settings", action: onSettings)
             case nil:
                 return CCBannerItem(
                     .offline, title: "Offline", message: detail, tone: .neutral,
-                    icon: "bolt.horizontal.circle", actionTitle: "Retry", action: onRetry)
+                    icon: "plugs", actionTitle: "Retry", action: onRetry)
             }
         case .stale:
             return CCBannerItem(
                 .stale, title: "Link stale",
                 message:
                     "\(ageText) since the daemon last spoke. Actions are disabled until it answers.",
-                tone: .danger, icon: "exclamationmark.triangle.fill",
+                tone: .danger, icon: "warning-fill",
                 actionTitle: "Retry", action: onRetry)
         case .connecting:
             // Only after 2s of connecting — a banner that flashes on
             // every reconnect is noise. The caller owns that delay.
             return CCBannerItem(
                 .offline, title: "Connecting", message: "Connecting to the daemon…",
-                tone: .info, icon: "arrow.triangle.2.circlepath")
+                tone: .info, icon: "arrows-clockwise")
         }
     }
 }

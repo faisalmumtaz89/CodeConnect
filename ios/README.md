@@ -54,6 +54,12 @@ The terminal needs no network library of its own: it rides the paired
 resolved is transitive and Apple-owned; `Package.resolved` is committed and is
 the real pin.
 
+The icons are [Phosphor](https://phosphoricons.com)'s (MIT), copied rather than
+depended on: only the SVGs the app draws, from `@phosphor-icons/core` 2.1.1, in
+`CodeConnect/Assets.xcassets/Phosphor` (regular, bold and light for a line icon,
+fill for a filled one), with Phosphor's licence shipped in the app as
+`CodeConnect/Resources/Phosphor-LICENSE.txt`. `CCIcon` draws them.
+
 ## Open and run
 
 Sources live in Xcode **synchronized file groups**, so adding a Swift file

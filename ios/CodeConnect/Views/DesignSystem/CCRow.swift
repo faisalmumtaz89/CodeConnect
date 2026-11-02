@@ -274,7 +274,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     @ViewBuilder
     private var chevron: some View {
         if showsChevron, action != nil {
-            CCIcon("chevron.right", size: CC.size.iconSm, weight: .semibold)
+            CCIcon("caret-right", size: CC.size.iconSm, weight: .semibold)
                 .foregroundStyle(CC.text.tertiary)
         }
     }
@@ -334,7 +334,7 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
         if let disabledReason {
             HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
                 CCIcon(
-                    "exclamationmark.circle.fill", size: 11, weight: .semibold,
+                    "warning-circle-fill", size: 11, weight: .semibold,
                     relativeTo: .caption
                 )
                 .foregroundStyle(CC.color.warning)

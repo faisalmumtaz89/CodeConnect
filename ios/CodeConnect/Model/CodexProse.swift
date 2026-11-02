@@ -79,20 +79,20 @@ enum CodexProse {
                 title: "The turn was stopped",
                 message:
                     "This question went away with it. Nothing was approved and nothing was denied.",
-                icon: "stop.circle", tone: .warning)
+                icon: "stop-circle", tone: .warning)
 
         case .cleared(.turnCompleted):
             return Banner(
                 title: "The turn ended",
                 message: "Codex finished before this was answered, and the question went with it.",
-                icon: "checkmark.circle", tone: .info)
+                icon: "check-circle", tone: .info)
 
         case .cleared(.superseded):
             return Banner(
                 title: "Replaced by a newer question",
                 message:
                     "Codex asked something else instead. Nothing was approved and nothing was denied.",
-                icon: "arrow.triangle.2.circlepath", tone: .info)
+                icon: "arrows-clockwise", tone: .info)
 
         // Deliberately **not** the `turn_completed` sentence: the turn is still
         // running, and telling a reader the session finished when it is still
@@ -101,7 +101,7 @@ enum CodexProse {
             return Banner(
                 title: "This step finished",
                 message: "It was settled at the computer. Codex is still working.",
-                icon: "checkmark.circle", tone: .info)
+                icon: "check-circle", tone: .info)
 
         case .cleared(.unknown(let raw)):
             return Banner(
@@ -109,13 +109,13 @@ enum CodexProse {
                 message:
                     "The computer gave a reason this app does not recognise (\(raw)). "
                     + "Nothing was approved and nothing was denied.",
-                icon: "questionmark.circle", tone: .warning)
+                icon: "question", tone: .warning)
 
         case .timeout:
             return Banner(
                 title: "No answer arrived in time",
                 message: "Codex stopped waiting. Nothing was approved and nothing was denied.",
-                icon: "clock.badge.exclamationmark", tone: .warning)
+                icon: "clock-countdown", tone: .warning)
 
         // The daemon attempted a write and never confirmed it. Its `cause` is
         // human text written to be shown, so it is shown — and the stage says
@@ -127,7 +127,7 @@ enum CodexProse {
                 message:
                     "\(who) was written and the computer did not learn what became of it. "
                     + "\(writeStage(stage)) It will not be sent again — check the computer. (\(cause))",
-                icon: "questionmark.circle", tone: .warning)
+                icon: "question", tone: .warning)
 
         case .unrecognisedStatus(let raw):
             return Banner(
@@ -135,7 +135,7 @@ enum CodexProse {
                 message:
                     "The computer reported an ending this app has never seen (\(raw)), so it cannot say "
                     + "what became of this question. Check the computer.",
-                icon: "questionmark.circle", tone: .warning)
+                icon: "question", tone: .warning)
         }
     }
 
@@ -145,7 +145,7 @@ enum CodexProse {
             return Banner(
                 title: "Answered from a phone",
                 message: "Codex has the answer.",
-                icon: "checkmark.seal", tone: .success)
+                icon: "seal-check", tone: .success)
         // **The honesty this arm exists for.** `decision` is absent for a
         // keyboard answer and always will be: upstream carries no provenance,
         // so the daemon knows somebody answered and not what they chose.
@@ -162,7 +162,7 @@ enum CodexProse {
                 message:
                     "The computer names an answerer this app does not recognise (\(raw)), "
                     + "so it cannot say where this was decided.",
-                icon: "questionmark.circle", tone: .warning)
+                icon: "question", tone: .warning)
         }
     }
 
@@ -221,12 +221,12 @@ enum CodexProse {
             return Banner(
                 title: "Stopped",
                 message: "The turn reached its aborted boundary.",
-                icon: "stop.circle.fill", tone: .success)
+                icon: "stop-circle-fill", tone: .success)
         case .duplicate:
             return Banner(
                 title: "Already stopped",
                 message: "This exact request already did that. The turn was not stopped twice.",
-                icon: "doc.on.doc", tone: .info)
+                icon: "copy", tone: .info)
         // **The title must not restate the sentence.** It read "Nothing was
         // sent" over a daemon sentence that itself ends `…; nothing was sent` —
         // the clause twice, with a full stop running into a lowercase seam.
@@ -236,7 +236,7 @@ enum CodexProse {
             return Banner(
                 title: "The computer refused this",
                 message: reason,
-                icon: "exclamationmark.triangle.fill", tone: .warning,
+                icon: "warning-fill", tone: .warning,
                 messageIsVerbatim: true)
         // **Never a retry.** The stop was issued and the daemon did not live to
         // see what it did; offering a resend would risk aborting a turn the
@@ -245,13 +245,13 @@ enum CodexProse {
             return Banner(
                 title: "Sent, outcome unknown",
                 message: reason,
-                icon: "questionmark.circle", tone: .warning,
+                icon: "question", tone: .warning,
                 messageIsVerbatim: true)
         case .unknown(let status):
             return Banner(
                 title: "Answer not recognised",
                 message: Self.unknownStatusSentence(status),
-                icon: "questionmark.circle", tone: .warning)
+                icon: "question", tone: .warning)
         }
     }
 
@@ -277,12 +277,12 @@ enum CodexProse {
             return Banner(
                 title: "Your words started a new turn",
                 message: "Codex was idle, so this began the turn it is running now.",
-                icon: "play.circle", tone: .success)
+                icon: "play-circle", tone: .success)
         case .steered:
             return Banner(
                 title: "Your words joined the running turn",
                 message: "Codex was already working, so this went in alongside what it was doing.",
-                icon: "arrow.turn.down.right", tone: .success)
+                icon: "arrow-elbow-down-right", tone: .success)
         // A replay reports the route **snapshotted at the claim**, so the verb
         // is the one that was true when the words landed, not the one that
         // would be true now.
@@ -293,12 +293,12 @@ enum CodexProse {
                 message:
                     "This was already sent. Nothing was said a second time — "
                     + "this is the same answer you got the first time.",
-                icon: "doc.on.doc", tone: .info)
+                icon: "copy", tone: .info)
         case .rejected(let reason):
             return Banner(
                 title: "The computer refused this",
                 message: reason,
-                icon: "exclamationmark.triangle.fill", tone: .warning,
+                icon: "warning-fill", tone: .warning,
                 messageIsVerbatim: true)
         // Written, outcome unknown, **never retried automatically** — and the
         // phone must not offer a retry that would resend.
@@ -306,13 +306,13 @@ enum CodexProse {
             return Banner(
                 title: "Sent, outcome unknown",
                 message: reason,
-                icon: "questionmark.circle", tone: .warning,
+                icon: "question", tone: .warning,
                 messageIsVerbatim: true)
         case .unknown(let status):
             return Banner(
                 title: "Answer not recognised",
                 message: Self.unknownStatusSentence(status),
-                icon: "questionmark.circle", tone: .warning)
+                icon: "question", tone: .warning)
         }
     }
 

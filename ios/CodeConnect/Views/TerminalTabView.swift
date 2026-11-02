@@ -528,7 +528,7 @@ struct TerminalTabView: View {
             // on a centred composition, a 10pt error in the middle of it.
             CCCard(padding: CC.space.xl, contentColumn: false) {
                 VStack(spacing: CC.space.sm) {
-                    glyphBadge("terminal")
+                    glyphBadge("terminal-window")
 
                     Text("Live terminal")
                         .ccType(CC.type.headline)
@@ -690,7 +690,7 @@ struct TerminalTabView: View {
 
         return centredState {
             CCEmptyState(
-                glyph: "terminal",
+                glyph: "terminal-window",
                 title: "Terminal closed",
                 message: reason,
                 actionTitle: route?.title,
@@ -1709,10 +1709,10 @@ struct TerminalKeyRow: View {
 
         var symbol: String {
             switch self {
-            case .up: return "arrow.up"
-            case .down: return "arrow.down"
-            case .left: return "arrow.left"
-            case .right: return "arrow.right"
+            case .up: return "arrow-up"
+            case .down: return "arrow-down"
+            case .left: return "arrow-left"
+            case .right: return "arrow-right"
             }
         }
 
@@ -1778,7 +1778,7 @@ struct TerminalKeyRow: View {
             .tint(CC.color.surfaceOverlay)
             .frame(maxWidth: .infinity)
             key(CCKeyCap(
-                symbol: "keyboard.chevron.compact.down", spokenLabel: "Hide keyboard",
+                symbol: "keyboard", spokenLabel: "Hide keyboard",
                 action: onHideKeyboard))
         }
         .padding(.horizontal, CC.space.xs)

@@ -33,13 +33,13 @@ struct TerminalLinkSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: CC.space.md) {
                     CCMonoBlock(link.url.absoluteString, showsCopy: false, wraps: true)
-                    CCButton("Open in Safari", icon: "safari", fullWidth: true) {
+                    CCButton("Open in Safari", icon: "compass", fullWidth: true) {
                         openURL(link.url)
                         dismiss()
                     }
                     CCButton(
                         copied ? "Copied" : "Copy link",
-                        icon: copied ? "checkmark" : "doc.on.doc",
+                        icon: copied ? "check" : "copy",
                         variant: .secondary, fullWidth: true
                     ) {
                         UIPasteboard.general.string = link.url.absoluteString

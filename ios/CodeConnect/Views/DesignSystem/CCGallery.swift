@@ -474,7 +474,7 @@ import SwiftUI
                             .ccType(CC.type.micro)
                             .foregroundStyle(CC.text.tertiary)
                         CCButton(
-                            "With icon", icon: "checkmark.seal.fill", variant: .primary,
+                            "With icon", icon: "seal-check-fill", variant: .primary,
                             size: .lg, fullWidth: true, action: { lastAction = "icon" })
                         CCButton(
                             "Loading", variant: .primary, size: .lg, fullWidth: true,
@@ -496,7 +496,7 @@ import SwiftUI
                             "Disabled ghost", variant: .ghost, size: .md, fullWidth: true,
                             disabledReason: CCDisabledReason("Nothing to undo."), action: {})
                         CCButton(
-                            "Deny", icon: "xmark", variant: .secondary, size: .lg,
+                            "Deny", icon: "x", variant: .secondary, size: .lg,
                             fullWidth: true, action: { lastAction = "deny" })
                         HStack(spacing: CC.space.xs) {
                             CCButton(
@@ -528,7 +528,7 @@ import SwiftUI
                     .fixedSize(horizontal: false, vertical: true)
                     CCHoldButton("Hold to allow", action: { lastAction = "held allow" })
                     CCHoldButton(
-                        "Hold to force push", icon: "arrow.up.forward.square.fill",
+                        "Hold to force push", icon: "arrow-square-up-right-fill",
                         tone: .warning, action: { lastAction = "held push" })
                     CCHoldButton("Submitting", isLoading: true, action: {})
 
@@ -913,7 +913,7 @@ import SwiftUI
                     }
                     labelled("count · icon · CCCountChip") {
                         CCBadge(status: .blocked, count: 3)
-                        CCBadge("live", icon: "bolt.fill", tone: .success)
+                        CCBadge("live", icon: "lightning-fill", tone: .success)
                         CCCountChip(3)
                         CCCountChip(128)
                     }
@@ -1122,8 +1122,8 @@ import SwiftUI
                     CCSegmented(
                         selection: $segment,
                         options: [
-                            CCSegmentedOption(.timeline, title: "Timeline", icon: "list.bullet"),
-                            CCSegmentedOption(.terminal, title: "Terminal", icon: "terminal"),
+                            CCSegmentedOption(.timeline, title: "Timeline", icon: "list-bullets"),
+                            CCSegmentedOption(.terminal, title: "Terminal", icon: "terminal-window"),
                         ],
                         accessibilityLabel: "Session surface")
                     CCSegmented(
@@ -1239,7 +1239,7 @@ import SwiftUI
                         CCBannerItem(
                             .rejected, title: "Token rejected",
                             message: "The daemon refused this phone's pairing token.",
-                            tone: .danger, icon: "lock.slash",
+                            tone: .danger, icon: "lock-open",
                             actionTitle: "Settings", action: { lastAction = "settings" }),
                         CCBannerItem(
                             .stale, title: "Link stale",
@@ -1253,7 +1253,7 @@ import SwiftUI
                     CCBanner(
                         "Last known state, 6m old",
                         message: "Nothing live has arrived yet this launch.",
-                        tone: .warning, icon: "clock.arrow.circlepath",
+                        tone: .warning, icon: "clock-counter-clockwise",
                         actionTitle: "Retry", action: { lastAction = "retry" })
                     CCBanner(
                         "Showing recent history only",
@@ -1375,7 +1375,7 @@ import SwiftUI
                 VStack(alignment: .leading, spacing: CC.space.md) {
                     CCCard(padding: 0) {
                         CCEmptyState(
-                            glyph: "terminal",
+                            glyph: "terminal-window",
                             title: "No agents running",
                             message: "Start one on the Mac:",
                             actionTitle: "Pair a Mac",
@@ -1388,7 +1388,7 @@ import SwiftUI
 
                     CCCard(padding: 0) {
                         CCEmptyState(
-                            glyph: "exclamationmark.triangle",
+                            glyph: "warning",
                             title: "Not connected",
                             message: "The daemon cannot be asked for a diff.",
                             tone: .warning,
@@ -1398,7 +1398,7 @@ import SwiftUI
 
                     CCCard(padding: 0) {
                         CCEmptyState(
-                            glyph: "xmark.octagon",
+                            glyph: "x-circle",
                             title: "The Mac could not read the diff",
                             tone: .danger,
                             actionTitle: "Try again",
@@ -1548,9 +1548,9 @@ import SwiftUI
                         "one construction, one ramp, a shared token was not enough, because both sides already used `CC.size.emptyGlyphCircle` and still measured 150.33 against 108.67 at AX5"
                     )
                     HStack(spacing: CC.space.xl) {
-                        CCScreenMark(glyph: "terminal")
-                        CCScreenMark(glyph: "exclamationmark.triangle", tone: .warning)
-                        CCScreenMark(glyph: "bolt.horizontal.circle", tone: .danger)
+                        CCScreenMark(glyph: "terminal-window")
+                        CCScreenMark(glyph: "warning", tone: .warning)
+                        CCScreenMark(glyph: "plugs", tone: .danger)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1595,8 +1595,8 @@ import SwiftUI
                 CCKeyCap("tab", spokenLabel: "Tab") { lastAction = "tab" }
                 CCKeyCap("^C", spokenLabel: "Control C, interrupt") { lastAction = "^C" }
                 CCKeyCapDivider()
-                CCKeyCap(symbol: "arrow.up", spokenLabel: "Up arrow") { lastAction = "up" }
-                CCKeyCap(symbol: "arrow.down", spokenLabel: "Down arrow") { lastAction = "down" }
+                CCKeyCap(symbol: "arrow-up", spokenLabel: "Up arrow") { lastAction = "up" }
+                CCKeyCap(symbol: "arrow-down", spokenLabel: "Down arrow") { lastAction = "down" }
             }
             .padding(.horizontal, CC.space.sm)
             .padding(.vertical, CC.space.xs)

@@ -3,6 +3,13 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## New icons on the iPhone
+
+- The iPhone app draws its icons from Phosphor, a cleaner, rounder set, in place of Apple's SF
+  Symbols. Every icon keeps its place and meaning; the status marks keep their filled shapes, so
+  a running, finished, failed or waiting session still reads at a glance without colour.
+  Phosphor's MIT licence ships with the app.
+
 ## A message sent as the connection drops no longer stays in the box
 
 - When the network between your iPhone and your computer goes quiet, as it does when Tailscale

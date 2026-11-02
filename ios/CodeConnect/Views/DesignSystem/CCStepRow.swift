@@ -200,7 +200,7 @@ struct CCStepRow<Accessory: View, Detail: View>: View {
     private var badge: some View {
         Group {
             if isComplete {
-                CCIcon("checkmark", size: 11, weight: .bold, relativeTo: .caption)
+                CCIcon("check", size: 11, weight: .bold, relativeTo: .caption)
                     .foregroundStyle(CC.color.success)
             } else {
                 Text("\(index)")

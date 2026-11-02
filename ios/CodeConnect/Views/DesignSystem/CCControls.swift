@@ -90,7 +90,7 @@ struct CCField: View {
                 .onTapGesture { focused = true }
 
             if let error {
-                footnote(error, tone: .danger, glyph: "exclamationmark.circle.fill")
+                footnote(error, tone: .danger, glyph: "warning-circle-fill")
             } else if let hint {
                 footnote(hint, tone: .neutral, glyph: nil)
             }

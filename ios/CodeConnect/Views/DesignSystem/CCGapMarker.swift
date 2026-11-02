@@ -44,7 +44,7 @@ struct CCGapMarker: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                 if action != nil {
-                    CCIcon("chevron.right", size: 9, weight: .bold, relativeTo: .caption)
+                    CCIcon("caret-right", size: 9, weight: .bold, relativeTo: .caption)
                         .foregroundStyle(CC.color.warning)
                 }
             }

@@ -111,11 +111,11 @@ struct CCVoiceButton: View {
                 maxSize: Self.glyphCap)
         case .send:
             CCIcon(
-                "arrow.up", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
+                "arrow-up", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
                 maxSize: Self.glyphCap)
         case .stop:
             CCIcon(
-                "stop.fill", size: Self.stopGlyph, weight: .semibold, relativeTo: .body,
+                "stop-fill", size: Self.stopGlyph, weight: .semibold, relativeTo: .body,
                 maxSize: Self.glyphCap)
         case .sending:
             // Inherits `onAccent`, so the ring is black on the white face
@@ -123,7 +123,7 @@ struct CCVoiceButton: View {
             CCProgressRing(inheritingSize: 13)
         case .sent:
             CCIcon(
-                "checkmark", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
+                "check", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
                 maxSize: Self.glyphCap)
         }
     }

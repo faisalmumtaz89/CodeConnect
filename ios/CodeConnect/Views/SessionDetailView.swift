@@ -1429,7 +1429,7 @@ struct SessionDetailView: View {
                 // carries the control; its outcome goes where every other
                 // mutation's outcome already goes, above the composer.
                 stopLabel,
-                icon: isStopping ? nil : "stop.fill",
+                icon: isStopping ? nil : "stop-fill",
                 variant: .secondary,
                 size: .md,
                 isLoading: isStopping,
@@ -1544,7 +1544,7 @@ struct SessionDetailView: View {
     private var notInTheList: some View {
         VStack {
             CCEmptyState(
-                glyph: "questionmark.folder",
+                glyph: "folder-dashed",
                 title: "Not in the daemon's list",
                 message:
                     "This run may have exited, or the daemon has restarted since the link was made.",
@@ -2126,7 +2126,7 @@ private struct TailPill: View {
     var body: some View {
         Button(action: jump) {
             HStack(spacing: CC.space.xxs + 1) {
-                CCIcon("arrow.down", size: 12, weight: .semibold, relativeTo: .caption)
+                CCIcon("arrow-down", size: 12, weight: .semibold, relativeTo: .caption)
                 Text(watch.newSinceLeaving > 0 ? "\(watch.newSinceLeaving) new" : "Latest")
                     .ccType(CC.type.footnote)
             }
@@ -2305,7 +2305,7 @@ private struct SessionBanner: View {
             title: "From the cache, \(Format.age(since: cachedAt, now: model.now)) old",
             message: "Nothing live has arrived for this session yet.",
             tone: .warning,
-            icon: "clock.arrow.circlepath")
+            icon: "clock-counter-clockwise")
     }
 }
 
@@ -2554,7 +2554,7 @@ private struct SessionComposeBar: View {
             // Capped at half the circle, like the voice button's glyphs: a
             // fixed circle cannot grow with Dynamic Type.
             CCIcon(
-                "xmark", size: CC.size.iconSm, weight: .semibold, relativeTo: .body,
+                "x", size: CC.size.iconSm, weight: .semibold, relativeTo: .body,
                 maxSize: CC.size.controlSm / 2
             )
             .foregroundStyle(CC.text.secondary)
@@ -2583,25 +2583,25 @@ private struct SessionComposeBar: View {
             // the reader is looking after they act.
             codexStopNote(result)
         } else if summary?.isCodex == true, case .notSent(let reason) = codexControls?.stop {
-            ComposeNote(text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+            ComposeNote(text: reason, tone: .warning, glyph: "warning-circle-fill")
         } else if summary?.isCodex == true, case .sentNoAnswer(let reason) = codexControls?.stop {
-            ComposeNote(text: reason, tone: .warning, glyph: "questionmark.circle.fill")
+            ComposeNote(text: reason, tone: .warning, glyph: "question-fill")
         } else if summary?.isCodex == true, case .settled(let result) = codexControls?.compose {
             codexComposeNote(result)
         } else if summary?.isCodex == true, case .notSent(let reason) = codexControls?.compose {
             ComposeNote(
-                text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+                text: reason, tone: .warning, glyph: "warning-circle-fill")
         } else if summary?.isCodex == true,
             case .sentNoAnswer(let reason) = codexControls?.compose
         {
-            ComposeNote(text: reason, tone: .warning, glyph: "questionmark.circle.fill")
+            ComposeNote(text: reason, tone: .warning, glyph: "question-fill")
         } else if let result {
             feedbackLine(result)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
         } else if let reason = sendBlockedReason {
             ComposeNote(
-                text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+                text: reason, tone: .warning, glyph: "warning-circle-fill")
         } else if isObserveOnly {
             ComposeNote(
                 text: "Observe only - answers are given at the computer.",
@@ -2662,10 +2662,10 @@ private struct SessionComposeBar: View {
     private func micFailureNote(reason: String, needsSettings: Bool) -> ComposeNote {
         guard needsSettings else {
             return ComposeNote(
-                text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+                text: reason, tone: .warning, glyph: "warning-circle-fill")
         }
         return ComposeNote(
-            text: reason, tone: .warning, glyph: "exclamationmark.circle.fill",
+            text: reason, tone: .warning, glyph: "warning-circle-fill",
             action: (title: "Settings", perform: { openSettings() }))
     }
 
@@ -2680,24 +2680,24 @@ private struct SessionComposeBar: View {
         case .sent:
             ComposeNote(
                 text: "Typed into the session.",
-                tone: .success, glyph: "checkmark")
+                tone: .success, glyph: "check")
         case .refused(let reason):
             ComposeNote(
                 text: "Not typed: \(reason)", tone: .warning,
-                glyph: "exclamationmark.triangle.fill")
+                glyph: "warning-fill")
         case .failed(let reason):
             ComposeNote(
                 text: "Couldn’t type the message: \(reason)", tone: .danger,
-                glyph: "xmark.octagon.fill")
+                glyph: "x-circle-fill")
         case .alreadyApplied:
             ComposeNote(
                 text: "Already typed earlier — not repeated.",
-                tone: .success, glyph: "checkmark")
+                tone: .success, glyph: "check")
         case .indeterminate(let reason):
             ComposeNote(
                 text: "Not confirmed: \(reason) "
                     + "Retry is safe; the message won’t be typed twice.",
-                tone: .warning, glyph: "questionmark.circle.fill")
+                tone: .warning, glyph: "question-fill")
         case .composerRecovered(let command, _, _):
             // **Not a success.** The same daemon result on the Model and Effort
             // sheets reports that no change was confirmed, and a typed command
@@ -2709,12 +2709,12 @@ private struct SessionComposeBar: View {
                 text: "After \(command) was typed, the computer's composer disappeared. "
                     + "CodeConnect pressed Esc and confirmed it returned. "
                     + "The command's outcome was not confirmed.",
-                tone: .warning, glyph: "questionmark.circle.fill")
+                tone: .warning, glyph: "question-fill")
         case .composerLost(let command):
             ComposeNote(
                 text: "\(command) was typed, but the computer's composer did not come back. "
                     + "Open Terminal to recover.",
-                tone: .danger, glyph: "exclamationmark.triangle.fill")
+                tone: .danger, glyph: "warning-fill")
         }
     }
 
