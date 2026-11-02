@@ -4089,8 +4089,10 @@ impl Store {
 
     /// **Settle what time and ended sessions decide:** unread messages past their
     /// expiry are expired, those for a run that has ended are ended, a sent
-    /// message no computer took within the unread time is expired, and settled
-    /// rows older than [`MailLimits::settled_ms`] are dropped.
+    /// message no computer took within the unread time is expired, one taken whose
+    /// answer never came is expired once the receiver's unread time for it has
+    /// surely run out, and settled rows older than [`MailLimits::settled_ms`] are
+    /// dropped.
     pub fn sweep_mail(&self, now_ms: i64, limits: MailLimits) -> Result<()> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -4107,9 +4109,13 @@ impl Store {
             params![lifecycle_str(Lifecycle::Exited)],
             "ended",
         )?;
+        // A receiver takes a message up to one unread time after it was written, and
+        // keeps it unread for one more.
         tx.execute(
-            "UPDATE mail_sent SET state = 'expired' WHERE state = 'sent' AND created_ms <= ?1",
-            params![now_ms - limits.unread_ms],
+            "UPDATE mail_sent SET state = 'expired'
+              WHERE (state = 'sent' AND created_ms <= ?1)
+                 OR (state = 'waiting' AND created_ms <= ?2)",
+            params![now_ms - limits.unread_ms, now_ms - 2 * limits.unread_ms],
         )?;
         let settled = now_ms - limits.settled_ms;
         tx.execute(
@@ -11093,6 +11099,36 @@ mod tests {
                 .map(|u| (u.message_id.as_str(), u.state))
                 .collect::<Vec<_>>(),
             [("m1", protocol::ipc::MailState::Expired)]
+        );
+    }
+
+    /// **A message taken whose answer never comes is expired in its sender's
+    /// outbox** (final round): the receiver's run pruned while the sending computer
+    /// was away drops the word that it ended. Once the receiver's own unread time has
+    /// surely run out — it may have taken the message up to one unread time after it
+    /// was written — the sender reads it expired, and not before.
+    #[test]
+    fn a_taken_message_whose_answer_never_comes_expires_for_its_sender() {
+        let (store, _path, _receiver, sender) = mail_store();
+        let t0 = 1_000_000_000;
+        store.file_sent_mail(&sent("m1", &sender), t0).unwrap();
+        store
+            .note_sent_mail("m1", protocol::ipc::MailState::Waiting, None, true)
+            .unwrap();
+        let updates = |at: i64| {
+            store.sweep_mail(at, MAIL_LIMITS).unwrap();
+            store
+                .offer_mail(&sender.uid, &format!("o{at}"), at)
+                .unwrap()
+                .updates
+                .iter()
+                .map(|u| (u.message_id.clone(), u.state))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(updates(t0 + 2 * MAIL_LIMITS.unread_ms - 1), []);
+        assert_eq!(
+            updates(t0 + 2 * MAIL_LIMITS.unread_ms),
+            [("m1".to_string(), protocol::ipc::MailState::Expired)]
         );
     }
 
