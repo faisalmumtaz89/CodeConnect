@@ -462,6 +462,7 @@ struct QuestionCardView: View {
                     relativeTo: .caption
                 )
                 .foregroundStyle(CC.color.warning)
+                .ccMark(beside: CC.type.footnote)
                 CCProse(blockedReason, style: CC.type.footnote, color: CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -593,6 +594,7 @@ private struct ChoiceRowLabel: View {
             if let symbol {
                 CCIcon(symbol, size: 18, weight: .regular, relativeTo: .callout)
                     .foregroundStyle(isChosen && isEnabled ? CC.text.primary : CC.text.tertiary)
+                    .ccMark(beside: CC.type.callout)
             }
             VStack(alignment: .leading, spacing: CC.space.xxs) {
                 Text(label)

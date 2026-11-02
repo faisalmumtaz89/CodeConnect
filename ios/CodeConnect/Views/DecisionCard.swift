@@ -1070,6 +1070,7 @@ struct DecisionCardView: View {
             HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
                 CCIcon("shield-check", size: 14, weight: .semibold, relativeTo: .footnote)
                     .foregroundStyle(CC.color.success)
+                    .ccMark(beside: CC.type.footnote)
                 // Deliberately its own element rather than combined with the
                 // glyph: this sentence is the one a reader — and the approval
                 // test — goes looking for by name.
@@ -1574,6 +1575,7 @@ struct DecisionCardView: View {
                     relativeTo: .caption
                 )
                 .foregroundStyle(CC.color.warning)
+                .ccMark(beside: CC.type.footnote)
                 Text("Still waiting on the computer - \(Format.age(elapsed)).")
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)

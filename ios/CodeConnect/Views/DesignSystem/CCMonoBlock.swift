@@ -622,8 +622,9 @@ struct CCMonoBlock: View {
 
     private var copyRow: some View {
         Button(action: copy) {
-            HStack(spacing: CC.space.xs) {
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
                 copyGlyph
+                    .ccMark(beside: CC.type.footnote.weight(.semibold))
                 Text(justCopied ? "Copied" : "Copy")
                     .ccType(CC.type.footnote.weight(.semibold))
                     .foregroundStyle(justCopied ? CC.color.success : CC.text.secondary)

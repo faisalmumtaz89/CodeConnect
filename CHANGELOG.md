@@ -9,6 +9,9 @@ User-facing changes, newest first. Mac releases are cut per
   Symbols. Every icon keeps its place and meaning; the status marks keep their filled shapes, so
   a running, finished, failed or waiting session still reads at a glance without colour.
   Phosphor's MIT licence ships with the app.
+- Every icon beside words now sits on the middle of their first line, at every text size: a
+  timeline notice, a tool call, a banner, a button, a row. Some sat up to 6 points above or below
+  it, most visibly beside "Claude is waiting for your input".
 
 ## A message sent as the connection drops no longer stays in the box
 

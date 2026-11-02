@@ -374,6 +374,7 @@ struct PairingView: View {
                                 relativeTo: .caption
                             )
                             .foregroundStyle(CC.color.success)
+                            .ccMark(beside: CC.type.footnote)
                             Text(PairingCredentialInput.describe(credential))
                                 .ccType(CC.type.footnote)
                                 .foregroundStyle(CC.color.success)

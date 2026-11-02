@@ -724,6 +724,7 @@ struct DeckAccessoryBar: View {
                 Spacer(minLength: CC.space.xs)
                 CCIcon("caret-right", size: CC.size.iconSm, weight: .semibold)
                     .foregroundStyle(CC.text.tertiary)
+                    .ccMark(beside: CC.type.callout)
                     .accessibilityHidden(true)
             }
         }
@@ -750,6 +751,7 @@ struct DeckAccessoryBar: View {
                 "warning-circle-fill", size: 11, weight: .semibold, relativeTo: .caption
             )
             .foregroundStyle(CC.color.warning)
+            .ccMark(beside: CC.type.footnote)
             // **A mark in the gutter takes no layout width**, the way
             // `CCSectionHeader` hangs its dot. Given a column to sit in instead,
             // this glyph grew past it at AX5 — an 11pt `caption` symbol scales to

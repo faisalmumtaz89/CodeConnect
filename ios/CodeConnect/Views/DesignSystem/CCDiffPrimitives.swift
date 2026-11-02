@@ -710,9 +710,10 @@ struct CCDiffFileChip: View {
             // No haptic: scrolling somewhere is not a commitment.
             action()
         } label: {
-            HStack(spacing: CC.space.xxs + 2) {
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 2) {
                 CCIcon(file.status.symbol, size: 10, weight: .semibold, relativeTo: .caption)
                     .foregroundStyle(CC.text.tertiary)
+                    .ccMark(beside: CC.type.monoSmall)
                 Text(file.shortName)
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.secondary)
@@ -769,9 +770,10 @@ struct CCDiffFileHeader: View {
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        HStack(spacing: CC.space.xs) {
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
             CCIcon(file.status.symbol, size: 14, weight: .medium, relativeTo: .footnote)
                 .foregroundStyle(CC.text.tertiary)
+                .ccMark(beside: CC.type.monoSmall)
 
             path
                 .ccType(CC.type.monoSmall)

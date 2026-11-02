@@ -765,18 +765,23 @@ private struct CCTypeModifier: ViewModifier {
     /// the font's own line height has to come out of the target first. Asking
     /// UIKit for it is exact; a 1.2× guess is not.
     private func leading(at size: CGFloat, target: CGFloat) -> CGFloat {
-        let font: UIFont =
-            style.design == .monospaced
-            ? .monospacedSystemFont(ofSize: size, weight: style.weight.uiKit)
-            : .systemFont(ofSize: size, weight: style.weight.uiKit)
-        return max(0, target - font.lineHeight)
+        max(0, target - style.uiFont(ofSize: size).lineHeight)
+    }
+}
+
+extension CCTextStyle {
+    /// The UIKit font this style draws at `size`, for its real metrics.
+    func uiFont(ofSize size: CGFloat) -> UIFont {
+        design == .monospaced
+            ? .monospacedSystemFont(ofSize: size, weight: weight.uiKit)
+            : .systemFont(ofSize: size, weight: weight.uiKit)
     }
 }
 
 extension Font.Weight {
-    /// The UIKit twin, for the two places the kit has to ask UIKit for a font's
-    /// real metrics — `.ccType`'s leading, and `CCProse`'s, which measures the
-    /// taller of a mixed prose/mono line.
+    /// The UIKit twin, for the places the kit has to ask UIKit for a font's
+    /// real metrics — `.ccType`'s leading, `CCProse`'s, which measures the
+    /// taller of a mixed prose/mono line, and `.ccMark`'s cap height.
     var uiKit: UIFont.Weight {
         switch self {
         case .ultraLight: return .ultraLight
@@ -810,6 +815,40 @@ extension View {
         } else {
             ccType(style)
         }
+    }
+}
+
+// MARK: - A mark beside text
+
+private struct CCMarkBeside: ViewModifier {
+    let style: CCTextStyle
+    @ScaledMetric private var scaledSize: CGFloat
+
+    init(style: CCTextStyle) {
+        self.style = style
+        _scaledSize = ScaledMetric(wrappedValue: style.size, relativeTo: style.relativeTo)
+    }
+
+    func body(content: Content) -> some View {
+        let lift = style.uiFont(ofSize: min(scaledSize, style.maxSize ?? .greatestFiniteMagnitude))
+            .capHeight / 2
+        return content
+            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + lift }
+            .alignmentGuide(.lastTextBaseline) { $0[VerticalAlignment.center] + lift }
+    }
+}
+
+extension View {
+    /// **A mark beside text centres on the middle of that text's first line.**
+    ///
+    /// For an icon, a dot or a badge in a row aligned on `.firstTextBaseline`:
+    /// the mark answers the baseline with its centre plus half a capital's
+    /// height in `style` — the style of the words beside it — so its centre
+    /// lands on the middle of their first line, however many lines they wrap
+    /// to. The mark cannot know that size itself; aligned by its top, its
+    /// middle or its own size instead, marks sat up to 6pt off the words.
+    func ccMark(beside style: CCTextStyle) -> some View {
+        modifier(CCMarkBeside(style: style))
     }
 }
 
