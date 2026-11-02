@@ -39,7 +39,7 @@ struct UnifiedDiff: Sendable, Hashable {
                 switch self {
                 case .added: return "plus-circle"
                 case .deleted: return "minus-circle"
-                case .modified: return "pencil-circle"
+                case .modified: return "pencil-simple"
                 case .renamed: return "arrow-circle-right"
                 case .binary: return "file-dashed"
                 }
