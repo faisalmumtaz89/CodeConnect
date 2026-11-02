@@ -122,14 +122,23 @@ final class SessionFollowUITests: XCTestCase {
         field.tap()
         let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        // The timeline keeps its tail as the keyboard rises, which carries the
+        // control up by the keyboard's height: nudged back down while it is
+        // above the bar (or no longer realized, which here means above), up
+        // while it is under the keyboard.
+        let barBottom = app.navigationBars.firstMatch.frame.maxY
         attempts = 0
         while attempts < 6 {
             if showMore.exists && showMore.isHittable
-                && showMore.frame.maxY < keyboard.frame.minY
+                && showMore.frame.minY >= barBottom && showMore.frame.maxY < keyboard.frame.minY
             {
                 break
             }
-            drag(timeline, fromY: 0.35, toY: 0.15)
+            if showMore.exists && showMore.frame.minY >= barBottom {
+                drag(timeline, fromY: 0.35, toY: 0.15)
+            } else {
+                drag(timeline, fromY: 0.15, toY: 0.35)
+            }
             attempts += 1
         }
         XCTAssertTrue(
