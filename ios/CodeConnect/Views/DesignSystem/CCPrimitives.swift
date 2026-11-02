@@ -398,7 +398,7 @@ struct CCIcon: View {
         Image(Self.asset(name, weight: weight))
             .resizable()
             .scaledToFit()
-            .frame(width: size, height: size)
+            .frame(width: size * Self.artScale, height: size * Self.artScale)
             // A fixed frame keeps a column of rows aligned no matter which
             // icon each one uses.
             .frame(width: size * 1.35, alignment: .center)
@@ -406,6 +406,14 @@ struct CCIcon: View {
             .alignmentGuide(.lastTextBaseline) { $0[VerticalAlignment.center] + lift }
             .accessibilityHidden(true)
     }
+
+    /// How much larger than `size` a Phosphor icon is laid out. Phosphor draws
+    /// inside a 256-unit box with room around the shape, and a system symbol at
+    /// a font size fills about a quarter more of it: measured over this app's
+    /// 95 icons, the symbol's ink was 1.26 times the Phosphor box's at the
+    /// median (1.20 to 1.45 from the tenth to the ninetieth percentile). Laid
+    /// out this much larger, an icon reads at the size its call site asks for.
+    static let artScale: CGFloat = 1.25
 
     /// The imageset for `name` at `weight` — see the type's comment.
     static func asset(_ name: String, weight: Font.Weight) -> String {

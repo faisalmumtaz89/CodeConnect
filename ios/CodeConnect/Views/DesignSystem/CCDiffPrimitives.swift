@@ -625,7 +625,7 @@ struct CCHunkHeader<Actions: View>: View {
         Image(CCIcon.asset("dots-three", weight: .semibold))
             .resizable()
             .scaledToFit()
-            .frame(width: fontSize, height: fontSize)
+            .frame(width: fontSize * CCIcon.artScale, height: fontSize * CCIcon.artScale)
             .foregroundStyle(CC.text.tertiary)
             .accessibilityHidden(true)
     }
