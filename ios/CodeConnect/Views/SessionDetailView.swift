@@ -1250,10 +1250,9 @@ struct SessionDetailView: View {
 
     /// **Everything the bar does not show, one tap away.** First the terminal,
     /// the most used: on the terminal the same item reads Timeline, so the way
-    /// back is the same place. Then the session's uncommitted changes, with
-    /// their count once the app has counted them, and the link's health under
-    /// the name of the computer the session is on, which is a heading, not an
-    /// action.
+    /// back is the same place. Then the session's changes, whose sheet counts
+    /// them, and the link's health under the name of the computer the session
+    /// is on, which is a heading, not an action.
     private var moreMenu: some View {
         let onTerminal = surface == .terminal
         return Menu {
@@ -1269,11 +1268,7 @@ struct SessionDetailView: View {
             Button {
                 showDiff = true
             } label: {
-                Text("Uncommitted changes")
-                if let count = changedFileCount {
-                    Text(count == 1 ? "1 file" : "\(count) files")
-                }
-                Image("plus-minus")
+                Label("Changes", image: "plus-minus")
             }
             if !model.sampleFleetActive {
                 Section(model.machineName.map { "On \($0)" } ?? "") {
@@ -1432,10 +1427,6 @@ struct SessionDetailView: View {
             summary: summary, shown: shown, reviewedSeq: shown?.reviewedSeq ?? 0)
         return status.ccDotColor
     }
-
-    // MARK: Toolbar
-
-    private var changedFileCount: Int? { model.diffState(for: key).changedFileCount }
 
     /// A deep link aimed at *this* session opens what it asked for.
     private func consumeDeepLink() {

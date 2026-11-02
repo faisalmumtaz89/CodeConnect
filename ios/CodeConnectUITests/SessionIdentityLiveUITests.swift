@@ -102,7 +102,7 @@ final class SessionIdentityLiveUITests: XCTestCase {
         // scoped to a uid the daemon does not know would come back as an error
         // rather than as a diff or a note.
         app.buttons["session-more"].tap()
-        app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Uncommitted changes'")).firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch.tap()
         let settled = app.staticTexts.matching(
             NSPredicate(
                 format:

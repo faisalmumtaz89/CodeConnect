@@ -9,8 +9,8 @@ User-facing changes, newest first. Mac releases are cut per
   gone, so the conversation and the terminal get the space back. In landscape the terminal now
   keeps the bar, a few rows shorter than before, so you are always one tap from the conversation.
 - The bar's "…" menu holds the rest. Terminal comes first, and on the terminal the same item
-  reads Timeline, so the way back is the same place. Then the session's uncommitted changes, with
-  how many files, and the link's health, under the name of the computer the session is on.
+  reads Timeline, so the way back is the same place. Then Changes, which opens the session's
+  uncommitted changes, and the link's health, under the name of the computer the session is on.
 - Notes that matter only for a while, such as how to pick an ended conversation up at the
   computer, show as a slim strip under the bar only while they apply.
 - Long-press the name in the bar to copy the session's full folder path.

@@ -96,7 +96,7 @@ final class ConversationLayoutUITests: XCTestCase {
             app.buttons["On Jordan’s Mac Studio"].exists, "which is not an action")
         XCTAssertTrue(app.buttons["Terminal"].exists, "beside the terminal")
         XCTAssertTrue(
-            app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Uncommitted changes'")).firstMatch.exists,
+            app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch.exists,
             "and the changes")
         link.tap()
         XCTAssertTrue(

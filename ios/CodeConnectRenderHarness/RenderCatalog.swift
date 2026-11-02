@@ -404,10 +404,10 @@ struct RenderDriver {
         more.tap()
     }
 
-    /// The session's uncommitted changes, from the bar's menu.
+    /// The session's changes, from the bar's menu.
     func openChanges(_ app: XCUIApplication) throws {
         try openSessionMenu(app)
-        let changes = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Uncommitted changes'")).firstMatch
+        let changes = app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch
         try require(changes, "the changes in the session bar's menu")
         changes.tap()
     }
