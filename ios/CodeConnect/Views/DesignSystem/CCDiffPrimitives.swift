@@ -194,8 +194,11 @@ enum CCDiffWordHighlight {
                 index += 1
             }
             for offset in 0..<min(deletions.count, additions.count) {
+                // On the text as the row draws it, so a range lands on the
+                // characters it names in a tab-indented file too.
                 let pair = ranges(
-                    deletion: deletions[offset].text, addition: additions[offset].text)
+                    deletion: DiffLineWrap.expandingTabs(deletions[offset].text),
+                    addition: DiffLineWrap.expandingTabs(additions[offset].text))
                 if !pair.deletion.isEmpty { result[deletions[offset].id] = pair.deletion }
                 if !pair.addition.isEmpty { result[additions[offset].id] = pair.addition }
             }
@@ -240,7 +243,10 @@ struct CCDiffRow: View {
             .padding(.leading, CC.space.xxs)
         }
         .fixedSize(horizontal: false, vertical: true)
-        .background(rowTint)
+        // In a rectangle, said out loud: a bare colour fills the container's
+        // shape, and inside the hunk's rounded card that rounded every row's
+        // ends, a notch at each seam down both edges.
+        .background(rowTint, in: Rectangle())
         .textSelection(.enabled)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
@@ -265,7 +271,12 @@ struct CCDiffRow: View {
     /// What is actually laid out: in `inline` gutter mode the line number is
     /// prefixed into the string so it wraps with it, rather than sitting in a
     /// column that mode exists to delete.
-    private var renderedText: String { numberPrefix + line.text }
+    private var renderedText: String { numberPrefix + displayText }
+
+    /// The line as drawn: tabs at 4-column stops, so the wrap column, the
+    /// hanging indent and the word highlights count the columns the reader
+    /// sees. Copying a line or a hunk keeps its real tabs.
+    private var displayText: String { DiffLineWrap.expandingTabs(line.text) }
 
     private var numberPrefix: String {
         guard metrics.gutter == .inline else { return "" }
@@ -280,7 +291,7 @@ struct CCDiffRow: View {
         /// The inline line number, when there is one and this is where it fell.
         let prefix: String
         let code: String
-        /// Where `code` starts inside `line.text`, so a word-level highlight
+        /// Where `code` starts inside `displayText`, so a word-level highlight
         /// computed against the whole line can be placed on this run.
         let codeStart: Int
     }
@@ -304,12 +315,12 @@ struct CCDiffRow: View {
         return out
     }
 
-    /// Columns a continuation gives up: it hangs at the line's own leading
-    /// whitespace, up to half the line, so a wrapped line reads as one
-    /// statement.
+    /// Columns a continuation gives up: it hangs where the line's code starts,
+    /// past an inline number and the line's own leading whitespace, up to half
+    /// the line, so a wrapped line reads as one statement.
     private var continuationIndent: Int {
-        let leading = line.text.prefix { $0 == " " || $0 == "\t" }.count
-        return min(leading, metrics.columns / 2)
+        let leading = displayText.prefix { $0 == " " }.count
+        return min(numberPrefix.count + leading, metrics.columns / 2)
     }
 
     private var gutterText: String {
@@ -883,7 +894,8 @@ private struct CCFoldRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             // Rows lighten one step, they do not scale.
-            .background(configuration.isPressed ? CC.color.surfaceRaised : CC.color.surface)
+            .background(
+                configuration.isPressed ? CC.color.surfaceRaised : CC.color.surface, in: Rectangle())
             .ccAnimation(CC.motion.micro, value: configuration.isPressed)
     }
 }
@@ -894,6 +906,20 @@ private struct CCFoldRowStyle: ButtonStyle {
 /// indent, or `CCMonoBlock`'s `↳`, can be put exactly where the break is. Only correct for a monospaced
 /// font, which is the only font the grid uses.
 enum DiffLineWrap {
+    /// Tabs replaced by spaces to the next 4-column stop, VS Code's default.
+    static func expandingTabs(_ text: String) -> String {
+        guard text.contains("\t") else { return text }
+        var out = ""
+        for character in text {
+            if character == "\t" {
+                out += String(repeating: " ", count: 4 - out.count % 4)
+            } else {
+                out.append(character)
+            }
+        }
+        return out
+    }
+
     static func wrap(_ text: String, columns: Int, continuationIndent: Int = 1) -> [String] {
         guard columns > 1 else { return [text] }
         guard text.count > columns else { return [text.isEmpty ? " " : text] }

@@ -424,12 +424,9 @@ private struct DiffSkeleton: View {
 
 /// **The refresh control, clocked by itself.**
 ///
-/// The bordered circle, drawn by us rather than by the platform's toolbar.
-///
-/// The circle is a `@ScaledMetric`, not a constant: `CCIcon` grows with Dynamic
-/// Type, and a growing glyph inside a fixed 28pt circle escapes it — measured at
-/// `accessibility-extra-large`, where the arrow overflowed the border entirely
-/// and the ring vanished.
+/// The sheet's pill (`ccSheetButton`), drawn by us rather than by the
+/// platform's toolbar: fixed at 36pt, with the glyph stopping at `xxxLarge` so
+/// it never outgrows it.
 ///
 /// **It is a view rather than a `@ViewBuilder` property because of where it is
 /// evaluated.** `CCSheetChrome` holds `trailing` as an escaping closure and
@@ -838,36 +835,42 @@ struct DiffDocumentView: View {
     /// capture is, on one line. The command is `git diff HEAD` on every diff
     /// this product draws, so the line does not restate it.
     ///
-    /// At accessibility sizes it is `monoSmall`, the counts **wrap** at the
-    /// interpuncts rather than clipping, and the age takes the next line: side
-    /// by side and clipped, AX5 once drew `+2,… −2,… 1 fi…`, three numbers the
-    /// app has counted exactly shown as ellipses.
+    /// Where that line does not fit (a large diff at `xxxLarge`, or any diff at
+    /// accessibility sizes, in `monoSmall`) the age takes the next line and the
+    /// counts **wrap** at the interpuncts rather than clipping: clipped, a
+    /// stamp once drew `+2,… −2,… 1 fi…`, numbers the app has counted exactly
+    /// shown as ellipses.
     private var counts: some View {
         let files = diff.files.count == 1 ? "1 file" : "\(diff.files.count) files"
-        let size =
-            Text("+\(diff.additions)").foregroundStyle(CC.color.success)
-            + Text(" −\(diff.deletions)").foregroundStyle(CC.color.danger)
-            + Text(" · \(files)\(typeSize.isAccessibilitySize ? "" : " ·")")
-            .foregroundStyle(CC.text.secondary)
         // Read as "+6 −3 · 2 files, Captured on the computer 3s ago": the
         // separator before the age is drawn, not spoken.
         let spokenSize = "+\(diff.additions) −\(diff.deletions) · \(files)"
+        func size(endingInSeparator: Bool) -> some View {
+            (Text("+\(diff.additions)").foregroundStyle(CC.color.success)
+                + Text(" −\(diff.deletions)").foregroundStyle(CC.color.danger)
+                + Text(" · \(files)\(endingInSeparator ? " ·" : "")")
+                .foregroundStyle(CC.text.secondary))
+                .accessibilityLabel(spokenSize)
+        }
         let age = DiffProvenanceLine(capturedAt: raw.capturedDate ?? fetchedAt)
+        let stacked = VStack(alignment: .leading, spacing: 0) {
+            size(endingInSeparator: false)
+            age
+        }
         return Group {
             if typeSize.isAccessibilitySize {
-                VStack(alignment: .leading, spacing: 0) {
-                    size.accessibilityLabel(spokenSize)
-                    age
-                }
-                .ccType(CC.type.monoSmall)
+                stacked.ccType(CC.type.monoSmall)
             } else {
-                HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    size.accessibilityLabel(spokenSize)
-                    Text(verbatim: " ").accessibilityHidden(true)
-                    age
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        size(endingInSeparator: true)
+                        Text(verbatim: " ").accessibilityHidden(true)
+                        age
+                    }
+                    .lineLimit(1)
+                    stacked
                 }
                 .ccType(CC.type.mono)
-                .lineLimit(1)
             }
         }
         .fixedSize(horizontal: false, vertical: true)

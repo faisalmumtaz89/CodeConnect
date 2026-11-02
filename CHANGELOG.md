@@ -9,6 +9,8 @@ User-facing changes, newest first. Mac releases are cut per
   VS Code: whole lines tinted red or green with the changed words stronger, a `+` or `−` beside
   each changed line, quiet separators between hunks, and long lines that wrap under their own
   indent. Folded lines are one quiet "⋯ 3 unchanged lines" row; tap it to show them.
+- In tab-indented files, such as Go, the highlighted words and the wrapped lines now line up
+  with the code they belong to.
 - The line above the diff is one short line, such as `+6 −3 · 2 files · 3s ago`.
 - A new or deleted file is marked with a plain plus or minus, like the pencil on an edited one.
 - At the largest text sizes the folded-lines row stays on one line and a file's chip keeps its

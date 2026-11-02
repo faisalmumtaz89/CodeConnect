@@ -1797,9 +1797,8 @@ import SwiftUI
                 status: .renamed, hunks: [], notes: []),
         ]
 
-        /// Long enough to wrap at 340pt, so the `↳` is on screen without a drag —
-        /// it is the mark that says a break fell inside a token, and it is the
-        /// one thing on the grid that may not be dimmer than the code.
+        /// Long enough to wrap at 340pt, so a hanging continuation is on screen
+        /// without a drag.
         private static let gridLines: [UnifiedDiff.Line] = [
             .init(
                 id: 0, kind: .context, text: "    let payload = encode(text)", oldNumber: 12,

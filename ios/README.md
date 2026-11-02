@@ -1187,10 +1187,9 @@ less height rather than giving up a fact:
 * the stamp's counts become **one wrapping `monoSmall` run** instead of three
   stacked `mono` lines (side by side they clipped to `+2,… −2,… 1 fi…`, which was
   the reason they were stacked);
-* the provenance line drops the constant — `Captured 0s ago`, not `Captured on
-  the Mac 0s ago · git diff HEAD` — because `git diff HEAD` is the same command
-  on every diff this product draws and the *age* is the whole point. VoiceOver
-  still gets the full sentence;
+* the stamp is one line, `+6 −3 · 2 files · 0s ago`, without `git diff HEAD`,
+  the same command on every diff this product draws; the *age* is the whole
+  point. Where the line does not fit, the age takes the next line;
 * the sticky file header drops its `+n −n` (restated on the chip directly above)
   and draws the **basename**, so the band that answers *which file am I in* stops
   head-truncating to `….swift`;
@@ -1208,13 +1207,9 @@ Measured on the render harness, `diff-sample` at AX5: the first line of code
 moved from **707pt to 574pt** down an 874pt screen, so the grid went from 167pt
 to 300pt — 80% more code, nothing dropped.
 
-The largest remaining item is measured and **not** fixed: a sheet's two toolbar
-circles are ~94pt each at AX5 (`ccGlyphContainer(28, relativeTo: .footnote)`
-× 3.4), which is 188pt of `CCSheetChrome` before any content. The kit's own answer
-exists — `CCMonoBlock` already turns its copy button into a labelled 44pt row at
-those sizes, on the reasoning that "a 60pt icon-only square is a worse target
-than a labelled 44pt row" — but applying it to `CCSheetChrome` changes every
-sheet in the product and wants its own render pass.
+A sheet's buttons no longer grow with type: they are the session header's 36pt
+pills in 44pt targets at every size, the glyph stopping at `xxxLarge` with the
+large content viewer past it, where they were ~94pt circles at AX5.
 
 **A command never breaks where the layout engine wants to.** Handed
 `git push --force origin main` at AX5, the engine breaks after the `--`, which
