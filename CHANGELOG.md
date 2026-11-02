@@ -9,6 +9,8 @@ User-facing changes, newest first. Mac releases are cut per
   there. A few seconds after a send it used to jump up to an earlier reply and scroll back down;
   that happened when the "Typed into the session." note under it went away. The note now appears
   and goes in one step.
+- When the keyboard opens or closes, or a note appears over the message box, the newest message
+  stays just above the box instead of sliding under it for a moment and scrolling back.
 
 ## Names stay whole at the largest text sizes
 

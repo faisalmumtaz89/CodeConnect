@@ -100,13 +100,13 @@ final class TailWatch {
     /// `leave()`, so no event in the debounce window can scroll a reader out
     /// of any of them.
     ///
-    /// `repin` is for a reader who was following when the tail slid away:
-    /// the last row grew, the keyboard came up, the viewport changed shape.
-    /// Such a reader never left, so when the debounce runs out with the tail
-    /// still off screen the verdict puts it back rather than declaring them
-    /// away. The list does not keep its bottom through a change of size on its
-    /// own — measured: a failed command expanding at the tail left the view
-    /// 849pt short of it, and the keyboard covered the rows being replied to.
+    /// `repin` is for a reader who was following when the last row grew
+    /// with no row added. Such a reader never left, so when the debounce runs
+    /// out with the tail still off screen the verdict puts it back rather than
+    /// declaring them away. The list does not keep its bottom through a change
+    /// of size on its own — measured: a failed command expanding at the tail
+    /// left the view 849pt short of it. A change of the viewport's own size is
+    /// not waited out here: `PageAnchor.keepLatest` keeps the tail through it.
     func depart(repin: (@MainActor () -> Void)? = nil) {
         verdict?.cancel()
         verdict = Task {
@@ -155,9 +155,12 @@ extension EnvironmentValues {
 /// outright — frames identical 175 seconds apart. KVO on `contentOffset` is
 /// exact viewport truth, delivered outside SwiftUI's layout, and writes
 /// nothing SwiftUI lays out — the verdicts go through `TailWatch`'s deferred
-/// tasks and repaint one capsule. It moves the offset in two cases only. The
-/// re-pin to the tail is a UIKit scroll that runs after the debounce, never
-/// inside a layout pass. The give-back of the collection view's own move for
+/// tasks and repaint one capsule. It moves the offset in two cases only, and
+/// has it moved in a third. The re-pin to the tail after the last row grew is
+/// a UIKit scroll that runs after the debounce, never inside a layout pass. A
+/// viewport that changed size under a reader at the tail is handed to
+/// `PageAnchor.keepLatest`, which puts the tail back from its own view's
+/// layout. The give-back of the collection view's own move for
 /// a row the reader opened (see `TailWatch.open`) runs from the probe's own
 /// `layoutSubviews`, later in the same layout pass, never from inside the
 /// collection view's call: made from there, the move was re-applied at once —
@@ -187,6 +190,9 @@ private struct TailObserver: UIViewRepresentable {
         /// view's move can come before the growth (iOS 26) or after it
         /// (iOS 27), in the same pass.
         private var openingLanded = false
+        /// The next reading is the first since this probe joined the window:
+        /// its `.initial` reading compares against wherever the last one left.
+        private var attaching = false
 
         override func layoutSubviews() {
             super.layoutSubviews()
@@ -220,6 +226,7 @@ private struct TailObserver: UIViewRepresentable {
             while view != nil, !(view is UIScrollView) { view = view?.superview }
             guard let scrollView = view as? UIScrollView else { return }
             anchor.attach(scrollView)
+            attaching = true
             // A row opened while this probe was out of the window grew where
             // it could not see, and the first reading below is `.initial`: its
             // move from zero must not be taken for the collection view's.
@@ -251,6 +258,8 @@ private struct TailObserver: UIViewRepresentable {
             lastContentSize = scrollView.contentSize
             lastBoundsSize = scrollView.bounds.size
             lastInsets = scrollView.adjustedContentInset
+            let attached = !attaching
+            attaching = false
             // KVO fires on every set, changed or not. A reading that saw
             // nothing move carries no news, and answering it with `arrive`
             // undid a `leave` made an instant earlier, before the expansion
@@ -291,11 +300,27 @@ private struct TailObserver: UIViewRepresentable {
             }
             let bottomEdge = scrollView.contentOffset.y + scrollView.bounds.height
                 - scrollView.adjustedContentInset.bottom
+            let hand = scrollView.isTracking || scrollView.isDecelerating
+            // **A reader at the tail stays there through a change of the
+            // viewport's size** — the keyboard coming or going, the header
+            // folding away or coming back, the compose bar growing or
+            // shrinking. The list keeps its top through such a change, so on
+            // its own the newest rows slid under the bar (measured: 295pt as
+            // the keyboard rose, 100pt as the header came back) until a re-pin
+            // brought them back almost a second later. Exact, not within the
+            // slack below: a 24pt note covered the last line for as long as it
+            // stood.
+            if resized, attached, !hand, !watch.isAway,
+                abs(bottomEdge - scrollView.contentSize.height) > 0.5
+            {
+                anchor.keepLatest()
+                return
+            }
             // One row-spacing of slack absorbs sub-pixel rounding and
             // rubber-banding; without it the verdict flaps at rest.
             if bottomEdge >= scrollView.contentSize.height - 32 {
                 watch.arrive()
-            } else if scrollView.isTracking || scrollView.isDecelerating {
+            } else if hand {
                 // A hand, or its deceleration: up is a departure the reader
                 // chose. The offset alone cannot say this — a viewport that
                 // grows upward (the header folding away for the keyboard)
@@ -310,7 +335,7 @@ private struct TailObserver: UIViewRepresentable {
                 watch.depart()
             } else {
                 // Nobody scrolled, and a reader who was following is off the
-                // tail: the content or the viewport changed size underneath.
+                // tail: the last row grew underneath.
                 watch.depart { [weak scrollView] in
                     guard let scrollView else { return }
                     let tail = scrollView.contentSize.height + scrollView.adjustedContentInset.bottom
@@ -415,6 +440,17 @@ final class PageAnchor {
                 self.restorer.setNeedsLayout()
             }
         }
+    }
+
+    /// The viewport changed size under a reader at the newest rows: they are
+    /// put back there from the restorer's layout, later in the pass that
+    /// resized the list, never from the reading that saw it. A row held for
+    /// a page or a reset keeps its place.
+    func keepLatest() {
+        guard hold == nil else { return }
+        holds += 1
+        hold = Hold(target: .latest, number: holds, isReset: false)
+        restorer.setNeedsLayout()
     }
 
     /// The chat became able to page with nothing on screen having moved. The
