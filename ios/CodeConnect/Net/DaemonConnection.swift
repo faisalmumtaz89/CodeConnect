@@ -289,6 +289,16 @@ final class DaemonConnection {
     /// produces traffic — and a fresh `lastContactAt` — every few seconds.
     private static let pingInterval: Duration = .seconds(10)
     private static let requestTimeout: Duration = .seconds(20)
+    /// How long a handshaken link may go without a single frame before it is
+    /// declared dead and dialled again: the 20s request wait plus one ping.
+    ///
+    /// A live daemon answers every ping with a pong, but it handles a link's
+    /// requests one at a time, so a slow answer holds the pong back. Its own
+    /// budgets keep ordinary answers inside the app's 20s wait; one slower
+    /// than that has already failed here, so dropping its link loses nothing
+    /// more. A network that vanished leaves a socket that accepts writes and
+    /// delivers nothing, which only this silence reveals.
+    static let silenceDeadline: TimeInterval = 30
     /// Comfortably longer than the daemon's own 10s handshake window.
     private static let handshakeTimeout: Duration = .seconds(15)
     nonisolated private static let maxBackoff: Double = 30
@@ -675,7 +685,7 @@ final class DaemonConnection {
                 clientID: Self.installationID,
                 clientName: Self.clientName))
 
-        let pinger = Task { [weak self] in await self?.pingLoop() }
+        let pinger = Task { [weak self] in await self?.pingLoop(socket) }
         defer { pinger.cancel() }
 
         // The daemon closes a client that never says hello (ws_server.rs
@@ -801,14 +811,32 @@ final class DaemonConnection {
         close(socket: socket, session: session)
     }
 
-    private func pingLoop() async {
+    /// The link's heartbeat, and its test of being alive: a ping every
+    /// `pingInterval`, and a link that has sent nothing for `silenceDeadline`
+    /// is cancelled, which the receive loop turns into the ordinary redial.
+    /// Checked only on the socket this loop belongs to, once it is handshaken:
+    /// the hello watchdog guards the time before that.
+    private func pingLoop(_ socket: URLSessionWebSocketTask) async {
         while !Task.isCancelled {
             try? await Task.sleep(for: Self.pingInterval)
             if Task.isCancelled { return }
-            // A ping that cannot be written is a dead socket; the receive loop
-            // will discover the same thing and drive the reconnect.
-            try? await send(.ping)
+            if self.socket === socket, phase.isConnected,
+                Self.silenceExpired(since: lastContactAt, now: Date())
+            {
+                socket.cancel(with: .goingAway, reason: nil)
+                return
+            }
+            // Not awaited: a write held up by a vanished network must not
+            // hold up the check above.
+            Task { [weak self] in try? await self?.send(.ping) }
         }
+    }
+
+    /// Whether a link last heard from at `lastContact` has been silent past
+    /// `silenceDeadline` by `now`.
+    static func silenceExpired(since lastContact: Date?, now: Date) -> Bool {
+        guard let lastContact else { return false }
+        return now.timeIntervalSince(lastContact) >= silenceDeadline
     }
 
     // MARK: - Sending
