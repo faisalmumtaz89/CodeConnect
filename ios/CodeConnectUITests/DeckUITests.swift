@@ -626,8 +626,11 @@ final class DeckUITests: XCTestCase {
         XCTAssertTrue(session.waitForExistence(timeout: 25))
         session.tap()
 
-        let diff = app.buttons["Diff"]
-        XCTAssertTrue(diff.waitForExistence(timeout: 20))
+        let more = app.buttons["session-more"]
+        XCTAssertTrue(more.waitForExistence(timeout: 20), "the session bar's menu")
+        more.tap()
+        let diff = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Uncommitted changes'")).firstMatch
+        XCTAssertTrue(diff.waitForExistence(timeout: 10), "the menu offers the changes")
         diff.tap()
 
         XCTAssertTrue(

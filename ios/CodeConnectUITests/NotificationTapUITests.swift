@@ -88,7 +88,7 @@ final class NotificationTapUITests: XCTestCase {
         let row = app.descendants(matching: .any).matching(identifier: "session-fx-1").firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 25), "the fleet")
         row.tap()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 20), "fx-1's chat")
+        XCTAssertTrue(app.buttons["session-more"].waitForExistence(timeout: 20), "fx-1's chat")
 
         tap("done")
         XCTAssertTrue(
@@ -96,10 +96,10 @@ final class NotificationTapUITests: XCTestCase {
             "the fleet is back, with its count under the title")
         XCTAssertEqual(
             app.buttons["deck-bar"].label, "3 waiting for you", "and the Deck bar under it")
-        XCTAssertFalse(app.buttons["Terminal"].exists, "and the chat is gone")
+        XCTAssertFalse(app.buttons["session-more"].exists, "and the chat is gone")
 
         row.tap()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 20), "fx-1's chat again")
+        XCTAssertTrue(app.buttons["session-more"].waitForExistence(timeout: 20), "fx-1's chat again")
         tap("approval")
         XCTAssertTrue(
             app.navigationBars["Waiting for you"].waitForExistence(timeout: 25),
@@ -113,7 +113,7 @@ final class NotificationTapUITests: XCTestCase {
     func testAWarmApprovalTapReplacesTheSessionOnScreen() {
         let app = launch(showing: "codeconnect://session/fx-1")
         XCTAssertTrue(
-            app.buttons["Terminal"].waitForExistence(timeout: 25),
+            app.buttons["session-more"].waitForExistence(timeout: 25),
             "the run-up: a session is what the reader is looking at")
 
         tap("approval")
@@ -121,7 +121,7 @@ final class NotificationTapUITests: XCTestCase {
             app.navigationBars["Waiting for you"].waitForExistence(timeout: 25),
             "the tap has to take them to the decision")
         XCTAssertFalse(
-            app.buttons["Terminal"].exists,
+            app.buttons["session-more"].exists,
             "and leave the session behind, not sit under it")
     }
 

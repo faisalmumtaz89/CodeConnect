@@ -1007,19 +1007,10 @@ struct SessionDetailView: View {
     @State private var showLinkDetail = false
     @State private var appearedAt = Date()
     /// The composer's focus, owned here rather than inside the bar: the
-    /// screen's chrome collapses around the keyboard, and only the screen can
-    /// do the collapsing.
+    /// timeline gives the keyboard back on a tap of its own.
     @FocusState private var composerFocused: Bool
-    /// The terminal pane holds the keyboard. Collapses the same chrome the
-    /// composer does: typing at the TTY needs the rows more than the header.
-    @State private var terminalTyping = false
-    private var typing: Bool { composerFocused || (terminalTyping && surface == .terminal) }
+    /// Landscape: the bar's title is one line, the path beside the project.
     @Environment(\.verticalSizeClass) private var verticalSizeClass
-    /// Landscape on the terminal: the screen is the terminal's. Turning back
-    /// to portrait is how the reader leaves, the way a video player works.
-    private var terminalFillsScreen: Bool {
-        verticalSizeClass == .compact && surface == .terminal
-    }
 
     /// The run this screen is about. Everything on it — the timeline, the
     /// compose bar, the diff, the terminal — is scoped to this one key, so a
@@ -1034,43 +1025,12 @@ struct SessionDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // While the keyboard is up, the header earns its height or loses
-            // it: the identity collapses to one line and the surface picker —
-            // an intent nobody has mid-sentence — steps aside, so the freed
-            // ~150pt goes to the conversation being typed at.
-            if terminalFillsScreen {
-                EmptyView()
-            } else if typing {
-                compactIdentityLine
-            } else {
-                identityBlock
-            }
-            // The surface picker lives in the content, not the navigation bar.
-            // A segmented control in a `.principal` slot squeezes the trailing
-            // items into an overflow menu on a phone — the diff button
-            // disappeared behind a "…" — and it clips outright at large Dynamic
-            // Type sizes. Below the bar it has the whole width and grows.
-            // Absent in the sample fleet, like the header's link: the terminal is
-            // the same connection as everything else, and the sample has none.
-            // With the picker gone the timeline default is the only surface,
-            // so the tab that would answer in pairing vocabulary cannot be
-            // reached at all — offered nothing, not offered a dead end.
-            if !typing && !terminalFillsScreen && !model.sampleFleetActive {
-                CCSegmented(
-                    selection: surfaceBinding,
-                    options: Surface.allCases.map { CCSegmentedOption($0, title: $0.label) },
-                    accessibilityLabel: "Session surface")
-                .padding(.horizontal, CC.space.md)
-                .padding(.top, CC.space.lg)
-                // Nothing under the picker on the Terminal side: the liveness
-                // strip sits *directly beneath* it and carries no top padding
-                // of its own, so the 12 that used to sit here measured as a
-                // 12pt seam of `bg` between two elements that are meant to
-                // touch. The timeline keeps its 12 — a scroll view abutting a
-                // control is not the same relationship.
-                .padding(.bottom, surface == .terminal ? 0 : CC.space.sm)
-                .background(CC.color.bg)
-            }
+            // **The header is the bar.** The project and its path are the bar's
+            // title, and the terminal and the rest are one tap away at its end, so
+            // the conversation starts where the bar stops. What the header carried
+            // only sometimes — a Codex turn's Stop, the permission note, an ended
+            // run's resume command — still shows, under the bar, while it applies.
+            sessionNotices
 
             // **Two slots, not two branches.** A `switch` here puts the two
             // surfaces in one structural position, so flipping the picker
@@ -1108,10 +1068,7 @@ struct SessionDetailView: View {
                         tmuxName: model.tmuxName(for: key),
                         unhosted: model.shownSummary(for: key)?.tmuxSession.isEmpty == true,
                         runLabel: label.spoken,
-                        onScreen: surface == .terminal,
-                        // Off the update pass: a pane whose session ends gives
-                        // the keyboard back from inside `updateUIView`.
-                        onKeyboard: { typing in DispatchQueue.main.async { terminalTyping = typing } }
+                        onScreen: surface == .terminal
                     )
                     .opacity(surface == .terminal ? 1 : 0)
                     // A hidden pane takes no taps and is not read out. The
@@ -1123,30 +1080,18 @@ struct SessionDetailView: View {
             }
         }
         .background(CC.color.bg)
-        // One coordinated animation for the chrome swap around the keyboard —
-        // the header and picker collapse and return as a unit. The focus
-        // change itself is never wrapped in `withAnimation`; the keyboard owns
-        // its own transition and fights any second one.
         .onChange(of: surface, initial: true) { _, new in
             if new == .terminal { terminalHasBeenOpened = true }
         }
-        .ccAnimation(CC.motion.small, value: typing)
         .ccNavigationChrome()
-        // Empty on purpose. The header below carries the project, at a width
-        // the bar could never give it.
+        // Empty: the title is the bar's principal item, the project over its
+        // path, which a title string cannot draw.
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(terminalFillsScreen ? .hidden : .automatic, for: .navigationBar)
-        .statusBarHidden(terminalFillsScreen)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { diffControl }
+            ToolbarItem(placement: .principal) { barTitle }
+            ToolbarItem(placement: .topBarTrailing) { moreMenu }
                 .ccPlainToolbarItem()
-            ToolbarItem(placement: .topBarTrailing) {
-                // Interactive everywhere. A control that looks tappable and is
-                // not is worse than no control.
-                SessionMachineLink { showLinkDetail = true }
-            }
-            .ccPlainToolbarItem()
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             // The compose bar types into Claude's prompt. In the terminal you
@@ -1261,145 +1206,160 @@ struct SessionDetailView: View {
         }
     }
 
-    /// One line of who this is, for while the keyboard owns the screen: the
-    /// status dot and the identity, nothing else. Everything the full block
-    /// carries — folder, cwd, freshness, the permission note — is context a
-    /// reader mid-sentence has already absorbed, and it returns the moment
-    /// focus ends.
-    private var compactIdentityLine: some View {
-        HStack(spacing: CC.space.sm) {
+    // MARK: Bar
+
+    /// **Who this is, as the bar's title**: the status dot, the project, and the
+    /// path under it (beside it in landscape). It stops growing where iOS's own
+    /// bar titles do, since a bar has one height. A long press copies the whole
+    /// path, as it did on the header's path line.
+    private var barTitle: some View {
+        let name = Text(verbatim: label.project)
+            .ccType(CC.type.headline)
+            .foregroundStyle(CC.text.primary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+        // The path is the Mac's, as it is: the phone does not know whose home
+        // folder it is under, so it does not shorten one. Head truncation keeps
+        // the tail, the part that identifies the run.
+        let path = Text(verbatim: summary?.shownCwd ?? "")
+            .ccType(CC.type.monoSmall)
+            .foregroundStyle(CC.text.tertiary)
+            .lineLimit(1)
+            .truncationMode(.head)
+        return HStack(spacing: CC.space.xs) {
             CCStatusDot(
                 color: dotColour,
-                size: CCStatusDot.Size.cardHeader.rawValue,
+                size: CCStatusDot.Size.row.rawValue,
                 isHollow: shown?.loadedFromCacheAt != nil && shown?.hasLiveData != true,
                 pulses: (shown?.pendingApprovals.isEmpty == false))
-            Text(verbatim: label.project)
-                .ccType(CC.type.headline)
-                .foregroundStyle(CC.text.primary)
-                .lineLimit(1)
-                // From the front, as everywhere else a project is drawn.
-                .truncationMode(.tail)
-            Spacer(minLength: 0)
+            if verticalSizeClass == .compact {
+                HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) { name; path }
+            } else {
+                VStack(alignment: .leading, spacing: 0) { name; path }
+            }
         }
-        .padding(.horizontal, CC.space.md)
-        .padding(.vertical, CC.space.sm)
-        .background(CC.color.surface)
-        .overlay(alignment: .bottom) { CCHairline() }
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .contentShape(Rectangle())
+        .onLongPressGesture {
+            if let summary { CCPasteboard.copy(summary.cwd) }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            [label.project, summary.map { "Working directory, \($0.shownCwd)" }]
+                .compactMap { $0 }.joined(separator: ". "))
+        .accessibilityIdentifier("session-title")
     }
 
-    // MARK: Identity block
-
-    /// Chrome, not content: `surface` fill and a 1pt bottom rule, no card.
-    private var identityBlock: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: TimelineSpine.gap) {
-                CCStatusDot(
-                    color: dotColour,
-                    size: CCStatusDot.Size.cardHeader.rawValue,
-                    isHollow: shown?.loadedFromCacheAt != nil && shown?.hasLiveData != true,
-                    pulses: (shown?.pendingApprovals.isEmpty == false))
-                // The same gutter the timeline's glyphs sit in, so the block's
-                // three lines start on the screen's one content column — 52,
-                // the number the fleet's rows use — and the dot on its one
-                // mark axis.
-                .ccGutterMark()
-                .padding(.top, CC.space.xs)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
-                        Text(verbatim: label.project)
-                            .ccType(CC.type.title)
-                            .foregroundStyle(CC.text.primary)
-                            .lineLimit(2)
-                            .truncationMode(.tail)
-                        Spacer(minLength: CC.space.xs)
-                        SessionFreshness(lastEventAt: shown?.lastEventAt)
-                    }
-                    // A phrase about this run — `started 1:51 PM` — so small
-                    // prose, not `micro`, which is the uppercase section label.
-                    if let qualifier = label.qualifier {
-                        Text(verbatim: qualifier)
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(CC.text.tertiary)
-                            .lineLimit(1)
-                    }
-                    // `textTertiary`: it is information with an action on it,
-                    // not chrome. The path is the Mac's, as it is: the phone
-                    // does not know whose home folder it is under, so it does
-                    // not shorten one. Head truncation keeps the tail, the
-                    // part that identifies the run. The
-                    // agent tag leads it, as it leads the fleet row's activity
-                    // line, and keeps its width while the path gives way. At
-                    // accessibility sizes the two stack, as the fleet row's
-                    // do: on one line at AX5 the tag left the path `…-1`.
-                    if let summary {
-                        CCAdaptiveStack(
-                            horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs
-                        ) {
-                            CCTag(agent: summary.agent)
-                            Text(summary.shownCwd)
-                                .ccType(CC.type.monoSmall)
-                                .foregroundStyle(CC.text.tertiary)
-                                .lineLimit(1)
-                                .truncationMode(.head)
-                                .onLongPressGesture { CCPasteboard.copy(summary.cwd) }
-                                .accessibilityLabel("Working directory, \(summary.shownCwd)")
-                        }
-                    }
-                    // **An ended run is not a dead end.** Claude Code keeps its own
-                    // transcript under `~/.claude/projects`, so the conversation
-                    // outlives our record of it and can be picked up at the Mac.
-                    // Shown only when the daemon actually recorded the id — it is
-                    // learned from a hook after the run starts, so a run that died
-                    // early may not have one, and a command with a blank id would
-                    // be worse than none.
-                    //
-                    // Resume happens at the Mac by design: the phone starting
-                    // processes on your machine is a different product, and the
-                    // daemon spawns nothing today.
-                    if summary?.lifecycle == .exited,
-                        let claudeID = summary?.claudeSessionID, !claudeID.isEmpty
-                    {
-                        VStack(alignment: .leading, spacing: CC.rhythm.text) {
-                            Text("Pick this conversation up at the computer")
-                                .ccType(CC.type.footnote)
-                                .foregroundStyle(CC.text.secondary)
-                            // Quoted, because this is a command a person copies
-                            // and runs. The id is whatever a hook reported —
-                            // decoded as an unrestricted string, never validated
-                            // — and a space in it would silently resume the
-                            // wrong thing while anything shell-special would run
-                            // as syntax. Quoting costs nothing on the UUID this
-                            // is in practice.
-                            CCMonoBlock("codeconnect claude --resume \(Shell.quoted(claudeID))")
-                        }
-                        .padding(.top, CC.rhythm.textSurface)
-                    }
-                    // Stated here rather than left to be inferred from an empty
-                    // screen. `textTertiary`, not a banner and not a warning:
-                    // deciding for itself is a thing the operator chose, and a
-                    // product that shouts about a deliberate setting teaches
-                    // people to ignore the places it shouts.
-                    if let notice = SessionState.silentNotice(
-                        permissionMode: model.permissionMode(for: key))
-                    {
-                        Text(notice)
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(CC.text.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, CC.space.xxs)
-                            .accessibilityIdentifier("session-permission-notice")
-                    }
-                    codexStopBlock
+    /// **Everything the bar does not show, one tap away.** First the terminal,
+    /// the most used: on the terminal the same item reads Timeline, so the way
+    /// back is the same place. Then the session's uncommitted changes, with
+    /// their count once the app has counted them, and the link's health under
+    /// the name of the computer the session is on, which is a heading, not an
+    /// action.
+    private var moreMenu: some View {
+        let onTerminal = surface == .terminal
+        return Menu {
+            // The terminal and the link are absent in the sample fleet: there
+            // is no connection to open one on or to report on.
+            if !model.sampleFleetActive {
+                Button {
+                    surfaceBinding.wrappedValue = onTerminal ? .timeline : .terminal
+                } label: {
+                    Label(onTerminal ? "Timeline" : "Terminal", image: onTerminal ? "chat-text" : "terminal-window")
                 }
             }
-            .padding(.horizontal, CC.space.md)
-            .padding(.vertical, CC.space.md)
-
-            CCHairline()
+            Button {
+                showDiff = true
+            } label: {
+                Text("Uncommitted changes")
+                if let count = changedFileCount {
+                    Text(count == 1 ? "1 file" : "\(count) files")
+                }
+                Image("plus-minus")
+            }
+            if !model.sampleFleetActive {
+                Section(model.machineName.map { "On \($0)" } ?? "") {
+                    Button {
+                        showLinkDetail = true
+                    } label: {
+                        Label("Link health", image: "desktop")
+                    }
+                }
+            }
+        } label: {
+            CCIcon("dots-three", size: CC.size.icon, weight: .semibold)
+                .foregroundStyle(CC.text.primary)
+                .frame(width: CC.size.controlSm, height: CC.size.controlSm)
+                .background(CC.color.surfaceRaised, in: Capsule())
+                .overlay { Capsule().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
+                .ccHitTarget()
         }
-        .background(CC.color.surface)
-        .accessibilityElement(children: .contain)
+        // Plain: a bar otherwise sets a menu's label in a 56x36 button of its
+        // own, under the 44pt target.
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .accessibilityLabel("More")
+        .accessibilityIdentifier("session-more")
+        .accessibilityShowsLargeContentViewer()
+    }
+
+    /// **What the header carried only sometimes**, under the bar and only while
+    /// it applies: an ended run's resume command, the permission note, and a
+    /// Codex turn's Stop.
+    @ViewBuilder
+    private var sessionNotices: some View {
+        let notice = SessionState.silentNotice(permissionMode: model.permissionMode(for: key))
+        let resumeID = summary?.lifecycle == .exited ? summary?.claudeSessionID : nil
+        if notice != nil || resumeID?.isEmpty == false || model.stopUnavailable(for: key) == nil {
+            VStack(alignment: .leading, spacing: 0) {
+                // **An ended run is not a dead end.** Claude Code keeps its own
+                // transcript under `~/.claude/projects`, so the conversation
+                // outlives our record of it and can be picked up at the Mac.
+                // Shown only when the daemon actually recorded the id — it is
+                // learned from a hook after the run starts, so a run that died
+                // early may not have one, and a command with a blank id would
+                // be worse than none.
+                //
+                // Resume happens at the Mac by design: the phone starting
+                // processes on your machine is a different product, and the
+                // daemon spawns nothing today.
+                if let resumeID, !resumeID.isEmpty {
+                    VStack(alignment: .leading, spacing: CC.rhythm.text) {
+                        Text("Pick this conversation up at the computer")
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.secondary)
+                        // Quoted, because this is a command a person copies
+                        // and runs. The id is whatever a hook reported —
+                        // decoded as an unrestricted string, never validated
+                        // — and a space in it would silently resume the
+                        // wrong thing while anything shell-special would run
+                        // as syntax. Quoting costs nothing on the UUID this
+                        // is in practice.
+                        CCMonoBlock("codeconnect claude --resume \(Shell.quoted(resumeID))")
+                    }
+                }
+                // Stated here rather than left to be inferred from an empty
+                // screen. `textTertiary`, not a banner and not a warning:
+                // deciding for itself is a thing the operator chose, and a
+                // product that shouts about a deliberate setting teaches
+                // people to ignore the places it shouts.
+                if let notice {
+                    Text(notice)
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, CC.space.xxs)
+                        .accessibilityIdentifier("session-permission-notice")
+                }
+                codexStopBlock
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, CC.space.md)
+            .padding(.vertical, CC.space.sm)
+            .background(CC.color.surface)
+            .overlay(alignment: .bottom) { CCHairline() }
+        }
     }
 
     // MARK: Stop
@@ -1476,36 +1436,6 @@ struct SessionDetailView: View {
     }
 
     // MARK: Toolbar
-
-    /// Not an 11pt system glyph. A bordered pill carrying the changed-file count
-    /// when the app has actually counted them, and a bare `±` when it has not —
-    /// a number the app cannot evidence is a number it does not print.
-    private var diffControl: some View {
-        Button {
-            CCHaptic.light.fire()
-            showDiff = true
-        } label: {
-            HStack(spacing: CC.space.xxs + 1) {
-                Text("±")
-                    .ccType(CC.type.monoSmall)
-                    .foregroundStyle(CC.text.primary)
-                if let count = changedFileCount {
-                    Text("\(count)")
-                        .ccType(CC.type.monoSmall)
-                        .foregroundStyle(CC.text.primary)
-                }
-            }
-            .padding(.horizontal, CC.space.sm)
-            .frame(minWidth: CC.size.controlSm, minHeight: CC.size.controlSm)
-            .background(CC.color.surfaceRaised, in: Capsule())
-            .overlay { Capsule().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
-            .ccHitTarget()
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Diff")
-        .accessibilityHint("Asks the computer for this session's uncommitted changes")
-        .accessibilityIdentifier("open-diff")
-    }
 
     private var changedFileCount: Int? { model.diffState(for: key).changedFileCount }
 
@@ -2150,107 +2080,7 @@ private struct TailPill: View {
     }
 }
 
-// MARK: - The four views that are allowed to read the clock
-
-/// **The age in the identity block, clocked by itself.**
-///
-/// It is one string — `21h` — and reading it from `SessionDetailView.body` put a
-/// one-second heartbeat under the entire timeline. It sleeps until its own
-/// string stops being true: a second while the run is seconds old, a minute
-/// while it is minutes old, an hour after that.
-private struct SessionFreshness: View {
-    let lastEventAt: Date?
-
-    /// Read, not merely written — see `ApprovalRow.lastTick`. A `@State` the
-    /// body never looks at does not invalidate the view, and an age that never
-    /// invalidates is an age that has quietly stopped being true.
-    @State private var lastTick = Date()
-
-    /// The wall clock, not the stored tick: a view waking from an hour's sleep
-    /// must measure against the real clock, never against the stamp it fell
-    /// asleep holding. Both rules are pinned by test in `AgeTick.renderTime`.
-    private var now: Date { AgeTick.renderTime(lastTick: lastTick) }
-
-    /// Nil when this run has no events at all. There is no age to keep true, so
-    /// there is nothing to wake for.
-    private var clock: AgeClock? {
-        lastEventAt.map { AgeClock(since: $0, scale: .age) }
-    }
-
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    /// Said with what it measures. Bare, `53s` sat above a card's `waiting 4s`:
-    /// numbers of seconds on one screen, unexplained. At accessibility sizes it is
-    /// `1m ago`: the whole phrase beside an AX5 title read `last… 1… ago`, and
-    /// moving it to a line of its own pushed the screen down a line.
-    var body: some View {
-        Group {
-            if let lastEventAt {
-                HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs) {
-                    if !dynamicTypeSize.isAccessibilitySize {
-                        Text("last event").ccType(CC.type.footnote)
-                    }
-                    Text(Format.age(since: lastEventAt, now: now)).ccType(CC.type.monoSmall)
-                    Text("ago").ccType(CC.type.footnote)
-                }
-                .lineLimit(1)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(
-                    "Last event \(Format.spokenAge(now.timeIntervalSince(lastEventAt)))")
-            } else {
-                Text("no events").ccType(CC.type.footnote)
-            }
-        }
-        .foregroundStyle(CC.text.tertiary)
-        .task(id: clock) {
-            guard let clock else { return }
-            await AgeTick.follow(clock) { lastTick = $0 }
-        }
-    }
-}
-
-/// **The computer this session is on, and whether it is answering** — the home
-/// screen's label (`CCMachineLabel`), on one line, as the button that opens the
-/// link's details. It reads the link itself, so the clock ticks this view alone.
-private struct SessionMachineLink: View {
-    @Environment(AppModel.self) private var model
-    let action: () -> Void
-
-    /// Under what a 375pt phone's bar leaves beside its margins and the back
-    /// and diff buttons: about 238pt, from those measured on a 402pt bar.
-    private static let widest: CGFloat = 220
-
-    var body: some View {
-        // Nothing at all in the sample fleet: a control reporting on a link
-        // that does not exist is worse than an empty slot however honestly it
-        // renders.
-        if !model.sampleFleetActive {
-            let health = model.linkHealth
-            Button {
-                CCHaptic.light.fire()
-                action()
-            } label: {
-                // Left to the bar, the label is measured short of its own text
-                // ("Jordan’s Mac Stu…" with the bar half empty), and an item
-                // wider than the bar's room goes behind "•••". So it sets its
-                // own width: its text, up to what the narrowest phone leaves
-                // beside the back and diff buttons, where the name gives way.
-                CCMachineLabel(name: model.machineName, level: health.level, lineLimit: 1)
-                    .frame(maxWidth: Self.widest, alignment: .trailing)
-                    .fixedSize()
-                    .frame(minHeight: CC.size.hitTarget)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Link health")
-            .accessibilityValue(
-                [model.machineName, health.spokenValue].compactMap { $0 }.joined(separator: ". "))
-            .accessibilityHint("Opens connection details")
-            .accessibilityAddTraits(.isButton)
-        }
-    }
-}
+// MARK: - The two views that are allowed to read the clock
 
 /// **The banner, clocked by itself.**
 ///

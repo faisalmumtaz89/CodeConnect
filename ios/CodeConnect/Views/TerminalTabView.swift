@@ -51,9 +51,6 @@ struct TerminalTabView: View {
     /// not hold the keyboard, and coming back to one is the moment to try the
     /// connection again.
     var onScreen = true
-    /// The pane took or gave back the keyboard — the screen collapses its
-    /// header around it, as it does for the composer.
-    var onKeyboard: (Bool) -> Void = { _ in }
 
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
@@ -754,7 +751,6 @@ struct TerminalTabView: View {
                 session: session, sessionUID: sessionUID, acceptsInput: live && onScreen,
                 fontSize: model.settings.terminalFontSize,
                 onLink: { linkToOpen = $0 },
-                onKeyboard: onKeyboard,
                 onZooms: { zooms in DispatchQueue.main.async { paneZooms = zooms } },
                 seeded: { fromTrimmedBuffer in
                     // Off the update pass. Seeding happens inside
@@ -1115,8 +1111,6 @@ final class TerminalPaneView: TerminalView {
 
     /// Where a tapped link goes: the tab's link sheet.
     var onLink: ((TerminalLink) -> Void)?
-    /// Whether this pane holds the keyboard, for the screen's chrome.
-    var onKeyboard: ((Bool) -> Void)?
     /// The pane's own size, once the daemon has stated it. `nil` until then —
     /// and for good from a daemon that never does — while the emulator takes
     /// its size from this view's bounds, as SwiftTerm always has.
@@ -1179,18 +1173,6 @@ final class TerminalPaneView: TerminalView {
         let height = ceil((font.ascender - font.descender + font.leading) * lineSpacing)
         return CGSize(
             width: max(1, ceil(width * scale) / scale), height: max(1, ceil(height * scale) / scale))
-    }
-
-    override func becomeFirstResponder() -> Bool {
-        let became = super.becomeFirstResponder()
-        if became { onKeyboard?(true) }
-        return became
-    }
-
-    override func resignFirstResponder() -> Bool {
-        let resigned = super.resignFirstResponder()
-        if resigned { onKeyboard?(false) }
-        return resigned
     }
 
     /// The link under the finger of the current tap.
@@ -1439,7 +1421,6 @@ struct SwiftTermView: UIViewRepresentable {
     /// A link the reader tapped, whole — the OSC 8 target or the URL across
     /// its wraps — for the tab to offer.
     let onLink: (TerminalLink) -> Void
-    let onKeyboard: (Bool) -> Void
     /// Whether a pinch zooms the view onto a pane wider than it, rather than
     /// changing the terminal font.
     let onZooms: (Bool) -> Void
@@ -1487,7 +1468,6 @@ struct SwiftTermView: UIViewRepresentable {
         view.inputAccessoryView = context.coordinator.makeAccessory(for: view)
         view.acceptsInput = acceptsInput
         view.onLink = onLink
-        view.onKeyboard = onKeyboard
         view.installLinkTap()
         context.coordinator.attach(
             scroller: scroller, session: session, sessionUID: sessionUID,
@@ -1504,7 +1484,6 @@ struct SwiftTermView: UIViewRepresentable {
         }
         view.acceptsInput = acceptsInput
         view.onLink = onLink
-        view.onKeyboard = onKeyboard
         context.coordinator.attach(
             scroller: scroller, session: session, sessionUID: sessionUID,
             onZooms: onZooms, seeded: seeded)

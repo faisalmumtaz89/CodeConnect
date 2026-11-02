@@ -68,7 +68,7 @@ final class ToolColumnUITests: XCTestCase {
         let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'app-5'")).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 25), "the running session row")
         row.tap()
-        XCTAssertTrue(app.buttons["open-diff"].waitForExistence(timeout: 20), "session detail")
+        XCTAssertTrue(app.buttons["session-more"].waitForExistence(timeout: 20), "session detail")
 
         // `Bash`, `Read` and `MultiEdit` — deliberately different widths, which
         // is the whole reason the fixture carries all three.
@@ -136,14 +136,16 @@ final class ToolColumnUITests: XCTestCase {
                 ).firstMatch
                 XCTAssertTrue(row.waitForExistence(timeout: 25))
                 row.tap()
-                XCTAssertTrue(app.buttons["open-diff"].waitForExistence(timeout: 20))
+                XCTAssertTrue(app.buttons["session-more"].waitForExistence(timeout: 20))
             case "link-health":
                 let row = app.buttons.matching(
                     NSPredicate(format: "identifier BEGINSWITH 'session-'")
                 ).firstMatch
                 if row.waitForExistence(timeout: 25) { row.tap() }
-                let pill = app.buttons["Link health"].firstMatch
-                if pill.waitForExistence(timeout: 20) { pill.tap() }
+                let more = app.buttons["session-more"].firstMatch
+                if more.waitForExistence(timeout: 20) { more.tap() }
+                let link = app.buttons["Link health"].firstMatch
+                if link.waitForExistence(timeout: 10) { link.tap() }
             case "settings":
                 let settings = app.buttons["Settings"].firstMatch
                 if settings.waitForExistence(timeout: 20) { settings.tap() }

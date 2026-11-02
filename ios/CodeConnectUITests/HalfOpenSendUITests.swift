@@ -88,12 +88,14 @@ final class HalfOpenSendUITests: XCTestCase {
         app.collectionViews["session-timeline"].coordinate(
             withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)
         ).tap()
+        app.buttons["session-more"].tap()
         let terminal = app.buttons["Terminal"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 10))
         terminal.tap()
         print("B18 TERMINAL shown at t=\(Date().timeIntervalSince(sentAt))s")
         // Past the 30 s silence deadline and the redial, on the terminal.
         Thread.sleep(forTimeInterval: max(0, 45 - Date().timeIntervalSince(sentAt)))
+        app.buttons["session-more"].tap()
         app.buttons["Timeline"].tap()
         let cleared = (0..<20).contains { _ in
             let shown = (field.value as? String) ?? ""
@@ -122,8 +124,11 @@ final class HalfOpenSendUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(session.waitForExistence(timeout: 40), "the scratch session is listed")
         session.tap()
-        let diff = app.buttons["Diff"].firstMatch
-        XCTAssertTrue(diff.waitForExistence(timeout: 15))
+        let more = app.buttons["session-more"]
+        XCTAssertTrue(more.waitForExistence(timeout: 20), "the session bar's menu")
+        more.tap()
+        let diff = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Uncommitted changes'")).firstMatch
+        XCTAssertTrue(diff.waitForExistence(timeout: 10), "the menu offers the changes")
         diff.tap()
         let asked = Date()
         print("B19 SLOW asked at \(asked)")

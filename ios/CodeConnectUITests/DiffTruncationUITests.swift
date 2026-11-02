@@ -48,8 +48,11 @@ final class DiffTruncationUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(session.waitForExistence(timeout: 30), "the fixture fleet has rows")
         session.tap()
-        let diff = app.buttons["open-diff"]
-        XCTAssertTrue(diff.waitForExistence(timeout: 20))
+        let more = app.buttons["session-more"]
+        XCTAssertTrue(more.waitForExistence(timeout: 20), "the session bar's menu")
+        more.tap()
+        let diff = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Uncommitted changes'")).firstMatch
+        XCTAssertTrue(diff.waitForExistence(timeout: 10), "the menu offers the changes")
         diff.tap()
     }
 

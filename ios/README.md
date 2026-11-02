@@ -91,7 +91,7 @@ pairing and opens no socket, and nothing in it reports a link
 | `CodeConnect/Net/` | `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket. |
 | `CodeConnect/Store/` | Keychain pairing, this device's identity, preferences, the on-disk event cache. |
 | `CodeConnect/Model/` | Event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, the unified-diff parser. |
-| `CodeConnect/Views/` | Fleet, Deck, session detail (Timeline / Terminal), decision card, diff, pairing and settings. |
+| `CodeConnect/Views/` | Fleet, Deck, session detail (the timeline, and the terminal from the bar's menu), decision card, diff, pairing and settings. |
 | `CodeConnectTests/` | Unit tests. Wire types are tested against JSON written by hand from `mac/protocol/src`. |
 | `CodeConnectUITests/` | End-to-end. `ApprovalFlowUITests` and `LiveDaemonUITests` need a **real** daemon; `DeckUITests` replays contract-shaped frames. |
 | `CodeConnectRenderHarness/` | The render catalog. Its own target, in its own scheme, **excluded from the product scheme's TestAction** — nothing here changes the product's test counts. See *The render harness*. |
@@ -885,11 +885,11 @@ haptic is not motion, and removing it removes information.
 | `CCRow` | `CCRow(title, titleStyle:, subtitle:, meta:, titleTruncation:, subtitleLineLimit:, showsChevron:, separator:, density:, isDimmed:, disabledReason:, accessibilityLabelText:, action:) { leading } trailing: { } meta: { }` — 64pt min, full-row target. **`meta` spans the whole row**, under the trailing accessory rather than beside it |
 | `CCFactRow` | `CCFactRow(label, value:, labelStyle: .prose/.identifier/.key, tone:, isUnmeasured:, age:, separator:)` · `CCFactRow(label) { value }` · `CCFactRow(label, detail: { })` — 48pt. Lands its own text on the 52pt column; no call site adds anything |
 | `CCBadge` | `CCBadge(text, icon:, tone:, count:, isSelected:, action:)` · `CCBadge(status:count:)` · `CCBadge(capability:)` — **one construction**, and no `style:` to pick another: tint@12 fill, tint@40 border, full-strength label, radius 6. A badge is **20pt**; the same construction **with an `action`** is a control and is `CC.size.chip` 32 with a wider inset, because a chip is a thing you press. `danger` takes a 1.5pt edge; nothing takes a saturated fill |
-| `CCTag` | `CCTag(text, accessibilityText:)` · `CCTag(agent:)` — which agent a session is (`Claude Code`, `Codex`, or an unsupported agent's own word), on an ended fleet row and in the session header; a run in a project card is titled with the same word instead. No fill, 1pt `borderStrong`, 9pt semibold uppercase `textTertiary`, **15pt** tall, radius 4; wraps at accessibility sizes like `CCBadge` |
+| `CCTag` | `CCTag(text, accessibilityText:)` · `CCTag(agent:)` — which agent a session is (`Claude Code`, `Codex`, or an unsupported agent's own word), on an ended fleet row; a run in a project card is titled with the same word instead. No fill, 1pt `borderStrong`, 9pt semibold uppercase `textTertiary`, **15pt** tall, radius 4; wraps at accessibility sizes like `CCBadge` |
 | `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH. <rationale>` |
 | `CCCountChip` | `CCCountChip(3)` — the same construction with a number in it. Used by `CCSectionHeader`; never hand-rolled |
 | `CCStatusDot` | `CCStatusDot(color:size:isHollow:pulses:)` · `CCStatusDot(tone:…)` · `CCStatusDot(status:size:isCached:)` — scales with Dynamic Type to `CC.size.dotMaxScale` (8 → 14 at AX5) |
-| `CCMachineLabel` | `CCMachineLabel(name:level:lineLimit:)` — a computer and whether it answers: a dot, the name, and a word (`Stale`, `Connecting`, `Offline`, `Not paired`) only while the link is not live. The home screen's project cards wrap it; the session header sets it on one line, where the name truncates and the word stays whole, as the button that opens the link's details. The one table is `LinkHealth.Level.machineMark` |
+| `CCMachineLabel` | `CCMachineLabel(name:level:lineLimit:)` — a computer and whether it answers: a dot, the name, and a word (`Stale`, `Connecting`, `Offline`, `Not paired`) only while the link is not live. The home screen's project cards wrap it. The one table is `LinkHealth.Level.machineMark` |
 | `CCField` | `CCField(label:text:placeholder:hint:error:axis:lineLimit:isSecure:keyboardType:…:isMono:labelOnContentColumn:onSubmit:)` — 52pt. `label` is **optional**: an empty string still reserves ~22pt of its line, `nil` draws no row. The label steps out to the content column unless `labelOnContentColumn: false`, for a document with no gutter (the question sheet), where it sits on the field's edge |
 | `CCSectionHeader` | `CCSectionHeader("Blocked", count:, dotColor:, dotPulses:, note:, noteAction:, actionTitle:, action:)` — **place it flush**: it puts its own label on the 52pt column and takes no column parameter. The dot hangs itself into the 32pt gutter, takes no layout width, and stays centred on that axis as it scales |
 | `CCEmptyState` | `CCEmptyState(glyph:title:message:tone:actionTitle:action:actionDisabledReason:secondaryActionTitle:secondaryAction:)` — the primary action is `.primary`, because an empty state has exactly one action worth taking, and `actionDisabledReason:` *draws* why the only way out is shut |
@@ -1233,8 +1233,7 @@ as a tall portrait box with a word wedged into it.
 **VoiceOver** — every interactive component carries a label, the right traits
 (`.isButton`, `.isSelected`, `.isHeader`), and a value where state exists
 (`"Busy"` while loading). `CCHoldButton` exposes a plain activation because
-VoiceOver cannot express a hold. The session header's link button speaks the
-link's age as words ("14 seconds ago"), never "fourteen ess".
+VoiceOver cannot express a hold.
 
 ## Reviewing the system
 
