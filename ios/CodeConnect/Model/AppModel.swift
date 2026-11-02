@@ -3269,12 +3269,25 @@ final class AppModel {
                 retainIdentityIfListed(mutation, requestID)
                 return .indeterminate(reason)
             }
+        } catch ConnectionError.sentButUnanswered {
+            // It left the phone and no answer came back: nobody knows whether
+            // it was typed, which is what indeterminate says. The identity is
+            // kept, so the next attempt is the recognisable retry.
+            retainIdentityIfListed(mutation, requestID)
+            return .indeterminate(ConnectionError.sentButUnanswered.localizedDescription)
         } catch {
             // The transport died before an answer. The mutation may have been
             // claimed, so the identity is kept for the same reason as above.
             retainIdentityIfListed(mutation, requestID)
             return .failed(error.localizedDescription)
         }
+    }
+
+    /// Whether this exact text to `key` still has the identity of an attempt whose
+    /// outcome is unknown, so sending it again is a retry and not a second typing.
+    func holdsSendIdentity(text: String, to key: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true)] != nil
     }
 
     /// Keeps an unsettled mutation's identity — unless its session departed

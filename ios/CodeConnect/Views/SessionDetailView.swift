@@ -953,6 +953,14 @@ struct SessionDetailView: View {
     /// the keyboard) and scrolled back by the re-pin. Set plainly, the bar and
     /// the inset change together, in one step.
     @State private var composeResult: ComposeAttempt?
+    /// The composer's last send whose answer never came (`.indeterminate`), asked
+    /// once more when the link to the computer comes back: the same text under the
+    /// same identity, so the computer says it was already typed (and the box clears)
+    /// or types it the one time it never arrived. Only while the box holds exactly
+    /// that text, within a minute of the send, and never for an ask-again's own
+    /// answer. Editing, another send, or leaving the session drops it.
+    @State private var unansweredSend: UnansweredSend?
+    @State private var askingAgain = false
     @State private var showModelSheet = false
     @State private var modelSheetPrefill = ""
     @State private var showEffortSheet = false
@@ -1160,6 +1168,7 @@ struct SessionDetailView: View {
                         focused: $composerFocused)
                 }
                 .onChange(of: composeText) { _, _ in
+                    unansweredSend = nil
                     // Editing is the user's next act; a standing failure
                     // note has been read. Success notes retire themselves.
                     switch composeResult {
@@ -1169,6 +1178,10 @@ struct SessionDetailView: View {
                 }
             }
         }
+        // A new handshake is the link back: the unanswered send is asked again. Here,
+        // not on the timeline's composer, so a handshake while the terminal is showing
+        // still counts.
+        .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
         .sheet(isPresented: $showModelSheet) {
             ModelSheet(sessionKey: key, prefill: modelSheetPrefill, onLanded: consumeDraft)
                 .environment(model)
@@ -1691,6 +1704,8 @@ struct SessionDetailView: View {
 
     private func send() {
         let text = composeText
+        let again = askingAgain
+        askingAgain = false
         // **A Codex session takes a different road entirely.** `send_text` is
         // Claude's TTY takeover and a Codex session refuses it by name; `compose`
         // is the message the app-server actually accepts, and it is not a
@@ -1721,10 +1736,18 @@ struct SessionDetailView: View {
         sending = true
         composeResult = nil
         composeResultClearTask?.cancel()
+        unansweredSend = nil
+        let generation = model.connection.generation
+        let sentAt = Date()
         Task {
             let result = await model.send(text: text, to: key)
             sending = false
             composeResult = result
+            if case .indeterminate = result, !again {
+                unansweredSend = UnansweredSend(text: text, sentAt: sentAt)
+                // The link may have come back while this send waited.
+                if model.connection.generation != generation { askUnansweredAgain() }
+            }
             switch result {
             case .sent, .alreadyApplied, .composerRecovered:
                 // Never optimistic: the field clears only on a landed
@@ -1748,6 +1771,24 @@ struct SessionDetailView: View {
             }
         }
     }
+
+    /// Ask the unanswered send once more (see `unansweredSend`), through `send`.
+    private func askUnansweredAgain() {
+        guard let unanswered = unansweredSend, !sending, model.connection.phase.isConnected,
+            composeText == unanswered.text,
+            Date().timeIntervalSince(unanswered.sentAt) < 60,
+            model.holdsSendIdentity(text: unanswered.text, to: key)
+        else { return }
+        unansweredSend = nil
+        askingAgain = true
+        send()
+    }
+}
+
+/// A composer send whose answer never came: what it said, and when it was sent.
+private struct UnansweredSend {
+    let text: String
+    let sentAt: Date
 }
 
 /// The session's timeline: its own view, so what the rest of the screen holds

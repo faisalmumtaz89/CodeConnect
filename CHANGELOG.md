@@ -3,6 +3,17 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A message sent as the connection drops no longer stays in the box
+
+- When the network between your iPhone and your computer goes quiet, as it does when Tailscale
+  disconnects, the app now notices within half a minute and connects again by itself. It used to
+  keep waiting on the dead connection for minutes.
+- If you had just sent a message when that happened, your computer had usually already typed it,
+  but the app never heard back, so the text stayed in the box. Once the app has reconnected, it
+  now checks that message with your computer and clears the box. Within a minute of the send, if
+  the message never arrived it is typed then, once; nothing is ever typed twice. The note no longer
+  says the message couldn't be typed when nobody knows; it says it isn't confirmed.
+
 ## The conversation stays still after you send
 
 - After you send a message from the iPhone, the conversation moves once, to your message, and stays
