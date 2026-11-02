@@ -2915,6 +2915,17 @@ impl Daemon {
         for (tool_use_id, rejected) in ended {
             self.call_ended(session_uid, &tool_use_id, rejected).await;
         }
+        // Marks only from lines written while this run lives: a conversation resumed
+        // into it is read from its start, and its old turns are not the run's.
+        let since = match started_ms.or(ended_ms) {
+            Some(_) => match self.db.get_session(session_uid.to_string()).await {
+                Ok(Some(row)) => protocol::time::unix_ms_from_rfc3339(&row.created_at),
+                _ => None,
+            },
+            None => None,
+        };
+        let lived = |ms: &i64| since.is_none_or(|since| *ms >= since);
+        let (started_ms, ended_ms) = (started_ms.filter(lived), ended_ms.filter(lived));
         if started_ms.is_some() || ended_ms.is_some() {
             if let Err(err) = self
                 .db
@@ -26058,12 +26069,7 @@ mod tests {
 
         // Its Stop, then its end in the transcript: the waiter is woken.
         crate::mail::turn_ended(&daemon, &claude);
-        let mut end: serde_json::Value = serde_json::from_str(&turns(6..7)[0]).unwrap();
-        end["timestamp"] =
-            protocol::time::rfc3339_from_unix_ms(protocol::time::now_unix_ms() + 1).into();
-        Transcript::of(&claude)
-            .read(&daemon, vec![end.to_string()])
-            .await;
+        Transcript::of(&claude).read(&daemon, turns(6..7)).await;
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut woken)
             .await
             .expect("woken at the turn's end")
@@ -26115,11 +26121,6 @@ mod tests {
     const TURNS: &str =
         include_str!("../../../fixtures/claude/transcript-turn-boundaries-2.1.316.jsonl");
 
-    /// When the measured session's hooks reached the daemon, by `TURNS`' clock.
-    const fn hook_at(ms: i64) -> i64 {
-        1_793_579_000_000 + ms
-    }
-
     fn turns(lines: std::ops::Range<usize>) -> Vec<String> {
         TURNS.lines().map(str::to_string).collect::<Vec<_>>()[lines].to_vec()
     }
@@ -26128,17 +26129,38 @@ mod tests {
     struct Transcript {
         path: std::path::PathBuf,
         uid: String,
+        /// Added to each line's timestamp: the run writes `TURNS` now, from a second
+        /// after it started, with the measured spacing.
+        offset_ms: i64,
     }
 
     impl Transcript {
+        /// `TURNS`, as the run writes them now.
         fn of(uid: &str) -> Transcript {
+            let first: serde_json::Value =
+                serde_json::from_str(TURNS.lines().next().unwrap()).unwrap();
+            let first =
+                protocol::time::unix_ms_from_rfc3339(first["timestamp"].as_str().unwrap()).unwrap();
+            let mut transcript = Transcript::as_written(uid);
+            transcript.offset_ms = protocol::time::now_unix_ms() + 1_000 - first;
+            transcript
+        }
+
+        /// Lines at the times they carry: a conversation written before the run.
+        fn as_written(uid: &str) -> Transcript {
             let path =
                 std::env::temp_dir().join(format!("ccd-turns-{}-{uid}.jsonl", std::process::id()));
             let _ = std::fs::remove_file(&path);
             Transcript {
                 path,
                 uid: uid.to_string(),
+                offset_ms: 0,
             }
+        }
+
+        /// When the measured session's hook at `ms` (by `TURNS`' clock) comes now.
+        fn at(&self, ms: i64) -> i64 {
+            1_793_579_000_000 + ms + self.offset_ms
         }
 
         /// Append `lines` and read them as one scan.
@@ -26150,6 +26172,14 @@ mod tests {
                 .open(&self.path)
                 .unwrap();
             for line in lines {
+                let mut line: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if let Some(at) = line["timestamp"]
+                    .as_str()
+                    .and_then(protocol::time::unix_ms_from_rfc3339)
+                {
+                    line["timestamp"] =
+                        protocol::time::rfc3339_from_unix_ms(at + self.offset_ms).into();
+                }
                 writeln!(file, "{line}").unwrap();
             }
             let run = SessionKey::new(&self.uid, "cc-1");
@@ -26193,7 +26223,7 @@ mod tests {
         let uid = register(&daemon, "cc-1", None).await.session.uid;
         leave_mail(&daemon, &uid, "hi");
         let transcript = Transcript::of(&uid);
-        let prompt = |ms: i64| daemon.store.mail_prompt(&uid, hook_at(ms)).unwrap();
+        let prompt = |ms: i64| daemon.store.mail_prompt(&uid, transcript.at(ms)).unwrap();
         let stop = || {
             daemon
                 .store
@@ -26264,7 +26294,7 @@ mod tests {
         let uid = register(&daemon, "cc-1", None).await.session.uid;
         leave_mail(&daemon, &uid, "hi");
         let transcript = Transcript::of(&uid);
-        let told = |ms: i64| daemon.store.mail_prompt(&uid, hook_at(ms)).unwrap();
+        let told = |ms: i64| daemon.store.mail_prompt(&uid, transcript.at(ms)).unwrap();
 
         assert!(told(124_141), "a prompt with no turn running is told");
         transcript.read(&daemon, turns(0..2)).await;
@@ -26279,6 +26309,25 @@ mod tests {
         assert!(told(206_505), "a prompt with no turn running is told");
         transcript.read(&daemon, turns(13..15)).await;
         assert!(!told(216_583), "the prompt after Esc");
+    }
+
+    /// **A resumed conversation's unended turn is not the run's** (final round, K1):
+    /// `codeconnect claude --resume`, or /resume inside a run, reads the conversation
+    /// into the run from its start, and a turn it left without an end (Esc, a killed
+    /// process) does not leave the new run taken for running.
+    #[tokio::test]
+    async fn a_resumed_conversations_unended_turn_is_not_the_runs() {
+        let daemon = test_daemon();
+        let uid = register(&daemon, "cc-1", None).await.session.uid;
+        leave_mail(&daemon, &uid, "hi");
+        let resumed: Vec<String> =
+            include_str!("../../../fixtures/transcript/interrupts-2.1.304/resume-after-esc.jsonl")
+                .lines()
+                .take(27)
+                .map(str::to_string)
+                .collect();
+        Transcript::as_written(&uid).read(&daemon, resumed).await;
+        assert!(wakeable(&daemon, &uid), "the resumed run is idle");
     }
 
     /// **A restart reads on from the transcript** (rounds 1–3). A turn running when
@@ -26357,7 +26406,10 @@ mod tests {
                 .collect()
         };
 
-        daemon.store.mail_prompt(&uid, hook_at(124_141)).unwrap();
+        daemon
+            .store
+            .mail_prompt(&uid, transcript.at(124_141))
+            .unwrap();
         transcript.read(&daemon, unmarked(0..1)).await;
         assert!(!wakeable(&daemon, &uid), "the hook marks the start");
         transcript.read(&daemon, unmarked(1..8)).await;
