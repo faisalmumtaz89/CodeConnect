@@ -37,6 +37,11 @@ import SwiftUI
 /// chase themselves. Widths are only ever added, so the column can move only
 /// when a row with a wider label is first drawn — in a chat's `List`, when it
 /// scrolls into view — and never back.
+///
+/// **Who takes the column.** The fleet's activity lines and the conversation's
+/// approval rows. The conversation's tool rows do not: there a tool call reads
+/// as one line of words, the command right after its name (`CCToolPairLayout`
+/// with no labels, which still keeps a long name to half the row).
 enum CCToolColumn {
     /// The one gap between a tool label and the argument beside it, on every
     /// row that draws the pair — a timeline tool row, an approval preview, a

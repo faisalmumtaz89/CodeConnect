@@ -3,6 +3,16 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## The conversation reads at one size
+
+- On the iPhone, everything in a conversation is now the size of Claude's own reply: a tool call
+  such as `Bash`, what you sent, notices like "Claude is waiting for your input", and approvals
+  and questions. Tool names used to be larger and your messages smaller.
+- A tool call reads as one line of words, its command right after its name, at every text size;
+  at the largest sizes the command no longer drops onto a line of its own. Consecutive tool calls
+  sit together, and each is still a full-size tap.
+- Icons in the conversation are smaller to match, and sit on the middle of their line.
+
 ## A cleaner Changes screen on the iPhone
 
 - The screen that shows a session's uncommitted changes is called Changes, and it reads like

@@ -88,6 +88,9 @@ enum TimelineSpine {
     /// 24 (gutter) + 12 (gap) = 36 from the list's leading edge; **52** from the
     /// screen's.
     static let content: CGFloat = gutter + gap
+    /// A row's glyph beside `reading` words, centred on their first line by
+    /// `.ccMark(beside: CC.type.reading)`.
+    static let mark: CGFloat = 12
 }
 
 extension View {
@@ -145,7 +148,7 @@ struct UserMessageRow: View {
             // page margin, words on 28 under `YOU` — the same edges a code block
             // or table in Claude's reply keeps.
             Text(text)
-                .ccType(isCommand ? CC.type.monoSmall : CC.type.userMessage)
+                .ccType(isCommand ? CC.type.readingMono : CC.type.reading)
                 .foregroundStyle(CC.text.primary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -384,11 +387,6 @@ struct ToolRow: View {
     /// stays collapsed, which is why this is state and not a computed property.
     @State private var didAutoExpand: Bool
 
-    @Environment(\.dynamicTypeSize) private var typeSize
-    /// Every tool label's width on this screen, from which this row's label
-    /// takes its column, so the commands beside them share one left edge. See
-    /// `CCToolColumn`.
-    @Environment(\.ccToolLabelWidths) private var toolLabelWidths
     @Environment(\.tailWatch) private var tailWatch
 
     init(tool: ToolItem) {
@@ -453,35 +451,30 @@ struct ToolRow: View {
             // pair's first line, side by side or stacked.
             HStack(alignment: .firstTextBaseline, spacing: TimelineSpine.gap) {
                 CCIcon(
-                    ToolSummary.symbol(tool: tool.name), size: CC.size.icon, weight: .medium,
+                    ToolSummary.symbol(tool: tool.name), size: TimelineSpine.mark, weight: .medium,
                     maxSize: CCColumn.markMaxSize)
                     .foregroundStyle(CC.text.tertiary)
                     // Fixed to the gutter column, because `CCIcon` sizes its own
                     // frame from the glyph and a column of tool rows has to line
                     // up whatever symbols it happens to hold.
                     .ccGutterMark()
-                    .ccMark(beside: CC.type.callout)
-                // The glyph above is already pinned to the gutter so a column of
-                // tool rows lines up; this is the same argument applied to the
-                // name, so the commands beside them line up too. See
-                // `CCToolColumn`. Stacked at accessibility sizes, like the
-                // approval row's pair: side by side at AX5 the command got a
-                // column a third of the row wide and read `run.…ss 8`.
-                let pair =
-                    typeSize.isAccessibilitySize
-                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: CC.space.xxs))
-                    : AnyLayout(CCToolPairLayout(labels: toolLabelWidths, alignment: .firstTextBaseline))
-                pair {
+                    .ccMark(beside: CC.type.reading)
+                // **One line of words at every size**: the name, then the
+                // command, on the reply's text, so a tool call reads as a line
+                // of the conversation. No shared column. The pair keeps the name
+                // to at most half the row, cut in the middle, and gives the
+                // command the rest, so a long name never hides the command.
+                CCToolPairLayout(labels: [], alignment: .firstTextBaseline) {
                     Text(tool.name)
-                        .ccType(CC.type.callout)
+                        .ccType(CC.type.reading.weight(.medium))
                         .foregroundStyle(CC.text.primary)
                         .lineLimit(1)
-                        .ccToolLabelColumn(disabled: typeSize.isAccessibilitySize)
+                        .truncationMode(.middle)
                     if let argument = tool.argument {
                         Text(argument.firstLine)
-                            .ccType(CC.type.monoSmall)
+                            .ccType(CC.type.readingMono)
                             .foregroundStyle(CC.text.secondary)
-                            .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+                            .lineLimit(1)
                             .truncationMode(.middle)
                     }
                 }
@@ -681,7 +674,7 @@ struct ApprovalRow: View {
             : AnyLayout(CCToolPairLayout(labels: toolLabelWidths, alignment: .firstTextBaseline))
         return layout {
             Text(approval.card.toolName)
-                .ccType(CC.type.callout)
+                .ccType(CC.type.reading)
                 .foregroundStyle(CC.text.primary)
                 .ccToolLabelColumn(disabled: typeSize.isAccessibilitySize)
             if let argument = ToolSummary.principalArgument(
@@ -692,7 +685,7 @@ struct ApprovalRow: View {
                 // at accessibility sizes: measured at AX5, cut to one line this
                 // read `git…main`, which is two halves of a command and not a
                 // fact — on the row whose whole job is to say what is waiting.
-                CCMonoBlock(inline: argument.firstLine)
+                CCMonoBlock(inline: argument.firstLine, style: CC.type.readingMono)
             }
         }
     }
@@ -716,7 +709,7 @@ struct ApprovalRow: View {
     private func resolvedFooter(_ outcome: AnswerOutcome) -> some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
             Text(Self.resolutionText(for: outcome))
-                .ccType(CC.type.footnote)
+                .ccType(CC.type.reading)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             CCAdaptiveSpacer(minLength: CC.space.xs)
@@ -742,7 +735,7 @@ struct ApprovalRow: View {
     private func codexResolvedFooter(_ resolution: CodexResolution) -> some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
             Text(CodexProse.resolution(resolution).title)
-                .ccType(CC.type.footnote)
+                .ccType(CC.type.reading)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             CCAdaptiveSpacer(minLength: CC.space.xs)
@@ -885,7 +878,7 @@ struct QuestionRow: View {
                 // Prose, set as prose, and cut at its end when it is long: the
                 // whole of it is on the card one tap away.
                 Text(questions.questions[0].text)
-                    .ccType(CC.type.callout)
+                    .ccType(CC.type.reading)
                     .foregroundStyle(CC.text.secondary)
                     .lineLimit(2)
                     .truncationMode(.tail)
@@ -909,13 +902,13 @@ struct QuestionRow: View {
     private var titleLine: some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
             Text(title)
-                .ccType(CC.type.callout)
+                .ccType(CC.type.reading)
                 .foregroundStyle(CC.text.primary)
                 .overlay(alignment: Alignment(horizontal: .leading, vertical: .firstTextBaseline)) {
                     CCIcon(
-                        "chat-circle-text", size: CC.size.icon, weight: .medium,
+                        "chat-circle-text", size: TimelineSpine.mark, weight: .medium,
                         maxSize: CCColumn.markMaxSize)
-                        .ccMark(beside: CC.type.callout)
+                        .ccMark(beside: CC.type.reading)
                         .foregroundStyle(approval.isPending ? CC.color.warning : CC.text.tertiary)
                         .fixedSize()
                         // Centred on the mark axis, 16 back from the text edge,
@@ -939,7 +932,7 @@ struct QuestionRow: View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xs) {
             if let summary = status.summary(of: questions) {
                 Text(summary)
-                    .ccType(CC.type.footnote)
+                    .ccType(CC.type.reading)
                     .foregroundStyle(CC.text.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -982,7 +975,7 @@ struct NoticeRow: View {
             // (`TimelineBuilder.drawn`), so it is one quiet line on the reading
             // lane rather than a success mark.
             Text(notice.title)
-                .ccType(CC.type.footnote)
+                .ccType(CC.type.reading)
                 .foregroundStyle(CC.text.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, CC.space.sm)
@@ -994,10 +987,10 @@ struct NoticeRow: View {
     private var marked: some View {
         HStack(alignment: .firstTextBaseline, spacing: TimelineSpine.gap) {
             CCIcon(
-                notice.symbol, size: CC.size.icon, weight: .medium, maxSize: CCColumn.markMaxSize)
+                notice.symbol, size: TimelineSpine.mark, weight: .medium, maxSize: CCColumn.markMaxSize)
                 .foregroundStyle(tone == .neutral ? CC.text.tertiary : tone.color)
                 .ccGutterMark()
-                .ccMark(beside: CC.type.footnote)
+                .ccMark(beside: CC.type.reading)
 
             // The time goes under the words at accessibility sizes. Beside
             // them at AX5 it took a third of the row, and a computer's name
@@ -1008,7 +1001,7 @@ struct NoticeRow: View {
             ) {
                 VStack(alignment: .leading, spacing: CC.space.xxs) {
                     Text(notice.title)
-                        .ccType(CC.type.footnote)
+                        .ccType(CC.type.reading)
                         .foregroundStyle(CC.text.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let detail = notice.detail, !detail.isEmpty {
@@ -1020,7 +1013,7 @@ struct NoticeRow: View {
                         // which read as a duplicate; its detail is now nil at the
                         // builder, so the boundary is a boundary.)
                         Text(AgentProse.inline(detail))
-                            .ccType(CC.type.footnote)
+                            .ccType(CC.type.reading)
                             .foregroundStyle(CC.text.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }

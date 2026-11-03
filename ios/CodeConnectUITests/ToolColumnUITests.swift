@@ -1,15 +1,15 @@
 import XCTest
 
-/// The commands beside tool names share one left edge.
+/// Where a command sits beside its tool's name.
 ///
-/// Measured before this was enforced, on a timeline holding `Bash`, `Read` and
-/// `MultiEdit`: the commands began at **98.00, 99.00 and 124.33** — a 26pt
-/// ragged edge down a vertical list. On the fleet, with `Edit`/`Bash`/`Read`, it
-/// was 83.67/90.00/90.67.
+/// On the fleet, the commands beside tool names share one left edge. Measured
+/// before that was enforced, with `Edit`/`Bash`/`Read`, they began at
+/// 83.67/90.00/90.67. In the conversation a tool call reads as one line of words
+/// instead: the command follows its own name, on its line, at every size.
 ///
-/// Asserted rather than left to a render, because it is invisible in review: the
-/// code reads perfectly well as `Text(tool) ; Text(command)` and the defect only
-/// exists once two rows with different-width tool names sit above one another.
+/// Asserted rather than left to a render, because both are invisible in review:
+/// the code reads perfectly well either way, and the difference only shows once
+/// rows with different-width tool names sit above one another.
 final class ToolColumnUITests: XCTestCase {
 
     private func launch(_ size: String) -> XCUIApplication {
@@ -63,24 +63,45 @@ final class ToolColumnUITests: XCTestCase {
         return origins
     }
 
-    func testTimelineCommandsShareOneLeftEdge() {
-        let app = launch("UICTContentSizeCategoryL")
-        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'app-5'")).firstMatch
-        XCTAssertTrue(row.waitForExistence(timeout: 25), "the running session row")
-        row.tap()
-        XCTAssertTrue(app.buttons["session-more"].waitForExistence(timeout: 20), "session detail")
+    /// In the conversation each command follows its own tool's name on the
+    /// name's line, one argument gap after it, at L and at AX5, where the pair
+    /// used to stack.
+    func testTimelineToolCallsReadAsOneLine() {
+        for size in ["UICTContentSizeCategoryL", "UICTContentSizeCategoryAccessibilityXXXL"] {
+            let app = launch(size)
+            let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'app-5'")).firstMatch
+            XCTAssertTrue(row.waitForExistence(timeout: 25), "the running session row, \(size)")
+            row.tap()
+            XCTAssertTrue(app.buttons["session-more"].waitForExistence(timeout: 20), "session detail, \(size)")
 
-        // `Bash`, `Read` and `MultiEdit` — deliberately different widths, which
-        // is the whole reason the fixture carries all three.
-        let origins = commandOrigins(
-            app, containing: ["echo soak", "README.md", "Router.swift"])
-        XCTAssertGreaterThanOrEqual(
-            origins.count, 3, "the fixture must reach three tool rows at once")
-        let spread = (origins.max() ?? 0) - (origins.min() ?? 0)
-        XCTAssertEqual(
-            spread, 0, accuracy: 0.5,
-            "commands must start on one edge; measured origins \(origins)")
+            // `Bash`, `Read` and `MultiEdit`: different widths, so a shared
+            // column would show as commands starting on one edge.
+            let commands = ["echo soak", "README.md", "Router.swift"]
+            _ = commandOrigins(app, containing: commands)
+            let list = app.collectionViews["session-timeline"].frame
+            let texts = (0..<app.staticTexts.count).map { app.staticTexts.element(boundBy: $0) }
+                .filter { $0.exists && $0.frame.width > 0 && list.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }
+            let names = texts.filter { ["Bash", "Read", "MultiEdit"].contains($0.label) }.map(\.frame)
+            var checked = 0
+            for command in texts where commands.contains(where: { command.label.contains($0) }) {
+                let line = command.frame
+                let name = names.filter { $0.maxX <= line.minX + 0.5 && $0.minY < line.maxY && line.minY < $0.maxY }
+                    .max { $0.maxX < $1.maxX }
+                XCTAssertNotNil(name, "\(command.label) sits on a tool name's line, \(size)")
+                if let name {
+                    XCTAssertLessThanOrEqual(
+                        line.minX - name.maxX, argumentGap + 0.5,
+                        "\(command.label) follows its name, \(size): name ends \(name.maxX), command starts \(line.minX)")
+                }
+                checked += 1
+            }
+            XCTAssertGreaterThanOrEqual(checked, 2, "the fixture must reach tool rows, \(size)")
+            app.terminate()
+        }
     }
+
+    /// `CCToolColumn.argumentGap` (8): the UI test target does not link the app.
+    private let argumentGap: CGFloat = 8
 
     func testFleetCommandsShareOneLeftEdge() {
         let app = launch("UICTContentSizeCategoryL")

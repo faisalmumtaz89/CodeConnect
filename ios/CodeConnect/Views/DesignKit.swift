@@ -627,12 +627,14 @@ extension CC {
             size: 16, lineHeight: 22, weight: .regular, tracking: 0,
             design: .default, relativeTo: .body, documentedColor: CC.text.primary)
 
-        /// 13.5/18.75 regular, uncapped. **Agent reading prose — that alone.**
+        /// 13.5/18.75 regular, uncapped. **The conversation's text: Claude's
+        /// reply, and every row's own words** — a tool call's name, what you
+        /// said, a notice, an approval's or a question's title — so the
+        /// conversation reads at one size.
         ///
         /// On its own token so the timeline's reading lane can be sized without
         /// moving `body`'s other callers — the composer, fact rows, buttons,
-        /// onboarding. Set so a reply reads as a conversation rather than a page,
-        /// which puts it under a tool row's name.
+        /// onboarding. A row's metadata (`YOU`, times, durations) stays smaller.
         /// Uncapped on purpose: this is the one run a reader enlarged the type to
         /// read, so it must keep growing to AX5 rather than meet a ceiling.
         static let reading = CCTextStyle(
@@ -650,14 +652,16 @@ extension CC {
             size: 13.5, lineHeight: 18.75, weight: .semibold, tracking: 0,
             design: .default, relativeTo: .body, documentedColor: CC.text.primary)
 
-        /// 11.25/15 regular. **What you said, in the timeline — that alone.**
+        /// 12.5/18.75 monospaced, uncapped. **A command in the conversation**
+        /// — a tool call's, an approval's, a slash command you sent.
         ///
-        /// Three-quarters of `callout`, on its `.callout` ramp: your own words
-        /// are the context for the reply, not the thing being read, so they sit
-        /// a step under Claude's.
-        static let userMessage = CCTextStyle(
-            size: 11.25, lineHeight: 15, weight: .regular, tracking: 0,
-            design: .default, relativeTo: .callout, documentedColor: CC.text.primary)
+        /// A monospaced face reads a size larger than a proportional one at the
+        /// same point size, so a command set beside `reading` words is 12.5 to
+        /// read as 13.5, on the same `.body` ramp so the two scale together.
+        static let readingMono = CCTextStyle(
+            size: 12.5, lineHeight: 18.75, weight: .regular, tracking: 0,
+            design: .monospaced, relativeTo: .body, documentedColor: CC.text.secondary,
+            monospacedDigits: true)
 
         /// 15/20 semibold. The fleet row's session name — one step under
         /// `headline`, so a band of rows reads as a list rather than as titles.

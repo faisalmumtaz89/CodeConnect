@@ -1974,6 +1974,9 @@ private struct SessionTimeline: View {
             default: break
             }
         }
+        // Consecutive tool calls sit flush, so a run of them reads as one block
+        // of lines; each row keeps its own tap height.
+        if case .tool = items[index].content, case .tool = items[index - 1].content { return 0 }
         return CC.space.xs
     }
 
