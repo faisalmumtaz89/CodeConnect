@@ -3,6 +3,11 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Arguments keep a trailing semicolon
+
+- An argument ending in `;` given to `codeconnect claude`, such as a first prompt, now reaches
+  Claude whole; it used to lose the `;`.
+
 ## The conversation reads at one size
 
 - On the iPhone, everything in a conversation is now the size of Claude's own reply: a tool call
