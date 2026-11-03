@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -42,7 +42,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
 
 /// The answer to a `list_projects` or `start_session`.
-pub async fn answer(daemon: &Daemon, message: ClientMessage) -> ServerMessage {
+pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
     match message {
         ClientMessage::ListProjects => list_projects(daemon).await,
         ClientMessage::StartSession {
@@ -67,6 +67,39 @@ pub async fn answer(daemon: &Daemon, message: ClientMessage) -> ServerMessage {
         }
         _ => unreachable!("handle_client passes only list_projects and start_session here"),
     }
+}
+
+/// Which agents could start, as the last check found: a project list answers
+/// from it rather than wait seconds on login shells. Empty until the first list
+/// after the daemon starts, which waits for the check.
+#[derive(Default)]
+pub struct KnownAgents(Mutex<Option<Vec<AgentAvailability>>>);
+
+impl KnownAgents {
+    fn get(&self) -> Option<Vec<AgentAvailability>> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn set(&self, agents: Vec<AgentAvailability>) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(agents);
+    }
+}
+
+/// The agents for a project list: the last check's answer, with a fresh check
+/// started for the next list; or, the first time, a check waited for.
+async fn agents(daemon: &Arc<Daemon>) -> Vec<AgentAvailability> {
+    if let Some(known) = daemon.agents.get() {
+        let daemon = Arc::clone(daemon);
+        tokio::spawn(async move { daemon.agents.set(check_agents().await) });
+        return known;
+    }
+    let checked = check_agents().await;
+    daemon.agents.set(checked.clone());
+    checked
+}
+
+async fn check_agents() -> Vec<AgentAvailability> {
+    futures_util::future::join_all(AGENTS.iter().map(agent_availability)).await
 }
 
 /// Starts already asked for, by `request_id`: in memory, so a repeat on this
@@ -236,7 +269,7 @@ fn last_line(bytes: &[u8]) -> Option<String> {
 }
 
 /// The answer to `list_projects`.
-async fn list_projects(daemon: &Daemon) -> ServerMessage {
+async fn list_projects(daemon: &Arc<Daemon>) -> ServerMessage {
     let rows = match daemon.db.projects().await {
         Ok(rows) => rows,
         Err(err) => {
@@ -269,8 +302,7 @@ async fn list_projects(daemon: &Daemon) -> ServerMessage {
         })
         .buffered(BRANCH_READS_AT_ONCE)
         .collect::<Vec<_>>();
-    let agents = futures_util::future::join_all(AGENTS.iter().map(agent_availability));
-    let (projects, agents) = tokio::join!(projects, agents);
+    let (projects, agents) = tokio::join!(projects, agents(daemon));
     ServerMessage::Projects { projects, agents }
 }
 

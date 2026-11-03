@@ -1014,7 +1014,8 @@ connections a terminal is offered to. `list_projects` is answered with
 its own table so removing a run does not remove its folder, each with its name,
 git branch and whether it still exists, and, for the computer, whether each
 agent can start (`codeconnect <agent> --version` through the user's login
-shell). `start_session {request_id, path, agent, prompt?}` takes only a listed
+shell) as last checked: the first list after the daemon starts waits for the
+check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt?}` takes only a listed
 folder and runs `codeconnect <agent> --no-attach [-- <prompt>]` there through
 the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise), every value an argument of its own. The launcher writes what it

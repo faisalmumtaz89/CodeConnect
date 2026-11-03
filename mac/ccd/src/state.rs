@@ -310,6 +310,8 @@ pub struct Daemon {
     pub(crate) waiters: crate::claude_waiter::Waiters,
     /// The phone's session starts, by request id.
     pub(crate) starts: crate::start_session::Starts,
+    /// Which agents could start, as last checked.
+    pub(crate) agents: crate::start_session::KnownAgents,
 }
 
 /// **What the Claude-only gate found**, for the callers that must tell two refusals
@@ -1964,6 +1966,7 @@ impl Daemon {
             terminal_leases: crate::terminal::TerminalLeases::new(),
             waiters: crate::claude_waiter::Waiters::default(),
             starts: crate::start_session::Starts::default(),
+            agents: crate::start_session::KnownAgents::default(),
         })
     }
 
