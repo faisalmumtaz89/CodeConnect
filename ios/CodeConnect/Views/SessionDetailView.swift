@@ -1189,6 +1189,9 @@ struct SessionDetailView: View {
             if let requestID = route.openRequestID { wantedRequestID = requestID }
             consumeDeepLink()
             openWantedApproval()
+            // A session this phone just started with nothing to say yet opens
+            // ready to type into.
+            if route.focusComposer { composerFocused = true }
         }
         .onDisappear {
             model.markReviewed(key)

@@ -12,18 +12,20 @@ struct SessionRoute: Hashable {
     /// Set for a session this phone just asked a computer to start: the
     /// route shows it starting until it is in the fleet.
     var startRequestID: String?
+    /// Opens with the keyboard up in the composer.
+    var focusComposer = false
 }
 
 /// What a start flow on the fleet is showing.
 private enum StartFlow: Identifiable {
     case new
-    case project(StartProject)
+    case project(StartProject, machineID: String)
     case all
 
     var id: String {
         switch self {
         case .new: return "new"
-        case .project(let project): return "project:\(project.path)"
+        case .project(let project, let machineID): return "project:\(machineID):\(project.path)"
         case .all: return "all"
         }
     }
@@ -139,8 +141,14 @@ struct FleetView: View {
     @State private var showStartSearch = false
     @State private var composerProject: StartProject?
     private let startOption = StartOption.current
-    private var startContext: StartContext { StartContext(model: model) }
-    private var canStart: Bool { model.connection.capabilities?.startsSessions == true }
+    /// The computer a start goes to; the one last used until one is chosen.
+    @State private var startMachineID = ""
+    /// Every paired computer that can start a session.
+    private var startContexts: [StartContext] {
+        machines.models.filter { $0.connection.capabilities?.startsSessions == true }
+            .map { StartContext(model: $0) }
+    }
+    private var canStart: Bool { !startContexts.isEmpty }
 
     /// Where every line of text on this screen starts: 52 at reading sizes.
     private var textColumn: CGFloat { ContentColumn.text(dot: gutterDot) }
@@ -252,7 +260,7 @@ struct FleetView: View {
                 if let requestID = route.startRequestID {
                     StartingSessionView(
                         requestID: requestID,
-                        onLive: { path = [SessionRoute(key: $0)] },
+                        onLive: { path = [SessionRoute(key: $0, focusComposer: $1)] },
                         onChooseAgain: {
                             path = []
                             Task {
@@ -261,7 +269,8 @@ struct FleetView: View {
                             }
                         }
                     )
-                    .environment(model)
+                    .environment(
+                        machines.models.first { $0.starter.starts[requestID] != nil } ?? model)
                 } else {
                     SessionDetailView(route: route)
                         .environment(owner(route.key))
@@ -343,13 +352,19 @@ struct FleetView: View {
                 } else {
                     VStack(spacing: 0) {
                         deckBar(screen)
+                        // One panel with the Deck bar: the composer continues its
+                        // surface under it, and stands alone when nothing waits.
                         if canStart, startOption == .messageFirst {
+                            if screen.risks.isEmpty { CCHairline() }
                             StartComposerBar(
-                                context: startContext, project: $composerProject,
+                                contexts: startContexts, machineID: $startMachineID,
+                                project: $composerProject,
                                 onPickProject: { startFlow = .all },
                                 onStarted: { id in
                                     path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
-                                })
+                                }
+                            )
+                            .background(CC.color.surfaceRaised, ignoresSafeAreaEdges: .bottom)
                         }
                     }
                 }
@@ -357,13 +372,9 @@ struct FleetView: View {
             .sheet(item: $startFlow, onDismiss: openStarted) { flow in startSheet(flow) }
             .fullScreenCover(isPresented: $showStartSearch, onDismiss: openStarted) {
                 StartSearchScreen(
-                    context: startContext, onStarted: started, onClose: { showStartSearch = false })
+                    contexts: startContexts, onStarted: started, onClose: { showStartSearch = false })
             }
-            .onChange(of: canStart, initial: true) { _, can in
-                guard can else { return }
-                startContext.load()
-                if composerProject == nil { composerProject = startContext.projects.first }
-            }
+            .onChange(of: startContexts.map(\.id), initial: true) { _, _ in loadStart() }
             // A row that leaves the fleet, or stops being removable, leaves the
             // selection with it; with nothing left to choose, choosing ends. The
             // note about a batch stays: it is what says what was not removed.
@@ -618,10 +629,18 @@ struct FleetView: View {
             ForEach(others, id: \.id) { projectCard($0) }
             if canStart, startOption == .cardAction {
                 let live = Set(screen.projects.map(\.id.folder))
+                let contexts = startContexts
                 StartRecentSection(
-                    projects: Array(startContext.projects.filter { !live.contains($0.path) }.prefix(5)),
-                    total: startContext.projects.count,
-                    onPick: { startFlow = .project($0) },
+                    projects: Array(
+                        contexts.flatMap { context in
+                            context.projects.filter { !live.contains($0.path) }.map { ($0, context) }
+                        }
+                        .sorted { $0.0.lastUsed > $1.0.lastUsed }
+                        .prefix(5)
+                    ).map { (project: $0.0, context: $0.1) },
+                    total: contexts.reduce(0) { $0 + $1.projects.count },
+                    showsComputer: contexts.count > 1,
+                    onPick: { startFlow = .project($0, machineID: $1.id) },
                     onAll: { startFlow = .all }
                 )
                 .padding(.top, CC.space.md)
@@ -740,7 +759,8 @@ struct FleetView: View {
                     CCHairline()
                     Button {
                         CCHaptic.light.fire()
-                        startFlow = .project(startProject(for: project))
+                        let context = startContexts.first { $0.id == project.id.machineID } ?? startContexts[0]
+                        startFlow = .project(startProject(for: project, in: context), machineID: context.id)
                     } label: {
                         HStack(spacing: CC.space.xs) {
                             CCIcon("plus", size: 16)
@@ -783,36 +803,63 @@ struct FleetView: View {
         path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
     }
 
+    /// Ask every computer for its projects, and choose the one last used.
+    private func loadStart() {
+        let contexts = startContexts
+        for context in contexts { context.load() }
+        guard !contexts.isEmpty else { return }
+        if !contexts.contains(where: { $0.id == startMachineID }) {
+            startMachineID =
+                contexts.max { ($0.lastUsed ?? .distantPast) < ($1.lastUsed ?? .distantPast) }?.id ?? ""
+        }
+        if composerProject == nil {
+            composerProject = startContext(contexts, startMachineID).projects.first
+        }
+    }
+
     @ViewBuilder
     private func startSheet(_ flow: StartFlow) -> some View {
         let close = { startFlow = nil }
+        let contexts = startContexts
         switch (flow, startOption) {
         case (.new, .steps):
-            StartStepsSheet(context: startContext, onStarted: started, onClose: close)
-                .ccTallSheet()
+            StartStepsSheet(
+                contexts: contexts, machineID: $startMachineID, onStarted: started, onClose: close
+            )
+            .ccTallSheet()
         case (.new, _):
-            StartRecentsSheet(context: startContext, onStarted: started, onClose: close)
-                .ccTallSheet()
-        case (.project(let project), _):
-            StartProjectSheet(context: startContext, project: project, onStarted: started, onClose: close)
-                .presentationDetents([.medium])
+            StartRecentsSheet(
+                contexts: contexts, machineID: $startMachineID, onStarted: started, onClose: close
+            )
+            .ccTallSheet()
+        case (.project(let project, let machineID), _):
+            StartProjectSheet(
+                context: startContext(contexts, machineID), project: project,
+                showsComputer: contexts.count > 1, onStarted: started, onClose: close
+            )
+            .presentationDetents([.medium])
         case (.all, .messageFirst):
             StartAllProjectsSheet(
-                context: startContext,
-                onPick: { composerProject = $0; startFlow = nil }, onClose: close
+                contexts: contexts, machineID: $startMachineID,
+                onPick: { project, _ in
+                    composerProject = project
+                    startFlow = nil
+                },
+                onClose: close
             )
             .ccTallSheet()
         case (.all, _):
             StartAllProjectsSheet(
-                context: startContext, onPick: { startFlow = .project($0) }, onClose: close
+                contexts: contexts, machineID: $startMachineID,
+                onPick: { startFlow = .project($0, machineID: $1.id) }, onClose: close
             )
             .ccTallSheet()
         }
     }
 
-    /// The card's project as the computer lists it, or as the card knows it.
-    private func startProject(for project: Project) -> StartProject {
-        startContext.projects.first { $0.path == project.id.folder }
+    /// The card's project as its computer lists it, or as the card knows it.
+    private func startProject(for project: Project, in context: StartContext) -> StartProject {
+        context.projects.first { $0.path == project.id.folder }
             ?? StartProject(
                 path: project.id.folder, name: project.name, lastUsed: Date(), lastAgent: nil,
                 gitBranch: nil, exists: true)

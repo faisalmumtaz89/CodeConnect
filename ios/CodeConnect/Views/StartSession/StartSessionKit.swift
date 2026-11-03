@@ -7,21 +7,32 @@ import SwiftUI
 /// What a start needs to know about the computer it runs on.
 @MainActor
 struct StartContext {
+    init(model: AppModel) { self.model = model }
+
     let model: AppModel
 
     var starter: SessionStarter { model.starter }
     var machineName: String { model.machineName ?? "this computer" }
     var projects: [StartProject] { (starter.projects ?? []).filter(\.exists) }
 
+    var id: String { model.machineID ?? "" }
+
     func load() {
-        if starter.projects == nil { starter.listProjects(fixtures: model.fixturesActive) }
+        guard starter.projects == nil, model.fixturesActive else { return }
+        starter.listFixtureProjects(linux: model.machineSystem == "Linux")
     }
 
     func start(_ project: StartProject, agent: StartAgent, prompt: String) -> String {
-        starter.start(
-            project: project, agent: agent, prompt: prompt, machineName: machineName,
-            fixtures: model.fixturesActive)
+        let requestID = starter.start(
+            project: project, agent: agent, prompt: prompt, machineName: machineName)
+        #if DEBUG
+            if model.fixturesActive { model.answerFixtureStart(requestID) }
+        #endif
+        return requestID
     }
+
+    /// When this computer last ran anything the phone can start again.
+    var lastUsed: Date? { projects.first?.lastUsed }
 
     /// Why an agent cannot be started on this computer, or nil when it can.
     func missingReason(_ agent: StartAgent, in project: StartProject) -> String? {
@@ -31,6 +42,49 @@ struct StartContext {
 
     func preferredAgent(_ project: StartProject) -> StartAgent? {
         project.preferredAgent(among: starter.availableAgents)
+    }
+}
+
+/// The context a choice names, or the first when it names none.
+@MainActor
+func startContext(_ contexts: [StartContext], _ id: String) -> StartContext {
+    contexts.first { $0.id == id } ?? contexts[0]
+}
+
+/// The paired computers that can start a session, as chips: the chosen one
+/// filled, each with its link's dot.
+struct StartComputerPicker: View {
+    let contexts: [StartContext]
+    @Binding var selection: String
+
+    var body: some View {
+        CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
+            ForEach(contexts, id: \.id) { context in
+                let on = context.id == selection
+                Button {
+                    selection = context.id
+                } label: {
+                    HStack(spacing: CC.space.xs) {
+                        Circle().fill(CC.color.success).frame(width: 6, height: 6)
+                        Text(context.machineName)
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(on ? CC.text.onAccent : CC.text.primary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, CC.space.sm)
+                    .frame(minHeight: CC.size.controlSm)
+                    .background(on ? CC.color.accent : CC.color.surfaceRaised, in: Capsule())
+                    .overlay {
+                        Capsule().strokeBorder(on ? Color.clear : CC.color.border, lineWidth: CC.stroke.hairline)
+                    }
+                    .ccHitTarget()
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(on ? .isSelected : [])
+                .accessibilityIdentifier("start-computer-\(context.machineName)")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -52,6 +106,8 @@ func startProjectMeta(_ project: StartProject, now: Date = Date()) -> String {
 struct StartProjectRow<Trailing: View>: View {
     let project: StartProject
     var isSelected = false
+    /// The computer it is on, where rows from several are mixed.
+    var computer: String?
     @ViewBuilder var trailing: () -> Trailing
 
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -73,6 +129,12 @@ struct StartProjectRow<Trailing: View>: View {
                     .foregroundStyle(CC.text.secondary)
                     .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
                     .truncationMode(.middle)
+                if let computer {
+                    Text("On \(computer)")
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.tertiary)
+                        .lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             trailing()
@@ -87,7 +149,7 @@ struct StartProjectRow<Trailing: View>: View {
 
 extension StartProjectRow where Trailing == EmptyView {
     init(project: StartProject, isSelected: Bool = false) {
-        self.init(project: project, isSelected: isSelected) { EmptyView() }
+        self.init(project: project, isSelected: isSelected, computer: nil) { EmptyView() }
     }
 }
 

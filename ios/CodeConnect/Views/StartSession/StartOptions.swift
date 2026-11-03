@@ -2,14 +2,16 @@ import SwiftUI
 
 // The five ways of starting a session, side by side until one is chosen. Each
 // hands back the request id of the start it sent; the fleet then opens the
-// new session's screen.
+// new session's screen. With several computers paired, each says where the
+// computer is chosen; the one last used is chosen first.
 
 // MARK: - 1 · Recents sheet
 
-/// One sheet: the recent projects, the last-used one already chosen, and the
-/// agent, the first message and Start pinned under them.
+/// One sheet: the computer, the recent projects with the last-used one already
+/// chosen, and the agent, the first message and Start pinned under them.
 struct StartRecentsSheet: View {
-    let context: StartContext
+    let contexts: [StartContext]
+    @Binding var machineID: String
     let onStarted: (String) -> Void
     let onClose: () -> Void
 
@@ -19,9 +21,16 @@ struct StartRecentsSheet: View {
     @State private var message = ""
     @Environment(\.dynamicTypeSize) private var typeSize
 
+    private var context: StartContext { startContext(contexts, machineID) }
+
     var body: some View {
         CCSheetChrome("New session", subtitle: context.machineName, onClose: onClose) {
             VStack(spacing: 0) {
+                if contexts.count > 1 {
+                    StartComputerPicker(contexts: contexts, selection: $machineID)
+                        .padding(.horizontal, CC.space.md)
+                        .padding(.top, CC.space.sm)
+                }
                 StartSearchField(text: $query)
                     .padding(.horizontal, CC.space.md)
                     .padding(.vertical, CC.space.sm)
@@ -34,8 +43,7 @@ struct StartRecentsSheet: View {
                         }
                         ForEach(startFilter(context.projects, query)) { project in
                             Button {
-                                selected = project
-                                agent = context.preferredAgent(project)
+                                choose(project)
                             } label: {
                                 StartProjectRow(project: project, isSelected: project == selected) {
                                     StartCheck(on: project == selected)
@@ -47,6 +55,7 @@ struct StartRecentsSheet: View {
                         }
                     }
                 }
+                .accessibilityIdentifier("start-list")
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !typeSize.isAccessibilitySize { startPanel }
@@ -54,17 +63,22 @@ struct StartRecentsSheet: View {
         }
         .onAppear {
             context.load()
-            if selected == nil, let first = context.projects.first {
-                selected = first
-                agent = context.preferredAgent(first)
-            }
+            if selected == nil, let first = context.projects.first { choose(first) }
+        }
+        .onChange(of: machineID) { _, _ in
+            context.load()
+            selected = nil
+            if let first = context.projects.first { choose(first) }
         }
     }
-}
 
-extension StartRecentsSheet {
+    private func choose(_ project: StartProject) {
+        selected = project
+        agent = context.preferredAgent(project)
+    }
+
     @ViewBuilder
-    fileprivate var startPanel: some View {
+    private var startPanel: some View {
         if let selected {
             CCActionBar {
                 StartAgentPicker(selection: $agent, project: selected, context: context)
@@ -82,52 +96,125 @@ extension StartRecentsSheet {
     }
 }
 
-// MARK: - 2 · Three steps
+// MARK: - 2 · Steps
 
-/// Where, then which agent, then what to say: one question a page.
+/// One question a page: which computer (when there are several), where, which
+/// agent, then what to say.
 struct StartStepsSheet: View {
-    let context: StartContext
+    let contexts: [StartContext]
+    @Binding var machineID: String
     let onStarted: (String) -> Void
     let onClose: () -> Void
 
-    @State private var step = 1
+    private enum Step { case computer, project, agent, message }
+
+    @State private var step: Step?
     @State private var query = ""
     @State private var project: StartProject?
     @State private var agent: StartAgent?
     @State private var message = ""
 
+    private var context: StartContext { startContext(contexts, machineID) }
+    private var steps: [Step] {
+        (contexts.count > 1 ? [.computer] : []) + [.project, .agent, .message]
+    }
+    private var current: Step { step ?? steps[0] }
+    private var index: Int { (steps.firstIndex(of: current) ?? 0) + 1 }
+
     private var title: String {
-        switch step {
-        case 1: return "Where?"
-        case 2: return "Which agent?"
-        default: return "First message"
+        switch current {
+        case .computer: return "Which computer?"
+        case .project: return "Where?"
+        case .agent: return "Which agent?"
+        case .message: return "First message"
         }
     }
 
     var body: some View {
-        CCSheetChrome(title, subtitle: "Step \(step) of 3", onClose: onClose) {
-            if step > 1 {
-                Button {
-                    step -= 1
-                } label: {
-                    Text("Back")
-                        .ccType(CC.type.body)
-                        .foregroundStyle(CC.text.primary)
-                        .ccHitTarget()
+        Group {
+            // The first step has nothing to go back to, and no empty slot for
+            // it: an empty trailing view still moves the close button.
+            if index > 1 {
+                CCSheetChrome(title, subtitle: "Step \(index) of \(steps.count)", onClose: onClose) {
+                    Button {
+                        step = steps[index - 2]
+                    } label: {
+                        CCIcon("arrow-left", size: 16, weight: .semibold)
+                            .foregroundStyle(CC.text.primary)
+                            .ccSheetButtonSizing()
+                            .ccSheetButton()
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Back")
+                } content: {
+                    stepContent
                 }
-                .buttonStyle(.plain)
-            }
-        } content: {
-            switch step {
-            case 1: whereStep
-            case 2: agentStep
-            default: messageStep
+            } else {
+                CCSheetChrome(title, subtitle: "Step \(index) of \(steps.count)", onClose: onClose) {
+                    stepContent
+                }
             }
         }
-        .onAppear { context.load() }
+        .onAppear { for context in contexts { context.load() } }
     }
 
-    private var whereStep: some View {
+    @ViewBuilder
+    private var stepContent: some View {
+        switch current {
+        case .computer: computerStep
+        case .project: projectStep
+        case .agent: agentStep
+        case .message: messageStep
+        }
+    }
+
+    private var computerStep: some View {
+        ScrollView {
+            VStack(spacing: CC.space.sm) {
+                ForEach(contexts, id: \.id) { candidate in
+                    Button {
+                        machineID = candidate.id
+                        step = .project
+                    } label: {
+                        HStack(spacing: CC.space.sm) {
+                            CCIcon("desktop", size: 22).foregroundStyle(CC.text.secondary)
+                            VStack(alignment: .leading, spacing: CC.space.xxs) {
+                                Text(candidate.machineName)
+                                    .ccType(CC.type.headline)
+                                    .foregroundStyle(CC.text.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text(computerSummary(candidate))
+                                    .ccType(CC.type.footnote)
+                                    .foregroundStyle(CC.text.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            CCIcon("caret-right", size: 16).foregroundStyle(CC.text.tertiary)
+                        }
+                        .padding(CC.space.md)
+                        .background(
+                            candidate.id == machineID ? CC.color.surfaceOverlay : CC.color.surface,
+                            in: RoundedRectangle(cornerRadius: CC.radius.lg))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: CC.radius.lg)
+                                .strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("start-computer-\(candidate.machineName)")
+                }
+            }
+            .padding(CC.space.md)
+        }
+    }
+
+    private func computerSummary(_ candidate: StartContext) -> String {
+        let count = candidate.projects.count
+        let used = candidate.lastUsed.map { " · last used \(Format.age(since: $0)) ago" } ?? ""
+        return "\(count) project\(count == 1 ? "" : "s")\(used)"
+    }
+
+    private var projectStep: some View {
         VStack(spacing: 0) {
             StartSearchField(text: $query)
                 .padding(.horizontal, CC.space.md)
@@ -138,7 +225,7 @@ struct StartStepsSheet: View {
                         Button {
                             project = candidate
                             agent = context.preferredAgent(candidate)
-                            step = 2
+                            step = .agent
                         } label: {
                             StartProjectRow(project: candidate) {
                                 CCIcon("caret-right", size: 16)
@@ -169,7 +256,7 @@ struct StartStepsSheet: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 CCActionBar {
-                    CCButton("Continue", fullWidth: true) { step = 3 }
+                    CCButton("Continue", fullWidth: true) { step = .message }
                         .accessibilityIdentifier("start-continue")
                 }
             }
@@ -206,8 +293,9 @@ struct StartStepsSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(CC.space.md)
-            .background(on ? CC.color.surfaceOverlay : CC.color.surface,
-                        in: RoundedRectangle(cornerRadius: CC.radius.lg))
+            .background(
+                on ? CC.color.surfaceOverlay : CC.color.surface,
+                in: RoundedRectangle(cornerRadius: CC.radius.lg))
             .overlay {
                 RoundedRectangle(cornerRadius: CC.radius.lg)
                     .strokeBorder(on ? CC.color.borderFocus : CC.color.border, lineWidth: CC.stroke.hairline)
@@ -215,6 +303,7 @@ struct StartStepsSheet: View {
         }
         .buttonStyle(.plain)
         .disabled(missing != nil)
+        .accessibilityIdentifier("start-agent-\(candidate.rawValue)")
     }
 
     @ViewBuilder
@@ -248,10 +337,12 @@ struct StartStepsSheet: View {
 // MARK: - 3 · From the card
 
 /// A project already chosen — from its card, or from the recent ones under
-/// the cards: only the agent, the message and Start are left.
+/// the cards: only the agent, the message and Start are left. The computer is
+/// the card's own, or the recent row's.
 struct StartProjectSheet: View {
     let context: StartContext
     let project: StartProject
+    var showsComputer = false
     let onStarted: (String) -> Void
     let onClose: () -> Void
 
@@ -261,13 +352,18 @@ struct StartProjectSheet: View {
     var body: some View {
         CCSheetChrome(project.name, subtitle: project.shownPath, onClose: onClose) {
             VStack(alignment: .leading, spacing: CC.space.md) {
-                Text(startProjectMeta(project))
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.secondary)
+                Text(
+                    (showsComputer ? "On \(context.machineName) · " : "") + startProjectMeta(project)
+                )
+                .ccType(CC.type.footnote)
+                .foregroundStyle(CC.text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 StartAgentPicker(selection: $agent, project: project, context: context)
                 StartMessagePill(text: $message, placeholder: "First message (optional)")
-                CCButton("Start \(agent?.displayName ?? "")", fullWidth: true,
-                         disabledReason: agent == nil ? CCDisabledReason("Choose an agent.") : nil) {
+                CCButton(
+                    "Start \(agent?.displayName ?? "")", fullWidth: true,
+                    disabledReason: agent == nil ? CCDisabledReason("Choose an agent.") : nil
+                ) {
                     guard let agent else { return }
                     onStarted(context.start(project, agent: agent, prompt: message))
                 }
@@ -279,24 +375,33 @@ struct StartProjectSheet: View {
     }
 }
 
-/// Every project, searchable, for the one not among the recent few.
+/// Every project on a computer, searchable, for the one not among the recent
+/// few; with several computers, the computer is chosen above the list.
 struct StartAllProjectsSheet: View {
-    let context: StartContext
-    let onPick: (StartProject) -> Void
+    let contexts: [StartContext]
+    @Binding var machineID: String
+    let onPick: (StartProject, StartContext) -> Void
     let onClose: () -> Void
 
     @State private var query = ""
 
+    private var context: StartContext { startContext(contexts, machineID) }
+
     var body: some View {
         CCSheetChrome("All projects", subtitle: context.machineName, onClose: onClose) {
             VStack(spacing: 0) {
+                if contexts.count > 1 {
+                    StartComputerPicker(contexts: contexts, selection: $machineID)
+                        .padding(.horizontal, CC.space.md)
+                        .padding(.top, CC.space.sm)
+                }
                 StartSearchField(text: $query)
                     .padding(.horizontal, CC.space.md)
                     .padding(.vertical, CC.space.sm)
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(startFilter(context.projects, query)) { project in
-                            Button { onPick(project) } label: { StartProjectRow(project: project) }
+                            Button { onPick(project, context) } label: { StartProjectRow(project: project) }
                                 .buttonStyle(StartRowStyle())
                                 .accessibilityIdentifier("start-project-\(project.name)")
                             CCHairline().padding(.leading, CC.space.md)
@@ -305,16 +410,17 @@ struct StartAllProjectsSheet: View {
                 }
             }
         }
-        .onAppear { context.load() }
+        .onAppear { for context in contexts { context.load() } }
     }
 }
 
-/// The recent projects with nothing running, under the fleet's cards, each
-/// one tap from its start sheet, and the door to all of them.
+/// The recent projects with nothing running, under the fleet's cards, from
+/// every computer, each one tap from its start sheet, and the door to all.
 struct StartRecentSection: View {
-    let projects: [StartProject]
+    let projects: [(project: StartProject, context: StartContext)]
     let total: Int
-    let onPick: (StartProject) -> Void
+    let showsComputer: Bool
+    let onPick: (StartProject, StartContext) -> Void
     let onAll: () -> Void
 
     var body: some View {
@@ -325,16 +431,19 @@ struct StartRecentSection: View {
                 .padding(.bottom, CC.space.xs)
             CCCard(padding: 0) {
                 VStack(spacing: 0) {
-                    ForEach(projects) { project in
-                        Button { onPick(project) } label: {
-                            StartProjectRow(project: project) {
+                    ForEach(projects, id: \.project.id) { item in
+                        Button { onPick(item.project, item.context) } label: {
+                            StartProjectRow(
+                                project: item.project,
+                                computer: showsComputer ? item.context.machineName : nil
+                            ) {
                                 CCIcon("plus", size: 18)
                                     .foregroundStyle(CC.text.primary)
                                     .ccSheetButton()
                             }
                         }
                         .buttonStyle(StartRowStyle())
-                        .accessibilityIdentifier("start-recent-\(project.name)")
+                        .accessibilityIdentifier("start-recent-\(item.project.name)")
                         CCHairline()
                     }
                     Button(action: onAll) {
@@ -360,10 +469,12 @@ struct StartRecentSection: View {
 
 // MARK: - 4 · Message first
 
-/// A composer at the foot of the fleet: say what to do, and sending it starts
-/// the agent in the project on its chip.
+/// A composer at the foot of the fleet, sharing one surface with the Deck
+/// bar: say what to do, and sending it starts the agent in the project on its
+/// chip, on the computer on its chip.
 struct StartComposerBar: View {
-    let context: StartContext
+    let contexts: [StartContext]
+    @Binding var machineID: String
     @Binding var project: StartProject?
     let onPickProject: () -> Void
     let onStarted: (String) -> Void
@@ -371,21 +482,40 @@ struct StartComposerBar: View {
     @State private var agent: StartAgent?
     @State private var message = ""
 
+    private var context: StartContext { startContext(contexts, machineID) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: CC.space.xs) {
             if let project {
-                HStack(spacing: CC.space.xs) {
-                    chip(project.name, identifier: "start-chip-project", action: onPickProject)
-                    Menu {
-                        ForEach(StartAgent.allCases) { candidate in
-                            Button(candidate.displayName) { agent = candidate }
-                                .disabled(context.missingReason(candidate, in: project) != nil)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: CC.space.xs) {
+                        if contexts.count > 1 {
+                            Menu {
+                                ForEach(contexts, id: \.id) { candidate in
+                                    Button(candidate.machineName) { machineID = candidate.id }
+                                }
+                            } label: {
+                                chipFace(context.machineName, icon: "desktop")
+                            }
+                            .accessibilityIdentifier("start-chip-computer")
                         }
-                    } label: {
-                        chipFace(agent?.displayName ?? "Agent")
+                        Button(action: onPickProject) { chipFace(project.name, icon: nil) }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("start-chip-project")
+                        Menu {
+                            ForEach(StartAgent.allCases) { candidate in
+                                if let missing = context.missingReason(candidate, in: project) {
+                                    Button("\(candidate.displayName) — \(missing)") {}
+                                        .disabled(true)
+                                } else {
+                                    Button(candidate.displayName) { agent = candidate }
+                                }
+                            }
+                        } label: {
+                            chipFace(agent?.displayName ?? "Agent", icon: nil)
+                        }
+                        .accessibilityIdentifier("start-chip-agent")
                     }
-                    .accessibilityIdentifier("start-chip-agent")
-                    Spacer(minLength: 0)
                 }
                 StartMessagePill(
                     text: $message,
@@ -399,19 +529,18 @@ struct StartComposerBar: View {
             }
         }
         .padding(.horizontal, CC.space.md)
-        .padding(.vertical, CC.space.xs)
-        .background(CC.color.bg)
+        .padding(.top, CC.space.sm)
+        .padding(.bottom, CC.space.xs)
         .onChange(of: project, initial: true) { _, new in agent = new.flatMap(context.preferredAgent) }
+        .onChange(of: machineID) { _, _ in
+            context.load()
+            project = context.projects.first
+        }
     }
 
-    private func chip(_ title: String, identifier: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { chipFace(title) }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier(identifier)
-    }
-
-    private func chipFace(_ title: String) -> some View {
+    private func chipFace(_ title: String, icon: String?) -> some View {
         HStack(spacing: CC.space.xxs) {
+            if let icon { CCIcon(icon, size: 14).foregroundStyle(CC.text.secondary) }
             Text(title)
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.primary)
@@ -420,7 +549,7 @@ struct StartComposerBar: View {
         }
         .padding(.horizontal, CC.space.sm)
         .frame(minHeight: CC.size.controlSm)
-        .background(CC.color.surfaceRaised, in: Capsule())
+        .background(CC.color.surfaceOverlay, in: Capsule())
         .overlay { Capsule().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
         .ccHitTarget()
     }
@@ -454,19 +583,17 @@ struct StartSearchDoor: View {
     }
 }
 
-/// Type a few letters of the project; each result starts an installed agent
-/// with one tap. The first message is typed in the session.
+/// Type a few letters of the project; under each result, one button per
+/// installed agent names exactly what it starts. Every computer's projects are
+/// searched at once, under their computer's name. The first message is typed
+/// in the session.
 struct StartSearchScreen: View {
-    let context: StartContext
+    let contexts: [StartContext]
     let onStarted: (String) -> Void
     let onClose: () -> Void
 
     @State private var query = ""
     @FocusState private var searching: Bool
-
-    private var installed: [StartAgent] {
-        StartAgent.allCases.filter { context.starter.availableAgents.contains($0) }
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -483,43 +610,29 @@ struct StartSearchScreen: View {
             }
             .padding(.horizontal, CC.space.md)
             .padding(.vertical, CC.space.sm)
-            if let missing = StartAgent.allCases.first(where: { !installed.contains($0) }) {
-                Text("\(missing.displayName) isn’t installed on \(context.machineName).")
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.tertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, CC.space.md)
-                    .padding(.bottom, CC.space.xs)
-            }
             CCHairline()
             ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(startFilter(context.projects, query)) { project in
-                        StartProjectRow(project: project) {
-                            VStack(spacing: CC.space.xs) {
-                                ForEach(installed) { agent in
-                                    Button {
-                                        onStarted(context.start(project, agent: agent, prompt: ""))
-                                    } label: {
-                                        Text(agent == .claude ? "Claude" : "Codex")
-                                            .ccType(CC.type.footnote)
-                                            .foregroundStyle(
-                                                agent == context.preferredAgent(project)
-                                                    ? CC.text.onAccent : CC.text.primary)
-                                            .padding(.horizontal, CC.space.sm)
-                                            .frame(minHeight: CC.size.controlSm)
-                                            .background(
-                                                agent == context.preferredAgent(project)
-                                                    ? CC.color.accent : CC.color.surfaceRaised,
-                                                in: Capsule())
-                                            .ccHitTarget()
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityIdentifier("start-\(agent.rawValue)-\(project.name)")
-                                }
-                            }
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(contexts, id: \.id) { context in
+                        let results = startFilter(context.projects, query)
+                        if contexts.count > 1, !results.isEmpty {
+                            CCSectionHeader(context.machineName)
+                                .padding(.horizontal, CC.space.md)
+                                .frame(minHeight: CC.space.xxl)
                         }
-                        CCHairline().padding(.leading, CC.space.md)
+                        if let missing = StartAgent.allCases.first(where: {
+                            !context.starter.availableAgents.contains($0)
+                        }), !results.isEmpty {
+                            Text("\(missing.displayName) isn’t installed on \(context.machineName).")
+                                .ccType(CC.type.footnote)
+                                .foregroundStyle(CC.text.tertiary)
+                                .padding(.horizontal, CC.space.md)
+                                .padding(.vertical, CC.space.xs)
+                        }
+                        ForEach(results) { project in
+                            result(project, context)
+                            CCHairline().padding(.leading, CC.space.md)
+                        }
                     }
                 }
             }
@@ -527,8 +640,42 @@ struct StartSearchScreen: View {
         }
         .background(CC.color.bg)
         .onAppear {
-            context.load()
+            for context in contexts { context.load() }
             searching = true
+        }
+    }
+
+    private func result(_ project: StartProject, _ context: StartContext) -> some View {
+        let installed = StartAgent.allCases.filter { context.starter.availableAgents.contains($0) }
+        let preferred = context.preferredAgent(project)
+        return VStack(alignment: .leading, spacing: 0) {
+            StartProjectRow(project: project)
+            CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
+                ForEach(installed) { agent in
+                    Button {
+                        onStarted(context.start(project, agent: agent, prompt: ""))
+                    } label: {
+                        Text("Start \(agent.displayName)")
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(agent == preferred ? CC.text.onAccent : CC.text.primary)
+                            .padding(.horizontal, CC.space.sm)
+                            .frame(minHeight: CC.size.controlSm)
+                            .background(
+                                agent == preferred ? CC.color.accent : CC.color.surfaceRaised,
+                                in: Capsule())
+                            .overlay {
+                                Capsule().strokeBorder(
+                                    agent == preferred ? Color.clear : CC.color.border,
+                                    lineWidth: CC.stroke.hairline)
+                            }
+                            .ccHitTarget()
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("start-\(agent.rawValue)-\(project.name)")
+                }
+            }
+            .padding(.horizontal, CC.space.md)
+            .padding(.bottom, CC.space.sm)
         }
     }
 }

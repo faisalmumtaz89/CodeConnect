@@ -5,8 +5,9 @@ import SwiftUI
 /// why it did not start and what to do about it.
 struct StartingSessionView: View {
     let requestID: String
-    /// The session is live: show its real screen.
-    let onLive: (String) -> Void
+    /// The session is live: show its real screen, ready to type into when
+    /// no first message was sent.
+    let onLive: (_ key: String, _ focusComposer: Bool) -> Void
     /// Back to choosing, from a start that failed.
     let onChooseAgain: () -> Void
 
@@ -35,7 +36,7 @@ struct StartingSessionView: View {
                 ToolbarItem(placement: .principal) { StartBarTitle(project: start.project) }
             }
         }
-        .onChange(of: liveKey) { _, key in if let key { onLive(key) } }
+        .onChange(of: liveKey) { _, key in if let key { onLive(key, start?.prompt == nil) } }
     }
 
     /// The new session's key once it is in the fleet with its first event.
