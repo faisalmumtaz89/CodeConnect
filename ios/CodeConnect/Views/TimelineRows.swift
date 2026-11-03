@@ -332,7 +332,6 @@ struct AgentMessageRow: View {
                         expanded.toggle()
                     }
                 }
-                .padding(.leading, -CC.space.sm)
                 // The same on both sides, and the same in both states: the
                 // control reads as belonging to the message rather than
                 // crowding whatever it follows.

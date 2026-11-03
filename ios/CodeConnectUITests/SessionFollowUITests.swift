@@ -236,6 +236,33 @@ final class SessionFollowUITests: XCTestCase {
                 + "not leave it wherever the clamp dropped it")
     }
 
+    /// The expander is outlined, so its outline is the edge the eye lines up:
+    /// it starts on the message's left edge, like every other row's content.
+    func testShowMoreStartsOnTheMessagesLeftEdge() {
+        let app = launchSession()
+        let timeline = app.collectionViews["session-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 20))
+        let showMore = app.buttons["Show more"]
+        let window = app.windows.firstMatch.frame
+        var attempts = 0
+        while attempts < 8 {
+            if showMore.exists && showMore.isHittable && showMore.frame.minY >= window.minY
+                && showMore.frame.maxY <= window.maxY
+            {
+                break
+            }
+            drag(timeline, fromY: 0.25, toY: 0.7)
+            attempts += 1
+        }
+        XCTAssertTrue(showMore.isHittable)
+        let preview = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Soak status")
+        ).firstMatch
+        XCTAssertTrue(preview.exists, "the collapsed preview must be queryable")
+        XCTAssertEqual(showMore.frame.minX, preview.frame.minX, accuracy: 1,
+            "Show more must start where the message's text starts")
+    }
+
     /// Measures the gap above the expander in both states and prints both.
     /// Not an assertion about a number nobody has measured — an instrument.
     func testMeasureTheGapAboveTheExpanderInBothStates() {
