@@ -25,7 +25,7 @@ enum CCVoiceButtonPhase: Equatable {
 ///
 /// One control in one position doing the compose bar's whole job, so the pill
 /// never grows a second button for the thumb to arbitrate at 2am. The disc is
-/// drawn at 36pt so it sits inside the 44pt pill, and the button still answers
+/// drawn at 36pt so it sits inside the 52pt pill, and the button still answers
 /// to the full 44pt circle around it.
 ///
 /// The face is `accent` in every live phase, the kit's primary signature.
@@ -111,11 +111,11 @@ struct CCVoiceButton: View {
                 maxSize: Self.glyphCap)
         case .send:
             CCIcon(
-                "arrow.up", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
+                "arrow-up", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
                 maxSize: Self.glyphCap)
         case .stop:
             CCIcon(
-                "stop.fill", size: Self.stopGlyph, weight: .semibold, relativeTo: .body,
+                "stop-fill", size: Self.stopGlyph, weight: .semibold, relativeTo: .body,
                 maxSize: Self.glyphCap)
         case .sending:
             // Inherits `onAccent`, so the ring is black on the white face
@@ -123,7 +123,7 @@ struct CCVoiceButton: View {
             CCProgressRing(inheritingSize: 13)
         case .sent:
             CCIcon(
-                "checkmark", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
+                "check", size: Self.faceGlyph, weight: .semibold, relativeTo: .body,
                 maxSize: Self.glyphCap)
         }
     }
@@ -131,9 +131,9 @@ struct CCVoiceButton: View {
     /// The one universal meaning of a red ring around a control: the mic is
     /// hot. Same breathing rhythm as a live `CCStatusDot` (1.6s, ease-in-out),
     /// collapsing to a steady ring under Reduce Motion — the *presence* of the
-    /// ring carries the fact; the breathing is only emphasis. It runs in the
-    /// 4pt between the 36pt disc and the 44pt end of the pill, 1pt clear of
-    /// each, so it never crosses the pill's edge.
+    /// ring carries the fact; the breathing is only emphasis. It runs 1pt
+    /// clear of the 36pt disc, inside the 8pt between the disc and the pill's
+    /// edge, so it never crosses that edge.
     private var recordingRing: some View {
         Circle()
             .stroke(

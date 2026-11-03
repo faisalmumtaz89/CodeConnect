@@ -8,15 +8,15 @@ import UIKit
 //  objective." Everything in this file exists to make a monospace grid readable
 //  on a 393pt screen at 2am, so the rules are tighter than elsewhere:
 //
-//    * The change signal is three parts — a 2pt change bar, a marker glyph and
-//      a **6%** row tint. Not a 12% fill: over a full-width mono block 12% reads
-//      as a highlighter and after two screens you stop seeing it.
+//    * The change signal is two parts, as in VS Code: a `+` / `−` marker
+//      glyph, so the kind of change never rests on red and green alone, and a
+//      **12%** tint across the whole row.
 //    * The *background* carries the word-level diff, never the foreground. Code
 //      must not become harder to read in the act of being highlighted.
 //    * One measurement, handed down. A monospaced font has a single advance, so
 //      the wrap column count is arithmetic rather than a guess — and because
-//      every row shares one `CCDiffMetrics`, the text and its continuation
-//      glyphs can never be laid out against two different widths.
+//      every row shares one `CCDiffMetrics`, the text and its hanging
+//      continuations can never be laid out against two different widths.
 // =============================================================================
 
 // MARK: - Metrics
@@ -194,8 +194,11 @@ enum CCDiffWordHighlight {
                 index += 1
             }
             for offset in 0..<min(deletions.count, additions.count) {
+                // On the text as the row draws it, so a range lands on the
+                // characters it names in a tab-indented file too.
                 let pair = ranges(
-                    deletion: deletions[offset].text, addition: additions[offset].text)
+                    deletion: DiffLineWrap.expandingTabs(deletions[offset].text),
+                    addition: DiffLineWrap.expandingTabs(additions[offset].text))
                 if !pair.deletion.isEmpty { result[deletions[offset].id] = pair.deletion }
                 if !pair.addition.isEmpty { result[additions[offset].id] = pair.addition }
             }
@@ -206,8 +209,8 @@ enum CCDiffWordHighlight {
 
 // MARK: - Line
 
-/// One diff line: gutter numbers, a change bar, a 6% tint, word-level
-/// highlighting and soft wrapping that says it wrapped.
+/// One diff line: gutter numbers, a marker, a 12% tint, word-level
+/// highlighting, and soft wrapping that hangs at the line's own indent.
 struct CCDiffRow: View {
     let line: UnifiedDiff.Line
     let metrics: CCDiffMetrics
@@ -227,14 +230,6 @@ struct CCDiffRow: View {
                     .foregroundStyle(CC.text.disabled)
                     .frame(width: metrics.gutterWidth, alignment: .trailing)
                     .padding(.trailing, CC.space.xxs)
-
-                // The rule that makes the grid read as a grid. Drawn per row so
-                // it runs unbroken down the whole hunk, including through the
-                // fold rows.
-                Rectangle()
-                    .fill(CC.color.border)
-                    .frame(width: CC.stroke.hairline)
-                    .frame(maxHeight: .infinity)
             }
 
             marker
@@ -248,36 +243,35 @@ struct CCDiffRow: View {
             .padding(.leading, CC.space.xxs)
         }
         .fixedSize(horizontal: false, vertical: true)
-        .background(rowTint)
-        .textSelection(.enabled)
+        // In a rectangle, said out loud: a bare colour fills the container's
+        // shape, and inside the hunk's rounded card that rounded every row's
+        // ends, a notch at each seam down both edges.
+        .background(rowTint, in: Rectangle())
+        // The line as it is in the file, real tabs and every wrapped piece,
+        // not as drawn: selecting the drawn text would copy expanded tabs and
+        // only the piece that was pressed.
+        .contextMenu {
+            Button { CCPasteboard.copy(line.text) } label: {
+                Label { Text("Copy line") } icon: { Image("copy") }
+            }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
+        .accessibilityAction(named: "Copy line") { CCPasteboard.copy(line.text) }
     }
 
     // MARK: Marker column
 
     private var marker: some View {
-        // `.topLeading`, not `.leading`: the change bar runs the full height of a
-        // wrapped row, and a centred glyph beside it drifts down to sit beside
-        // the *continuation* — measured on a two-line addition, where the `+`
-        // landed next to `↳load, deadline:` and the first line read as context.
-        // The marker belongs to the line, and the line starts at the top.
-        ZStack(alignment: .topLeading) {
-            if let tone = changeTone {
-                // The change bar. 2pt, full row height, and the part that
-                // survives being glanced at.
-                Rectangle()
-                    .fill(tone)
-                    .frame(width: 2)
-                    .frame(maxHeight: .infinity)
-            }
-            Text(markerGlyph)
-                .font(.system(size: fontSize, design: .monospaced))
-                .foregroundStyle(changeTone ?? CC.text.disabled)
-                .frame(maxWidth: .infinity)
-        }
-        .frame(width: metrics.markerWidth)
-        .accessibilityHidden(true)
+        // At the top, not centred: a centred glyph on a wrapped row drifts down
+        // beside the *continuation*, measured on a two-line addition where the
+        // `+` landed next to `load, deadline:` and the first line read as
+        // context. The marker belongs to the line, and the line starts at the top.
+        Text(markerGlyph)
+            .font(.system(size: fontSize, design: .monospaced))
+            .foregroundStyle(changeTone ?? CC.text.disabled)
+            .frame(width: metrics.markerWidth, alignment: .top)
+            .accessibilityHidden(true)
     }
 
     // MARK: Text
@@ -285,7 +279,12 @@ struct CCDiffRow: View {
     /// What is actually laid out: in `inline` gutter mode the line number is
     /// prefixed into the string so it wraps with it, rather than sitting in a
     /// column that mode exists to delete.
-    private var renderedText: String { numberPrefix + line.text }
+    private var renderedText: String { numberPrefix + drawnText }
+
+    /// The line as drawn: tabs at 4-column stops, so the wrap column, the
+    /// hanging indent and the word highlights count the columns the reader
+    /// sees. Copying a line or a hunk keeps its real tabs.
+    private var drawnText: String { DiffLineWrap.expandingTabs(line.text) }
 
     private var numberPrefix: String {
         guard metrics.gutter == .inline else { return "" }
@@ -295,18 +294,19 @@ struct CCDiffRow: View {
 
     /// One wrapped run, split into the parts that are drawn in different inks.
     private struct Segment: Identifiable {
-        /// Wrap index. `0` is the first line; every other one wears a `↳`.
+        /// Wrap index. `0` is the first line; every other one hangs.
         let id: Int
         /// The inline line number, when there is one and this is where it fell.
         let prefix: String
         let code: String
-        /// Where `code` starts inside `line.text`, so a word-level highlight
+        /// Where `code` starts inside `drawnText`, so a word-level highlight
         /// computed against the whole line can be placed on this run.
         let codeStart: Int
     }
 
     private var segments: [Segment] {
-        let wrapped = DiffLineWrap.wrap(renderedText, columns: metrics.columns)
+        let wrapped = DiffLineWrap.wrap(
+            renderedText, columns: metrics.columns, continuationIndent: continuationIndent)
         var out: [Segment] = []
         var consumed = 0
         for (index, piece) in wrapped.enumerated() {
@@ -321,6 +321,14 @@ struct CCDiffRow: View {
             consumed += characters.count
         }
         return out
+    }
+
+    /// Columns a continuation gives up: it hangs where the line's code starts,
+    /// past an inline number and the line's own leading whitespace, up to half
+    /// the line, so a wrapped line reads as one statement.
+    private var continuationIndent: Int {
+        let leading = drawnText.prefix { $0 == " " }.count
+        return min(numberPrefix.count + leading, metrics.columns / 2)
     }
 
     private var gutterText: String {
@@ -347,7 +355,7 @@ struct CCDiffRow: View {
         }
     }
 
-    /// 6% over `bg`, pinned as a literal in DesignKit so a row tint cannot drift
+    /// 12% over `bg`, pinned as a literal in DesignKit so a row tint cannot drift
     /// with an opacity change somewhere.
     private var rowTint: Color {
         switch line.kind {
@@ -379,19 +387,8 @@ struct CCDiffRow: View {
     private func segmentView(_ segment: Segment) -> some View {
         HStack(alignment: .top, spacing: 0) {
             if segment.id > 0 {
-                Text("↳")
-                    .font(mono)
-                    // `textTertiary`, not `textDisabled`. `textDisabled` is
-                    // reserved for genuinely inactive text and the continuation
-                    // mark is not that: a gutter *number* is a coordinate you
-                    // look up, but this glyph is the only thing saying the line
-                    // above did not end where it stopped. At 2.54:1 it was
-                    // dimmer than the code it was qualifying.
-                    .foregroundStyle(CC.text.tertiary)
-                    .fixedSize()
-                    // Exactly one advance, so a wrapped line's code column lines
-                    // up with the column above it.
-                    .frame(width: metrics.advance, alignment: .leading)
+                Color.clear
+                    .frame(width: metrics.advance * CGFloat(continuationIndent), height: 0)
             }
             if !segment.prefix.isEmpty {
                 Text(segment.prefix)
@@ -486,20 +483,19 @@ struct CCHunkActions {
 
 // MARK: - Hunk header
 
-/// `@@ -12,7 +12,9 @@ func send(_ text: String)` — 28pt, `surfaceRaised`, a
-/// hairline beneath, and the machine part separated from the human part.
+/// `@@ -12,7 +12,9 @@ func send(_ text: String)` — 28pt, a quiet separator
+/// between two hairlines, and the machine part separated from the human part.
 ///
 /// **The header is the hunk's control, and the gesture lives here because here
 /// is the only place it can survive.** The intended gesture was a 0.4s
 /// long-press anywhere in a hunk — the thesis of the whole Diff surface;
 /// measured, 1.2s presses at three positions inside three hunks at both type
 /// sizes produced no menu and no lift. A `.contextMenu` on the hunk container
-/// cannot win — every `CCDiffRow` inside it carries `.textSelection(.enabled)`,
-/// and text selection owns the long press. That is not a bug to be tuned; it is
-/// two features asking for one gesture on one rectangle.
+/// cannot win — every `CCDiffRow` inside it owns its long press, for Copy line.
+/// That is not a bug to be tuned; it is two features asking for one gesture on
+/// one rectangle.
 ///
-/// So the gesture moved to the one strip of the hunk that has no selectable text
-/// in it. The header carries the actions as a menu — tap or press-and-hold, both
+/// So the gesture moved to the one strip of the hunk that is not a row. The header carries the actions as a menu — tap or press-and-hold, both
 /// open it — which also hands Switch Control and VoiceOver a real button where
 /// before they had a long-press they could not perform.
 ///
@@ -597,7 +593,7 @@ struct CCHunkHeader<Actions: View>: View {
             if let context = contextPart {
                 Text(context)
                     .font(.system(size: fontSize - 1, design: .monospaced))
-                    .foregroundStyle(CC.text.secondary)
+                    .foregroundStyle(CC.text.tertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -607,7 +603,8 @@ struct CCHunkHeader<Actions: View>: View {
         .padding(.horizontal, CC.space.xs)
         .frame(minHeight: bandHeight, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(CC.color.surfaceRaised)
+        // A separator, not a band: the page's own ground between two hairlines.
+        .overlay(alignment: .top) { CCHairline() }
         .overlay(alignment: .bottom) { CCHairline() }
     }
 
@@ -622,9 +619,10 @@ struct CCHunkHeader<Actions: View>: View {
     /// they were sitting next to. Reachability is not what the glyph was
     /// carrying anyway; the 44pt band is.
     private var ellipsis: some View {
-        Image(systemName: "ellipsis")
-            .font(.system(size: fontSize, weight: .semibold))
-            .symbolRenderingMode(.monochrome)
+        Image(CCIcon.asset("dots-three", weight: .semibold))
+            .resizable()
+            .scaledToFit()
+            .frame(width: fontSize * CCIcon.artScale, height: fontSize * CCIcon.artScale)
             .foregroundStyle(CC.text.tertiary)
             .accessibilityHidden(true)
     }
@@ -633,17 +631,17 @@ struct CCHunkHeader<Actions: View>: View {
     private func menuItems(_ actions: CCHunkActions) -> some View {
         if let comment = actions.comment {
             Button(action: comment) {
-                Label("Comment to agent", systemImage: "text.bubble")
+                Label { Text("Comment to agent") } icon: { Image("chat-text") }
             }
         }
         if let copyHunk = actions.copyHunk {
             Button(action: copyHunk) {
-                Label("Copy hunk", systemImage: "doc.on.doc")
+                Label { Text("Copy hunk") } icon: { Image("copy") }
             }
         }
         if let copyPath = actions.copyPath {
             Button(action: copyPath) {
-                Label("Copy file path", systemImage: "doc.on.doc")
+                Label { Text("Copy file path") } icon: { Image("copy") }
             }
         }
     }
@@ -702,6 +700,9 @@ extension CCHunkHeader where Actions == EmptyView {
 /// signature for controls whose state the app actually knows.
 struct CCDiffFileChip: View {
     let file: UnifiedDiff.FileDiff
+    /// The widest the chip may be: the strip's own width, so the counts stay on
+    /// screen and a long name gives way, from its middle, instead.
+    var maxWidth: CGFloat? = nil
     let action: () -> Void
 
     var body: some View {
@@ -709,21 +710,26 @@ struct CCDiffFileChip: View {
             // No haptic: scrolling somewhere is not a commitment.
             action()
         } label: {
-            HStack(spacing: CC.space.xxs + 2) {
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 2) {
                 CCIcon(file.status.symbol, size: 10, weight: .semibold, relativeTo: .caption)
                     .foregroundStyle(CC.text.tertiary)
+                    .ccMark(beside: CC.type.monoSmall)
                 Text(file.shortName)
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.secondary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
                 Text("+\(file.additions)")
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.color.success)
+                    .fixedSize()
                 Text("−\(file.deletions)")
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.color.danger)
+                    .fixedSize()
             }
             .padding(.horizontal, CC.space.sm)
+            .frame(maxWidth: maxWidth)
             // The floor is capped (`chipMaxScale`); the content still grows the
             // chip wherever it actually needs to.
             .frame(minHeight: min(chipHeight, CC.size.chip * CC.size.chipMaxScale))
@@ -768,9 +774,10 @@ struct CCDiffFileHeader: View {
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        HStack(spacing: CC.space.xs) {
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
             CCIcon(file.status.symbol, size: 14, weight: .medium, relativeTo: .footnote)
                 .foregroundStyle(CC.text.tertiary)
+                .ccMark(beside: CC.type.monoSmall)
 
             path
                 .ccType(CC.type.monoSmall)
@@ -850,7 +857,8 @@ struct CCDiffFileHeader: View {
 
 // MARK: - Fold row
 
-/// `⋯  6 unchanged lines … Show`. 44pt, not the ~26pt it replaced: this is a
+/// `⋯ 6 unchanged lines`, one quiet row where the code starts. A tap
+/// anywhere on it shows them. 44pt, not the ~26pt it replaced: this is a
 /// control, and a control is 44pt.
 struct CCFoldRow: View {
     let count: Int
@@ -859,47 +867,33 @@ struct CCFoldRow: View {
 
     var body: some View {
         Button(action: expand) {
-            HStack(spacing: 0) {
-                if metrics.gutter != .inline {
-                    Text("⋯")
-                        .font(.system(size: metrics.fontSize, design: .monospaced))
-                        // The fold's own mark, in the gutter but **not** a
-                        // gutter number: it stands in for the lines that are not
-                        // being shown, on a control the reader is meant to find
-                        // and press. `textDisabled` is for line numbers, the cwd
-                        // breadcrumb, the `·` between a project and its start, and disabled-button
-                        // labels — inactive things, which this is not.
-                        .foregroundStyle(CC.text.tertiary)
-                        .frame(width: metrics.gutterWidth, alignment: .trailing)
-                        .padding(.trailing, CC.space.xxs)
-                    // Keeps the grid rule continuous through the fold.
-                    Rectangle()
-                        .fill(CC.color.border)
-                        .frame(width: CC.stroke.hairline)
-                        .frame(maxHeight: .infinity)
-                }
-
-                HStack(spacing: CC.space.xs) {
-                    Text(label)
-                        .ccType(CC.type.monoSmall)
-                        .foregroundStyle(CC.text.tertiary)
-                    Spacer(minLength: CC.space.xs)
-                    Text("Show")
-                        .ccType(CC.type.badgeLabel)
-                        .foregroundStyle(CC.text.secondary)
-                }
-                .padding(.horizontal, CC.space.xs)
-            }
-            .frame(minHeight: CC.size.hitTarget)
-            .contentShape(Rectangle())
+            // The grid's own size, as the hunk header is: the diff does not
+            // ride Dynamic Type, and a label that did stood over the code it
+            // folds, broken into fragments at AX5.
+            Text(label)
+                .font(.system(size: metrics.fontSize - 1, design: .monospaced))
+                .foregroundStyle(CC.text.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, codeInset)
+                .padding(.trailing, CC.space.xs)
+                .padding(.vertical, CC.space.xxs)
+                .frame(minHeight: CC.size.hitTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(CCFoldRowStyle())
         .accessibilityLabel("\(count) unchanged line\(count == 1 ? "" : "s") hidden")
         .accessibilityHint("Shows them")
     }
 
+    /// Where a row's code starts, so the label reads as a line of the file.
+    private var codeInset: CGFloat {
+        let gutter = metrics.gutter == .inline ? 0 : metrics.gutterWidth + CC.space.xxs
+        return gutter + metrics.markerWidth + CC.space.xxs
+    }
+
     private var label: String {
-        count == 1 ? "1 unchanged line" : "\(count) unchanged lines"
+        count == 1 ? "⋯ 1 unchanged line" : "⋯ \(count) unchanged lines"
     }
 }
 
@@ -907,31 +901,46 @@ private struct CCFoldRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             // Rows lighten one step, they do not scale.
-            .background(configuration.isPressed ? CC.color.surfaceRaised : CC.color.surface)
+            .background(
+                configuration.isPressed ? CC.color.surfaceRaised : CC.color.surface, in: Rectangle())
             .ccAnimation(CC.motion.micro, value: configuration.isPressed)
     }
 }
 
 // MARK: - Wrapping
 
-/// Wrapping done here rather than by the layout engine, so the continuation
-/// glyph can be put exactly where the break is. Only correct for a monospaced
+/// Wrapping done here rather than by the layout engine, so a continuation's
+/// indent, or `CCMonoBlock`'s `↳`, can be put exactly where the break is. Only correct for a monospaced
 /// font, which is the only font the grid uses.
 enum DiffLineWrap {
-    static func wrap(_ text: String, columns: Int) -> [String] {
+    /// Tabs replaced by spaces to the next 4-column stop, VS Code's default.
+    static func expandingTabs(_ text: String) -> String {
+        guard text.contains("\t") else { return text }
+        var out = ""
+        for character in text {
+            if character == "\t" {
+                out += String(repeating: " ", count: 4 - out.count % 4)
+            } else {
+                out.append(character)
+            }
+        }
+        return out
+    }
+
+    static func wrap(_ text: String, columns: Int, continuationIndent: Int = 1) -> [String] {
         guard columns > 1 else { return [text] }
         guard text.count > columns else { return [text.isEmpty ? " " : text] }
         var segments: [String] = []
         var remainder = Substring(text)
-        // The first line gets the full width; continuations lose one column to
-        // the `↳`.
+        // The first line gets the full width; continuations lose the columns
+        // their `↳` or hanging indent takes.
         var width = columns
         while !remainder.isEmpty {
             let take = min(width, remainder.count)
             let index = remainder.index(remainder.startIndex, offsetBy: take)
             segments.append(String(remainder[..<index]))
             remainder = remainder[index...]
-            width = max(1, columns - 1)
+            width = max(1, columns - continuationIndent)
         }
         return segments
     }

@@ -86,29 +86,25 @@ struct CCStepRow<Accessory: View, Detail: View>: View {
                 // Everything moves to one left edge instead.
                 VStack(alignment: .leading, spacing: CC.space.xs) {
                     HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-                        badge
+                        badge.ccMark(beside: CC.type.fieldLabel)
                         titleLabel
                     }
                     accessory()
                     stepBody
                 }
             } else {
-                HStack(alignment: .top, spacing: CC.space.sm) {
+                HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
                     badge
                         // The gutter column. See the note above: 8pt of layout,
                         // 20pt of graphic, centred.
                         .frame(width: CC.size.dot)
-                        // **A fixed line box, not a minimum.** With `minHeight` the
-                        // frame grew to the badge's own 20pt while the title's line
-                        // is about 14, so the circle's centre sat ~3pt below the
-                        // centre of the words it numbers, and every step in a card
-                        // repeated the error down the column. A fixed height centres
-                        // the badge on the title's line and lets the circle overhang
-                        // it symmetrically, which is what a marginal number does.
-                        .frame(height: titleLine)
+                        // Centred on the middle of the title's first line, the
+                        // circle overhanging it symmetrically, which is what a
+                        // marginal number does.
+                        .ccMark(beside: CC.type.fieldLabel)
 
                     VStack(alignment: .leading, spacing: CC.space.xs) {
-                        HStack(spacing: CC.space.xs) {
+                        HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
                             titleLabel
                             // The accessory belongs on the row's **trailing
                             // edge**, not tucked against the title. Without the
@@ -189,18 +185,13 @@ struct CCStepRow<Accessory: View, Detail: View>: View {
         (try? AttributedString(markdown: message)) ?? AttributedString(message)
     }
 
-    /// Tracks the title's own line height so the badge stays beside the *title*
-    /// on a step whose body runs to four lines, rather than drifting to the
-    /// vertical centre of the whole block.
-    @ScaledMetric(relativeTo: .caption) private var titleLine: CGFloat = 14
-
     /// The badge scales with the digit inside it. A fixed 20pt circle around a
     /// glyph that grows is a glyph that escapes its circle — `ccGlyphContainer`
     /// is the one place that rule is implemented.
     private var badge: some View {
         Group {
             if isComplete {
-                CCIcon("checkmark", size: 11, weight: .bold, relativeTo: .caption)
+                CCIcon("check", size: 11, weight: .bold, relativeTo: .caption)
                     .foregroundStyle(CC.color.success)
             } else {
                 Text("\(index)")

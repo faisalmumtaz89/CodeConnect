@@ -375,25 +375,41 @@ struct RenderDriver {
         try require(app.navigationBars["Settings"], "the Settings screen")
     }
 
-    /// Link health, from the session header's computer name. A fixture's
+    /// Link health, under the computer in the session bar's menu. A fixture's
     /// computer has no screen of its own in Settings to open it from.
     func openLinkHealth(_ app: XCUIApplication) throws {
         try openFirstSession(app)
+        try openSessionMenu(app)
         let link = app.buttons["Link health"].firstMatch
-        try require(link, "the session header's link")
+        try require(link, "Link health in the session bar's menu")
         link.tap()
         // The sheet is `CCSheetChrome`, so there is no navigation bar to wait
         // on — the measured sentence is the signal.
         try require(element(containing: "daemon last spoke", in: app), "the link-health sheet")
     }
 
-    /// The session's Terminal tab. `firstMatch` because `safeAreaInset` renders
-    /// the segmented control into the hierarchy more than once.
+    /// The session's terminal, from the bar's menu.
     func openTerminal(_ app: XCUIApplication) throws {
         try openFirstSession(app)
+        try openSessionMenu(app)
         let terminal = app.buttons["Terminal"].firstMatch
-        try require(terminal, "the Terminal tab")
+        try require(terminal, "Terminal in the session bar's menu")
         terminal.tap()
+    }
+
+    /// The session bar's "…" menu.
+    func openSessionMenu(_ app: XCUIApplication) throws {
+        let more = app.buttons["session-more"].firstMatch
+        try require(more, "the session bar's menu")
+        more.tap()
+    }
+
+    /// The session's changes, from the bar's menu.
+    func openChanges(_ app: XCUIApplication) throws {
+        try openSessionMenu(app)
+        let changes = app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch
+        try require(changes, "the changes in the session bar's menu")
+        changes.tap()
     }
 
     /// Focuses the composer and types. A vertical-axis TextField is backed
@@ -622,12 +638,11 @@ enum RenderCatalog {
             arguments: ["-CC_FIXTURE", "deck"],
             reach: { app, driver in
                 try driver.openFirstSession(app)
-                try driver.require(app.buttons["open-diff"], "the session detail")
+                try driver.require(app.buttons["session-more"], "the session detail")
             }),
 
         // **A conversation, as a new user's first one reads.** Your words and
-        // Claude's on one edge, no "Turn complete" under a reply, and the
-        // computer named in the header.
+        // Claude's on one edge, and no "Turn complete" under a reply.
         RenderScenario(
             name: "session-conversation",
             purpose: "\"hi\" and Claude's answer: one edge, no line under a reply",
@@ -650,12 +665,15 @@ enum RenderCatalog {
         // The header's one line, when the computer's name is longer than it.
         RenderScenario(
             name: "session-header-long-name",
-            purpose: "a computer name longer than the header's line",
+            purpose: "a computer name longer than its line in the session bar's menu",
             arguments: [
                 "-CC_FIXTURE", "timelineLongName", "-CC_DEEPLINK", "codeconnect://session/fx-6",
             ],
             reach: { app, driver in
-                try driver.require(app.buttons["Link health"].firstMatch, "the header's link")
+                try driver.openSessionMenu(app)
+                try driver.requireExists(
+                    app.staticTexts["On Jordan’s MacBook Pro (16-inch, Nov 2024)"].firstMatch,
+                    "the computer's name, heading the menu's link item")
             }),
 
         // **The decision, as a sheet.** The Deck renders this card full
@@ -697,7 +715,7 @@ enum RenderCatalog {
                 "-CC_FIXTURE", "stacked", "-CC_DEEPLINK", "codeconnect://session/fx-5",
             ],
             reach: { app, driver in
-                try driver.require(app.buttons["open-diff"], "the session detail")
+                try driver.require(app.buttons["session-more"], "the session detail")
             }),
 
         // **The slash palette and its eight native commands.** Every state
@@ -943,9 +961,7 @@ enum RenderCatalog {
             arguments: ["-CC_FIXTURE", "deck", "-cc.debug.diff", "sample"],
             reach: { app, driver in
                 try driver.openFirstSession(app)
-                let diff = app.buttons["open-diff"]
-                try driver.require(diff, "the diff button")
-                diff.tap()
+                try driver.openChanges(app)
                 try driver.require(
                     driver.text(containing: "Captured on the computer", in: app),
                     "a rendered diff carrying its capture time")
@@ -961,9 +977,7 @@ enum RenderCatalog {
             ],
             reach: { app, driver in
                 try driver.openFirstSession(app)
-                let diff = app.buttons["open-diff"]
-                try driver.require(diff, "the diff button")
-                diff.tap()
+                try driver.openChanges(app)
                 try driver.require(
                     driver.text(containing: "Truncated", in: app),
                     "the truncation banner")
@@ -1461,7 +1475,7 @@ enum RenderCatalog {
                     driver.element(containing: "try again shortly", in: app),
                     "the daemon's own sentence, unedited")
             }),
-        // **The session route**, so the header's own Stop control is
+        // **The session route**, so the session screen's own Stop control is
         // photographed too. The other three S-series scenarios drive the fleet
         // row; this one drives the same mutation from the screen a reader is on
         // when they are watching the turn they want to end, and the two draw the

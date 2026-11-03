@@ -48,9 +48,18 @@ final class SessionFollowUITests: XCTestCase {
     /// the compose bar, so a press in its bottom fifth lands on the text
     /// field. The trailing padding above dy 0.65 is scrollable surface that
     /// nothing else wants.
+    ///
+    /// Fractions of the part on show: the list runs on under the navigation
+    /// bar, where a press lands on the bar.
     private func drag(_ timeline: XCUIElement, fromY: CGFloat, toY: CGFloat) {
-        let start = timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: fromY))
-        let end = timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: toY))
+        let frame = timeline.frame
+        let top = max(frame.minY, XCUIApplication().navigationBars.firstMatch.frame.maxY) - frame.minY
+        let origin = timeline.coordinate(withNormalizedOffset: .zero)
+        func point(_ y: CGFloat) -> XCUICoordinate {
+            origin.withOffset(CGVector(dx: frame.width * 0.97, dy: top + (frame.height - top) * y))
+        }
+        let start = point(fromY)
+        let end = point(toY)
         start.press(
             forDuration: 0.05, thenDragTo: end,
             withVelocity: .default, thenHoldForDuration: 0.25)
@@ -113,14 +122,23 @@ final class SessionFollowUITests: XCTestCase {
         field.tap()
         let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        // The timeline keeps its tail as the keyboard rises, which carries the
+        // control up by the keyboard's height: nudged back down while it is
+        // above the bar (or no longer realized, which here means above), up
+        // while it is under the keyboard.
+        let barBottom = app.navigationBars.firstMatch.frame.maxY
         attempts = 0
         while attempts < 6 {
             if showMore.exists && showMore.isHittable
-                && showMore.frame.maxY < keyboard.frame.minY
+                && showMore.frame.minY >= barBottom && showMore.frame.maxY < keyboard.frame.minY
             {
                 break
             }
-            drag(timeline, fromY: 0.35, toY: 0.15)
+            if showMore.exists && showMore.frame.minY >= barBottom {
+                drag(timeline, fromY: 0.35, toY: 0.15)
+            } else {
+                drag(timeline, fromY: 0.15, toY: 0.35)
+            }
             attempts += 1
         }
         XCTAssertTrue(

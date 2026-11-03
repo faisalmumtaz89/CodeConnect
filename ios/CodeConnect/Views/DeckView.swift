@@ -667,19 +667,17 @@ struct DeckAccessoryBar: View {
     /// The dot, the aggregate, the risks, and the door.
     private var summary: some View {
         HStack(alignment: .center, spacing: CC.space.sm) {
-            HStack(alignment: .top, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
                 CCStatusDot(
                     color: CC.color.warning,
                     size: CCStatusDot.Size.cardHeader.rawValue,
                     pulses: true)
-                // Optically centres the disc on the aggregate's cap height
-                // rather than on its line box.
-                .padding(.top, 3)
                 // The gutter is a *column*, not a dot plus a gap: the bar's disc
                 // is 10pt where a row's is 8, and hanging the text off the dot's
                 // own width would put this line 2pt right of every row above it.
                 .frame(
                     width: ContentColumn.gutterWidth(dot: gutterDot), alignment: .leading)
+                .ccMark(beside: CC.type.callout)
 
                 VStack(alignment: .leading, spacing: CC.space.xxs) {
                     aggregateLine
@@ -722,8 +720,9 @@ struct DeckAccessoryBar: View {
                 .fixedSize(horizontal: false, vertical: true)
             if isLargeType {
                 Spacer(minLength: CC.space.xs)
-                CCIcon("chevron.right", size: CC.size.iconSm, weight: .semibold)
+                CCIcon("caret-right", size: CC.size.iconSm, weight: .semibold)
                     .foregroundStyle(CC.text.tertiary)
+                    .ccMark(beside: CC.type.callout)
                     .accessibilityHidden(true)
             }
         }
@@ -747,9 +746,10 @@ struct DeckAccessoryBar: View {
     private func reasonLine(_ reason: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             CCIcon(
-                "exclamationmark.circle.fill", size: 11, weight: .semibold, relativeTo: .caption
+                "warning-circle-fill", size: 11, weight: .semibold, relativeTo: .caption
             )
             .foregroundStyle(CC.color.warning)
+            .ccMark(beside: CC.type.footnote)
             // **A mark in the gutter takes no layout width**, the way
             // `CCSectionHeader` hangs its dot. Given a column to sit in instead,
             // this glyph grew past it at AX5 — an 11pt `caption` symbol scales to

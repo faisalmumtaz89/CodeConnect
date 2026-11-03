@@ -70,16 +70,15 @@ struct CCSheetChrome<Content: View, Trailing: View>: View {
     /// surviving AX5 its own way.
     ///
     /// Measured failure this replaces: at AX5 a refresh circle and a close
-    /// circle are ~60pt each and `fixedSize`, so on a 402pt sheet they left the
-    /// title about 150pt and `Diff · fx-1` wrapped to `Diff ·` / `fx-1` — a
-    /// heading broken across a separator glyph, on the sheet that says which
-    /// session's changes you are looking at.
+    /// circle beside the title left it about 150pt on a 402pt sheet, and
+    /// `Diff · fx-1` wrapped to `Diff ·` / `fx-1`, a heading broken across a
+    /// separator glyph, on the sheet that says which session's changes you are
+    /// looking at.
     ///
     /// **Two** is the condition, not "accessibility sizes", because two is what
-    /// was measured. One circle leaves a title ~260pt, which is a line and a
-    /// half of AX5 headline and no squeeze at all; moving it down anyway costs
-    /// ~90pt of empty black at the top of every sheet in the product, on the
-    /// screen where the least room is left for content. The rule is the same
+    /// was measured. One button leaves the title most of the line; moving it
+    /// down anyway costs ~90pt of empty black at the top of every sheet in the
+    /// product, on the screen where the least room is left for content. The rule is the same
     /// shape as the kit's other AX switches and it fires where the damage is.
     ///
     /// The title stays *first*: the controls move below it rather than above so
@@ -93,18 +92,26 @@ struct CCSheetChrome<Content: View, Trailing: View>: View {
         if stacksControls {
             VStack(alignment: .leading, spacing: CC.space.sm) {
                 titleBlock
-                HStack(spacing: CC.space.sm) {
+                HStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    trailing()
-                    if let onClose { closeButton(onClose) }
+                    controls
                 }
             }
         } else {
             HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
                 titleBlock
-                trailing()
-                if let onClose { closeButton(onClose) }
+                // Centred on the title's first line, however many it wraps to.
+                controls.ccMark(beside: CC.type.headline)
             }
+        }
+    }
+
+    /// The buttons with their 44pt targets touching, so two pills stand 8pt
+    /// apart: the spacing of the session header's pair.
+    private var controls: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            trailing()
+            if let onClose { closeButton(onClose) }
         }
     }
 
@@ -163,17 +170,34 @@ struct CCSheetChrome<Content: View, Trailing: View>: View {
             CCHaptic.light.fire()
             action()
         } label: {
-            CCIcon("xmark", size: CC.size.iconSm, weight: .bold, relativeTo: .footnote)
-                .foregroundStyle(CC.text.secondary)
-                // The circle scales on the *same* ramp as the cross inside it.
-                // Measured failure this replaces: at `accessibility-extra-large`
-                // the 13pt cross grew past the fixed 28pt ring and the button
-                // read as a stray glyph on a smudge. See `ccGlyphContainer`.
-                .ccGlyphContainer(CC.size.glyph, relativeTo: .footnote)
-                .ccHitTarget()
+            CCIcon("x", size: CC.size.icon, weight: .semibold, relativeTo: .footnote)
+                .foregroundStyle(CC.text.primary)
+                .ccSheetButton()
         }
         .buttonStyle(CCCloseButtonStyle())
+        .ccSheetButtonSizing()
         .accessibilityLabel(closeLabel)
+    }
+}
+
+extension View {
+    /// **A sheet's button is the session header's pill**: a 36pt capsule on
+    /// `surfaceRaised` with a hairline edge, in a 44pt target. Fixed like the
+    /// header's, so two of them in `CCSheetChrome` keep their 8pt apart at
+    /// every text size.
+    func ccSheetButton() -> some View {
+        frame(width: CC.size.controlSm, height: CC.size.controlSm)
+            .background(CC.color.surfaceRaised, in: Capsule())
+            .overlay { Capsule().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
+            .ccHitTarget()
+    }
+
+    /// On the button itself: the glyph stops growing at `xxxLarge`, where it
+    /// still fits the fixed pill, and past it the large content viewer shows
+    /// it, as the session header's pill does.
+    func ccSheetButtonSizing() -> some View {
+        dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+            .accessibilityShowsLargeContentViewer()
     }
 }
 

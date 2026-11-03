@@ -81,7 +81,7 @@ struct CCDisclosure<Content: View>: View {
                 // and does not buzz.
                 withAnimation(CC.motion.small) { isExpanded.wrappedValue.toggle() }
             } label: {
-                HStack(spacing: CC.space.sm) {
+                HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
                     Text(label.uppercased())
                         .ccType(CC.type.micro)
                         .foregroundStyle(CC.text.tertiary)
@@ -94,8 +94,9 @@ struct CCDisclosure<Content: View>: View {
                             .foregroundStyle(CC.text.tertiary)
                             .lineLimit(1)
                     }
-                    CCIcon("chevron.right", size: 12, weight: .semibold, relativeTo: .caption)
+                    CCIcon("caret-right", size: 12, weight: .semibold, relativeTo: .caption)
                         .foregroundStyle(CC.text.tertiary)
+                        .ccMark(beside: CC.type.micro)
                         .rotationEffect(.degrees(isExpanded.wrappedValue ? 90 : 0))
                         // Rotation is geometry, so Reduce Motion gets the state
                         // change without the sweep — the chevron still ends up

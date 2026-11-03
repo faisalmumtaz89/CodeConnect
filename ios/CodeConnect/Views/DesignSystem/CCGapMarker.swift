@@ -35,7 +35,7 @@ struct CCGapMarker: View {
     private var marker: some View {
         HStack(spacing: CC.space.sm) {
             dashes
-            HStack(spacing: CC.space.xxs) {
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs) {
                 // The pill between the dashes is a badge label, not a
                 // section heading — same role as `CCBadge`'s text, same token.
                 Text(label.uppercased())
@@ -44,8 +44,9 @@ struct CCGapMarker: View {
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                 if action != nil {
-                    CCIcon("chevron.right", size: 9, weight: .bold, relativeTo: .caption)
+                    CCIcon("caret-right", size: 9, weight: .bold, relativeTo: .caption)
                         .foregroundStyle(CC.color.warning)
+                        .ccMark(beside: CC.type.badgeLabel)
                 }
             }
             .fixedSize(horizontal: false, vertical: true)

@@ -26,12 +26,12 @@ enum ToolStatus: Sendable, Hashable {
 
     var symbol: String {
         switch self {
-        case .running: return "circle.dotted"
-        case .succeeded: return "checkmark.circle.fill"
-        case .failed: return "xmark.octagon.fill"
-        case .interrupted: return "stop.circle.fill"
-        case .denied: return "hand.raised.fill"
-        case .unresolved: return "questionmark.circle"
+        case .running: return "circle-dashed"
+        case .succeeded: return "check-circle-fill"
+        case .failed: return "x-circle-fill"
+        case .interrupted: return "stop-circle-fill"
+        case .denied: return "hand-palm-fill"
+        case .unresolved: return "question"
         }
     }
 }
@@ -415,7 +415,7 @@ enum TimelineBuilder {
                                     .notice(
                                         NoticeItem(
                                             kind: .other,
-                                            symbol: "terminal",
+                                            symbol: "terminal-window",
                                             title: title,
                                             detail: text,
                                             severity: .info))))
@@ -428,7 +428,7 @@ enum TimelineBuilder {
                             .notice(
                                 NoticeItem(
                                     kind: .turnInterrupted,
-                                    symbol: "stop.circle",
+                                    symbol: "stop-circle",
                                     title: "Interrupted · What should Claude do instead?",
                                     detail: nil,
                                     severity: .info))))
@@ -442,7 +442,7 @@ enum TimelineBuilder {
                                 .notice(
                                     NoticeItem(
                                         kind: event.isTranscriptOnly ? .other : .taskReport,
-                                        symbol: "circle.fill",
+                                        symbol: "circle-fill",
                                         title: line,
                                         detail: nil,
                                         severity: notification.severity))))
@@ -529,7 +529,7 @@ enum TimelineBuilder {
                             .notice(
                                 NoticeItem(
                                     kind: .failure,
-                                    symbol: "exclamationmark.triangle",
+                                    symbol: "warning",
                                     title: "Approval request could not be read",
                                     detail: "The daemon sent a card this app could not decode.",
                                     severity: .warning))))
@@ -582,7 +582,7 @@ enum TimelineBuilder {
                         .notice(
                             NoticeItem(
                                 kind: .sessionStart,
-                                symbol: "play.circle",
+                                symbol: "play-circle",
                                 title: title,
                                 // Through the same mapper the Model sheet
                                 // uses, so the two never disagree about the
@@ -606,7 +606,7 @@ enum TimelineBuilder {
                         .notice(
                             NoticeItem(
                                 kind: .link,
-                                symbol: fact.link == "attached" ? "link" : "link.badge.plus",
+                                symbol: fact.link == "attached" ? "link" : "link-simple",
                                 title: "Link \(fact.link)",
                                 detail: fact.reason,
                                 severity: fact.link == "attached" ? .info : .warning))))
@@ -617,7 +617,7 @@ enum TimelineBuilder {
                         .notice(
                             NoticeItem(
                                 kind: .failure,
-                                symbol: "exclamationmark.octagon",
+                                symbol: "warning-octagon",
                                 title: "Error",
                                 detail: event.payload.firstString("message", "error")
                                     ?? event.payload.prettyJSONString,
@@ -736,7 +736,7 @@ enum TimelineBuilder {
             if let promptID, approvalPromptIDs.contains(promptID) { return nil }
             return NoticeItem(
                 kind: .agentWaiting,
-                symbol: "bell.badge",
+                symbol: "bell-ringing",
                 title: "Claude asked for permission",
                 // Built as a sentence rather than glued to the message with
                 // punctuation: the daemon does not always send one, and a
@@ -752,21 +752,21 @@ enum TimelineBuilder {
             // say "Waiting for you" over a detail saying the same.
             return NoticeItem(
                 kind: .agentIdle,
-                symbol: "ellipsis.bubble",
+                symbol: "chat-circle-dots",
                 title: event.notificationMessage ?? "Waiting for your next message",
                 detail: nil,
                 severity: .info)
         case "agent_needs_input":
             return NoticeItem(
                 kind: .agentWaiting,
-                symbol: "questionmark.bubble",
+                symbol: "chat-circle-text",
                 title: "Waiting for you",
                 detail: event.notificationMessage,
                 severity: .warning)
         case "agent_completed":
             return NoticeItem(
                 kind: .agentFinished,
-                symbol: "checkmark.seal",
+                symbol: "seal-check",
                 title: "Agent finished",
                 detail: event.notificationMessage,
                 severity: .success)
@@ -784,7 +784,7 @@ enum TimelineBuilder {
         if event.isTurnComplete {
             return NoticeItem(
                 kind: .turnComplete,
-                symbol: "checkmark.circle",
+                symbol: "check-circle",
                 title: "Turn complete",
                 // A boundary, not a bearer: the hook's copy of the message
                 // rendered here, clamped, directly above the transcript's own
@@ -799,7 +799,7 @@ enum TimelineBuilder {
         if let code = event.exitCode {
             return NoticeItem(
                 kind: .sessionEnded,
-                symbol: code == 0 ? "power" : "exclamationmark.octagon",
+                symbol: code == 0 ? "power" : "warning-octagon",
                 title: code == 0 ? "Session ended" : "Session ended (exit \(code))",
                 detail: nil,
                 severity: code == 0 ? .info : .failure)

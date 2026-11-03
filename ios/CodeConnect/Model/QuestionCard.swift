@@ -278,55 +278,55 @@ enum QuestionCardStatus: Sendable, Hashable {
             return (
                 "Asking at the computer",
                 "Claude is asking this at the computer, so it can only be answered there.",
-                .info, "desktopcomputer"
+                .info, "desktop"
             )
         case .answerAtMac:
             return (
                 "Answer at the computer",
                 "This question can no longer be answered from the phone. It may still be open "
                     + "at the computer.",
-                .warning, "desktopcomputer"
+                .warning, "desktop"
             )
         case .macTooOld:
             return (
                 "Answer at the computer",
                 "This computer's CodeConnect is too old to answer Claude's questions from the "
                     + "phone. Answer it at the computer, or update it to answer here.",
-                .warning, "desktopcomputer"
+                .warning, "desktop"
             )
         case .unreachable(let reason):
-            return ("Not connected", reason, .warning, "desktopcomputer")
+            return ("Not connected", reason, .warning, "desktop")
         case .answeredOnPhone:
             return (
                 "Answered", "Claude has the answers sent from the phone.", .success,
-                "checkmark.circle.fill"
+                "check-circle-fill"
             )
         case .answeredAtMac:
             return (
                 "Answered at the computer",
                 "This question was answered at the computer. Nothing from this phone was used.",
-                .info, "desktopcomputer"
+                .info, "desktop"
             )
         case .declined:
             return (
                 "Declined", "Declined from the phone, as Escape does at the computer.", .info,
-                "xmark.circle"
+                "x-circle"
             )
         case .unconfirmed:
             return (
                 "Unconfirmed",
                 "The computer took this answer but could not confirm Claude received it. "
                     + "Check the computer.",
-                .warning, "questionmark.circle"
+                .warning, "question"
             )
         case .closed:
-            return ("Closed", "This question is no longer open.", .info, "questionmark.circle")
+            return ("Closed", "This question is no longer open.", .info, "question")
         case .unavailable:
             return (
                 "No longer available",
                 "This question can't be answered here — the run left the daemon's list or its "
                     + "log was reset.",
-                .warning, "questionmark.circle"
+                .warning, "question"
             )
         }
     }

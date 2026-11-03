@@ -256,7 +256,11 @@ final class WideToolLabelUITests: XCTestCase {
                 NSPredicate(format: "label BEGINSWITH %@", "\(tool) tool call, \(argument)")
             ).firstMatch
             var swipes = 0
-            while !(row.exists && list.frame.contains(row.frame)), swipes < 8 {
+            // On show means below the bar: the list runs on under it.
+            let shown = list.frame.divided(
+                atDistance: max(0, app.navigationBars.firstMatch.frame.maxY - list.frame.minY), from: .minYEdge
+            ).remainder
+            while !(row.exists && shown.contains(row.frame)), swipes < 8 {
                 list.swipeDown(velocity: .slow)
                 swipes += 1
             }

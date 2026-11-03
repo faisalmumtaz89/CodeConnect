@@ -689,7 +689,7 @@ struct FleetView: View {
             if band.status == .ended, let note = batchNote(band.rows) {
                 CCBanner(
                     note.title, message: note.reasons, tone: .warning,
-                    icon: "exclamationmark.triangle")
+                    icon: "warning")
                     .padding(.horizontal, CC.space.md)
             }
             CCCard(padding: 0, border: bandBorder(band.status)) {
@@ -1046,7 +1046,7 @@ struct FleetView: View {
             // centre; taller content at the largest sizes still scrolls.
             Color.clear.containerRelativeFrame(.vertical)
             CCEmptyState(
-                glyph: "terminal",
+                glyph: "terminal-window",
                 title: "Start an agent on your computer",
                 message:
                     "Start one with CodeConnect and its project shows up here, ready to follow and answer from this phone."
@@ -1368,7 +1368,7 @@ private struct FleetBanner: View {
                     title: "Update CodeConnect on this iPhone",
                     message: "\(unreadable) Some of what your computer reports will be missing here.",
                     tone: .warning,
-                    icon: "arrow.down.circle")
+                    icon: "arrow-circle-down")
             ]
         }
         let link = model.pairing.isPaired || model.fixturesActive ? linkBannerItem : nil
@@ -1446,7 +1446,7 @@ private struct FleetBanner: View {
             title: "Last known state, \(Format.age(since: cachedAt, now: model.now)) old",
             message: "Nothing live has arrived this launch.",
             tone: .warning,
-            icon: "clock.arrow.circlepath",
+            icon: "clock-counter-clockwise",
             actionTitle: "Retry",
             action: { machines.retryNow() })
     }
@@ -1657,7 +1657,7 @@ struct FleetRowCell: View, Equatable {
             // sent, so the daemon has said nothing about it.
             CCBanner(
                 "Nothing was sent", message: reason, tone: .warning,
-                icon: "exclamationmark.triangle.fill")
+                icon: "warning-fill")
                 .padding(.horizontal, CC.space.md)
                 .padding(.bottom, CC.space.sm)
         case .sentNoAnswer(let reason):
@@ -1665,7 +1665,7 @@ struct FleetRowCell: View, Equatable {
             // the thing nobody knows.
             CCBanner(
                 "Sent, no answer heard", message: reason, tone: .warning,
-                icon: "questionmark.circle")
+                icon: "question")
                 .padding(.horizontal, CC.space.md)
                 .padding(.bottom, CC.space.sm)
         case .idle, .inFlight:
@@ -1773,7 +1773,7 @@ struct FleetRowView: View {
         Group {
             if let selection {
                 content {
-                    CCIcon(selection ? "checkmark.circle.fill" : "circle", size: 18)
+                    CCIcon(selection ? "check-circle-fill" : "circle", size: 18)
                         .foregroundStyle(selection ? CC.text.primary : CC.text.tertiary)
                         .accessibilityHidden(true)
                 }
@@ -1981,7 +1981,7 @@ struct FleetRowView: View {
         if let onStop {
             CCButton(
                 stopping ? "Stopping…" : "Stop",
-                icon: stopping ? nil : "stop.fill",
+                icon: stopping ? nil : "stop-fill",
                 variant: .secondary,
                 size: .sm,
                 isLoading: stopping,

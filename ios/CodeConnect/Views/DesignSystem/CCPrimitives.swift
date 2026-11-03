@@ -354,10 +354,14 @@ struct CCHairline: View {
 
 // MARK: - Icon
 
-/// An SF Symbol at a size that tracks Dynamic Type.
+/// A Phosphor icon at a size that tracks Dynamic Type.
 ///
-/// Symbols are `.monochrome` throughout: a hierarchical or multicolour symbol
-/// introduces colour that is not carrying information, and in this product
+/// `name` is Phosphor's own (`check-circle`), from `Assets.xcassets/Phosphor`;
+/// a `-fill` name (`check-circle-fill`) is the filled shape, drawn as it is. A
+/// line icon takes its stroke from `weight`, as text would: semibold and
+/// heavier draw the bold set, light and thinner the light set, regular and
+/// medium the regular one. Every icon is a template, so it takes the
+/// foreground style like text does — one colour, because in this product
 /// colour is information, never decoration.
 struct CCIcon: View {
     let name: String
@@ -387,13 +391,31 @@ struct CCIcon: View {
 
     var body: some View {
         let size = min(scaled, maxSize)
-        Image(systemName: name)
-            .font(.system(size: size, weight: weight))
-            .symbolRenderingMode(.monochrome)
-            // Symbols vary in optical width; a fixed frame keeps a column of
-            // rows aligned no matter which glyph each one uses.
+        // Beside text, its row gives it `.ccMark(beside:)`.
+        Image(Self.asset(name, weight: weight))
+            .resizable()
+            .scaledToFit()
+            .frame(width: size * Self.artScale, height: size * Self.artScale)
+            // A fixed frame keeps a column of rows aligned no matter which
+            // icon each one uses.
             .frame(width: size * 1.35, alignment: .center)
             .accessibilityHidden(true)
+    }
+
+    /// How much larger than `size` a Phosphor icon is laid out. Phosphor draws
+    /// inside a 256-unit box with room around the shape, and a system symbol at
+    /// a font size fills about a quarter more of it: measured over this app's
+    /// 95 icons, the symbol's ink was 1.26 times the Phosphor box's at the
+    /// median (1.20 to 1.45 from the tenth to the ninetieth percentile). Laid
+    /// out this much larger, an icon reads at the size its call site asks for.
+    static let artScale: CGFloat = 1.25
+
+    /// The imageset for `name` at `weight` — see the type's comment.
+    static func asset(_ name: String, weight: Font.Weight) -> String {
+        if name.hasSuffix("-fill") { return name }
+        if [.semibold, .bold, .heavy, .black].contains(weight) { return "\(name)-bold" }
+        if [.light, .thin, .ultraLight].contains(weight) { return "\(name)-light" }
+        return name
     }
 }
 
@@ -599,10 +621,11 @@ private struct CCDisabledModifier: ViewModifier {
             if let reason {
                 HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
                     CCIcon(
-                        "exclamationmark.circle.fill", size: 11, weight: .semibold,
+                        "warning-circle-fill", size: 11, weight: .semibold,
                         relativeTo: .caption
                     )
                     .foregroundStyle(CC.color.warning)
+                    .ccMark(beside: CC.type.footnote)
                     // `CCProse`, not `Text`: a blocked reason is the one string
                     // in the kit most likely to name the command that would
                     // unblock it — `codeconnect pair`, `codeconnect token` — and those

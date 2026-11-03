@@ -143,7 +143,7 @@ final class AgentSeamRenderingTests: XCTestCase {
         let unconfirmed = outcome(appliedVia: .sendKeys, indeterminate: true)
         XCTAssertEqual(DecisionCardView.alreadyResolvedTitle(for: unconfirmed), "Unconfirmed")
         XCTAssertNotEqual(
-            DecisionCardView.alreadyResolvedIcon(for: unconfirmed), "checkmark.seal",
+            DecisionCardView.alreadyResolvedIcon(for: unconfirmed), "seal-check",
             "an unconfirmed outcome must not wear the confirming seal")
         XCTAssertTrue(
             DecisionCardView.alreadyResolvedMessage(for: unconfirmed, now: Date())
@@ -151,7 +151,7 @@ final class AgentSeamRenderingTests: XCTestCase {
 
         let confirmed = outcome(appliedVia: .sendKeys, indeterminate: false)
         XCTAssertEqual(DecisionCardView.alreadyResolvedTitle(for: confirmed), "Already resolved")
-        XCTAssertEqual(DecisionCardView.alreadyResolvedIcon(for: confirmed), "checkmark.seal")
+        XCTAssertEqual(DecisionCardView.alreadyResolvedIcon(for: confirmed), "seal-check")
     }
 
     // MARK: The timeline tool status

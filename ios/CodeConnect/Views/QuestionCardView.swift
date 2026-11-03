@@ -290,8 +290,8 @@ struct QuestionCardView: View {
     }
 
     private static func symbol(chosen: Bool, multiSelect: Bool) -> String {
-        if multiSelect { return chosen ? "checkmark.square.fill" : "square" }
-        return chosen ? "largecircle.fill.circle" : "circle"
+        if multiSelect { return chosen ? "check-square-fill" : "square" }
+        return chosen ? "radio-button-fill" : "circle"
     }
 
     private func otherBinding(_ index: Int) -> Binding<String> {
@@ -440,7 +440,7 @@ struct QuestionCardView: View {
     private var notice: AnyView? {
         if let attempt { return AnyView(ResolutionBanner(attempt: attempt)) }
         if let authNotice {
-            return AnyView(CCBanner("Face ID", message: authNotice, tone: .warning, icon: "faceid"))
+            return AnyView(CCBanner("Face ID", message: authNotice, tone: .warning, icon: "scan-smiley"))
         }
         if let sampleNotice {
             return AnyView(CCBanner("Sample fleet", message: sampleNotice, tone: .info, icon: "eye"))
@@ -458,10 +458,11 @@ struct QuestionCardView: View {
         if let blockedReason {
             HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
                 CCIcon(
-                    "exclamationmark.circle.fill", size: 11, weight: .semibold,
+                    "warning-circle-fill", size: 11, weight: .semibold,
                     relativeTo: .caption
                 )
                 .foregroundStyle(CC.color.warning)
+                .ccMark(beside: CC.type.footnote)
                 CCProse(blockedReason, style: CC.type.footnote, color: CC.color.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -524,7 +525,7 @@ struct QuestionCardView: View {
     private var subordinateControls: some View {
         VStack(spacing: CC.rhythm.controls) {
             CCButton(
-                "Decline", icon: "xmark", variant: .secondary, size: .md, fullWidth: true,
+                "Decline", icon: "x", variant: .secondary, size: .md, fullWidth: true,
                 isLoading: spinningControl == "decline"
             ) {
                 submit(.decline, key: "decline")
@@ -538,7 +539,7 @@ struct QuestionCardView: View {
 
     private func comeBackButton(_ action: @escaping () -> Void) -> some View {
         CCButton(
-            "Come back to this", icon: "arrow.uturn.down", variant: .ghost, size: .md,
+            "Come back to this", icon: "arrow-u-down-left", variant: .ghost, size: .md,
             fullWidth: true, haptic: nil, action: action
         )
         .accessibilityIdentifier("deck-later")
@@ -593,6 +594,7 @@ private struct ChoiceRowLabel: View {
             if let symbol {
                 CCIcon(symbol, size: 18, weight: .regular, relativeTo: .callout)
                     .foregroundStyle(isChosen && isEnabled ? CC.text.primary : CC.text.tertiary)
+                    .ccMark(beside: CC.type.callout)
             }
             VStack(alignment: .leading, spacing: CC.space.xxs) {
                 Text(label)

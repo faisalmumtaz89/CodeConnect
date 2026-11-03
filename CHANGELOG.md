@@ -3,6 +3,73 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A cleaner Changes screen on the iPhone
+
+- The screen that shows a session's uncommitted changes is called Changes, and it reads like
+  VS Code: whole lines tinted red or green with the changed words stronger, a `+` or `−` beside
+  each changed line, quiet separators between hunks, and long lines that wrap under their own
+  indent. Folded lines are one quiet "⋯ 3 unchanged lines" row; tap it to show them.
+- In tab-indented files, such as Go, the highlighted words and the wrapped lines now line up
+  with the code they belong to.
+- Press and hold a line to copy it: Copy line copies the whole line exactly as it is in the file,
+  tabs included.
+- The line above the diff is one short line, such as `+6 −3 · 2 files · 3s ago`.
+- A new or deleted file is marked with a plain plus or minus, like the pencil on an edited one.
+- At the largest text sizes the folded-lines row stays on one line and a file's chip keeps its
+  counts on screen, shortening a long name in the middle.
+- The refresh and close buttons sit 8 points apart, in the same pills as the session's header,
+  level with the title. Every other sheet's close button uses the same pill.
+
+## A softer message box on the iPhone
+
+- The message box in a session is a little taller on one line, 52 points instead of 44, with a
+  lighter fill and a soft light along its top and bottom edges. The send button sits evenly inside
+  it. Tapping into the box no longer turns its edge white; the cursor and the keyboard show where
+  you are typing. The placeholder, the icons and how the box grows with longer messages are
+  unchanged.
+
+## More room for the conversation on the iPhone
+
+- A session's name and folder now sit in the navigation bar, and the block of facts under it is
+  gone, so the conversation and the terminal get the space back. In landscape the terminal now
+  keeps the bar, a few rows shorter than before, so you are always one tap from the conversation.
+- The bar's "…" menu holds the rest. Terminal comes first, and on the terminal the same item
+  reads Timeline, so the way back is the same place. Then Changes, which opens the session's
+  uncommitted changes, and the link's health, under the name of the computer the session is on.
+- Notes that matter only for a while, such as how to pick an ended conversation up at the
+  computer, show as a slim strip under the bar only while they apply.
+- Long-press the name in the bar to copy the session's full folder path.
+
+## New icons on the iPhone
+
+- The iPhone app draws its icons from Phosphor, a cleaner, rounder set, in place of Apple's SF
+  Symbols. Every icon keeps its place and meaning; the status marks keep their filled shapes, so
+  a running, finished, failed or waiting session still reads at a glance without colour.
+  Phosphor's MIT licence ships with the app.
+- Every icon beside words now sits on the middle of their first line, at every text size: a
+  timeline notice, a tool call, a banner, a button, a row. Some sat up to 6 points above or below
+  it, most visibly beside "Claude is waiting for your input".
+
+## A message sent as the connection drops no longer stays in the box
+
+- When the network between your iPhone and your computer goes quiet, as it does when Tailscale
+  disconnects, the app now notices within half a minute and connects again by itself. It used to
+  keep waiting on the dead connection for minutes.
+- If you had just sent a message when that happened, your computer had usually already typed it,
+  but the app never heard back, so the text stayed in the box. Once the app has reconnected, it
+  now checks that message with your computer and clears the box. Within a minute of the send, if
+  the message never arrived it is typed then, once; nothing is ever typed twice. The note no longer
+  says the message couldn't be typed when nobody knows; it says it isn't confirmed.
+
+## The conversation stays still after you send
+
+- After you send a message from the iPhone, the conversation moves once, to your message, and stays
+  there. A few seconds after a send it used to jump up to an earlier reply and scroll back down;
+  that happened when the "Typed into the session." note under it went away. The note now appears
+  and goes in one step.
+- When the keyboard opens or closes, or a note appears over the message box, the newest message
+  stays just above the box instead of sliding under it for a moment and scrolling back.
+
 ## Agents message each other
 
 - A Claude Code or Codex session started through CodeConnect can message any other such session on

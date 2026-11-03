@@ -95,11 +95,6 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     private let meta: () -> Meta
 
     @Environment(\.dynamicTypeSize) private var typeSize
-    /// The height of the title's first line, scaled. Everything in the gutter
-    /// and the trailing edge centres on *this*, not on the row — see
-    /// `content(pressed:)`. 21 for `headline`, in proportion for a smaller
-    /// title style, and on that style's own ramp.
-    @ScaledMetric private var titleLine: CGFloat
 
     /// Declared in the struct body rather than an extension on purpose: an
     /// initialiser in an extension does not suppress the synthesised
@@ -125,9 +120,6 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
         self.title = title
         self.titleIsMono = titleIsMono
         self.titleStyle = titleStyle
-        _titleLine = ScaledMetric(
-            wrappedValue: 21 * titleStyle.size / CC.type.headline.size,
-            relativeTo: titleStyle.relativeTo)
         self.subtitle = subtitle
         self.titleTruncation = titleTruncation
         self.subtitleLineLimit = subtitleLineLimit
@@ -188,8 +180,8 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
                 // badge has to leave the line entirely; there is no width to
                 // negotiate over.
                 VStack(alignment: .leading, spacing: CC.space.sm) {
-                    HStack(alignment: .top, spacing: CC.space.sm) {
-                        leading().frame(minHeight: titleLine)
+                    HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
+                        leading().ccMark(beside: titleText)
                         textBlock
                     }
                     if Trailing.self != EmptyView.self || (showsChevron && action != nil) {
@@ -214,7 +206,9 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
         .contentShape(Rectangle())
     }
 
-    /// `.top`, with every satellite centred inside one title-line's height.
+    /// On the title's first baseline: the mark and the chevron centre on the
+    /// middle of the title's first line, and the trailing text shares its
+    /// baseline.
     ///
     /// Centring the whole HStack instead — the obvious version — floats the
     /// status dot down beside the *subtitle* on any row that wraps to three
@@ -226,15 +220,13 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
     /// and a clock stealing 90pt from line three is how a command lost its
     /// branch name.
     private var horizontalContent: some View {
-        HStack(alignment: .top, spacing: CC.space.sm) {
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
             leadingSlot
             VStack(alignment: .leading, spacing: CC.space.xxs) {
-                HStack(alignment: .top, spacing: CC.space.sm) {
+                HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
                     titleBlock
                     trailing()
-                        .frame(minHeight: titleLine)
                     chevron
-                        .frame(minHeight: titleLine)
                 }
                 metaBlock
             }
@@ -267,15 +259,16 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
         if Leading.self != EmptyView.self {
             leading()
                 .frame(width: CC.size.dot)
-                .frame(minHeight: titleLine)
+                .ccMark(beside: titleText)
         }
     }
 
     @ViewBuilder
     private var chevron: some View {
         if showsChevron, action != nil {
-            CCIcon("chevron.right", size: CC.size.iconSm, weight: .semibold)
+            CCIcon("caret-right", size: CC.size.iconSm, weight: .semibold)
                 .foregroundStyle(CC.text.tertiary)
+                .ccMark(beside: titleText)
         }
     }
 
@@ -289,12 +282,15 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// The style the title is set in.
+    private var titleText: CCTextStyle { titleIsMono ? CC.type.monoSmall : titleStyle }
+
     /// Lines one and two — the only ones that share their line with an
     /// accessory.
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: CC.space.xxs) {
             Text(title)
-                .ccType(titleIsMono ? CC.type.monoSmall : titleStyle)
+                .ccType(titleText)
                 .foregroundStyle(isDimmed ? CC.text.tertiary : CC.text.primary)
                 .lineLimit(titleLineLimit)
                 .truncationMode(titleTruncation)
@@ -334,10 +330,11 @@ struct CCRow<Leading: View, Trailing: View, Meta: View>: View {
         if let disabledReason {
             HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
                 CCIcon(
-                    "exclamationmark.circle.fill", size: 11, weight: .semibold,
+                    "warning-circle-fill", size: 11, weight: .semibold,
                     relativeTo: .caption
                 )
                 .foregroundStyle(CC.color.warning)
+                .ccMark(beside: CC.type.footnote)
                 Text(disabledReason.text)
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.color.warning)

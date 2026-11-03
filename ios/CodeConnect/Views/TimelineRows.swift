@@ -258,8 +258,9 @@ struct AgentMessageRow: View {
             // agent's prose, and the fact that it stops early belongs where the
             // stopping happened.
             if isInterrupted {
-                HStack(spacing: CC.space.xxs) {
-                    CCIcon("stop.circle", size: 12, weight: .regular, relativeTo: .caption)
+                HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs) {
+                    CCIcon("stop-circle", size: 12, weight: .regular, relativeTo: .caption)
+                        .ccMark(beside: CC.type.micro)
                     Text("Interrupted")
                         .ccType(CC.type.micro)
                 }
@@ -448,12 +449,9 @@ struct ToolRow: View {
 
     private var summaryLine: some View {
         CCAdaptiveStack(horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.xxs) {
-            // Top at accessibility sizes, where the pair below stacks: centred,
-            // the glyph sat beside the command instead of the tool's name.
-            HStack(
-                alignment: typeSize.isAccessibilitySize ? .top : .center,
-                spacing: TimelineSpine.gap
-            ) {
+            // On the first baseline, the glyph centres on the tool's name — the
+            // pair's first line, side by side or stacked.
+            HStack(alignment: .firstTextBaseline, spacing: TimelineSpine.gap) {
                 CCIcon(
                     ToolSummary.symbol(tool: tool.name), size: CC.size.icon, weight: .medium,
                     maxSize: CCColumn.markMaxSize)
@@ -462,6 +460,7 @@ struct ToolRow: View {
                     // frame from the glyph and a column of tool rows has to line
                     // up whatever symbols it happens to hold.
                     .ccGutterMark()
+                    .ccMark(beside: CC.type.callout)
                 // The glyph above is already pinned to the gutter so a column of
                 // tool rows lines up; this is the same argument applied to the
                 // name, so the commands beside them line up too. See
@@ -471,7 +470,7 @@ struct ToolRow: View {
                 let pair =
                     typeSize.isAccessibilitySize
                     ? AnyLayout(VStackLayout(alignment: .leading, spacing: CC.space.xxs))
-                    : AnyLayout(CCToolPairLayout(labels: toolLabelWidths))
+                    : AnyLayout(CCToolPairLayout(labels: toolLabelWidths, alignment: .firstTextBaseline))
                 pair {
                     Text(tool.name)
                         .ccType(CC.type.callout)
@@ -529,13 +528,14 @@ struct ToolRow: View {
     }
 
     private var statusView: some View {
-        HStack(spacing: CC.space.xs) {
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
             if let duration = tool.durationMS {
                 Text(Format.duration(ms: duration))
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.tertiary)
             }
             CCIcon(tool.status.symbol, size: 12, weight: .semibold, relativeTo: .caption)
+                .ccMark(beside: CC.type.monoSmall)
                 .foregroundStyle(
                     tool.status.ccTone == .neutral
                         ? (tool.status == .running ? CC.text.primary : CC.text.tertiary)
@@ -911,10 +911,11 @@ struct QuestionRow: View {
             Text(title)
                 .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.primary)
-                .overlay(alignment: .leading) {
+                .overlay(alignment: Alignment(horizontal: .leading, vertical: .firstTextBaseline)) {
                     CCIcon(
-                        "questionmark.bubble", size: CC.size.icon, weight: .medium,
+                        "chat-circle-text", size: CC.size.icon, weight: .medium,
                         maxSize: CCColumn.markMaxSize)
+                        .ccMark(beside: CC.type.callout)
                         .foregroundStyle(approval.isPending ? CC.color.warning : CC.text.tertiary)
                         .fixedSize()
                         // Centred on the mark axis, 16 back from the text edge,
@@ -991,19 +992,19 @@ struct NoticeRow: View {
     }
 
     private var marked: some View {
-        HStack(alignment: .top, spacing: TimelineSpine.gap) {
+        HStack(alignment: .firstTextBaseline, spacing: TimelineSpine.gap) {
             CCIcon(
                 notice.symbol, size: CC.size.icon, weight: .medium, maxSize: CCColumn.markMaxSize)
                 .foregroundStyle(tone == .neutral ? CC.text.tertiary : tone.color)
                 .ccGutterMark()
-                .padding(.top, 1)
+                .ccMark(beside: CC.type.footnote)
 
             // The time goes under the words at accessibility sizes. Beside
             // them at AX5 it took a third of the row, and a computer's name
             // broke mid-word in what was left: `cc-12@bui` / `ld-server-`.
             CCAdaptiveStack(
                 horizontalSpacing: TimelineSpine.gap, verticalSpacing: CC.space.xxs,
-                verticalAlignment: .top
+                verticalAlignment: .firstTextBaseline
             ) {
                 VStack(alignment: .leading, spacing: CC.space.xxs) {
                     Text(notice.title)

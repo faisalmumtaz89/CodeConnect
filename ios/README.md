@@ -54,6 +54,12 @@ The terminal needs no network library of its own: it rides the paired
 resolved is transitive and Apple-owned; `Package.resolved` is committed and is
 the real pin.
 
+The icons are [Phosphor](https://phosphoricons.com)'s (MIT), copied rather than
+depended on: only the SVGs the app draws, from `@phosphor-icons/core` 2.1.1, in
+`CodeConnect/Assets.xcassets/Phosphor` (regular, bold and light for a line icon,
+fill for a filled one), with Phosphor's licence shipped in the app as
+`CodeConnect/Resources/Phosphor-LICENSE.txt`. `CCIcon` draws them.
+
 ## Open and run
 
 Sources live in Xcode **synchronized file groups**, so adding a Swift file
@@ -85,7 +91,7 @@ pairing and opens no socket, and nothing in it reports a link
 | `CodeConnect/Net/` | `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket. |
 | `CodeConnect/Store/` | Keychain pairing, this device's identity, preferences, the on-disk event cache. |
 | `CodeConnect/Model/` | Event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, the unified-diff parser. |
-| `CodeConnect/Views/` | Fleet, Deck, session detail (Timeline / Terminal), decision card, diff, pairing and settings. |
+| `CodeConnect/Views/` | Fleet, Deck, session detail (the timeline, and the terminal from the bar's menu), decision card, diff, pairing and settings. |
 | `CodeConnectTests/` | Unit tests. Wire types are tested against JSON written by hand from `mac/protocol/src`. |
 | `CodeConnectUITests/` | End-to-end. `ApprovalFlowUITests` and `LiveDaemonUITests` need a **real** daemon; `DeckUITests` replays contract-shaped frames. |
 | `CodeConnectRenderHarness/` | The render catalog. Its own target, in its own scheme, **excluded from the product scheme's TestAction** — nothing here changes the product's test counts. See *The render harness*. |
@@ -792,7 +798,7 @@ CC.color   bg surface surfaceRaised surfaceOverlay
            accent accentPressed onAccent
            success info warning danger
            muted(_ tone:)                       // 12% semantic wash
-           successMuted dangerMuted             // diff row tints, 6%
+           successMuted dangerMuted             // diff row tints, 12%
            successWord dangerWord               // diff word tints, 22%
            syntaxKeyword syntaxString syntaxComment   // three roles, only three
 
@@ -879,18 +885,18 @@ haptic is not motion, and removing it removes information.
 | `CCRow` | `CCRow(title, titleStyle:, subtitle:, meta:, titleTruncation:, subtitleLineLimit:, showsChevron:, separator:, density:, isDimmed:, disabledReason:, accessibilityLabelText:, action:) { leading } trailing: { } meta: { }` — 64pt min, full-row target. **`meta` spans the whole row**, under the trailing accessory rather than beside it |
 | `CCFactRow` | `CCFactRow(label, value:, labelStyle: .prose/.identifier/.key, tone:, isUnmeasured:, age:, separator:)` · `CCFactRow(label) { value }` · `CCFactRow(label, detail: { })` — 48pt. Lands its own text on the 52pt column; no call site adds anything |
 | `CCBadge` | `CCBadge(text, icon:, tone:, count:, isSelected:, action:)` · `CCBadge(status:count:)` · `CCBadge(capability:)` — **one construction**, and no `style:` to pick another: tint@12 fill, tint@40 border, full-strength label, radius 6. A badge is **20pt**; the same construction **with an `action`** is a control and is `CC.size.chip` 32 with a wider inset, because a chip is a thing you press. `danger` takes a 1.5pt edge; nothing takes a saturated fill |
-| `CCTag` | `CCTag(text, accessibilityText:)` · `CCTag(agent:)` — which agent a session is (`Claude Code`, `Codex`, or an unsupported agent's own word), on an ended fleet row and in the session header; a run in a project card is titled with the same word instead. No fill, 1pt `borderStrong`, 9pt semibold uppercase `textTertiary`, **15pt** tall, radius 4; wraps at accessibility sizes like `CCBadge` |
+| `CCTag` | `CCTag(text, accessibilityText:)` · `CCTag(agent:)` — which agent a session is (`Claude Code`, `Codex`, or an unsupported agent's own word), on an ended fleet row; a run in a project card is titled with the same word instead. No fill, 1pt `borderStrong`, 9pt semibold uppercase `textTertiary`, **15pt** tall, radius 4; wraps at accessibility sizes like `CCBadge` |
 | `CCRiskTag` | `CCRiskTag(risk)` — `CCTag`'s construction for risk, **without colour**: HIGH is a solid `text` chip with a bold `onAccent` label, MEDIUM an outline with a `textSecondary` label, LOW draws nothing. VoiceOver: `Risk HIGH. <rationale>` |
 | `CCCountChip` | `CCCountChip(3)` — the same construction with a number in it. Used by `CCSectionHeader`; never hand-rolled |
 | `CCStatusDot` | `CCStatusDot(color:size:isHollow:pulses:)` · `CCStatusDot(tone:…)` · `CCStatusDot(status:size:isCached:)` — scales with Dynamic Type to `CC.size.dotMaxScale` (8 → 14 at AX5) |
-| `CCMachineLabel` | `CCMachineLabel(name:level:lineLimit:)` — a computer and whether it answers: a dot, the name, and a word (`Stale`, `Connecting`, `Offline`, `Not paired`) only while the link is not live. The home screen's project cards wrap it; the session header sets it on one line, where the name truncates and the word stays whole, as the button that opens the link's details. The one table is `LinkHealth.Level.machineMark` |
+| `CCMachineLabel` | `CCMachineLabel(name:level:lineLimit:)` — a computer and whether it answers: a dot, the name, and a word (`Stale`, `Connecting`, `Offline`, `Not paired`) only while the link is not live. The home screen's project cards wrap it. The one table is `LinkHealth.Level.machineMark` |
 | `CCField` | `CCField(label:text:placeholder:hint:error:axis:lineLimit:isSecure:keyboardType:…:isMono:labelOnContentColumn:onSubmit:)` — 52pt. `label` is **optional**: an empty string still reserves ~22pt of its line, `nil` draws no row. The label steps out to the content column unless `labelOnContentColumn: false`, for a document with no gutter (the question sheet), where it sits on the field's edge |
 | `CCSectionHeader` | `CCSectionHeader("Blocked", count:, dotColor:, dotPulses:, note:, noteAction:, actionTitle:, action:)` — **place it flush**: it puts its own label on the 52pt column and takes no column parameter. The dot hangs itself into the 32pt gutter, takes no layout width, and stays centred on that axis as it scales |
 | `CCEmptyState` | `CCEmptyState(glyph:title:message:tone:actionTitle:action:actionDisabledReason:secondaryActionTitle:secondaryAction:)` — the primary action is `.primary`, because an empty state has exactly one action worth taking, and `actionDisabledReason:` *draws* why the only way out is shut |
 | `CCScreenMark` | `CCScreenMark(glyph:tone:)` — a 32pt glyph in a 64pt bordered circle. **A component, not a modifier, because the Dynamic Type ramp is welded to the token**: `ccGlyphContainer`'s free `relativeTo:` let two marks meaning "here is the thing this screen is about" ride `.title2` and `.largeTitle`, which measured 150.33 against 108.67 at AX5 and 0.00 apart at the default `L`. Use it for any such mark |
 | `CCSheetChrome` | `CCSheetChrome("Decision", subtitle:, onClose:) { content }` (+ `trailing:` slot); pairs with `CCActionBar`. The **subtitle** resolves backtick markup, so a sheet's anchor sets its path in mono; the **title** is verbatim and bounded to two lines, because it carries a project name — arbitrary text from a filesystem, which a markup renderer would eat |
 | `CCActionPair` | `CCActionPair { deny } allow: { allow }` — **40 : 60, 12pt gap**, and no ratio parameter. A `Layout`, not a measurement: exact on the first frame, no `@State`, no `PreferenceKey`. Stacks at accessibility sizes |
-| `CCMonoBlock` | `CCMonoBlock(text, lineLimit:, tone:, showsCopy:, wraps:, truncation:, isSmall:)` — **wraps at the measured column with the diff grid's `↳`; never fades, never ellipsises, never runs under the copy button.** `lineLimit` collapses with a `SHOW ALL n LINES` disclosure rather than truncating. `wraps:` soft-wraps prose-shaped output and marks only the breaks that cut a token. `truncation:` is `CCMonoTruncation.head`/`.middle` and is for **unbounded identifiers only** — there is no `.tail`, because tail truncation cuts a command's arguments. `CCMonoBlock(inline:truncation:lines:)` is the same run with **no container**: no raised surface, no copy button, no extra height, for the three places a command appears inside something else |
+| `CCMonoBlock` | `CCMonoBlock(text, lineLimit:, tone:, showsCopy:, wraps:, truncation:, isSmall:)` — **wraps at the measured column with a `↳`; never fades, never ellipsises, never runs under the copy button.** `lineLimit` collapses with a `SHOW ALL n LINES` disclosure rather than truncating. `wraps:` soft-wraps prose-shaped output and marks only the breaks that cut a token. `truncation:` is `CCMonoTruncation.head`/`.middle` and is for **unbounded identifiers only** — there is no `.tail`, because tail truncation cuts a command's arguments. `CCMonoBlock(inline:truncation:lines:)` is the same run with **no container**: no raised surface, no copy button, no extra height, for the three places a command appears inside something else |
 | `CCSegmented` | `CCSegmented(selection:options:accessibilityLabel:)` with `CCSegmentedOption(value, title:, icon:)` |
 | `CCGapMarker` | `CCGapMarker(label:actionLabel:action:)` — inline, at its position in time |
 | `CCBanner` / `CCBannerSlot` | `CCBannerSlot([CCBannerItem(.rejected, title:…), …])` renders **exactly one**, by the ladder `rejected > offline > stale > cached > gap > truncated` |
@@ -1160,14 +1166,15 @@ colour this app chooses for its own text.
 1.39:1 on `bg` and `borderStrong` #383838 measures 1.79:1. They are *separation*,
 never the sole identifier of a control: every CC control is identified by its
 label (≥ 4.5:1) and, when focused, by a 2pt `borderFocus` ring at **17.94:1**.
-WCAG 1.4.11 and 2.4.11 are met through the label and the focus ring.
+WCAG 1.4.11 and 2.4.11 are met through the label and the focus ring. The one
+exception is the session composer: it keeps its lit rim when focused, and the
+caret and the keyboard show the focus.
 
 **Dynamic Type** — verified by screenshot at `medium`, `xxxLarge`, and
 `AX5` (`accessibility-extra-extra-extra-large`) on iPhone 17 Pro. Nothing clips
 and nothing truncates. Six layout switches make that true: `CCRow` moves its
 trailing accessory below the text block at accessibility sizes; `CCSheetChrome`
-does the same with its toolbar circles, which are ~60pt each at AX5 and left
-`Diff · fx-1` about 150pt to wrap in; `CCBadge` stops being `fixedSize`
+does the same with its two buttons, so the title keeps the sheet's width; `CCBadge` stops being `fixedSize`
 horizontally so it wraps instead of starving the row; `CCMonoBlock` moves its
 copy button out of the text's line and into a labelled row underneath, giving
 the command the block's full width; `CCStatStrip` becomes a vertical stack; and
@@ -1182,10 +1189,9 @@ less height rather than giving up a fact:
 * the stamp's counts become **one wrapping `monoSmall` run** instead of three
   stacked `mono` lines (side by side they clipped to `+2,… −2,… 1 fi…`, which was
   the reason they were stacked);
-* the provenance line drops the constant — `Captured 0s ago`, not `Captured on
-  the Mac 0s ago · git diff HEAD` — because `git diff HEAD` is the same command
-  on every diff this product draws and the *age* is the whole point. VoiceOver
-  still gets the full sentence;
+* the stamp is one line, `+6 −3 · 2 files · 0s ago`, without `git diff HEAD`,
+  the same command on every diff this product draws; the *age* is the whole
+  point. Where the line does not fit, the age takes the next line;
 * the sticky file header drops its `+n −n` (restated on the chip directly above)
   and draws the **basename**, so the band that answers *which file am I in* stops
   head-truncating to `….swift`;
@@ -1203,19 +1209,15 @@ Measured on the render harness, `diff-sample` at AX5: the first line of code
 moved from **707pt to 574pt** down an 874pt screen, so the grid went from 167pt
 to 300pt — 80% more code, nothing dropped.
 
-The largest remaining item is measured and **not** fixed: a sheet's two toolbar
-circles are ~94pt each at AX5 (`ccGlyphContainer(28, relativeTo: .footnote)`
-× 3.4), which is 188pt of `CCSheetChrome` before any content. The kit's own answer
-exists — `CCMonoBlock` already turns its copy button into a labelled 44pt row at
-those sizes, on the reasoning that "a 60pt icon-only square is a worse target
-than a labelled 44pt row" — but applying it to `CCSheetChrome` changes every
-sheet in the product and wants its own render pass.
+A sheet's buttons no longer grow with type: they are the session header's 36pt
+pills in 44pt targets at every size, the glyph stopping at `xxxLarge` with the
+large content viewer past it, where they were ~94pt circles at AX5.
 
 **A command never breaks where the layout engine wants to.** Handed
 `git push --force origin main` at AX5, the engine breaks after the `--`, which
 reads as a bare `--` separator followed by a file called `force`.
 `CCMonoBlock` — block *and* `inline:` form — wraps at the measured column
-instead and marks every break with the diff grid's `↳`, so a break inside a
+instead and marks every break with a `↳`, so a break inside a
 token is always visible as one.
 
 **Nothing round is a fixed size.** `CCStatusDot`, every badge and chip, and every
@@ -1227,8 +1229,7 @@ as a tall portrait box with a word wedged into it.
 **VoiceOver** — every interactive component carries a label, the right traits
 (`.isButton`, `.isSelected`, `.isHeader`), and a value where state exists
 (`"Busy"` while loading). `CCHoldButton` exposes a plain activation because
-VoiceOver cannot express a hold. The session header's link button speaks the
-link's age as words ("14 seconds ago"), never "fourteen ess".
+VoiceOver cannot express a hold.
 
 ## Reviewing the system
 

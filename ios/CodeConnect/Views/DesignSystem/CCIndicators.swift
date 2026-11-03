@@ -103,9 +103,10 @@ struct CCBadge: View {
     }
 
     private var chip: some View {
-        HStack(spacing: CC.space.xxs) {
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs) {
             if let icon {
                 CCIcon(icon, size: 9, weight: .bold, relativeTo: .caption)
+                    .ccMark(beside: CC.type.badgeLabel)
             }
             Text(text.uppercased())
                 .ccType(CC.type.badgeLabel)
