@@ -1,0 +1,159 @@
+import SwiftUI
+
+/// Where a start lands the moment it is sent: the new session's own screen,
+/// saying what it is waiting for until the session's first event arrives, or
+/// why it did not start and what to do about it.
+struct StartingSessionView: View {
+    let requestID: String
+    /// The session is live: show its real screen.
+    let onLive: (String) -> Void
+    /// Back to choosing, from a start that failed.
+    let onChooseAgain: () -> Void
+
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    private var start: SessionStart? { model.starter.starts[requestID] }
+
+    var body: some View {
+        Group {
+            if let start {
+                if case .failed(let reason, let detail) = start.outcome {
+                    failure(start, reason: reason, detail: detail)
+                } else {
+                    starting(start)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(CC.color.bg)
+        .ccNavigationChrome()
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let start {
+                ToolbarItem(placement: .principal) { StartBarTitle(project: start.project) }
+            }
+        }
+        .onChange(of: liveKey) { _, key in if let key { onLive(key) } }
+    }
+
+    /// The new session's key once it is in the fleet with its first event.
+    private var liveKey: String? {
+        guard case .started(let uid) = start?.outcome ?? .failed(.launchFailed, detail: ""),
+            model.shown(for: uid) != nil
+        else { return nil }
+        return uid
+    }
+
+    // MARK: Starting
+
+    private func starting(_ start: SessionStart) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: CC.space.lg) {
+                HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
+                    ProgressView()
+                        .tint(CC.text.secondary)
+                    Text("Starting \(start.agent.displayName)…")
+                        .ccType(CC.type.title)
+                        .foregroundStyle(CC.text.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                TimelineView(.periodic(from: start.sentAt, by: 1)) { context in
+                    VStack(alignment: .leading, spacing: CC.space.sm) {
+                        step(
+                            done: start.outcome != nil,
+                            start.outcome == nil
+                                ? "Asking \(start.machineName) to start it"
+                                : "\(start.machineName) started it")
+                        step(
+                            done: false,
+                            "Waiting for \(start.agent.displayName)’s first words · "
+                                + Format.age(context.date.timeIntervalSince(start.sentAt)))
+                    }
+                }
+                if let branch = start.project.gitBranch {
+                    Text("In \(start.project.name) on \(branch)")
+                        .ccType(CC.type.callout)
+                        .foregroundStyle(CC.text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let prompt = start.prompt {
+                    VStack(alignment: .leading, spacing: CC.space.xs) {
+                        Text("YOUR FIRST MESSAGE")
+                            .ccType(CC.type.fieldLabel, color: nil)
+                        Text(prompt)
+                            .ccType(CC.type.reading)
+                            .foregroundStyle(CC.text.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(CC.space.sm)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                CC.color.surfaceRaised, in: RoundedRectangle(cornerRadius: CC.radius.lg))
+                        Text("\(start.agent.displayName) reads it as soon as it starts.")
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.tertiary)
+                    }
+                }
+            }
+            .padding(.horizontal, CC.space.md)
+            .padding(.top, CC.space.xl)
+        }
+    }
+
+    private func step(done: Bool, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
+            CCIcon(done ? "check-circle-fill" : "circle-dashed", size: 18)
+                .foregroundStyle(done ? CC.color.success : CC.text.tertiary)
+            Text(text)
+                .ccType(CC.type.body)
+                .foregroundStyle(done ? CC.text.secondary : CC.text.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: Failed
+
+    private func failure(_ start: SessionStart, reason: StartFailure, detail: String) -> some View {
+        let copy = Self.copy(for: reason, start: start)
+        return ScrollView {
+            CCEmptyState(
+                glyph: copy.glyph, title: copy.title, message: copy.message, tone: .danger,
+                actionTitle: copy.action, action: onChooseAgain,
+                secondaryActionTitle: "Back to Projects", secondaryAction: { dismiss() }
+            ) {
+                VStack(alignment: .leading, spacing: CC.space.xxs) {
+                    Text("\(start.machineName.uppercased()) SAID")
+                        .ccType(CC.type.fieldLabel, color: nil)
+                    CCMonoBlock(detail)
+                }
+                .frame(maxWidth: 320)
+                .padding(.top, CC.space.xs)
+            }
+            .padding(.top, CC.space.xxl)
+        }
+    }
+
+    private static func copy(for reason: StartFailure, start: SessionStart)
+        -> (glyph: String, title: String, message: String, action: String)
+    {
+        let agent = start.agent.displayName
+        switch reason {
+        case .folderMissing:
+            return (
+                "folder-dashed", "That folder isn’t there any more",
+                "\(start.project.shownPath) is gone from \(start.machineName): moved, renamed or deleted. Nothing was started.",
+                "Choose another project")
+        case .agentMissing:
+            return (
+                "terminal-window", "\(agent) isn’t installed",
+                "\(start.machineName) has no \(agent). Install it there, then start again from here.",
+                "Choose another agent")
+        case .launchFailed:
+            return (
+                "warning", "\(agent) didn’t start",
+                "\(start.machineName) tried and the shell stopped. Its own words are below.",
+                "Try again")
+        }
+    }
+}
