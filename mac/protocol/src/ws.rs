@@ -1723,10 +1723,15 @@ mod tests {
             crate::PROTOCOL_MINOR >= 26,
             "`machine_id` on `hello_ack` is minor 26"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 27,
+            "agents' messages (`send_agent_message`, `list_agents`, `protocol::peer`) are \
+             minor 27"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 26);
+        assert_eq!(crate::PROTOCOL_MINOR, 27);
     }
 
     /// **The tags, pinned on this side too.**

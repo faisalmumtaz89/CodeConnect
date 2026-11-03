@@ -44,6 +44,7 @@ pub enum HookEventName {
     SessionStart,
     SessionEnd,
     Stop,
+    UserPromptSubmit,
     Other(String),
 }
 
@@ -57,6 +58,7 @@ impl HookEventName {
             "SessionStart" => HookEventName::SessionStart,
             "SessionEnd" => HookEventName::SessionEnd,
             "Stop" => HookEventName::Stop,
+            "UserPromptSubmit" => HookEventName::UserPromptSubmit,
             other => HookEventName::Other(other.to_string()),
         }
     }
@@ -70,6 +72,7 @@ impl HookEventName {
             HookEventName::SessionStart => "SessionStart",
             HookEventName::SessionEnd => "SessionEnd",
             HookEventName::Stop => "Stop",
+            HookEventName::UserPromptSubmit => "UserPromptSubmit",
             HookEventName::Other(s) => s.as_str(),
         }
     }
@@ -101,6 +104,7 @@ impl HookEventName {
             // reporting, and `SessionEnd` is now emitted only by the daemon when
             // the process is genuinely gone.
             HookEventName::Stop => EventKind::TurnComplete,
+            HookEventName::UserPromptSubmit => EventKind::Other("hook_UserPromptSubmit".into()),
             HookEventName::Other(s) => EventKind::Other(format!("hook_{s}")),
         }
     }
@@ -184,6 +188,9 @@ pub struct HookDecision {
     /// dialog does (measured on 2.1.286: same text, no model request, no Stop).
     #[serde(default, skip_serializing_if = "is_false")]
     pub interrupt: bool,
+    /// On a `UserPromptSubmit`: text Claude reads beside the person's prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -212,6 +219,15 @@ impl HookDecision {
             reason: None,
             updated_input: None,
             interrupt: false,
+            additional_context: None,
+        }
+    }
+
+    /// A `UserPromptSubmit` hook's text for Claude to read beside the prompt.
+    pub fn prompt_context(text: impl Into<String>) -> Self {
+        HookDecision {
+            additional_context: Some(text.into()),
+            ..HookDecision::passthrough()
         }
     }
 
@@ -230,6 +246,15 @@ impl HookDecision {
     /// than to an invalid shape, because an invalid shape voids the whole
     /// output — a strictly worse failure than staying silent.
     pub fn render(&self, event: &HookEventName) -> Option<String> {
+        if let (HookEventName::UserPromptSubmit, Some(context)) = (event, &self.additional_context)
+        {
+            return Some(
+                serde_json::json!({
+                    "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}
+                })
+                .to_string(),
+            );
+        }
         match (event, self.decision) {
             (_, Decision::Passthrough) => None,
 
@@ -311,6 +336,29 @@ impl HookDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The documented `UserPromptSubmit` shape; on any other event the text is not printed.
+    #[test]
+    fn a_prompt_context_prints_as_additional_context_on_user_prompt_submit_only() {
+        let decision = HookDecision::prompt_context("[CodeConnect] mail");
+        let printed: serde_json::Value =
+            serde_json::from_str(&decision.render(&HookEventName::UserPromptSubmit).unwrap())
+                .unwrap();
+        assert_eq!(
+            printed,
+            serde_json::json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                "additionalContext": "[CodeConnect] mail"}})
+        );
+        assert_eq!(decision.render(&HookEventName::Stop), None);
+        assert_eq!(
+            HookDecision::passthrough().render(&HookEventName::UserPromptSubmit),
+            None
+        );
+        assert_eq!(
+            HookEventName::parse("UserPromptSubmit"),
+            HookEventName::UserPromptSubmit
+        );
+    }
 
     #[test]
     fn passthrough_prints_nothing_for_every_event() {

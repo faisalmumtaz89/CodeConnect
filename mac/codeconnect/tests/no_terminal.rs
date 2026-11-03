@@ -146,7 +146,8 @@ fn with_no_terminal_to_show_a_session_claude_runs_as_it_runs_directly() {
     }
     // And with nothing missing it hosts — where there is a tmux to host on — so
     // the three above are about the terminal and not about a launch that could
-    // never host: claude is handed its `--settings`, and the command exits 0.
+    // never host: claude is handed its `--mcp-config` and `--settings`, and the command
+    // exits 0.
     let control = protocol::tmux::tmux_bin().map(|_| {
         let (status, printed) = launch(&home, Missing::Nothing);
         (status, printed, home.join("cc/sessions").exists())
@@ -155,7 +156,8 @@ fn with_no_terminal_to_show_a_session_claude_runs_as_it_runs_directly() {
     if let Some((status, printed, hosted)) = control {
         assert!(hosted, "a usable terminal hosted nothing: {printed}");
         assert_eq!(status, Some(0), "{printed}");
-        assert!(printed.contains("STAND-IN --settings "), "{printed}");
+        assert!(printed.contains("STAND-IN --mcp-config "), "{printed}");
+        assert!(printed.contains("/mcp.json --settings "), "{printed}");
     }
     for (name, status, printed, hosted) in verdicts {
         // Claude's own status and exactly its argv: a hosted run exits 0 and hands

@@ -157,42 +157,84 @@ pub fn agent_support_on(
 /// operator with no idea whether their history had been removed — which is the
 /// one thing this command must never be ambiguous about.
 pub fn request_within(frame: &ClientFrame, timeout: Duration) -> Result<DaemonFrame> {
-    let socket = protocol::socket_path();
-    let mut stream = UnixStream::connect(&socket).with_context(|| {
-        // With no systemd, `daemon install` refuses: name the line that starts it by hand.
-        #[cfg(target_os = "linux")]
-        let start = crate::service::no_systemd().map_or_else(
-            || "codeconnect daemon install".to_string(),
-            |_| crate::service::hand_run_line(),
-        );
-        #[cfg(not(target_os = "linux"))]
-        let start = "codeconnect daemon install";
-        format!(
-            "cannot reach the CodeConnect daemon at {}: start it with \
-             `{start}`, or check it with `codeconnect daemon status`",
-            socket.display()
-        )
-    })?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
+    request_at(&protocol::socket_path(), frame, timeout)
+}
 
-    let mut line = serde_json::to_vec(frame)?;
-    line.push(b'\n');
-    stream.write_all(&line).context("writing to ccd")?;
-    stream.flush().context("flushing to ccd")?;
+/// The same, to the daemon at `socket`.
+pub fn request_at(
+    socket: &std::path::Path,
+    frame: &ClientFrame,
+    timeout: Duration,
+) -> Result<DaemonFrame> {
+    DaemonLink::connect(socket, timeout)?.request(frame)
+}
 
-    let mut response = String::new();
-    let read = BufReader::new(stream)
-        .read_line(&mut response)
-        .context("reading ccd's reply")?;
-    if read == 0 {
-        bail!("ccd closed the connection without replying");
+/// One connection to the daemon, for an exchange of more than one frame: the
+/// `codeconnect` tool's `read_messages` confirms on the same connection that the
+/// agent was given what it read.
+/// **ccd took a frame and no reply came back**: it closed, or stopped answering,
+/// after the frame was written to it, so what the frame asked may have been done.
+#[derive(Debug)]
+pub struct NoAnswer(String);
+
+impl std::fmt::Display for NoAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoAnswer {}
+
+pub struct DaemonLink {
+    stream: BufReader<UnixStream>,
+}
+
+impl DaemonLink {
+    pub fn connect(socket: &std::path::Path, timeout: Duration) -> Result<DaemonLink> {
+        let stream = UnixStream::connect(socket).with_context(|| {
+            // With no systemd, `daemon install` refuses: name the line that starts it by hand.
+            #[cfg(target_os = "linux")]
+            let start = crate::service::no_systemd().map_or_else(
+                || "codeconnect daemon install".to_string(),
+                |_| crate::service::hand_run_line(),
+            );
+            #[cfg(not(target_os = "linux"))]
+            let start = "codeconnect daemon install";
+            format!(
+                "cannot reach the CodeConnect daemon at {}: start it with \
+                 `{start}`, or check it with `codeconnect daemon status`",
+                socket.display()
+            )
+        })?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        Ok(DaemonLink {
+            stream: BufReader::new(stream),
+        })
     }
 
-    match serde_json::from_str::<DaemonFrame>(response.trim())? {
-        // Surfaced here so no caller has to remember to check for it.
-        DaemonFrame::Error { message } => bail!("{message}"),
-        frame => Ok(frame),
+    /// Send one frame and read the daemon's one reply.
+    pub fn request(&mut self, frame: &ClientFrame) -> Result<DaemonFrame> {
+        let mut line = serde_json::to_vec(frame)?;
+        line.push(b'\n');
+        let stream = self.stream.get_mut();
+        stream.write_all(&line).context("writing to ccd")?;
+        stream.flush().context("flushing to ccd")?;
+
+        let mut response = String::new();
+        let read = self
+            .stream
+            .read_line(&mut response)
+            .map_err(|err| NoAnswer(format!("reading ccd's reply: {err}")))?;
+        if read == 0 {
+            return Err(NoAnswer("ccd closed the connection without replying".into()).into());
+        }
+
+        match serde_json::from_str::<DaemonFrame>(response.trim())? {
+            // Surfaced here so no caller has to remember to check for it.
+            DaemonFrame::Error { message } => bail!("{message}"),
+            frame => Ok(frame),
+        }
     }
 }
 

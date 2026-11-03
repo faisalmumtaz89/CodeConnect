@@ -1,4 +1,5 @@
-//! Generated per-session `--settings` that installs the control plane.
+//! Generated per-session `--settings` that installs the control plane, and the
+//! `--mcp-config` that gives the session the `codeconnect` tool ([`crate::mcp`]).
 //!
 //! Two properties matter more than anything else here:
 //!
@@ -36,10 +37,26 @@ const OBSERVE_EVENTS: &[&str] = &[
     "Notification",
     "SessionStart",
     "Stop",
+    "UserPromptSubmit",
 ];
+
+/// How long the `UserPromptSubmit` hook waits for the daemon's mail reminder. The
+/// daemon's own work is one read; this bounds a stalled daemon, and the prompt goes
+/// on without the reminder.
+const PROMPT_REPLY_MS: u64 = 1_000;
+
+/// The events whose end leaves Claude waiting for the person: each also starts a
+/// mail waiter, which wakes Claude when another agent's message arrives.
+const WAITER_EVENTS: &[&str] = &["SessionStart", "Stop"];
+
+/// Claude's timeout for a mail waiter: twelve hours. Past it, mail waits for the
+/// person's next prompt, where the `UserPromptSubmit` reminder names it.
+const WAITER_TIMEOUT_SECS: u64 = 43_200;
 
 pub struct SettingsPlan {
     pub path: PathBuf,
+    /// The session's `--mcp-config`: the `codeconnect` tool, run for this session.
+    pub mcp_path: PathBuf,
 }
 
 /// Locate `cc-hook` next to this binary, which is correct for both a cargo
@@ -94,7 +111,29 @@ pub fn write_for_session(
     let document = build(session_id, session_uid, config, &hook_bin);
     let encoded = serde_json::to_string_pretty(&document)?;
     std::fs::write(&path, encoded).with_context(|| format!("writing {}", path.display()))?;
-    Ok(SettingsPlan { path })
+
+    let mcp_path = dir.join("mcp.json");
+    let mcp = mcp_config(
+        &std::env::current_exe().context("locating the codeconnect binary")?,
+        session_uid,
+        &protocol::socket_path(),
+    );
+    std::fs::write(&mcp_path, serde_json::to_string_pretty(&mcp)?)
+        .with_context(|| format!("writing {}", mcp_path.display()))?;
+    Ok(SettingsPlan { path, mcp_path })
+}
+
+/// The `codeconnect` MCP server, as Claude Code's `--mcp-config` names it.
+fn mcp_config(codeconnect: &Path, session_uid: &str, socket: &Path) -> serde_json::Value {
+    json!({
+        "mcpServers": {
+            "codeconnect": {
+                "type": "stdio",
+                "command": codeconnect,
+                "args": crate::mcp::server_args(session_uid, socket),
+            }
+        }
+    })
 }
 
 fn build(
@@ -133,18 +172,23 @@ fn build(
         if hooks.contains_key(*event) {
             continue; // already installed as the gate
         }
-        hooks.insert(
-            (*event).to_string(),
-            json!([{
-                "hooks": [{
-                    "type": "command",
-                    "command": observe_command(session_id, session_uid, event, config, hook_bin),
-                    // Fire-and-forget: cc-hook returns in well under a second,
-                    // and a short timeout bounds the damage if it ever does not.
-                    "timeout": 10,
-                }]
-            }]),
-        );
+        let mut commands = vec![json!({
+            "type": "command",
+            "command": observe_command(session_id, session_uid, event, config, hook_bin),
+            // Fire-and-forget: cc-hook returns in well under a second,
+            // and a short timeout bounds the damage if it ever does not.
+            "timeout": 10,
+        })];
+        if WAITER_EVENTS.contains(event) {
+            commands.push(json!({
+                "type": "command",
+                "command": waiter_command(session_id, session_uid, event, hook_bin),
+                // In the background; its exit 2 wakes Claude, even when idle.
+                "asyncRewake": true,
+                "timeout": WAITER_TIMEOUT_SECS,
+            }));
+        }
+        hooks.insert((*event).to_string(), json!([{ "hooks": commands }]));
     }
 
     json!({ "hooks": hooks })
@@ -184,7 +228,7 @@ fn observe_command(
     config: &Config,
     hook_bin: &Path,
 ) -> String {
-    [
+    let mut parts = vec![
         shell_quote(&hook_bin.to_string_lossy()),
         "--session".into(),
         shell_quote(session_id),
@@ -194,6 +238,25 @@ fn observe_command(
         shell_quote(event),
         "--connect-timeout-ms".into(),
         config.connect_timeout_ms.to_string(),
+    ];
+    // The one observer that waits: the daemon may answer a prompt with a
+    // reminder of mail waiting for Claude.
+    if event == "UserPromptSubmit" {
+        parts.extend(["--reply-ms".into(), PROMPT_REPLY_MS.to_string()]);
+    }
+    parts.join(" ")
+}
+
+fn waiter_command(session_id: &str, session_uid: &str, event: &str, hook_bin: &Path) -> String {
+    [
+        shell_quote(&hook_bin.to_string_lossy()),
+        "--session".into(),
+        shell_quote(session_id),
+        "--session-uid".into(),
+        shell_quote(session_uid),
+        "--event".into(),
+        shell_quote(event),
+        "--mail-waiter".into(),
     ]
     .join(" ")
 }
@@ -226,6 +289,7 @@ mod tests {
             "Notification",
             "SessionStart",
             "Stop",
+            "UserPromptSubmit",
         ] {
             assert!(hooks.contains_key(event), "missing {event}");
         }
@@ -248,6 +312,52 @@ mod tests {
             !observe.contains("--gate"),
             "PreToolUse must never block the agent: {observe}"
         );
+    }
+
+    /// The UserPromptSubmit hook asks for the daemon's reply, bounded well inside
+    /// Claude's own timeout for it; no other observer waits.
+    #[test]
+    fn only_the_prompt_hook_waits_for_a_reply_and_briefly() {
+        let document = plan(&Config::default());
+        let prompt = &document["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+        let command = prompt["command"].as_str().unwrap();
+        assert!(
+            command.ends_with(&format!("--reply-ms {PROMPT_REPLY_MS}")),
+            "{command}"
+        );
+        assert!(PROMPT_REPLY_MS < prompt["timeout"].as_u64().unwrap() * 1000);
+        for event in OBSERVE_EVENTS
+            .iter()
+            .filter(|event| **event != "UserPromptSubmit")
+        {
+            let command = document["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
+            assert!(!command.contains("--reply-ms"), "{event}: {command}");
+        }
+    }
+
+    /// Stop and SessionStart each also start a mail waiter in the background, with
+    /// the twelve-hour timeout; no other event does, and no hook blocks a Stop.
+    #[test]
+    fn stop_and_session_start_also_start_a_background_mail_waiter() {
+        let document = plan(&Config::default());
+        for (event, entry) in document["hooks"].as_object().unwrap() {
+            let waiters: Vec<_> = entry[0]["hooks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|hook| hook["command"].as_str().unwrap().ends_with("--mail-waiter"))
+                .collect();
+            if WAITER_EVENTS.contains(&event.as_str()) {
+                assert_eq!(waiters.len(), 1, "{event}");
+                assert_eq!(waiters[0]["asyncRewake"], true, "{event}");
+                assert_eq!(waiters[0]["timeout"], 43_200, "{event}");
+            } else {
+                assert!(waiters.is_empty(), "{event}");
+            }
+        }
+        assert!(!document.to_string().contains("StopFailure"));
     }
 
     #[test]
@@ -386,11 +496,13 @@ mod tests {
         // rather than looked up at hook time.
         let document = plan(&Config::default());
         for (event, entry) in document["hooks"].as_object().unwrap() {
-            let command = entry[0]["hooks"][0]["command"].as_str().unwrap();
-            assert!(
-                command.contains(&format!("--session-uid '{UID}'")),
-                "{event} does not carry the session uid: {command}"
-            );
+            for hook in entry[0]["hooks"].as_array().unwrap() {
+                let command = hook["command"].as_str().unwrap();
+                assert!(
+                    command.contains(&format!("--session-uid '{UID}'")),
+                    "{event} does not carry the session uid: {command}"
+                );
+            }
         }
     }
 

@@ -29,10 +29,12 @@ pub mod hash;
 pub mod hook;
 pub mod ipc;
 pub mod pairing;
+pub mod peer;
 pub mod proc;
 pub mod proc_identity;
 pub mod risk;
 pub mod secret;
+pub mod tailnet;
 pub mod time;
 pub mod tmux;
 pub mod uid;
@@ -584,7 +586,20 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         daemon's home ([`machine_id_path`]) and the same on every handshake.
 ///
 ///     A client that gets none tells machines apart by address, as before.
-pub const PROTOCOL_MINOR: u32 = 26;
+///   * `27` — **Agents message each other.**
+///
+///     A hosted agent can send another a message, which the receiving computer's
+///     daemon keeps until that agent reads it. Between this computer's own
+///     processes, and nothing a phone sends or reads changes:
+///       - [`ipc::ClientFrame::SendAgentMessage`], [`ipc::ClientFrame::ListAgents`],
+///         [`ipc::ClientFrame::ReadAgentMessages`] and [`ipc::ClientFrame::MailRead`]
+///         — the `codeconnect` tool's requests.
+///       - [`ipc::ClientFrame::MailWaiter`] — a Claude session's mail waiter.
+///       - [`peer`] — one daemon asking another: a frame that is not a phone
+///         message, before any phone hello, may be a [`peer::PeerRequest`], answered by one
+///         [`peer::PeerReply`] and the connection closed. A daemon below 27
+///         answers `bad_request`, which the sender reads as "older CodeConnect".
+pub const PROTOCOL_MINOR: u32 = 27;
 
 #[cfg(test)]
 mod ledger_tests {

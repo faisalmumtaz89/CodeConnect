@@ -21,6 +21,7 @@ CodeConnect brings the Claude Code and Codex sessions on your Mac or Linux compu
 - **Talk to the agent.** Type or dictate a message; dictation uses Apple's speech recognition, and nothing is sent until you send it.
 - **A live terminal.** Open the session's terminal on the phone and take over.
 - **Claude Code and Codex.** Both run as they do on their own. Everything above works with Claude Code; on a Codex session the phone answers approvals with Codex's own options, stops a turn, and sends a message ([details](docs/codex.md)).
+- **Agents message each other.** A Claude Code or Codex session can message any other session on your computers, through a `codeconnect` tool CodeConnect gives it; the message waits until that session reads it, and the agent is woken to read it ([details](docs/codex.md#messages-from-other-agents)).
 - **Honest about what it knows.** A session shows the age of its last event, and a stale connection disables actions and says why.
 
 ## Requirements
@@ -68,6 +69,7 @@ codeconnect pair              # a new pairing code (single use, 5 minutes)
 codeconnect devices           # paired phones
 codeconnect revoke <device>   # cut a phone off, open connections included
 codeconnect daemon status     # is the daemon running?
+codeconnect mail-trust on     # let your agents act on each other's messages (off: they show them to you)
 ```
 
 ## Update and uninstall
@@ -91,6 +93,7 @@ iPhone ──── WebSocket over your tailnet ────▶ ccd, the daemon 
 - Sessions go directly between your computer and your phone, over Tailscale by default; no CodeConnect server sees them.
 - A notification passes through Apple and, unless your daemon has its own Apple push key, CodeConnect's push relay, which receives no session content.
 - When `codeconnect claude` or `codeconnect codex` starts a session, CodeConnect asks GitHub for a newer release at most once a day; `"update_check": false` in `~/.codeconnect/config.json` turns that off.
+- Your agents' messages to each other travel only between your own computers, over Tailscale, and only between computers of the same Tailscale user; any program on one of those computers can send one, with no further credential. Whether an agent acts on one is your choice, asked once (`codeconnect mail-trust`); it is guidance to the agent, and its own permission mode still governs what it may do.
 - A paired phone can type into your sessions. [SECURITY.md](SECURITY.md) covers the trust boundaries and reporting a vulnerability privately; the [privacy policy](https://codeconnect.sh/privacy) lists every connection.
 
 ## Documentation

@@ -146,6 +146,16 @@ db_ops! {
     /// the whole fleet.
     fn push_target_for(device_id: String) -> Option<crate::store::PushRegistration>;
     fn recover_text_mutations(at: String) -> usize;
+    fn mail_context(session_uid: String, message_id: String) -> Option<String>;
+    fn read_mail(offer: String) -> usize;
+    fn release_mail(offer: String) -> ();
+    fn recover_mail() -> usize;
+    fn end_mail(session_uid: String) -> usize;
+    fn sent_mail_computer(message_id: String) -> Option<String>;
+    fn unsent_mail() -> Vec<crate::store::SentMail>;
+    fn untold_mail() -> Vec<crate::store::UntoldMail>;
+    fn release_mail_wake(session_uid: String) -> ();
+    fn mail_runs() -> Vec<(SessionRow, u32)>;
     fn orphan_event_count() -> u64;
 }
 
@@ -406,6 +416,104 @@ impl Db {
         .await
     }
 
+    // Hand-written for the reason [`Db::upsert_session_at_generation`] is: these
+    // take scalars and a state by value.
+
+    pub async fn take_mail(
+        &self,
+        mail: crate::store::MailIntake,
+        now_ms: i64,
+        limits: crate::store::MailLimits,
+    ) -> Result<crate::store::MailTaken> {
+        self.run(move |store| store.take_mail(&mail, now_ms, limits))
+            .await
+    }
+
+    pub async fn offer_mail(
+        &self,
+        session_uid: String,
+        offer: String,
+        now_ms: i64,
+    ) -> Result<crate::store::MailOffer> {
+        self.run(move |store| store.offer_mail(&session_uid, &offer, now_ms))
+            .await
+    }
+
+    pub async fn sweep_mail(&self, now_ms: i64, limits: crate::store::MailLimits) -> Result<()> {
+        self.run(move |store| store.sweep_mail(now_ms, limits))
+            .await
+    }
+
+    pub async fn file_sent_mail(&self, mail: crate::store::SentMail, now_ms: i64) -> Result<()> {
+        self.run(move |store| store.file_sent_mail(&mail, now_ms))
+            .await
+    }
+
+    pub async fn note_sent_mail(
+        &self,
+        message_id: String,
+        state: protocol::ipc::MailState,
+        reason: Option<String>,
+        told: bool,
+    ) -> Result<()> {
+        self.run(move |store| store.note_sent_mail(&message_id, state, reason.as_deref(), told))
+            .await
+    }
+
+    pub async fn note_mail_minor(&self, session_uid: String, minor: u32) -> Result<()> {
+        self.run(move |store| store.note_mail_minor(&session_uid, minor))
+            .await
+    }
+
+    pub async fn claim_mail_wake(
+        &self,
+        session_uid: String,
+        now_ms: i64,
+        between_turns: bool,
+    ) -> Result<bool> {
+        self.run(move |store| store.claim_mail_wake(&session_uid, now_ms, between_turns))
+            .await
+    }
+
+    pub async fn mail_turn_ended(
+        &self,
+        session_uid: String,
+        now_ms: i64,
+        misses_allowed: u32,
+    ) -> Result<()> {
+        self.run(move |store| store.mail_turn_ended(&session_uid, now_ms, misses_allowed))
+            .await
+    }
+
+    pub async fn mail_prompt(&self, session_uid: String, now_ms: i64) -> Result<bool> {
+        self.run(move |store| store.mail_prompt(&session_uid, now_ms))
+            .await
+    }
+
+    pub async fn mail_turn_marks(
+        &self,
+        session_uid: String,
+        started_ms: Option<i64>,
+        ended_ms: Option<i64>,
+    ) -> Result<()> {
+        self.run(move |store| store.mail_turn_marks(&session_uid, started_ms, ended_ms))
+            .await
+    }
+
+    pub async fn runs_with_unread_mail(&self, now_ms: i64) -> Result<Vec<String>> {
+        self.run(move |store| store.runs_with_unread_mail(now_ms))
+            .await
+    }
+
+    pub async fn told_mail(
+        &self,
+        message_id: String,
+        state: protocol::ipc::MailState,
+    ) -> Result<()> {
+        self.run(move |store| store.told_mail(&message_id, state))
+            .await
+    }
+
     /// Give back a claim whose write was refused before it did anything. `false` when
     /// the claim was already terminal.
     pub async fn release_mutation(
@@ -627,6 +735,16 @@ impl Db {
         terminal_source_event_id: String,
     ) -> Result<bool> {
         self.run(move |store| store.turn_terminal_filed(&session_uid, &terminal_source_event_id))
+            .await
+    }
+
+    /// See [`crate::store::Store::codex_turn_messages`].
+    pub async fn codex_turn_messages(
+        &self,
+        session_uid: String,
+        turn_id: String,
+    ) -> Result<(bool, usize)> {
+        self.run(move |store| store.codex_turn_messages(&session_uid, &turn_id))
             .await
     }
 

@@ -1515,7 +1515,7 @@ fn scan_codex_argv(args: &[String]) -> Result<ArgvScan, CodexRefusal> {
 /// it. A spaced value is never flag-shaped (see [`scan_codex_argv`]), so every
 /// flag-shaped token is a flag; a known flag's spaced value is stepped over so it is
 /// never taken for the first positional.
-fn asks_help_or_version(args: &[String]) -> bool {
+pub(crate) fn asks_help_or_version(args: &[String]) -> bool {
     let mut i = 0;
     let mut positional_seen = false;
     while i < args.len() && args[i] != "--" {

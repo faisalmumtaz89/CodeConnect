@@ -306,6 +306,8 @@ pub struct Daemon {
     /// Leases for the live-terminal carrier: the global attachment cap and the
     /// one-terminal-per-session rule. Shared across every connection.
     pub terminal_leases: crate::terminal::TerminalLeases,
+    /// Each Claude run's mail waiter: the one hook that can wake it.
+    pub(crate) waiters: crate::claude_waiter::Waiters,
 }
 
 /// **What the Claude-only gate found**, for the callers that must tell two refusals
@@ -1364,6 +1366,9 @@ pub struct SupervisorHandle {
     /// straddle an upgrade, and the phone's palette must describe the one it
     /// is typing into.
     claude_bin: Option<String>,
+    /// The agent executable a Codex run was launched with (`agent_bin`): the
+    /// `codex` its wake is queued through, so the CLI matches its app-server.
+    agent_bin: Option<String>,
     /// Which registration this handle belongs to. A supervisor that reconnects
     /// registers again under the same uid, so "remove the entry for this uid" is
     /// not the same question as "remove *my* entry".
@@ -1821,6 +1826,35 @@ fn delivers_prompt(pending: &PendingEvent) -> bool {
             || line["turnOrigin"].is_string())
 }
 
+/// **When a turn of the run last started and ended in this batch**, by the
+/// transcript's own clock, for the mail wake rule: a turn runs while its newest
+/// start is later than its newest end. A start is a line that hands Claude a prompt
+/// ([`delivers_prompt`]) or a queued one taken off Claude's queue, which is written
+/// ahead of the end of the turn it follows and stamped after it. An end is every
+/// line the tailer reads as a turn's end.
+fn turn_marks(pendings: &[PendingEvent]) -> (Option<i64>, Option<i64>) {
+    let at = |pending: &PendingEvent| {
+        pending.payload["timestamp"]
+            .as_str()
+            .and_then(protocol::time::unix_ms_from_rfc3339)
+    };
+    let dequeued = |pending: &PendingEvent| {
+        matches!(&pending.kind, EventKind::Other(kind) if kind == "transcript_queue-operation")
+            && pending.payload["operation"] == "dequeue"
+    };
+    let started = pendings
+        .iter()
+        .filter(|pending| delivers_prompt(pending) || dequeued(pending))
+        .filter_map(at)
+        .max();
+    let ended = pendings
+        .iter()
+        .filter(|pending| pending.kind == EventKind::TurnComplete)
+        .filter_map(at)
+        .max();
+    (started, ended)
+}
+
 /// Whether this card's dialog is drawn on the run's pane while it waits: every
 /// card not held for the phone, and a main-conversation approval held for it,
 /// which Claude draws at the same time. Not a held question, whose hook says
@@ -1926,6 +1960,7 @@ impl Daemon {
             liveness_sweep: Mutex::new(()),
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
+            waiters: crate::claude_waiter::Waiters::default(),
         })
     }
 
@@ -2057,6 +2092,15 @@ impl Daemon {
             }
             Ok(_) => {}
             Err(err) => crate::log_error!("recovery: could not read answer claims: {err:#}"),
+        }
+
+        match self.db.recover_mail().await {
+            Ok(0) => {}
+            Ok(count) => crate::log_info!(
+                "recovery: {count} message(s) from other agents were being read when the daemon \
+                 stopped; they are unread again"
+            ),
+            Err(err) => crate::log_error!("recovery: could not release offered mail: {err:#}"),
         }
 
         match self.db.recover_text_mutations(now.clone()).await {
@@ -2791,7 +2835,7 @@ impl Daemon {
     /// consumed cannot be two separate writes: a crash between them skips those
     /// lines permanently, because the cursor already claims they are done.
     pub async fn ingest_scan(
-        &self,
+        self: &Arc<Self>,
         session_uid: &str,
         pendings: Vec<PendingEvent>,
         cursor: crate::store::TailCursor,
@@ -2810,6 +2854,7 @@ impl Daemon {
             .filter(|pending| delivers_prompt(pending))
             .filter_map(|pending| pending.source_event_id.clone())
             .collect();
+        let (started_ms, ended_ms) = turn_marks(&pendings);
         for pending in &mut pendings {
             self.truncate_payload(pending);
         }
@@ -2869,6 +2914,29 @@ impl Daemon {
         }
         for (tool_use_id, rejected) in ended {
             self.call_ended(session_uid, &tool_use_id, rejected).await;
+        }
+        // Marks only from lines written while this run lives: a conversation resumed
+        // into it is read from its start, and its old turns are not the run's.
+        let since = match started_ms.or(ended_ms) {
+            Some(_) => match self.db.get_session(session_uid.to_string()).await {
+                Ok(Some(row)) => protocol::time::unix_ms_from_rfc3339(&row.created_at),
+                _ => None,
+            },
+            None => None,
+        };
+        let lived = |ms: &i64| since.is_none_or(|since| *ms >= since);
+        let (started_ms, ended_ms) = (started_ms.filter(lived), ended_ms.filter(lived));
+        if started_ms.is_some() || ended_ms.is_some() {
+            if let Err(err) = self
+                .db
+                .mail_turn_marks(session_uid.to_string(), started_ms, ended_ms)
+                .await
+            {
+                crate::log_error!("mail for {session_uid}: could not record a turn: {err:#}");
+            }
+            if ended_ms.is_some() {
+                self.wake_if_due(session_uid).await;
+            }
         }
         Ok(events.len())
     }
@@ -3068,6 +3136,18 @@ impl Daemon {
                 .entry(session.uid.clone())
                 .or_default() += 1;
             self.main_thread_moved(&session).await;
+            crate::mail::turn_ended(self, &session.uid);
+        }
+
+        // The person's prompt is never filed: this hook only reminds Claude of mail
+        // waiting for it.
+        if event_name == HookEventName::UserPromptSubmit {
+            return Ok(
+                match crate::mail::prompt_submitted(self, &session.uid).await {
+                    Some(nudge) => HookDecision::prompt_context(nudge),
+                    None => HookDecision::passthrough(),
+                },
+            );
         }
 
         match &event_name {
@@ -5128,20 +5208,39 @@ impl Daemon {
                 return Ok(Some(row));
             }
         }
-        let attached: Option<SessionRow> = {
-            let inner = self.inner.lock().await;
-            self.store
-                .list_sessions()?
-                .into_iter()
-                .filter(|row| {
-                    row.session_id == reference && inner.supervisors.contains_key(&row.session_uid)
-                })
-                .max_by(|a, b| a.session_uid.cmp(&b.session_uid))
-        };
+        let attached = self.attached_run(reference).await?;
         if attached.is_some() {
             return Ok(attached);
         }
         self.store.find_session(reference)
+    }
+
+    /// The newest run named `name` whose supervisor is attached now, and never an
+    /// ended one.
+    pub(crate) async fn attached_run(&self, name: &str) -> Result<Option<SessionRow>> {
+        Ok(self
+            .attached_runs()
+            .await?
+            .into_iter()
+            .filter(|row| row.session_id == name)
+            .max_by(|a, b| a.session_uid.cmp(&b.session_uid)))
+    }
+
+    /// The agent executable the live supervisor of `run_uid` reported, if any.
+    pub(crate) async fn agent_bin(&self, run_uid: &str) -> Option<String> {
+        let inner = self.inner.lock().await;
+        inner.supervisors.get(run_uid)?.agent_bin.clone()
+    }
+
+    /// Every run whose supervisor is attached now.
+    pub(crate) async fn attached_runs(&self) -> Result<Vec<SessionRow>> {
+        let inner = self.inner.lock().await;
+        Ok(self
+            .store
+            .list_sessions()?
+            .into_iter()
+            .filter(|row| inner.supervisors.contains_key(&row.session_uid))
+            .collect())
     }
 
     // --------------------------------------------------------------- answers
@@ -8199,6 +8298,7 @@ impl Daemon {
                     epoch,
                     protocol_minor: info.protocol_minor,
                     claude_bin: info.claude_bin.clone(),
+                    agent_bin: info.agent_bin.clone(),
                     codex_generation: info.codex_generation,
                 },
             );
@@ -8210,6 +8310,15 @@ impl Daemon {
             // very epoch under the lock before it builds anything. The two are
             // deliberately NOT one step — the link's lifecycle needs awaits (a
             // bounded join) that must not run under `inner`.
+        }
+        // What this run can do with mail, kept with it: a restarted daemon lists it
+        // and takes its mail before its supervisor has registered again.
+        if let Err(err) = self
+            .db
+            .note_mail_minor(session.uid.clone(), info.protocol_minor)
+            .await
+        {
+            crate::log_error!("could not keep {}'s mail capability: {err:#}", session.name);
         }
 
         // **The control link's whole lifecycle.** Join any parked corpse, take the
@@ -8850,6 +8959,7 @@ impl Daemon {
         {
             crate::log_error!("failed to mark {} exited: {err:#}", session.name);
         }
+        self.end_mail(&session.uid).await;
         // The row's third writer counts its write like the other two, under the same
         // gate — so "every writer bumps this" is a property of the type rather than a
         // habit two of them happen to share. See [`Inner::row_writes`].
@@ -20599,6 +20709,7 @@ mod tests {
                 epoch: owning_epoch,
                 protocol_minor: protocol::PROTOCOL_MINOR,
                 claude_bin: None,
+                agent_bin: None,
                 codex_generation: Some(1),
             },
         );
@@ -22311,6 +22422,7 @@ mod tests {
                     epoch,
                     protocol_minor: protocol::PROTOCOL_MINOR,
                     claude_bin: None,
+                    agent_bin: None,
                     codex_generation: None,
                 },
             );
@@ -25496,6 +25608,1017 @@ mod tests {
             "a registered Codex run must read back as one, or every gate below is \
              being handed a Claude row and passing for the wrong reason"
         );
+    }
+
+    fn six_nodes() -> protocol::tailnet::Tailnet {
+        protocol::tailnet::Tailnet::parse(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap()
+    }
+
+    fn refusal(status: protocol::ipc::MailStatus) -> String {
+        match status {
+            protocol::ipc::MailStatus {
+                state: protocol::ipc::MailState::Refused,
+                reason: Some(reason),
+                ..
+            } => reason,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// **What an agent's message is told, case by case**, on this computer as the
+    /// recorded tailnet names it (`studio`; `desktop` online, `linux-box` offline).
+    #[tokio::test]
+    async fn an_agents_message_is_refused_or_waits() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let sender = protocol::uid::new().unwrap();
+        let codex = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        register_codex_session(&daemon, &codex, "cc-1").await;
+        let send = |to: String, text: String| {
+            let daemon = Arc::clone(&daemon);
+            let tailnet = tailnet.clone();
+            let sender = sender.clone();
+            async move {
+                daemon
+                    .send_agent_message_on(Some(&tailnet), &sender, &to, &text, None)
+                    .await
+            }
+        };
+        let hi = || "hi".to_string();
+        let to = |computer: &str| format!("{codex}@{computer}");
+
+        assert!(refusal(send("cc-1@studio".into(), hi()).await).contains("<run id>@computer"));
+        assert!(refusal(send(format!("{codex}@"), hi()).await).contains("<run id>@computer"));
+        assert!(refusal(send(to("studio"), String::new()).await).contains("empty"));
+        assert!(refusal(send(to("studio"), "a\u{1b}[2Jb".into()).await).contains("control"));
+        let long = "x".repeat(protocol::ipc::MAIL_TEXT_BYTES + 1);
+        assert!(refusal(send(to("studio"), long).await).contains("too long"));
+        assert!(refusal(send(to("nowhere"), hi()).await).contains("not a computer"));
+        assert!(refusal(send(to("linux-box"), hi()).await).contains("offline"));
+        for device in ["phone", "desktop"] {
+            assert!(
+                refusal(send(to(device), hi()).await).contains("CodeConnect does not run on"),
+                "{device}"
+            );
+        }
+        let never = protocol::uid::new().unwrap();
+        assert!(
+            refusal(send(format!("{never}@studio"), hi()).await).contains("not a running session")
+        );
+        assert!(
+            refusal(send(format!("{sender}@STUDIO"), hi()).await).contains("own address"),
+            "its own address, whatever the case of the computer's name"
+        );
+        let old = register_speaking(&daemon, "cc-4", None, MAIL_MINOR_BEFORE).await;
+        assert!(
+            refusal(send(format!("{}@studio", old.session.uid), hi()).await).contains("restarted"),
+            "a run launched before mail is told to restart"
+        );
+        assert!(refusal(
+            daemon
+                .send_agent_message_on(None, &sender, &to("studio"), "hi", None)
+                .await
+        )
+        .contains("Tailscale"));
+        assert!(refusal(
+            daemon
+                .send_agent_message_on(Some(&tailnet), "nobody", &to("studio"), "hi", None)
+                .await
+        )
+        .contains("not known"));
+        assert!(refusal(
+            daemon
+                .send_agent_message_on(Some(&tailnet), &sender, &to("studio"), "hi", Some("m0"))
+                .await
+        )
+        .contains("not a message you were sent"));
+
+        for text in ["please review", "and this"] {
+            let status = send(to("Studio"), text.into()).await;
+            assert_eq!(
+                status.state,
+                protocol::ipc::MailState::Waiting,
+                "{status:?}"
+            );
+        }
+        let offer = daemon
+            .store
+            .offer_mail(&codex, "o1", protocol::time::now_unix_ms())
+            .unwrap();
+        let from = format!("{sender}@studio");
+        let read: Vec<(&str, &str, &str)> = offer
+            .messages
+            .iter()
+            .map(|m| (m.from.as_str(), m.label.as_str(), m.text.as_str()))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (from.as_str(), "cc-2@studio", "please review"),
+                (from.as_str(), "cc-2@studio", "and this")
+            ]
+        );
+    }
+
+    /// The protocol minor of a supervisor from before mail.
+    const MAIL_MINOR_BEFORE: u32 = 26;
+
+    /// **A run is addressed as itself, never by its label.** Two runs under one
+    /// label are two entries and two mailboxes; once a run is gone, mail to it is
+    /// refused even while another run carries its label, and the other never reads
+    /// what was left for it.
+    #[tokio::test]
+    async fn a_run_is_addressed_as_itself_never_by_its_label() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let first_run = register(&daemon, "cc-1", None).await;
+        let first = first_run.session.uid.clone();
+        let second = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &second, "cc-1").await;
+
+        let (_, agents) = daemon
+            .list_agents_on(Some(&tailnet), &sender, Vec::new())
+            .await
+            .unwrap();
+        let mut listed: Vec<(String, String)> =
+            agents.into_iter().map(|a| (a.address, a.label)).collect();
+        listed.sort();
+        let mut expected = vec![
+            (format!("{first}@studio"), "cc-1@studio".to_string()),
+            (format!("{second}@studio"), "cc-1@studio".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(listed, expected, "two runs, one label, two addresses");
+
+        let send = |run: &str, text: &str| {
+            let daemon = Arc::clone(&daemon);
+            let (tailnet, sender, to, text) = (
+                tailnet.clone(),
+                sender.clone(),
+                format!("{run}@studio"),
+                text.to_string(),
+            );
+            async move {
+                daemon
+                    .send_agent_message_on(Some(&tailnet), &sender, &to, &text, None)
+                    .await
+            }
+        };
+        assert_eq!(
+            send(&first, "for the first").await.state,
+            protocol::ipc::MailState::Waiting
+        );
+        assert_eq!(
+            send(&second, "for the second").await.state,
+            protocol::ipc::MailState::Waiting
+        );
+        let texts = |run: &str| -> Vec<String> {
+            daemon
+                .store
+                .offer_mail(
+                    run,
+                    &protocol::uid::new().unwrap(),
+                    protocol::time::now_unix_ms(),
+                )
+                .unwrap()
+                .messages
+                .into_iter()
+                .map(|m| m.text)
+                .collect()
+        };
+        assert_eq!(texts(&first), ["for the first"]);
+        assert_eq!(texts(&second), ["for the second"]);
+
+        // The first run ends; a new run takes its label.
+        daemon
+            .session_exited("cc-1", Some(&first), Some(0), None, Some(&first_run))
+            .await;
+        let replacement = register(&daemon, "cc-1", None).await.session.uid;
+        assert!(refusal(send(&first, "too late").await).contains("not a running session"));
+        assert!(
+            texts(&replacement).is_empty(),
+            "nothing of the old run's reaches the new one"
+        );
+    }
+
+    /// **A reply stays in its conversation, and each sender sees its own message
+    /// read**, once, in its next `read_messages`, by way of the offer its agent was
+    /// given.
+    #[tokio::test]
+    async fn a_reply_keeps_its_conversation_and_the_sender_sees_its_message_read() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let (asker, answerer) = (protocol::uid::new().unwrap(), protocol::uid::new().unwrap());
+        register_codex_session(&daemon, &asker, "cc-2").await;
+        register_codex_session(&daemon, &answerer, "cc-1").await;
+
+        let question = daemon
+            .send_agent_message_on(
+                Some(&tailnet),
+                &asker,
+                &format!("{answerer}@studio"),
+                "status?",
+                None,
+            )
+            .await;
+        assert_eq!(question.state, protocol::ipc::MailState::Waiting);
+        let (offer, batch) = daemon.offer_agent_messages(&answerer).await.unwrap();
+        let received = batch.messages[0].clone();
+        assert_eq!(received.message_id, question.message_id);
+        assert_eq!(received.from, format!("{asker}@studio"));
+        daemon.read_offered_mail(&offer).await;
+
+        let answer = daemon
+            .send_agent_message_on(
+                Some(&tailnet),
+                &answerer,
+                &received.from,
+                "green",
+                Some(&question.message_id),
+            )
+            .await;
+        assert_eq!(answer.state, protocol::ipc::MailState::Waiting);
+        let (offer, batch) = daemon.offer_agent_messages(&asker).await.unwrap();
+        let reply = &batch.messages[0];
+        assert_eq!(
+            reply.context_id, received.context_id,
+            "the same conversation"
+        );
+        assert_eq!(
+            reply.in_reply_to.as_deref(),
+            Some(question.message_id.as_str())
+        );
+        assert_eq!(
+            batch
+                .updates
+                .iter()
+                .map(|u| (u.message_id.as_str(), u.state))
+                .collect::<Vec<_>>(),
+            [(question.message_id.as_str(), protocol::ipc::MailState::Read)]
+        );
+        daemon.read_offered_mail(&offer).await;
+        let (_, again) = daemon.offer_agent_messages(&asker).await.unwrap();
+        assert!(again.messages.is_empty() && again.updates.is_empty());
+    }
+
+    /// **Another computer's daemon is served only when it is one of the owner's
+    /// computers**, read from this computer's own tailnet: its message is taken as a
+    /// local one is, from a run of the computer the connection came from, once per
+    /// message id, with its labels as data; and only the computer a message went to
+    /// may say where it stands.
+    #[tokio::test]
+    async fn another_computers_daemon_is_served_only_from_the_owners_computers() {
+        use protocol::peer::{PeerReply, PeerRequest};
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let codex = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &codex, "cc-1").await;
+        let desktop: std::net::IpAddr = "100.64.0.2".parse().unwrap();
+        let remote = protocol::uid::new().unwrap();
+        let (m1, m2, m3) = (
+            protocol::uid::new().unwrap(),
+            protocol::uid::new().unwrap(),
+            protocol::uid::new().unwrap(),
+        );
+        let message =
+            |id: &str, from_uid: &str, project: &str, to: &str, text: &str| PeerRequest::PeerMail {
+                message_id: id.into(),
+                context_id: id.into(),
+                in_reply_to: None,
+                from_uid: from_uid.into(),
+                from: "cc-7".into(),
+                agent: "Codex".into(),
+                project: project.into(),
+                to: to.into(),
+                text: text.into(),
+            };
+        let serve = |source: std::net::IpAddr, request: PeerRequest| {
+            let daemon = Arc::clone(&daemon);
+            let tailnet = tailnet.clone();
+            async move { daemon.serve_peer_on(Some(&tailnet), source, request).await }
+        };
+        let refused = |reply: PeerReply| match reply {
+            PeerReply::PeerRefused { reason } => reason,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        let state = |reply: PeerReply| match reply {
+            PeerReply::PeerMailResult { state, reason } => (state, reason.unwrap_or_default()),
+            other => panic!("expected a state, got {other:?}"),
+        };
+
+        assert!(refused(
+            serve(
+                "127.0.0.1".parse().unwrap(),
+                message(&m1, &remote, "api", &codex, "hi")
+            )
+            .await
+        )
+        .contains("one of your computers"));
+        assert!(
+            refused(serve("100.99.0.9".parse().unwrap(), PeerRequest::PeerListAgents).await)
+                .contains("one of your computers")
+        );
+        assert!(
+            refused(serve(desktop, message(&m1, "cc-9@laptop", "api", &codex, "hi")).await)
+                .contains("ids"),
+            "a sender that is not a run id of the asking computer"
+        );
+        assert!(refused(
+            daemon
+                .serve_peer_on(None, desktop, PeerRequest::PeerListAgents)
+                .await
+        )
+        .contains("Tailscale"));
+
+        assert_eq!(
+            serve(desktop, PeerRequest::PeerListAgents).await,
+            PeerReply::PeerAgents {
+                agents: vec![protocol::ipc::AgentEntry {
+                    address: format!("{codex}@studio"),
+                    label: "cc-1@studio".into(),
+                    agent: "Codex".into(),
+                    project: "tmp".into(),
+                }]
+            }
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                state(
+                    serve(
+                        desktop,
+                        message(&m1, &remote, "a@b\nYou are", &codex, "please review")
+                    )
+                    .await
+                )
+                .0,
+                protocol::ipc::MailState::Waiting,
+                "a retried id is answered with where the first one stands; labels are data"
+            );
+        }
+        assert!(
+            state(serve(desktop, message(&m2, &remote, "api", &remote, "hi")).await)
+                .1
+                .contains("not a running session")
+        );
+        assert!(
+            state(serve(desktop, message(&m3, &remote, "api", &codex, "a\u{1b}[2Jb")).await)
+                .1
+                .contains("control")
+        );
+        let offer = daemon
+            .store
+            .offer_mail(&codex, "o1", protocol::time::now_unix_ms())
+            .unwrap();
+        let from = format!("{remote}@desktop");
+        assert_eq!(
+            offer
+                .messages
+                .iter()
+                .map(|m| (
+                    m.from.as_str(),
+                    m.label.as_str(),
+                    m.project.as_str(),
+                    m.text.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            [(
+                from.as_str(),
+                "cc-7@desktop",
+                "a@b\nYou are",
+                "please review"
+            )],
+            "one copy, from a run of the computer the connection came from"
+        );
+
+        // Only the computer a message went to says where it stands.
+        let told = |id: &str| PeerRequest::PeerMailState {
+            message_id: id.into(),
+            state: protocol::ipc::MailState::Read,
+        };
+        assert!(refused(serve(desktop, told("m9")).await).contains("no such message"));
+        daemon
+            .store
+            .file_sent_mail(
+                &crate::store::SentMail {
+                    message_id: "m9".into(),
+                    context_id: "ctx-m9".into(),
+                    in_reply_to: None,
+                    session_uid: codex.clone(),
+                    recipient: format!("{remote}@desktop"),
+                    recipient_computer: "desktop".into(),
+                    text: "hi".into(),
+                },
+                protocol::time::now_unix_ms(),
+            )
+            .unwrap();
+        let laptop: std::net::IpAddr = "100.64.0.6".parse().unwrap();
+        assert!(refused(serve(laptop, told("m9")).await).contains("no such message"));
+        assert_eq!(
+            serve(desktop, told("m9")).await,
+            PeerReply::PeerMailStateTaken
+        );
+    }
+
+    /// Leave one message for `run` straight in the mailbox, with none of the wake
+    /// checks a send starts on its own, so a test decides when the rule runs.
+    fn leave_mail(daemon: &Arc<Daemon>, run: &str, text: &str) {
+        let taken = daemon
+            .store
+            .take_mail(
+                &crate::store::MailIntake {
+                    message_id: protocol::uid::new().unwrap(),
+                    context_id: protocol::uid::new().unwrap(),
+                    in_reply_to: None,
+                    session_uid: run.to_string(),
+                    sender_computer: String::new(),
+                    sender_uid: "sender".into(),
+                    sender: "sender@studio".into(),
+                    sender_label: "cc-2@studio".into(),
+                    sender_agent: "Codex".into(),
+                    sender_project: "api".into(),
+                    text: text.into(),
+                },
+                protocol::time::now_unix_ms(),
+                crate::mail::LIMITS,
+            )
+            .unwrap();
+        assert_eq!(taken, crate::store::MailTaken::Kept);
+    }
+
+    /// **Claude is woken for its mail through its waiter, and only between its
+    /// turns** (M-01, M-02 and the T5 rule): mail taken while a turn runs wakes no
+    /// one until that turn's end is read, and the turn the wake starts is not told
+    /// again.
+    #[tokio::test]
+    async fn a_claude_run_is_woken_for_its_mail_only_between_its_turns() {
+        let daemon = test_daemon();
+        let claude = register(&daemon, "cc-1", None).await.session.uid;
+        let (_, mut woken) = daemon.waiters.register(&claude);
+
+        // The person's prompt starts a turn, with no mail yet.
+        assert_eq!(crate::mail::prompt_submitted(&daemon, &claude).await, None);
+        leave_mail(&daemon, &claude, "hi");
+        daemon.wake_if_due(&claude).await;
+        assert!(woken.try_recv().is_err(), "no wake while the turn runs");
+
+        // Its Stop, then its end in the transcript: the waiter is woken.
+        crate::mail::turn_ended(&daemon, &claude);
+        Transcript::of(&claude).read(&daemon, turns(6..7)).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), &mut woken)
+            .await
+            .expect("woken at the turn's end")
+            .unwrap();
+        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
+        assert_eq!(
+            crate::mail::prompt_submitted(&daemon, &claude).await,
+            None,
+            "the wake's own turn is not told again"
+        );
+    }
+
+    /// **A wake that cannot be issued leaves the mail waiting and nothing
+    /// outstanding** (M-12): a Codex run whose `codex` cannot be run, and a Claude
+    /// run with no waiter, are tried again at the next trigger, never handed the
+    /// mail any other way.
+    #[tokio::test]
+    async fn a_wake_that_cannot_be_issued_leaves_nothing_outstanding() {
+        let daemon = test_daemon();
+        let codex = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &codex, "cc-1").await;
+        let claude = register(&daemon, "cc-3", None).await.session.uid;
+        for run in [&codex, &claude] {
+            leave_mail(&daemon, run, "hi");
+            daemon.wake_if_due(run).await;
+            assert!(
+                daemon
+                    .store
+                    .claim_mail_wake(run, protocol::time::now_unix_ms(), false)
+                    .unwrap(),
+                "no wake left outstanding for {run}"
+            );
+            daemon.store.release_mail_wake(run).unwrap();
+        }
+        // The waiter that registers later is woken at once.
+        let (_, woken) = daemon.waiters.register(&claude);
+        crate::mail::waiter_registered(&daemon, &claude);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+            .await
+            .expect("woken when its waiter registers")
+            .unwrap();
+        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
+    }
+
+    /// The turn boundaries of one measured Claude Code 2.1.316 session (round 3,
+    /// R3-1), its paths replaced: a prompt queued while a short turn ran (0–7), one
+    /// typed during a tool call (8–12), Esc (13–14) and the next prompt (15–17), a
+    /// background task's report (18–22), and a manual /compact (23–26).
+    const TURNS: &str =
+        include_str!("../../../fixtures/claude/transcript-turn-boundaries-2.1.316.jsonl");
+
+    fn turns(lines: std::ops::Range<usize>) -> Vec<String> {
+        TURNS.lines().map(str::to_string).collect::<Vec<_>>()[lines].to_vec()
+    }
+
+    /// A run's transcript, read by the tailer as Claude Code appends to it.
+    struct Transcript {
+        path: std::path::PathBuf,
+        uid: String,
+        /// Added to each line's timestamp: the run writes `TURNS` now, from a second
+        /// after it started, with the measured spacing.
+        offset_ms: i64,
+    }
+
+    impl Transcript {
+        /// `TURNS`, as the run writes them now.
+        fn of(uid: &str) -> Transcript {
+            let first: serde_json::Value =
+                serde_json::from_str(TURNS.lines().next().unwrap()).unwrap();
+            let first =
+                protocol::time::unix_ms_from_rfc3339(first["timestamp"].as_str().unwrap()).unwrap();
+            let mut transcript = Transcript::as_written(uid);
+            transcript.offset_ms = protocol::time::now_unix_ms() + 1_000 - first;
+            transcript
+        }
+
+        /// Lines at the times they carry: a conversation written before the run.
+        fn as_written(uid: &str) -> Transcript {
+            let path =
+                std::env::temp_dir().join(format!("ccd-turns-{}-{uid}.jsonl", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            Transcript {
+                path,
+                uid: uid.to_string(),
+                offset_ms: 0,
+            }
+        }
+
+        /// When the measured session's hook at `ms` (by `TURNS`' clock) comes now.
+        fn at(&self, ms: i64) -> i64 {
+            1_793_579_000_000 + ms + self.offset_ms
+        }
+
+        /// Append `lines` and read them as one scan.
+        async fn read(&self, daemon: &Arc<Daemon>, lines: Vec<String>) {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .unwrap();
+            for line in lines {
+                let mut line: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if let Some(at) = line["timestamp"]
+                    .as_str()
+                    .and_then(protocol::time::unix_ms_from_rfc3339)
+                {
+                    line["timestamp"] =
+                        protocol::time::rfc3339_from_unix_ms(at + self.offset_ms).into();
+                }
+                writeln!(file, "{line}").unwrap();
+            }
+            let run = SessionKey::new(&self.uid, "cc-1");
+            let scan = crate::tailer::scan_file(&daemon.store, &run, self.path.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            daemon
+                .ingest_scan(&self.uid, scan.events, scan.cursor)
+                .await
+                .unwrap();
+        }
+    }
+
+    impl Drop for Transcript {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// Whether the wake rule would wake `uid` now, between its turns.
+    fn wakeable(daemon: &Arc<Daemon>, uid: &str) -> bool {
+        let claimed = daemon
+            .store
+            .claim_mail_wake(uid, protocol::time::now_unix_ms(), true)
+            .unwrap();
+        if claimed {
+            daemon.store.release_mail_wake(uid).unwrap();
+        }
+        claimed
+    }
+
+    /// **A Claude turn runs from its start to its end as its transcript has them**
+    /// (round 3, R3-1). A prompt queued while a turn runs is submitted before that
+    /// turn's Stop and starts its own turn after it (the attacker's q shape); one
+    /// typed during a tool call joins the turn running, which ends once. Esc ends
+    /// nothing until the next turn ends. A background task's report is a turn. A
+    /// manual /compact starts none. The hooks come at their measured times.
+    #[tokio::test]
+    async fn a_turn_runs_from_its_start_to_its_end_as_its_transcript_has_them() {
+        let daemon = test_daemon();
+        let uid = register(&daemon, "cc-1", None).await.session.uid;
+        leave_mail(&daemon, &uid, "hi");
+        let transcript = Transcript::of(&uid);
+        let prompt = |ms: i64| daemon.store.mail_prompt(&uid, transcript.at(ms)).unwrap();
+        let stop = || {
+            daemon
+                .store
+                .mail_turn_ended(&uid, protocol::time::now_unix_ms(), 3)
+                .unwrap()
+        };
+
+        prompt(124_141);
+        transcript.read(&daemon, turns(0..2)).await;
+        prompt(124_602);
+        stop();
+        assert!(
+            !wakeable(&daemon, &uid),
+            "q: a prompt is queued behind the Stop"
+        );
+        transcript.read(&daemon, turns(2..5)).await;
+        assert!(
+            !wakeable(&daemon, &uid),
+            "q: taken off the queue after the first turn's end, before its own start is read"
+        );
+        transcript.read(&daemon, turns(5..6)).await;
+        assert!(!wakeable(&daemon, &uid), "q: the queued turn runs");
+        stop();
+        transcript.read(&daemon, turns(6..8)).await;
+        assert!(wakeable(&daemon, &uid), "q: the queued turn ended");
+
+        prompt(148_845);
+        transcript.read(&daemon, turns(8..9)).await;
+        prompt(154_897);
+        transcript.read(&daemon, turns(9..11)).await;
+        assert!(!wakeable(&daemon, &uid), "a prompt joined the running turn");
+        stop();
+        transcript.read(&daemon, turns(11..13)).await;
+        assert!(wakeable(&daemon, &uid), "the turn it joined ended once");
+
+        prompt(206_505);
+        transcript.read(&daemon, turns(13..15)).await;
+        assert!(!wakeable(&daemon, &uid), "Esc ends no turn");
+        prompt(216_583);
+        transcript.read(&daemon, turns(15..16)).await;
+        stop();
+        transcript.read(&daemon, turns(16..18)).await;
+        assert!(wakeable(&daemon, &uid), "the next turn ended");
+
+        transcript.read(&daemon, turns(18..19)).await;
+        prompt(224_515);
+        transcript.read(&daemon, turns(19..21)).await;
+        assert!(
+            !wakeable(&daemon, &uid),
+            "a background task's report runs a turn"
+        );
+        stop();
+        transcript.read(&daemon, turns(21..23)).await;
+        assert!(wakeable(&daemon, &uid), "the report's turn ended");
+
+        transcript.read(&daemon, turns(23..27)).await;
+        assert!(wakeable(&daemon, &uid), "a manual /compact starts no turn");
+    }
+
+    /// **Only a prompt that starts a turn with none running is told of mail
+    /// waiting** (final round, F1). A prompt typed while a turn runs joins it, and
+    /// one queued behind it runs right after it: told, either would read the mail
+    /// inside a turn. The wake after that turn reads it instead. So does the one
+    /// after Esc, which ends no turn.
+    #[tokio::test]
+    async fn only_a_prompt_with_no_turn_running_is_told_of_mail() {
+        let daemon = test_daemon();
+        let uid = register(&daemon, "cc-1", None).await.session.uid;
+        leave_mail(&daemon, &uid, "hi");
+        let transcript = Transcript::of(&uid);
+        let told = |ms: i64| daemon.store.mail_prompt(&uid, transcript.at(ms)).unwrap();
+
+        assert!(told(124_141), "a prompt with no turn running is told");
+        transcript.read(&daemon, turns(0..2)).await;
+        assert!(!told(124_602), "a prompt queued behind the running turn");
+        transcript.read(&daemon, turns(2..8)).await;
+
+        assert!(told(148_845), "a prompt with no turn running is told");
+        transcript.read(&daemon, turns(8..9)).await;
+        assert!(!told(154_897), "a prompt typed during a tool call");
+        transcript.read(&daemon, turns(9..13)).await;
+
+        assert!(told(206_505), "a prompt with no turn running is told");
+        transcript.read(&daemon, turns(13..15)).await;
+        assert!(!told(216_583), "the prompt after Esc");
+    }
+
+    /// **A resumed conversation's unended turn is not the run's** (final round, K1):
+    /// `codeconnect claude --resume`, or /resume inside a run, reads the conversation
+    /// into the run from its start, and a turn it left without an end (Esc, a killed
+    /// process) does not leave the new run taken for running.
+    #[tokio::test]
+    async fn a_resumed_conversations_unended_turn_is_not_the_runs() {
+        let daemon = test_daemon();
+        let uid = register(&daemon, "cc-1", None).await.session.uid;
+        leave_mail(&daemon, &uid, "hi");
+        let resumed: Vec<String> =
+            include_str!("../../../fixtures/transcript/interrupts-2.1.304/resume-after-esc.jsonl")
+                .lines()
+                .take(27)
+                .map(str::to_string)
+                .collect();
+        Transcript::as_written(&uid).read(&daemon, resumed).await;
+        assert!(wakeable(&daemon, &uid), "the resumed run is idle");
+    }
+
+    /// **A restart reads on from the transcript** (rounds 1–3). A turn running when
+    /// the daemon stopped is still running (shape M); one that ended while it was
+    /// down is read to have ended (variant B). A Claude wake whose Stop found no
+    /// daemon is dropped (variant W); a Codex wake, which may still be held in
+    /// Codex's queue, is not queued twice.
+    #[tokio::test]
+    async fn a_restart_reads_on_from_the_transcript() {
+        let daemon = test_daemon();
+        let busy = register(&daemon, "cc-1", None).await.session.uid;
+        let done = register(&daemon, "cc-2", None).await.session.uid;
+        let woken = register(&daemon, "cc-3", None).await.session.uid;
+        let codex = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &codex, "cc-4").await;
+        for run in [&busy, &done, &woken, &codex] {
+            leave_mail(&daemon, run, "hi");
+        }
+        let (busy_transcript, done_transcript) = (Transcript::of(&busy), Transcript::of(&done));
+        busy_transcript.read(&daemon, turns(8..9)).await;
+        done_transcript.read(&daemon, turns(8..9)).await;
+        let now = protocol::time::now_unix_ms();
+        assert!(daemon.store.claim_mail_wake(&woken, now, true).unwrap());
+        assert!(daemon.store.claim_mail_wake(&codex, now, false).unwrap());
+
+        daemon.recover().await;
+        assert!(!wakeable(&daemon, &busy), "M: still running");
+        assert!(
+            !wakeable(&daemon, &done),
+            "B: running until its end is read"
+        );
+        let (_, woken_at_its_end) = daemon.waiters.register(&done);
+        done_transcript.read(&daemon, turns(9..13)).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), woken_at_its_end)
+            .await
+            .expect("B: woken once its end, written while ccd was down, is read")
+            .unwrap();
+        assert_eq!(outcome, crate::claude_waiter::WaiterOutcome::Wake);
+        assert!(wakeable(&daemon, &woken), "W: the Claude wake is gone");
+        assert!(
+            !daemon
+                .store
+                .claim_mail_wake(&codex, protocol::time::now_unix_ms(), false)
+                .unwrap(),
+            "the held Codex wake is still outstanding"
+        );
+    }
+
+    /// **Without the transcript's marks a turn is taken for running** (round 3,
+    /// R3-1): the safe default should a Claude Code update stop writing them. With no
+    /// turn start in the transcript, the UserPromptSubmit hook still marks one, so no
+    /// turn is woken in; with no turn end, the run is not woken and its mail waits.
+    #[tokio::test]
+    async fn without_the_transcripts_marks_a_turn_is_taken_for_running() {
+        let daemon = test_daemon();
+        let uid = register(&daemon, "cc-1", None).await.session.uid;
+        leave_mail(&daemon, &uid, "hi");
+        let transcript = Transcript::of(&uid);
+        let unmarked = |lines: std::ops::Range<usize>| -> Vec<String> {
+            turns(lines)
+                .into_iter()
+                .filter_map(|line| {
+                    let mut line: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let object = line.as_object_mut().unwrap();
+                    if object["type"] == "queue-operation"
+                        || object
+                            .get("subtype")
+                            .is_some_and(|s| s == "stop_hook_summary")
+                    {
+                        return None;
+                    }
+                    object.remove("promptSource");
+                    object.remove("turnOrigin");
+                    Some(line.to_string())
+                })
+                .collect()
+        };
+
+        daemon
+            .store
+            .mail_prompt(&uid, transcript.at(124_141))
+            .unwrap();
+        transcript.read(&daemon, unmarked(0..1)).await;
+        assert!(!wakeable(&daemon, &uid), "the hook marks the start");
+        transcript.read(&daemon, unmarked(1..8)).await;
+        daemon
+            .store
+            .mail_turn_ended(&uid, protocol::time::now_unix_ms(), 3)
+            .unwrap();
+        assert!(!wakeable(&daemon, &uid), "no end seen: still running");
+    }
+
+    /// **A run whose supervisor has not come back yet still takes mail** (round 1,
+    /// R1-2): after a restart, a run is listed and sent to by its saved row and the
+    /// mail it was launched able to take, not by whether its supervisor has registered
+    /// again; one that ended is still refused.
+    #[tokio::test]
+    async fn a_run_takes_mail_before_its_supervisor_registers_again() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let run = register(&daemon, "cc-1", None).await;
+        // A restart, as far as this run goes: its supervisor is not here.
+        daemon.unregister_supervisor(&run).await;
+        let to = format!("{}@studio", run.session.uid);
+        let status = daemon
+            .send_agent_message_on(Some(&tailnet), &sender, &to, "hi", None)
+            .await;
+        assert_eq!(
+            status.state,
+            protocol::ipc::MailState::Waiting,
+            "{status:?}"
+        );
+        let (_, agents) = daemon
+            .list_agents_on(Some(&tailnet), &sender, Vec::new())
+            .await
+            .unwrap();
+        assert!(agents.iter().any(|a| a.address == to), "{agents:?}");
+
+        daemon
+            .store
+            .set_lifecycle(&run.session.uid, protocol::event::Lifecycle::Exited)
+            .unwrap();
+        assert!(refusal(
+            daemon
+                .send_agent_message_on(Some(&tailnet), &sender, &to, "again", None)
+                .await
+        )
+        .contains("not a running session"));
+    }
+
+    /// **A message written down before the daemon stopped still goes** (round 1,
+    /// B-38): one to a session on this computer, kept in the outbox and never taken
+    /// because the daemon stopped in between, is taken by the next sweep, once.
+    #[tokio::test]
+    async fn a_local_message_the_daemon_stopped_before_taking_is_taken_by_the_sweep() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let receiver = register(&daemon, "cc-1", None).await.session.uid;
+        let mail = crate::store::SentMail {
+            message_id: protocol::uid::new().unwrap(),
+            context_id: protocol::uid::new().unwrap(),
+            in_reply_to: None,
+            session_uid: sender.clone(),
+            recipient: format!("{receiver}@studio"),
+            recipient_computer: String::new(),
+            text: "written down, then the daemon stopped".into(),
+        };
+        daemon
+            .store
+            .file_sent_mail(&mail, protocol::time::now_unix_ms())
+            .unwrap();
+        for _ in 0..2 {
+            daemon.sweep_mail_on(Some(&tailnet)).await;
+        }
+        let (_, batch) = daemon.offer_agent_messages(&receiver).await.unwrap();
+        assert_eq!(
+            batch
+                .messages
+                .iter()
+                .map(|m| (m.message_id.as_str(), m.from.clone()))
+                .collect::<Vec<_>>(),
+            [(mail.message_id.as_str(), format!("{sender}@studio"))],
+            "taken once, from its sender"
+        );
+    }
+
+    /// **A person's prompt with mail waiting is told of it**, in the fixed words
+    /// and nothing of the message, and a run with none is told nothing (M-09, M-11).
+    #[tokio::test]
+    async fn a_persons_prompt_is_told_of_waiting_mail_in_the_fixed_words() {
+        let daemon = test_daemon();
+        let claude = register(&daemon, "cc-1", None).await.session.uid;
+        assert_eq!(crate::mail::prompt_submitted(&daemon, &claude).await, None);
+        daemon
+            .store
+            .mail_turn_marks(&claude, None, Some(protocol::time::now_unix_ms()))
+            .unwrap();
+        leave_mail(&daemon, &claude, "MARKER-7731");
+        let told = crate::mail::prompt_submitted(&daemon, &claude).await;
+        let told = told.expect("told of its mail");
+        assert!(protocol::ipc::is_mail_nudge(told), "{told}");
+        assert!(!told.contains("MARKER"));
+    }
+
+    /// **A run's mail is ended the moment the run exits** (M23-c), not at the next
+    /// sweep: its sender reads `ended` at once.
+    #[tokio::test]
+    async fn a_runs_unread_mail_is_ended_the_moment_it_exits() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let sender = protocol::uid::new().unwrap();
+        register_codex_session(&daemon, &sender, "cc-2").await;
+        let run = register(&daemon, "cc-1", None).await;
+        let status = daemon
+            .send_agent_message_on(
+                Some(&tailnet),
+                &sender,
+                &format!("{}@studio", run.session.uid),
+                "hi",
+                None,
+            )
+            .await;
+        assert_eq!(status.state, protocol::ipc::MailState::Waiting);
+        daemon
+            .session_exited("cc-1", Some(&run.session.uid), Some(0), None, Some(&run))
+            .await;
+        let (_, mine) = daemon.offer_agent_messages(&sender).await.unwrap();
+        assert_eq!(
+            mine.updates
+                .iter()
+                .map(|u| (u.message_id.as_str(), u.state))
+                .collect::<Vec<_>>(),
+            [(status.message_id.as_str(), protocol::ipc::MailState::Ended)]
+        );
+    }
+
+    /// **The agents a session can message**: every other run on this computer
+    /// that was launched with mail, each by its own address with its label beside
+    /// it, and never itself; the asker is told its own.
+    #[tokio::test]
+    async fn an_agent_lists_the_other_running_sessions_on_this_computer() {
+        let daemon = test_daemon();
+        let tailnet = six_nodes();
+        let (asker, codex) = (protocol::uid::new().unwrap(), protocol::uid::new().unwrap());
+        register_codex_session(&daemon, &asker, "cc-2").await;
+        register_codex_session(&daemon, &codex, "cc-1").await;
+        let claude = register(&daemon, "cc-3", None).await.session.uid;
+        register_speaking(&daemon, "cc-4", None, MAIL_MINOR_BEFORE).await;
+        let (you, agents) = daemon
+            .list_agents_on(Some(&tailnet), &asker, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            (you.address, you.label),
+            (format!("{asker}@studio"), "cc-2@studio".to_string()),
+            "the asker is told its own address"
+        );
+        let mut listed: Vec<(String, String, String)> = agents
+            .into_iter()
+            .map(|a| (a.address, a.label, a.agent))
+            .collect();
+        listed.sort();
+        let mut expected = vec![
+            (
+                format!("{codex}@studio"),
+                "cc-1@studio".to_string(),
+                "Codex".to_string(),
+            ),
+            (
+                format!("{claude}@studio"),
+                "cc-3@studio".to_string(),
+                "Claude".to_string(),
+            ),
+        ];
+        expected.sort();
+        assert_eq!(listed, expected, "the run from before mail is not listed");
+        assert!(daemon
+            .list_agents_on(None, &asker, Vec::new())
+            .await
+            .unwrap_err()
+            .contains("Tailscale"));
+        let mut status: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/tailscale/status-six-nodes.json"
+        ))
+        .unwrap();
+        status["Self"]["Tags"] = serde_json::json!(["tag:server"]);
+        let tagged = protocol::tailnet::Tailnet::parse(&status.to_string()).unwrap();
+        assert!(
+            daemon
+                .list_agents_on(Some(&tagged), &asker, Vec::new())
+                .await
+                .unwrap_err()
+                .contains("tagged"),
+            "a tagged computer lists no one"
+        );
+        assert!(refusal(
+            daemon
+                .send_agent_message_on(
+                    Some(&tagged),
+                    &asker,
+                    &format!("{codex}@studio"),
+                    "hi",
+                    None
+                )
+                .await
+        )
+        .contains("tagged"));
     }
 
     /// The same frame with the agent swapped, so a test can register the SAME uid

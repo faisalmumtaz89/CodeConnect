@@ -482,6 +482,89 @@ async fn read_loop(
             ClientFrame::DaemonInfo => {
                 let _ = tx.send(DaemonFrame::Daemon(daemon.info().await)).await;
             }
+            ClientFrame::SendAgentMessage {
+                from_uid,
+                to,
+                text,
+                reply_to,
+            } => {
+                let status = daemon
+                    .send_agent_message(&from_uid, &to, &text, reply_to.as_deref())
+                    .await;
+                let _ = tx.send(DaemonFrame::AgentMessageResult { status }).await;
+            }
+            ClientFrame::ReadAgentMessages { from_uid } => {
+                let (offer, batch) = match daemon.offer_agent_messages(&from_uid).await {
+                    Ok(offered) => offered,
+                    Err(message) => {
+                        let _ = tx.send(DaemonFrame::Error { message }).await;
+                        continue;
+                    }
+                };
+                let _ = tx
+                    .send(DaemonFrame::AgentMessages {
+                        offer: offer.clone(),
+                        messages: batch.messages,
+                        updates: batch.updates,
+                        more_pending: batch.more_pending,
+                    })
+                    .await;
+                // The next frame says whether the answer reached the agent; anything
+                // else, the connection closing included, leaves the batch unread.
+                let confirmed = matches!(
+                    read_line_limited(reader, MAX_FRAME_BYTES).await,
+                    Ok(Some(line)) if matches!(
+                        serde_json::from_slice::<ClientFrame>(&line),
+                        Ok(ClientFrame::MailRead { offer: named }) if named == offer
+                    )
+                );
+                if confirmed {
+                    daemon.read_offered_mail(&offer).await;
+                    let _ = tx.send(DaemonFrame::Ack).await;
+                } else {
+                    daemon.release_offered_mail(&offer).await;
+                }
+                return Ok(());
+            }
+            ClientFrame::MailRead { .. } => {
+                let _ = tx
+                    .send(DaemonFrame::Error {
+                        message: "no messages were offered on this connection".into(),
+                    })
+                    .await;
+            }
+            ClientFrame::MailWaiter { session_uid } => {
+                // A waiter sends this one frame and then only waits, so the next
+                // thing this connection can do is close: the hook has gone.
+                let (generation, outcome) = daemon.waiters.register(&session_uid);
+                crate::mail::waiter_registered(daemon, &session_uid);
+                let gone = read_line_limited(reader, MAX_FRAME_BYTES);
+                tokio::select! {
+                    Ok(outcome) = outcome => {
+                        let frame = match outcome {
+                            crate::claude_waiter::WaiterOutcome::Wake => DaemonFrame::MailWake {
+                                nudge: crate::mail::nudge().into(),
+                            },
+                            crate::claude_waiter::WaiterOutcome::Superseded => DaemonFrame::MailSuperseded,
+                        };
+                        let _ = tx.send(frame).await;
+                    }
+                    _ = gone => {}
+                }
+                daemon.waiters.release(&session_uid, generation);
+                return Ok(());
+            }
+            ClientFrame::ListAgents { from_uid } => {
+                let frame = match daemon.list_agents(&from_uid).await {
+                    Ok((you, agents, unreachable)) => DaemonFrame::Agents {
+                        you,
+                        agents,
+                        unreachable,
+                    },
+                    Err(message) => DaemonFrame::Error { message },
+                };
+                let _ = tx.send(frame).await;
+            }
         }
     }
 }
@@ -653,6 +736,99 @@ mod tests {
     ///
     /// **Mutation:** restore `register_supervisor(...).await?` and this goes red — the
     /// second `exchange` reads a closed connection instead of an `Error`.
+    /// **Messages are read only once their answer reached the agent**, which the
+    /// tool says on the connection that carried them: a connection that closes
+    /// first leaves them unread for the next call, and a confirmed one leaves none.
+    #[tokio::test]
+    async fn mail_is_read_only_once_its_connection_confirms_it() {
+        let (daemon, socket) = served_daemon().await;
+        let uid = protocol::uid::new().unwrap();
+        assert!(matches!(
+            exchange(
+                &socket,
+                &register_frame(&uid, "cc-1", protocol::agent::AgentKind::Codex)
+            )
+            .await,
+            DaemonFrame::Ack
+        ));
+        daemon
+            .store
+            .take_mail(
+                &crate::store::MailIntake {
+                    message_id: "m1".into(),
+                    context_id: "c1".into(),
+                    in_reply_to: None,
+                    session_uid: uid.clone(),
+                    sender_computer: String::new(),
+                    sender_uid: "sender".into(),
+                    sender: "sender@studio".into(),
+                    sender_label: "cc-2@studio".into(),
+                    sender_agent: "Codex".into(),
+                    sender_project: "api".into(),
+                    text: "hi".into(),
+                },
+                protocol::time::now_unix_ms(),
+                crate::mail::LIMITS,
+            )
+            .unwrap();
+        let read = serde_json::to_string(&ClientFrame::ReadAgentMessages {
+            from_uid: uid.clone(),
+        })
+        .unwrap();
+        let offered = |frame: DaemonFrame| match frame {
+            DaemonFrame::AgentMessages {
+                offer, messages, ..
+            } => (offer, messages.len()),
+            other => panic!("expected messages, got {other:?}"),
+        };
+
+        // Read, and the connection closes with no confirmation.
+        assert_eq!(offered(exchange(&socket, &read).await).1, 1);
+        let mut unread = 0;
+        for _ in 0..200 {
+            unread = offered(exchange(&socket, &read).await).1;
+            if unread == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(unread, 1, "an unconfirmed read leaves the message unread");
+
+        // Released by the last exchange closing; read, then confirm.
+        let mut answer = None;
+        for _ in 0..200 {
+            let stream = UnixStream::connect(&socket).await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            write_half
+                .write_all(format!("{read}\n").as_bytes())
+                .await
+                .unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let (offer, count) = offered(serde_json::from_str(&line).unwrap());
+            if count == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                continue;
+            }
+            let confirm = serde_json::to_string(&ClientFrame::MailRead { offer }).unwrap();
+            write_half
+                .write_all(format!("{confirm}\n").as_bytes())
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            answer = Some(serde_json::from_str::<DaemonFrame>(&line).unwrap());
+            break;
+        }
+        assert!(matches!(answer, Some(DaemonFrame::Ack)), "{answer:?}");
+        assert_eq!(
+            offered(exchange(&socket, &read).await).1,
+            0,
+            "a confirmed read leaves nothing unread"
+        );
+    }
+
     #[tokio::test]
     async fn a_refused_registration_is_told_over_the_socket_not_silently_closed() {
         let (_daemon, socket) = served_daemon().await;

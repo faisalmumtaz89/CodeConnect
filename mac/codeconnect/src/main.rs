@@ -27,6 +27,8 @@ mod forked_holder;
 #[cfg(test)]
 mod home_guard;
 mod job;
+mod mail_trust;
+mod mcp;
 mod pair;
 mod service;
 mod session_name;
@@ -109,8 +111,15 @@ fn main() -> Result<()> {
     }
 
     match command {
-        "claude" => start_claude(rest),
-        "codex" => codex::start(rest),
+        "claude" => {
+            ask_about_mail(!claude_asks_help_or_version(rest));
+            start_claude(rest)
+        }
+        "codex" => {
+            ask_about_mail(!codex::asks_help_or_version(rest));
+            codex::start(rest)
+        }
+        "mail-trust" => mail_trust::command(rest),
         "attach" => attach(rest),
         "ls" | "list" => no_arguments(rest, "codeconnect ls").and_then(|()| list()),
         "sessions" => sessions::command(rest),
@@ -148,6 +157,9 @@ fn main() -> Result<()> {
         // the interactive TUI against the broker. Machinery, never typed by a
         // human — the coordinator spawns it.
         "internal-codex-host" => codex_host::run_host(rest),
+        // Hidden: the MCP server a hosted agent messages other agents with, started
+        // by the agent itself. Machinery, never typed by a human.
+        "mcp" => mcp::run(rest),
         // Hidden: the detached update checker `codeconnect claude` spawns.
         // Not in --help on purpose — it is machinery, not a command.
         "__update-check" => update_check::run_checker(),
@@ -196,6 +208,23 @@ fn usage() {
     eprintln!("{}", usage_text());
 }
 
+/// The one question a session launch can ask, once per computer, and only when it
+/// starts an agent's session in a terminal a person is at ([`mail_trust`]): never
+/// for an agent's help or version, which only print.
+fn ask_about_mail(starts_a_session: bool) {
+    if starts_a_session && crate::attach::Terminal::available() {
+        mail_trust::ask_once();
+    }
+}
+
+/// Whether `codeconnect claude <args>` asks Claude Code only for its help or its
+/// version (`-h`, `--help`, `-v`, `--version`, before any `--`).
+fn claude_asks_help_or_version(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help" | "-v" | "--version"))
+}
+
 /// The banner, as text rather than as a side effect.
 ///
 /// Split out so it can be held to the same bar as the retirement notice. This
@@ -214,6 +243,8 @@ codeconnect — host coding agents your iPhone can see and answer
   codeconnect ls                  list running sessions (works with the daemon down)
   codeconnect sessions            list every session the daemon knows, live or ended
   codeconnect sessions prune      remove ended sessions and their history (--dry-run first)
+
+  codeconnect mail-trust on|off    let your agents act on each other's messages, or not
 
   codeconnect update              install the latest release (the daemon restarts)
   codeconnect --version           print the installed version
@@ -459,8 +490,13 @@ struct AgentLaunchPlan {
 /// The exact argv and env a Claude session runs — a **pure** function, so the
 /// byte-identical guarantee is testable without touching the filesystem or tmux.
 /// Any change here changes what `claude` itself sees; the launcher test pins it.
+///
+/// `--mcp-config` comes first because it takes several values: placed after the
+/// passthrough it would take the person's prompt as a config file, and before
+/// `--settings` that flag ends it.
 fn claude_argv_and_env(
     binary: &std::path::Path,
+    mcp_config_path: &std::path::Path,
     settings_path: &std::path::Path,
     session_id: &str,
     session_uid: &str,
@@ -468,6 +504,8 @@ fn claude_argv_and_env(
 ) -> (Vec<String>, Vec<(String, String)>) {
     let mut argv = vec![
         binary.to_string_lossy().to_string(),
+        "--mcp-config".to_string(),
+        mcp_config_path.to_string_lossy().to_string(),
         "--settings".to_string(),
         settings_path.to_string_lossy().to_string(),
     ];
@@ -507,8 +545,14 @@ fn plan_claude_launch(
     passthrough: &[String],
 ) -> Result<AgentLaunchPlan> {
     let settings = settings::write_for_session(session_id, session_uid, config)?;
-    let (argv, env) =
-        claude_argv_and_env(binary, &settings.path, session_id, session_uid, passthrough);
+    let (argv, env) = claude_argv_and_env(
+        binary,
+        &settings.mcp_path,
+        &settings.path,
+        session_id,
+        session_uid,
+        passthrough,
+    );
     let session_dir = settings
         .path
         .parent()
@@ -1328,6 +1372,31 @@ fn is_same_file(candidate: &std::path::Path, current: Option<&std::path::Path>) 
 mod tests {
     use super::*;
 
+    /// **Asking for Claude Code's help or version is not a session**, so it never
+    /// stops at the mail question: `codeconnect claude --version` in a
+    /// terminal once did, and waited for an answer.
+    #[test]
+    fn only_a_session_start_asks_about_mail() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        for asks in [
+            &["--version"][..],
+            &["-v"],
+            &["--help"],
+            &["-h"],
+            &["--model", "x", "-h"],
+        ] {
+            assert!(claude_asks_help_or_version(&args(asks)), "{asks:?}");
+        }
+        for starts in [
+            &[][..],
+            &["fix the tests"],
+            &["--model", "opus"],
+            &["--", "--version"],
+        ] {
+            assert!(!claude_asks_help_or_version(&args(starts)), "{starts:?}");
+        }
+    }
+
     /// **The launcher byte-identical gate.** The agent-parameterised launcher
     /// must leave the `claude` argv and env exactly as they shipped. This pins
     /// the pure builder both planners flow through, so a refactor that reorders a
@@ -1337,6 +1406,7 @@ mod tests {
     fn the_claude_argv_and_env_are_byte_identical() {
         let (argv, env) = claude_argv_and_env(
             std::path::Path::new("/usr/local/bin/claude"),
+            std::path::Path::new("/home/u/.codeconnect/sessions/cc-1-UID/mcp.json"),
             std::path::Path::new("/home/u/.codeconnect/sessions/cc-1-UID/settings.json"),
             "cc-1",
             "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
@@ -1350,6 +1420,8 @@ mod tests {
             argv,
             vec![
                 "/usr/local/bin/claude",
+                "--mcp-config",
+                "/home/u/.codeconnect/sessions/cc-1-UID/mcp.json",
                 "--settings",
                 "/home/u/.codeconnect/sessions/cc-1-UID/settings.json",
                 "--resume",
@@ -1375,12 +1447,36 @@ mod tests {
         // — never merged, deduplicated or reordered.
         let (bare, _) = claude_argv_and_env(
             std::path::Path::new("claude"),
+            std::path::Path::new("/m.json"),
             std::path::Path::new("/s.json"),
             "cc-2",
             "UID",
             &[],
         );
-        assert_eq!(bare, vec!["claude", "--settings", "/s.json"]);
+        assert_eq!(
+            bare,
+            vec!["claude", "--mcp-config", "/m.json", "--settings", "/s.json"]
+        );
+    }
+
+    /// **A prompt in the passthrough stays the prompt.** `--mcp-config` takes several
+    /// values, so a flag must end it before the passthrough begins; the prompt is the
+    /// first word after the settings document, and nothing after `--mcp-config`'s one
+    /// file is anything but another flag.
+    #[test]
+    fn a_prompt_in_the_passthrough_is_never_taken_as_an_mcp_config() {
+        let (argv, _) = claude_argv_and_env(
+            std::path::Path::new("claude"),
+            std::path::Path::new("/m.json"),
+            std::path::Path::new("/s.json"),
+            "cc-1",
+            "UID",
+            &["review the diff".to_string()],
+        );
+        let mcp = argv.iter().position(|a| a == "--mcp-config").unwrap();
+        assert!(argv[mcp + 2].starts_with("--"), "{argv:?}");
+        assert_eq!(argv.last().unwrap(), "review the diff");
+        assert!(mcp < argv.iter().position(|a| a == "review the diff").unwrap());
     }
 
     /// Whether a bare command name resolves on this machine's `PATH`.

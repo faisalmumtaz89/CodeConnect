@@ -725,6 +725,29 @@ pub(crate) fn set_once<T>(slot: &mut Option<T>, flag: &str, value: T) -> Result<
 
 // ------------------------------------------------------------- orchestration
 
+/// The `-c` overrides that give the app-server the `codeconnect` MCP server for this
+/// session, pre-approved: Codex asks for MCP tool approval only at the computer's
+/// keyboard, so an unapproved send would stall a session the person is away from.
+/// Placed after `--listen`, on the app-server only — the TUI gets nothing new.
+/// Each value is TOML, and a JSON string or array of strings is one.
+fn mcp_overrides(codeconnect: &Path, session_uid: &str, socket: &Path) -> Vec<String> {
+    let args = crate::mcp::server_args(session_uid, socket);
+    vec![
+        "-c".into(),
+        format!(
+            "mcp_servers.codeconnect.command={}",
+            serde_json::Value::from(codeconnect.to_string_lossy().into_owned())
+        ),
+        "-c".into(),
+        format!(
+            "mcp_servers.codeconnect.args={}",
+            serde_json::Value::from(args)
+        ),
+        "-c".into(),
+        "mcp_servers.codeconnect.default_tools_approval_mode=\"approve\"".into(),
+    ]
+}
+
 /// The TUI's command: a `--remote` client of this session's broker at `tui_sock`, with
 /// the caller's passthrough behind the fence and nothing of CodeConnect's own — no
 /// sandbox, no approval policy, no config — so it chooses them exactly as native codex
@@ -1385,6 +1408,10 @@ async fn run_session(args: &HostArgs, paths: &Paths, signals: &mut Signals) -> O
         .arg("app-server")
         .arg("--listen")
         .arg(format!("unix://{}", paths.as_sock.display()))
+        .args(match std::env::current_exe() {
+            Ok(codeconnect) => mcp_overrides(&codeconnect, &args.uid, &protocol::socket_path()),
+            Err(err) => return Outcome::Fatal(format!("locating the codeconnect binary: {err}")),
+        })
         .env("CODEX_HOME", &args.codex_home)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
@@ -3139,6 +3166,28 @@ fn assert_sun_len(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The app-server is given the `codeconnect` tool for its own session,
+    /// pre-approved**, in three `-c` values that are TOML.
+    #[test]
+    fn the_app_server_gets_the_codeconnect_tool_for_its_session() {
+        let overrides = mcp_overrides(
+            Path::new("/opt/cc/bin/codeconnect"),
+            "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+            Path::new("/Users/u/.codeconnect/ccd.sock"),
+        );
+        assert_eq!(
+            overrides,
+            [
+                "-c",
+                r#"mcp_servers.codeconnect.command="/opt/cc/bin/codeconnect""#,
+                "-c",
+                r#"mcp_servers.codeconnect.args=["mcp","--session-uid","01K1B3XQ8ZC0DE5FGH7JKMNPQR","--socket","/Users/u/.codeconnect/ccd.sock"]"#,
+                "-c",
+                r#"mcp_servers.codeconnect.default_tools_approval_mode="approve""#,
+            ]
+        );
+    }
 
     #[test]
     fn terminal_wait_is_an_optional_unique_host_flag() {

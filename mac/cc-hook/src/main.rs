@@ -6,9 +6,12 @@
 //!    error* in Claude Code. A crash in CodeConnect must never look like a
 //!    denial, so every failure path here degrades to "print nothing, exit 0" —
 //!    which is behaviourally identical to the hook not being installed at all.
+//!    The one exit 2 is the mail waiter's (`--mail-waiter`), an `asyncRewake`
+//!    hook, where exit 2 is not a block but the documented way to wake Claude.
 //! 2. **Never block longer than promised.** Reaching the daemon is bounded by
 //!    `--connect-timeout-ms` (default 200ms) and waiting for a decision by
-//!    `--gate-timeout-ms`. Observability events do not wait at all. The one
+//!    `--gate-timeout-ms`, and a `UserPromptSubmit` asked for its reply by
+//!    `--reply-ms`. Other observability events do not wait at all. The one
 //!    exception is `PermissionRequest`: its answer comes from the phone through
 //!    this hook, so it is held for as long as Claude waits on it: Claude's
 //!    hook timeout is the bound. It ends sooner when its parent changes (Claude,
@@ -39,8 +42,13 @@ struct Args {
     event: Option<String>,
     gate: bool,
     gate_timeout: Duration,
+    /// Wait this long for the daemon's reply to an event that is not the gate:
+    /// the `UserPromptSubmit` that reminds Claude of mail waiting for it.
+    reply: Option<Duration>,
     connect_timeout: Duration,
     unreachable_ask: bool,
+    /// Run as the mail waiter: wait until the daemon has mail for this run.
+    mail_waiter: bool,
     socket: PathBuf,
 }
 
@@ -52,8 +60,10 @@ impl Default for Args {
             event: None,
             gate: false,
             gate_timeout: Duration::from_secs(120),
+            reply: None,
             connect_timeout: Duration::from_millis(200),
             unreachable_ask: false,
+            mail_waiter: false,
             socket: protocol::socket_path(),
         }
     }
@@ -68,6 +78,7 @@ fn parse_args<I: Iterator<Item = String>>(mut it: I) -> Args {
             "--event" => args.event = it.next(),
             "--gate" => args.gate = true,
             "--unreachable-ask" => args.unreachable_ask = true,
+            "--mail-waiter" => args.mail_waiter = true,
             "--gate-timeout-ms" => {
                 if let Some(ms) = it.next().and_then(|v| v.parse::<u64>().ok()) {
                     args.gate_timeout = Duration::from_millis(ms);
@@ -76,6 +87,11 @@ fn parse_args<I: Iterator<Item = String>>(mut it: I) -> Args {
             "--connect-timeout-ms" => {
                 if let Some(ms) = it.next().and_then(|v| v.parse::<u64>().ok()) {
                     args.connect_timeout = Duration::from_millis(ms);
+                }
+            }
+            "--reply-ms" => {
+                if let Some(ms) = it.next().and_then(|v| v.parse::<u64>().ok()) {
+                    args.reply = Some(Duration::from_millis(ms));
                 }
             }
             "--socket" => {
@@ -125,6 +141,14 @@ fn run() {
         return;
     }
 
+    if args.mail_waiter {
+        if let Some(uid) = resolve_session_uid(&args) {
+            exit_when_orphaned(parent);
+            std::process::exit(wait_for_mail(&args, &uid));
+        }
+        return;
+    }
+
     let payload: serde_json::Value = match serde_json::from_slice(&stdin_bytes) {
         Ok(value) => value,
         Err(err) => {
@@ -147,7 +171,7 @@ fn run() {
         session_uid: resolve_session_uid(&args),
         event: event_name.as_str().to_string(),
         payload,
-        wait: args.gate,
+        wait: args.gate || args.reply.is_some(),
         holds_questions: args.gate,
         holds_approvals: args.gate,
     };
@@ -269,13 +293,17 @@ fn post_to_daemon(
         .and_then(|()| stream.write_all(b"\n"))
         .and_then(|()| stream.flush())
         .map_err(|err| format!("write: {err}"))?;
-    if !args.gate {
+    if !post.wait {
         // Half-close so the daemon sees a clean end-of-request even if it reads to EOF.
         let _ = stream.shutdown(Shutdown::Write);
         return Ok(HookDecision::passthrough());
     }
 
-    let _ = stream.set_read_timeout((!held).then_some(args.gate_timeout));
+    let _ = stream.set_read_timeout(match (held, args.gate) {
+        (true, _) => None,
+        (false, true) => Some(args.gate_timeout),
+        (false, false) => args.reply,
+    });
     if held {
         exit_when_orphaned(parent);
     }
@@ -296,6 +324,46 @@ fn post_to_daemon(
             Err("timeout".to_string())
         }
         Err(err) => Err(format!("read: {err}")),
+    }
+}
+
+/// How long the mail waiter waits before reaching the daemon again, after it went
+/// away (a restart, an update) or could not be reached.
+const WAITER_RETRY: Duration = Duration::from_secs(2);
+
+/// **The mail waiter**: wait on the daemon until it has mail for this run, then
+/// print the line it sends for Claude and return 2, which wakes it. Returns 0 when a
+/// newer waiter took over. Claude's own timeout on the hook is the bound; a daemon
+/// that goes away is reached again, so a restart costs no wake.
+fn wait_for_mail(args: &Args, session_uid: &str) -> i32 {
+    let frame = ClientFrame::MailWaiter {
+        session_uid: session_uid.to_string(),
+    };
+    let Ok(line) = serde_json::to_string(&frame) else {
+        return 0;
+    };
+    loop {
+        if let Some(mut stream) = connect_with_timeout(&args.socket, args.connect_timeout) {
+            let sent = stream
+                .write_all(line.as_bytes())
+                .and_then(|()| stream.write_all(b"\n"))
+                .and_then(|()| stream.flush());
+            if sent.is_ok() {
+                let mut reply = String::new();
+                if BufReader::new(stream).read_line(&mut reply).is_ok() {
+                    match serde_json::from_str::<DaemonFrame>(reply.trim()) {
+                        Ok(DaemonFrame::MailWake { nudge }) => {
+                            eprintln!("{nudge}");
+                            return 2;
+                        }
+                        // A daemon that refuses the waiter will refuse it again.
+                        Ok(DaemonFrame::MailSuperseded | DaemonFrame::Error { .. }) => return 0,
+                        _ => debug_log("mail waiter: the daemon went away; reaching it again"),
+                    }
+                }
+            }
+        }
+        thread::sleep(WAITER_RETRY);
     }
 }
 
@@ -417,6 +485,58 @@ mod tests {
         let args = args_from(&["--session", "cc-1", "--event", "PreToolUse"]);
         assert_eq!(args.session_uid, None);
         assert_eq!(args.session.as_deref(), Some("cc-1"));
+    }
+
+    /// A UserPromptSubmit asked for its reply waits for it, bounded; one from a
+    /// settings file that does not ask stays fire-and-forget, and an unreachable
+    /// daemon prints nothing either way.
+    #[test]
+    fn a_prompt_asked_for_its_reply_waits_a_bounded_time() {
+        let asked = args_from(&["--event", "UserPromptSubmit", "--reply-ms", "1000"]);
+        assert_eq!(asked.reply, Some(Duration::from_millis(1000)));
+        assert!(!asked.gate);
+        assert_eq!(args_from(&["--event", "UserPromptSubmit"]).reply, None);
+        let silent = fallback_decision(&asked, &HookEventName::UserPromptSubmit, "timeout");
+        assert_eq!(silent.render(&HookEventName::UserPromptSubmit), None);
+    }
+
+    /// **The mail waiter exits 2 only when the daemon wakes it**, and 0 when a
+    /// newer waiter took its place: Claude reads exit 2 from an `asyncRewake` hook
+    /// as the wake. It sends its own run's uid.
+    #[test]
+    fn the_mail_waiter_exits_2_on_a_wake_and_0_when_superseded() {
+        let wake = DaemonFrame::MailWake {
+            nudge: protocol::ipc::MAIL_NUDGE_SHOW.into(),
+        };
+        for (reply, code) in [(wake, 2), (DaemonFrame::MailSuperseded, 0)] {
+            let socket = std::env::temp_dir()
+                .join(format!("cc-hook-waiter-{}-{code}.sock", std::process::id()));
+            let _ = std::fs::remove_file(&socket);
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let daemon = thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut asked = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut asked)
+                    .unwrap();
+                let mut stream = stream;
+                stream
+                    .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+                    .unwrap();
+                asked
+            });
+            let args = Args {
+                socket: socket.clone(),
+                ..args_from(&["--mail-waiter"])
+            };
+            assert_eq!(wait_for_mail(&args, "01K1B3XQ8ZC0DE5FGH7JKMNPQR"), code);
+            let asked: ClientFrame = serde_json::from_str(daemon.join().unwrap().trim()).unwrap();
+            assert!(matches!(
+                asked,
+                ClientFrame::MailWaiter { session_uid } if session_uid == "01K1B3XQ8ZC0DE5FGH7JKMNPQR"
+            ));
+            let _ = std::fs::remove_file(&socket);
+        }
     }
 
     #[test]

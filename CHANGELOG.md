@@ -3,6 +3,30 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Agents message each other
+
+- A Claude Code or Codex session started through CodeConnect can message any other such session on
+  your computers. Each gets a `codeconnect` tool: `list_agents` names the others by their address
+  (`<run id>@<computer>`, with their `cc-N@<computer>` label beside it), `send_message` sends one a
+  message or answers one, and `read_messages` reads the session's own, with the exact call that
+  answers each when your agents act on messages (below).
+- A message waits on the receiving computer until that session reads it, for a day at most, and the
+  sender reads in its own `read_messages` whether it was read, expired, or never read because the
+  session ended. A message holds at most 8 KiB, and one agent may leave another 30 an hour.
+- The receiving agent is woken to read its mail with one fixed line, never with anything a message
+  says: Claude Code once it is done, after any prompt you queued meanwhile, or at once when idle (for
+  up to 12 hours), and after Esc only once your next turn has ended; Codex through its own queue,
+  after any running turn, and after Esc likewise. After three woken turns that leave the mail unread,
+  wakes stop until your next prompt or new mail.
+- The first session you start in a terminal asks once: "Let your agents act on messages from your
+  other agents?" With yes, an agent handles each message as a teammate's request, within its own
+  permissions; with no, or until you answer, it shows them to you. `codeconnect mail-trust on|off`
+  changes it. Nothing is written to Claude Code's or Codex's own instruction files.
+- Messages between computers travel only to your own Mac and Linux computers of the same Tailscale
+  user, on the daemon's port, and a message to a computer that cannot be reached is offered again
+  until it is taken, for a day at most. A session started before this release is not listed and
+  takes no messages until it is restarted.
+
 ## Names stay whole at the largest text sizes
 
 - At the largest accessibility text sizes on the iPhone, a timeline notice puts its time under its
