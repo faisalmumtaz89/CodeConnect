@@ -8523,6 +8523,181 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// **The start-session wire a minor-28 daemon sends, emitted by this build.**
+    /// The phone's tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`), so the phone is tested against
+    /// what this daemon writes, not against a shape written by hand.
+    #[tokio::test]
+    async fn the_minor_28_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-28-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_28_wire().await,
+            committed,
+            "the committed minor-28 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_28_wire_fixture, then copy it over its copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-28-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_28_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_28_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-28-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// The handshake and project list as a paired phone receives them over a
+    /// live socket, and each start outcome as `start_session` answers it, from
+    /// a stub launcher standing in for `codeconnect <agent> --no-attach`.
+    ///
+    /// Fixed paths under `/tmp/ccd-minor-28`, so the fixture is the same on every
+    /// machine. Which agents can start is set rather than checked: a check asks
+    /// this machine's launcher, and the fixture would say what it found.
+    async fn derived_minor_28_wire() -> serde_json::Value {
+        use protocol::agent::AgentKind;
+        use protocol::ws::{AgentAvailability, StartSessionResult};
+
+        let root = std::path::Path::new("/tmp/ccd-minor-28");
+        let (app, notes, gone) = (root.join("app"), root.join("notes"), root.join("gone"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&notes).unwrap();
+        assert!(!gone.exists(), "{} must not exist", gone.display());
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&app)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let launcher = root.join("codeconnect");
+        std::fs::write(
+            &launcher,
+            r#"#!/bin/sh
+case "$1:$4" in
+claude:fail) echo 'Error: creating tmux session cc-3' >&2; exit 1 ;;
+claude:*) printf '{"uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_name":"cc-3","agent":"claude"}\n' > "$CODECONNECT_LAUNCH_RESULT" ;;
+codex:*) printf '{"error":"agent_missing","detail":"could not find the codex binary: install Codex"}\n' > "$CODECONNECT_LAUNCH_RESULT"; exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&launcher)
+            .status()
+            .unwrap();
+
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        for (cwd, at, agent) in [
+            (&app, "2026-11-04T09:00:00.000Z", AgentKind::Codex),
+            (&notes, "2026-11-03T18:30:00.000Z", AgentKind::Claude),
+            (&gone, "2026-10-01T08:00:00.000Z", AgentKind::Claude),
+        ] {
+            let filed = server
+                .store
+                .upsert_session(&crate::store::SessionRow {
+                    session_uid: protocol::uid::new().unwrap(),
+                    session_id: "cc-1".into(),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: "codeconnect".into(),
+                    cwd: cwd.display().to_string(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Exited,
+                    created_at: at.into(),
+                    updated_at: at.into(),
+                    agent,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .unwrap();
+            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+        }
+        server.daemon.agents.set(vec![
+            AgentAvailability {
+                agent: AgentKind::Claude,
+                available: true,
+                detail: None,
+            },
+            AgentAvailability {
+                agent: AgentKind::Codex,
+                available: false,
+                detail: Some("could not find the codex binary: install Codex".into()),
+            },
+        ]);
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let list_projects_request = serde_json::to_value(ClientMessage::ListProjects).unwrap();
+        phone
+            .send(Message::Text(list_projects_request.to_string()))
+            .await
+            .unwrap();
+        let projects = next_json(&mut phone).await.unwrap();
+
+        let start = |path: &std::path::Path, agent: AgentKind, prompt: Option<&'static str>| {
+            let (db, launcher) = (&server.daemon.db, launcher.clone());
+            let path = path.display().to_string();
+            async move {
+                crate::start_session::launch(db, Ok(launcher), root, &path, &agent, prompt).await
+            }
+        };
+        let reply = |request_id: &str, result: StartSessionResult| {
+            serde_json::to_value(ServerMessage::StartSessionResult {
+                request_id: request_id.into(),
+                result,
+            })
+            .unwrap()
+        };
+        let starts = crate::start_session::Starts::default();
+        let first = starts
+            .once("r-repeat", start(&app, AgentKind::Claude, None))
+            .await;
+        let again = starts
+            .once("r-repeat", start(&app, AgentKind::Claude, None))
+            .await;
+
+        serde_json::json!({
+            "hello_ack_capabilities": ack["capabilities"],
+            "list_projects_request": list_projects_request,
+            "start_session_request": serde_json::to_value(ClientMessage::StartSession {
+                request_id: "r1".into(),
+                path: app.display().to_string(),
+                agent: AgentKind::Claude,
+                prompt: Some("fix the \"login\" test; then run it\nand commit;".into()),
+            })
+            .unwrap(),
+            "projects": projects,
+            "start_started": reply(
+                "r1",
+                start(&app, AgentKind::Claude, Some("fix the tests")).await
+            ),
+            "start_failed_folder_missing": reply(
+                "r2",
+                start(&gone, AgentKind::Claude, None).await
+            ),
+            "start_failed_agent_missing": reply(
+                "r3",
+                start(&notes, AgentKind::Codex, None).await
+            ),
+            "start_failed_launch_failed": reply(
+                "r4",
+                start(&notes, AgentKind::Claude, Some("fail")).await
+            ),
+            "start_repeat": [reply("r-repeat", first), reply("r-repeat", again)],
+        })
+    }
+
     /// The `terminal_pty` capability answers the same question the attach
     /// handler does, over every transport the daemon serves.
     ///

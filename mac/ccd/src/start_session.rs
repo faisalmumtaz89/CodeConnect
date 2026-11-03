@@ -80,7 +80,7 @@ impl KnownAgents {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    fn set(&self, agents: Vec<AgentAvailability>) {
+    pub(crate) fn set(&self, agents: Vec<AgentAvailability>) {
         *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(agents);
     }
 }
@@ -110,7 +110,7 @@ pub struct Starts(Mutex<HashMap<String, watch::Receiver<Option<StartSessionResul
 
 impl Starts {
     /// The outcome for `request_id`: `launch`'s, run once however often it is asked.
-    async fn once(
+    pub(crate) async fn once(
         &self,
         request_id: &str,
         launch: impl std::future::Future<Output = StartSessionResult>,
@@ -150,7 +150,7 @@ fn failed(reason: StartFailure, detail: String) -> StartSessionResult {
 /// Run `codeconnect <agent> --no-attach [-- <prompt>]` in `path` through the
 /// user's login shell, and read what it started from its result line, a file in
 /// `state_dir`.
-async fn launch(
+pub(crate) async fn launch(
     db: &crate::db::Db,
     launcher: Result<PathBuf, String>,
     state_dir: &Path,
