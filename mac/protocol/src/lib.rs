@@ -28,6 +28,7 @@ pub mod fsperm;
 pub mod hash;
 pub mod hook;
 pub mod ipc;
+pub mod launch_result;
 pub mod pairing;
 pub mod peer;
 pub mod proc;
@@ -599,7 +600,24 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         message, before any phone hello, may be a [`peer::PeerRequest`], answered by one
 ///         [`peer::PeerReply`] and the connection closed. A daemon below 27
 ///         answers `bad_request`, which the sender reads as "older CodeConnect".
-pub const PROTOCOL_MINOR: u32 = 27;
+///   * `28` — **A session started from the phone.**
+///
+///     A phone picks a folder sessions have run in and starts Claude Code or
+///     Codex there, as if `codeconnect <agent>` had been typed in it. Additive,
+///     and a client written against minor 27 needs none of it:
+///       - [`ws::Capabilities::start_session`] — this daemon understands the rest.
+///       - [`ws::ClientMessage::ListProjects`] and [`ws::ServerMessage::Projects`]
+///         — the folders, most recent first, and which agents this computer can
+///         start.
+///       - [`ws::ClientMessage::StartSession`] and
+///         [`ws::ServerMessage::StartSessionResult`] — one start, idempotent by
+///         `request_id`, answered with the new session's uid or why it failed.
+///       - [`launch_result`] — between this computer's own processes: how
+///         `codeconnect <agent> --no-attach` tells the daemon what it started.
+///
+///     A daemon below 28 answers both requests `bad_request`, so a client sends
+///     them only when the capability is advertised.
+pub const PROTOCOL_MINOR: u32 = 28;
 
 #[cfg(test)]
 mod ledger_tests {

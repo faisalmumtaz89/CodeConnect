@@ -439,6 +439,28 @@ pub enum ClientMessage {
         payload_hash: String,
     },
 
+    /// **The folders sessions have run in on this computer** (minor 28,
+    /// `start_session`), answered with one [`ServerMessage::Projects`].
+    ListProjects,
+    /// **Start an agent in one of those folders** (minor 28, `start_session`), as
+    /// if `codeconnect <agent>` had been typed there. Answered with one
+    /// [`ServerMessage::StartSessionResult`] carrying the same `request_id`.
+    ///
+    /// `path` must be one [`ServerMessage::Projects`] listed; anything else is
+    /// refused before anything runs. `prompt`, when present, is the agent's own
+    /// first prompt, bounded by [`MAX_COMPOSE_BYTES`] and passed as one argument,
+    /// never through a shell string.
+    ///
+    /// `request_id` makes the start idempotent: the same id sent again, on this
+    /// connection or a later one, gets the first answer and starts nothing new.
+    StartSession {
+        request_id: String,
+        path: String,
+        agent: crate::agent::AgentKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+    },
+
     Ping,
 }
 
@@ -629,7 +651,77 @@ pub enum ServerMessage {
         result: ComposeResult,
     },
 
+    /// The answer to [`ClientMessage::ListProjects`]: most recently used first.
+    /// `agents` says which agents this computer can start, for every project.
+    Projects {
+        projects: Vec<Project>,
+        agents: Vec<AgentAvailability>,
+    },
+    /// The outcome of a [`ClientMessage::StartSession`]. A repeat of the same
+    /// `request_id` gets the same outcome again.
+    StartSessionResult {
+        request_id: String,
+        result: StartSessionResult,
+    },
+
     Pong,
+}
+
+/// A folder sessions have run in, from every session this computer has hosted,
+/// including ended and removed ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    /// The folder, exactly as the sessions recorded it. A
+    /// [`ClientMessage::StartSession`] names it by this string.
+    pub path: String,
+    /// What the fleet calls the project.
+    pub name: String,
+    /// When a session last started there (RFC 3339).
+    pub last_used: String,
+    /// The agent of that session.
+    pub last_agent: crate::agent::AgentKind,
+    /// The folder's current git branch; absent outside a git repository or on a
+    /// detached head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    /// False when the folder is gone: listed, but a start there fails.
+    pub exists: bool,
+}
+
+/// Whether this computer can start one agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentAvailability {
+    pub agent: crate::agent::AgentKind,
+    pub available: bool,
+    /// Why not, safe to show verbatim; absent when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// What became of a [`ClientMessage::StartSession`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum StartSessionResult {
+    /// The session exists; `session_uid` is how the fleet names it. It may reach
+    /// the fleet a moment after this answer.
+    Started { session_uid: String },
+    /// No session was started. `detail` is human text, safe to show verbatim.
+    Failed {
+        reason: StartFailure,
+        detail: String,
+    },
+}
+
+/// Why a start failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartFailure {
+    /// The agent is not installed on this computer, or cannot be found.
+    AgentMissing,
+    /// The folder no longer exists.
+    FolderMissing,
+    /// Anything else, the detail says what.
+    LaunchFailed,
 }
 
 /// What became of an [`ClientMessage::Interrupt`].
@@ -881,6 +973,12 @@ pub struct Capabilities {
     /// `bad_request`, so a client sends it only when this is advertised.
     #[serde(default)]
     pub history_pages: bool,
+    /// **This daemon lists its projects and starts sessions in them**
+    /// ([`ClientMessage::ListProjects`], [`ClientMessage::StartSession`], minor 28).
+    /// Absent decodes `false`: an older daemon answers both with `bad_request`, so
+    /// a client sends them, and offers a new session, only when this is advertised.
+    #[serde(default)]
+    pub start_session: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -1728,10 +1826,15 @@ mod tests {
             "agents' messages (`send_agent_message`, `list_agents`, `protocol::peer`) are \
              minor 27"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 28,
+            "starting a session from the phone (`list_projects`, `start_session`, \
+             `start_session` capability) is minor 28"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 27);
+        assert_eq!(crate::PROTOCOL_MINOR, 28);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2237,6 +2340,7 @@ mod tests {
             question_card: true,
             hook_only_approvals: true,
             history_pages: true,
+            start_session: true,
         }
     }
 
@@ -2672,6 +2776,140 @@ mod tests {
             }
             other => panic!("wrong message: {other:?}"),
         }
+    }
+
+    /// **The start-session wire, pinned as the phone matches it** (minor 28).
+    /// Each message encodes to exactly this JSON and decodes back to it.
+    #[test]
+    fn the_start_session_messages_round_trip_as_the_phone_matches_them() {
+        fn round_trip_client(message: ClientMessage, expected: serde_json::Value) {
+            assert_eq!(serde_json::to_value(&message).unwrap(), expected);
+            let decoded: ClientMessage = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
+        fn round_trip_server(message: ServerMessage, expected: serde_json::Value) {
+            assert_eq!(serde_json::to_value(&message).unwrap(), expected);
+            let decoded: ServerMessage = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
+
+        round_trip_client(
+            ClientMessage::ListProjects,
+            serde_json::json!({"type": "list_projects"}),
+        );
+        round_trip_client(
+            ClientMessage::StartSession {
+                request_id: "r1".into(),
+                path: "/Users/me/src/app".into(),
+                agent: crate::agent::AgentKind::Claude,
+                prompt: Some("-fix \"it\"; $(x)\nnow;".into()),
+            },
+            serde_json::json!({"type": "start_session", "request_id": "r1",
+                "path": "/Users/me/src/app", "agent": "claude",
+                "prompt": "-fix \"it\"; $(x)\nnow;"}),
+        );
+        round_trip_client(
+            ClientMessage::StartSession {
+                request_id: "r2".into(),
+                path: "/srv/x".into(),
+                agent: crate::agent::AgentKind::Codex,
+                prompt: None,
+            },
+            serde_json::json!({"type": "start_session", "request_id": "r2",
+                "path": "/srv/x", "agent": "codex"}),
+        );
+
+        round_trip_server(
+            ServerMessage::Projects {
+                projects: vec![
+                    Project {
+                        path: "/Users/me/src/app".into(),
+                        name: "app".into(),
+                        last_used: "2026-11-04T01:00:00.000Z".into(),
+                        last_agent: crate::agent::AgentKind::Codex,
+                        git_branch: Some("main".into()),
+                        exists: true,
+                    },
+                    Project {
+                        path: "/Users/me/gone".into(),
+                        name: "gone".into(),
+                        last_used: "2026-10-01T09:00:00.000Z".into(),
+                        last_agent: crate::agent::AgentKind::Claude,
+                        git_branch: None,
+                        exists: false,
+                    },
+                ],
+                agents: vec![
+                    AgentAvailability {
+                        agent: crate::agent::AgentKind::Claude,
+                        available: true,
+                        detail: None,
+                    },
+                    AgentAvailability {
+                        agent: crate::agent::AgentKind::Codex,
+                        available: false,
+                        detail: Some("codex is not installed".into()),
+                    },
+                ],
+            },
+            serde_json::json!({"type": "projects",
+                "projects": [
+                    {"path": "/Users/me/src/app", "name": "app",
+                     "last_used": "2026-11-04T01:00:00.000Z", "last_agent": "codex",
+                     "git_branch": "main", "exists": true},
+                    {"path": "/Users/me/gone", "name": "gone",
+                     "last_used": "2026-10-01T09:00:00.000Z", "last_agent": "claude",
+                     "exists": false}],
+                "agents": [
+                    {"agent": "claude", "available": true},
+                    {"agent": "codex", "available": false,
+                     "detail": "codex is not installed"}]}),
+        );
+
+        round_trip_server(
+            ServerMessage::StartSessionResult {
+                request_id: "r1".into(),
+                result: StartSessionResult::Started {
+                    session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+                },
+            },
+            serde_json::json!({"type": "start_session_result", "request_id": "r1",
+                "result": {"status": "started",
+                           "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR"}}),
+        );
+        for (reason, word) in [
+            (StartFailure::AgentMissing, "agent_missing"),
+            (StartFailure::FolderMissing, "folder_missing"),
+            (StartFailure::LaunchFailed, "launch_failed"),
+        ] {
+            round_trip_server(
+                ServerMessage::StartSessionResult {
+                    request_id: "r2".into(),
+                    result: StartSessionResult::Failed {
+                        reason,
+                        detail: "why".into(),
+                    },
+                },
+                serde_json::json!({"type": "start_session_result", "request_id": "r2",
+                    "result": {"status": "failed", "reason": word, "detail": "why"}}),
+            );
+        }
+    }
+
+    /// A minor-27 ack has no `start_session`, so a client reading it offers no
+    /// new session; this daemon's own ack says it.
+    #[test]
+    fn start_session_is_absent_from_an_older_ack_and_present_in_this_one() {
+        let old: Capabilities = serde_json::from_str(
+            r#"{"can_approve_reliably":true,"fail_mode":"fail_open",
+                "answer_path":"hook_return","hold_secs":0,"send_text":true,
+                "capture":true,"push":false,"tls":true,"history_pages":true}"#,
+        )
+        .unwrap();
+        assert!(!old.start_session);
+
+        let current = serde_json::to_value(capabilities_fixture()).unwrap();
+        assert_eq!(current["start_session"], true);
     }
 
     #[test]

@@ -1083,6 +1083,18 @@ where
         // it to do.
         ClientMessage::Hello { .. } => {}
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
+        // Not advertised yet (`start_session` is false): answered as a daemon
+        // below minor 28 answers them.
+        ClientMessage::ListProjects | ClientMessage::StartSession { .. } => {
+            send(
+                sink,
+                &ServerMessage::Error {
+                    code: "bad_request".into(),
+                    message: "this daemon does not start sessions yet".into(),
+                },
+            )
+            .await?
+        }
         ClientMessage::RegisterPush {
             token,
             environment,
@@ -3066,6 +3078,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         question_card: true,
         hook_only_approvals: true,
         history_pages: true,
+        start_session: false,
     }
 }
 
