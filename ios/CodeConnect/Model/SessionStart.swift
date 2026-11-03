@@ -89,58 +89,44 @@ final class SessionStarter {
     var availableAgents: Set<StartAgent> { Set(agents.filter(\.available).map(\.agent)) }
     private(set) var starts: [String: SessionStart] = [:]
 
-    func listProjects(fixtures: Bool) {
-        guard fixtures else { return }
-        projects = Self.fixtureProjects(now: Date())
+    /// The fixture answer to `list_projects`: a Mac's forty folders, or a
+    /// Linux server's few. `-CC_START_AGENTS claude` leaves Codex uninstalled.
+    func listFixtureProjects(linux: Bool) {
+        projects = linux ? Self.fixtureLinuxProjects(now: Date()) : Self.fixtureProjects(now: Date())
+        var codex = true
+        #if DEBUG
+            codex = UserDefaults.standard.string(forKey: "CC_START_AGENTS") != "claude"
+        #endif
         agents = [
             StartAgentStatus(agent: .claude, available: true, detail: nil),
-            StartAgentStatus(agent: .codex, available: false, detail: "codex is not installed"),
+            StartAgentStatus(
+                agent: .codex, available: codex, detail: codex ? nil : "codex is not installed"),
         ]
+    }
+
+    /// What `start_session_result` said about one start.
+    func resolve(_ requestID: String, _ outcome: StartOutcome) {
+        starts[requestID]?.outcome = outcome
     }
 
     /// Send one start. The request id is what makes a double tap or a resend
     /// after a reconnect one session rather than two.
     @discardableResult
     func start(
-        project: StartProject, agent: StartAgent, prompt: String, machineName: String,
-        fixtures: Bool
+        project: StartProject, agent: StartAgent, prompt: String, machineName: String
     ) -> String {
         let requestID = UUID().uuidString.lowercased()
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         starts[requestID] = SessionStart(
             requestID: requestID, project: project, agent: agent,
             prompt: trimmed.isEmpty ? nil : trimmed, machineName: machineName, sentAt: Date())
-        if fixtures { answerFromFixture(requestID) }
         return requestID
     }
 
     // MARK: Fixtures
 
-    /// A fixture start stays starting — no session ever arrives — unless
-    /// `CC_START_OUTCOME` names the failure it should end in.
-    private func answerFromFixture(_ requestID: String) {
-        #if DEBUG
-            guard let wanted = UserDefaults.standard.string(forKey: "CC_START_OUTCOME"),
-                let reason = StartFailure(rawValue: wanted),
-                let start = starts[requestID]
-            else { return }
-            let detail: String
-            switch reason {
-            case .folderMissing: detail = "cd: no such file or directory: \(start.project.path)"
-            case .agentMissing: detail = "zsh: command not found: \(start.agent.rawValue)"
-            case .launchFailed:
-                detail = "/Users/jordan/.zshrc:42: command not found: nvm\nlogin shell exited with status 127"
-            }
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(600))
-                starts[requestID]?.outcome = .failed(reason, detail: detail)
-            }
-        #endif
-    }
-
-    /// Forty folders on one computer that has Claude Code and no Codex: the
-    /// long paths, long branch names and the folder that is not a repository
-    /// are the shapes a real history holds.
+    /// Forty folders on one Mac: the long paths, long branch names and the
+    /// folder that is not a repository are the shapes a real history holds.
     static func fixtureProjects(now: Date) -> [StartProject] {
         let home = "/Users/jordan"
         let named: [(String, String?, TimeInterval, StartAgent?)] = [
@@ -178,6 +164,24 @@ final class SessionStarter {
                 path: path, name: String(relative.split(separator: "/").last ?? ""),
                 lastUsed: now.addingTimeInterval(-age), lastAgent: agent, gitBranch: branch,
                 exists: true)
+        }
+    }
+}
+
+extension SessionStarter {
+    /// A Linux build server's few projects, in the home folder.
+    static func fixtureLinuxProjects(now: Date) -> [StartProject] {
+        let rows: [(String, String?, TimeInterval, StartAgent?)] = [
+            ("data-pipeline", "main", 20 * 60, .codex),
+            ("ml-eval", "eval/q4-regression-suite", 2 * 3600, .claude),
+            ("gpu-benchmarks", "main", 26 * 3600, .claude),
+            ("log-shipper", "main", 4 * 86400, .codex),
+            ("nightly-builds", nil, 9 * 86400, .claude),
+        ]
+        return rows.map { name, branch, age, agent in
+            StartProject(
+                path: "/home/jordan/\(name)", name: name, lastUsed: now.addingTimeInterval(-age),
+                lastAgent: agent, gitBranch: branch, exists: true)
         }
     }
 }

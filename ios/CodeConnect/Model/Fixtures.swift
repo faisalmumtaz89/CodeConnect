@@ -486,6 +486,94 @@ enum Fixtures {
         }
     }
 
+    /// The second computer's own stream: a Linux build server with one run
+    /// mid-command and one finished.
+    static func secondMachineFrames(now: Date = Date()) -> [ServerMessage] {
+        let stamp = rfc3339(now)
+        let ack = helloAckJSON.replacingOccurrences(
+            of: "\"machine_name\":\"Jordan’s Mac Studio\",\"machine_os\":\"macos\"",
+            with: "\"machine_name\":\"build-server-eu-west-1\",\"machine_os\":\"linux\"")
+        let session = { (id: String, name: String, seq: Int) in
+            """
+            {"session_id":"\(id)","tmux_session":"\(id)","cwd":"/home/jordan/\(name)",\
+            "project_label":"\(name)","lifecycle":"live","link":"attached",\
+            "last_seq":\(seq),"created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[]}
+            """
+        }
+        let frames = [
+            ack,
+            "{\"type\":\"sessions\",\"sessions\":["
+                + session("fx-6", "data-pipeline", 2) + "," + session("fx-7", "ml-eval", 3) + "]}",
+            """
+            {"type":"event","event":{"seq":2,"session_id":"fx-6","ts":"\(stamp)",\
+            "kind":"tool_call","source":"hook",\
+            "payload":{"tool_use_id":"toolu_fixture_cargo","tool_name":"Bash",\
+            "tool_input":{"command":"cargo test --workspace --release"}}}}
+            """,
+            """
+            {"type":"event","event":{"seq":3,"session_id":"fx-7","ts":"\(stamp)",\
+            "kind":"turn_complete","source":"hook",\
+            "payload":{"hook_event_name":"Stop",\
+            "last_assistant_message":"Finished the evaluation run: 3 of 412 cases regressed."}}}
+            """,
+        ]
+        return frames.compactMap(decode)
+    }
+
+    /// A started session as the computer reports it: listed beside the ones
+    /// already there, then its start and, when one was given, its first message.
+    static func startedSessionFrames(_ start: SessionStart, uid: String, listed: [SessionSummary])
+        -> [ServerMessage]
+    {
+        let stamp = rfc3339(Date())
+        let id = "cc-\(listed.count + 1)"
+        let agent = start.agent == .codex ? "\"agent\":\"codex\"," : ""
+        let summary = """
+            {"session_uid":"\(uid)","session_id":"\(id)","tmux_session":"\(id)",\(agent)\
+            "cwd":\(quoted(start.project.path)),"project_label":\(quoted(start.project.name)),\
+            "lifecycle":"live","link":"attached","last_seq":\(start.prompt == nil ? 1 : 2),\
+            "created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[]}
+            """
+        guard let new = try? JSONDecoder().decode(SessionSummary.self, from: Data(summary.utf8))
+        else { return [] }
+        var frames: [ServerMessage] = [.sessions(listed + [new])]
+        let events = [
+            """
+            {"type":"event","event":{"seq":1,"session_id":"\(id)","session_uid":"\(uid)",\
+            "ts":"\(stamp)","kind":"session_start","source":"hook",\
+            "payload":{"hook_event_name":"SessionStart","model":"claude-opus-5[1m]"}}}
+            """
+        ] + (start.prompt.map { prompt in
+            [
+                """
+                {"type":"event","event":{"seq":2,"session_id":"\(id)","session_uid":"\(uid)",\
+                "ts":"\(stamp)","kind":"user_message","source":"transcript",\
+                "payload":{"type":"user","message":{"role":"user","content":\(quoted(prompt))}}}}
+                """
+            ]
+        } ?? [])
+        frames += events.compactMap(decode)
+        return frames
+    }
+
+    /// The detail a failed start carries, in the words the computer uses.
+    static func startFailureDetail(_ reason: StartFailure, _ start: SessionStart) -> String {
+        switch reason {
+        case .agentMissing:
+            return start.agent == .claude
+                ? "could not find the claude binary: install Claude Code "
+                    + "(https://code.claude.com/docs/en/setup), or set claude_bin in "
+                    + "~/.codeconnect/config.json"
+                : "could not find the codex binary: install Codex "
+                    + "(https://github.com/openai/codex), or set codex_bin in ~/.codeconnect/config.json"
+        case .folderMissing:
+            return "\(start.project.path) no longer exists"
+        case .launchFailed:
+            return "`/opt/homebrew/bin/codex --version` exited with exit status: 127: "
+                + "env: node: No such file or directory"
+        }
+    }
+
     /// `app-N` in `/Users/dev`, or, with `-CC_FIXTURE_REAL_NAMES`, the folders
     /// the start-a-session list holds, so a card and its project are one folder.
     private static let realNames = ["storefront-api", "ios-app", "docs-site", "query-parser", "web-dashboard"]

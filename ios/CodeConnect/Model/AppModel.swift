@@ -856,6 +856,41 @@ final class AppModel {
             keepFixtureLinkFresh()
         }
 
+        /// Test seam: the second fixture machine online, with its own
+        /// sessions and projects, so a start can choose between two computers.
+        func applySecondMachineFixtures() {
+            fixturesActive = true
+            connection.fixtureAnswers = true
+            connection.simulateConnectedForTesting()
+            for message in Fixtures.secondMachineFrames() { connection.injectForTesting(message) }
+            keepFixtureLinkFresh()
+        }
+
+        /// The fixture answer to `start_session`. `-CC_START_OUTCOME` names a
+        /// failure to end in, or `pending` to stay starting; otherwise the start
+        /// succeeds and the new session arrives as a real one does: listed,
+        /// then its first events.
+        func answerFixtureStart(_ requestID: String) {
+            guard let start = starter.starts[requestID] else { return }
+            let wanted = UserDefaults.standard.string(forKey: "CC_START_OUTCOME")
+            if wanted == "pending" { return }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(wanted == nil ? 1500 : 600))
+                guard let self else { return }
+                if let wanted, let reason = StartFailure(rawValue: wanted) {
+                    self.starter.resolve(
+                        requestID, .failed(reason, detail: Fixtures.startFailureDetail(reason, start)))
+                    return
+                }
+                let uid = "01K1START" + String(requestID.prefix(8)).uppercased()
+                self.starter.resolve(requestID, .started(sessionUID: uid))
+                try? await Task.sleep(for: .milliseconds(400))
+                for message in Fixtures.startedSessionFrames(start, uid: uid, listed: self.summaries) {
+                    self.connection.injectForTesting(message)
+                }
+            }
+        }
+
         /// Link health is measured from when a frame last *arrived*, so a
         /// fixture run needs frames to keep arriving or the link correctly goes
         /// stale mid-render and disables every action.
