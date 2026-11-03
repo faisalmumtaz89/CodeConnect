@@ -32171,6 +32171,26 @@ mod tests {
         daemon.handle_hook(post(uid, ran, false)).await;
     }
 
+    /// The question ran with the phone's answer, the answer's resolution filed
+    /// before the tool result. The `PostToolUse` hook tells the waiting answer
+    /// which answer ran before it files the result, so in one hook call the two
+    /// race for the session's next seq; a fixture of either takes this order.
+    async fn question_ran_after_answer(
+        daemon: &Arc<Daemon>,
+        uid: &str,
+        sent: serde_json::Value,
+        answering: tokio::task::JoinHandle<AnswerResult>,
+    ) -> AnswerResult {
+        let mut ran = question_hook("PostToolUse");
+        ran["tool_input"] = sent.clone();
+        daemon
+            .note_question_ran(uid, &serde_json::from_value(ran).unwrap())
+            .await;
+        let answered = answering.await.unwrap();
+        question_ran(daemon, uid, sent).await;
+        answered
+    }
+
     fn card_hold(daemon: &Daemon, uid: &str) -> Option<QuestionHold> {
         daemon
             .inner
@@ -34217,9 +34237,8 @@ mod tests {
             })
         };
         let sent = returned(raised.hook).await.updated_input.unwrap();
-        question_ran(&answered, uid, sent).await;
         assert!(matches!(
-            answering.await.unwrap(),
+            question_ran_after_answer(&answered, uid, sent, answering).await,
             AnswerResult::Applied { .. }
         ));
 
@@ -34375,9 +34394,8 @@ mod tests {
             })
         };
         let sent = returned(hook).await.updated_input.unwrap();
-        question_ran(&unchecked, uid, sent).await;
         assert!(matches!(
-            answering.await.unwrap(),
+            question_ran_after_answer(&unchecked, uid, sent, answering).await,
             AnswerResult::Applied { .. }
         ));
 
