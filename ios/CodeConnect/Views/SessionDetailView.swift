@@ -1224,12 +1224,13 @@ struct SessionDetailView: View {
             .foregroundStyle(CC.text.tertiary)
             .lineLimit(1)
             .truncationMode(.head)
-        return HStack(spacing: CC.space.xs) {
+        return HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
             CCStatusDot(
                 color: dotColour,
                 size: CCStatusDot.Size.row.rawValue,
                 isHollow: shown?.loadedFromCacheAt != nil && shown?.hasLiveData != true,
                 pulses: (shown?.pendingApprovals.isEmpty == false))
+            .ccMark(beside: CC.type.headline)
             if verticalSizeClass == .compact {
                 HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) { name; path }
             } else {
