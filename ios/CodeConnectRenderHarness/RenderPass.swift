@@ -54,12 +54,20 @@ final class RenderPass: XCTestCase {
         try render(at: .ax5)
     }
 
+    func testRendersStartOptionsAtLarge() throws {
+        try render(at: .large, RenderCatalog.startOptions)
+    }
+
+    func testRendersStartOptionsAtAX5() throws {
+        try render(at: .ax5, RenderCatalog.startOptionsAX5)
+    }
+
     // MARK: - The pass
 
-    private func render(at size: Size) throws {
+    private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {
         var failures: [String] = []
 
-        for scenario in RenderCatalog.all {
+        for scenario in scenarios {
             let app = XCUIApplication()
             app.launchArguments =
                 scenario.arguments + [
@@ -98,7 +106,7 @@ final class RenderPass: XCTestCase {
         // scattered through forty scenarios is a log nobody reads to the bottom.
         if !failures.isEmpty {
             XCTFail(
-                "\(failures.count) of \(RenderCatalog.all.count) scenarios could not be "
+                "\(failures.count) of \(scenarios.count) scenarios could not be "
                     + "rendered at \(size.suffix):\n  " + failures.joined(separator: "\n  "))
         }
     }
