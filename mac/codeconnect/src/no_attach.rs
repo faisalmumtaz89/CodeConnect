@@ -45,6 +45,7 @@ pub fn run(agent: AgentKind, args: &[String]) -> Result<()> {
     }
     let started = agent_args(&args[1..]).and_then(|passthrough| match &agent {
         AgentKind::Claude => crate::start_detached(&passthrough),
+        AgentKind::Codex => crate::codex::start(&passthrough, true),
         other => bail!("{} sessions cannot be started this way", other.as_str()),
     });
     let outcome = match &started {

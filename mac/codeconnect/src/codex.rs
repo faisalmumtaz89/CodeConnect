@@ -178,7 +178,11 @@ pub struct ResolvedCodex {
 ///     install out its own way and computes what the binary is started with, so
 ///     running the launcher is the only way Codex behaves as it does when the user
 ///     types `codex`; pinning past it would mean re-implementing every one of them.
-pub fn start(passthrough: &[String]) -> Result<()> {
+///
+/// `detached` (`codeconnect codex --no-attach`) launches the same session without
+/// showing it: at [`crate::no_attach::SIZE`], with the host starting the TUI
+/// without waiting for a terminal, and returning once the launch is ready.
+pub fn start(passthrough: &[String], detached: bool) -> Result<crate::no_attach::Started> {
     let config = Config::load();
 
     // `--help` and `--version` are codex's own answers, printed in this terminal as
@@ -194,7 +198,10 @@ pub fn start(passthrough: &[String]) -> Result<()> {
     // Binary first, exactly as the Claude path resolves its binary first: a
     // missing or unusable executable must surface before anything else. The
     // resolved path is what we check and exec.
-    let resolved = resolve_codex_bin(&config)?;
+    let resolved = match resolve_codex_bin(&config) {
+        Err(err) if detached => return Err(crate::no_attach::agent_missing(err)),
+        resolved => resolved?,
+    };
     // Reserved grammar. A refused flag or subcommand surfaces here, naming what
     // was refused and why, before anything is created.
     let argv = scan_codex_argv(passthrough).map_err(|refusal| anyhow!("{refusal}"))?;
@@ -213,7 +220,7 @@ pub fn start(passthrough: &[String]) -> Result<()> {
         &protocol::agent::AgentKind::Codex,
     ))?;
 
-    launch(&resolved, &folder, &argv.normalized, &config)
+    launch(&resolved, &folder, &argv.normalized, &config, detached)
 }
 
 /// Refuse the launch when the daemon that is running cannot host Codex.
@@ -279,7 +286,8 @@ fn launch(
     folder: &Path,
     passthrough: &[String],
     config: &Config,
-) -> Result<()> {
+    detached: bool,
+) -> Result<crate::no_attach::Started> {
     // The folder is passed RAW, and that is not an oversight. The chain has exactly
     // one canonicalization, in the coordinator
     // (`codex_coordinator::canonical_launch_cwd`), and every later hop carries its
@@ -292,15 +300,20 @@ fn launch(
     // The session is shown by attaching this terminal to it, which needs a
     // terminal to read keys from and draw on. Native codex refuses a keyboard or a
     // screen that is not one, in that order and in these words; so does this,
-    // before a name, a uid or a coordinator exists to be left behind.
-    use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() {
-        bail!("stdin is not a terminal");
-    }
-    if !std::io::stdout().is_terminal() {
-        bail!("stdout is not a terminal");
-    }
-    let terminal_size = crate::tmux::terminal_size().context("reading the terminal size")?;
+    // before a name, a uid or a coordinator exists to be left behind. A detached
+    // launch shows nothing, so it has no terminal to need.
+    let terminal_size = if detached {
+        crate::no_attach::SIZE
+    } else {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            bail!("stdin is not a terminal");
+        }
+        if !std::io::stdout().is_terminal() {
+            bail!("stdout is not a terminal");
+        }
+        crate::tmux::terminal_size().context("reading the terminal size")?
+    };
 
     // The same namespace `codeconnect claude` draws from, on the same tmux server:
     // one `cc-N` sequence across both agents, so `ls` and `attach` see one fleet. (The
@@ -312,7 +325,9 @@ fn launch(
     // anything of the session exists: codex starts once this terminal attaches, or
     // after the host's 5 s wait for it (`codex_host::wait_for_terminal`) without this
     // terminal's colors, so a hold after the spawn would change the session.
-    crate::advise_before_attach(config);
+    if !detached {
+        crate::advise_before_attach(config);
+    }
     let session_name = crate::tmux::next_session_name()?;
     // Minted here, once, before anything else knows the session exists — the same
     // rule and the same minter as the Claude path. The tmux name is reused as soon
@@ -330,11 +345,35 @@ fn launch(
         codex_home: &codex_home(),
         tui_args: passthrough,
         terminal_size: Some(terminal_size),
+        wait_for_terminal: !detached,
     });
     let _held = crate::attach::hold_signal_keys();
     spawn_coordinator(&session_name, &session_uid, &charter)?;
 
-    wait_with_terminal(&session_uid, LAUNCH_PATIENCE, RECORD_POLL)
+    if detached {
+        wait_until_ready(&session_uid, LAUNCH_PATIENCE, RECORD_POLL)?;
+    } else {
+        wait_with_terminal(&session_uid, LAUNCH_PATIENCE, RECORD_POLL)?;
+    }
+    Ok(crate::no_attach::Started {
+        uid: session_uid,
+        session_name,
+    })
+}
+
+/// Wait for the coordinator to record the launch ready, or its reason not to be.
+fn wait_until_ready(uid: &str, patience: Duration, poll: Duration) -> Result<()> {
+    use crate::codex_coordinator::LaunchWait;
+    match crate::codex_coordinator::wait_on_record(uid, patience, poll) {
+        LaunchWait::Ready => Ok(()),
+        LaunchWait::Failed(reason) => bail!("{reason}"),
+        LaunchWait::TimedOut => bail!(
+            "the codex launch did not reach a terminal state within {}s; the coordinator \
+             and its custodian still own it, and its outcome is recorded at {}",
+            patience.as_secs(),
+            crate::codex_launch::session_dir(uid).display()
+        ),
+    }
 }
 
 /// Whether this launch ended because it was quit while it was starting — Ctrl+C in
@@ -481,6 +520,8 @@ struct CharterInputs<'a> {
     codex_home: &'a Path,
     tui_args: &'a [String],
     terminal_size: Option<(u16, u16)>,
+    /// The host starts the TUI only once this launch's terminal attaches.
+    wait_for_terminal: bool,
 }
 
 /// Build the `internal-codex-coordinator` charter argv.
@@ -531,6 +572,8 @@ fn coordinator_charter(inputs: &CharterInputs<'_>) -> Vec<String> {
     // with nothing keeping the two equal.
     if let Some((cols, rows)) = inputs.terminal_size {
         argv.extend(["--terminal-size".into(), format!("{cols}x{rows}")]);
+    }
+    if inputs.wait_for_terminal {
         argv.push("--wait-for-terminal".into());
     }
     if !inputs.tui_args.is_empty() {
@@ -1858,6 +1901,7 @@ mod tests {
             codex_home: Path::new("/home/u/.codex"),
             tui_args,
             terminal_size,
+            wait_for_terminal: terminal_size.is_some(),
         });
         (argv, real)
     }
@@ -1881,6 +1925,7 @@ mod tests {
             codex_home: Path::new("/home/u/.codex"),
             tui_args,
             terminal_size: None,
+            wait_for_terminal: false,
         });
         (argv, real)
     }
@@ -1908,6 +1953,30 @@ mod tests {
         assert_eq!(&argv[boundary + 1..], &prompt);
         let (argv, _) = charter_over_a_real_file_with(&"b".repeat(CODEX_SHA256_HEX_LEN), &[], None);
         assert!(!argv.iter().any(|arg| arg == "--terminal-size"));
+        assert!(!argv.iter().any(|arg| arg == "--wait-for-terminal"));
+    }
+
+    /// A detached launch has a size for the session and no terminal for the host
+    /// to wait for.
+    #[test]
+    fn a_detached_launch_carries_its_size_and_does_not_wait_for_a_terminal() {
+        let resolved = ResolvedCodex {
+            path: std::env::current_exe().expect("this test binary is a real file"),
+            sha256: "b".repeat(CODEX_SHA256_HEX_LEN),
+        };
+        let argv = coordinator_charter(&CharterInputs {
+            uid: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            launch_nonce: "nonce-a",
+            custodian_nonce: "nonce-b",
+            session_name: "cc-7",
+            cwd: "/some/where",
+            codex: &resolved,
+            codex_home: Path::new("/home/u/.codex"),
+            tui_args: &["--".to_string(), "-p fix it;".to_string()],
+            terminal_size: Some(crate::no_attach::SIZE),
+            wait_for_terminal: false,
+        });
+        assert_eq!(flag(&argv, "--terminal-size"), Some("120x40"));
         assert!(!argv.iter().any(|arg| arg == "--wait-for-terminal"));
     }
 
@@ -2056,7 +2125,7 @@ mod tests {
     fn the_preflight_refuses_before_a_uid_or_a_tmux_name_is_taken() {
         let body = production_fn;
 
-        let start = body("pub fn start(passthrough: &[String]) -> Result<()> {");
+        let start = body("pub fn start(passthrough: &[String], detached: bool) -> Result<crate::no_attach::Started> {");
         let preflight = start
             .find("refuse_unless_hostable(")
             .expect("start must run the preflight");
@@ -2670,7 +2739,7 @@ mod tests {
     /// calling it.
     #[test]
     fn the_version_is_read_and_its_value_decides_nothing() {
-        let start = production_fn("pub fn start(passthrough: &[String]) -> Result<()> {");
+        let start = production_fn("pub fn start(passthrough: &[String], detached: bool) -> Result<crate::no_attach::Started> {");
 
         assert!(
             start.contains("probe_codex("),
@@ -3334,7 +3403,7 @@ mod tests {
     /// native binary.
     #[test]
     fn help_and_version_run_before_any_refusal_or_launch_check() {
-        let start = production_fn("pub fn start(passthrough: &[String]) -> Result<()> {");
+        let start = production_fn("pub fn start(passthrough: &[String], detached: bool) -> Result<crate::no_attach::Started> {");
         let native = start
             .find("codex_itself(")
             .expect("start runs codex itself");

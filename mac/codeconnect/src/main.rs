@@ -120,9 +120,12 @@ fn main() -> Result<()> {
             ask_about_mail(!claude_asks_help_or_version(rest));
             start_claude(rest)
         }
+        "codex" if no_attach::requested(rest) => {
+            no_attach::run(protocol::agent::AgentKind::Codex, rest)
+        }
         "codex" => {
             ask_about_mail(!codex::asks_help_or_version(rest));
-            codex::start(rest)
+            codex::start(rest, false).map(|_| ())
         }
         "mail-trust" => mail_trust::command(rest),
         "attach" => attach(rest),
