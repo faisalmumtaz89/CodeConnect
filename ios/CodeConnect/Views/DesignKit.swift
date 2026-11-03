@@ -168,7 +168,8 @@ extension CC {
         // control. Every CC control is identified by its label (≥ 4.5:1) and,
         // when focused, by a `borderFocus` ring at 17.94:1 (WCAG 1.4.11 and
         // 2.4.11 are met through the label and the focus ring, not the resting
-        // hairline). See README "Contrast verification".
+        // hairline; the session composer is the one exception). See README
+        // "Contrast verification".
         static let border = Color(cc: Hex.border)
         static let borderStrong = Color(cc: Hex.borderStrong)
         static let borderFocus = Color(cc: Hex.borderFocus)
