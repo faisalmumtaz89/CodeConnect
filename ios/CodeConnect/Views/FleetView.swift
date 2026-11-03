@@ -9,6 +9,24 @@ struct SessionRoute: Hashable {
     let key: String
     /// Set when arriving from the Deck, so the card opens without a second tap.
     var openRequestID: String?
+    /// Set for a session this phone just asked a computer to start: the
+    /// route shows it starting until it is in the fleet.
+    var startRequestID: String?
+}
+
+/// What a start flow on the fleet is showing.
+private enum StartFlow: Identifiable {
+    case new
+    case project(StartProject)
+    case all
+
+    var id: String {
+        switch self {
+        case .new: return "new"
+        case .project(let project): return "project:\(project.path)"
+        case .all: return "all"
+        }
+    }
 }
 
 /// What the removal question says, and what confirming it does.
@@ -114,6 +132,15 @@ struct FleetView: View {
     /// AX5, which is a third vertical edge — the screen gets exactly two —
     /// arriving by accident at exactly the size they are hardest to hold.
     @ScaledMetric(relativeTo: .footnote) private var gutterDot: CGFloat = CC.size.dot
+    /// The start flow on screen, the start it sent (opened once the flow has
+    /// gone), the full-screen search, and the composer's project.
+    @State private var startFlow: StartFlow?
+    @State private var startedRequest: String?
+    @State private var showStartSearch = false
+    @State private var composerProject: StartProject?
+    private let startOption = StartOption.current
+    private var startContext: StartContext { StartContext(model: model) }
+    private var canStart: Bool { model.connection.capabilities?.startsSessions == true }
 
     /// Where every line of text on this screen starts: 52 at reading sizes.
     private var textColumn: CGFloat { ContentColumn.text(dot: gutterDot) }
@@ -222,11 +249,47 @@ struct FleetView: View {
                 // SwiftUI would otherwise keep the old chat's view — its draft,
                 // its open sheets, its timeline wiring — under the new key, and
                 // never show it appearing, so the link it came by stays unread.
-                SessionDetailView(route: route)
-                    .environment(owner(route.key))
-                    .id(route.key)
+                if let requestID = route.startRequestID {
+                    StartingSessionView(
+                        requestID: requestID,
+                        onLive: { path = [SessionRoute(key: $0)] },
+                        onChooseAgain: {
+                            path = []
+                            Task {
+                                try? await Task.sleep(for: .milliseconds(450))
+                                openStart()
+                            }
+                        }
+                    )
+                    .environment(model)
+                } else {
+                    SessionDetailView(route: route)
+                        .environment(owner(route.key))
+                        .id(route.key)
+                }
             }
             .toolbar {
+                if canStart, startOption == .recentsSheet {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            CCHaptic.light.fire()
+                            openStart()
+                        } label: {
+                            HStack(spacing: CC.space.xxs) {
+                                CCIcon("plus", size: 16)
+                                Text("New")
+                                    .ccType(CC.type.body)
+                            }
+                            .foregroundStyle(CC.text.primary)
+                            .fixedSize()
+                            .ccHitTarget()
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("New session")
+                        .accessibilityIdentifier("start-entry")
+                    }
+                    .ccPlainToolbarItem()
+                }
                 ToolbarItem(placement: .principal) {
                     // The same word the scroll header carries, arriving only as
                     // that header leaves. Two titles at once is the bug this
@@ -253,14 +316,53 @@ struct FleetView: View {
                 }
                 .ccPlainToolbarItem()
             }
+            .overlay(alignment: .bottomTrailing) {
+                if canStart, startOption == .steps, !selecting {
+                    Button {
+                        CCHaptic.light.fire()
+                        openStart()
+                    } label: {
+                        CCIcon("plus", size: 24, weight: .semibold)
+                            .foregroundStyle(CC.text.onAccent)
+                            .frame(width: 56, height: 56)
+                            .background(CC.color.accent, in: Circle())
+                            .shadow(color: .black.opacity(0.5), radius: 12, y: 4)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("New session")
+                    .accessibilityIdentifier("start-entry")
+                    .padding(.trailing, CC.space.md)
+                    .padding(.bottom, CC.space.md)
+                }
+            }
             // The bar prints the header's own number, not its own count of the
             // cards it happens to hold — see `FleetCount`.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if selecting {
                     selectionBar(screen.selectable)
                 } else {
-                    deckBar(screen)
+                    VStack(spacing: 0) {
+                        deckBar(screen)
+                        if canStart, startOption == .messageFirst {
+                            StartComposerBar(
+                                context: startContext, project: $composerProject,
+                                onPickProject: { startFlow = .all },
+                                onStarted: { id in
+                                    path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
+                                })
+                        }
+                    }
                 }
+            }
+            .sheet(item: $startFlow, onDismiss: openStarted) { flow in startSheet(flow) }
+            .fullScreenCover(isPresented: $showStartSearch, onDismiss: openStarted) {
+                StartSearchScreen(
+                    context: startContext, onStarted: started, onClose: { showStartSearch = false })
+            }
+            .onChange(of: canStart, initial: true) { _, can in
+                guard can else { return }
+                startContext.load()
+                if composerProject == nil { composerProject = startContext.projects.first }
             }
             // A row that leaves the fleet, or stops being removable, leaves the
             // selection with it; with nothing left to choose, choosing ends. The
@@ -445,6 +547,10 @@ struct FleetView: View {
                 .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if canStart, startOption == .searchFirst {
+                StartSearchDoor { showStartSearch = true }
+                    .padding(.top, CC.space.sm)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, CC.space.md)
@@ -510,6 +616,16 @@ struct FleetView: View {
                 }
             }
             ForEach(others, id: \.id) { projectCard($0) }
+            if canStart, startOption == .cardAction {
+                let live = Set(screen.projects.map(\.id.folder))
+                StartRecentSection(
+                    projects: Array(startContext.projects.filter { !live.contains($0.path) }.prefix(5)),
+                    total: startContext.projects.count,
+                    onPick: { startFlow = .project($0) },
+                    onAll: { startFlow = .all }
+                )
+                .padding(.top, CC.space.md)
+            }
             if let ended = screen.ended {
                 if showEnded {
                     bandView(ended).padding(.top, CC.space.lg)
@@ -620,10 +736,86 @@ struct FleetView: View {
                 .accessibilityAddTraits(.isHeader)
                 CCHairline()
                 ForEach(project.cells, id: \.row.id) { rowCell($0) }
+                if canStart, startOption == .cardAction {
+                    CCHairline()
+                    Button {
+                        CCHaptic.light.fire()
+                        startFlow = .project(startProject(for: project))
+                    } label: {
+                        HStack(spacing: CC.space.xs) {
+                            CCIcon("plus", size: 16)
+                            Text("New session")
+                                .ccType(CC.type.body)
+                        }
+                        .foregroundStyle(CC.text.primary)
+                        .frame(maxWidth: .infinity, minHeight: CC.size.controlLg)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(StartRowStyle())
+                    .accessibilityIdentifier("start-card-\(project.name)")
+                }
             }
         }
         .padding(.horizontal, CC.space.md)
         .padding(.bottom, CC.space.sm)
+    }
+
+    // MARK: Start
+
+    private func openStart() {
+        switch startOption {
+        case .recentsSheet, .steps: startFlow = .new
+        case .cardAction, .messageFirst: startFlow = .all
+        case .searchFirst: showStartSearch = true
+        }
+    }
+
+    /// A flow sent a start: close it, and open the new session as it goes.
+    private func started(_ requestID: String) {
+        startedRequest = requestID
+        startFlow = nil
+        showStartSearch = false
+    }
+
+    private func openStarted() {
+        guard let id = startedRequest else { return }
+        startedRequest = nil
+        path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
+    }
+
+    @ViewBuilder
+    private func startSheet(_ flow: StartFlow) -> some View {
+        let close = { startFlow = nil }
+        switch (flow, startOption) {
+        case (.new, .steps):
+            StartStepsSheet(context: startContext, onStarted: started, onClose: close)
+                .ccTallSheet()
+        case (.new, _):
+            StartRecentsSheet(context: startContext, onStarted: started, onClose: close)
+                .ccTallSheet()
+        case (.project(let project), _):
+            StartProjectSheet(context: startContext, project: project, onStarted: started, onClose: close)
+                .presentationDetents([.medium])
+        case (.all, .messageFirst):
+            StartAllProjectsSheet(
+                context: startContext,
+                onPick: { composerProject = $0; startFlow = nil }, onClose: close
+            )
+            .ccTallSheet()
+        case (.all, _):
+            StartAllProjectsSheet(
+                context: startContext, onPick: { startFlow = .project($0) }, onClose: close
+            )
+            .ccTallSheet()
+        }
+    }
+
+    /// The card's project as the computer lists it, or as the card knows it.
+    private func startProject(for project: Project) -> StartProject {
+        startContext.projects.first { $0.path == project.id.folder }
+            ?? StartProject(
+                path: project.id.folder, name: project.name, lastUsed: Date(), lastAgent: nil,
+                gitBranch: nil, exists: true)
     }
 
     // MARK: Bands
