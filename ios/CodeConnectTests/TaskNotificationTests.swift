@@ -77,7 +77,7 @@ final class TaskNotificationTests: XCTestCase {
             notices(items),
             [
                 NoticeItem(
-                    kind: .taskReport, symbol: "circle.fill",
+                    kind: .taskReport, symbol: "circle-fill",
                     title: "Agent \"Background helper\" finished · 4s", detail: nil,
                     severity: .success)
             ])

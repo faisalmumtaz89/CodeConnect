@@ -2,11 +2,10 @@ import XCTest
 
 /// The keyboard's claim on the session screen, proven on the running app.
 ///
-/// The rule: while the composer is focused, the chrome that is not part of
-/// typing — the full identity block, the Timeline/Terminal picker — stands
-/// aside so the conversation keeps the screen; drag or a background tap gives
-/// the keyboard back. None of that is provable from source: focus, keyboard
-/// animation and gesture arbitration are runtime facts.
+/// The rule: the session's header is its bar, so focusing the composer moves
+/// nothing above the conversation, and the terminal stays one tap away; drag or
+/// a background tap gives the keyboard back. None of that is provable from
+/// source: focus, keyboard animation and gesture arbitration are runtime facts.
 final class SessionKeyboardUITests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -24,20 +23,20 @@ final class SessionKeyboardUITests: XCTestCase {
         return app
     }
 
-    func testFocusCollapsesChromeAndBackgroundTapRestoresIt() {
+    func testTheBarStaysWhileTypingAndBackgroundTapGivesTheKeyboardBack() {
         let app = launchSession()
-        let terminalTab = app.buttons["Terminal"]
-        XCTAssertTrue(terminalTab.waitForExistence(timeout: 20), "picker visible before focus")
+        let more = app.buttons["session-more"]
+        XCTAssertTrue(more.waitForExistence(timeout: 20), "the bar's menu")
+        let before = more.frame
 
         let field = app.textFields.firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 10))
         field.tap()
 
-        // Focused: the picker steps aside and the keyboard is up.
-        XCTAssertTrue(
-            waitUntil(timeout: 5) { !terminalTab.exists },
-            "the surface picker must stand aside while typing")
+        // Focused: the keyboard is up and the bar has not moved.
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(more.isHittable, "the menu, and the terminal in it, stay in reach while typing")
+        XCTAssertEqual(more.frame, before, "the bar does not move for the keyboard")
 
         // A tap on the timeline's background resigns focus. Coordinates, not
         // an element — the point is that nothing interactive is there — and
@@ -50,9 +49,6 @@ final class SessionKeyboardUITests: XCTestCase {
         XCTAssertTrue(scroll.waitForExistence(timeout: 5))
         scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).tap()
 
-        XCTAssertTrue(
-            waitUntil(timeout: 5) { terminalTab.exists },
-            "dismissing the keyboard must bring the chrome back")
         XCTAssertTrue(
             waitUntil(timeout: 5) { !app.keyboards.firstMatch.exists },
             "the background tap must dismiss the keyboard")

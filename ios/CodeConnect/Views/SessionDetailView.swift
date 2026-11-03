@@ -100,13 +100,13 @@ final class TailWatch {
     /// `leave()`, so no event in the debounce window can scroll a reader out
     /// of any of them.
     ///
-    /// `repin` is for a reader who was following when the tail slid away:
-    /// the last row grew, the keyboard came up, the viewport changed shape.
-    /// Such a reader never left, so when the debounce runs out with the tail
-    /// still off screen the verdict puts it back rather than declaring them
-    /// away. The list does not keep its bottom through a change of size on its
-    /// own — measured: a failed command expanding at the tail left the view
-    /// 849pt short of it, and the keyboard covered the rows being replied to.
+    /// `repin` is for a reader who was following when the last row grew
+    /// with no row added. Such a reader never left, so when the debounce runs
+    /// out with the tail still off screen the verdict puts it back rather than
+    /// declaring them away. The list does not keep its bottom through a change
+    /// of size on its own — measured: a failed command expanding at the tail
+    /// left the view 849pt short of it. A change of the viewport's own size is
+    /// not waited out here: `PageAnchor.keepLatest` keeps the tail through it.
     func depart(repin: (@MainActor () -> Void)? = nil) {
         verdict?.cancel()
         verdict = Task {
@@ -155,9 +155,12 @@ extension EnvironmentValues {
 /// outright — frames identical 175 seconds apart. KVO on `contentOffset` is
 /// exact viewport truth, delivered outside SwiftUI's layout, and writes
 /// nothing SwiftUI lays out — the verdicts go through `TailWatch`'s deferred
-/// tasks and repaint one capsule. It moves the offset in two cases only. The
-/// re-pin to the tail is a UIKit scroll that runs after the debounce, never
-/// inside a layout pass. The give-back of the collection view's own move for
+/// tasks and repaint one capsule. It moves the offset in two cases only, and
+/// has it moved in a third. The re-pin to the tail after the last row grew is
+/// a UIKit scroll that runs after the debounce, never inside a layout pass. A
+/// viewport that changed size under a reader at the tail is handed to
+/// `PageAnchor.keepLatest`, which puts the tail back from its own view's
+/// layout. The give-back of the collection view's own move for
 /// a row the reader opened (see `TailWatch.open`) runs from the probe's own
 /// `layoutSubviews`, later in the same layout pass, never from inside the
 /// collection view's call: made from there, the move was re-applied at once —
@@ -187,6 +190,9 @@ private struct TailObserver: UIViewRepresentable {
         /// view's move can come before the growth (iOS 26) or after it
         /// (iOS 27), in the same pass.
         private var openingLanded = false
+        /// The next reading is the first since this probe joined the window:
+        /// its `.initial` reading compares against wherever the last one left.
+        private var attaching = false
 
         override func layoutSubviews() {
             super.layoutSubviews()
@@ -220,6 +226,7 @@ private struct TailObserver: UIViewRepresentable {
             while view != nil, !(view is UIScrollView) { view = view?.superview }
             guard let scrollView = view as? UIScrollView else { return }
             anchor.attach(scrollView)
+            attaching = true
             // A row opened while this probe was out of the window grew where
             // it could not see, and the first reading below is `.initial`: its
             // move from zero must not be taken for the collection view's.
@@ -251,6 +258,8 @@ private struct TailObserver: UIViewRepresentable {
             lastContentSize = scrollView.contentSize
             lastBoundsSize = scrollView.bounds.size
             lastInsets = scrollView.adjustedContentInset
+            let attached = !attaching
+            attaching = false
             // KVO fires on every set, changed or not. A reading that saw
             // nothing move carries no news, and answering it with `arrive`
             // undid a `leave` made an instant earlier, before the expansion
@@ -291,14 +300,30 @@ private struct TailObserver: UIViewRepresentable {
             }
             let bottomEdge = scrollView.contentOffset.y + scrollView.bounds.height
                 - scrollView.adjustedContentInset.bottom
+            let hand = scrollView.isTracking || scrollView.isDecelerating
+            // **A reader at the tail stays there through a change of the
+            // viewport's size** — the keyboard coming or going, the strip under
+            // the bar appearing or going, the compose bar growing or
+            // shrinking. The list keeps its top through such a change, so on
+            // its own the newest rows slid under the bar (measured: 295pt as
+            // the keyboard rose, 100pt as the header came back) until a re-pin
+            // brought them back almost a second later. Exact, not within the
+            // slack below: a 24pt note covered the last line for as long as it
+            // stood.
+            if resized, attached, !hand, !watch.isAway,
+                abs(bottomEdge - scrollView.contentSize.height) > 0.5
+            {
+                anchor.keepLatest()
+                return
+            }
             // One row-spacing of slack absorbs sub-pixel rounding and
             // rubber-banding; without it the verdict flaps at rest.
             if bottomEdge >= scrollView.contentSize.height - 32 {
                 watch.arrive()
-            } else if scrollView.isTracking || scrollView.isDecelerating {
+            } else if hand {
                 // A hand, or its deceleration: up is a departure the reader
                 // chose. The offset alone cannot say this — a viewport that
-                // grows upward (the header folding away for the keyboard)
+                // grows upward (the strip under the bar going away)
                 // moves it up by the same amount with nobody touching it.
                 if dy < -0.5 { watch.leave() } else { watch.depart() }
             } else if dy < -0.5, !resized, abs(grown) < -dy - 0.5 {
@@ -310,7 +335,7 @@ private struct TailObserver: UIViewRepresentable {
                 watch.depart()
             } else {
                 // Nobody scrolled, and a reader who was following is off the
-                // tail: the content or the viewport changed size underneath.
+                // tail: the last row grew underneath.
                 watch.depart { [weak scrollView] in
                     guard let scrollView else { return }
                     let tail = scrollView.contentSize.height + scrollView.adjustedContentInset.bottom
@@ -415,6 +440,17 @@ final class PageAnchor {
                 self.restorer.setNeedsLayout()
             }
         }
+    }
+
+    /// The viewport changed size under a reader at the newest rows: they are
+    /// put back there from the restorer's layout, later in the pass that
+    /// resized the list, never from the reading that saw it. A row held for
+    /// a page or a reset keeps its place.
+    func keepLatest() {
+        guard hold == nil else { return }
+        holds += 1
+        hold = Hold(target: .latest, number: holds, isReset: false)
+        restorer.setNeedsLayout()
     }
 
     /// The chat became able to page with nothing on screen having moved. The
@@ -884,10 +920,8 @@ private struct HistoryHead: View {
 /// The semantic timeline for one session, plus the two things you can do to it:
 /// answer a card, or say something.
 ///
-/// The identity block replaces the ambiguity of a bare nav title. The nav bar is
-/// left with nothing but a back chevron on purpose: the pushed screen's own
-/// header carries the project, and a project name is longer than a title bar
-/// can render honestly.
+/// The bar is the header: its title is the project and the path, its one
+/// trailing item the "…" menu with the terminal, the changes and the link.
 /// Handed the model of the machine the session is on, so everything done here
 /// goes to that machine.
 struct SessionDetailView: View {
@@ -909,7 +943,22 @@ struct SessionDetailView: View {
     @Environment(\.dynamicTypeSize) private var screenTypeSize
     @State private var composeText = ""
     @State private var openApproval: ApprovalItem?
+    /// The note over the composer. **Never set inside `withAnimation`.** It
+    /// changes the compose bar's height, and the bar is the timeline's bottom
+    /// inset: changed inside an animation, the list animates its frame instead
+    /// and, when that ends, puts its inset back without its offset — measured,
+    /// a reader at the newest message thrown up by the whole inset (388pt over
+    /// the keyboard) and scrolled back by the re-pin. Set plainly, the bar and
+    /// the inset change together, in one step.
     @State private var composeResult: ComposeAttempt?
+    /// The composer's last send whose answer never came (`.indeterminate`), asked
+    /// once more when the link to the computer comes back: the same text under the
+    /// same identity, so the computer says it was already typed (and the box clears)
+    /// or types it the one time it never arrived. Only while the box holds exactly
+    /// that text, within a minute of the send, and never for an ask-again's own
+    /// answer. Editing, another send, or leaving the session drops it.
+    @State private var unansweredSend: UnansweredSend?
+    @State private var askingAgain = false
     @State private var showModelSheet = false
     @State private var modelSheetPrefill = ""
     @State private var showEffortSheet = false
@@ -935,7 +984,7 @@ struct SessionDetailView: View {
     /// tree while the timeline is the one on show.
     @State private var terminalHasBeenOpened = false
     #if DEBUG
-        /// Test seam: drive the picker from outside.
+        /// Test seam: switch between the timeline and the terminal from outside.
         ///
         /// The terminal's emulator has to survive a trip to the timeline and
         /// back, and that is a claim about one `UIView` instance rather than
@@ -944,7 +993,7 @@ struct SessionDetailView: View {
         var surfaceForTesting: Binding<Surface>?
     #endif
 
-    /// The picker's selection: this screen's own, or a test's.
+    /// The surface on show: this screen's own, or a test's.
     private var surfaceBinding: Binding<Surface> {
         #if DEBUG
             if let surfaceForTesting { return surfaceForTesting }
@@ -956,19 +1005,10 @@ struct SessionDetailView: View {
     @State private var showLinkDetail = false
     @State private var appearedAt = Date()
     /// The composer's focus, owned here rather than inside the bar: the
-    /// screen's chrome collapses around the keyboard, and only the screen can
-    /// do the collapsing.
+    /// timeline gives the keyboard back on a tap of its own.
     @FocusState private var composerFocused: Bool
-    /// The terminal pane holds the keyboard. Collapses the same chrome the
-    /// composer does: typing at the TTY needs the rows more than the header.
-    @State private var terminalTyping = false
-    private var typing: Bool { composerFocused || (terminalTyping && surface == .terminal) }
+    /// Landscape: the bar's title is one line, the path beside the project.
     @Environment(\.verticalSizeClass) private var verticalSizeClass
-    /// Landscape on the terminal: the screen is the terminal's. Turning back
-    /// to portrait is how the reader leaves, the way a video player works.
-    private var terminalFillsScreen: Bool {
-        verticalSizeClass == .compact && surface == .terminal
-    }
 
     /// The run this screen is about. Everything on it — the timeline, the
     /// compose bar, the diff, the terminal — is scoped to this one key, so a
@@ -983,46 +1023,15 @@ struct SessionDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // While the keyboard is up, the header earns its height or loses
-            // it: the identity collapses to one line and the surface picker —
-            // an intent nobody has mid-sentence — steps aside, so the freed
-            // ~150pt goes to the conversation being typed at.
-            if terminalFillsScreen {
-                EmptyView()
-            } else if typing {
-                compactIdentityLine
-            } else {
-                identityBlock
-            }
-            // The surface picker lives in the content, not the navigation bar.
-            // A segmented control in a `.principal` slot squeezes the trailing
-            // items into an overflow menu on a phone — the diff button
-            // disappeared behind a "…" — and it clips outright at large Dynamic
-            // Type sizes. Below the bar it has the whole width and grows.
-            // Absent in the sample fleet, like the header's link: the terminal is
-            // the same connection as everything else, and the sample has none.
-            // With the picker gone the timeline default is the only surface,
-            // so the tab that would answer in pairing vocabulary cannot be
-            // reached at all — offered nothing, not offered a dead end.
-            if !typing && !terminalFillsScreen && !model.sampleFleetActive {
-                CCSegmented(
-                    selection: surfaceBinding,
-                    options: Surface.allCases.map { CCSegmentedOption($0, title: $0.label) },
-                    accessibilityLabel: "Session surface")
-                .padding(.horizontal, CC.space.md)
-                .padding(.top, CC.space.lg)
-                // Nothing under the picker on the Terminal side: the liveness
-                // strip sits *directly beneath* it and carries no top padding
-                // of its own, so the 12 that used to sit here measured as a
-                // 12pt seam of `bg` between two elements that are meant to
-                // touch. The timeline keeps its 12 — a scroll view abutting a
-                // control is not the same relationship.
-                .padding(.bottom, surface == .terminal ? 0 : CC.space.sm)
-                .background(CC.color.bg)
-            }
+            // **The header is the bar.** The project and its path are the bar's
+            // title, and the terminal and the rest are one tap away at its end, so
+            // the conversation starts where the bar stops. What the header carried
+            // only sometimes — a Codex turn's Stop, the permission note, an ended
+            // run's resume command — still shows, under the bar, while it applies.
+            sessionNotices
 
             // **Two slots, not two branches.** A `switch` here puts the two
-            // surfaces in one structural position, so flipping the picker
+            // surfaces in one structural position, so switching between them
             // dismantles whichever was showing — and the terminal's emulator
             // is not a view that can be rebuilt from its inputs. It *is* the
             // scrollback: `cargo build` scrolls megabytes through it, the
@@ -1057,10 +1066,7 @@ struct SessionDetailView: View {
                         tmuxName: model.tmuxName(for: key),
                         unhosted: model.shownSummary(for: key)?.tmuxSession.isEmpty == true,
                         runLabel: label.spoken,
-                        onScreen: surface == .terminal,
-                        // Off the update pass: a pane whose session ends gives
-                        // the keyboard back from inside `updateUIView`.
-                        onKeyboard: { typing in DispatchQueue.main.async { terminalTyping = typing } }
+                        onScreen: surface == .terminal
                     )
                     .opacity(surface == .terminal ? 1 : 0)
                     // A hidden pane takes no taps and is not read out. The
@@ -1072,30 +1078,18 @@ struct SessionDetailView: View {
             }
         }
         .background(CC.color.bg)
-        // One coordinated animation for the chrome swap around the keyboard —
-        // the header and picker collapse and return as a unit. The focus
-        // change itself is never wrapped in `withAnimation`; the keyboard owns
-        // its own transition and fights any second one.
         .onChange(of: surface, initial: true) { _, new in
             if new == .terminal { terminalHasBeenOpened = true }
         }
-        .ccAnimation(CC.motion.small, value: typing)
         .ccNavigationChrome()
-        // Empty on purpose. The header below carries the project, at a width
-        // the bar could never give it.
+        // Empty: the title is the bar's principal item, the project over its
+        // path, which a title string cannot draw.
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(terminalFillsScreen ? .hidden : .automatic, for: .navigationBar)
-        .statusBarHidden(terminalFillsScreen)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { diffControl }
+            ToolbarItem(placement: .principal) { barTitle }
+            ToolbarItem(placement: .topBarTrailing) { moreMenu }
                 .ccPlainToolbarItem()
-            ToolbarItem(placement: .topBarTrailing) {
-                // Interactive everywhere. A control that looks tappable and is
-                // not is worse than no control.
-                SessionMachineLink { showLinkDetail = true }
-            }
-            .ccPlainToolbarItem()
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             // The compose bar types into Claude's prompt. In the terminal you
@@ -1117,18 +1111,20 @@ struct SessionDetailView: View {
                         focused: $composerFocused)
                 }
                 .onChange(of: composeText) { _, _ in
+                    unansweredSend = nil
                     // Editing is the user's next act; a standing failure
                     // note has been read. Success notes retire themselves.
-                    if case .refused = composeResult {
-                        withAnimation(CC.motion.micro) { composeResult = nil }
-                    } else if case .failed = composeResult {
-                        withAnimation(CC.motion.micro) { composeResult = nil }
-                    } else if case .indeterminate = composeResult {
-                        withAnimation(CC.motion.micro) { composeResult = nil }
+                    switch composeResult {
+                    case .refused, .failed, .indeterminate: composeResult = nil
+                    default: break
                     }
                 }
             }
         }
+        // A new handshake is the link back: the unanswered send is asked again. Here,
+        // not on the timeline's composer, so a handshake while the terminal is showing
+        // still counts.
+        .onChange(of: model.connection.generation) { _, _ in askUnansweredAgain() }
         .sheet(isPresented: $showModelSheet) {
             ModelSheet(sessionKey: key, prefill: modelSheetPrefill, onLanded: consumeDraft)
                 .environment(model)
@@ -1208,151 +1204,161 @@ struct SessionDetailView: View {
         }
     }
 
-    /// One line of who this is, for while the keyboard owns the screen: the
-    /// status dot and the identity, nothing else. Everything the full block
-    /// carries — folder, cwd, freshness, the permission note — is context a
-    /// reader mid-sentence has already absorbed, and it returns the moment
-    /// focus ends.
-    private var compactIdentityLine: some View {
-        HStack(spacing: CC.space.sm) {
+    // MARK: Bar
+
+    /// **Who this is, as the bar's title**: the status dot, the project, and the
+    /// path under it (beside it in landscape). It stops growing where iOS's own
+    /// bar titles do, since a bar has one height. A long press copies the whole
+    /// path, as it did on the header's path line.
+    private var barTitle: some View {
+        let name = Text(verbatim: label.project)
+            .ccType(CC.type.headline)
+            .foregroundStyle(CC.text.primary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+        // The path is the Mac's, as it is: the phone does not know whose home
+        // folder it is under, so it does not shorten one. Head truncation keeps
+        // the tail, the part that identifies the run.
+        let path = Text(verbatim: summary?.shownCwd ?? "")
+            .ccType(CC.type.monoSmall)
+            .foregroundStyle(CC.text.tertiary)
+            .lineLimit(1)
+            .truncationMode(.head)
+        return HStack(spacing: CC.space.xs) {
             CCStatusDot(
                 color: dotColour,
-                size: CCStatusDot.Size.cardHeader.rawValue,
+                size: CCStatusDot.Size.row.rawValue,
                 isHollow: shown?.loadedFromCacheAt != nil && shown?.hasLiveData != true,
                 pulses: (shown?.pendingApprovals.isEmpty == false))
-            Text(verbatim: label.project)
-                .ccType(CC.type.headline)
-                .foregroundStyle(CC.text.primary)
-                .lineLimit(1)
-                // From the front, as everywhere else a project is drawn.
-                .truncationMode(.tail)
-            Spacer(minLength: 0)
+            if verticalSizeClass == .compact {
+                HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) { name; path }
+            } else {
+                VStack(alignment: .leading, spacing: 0) { name; path }
+            }
         }
-        .padding(.horizontal, CC.space.md)
-        .padding(.vertical, CC.space.sm)
-        .background(CC.color.surface)
-        .overlay(alignment: .bottom) { CCHairline() }
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .contentShape(Rectangle())
+        .onLongPressGesture {
+            if let summary { CCPasteboard.copy(summary.cwd) }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            [label.project, summary.map { "Working directory, \($0.shownCwd)" }]
+                .compactMap { $0 }.joined(separator: ". "))
+        .accessibilityIdentifier("session-title")
     }
 
-    // MARK: Identity block
-
-    /// Chrome, not content: `surface` fill and a 1pt bottom rule, no card.
-    private var identityBlock: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: TimelineSpine.gap) {
-                CCStatusDot(
-                    color: dotColour,
-                    size: CCStatusDot.Size.cardHeader.rawValue,
-                    isHollow: shown?.loadedFromCacheAt != nil && shown?.hasLiveData != true,
-                    pulses: (shown?.pendingApprovals.isEmpty == false))
-                // The same gutter the timeline's glyphs sit in, so the block's
-                // three lines start on the screen's one content column — 52,
-                // the number the fleet's rows use — and the dot on its one
-                // mark axis.
-                .ccGutterMark()
-                .padding(.top, CC.space.xs)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
-                        Text(verbatim: label.project)
-                            .ccType(CC.type.title)
-                            .foregroundStyle(CC.text.primary)
-                            .lineLimit(2)
-                            .truncationMode(.tail)
-                        Spacer(minLength: CC.space.xs)
-                        SessionFreshness(lastEventAt: shown?.lastEventAt)
-                    }
-                    // A phrase about this run — `started 1:51 PM` — so small
-                    // prose, not `micro`, which is the uppercase section label.
-                    if let qualifier = label.qualifier {
-                        Text(verbatim: qualifier)
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(CC.text.tertiary)
-                            .lineLimit(1)
-                    }
-                    // `textTertiary`: it is information with an action on it,
-                    // not chrome. The path is the Mac's, as it is: the phone
-                    // does not know whose home folder it is under, so it does
-                    // not shorten one. Head truncation keeps the tail, the
-                    // part that identifies the run. The
-                    // agent tag leads it, as it leads the fleet row's activity
-                    // line, and keeps its width while the path gives way. At
-                    // accessibility sizes the two stack, as the fleet row's
-                    // do: on one line at AX5 the tag left the path `…-1`.
-                    if let summary {
-                        CCAdaptiveStack(
-                            horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xxs
-                        ) {
-                            CCTag(agent: summary.agent)
-                            Text(summary.shownCwd)
-                                .ccType(CC.type.monoSmall)
-                                .foregroundStyle(CC.text.tertiary)
-                                .lineLimit(1)
-                                .truncationMode(.head)
-                                .onLongPressGesture { CCPasteboard.copy(summary.cwd) }
-                                .accessibilityLabel("Working directory, \(summary.shownCwd)")
-                        }
-                    }
-                    // **An ended run is not a dead end.** Claude Code keeps its own
-                    // transcript under `~/.claude/projects`, so the conversation
-                    // outlives our record of it and can be picked up at the Mac.
-                    // Shown only when the daemon actually recorded the id — it is
-                    // learned from a hook after the run starts, so a run that died
-                    // early may not have one, and a command with a blank id would
-                    // be worse than none.
-                    //
-                    // Resume happens at the Mac by design: the phone starting
-                    // processes on your machine is a different product, and the
-                    // daemon spawns nothing today.
-                    if summary?.lifecycle == .exited,
-                        let claudeID = summary?.claudeSessionID, !claudeID.isEmpty
-                    {
-                        VStack(alignment: .leading, spacing: CC.rhythm.text) {
-                            Text("Pick this conversation up at the computer")
-                                .ccType(CC.type.footnote)
-                                .foregroundStyle(CC.text.secondary)
-                            // Quoted, because this is a command a person copies
-                            // and runs. The id is whatever a hook reported —
-                            // decoded as an unrestricted string, never validated
-                            // — and a space in it would silently resume the
-                            // wrong thing while anything shell-special would run
-                            // as syntax. Quoting costs nothing on the UUID this
-                            // is in practice.
-                            CCMonoBlock("codeconnect claude --resume \(Shell.quoted(claudeID))")
-                        }
-                        .padding(.top, CC.rhythm.textSurface)
-                    }
-                    // Stated here rather than left to be inferred from an empty
-                    // screen. `textTertiary`, not a banner and not a warning:
-                    // deciding for itself is a thing the operator chose, and a
-                    // product that shouts about a deliberate setting teaches
-                    // people to ignore the places it shouts.
-                    if let notice = SessionState.silentNotice(
-                        permissionMode: model.permissionMode(for: key))
-                    {
-                        Text(notice)
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(CC.text.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, CC.space.xxs)
-                            .accessibilityIdentifier("session-permission-notice")
-                    }
-                    codexStopBlock
+    /// **Everything the bar does not show, one tap away.** First the terminal,
+    /// the most used: on the terminal the same item reads Timeline, so the way
+    /// back is the same place. Then the session's changes, whose sheet counts
+    /// them, and the link's health under the name of the computer the session
+    /// is on, which is a heading, not an action.
+    private var moreMenu: some View {
+        let onTerminal = surface == .terminal
+        return Menu {
+            // The terminal and the link are absent in the sample fleet: there
+            // is no connection to open one on or to report on.
+            if !model.sampleFleetActive {
+                Button {
+                    surfaceBinding.wrappedValue = onTerminal ? .timeline : .terminal
+                } label: {
+                    Label(onTerminal ? "Timeline" : "Terminal", image: onTerminal ? "chat-text" : "terminal-window")
                 }
             }
-            .padding(.horizontal, CC.space.md)
-            .padding(.vertical, CC.space.md)
-
-            CCHairline()
+            Button {
+                showDiff = true
+            } label: {
+                Label("Changes", image: "plus-minus")
+            }
+            if !model.sampleFleetActive {
+                Section(model.machineName.map { "On \($0)" } ?? "") {
+                    Button {
+                        showLinkDetail = true
+                    } label: {
+                        Label("Link health", image: "desktop")
+                    }
+                }
+            }
+        } label: {
+            CCIcon("dots-three", size: CC.size.icon, weight: .semibold)
+                .foregroundStyle(CC.text.primary)
+                .frame(width: CC.size.controlSm, height: CC.size.controlSm)
+                .background(CC.color.surfaceRaised, in: Capsule())
+                .overlay { Capsule().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
+                .ccHitTarget()
         }
-        .background(CC.color.surface)
-        .accessibilityElement(children: .contain)
+        // Plain: a bar otherwise sets a menu's label in a 56x36 button of its
+        // own, under the 44pt target.
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .accessibilityLabel("More")
+        .accessibilityIdentifier("session-more")
+        .accessibilityShowsLargeContentViewer()
+    }
+
+    /// **What the header carried only sometimes**, under the bar and only while
+    /// it applies: an ended run's resume command, the permission note, and a
+    /// Codex turn's Stop.
+    @ViewBuilder
+    private var sessionNotices: some View {
+        let notice = SessionState.silentNotice(permissionMode: model.permissionMode(for: key))
+        let resumeID = summary?.lifecycle == .exited ? summary?.claudeSessionID : nil
+        if notice != nil || resumeID?.isEmpty == false || model.stopUnavailable(for: key) == nil {
+            VStack(alignment: .leading, spacing: 0) {
+                // **An ended run is not a dead end.** Claude Code keeps its own
+                // transcript under `~/.claude/projects`, so the conversation
+                // outlives our record of it and can be picked up at the Mac.
+                // Shown only when the daemon actually recorded the id — it is
+                // learned from a hook after the run starts, so a run that died
+                // early may not have one, and a command with a blank id would
+                // be worse than none.
+                //
+                // Resume happens at the Mac by design: the phone starting
+                // processes on your machine is a different product, and the
+                // daemon spawns nothing today.
+                if let resumeID, !resumeID.isEmpty {
+                    VStack(alignment: .leading, spacing: CC.rhythm.text) {
+                        Text("Pick this conversation up at the computer")
+                            .ccType(CC.type.footnote)
+                            .foregroundStyle(CC.text.secondary)
+                        // Quoted, because this is a command a person copies
+                        // and runs. The id is whatever a hook reported —
+                        // decoded as an unrestricted string, never validated
+                        // — and a space in it would silently resume the
+                        // wrong thing while anything shell-special would run
+                        // as syntax. Quoting costs nothing on the UUID this
+                        // is in practice.
+                        CCMonoBlock("codeconnect claude --resume \(Shell.quoted(resumeID))")
+                    }
+                }
+                // Stated here rather than left to be inferred from an empty
+                // screen. `textTertiary`, not a banner and not a warning:
+                // deciding for itself is a thing the operator chose, and a
+                // product that shouts about a deliberate setting teaches
+                // people to ignore the places it shouts.
+                if let notice {
+                    Text(notice)
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(CC.text.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, CC.space.xxs)
+                        .accessibilityIdentifier("session-permission-notice")
+                }
+                codexStopBlock
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, CC.space.md)
+            .padding(.vertical, CC.space.sm)
+            .background(CC.color.surface)
+            .overlay(alignment: .bottom) { CCHairline() }
+        }
     }
 
     // MARK: Stop
 
-    /// **Stop, in the session header**, where the reader is already looking at
-    /// the turn they want to end.
+    /// **Stop, in the strip under the bar**, where the reader is already
+    /// looking at the turn they want to end.
     ///
     /// Absent when the phone holds no turn to name — the one honest hide. There
     /// is no "turn started" fact on the Codex wire at all, so the running turn
@@ -1376,7 +1382,7 @@ struct SessionDetailView: View {
                 // carries the control; its outcome goes where every other
                 // mutation's outcome already goes, above the composer.
                 stopLabel,
-                icon: isStopping ? nil : "stop.fill",
+                icon: isStopping ? nil : "stop-fill",
                 variant: .secondary,
                 size: .md,
                 isLoading: isStopping,
@@ -1422,40 +1428,6 @@ struct SessionDetailView: View {
         return status.ccDotColor
     }
 
-    // MARK: Toolbar
-
-    /// Not an 11pt system glyph. A bordered pill carrying the changed-file count
-    /// when the app has actually counted them, and a bare `±` when it has not —
-    /// a number the app cannot evidence is a number it does not print.
-    private var diffControl: some View {
-        Button {
-            CCHaptic.light.fire()
-            showDiff = true
-        } label: {
-            HStack(spacing: CC.space.xxs + 1) {
-                Text("±")
-                    .ccType(CC.type.monoSmall)
-                    .foregroundStyle(CC.text.primary)
-                if let count = changedFileCount {
-                    Text("\(count)")
-                        .ccType(CC.type.monoSmall)
-                        .foregroundStyle(CC.text.primary)
-                }
-            }
-            .padding(.horizontal, CC.space.sm)
-            .frame(minWidth: CC.size.controlSm, minHeight: CC.size.controlSm)
-            .background(CC.color.surfaceRaised, in: Capsule())
-            .overlay { Capsule().strokeBorder(CC.color.border, lineWidth: CC.stroke.hairline) }
-            .ccHitTarget()
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Diff")
-        .accessibilityHint("Asks the computer for this session's uncommitted changes")
-        .accessibilityIdentifier("open-diff")
-    }
-
-    private var changedFileCount: Int? { model.diffState(for: key).changedFileCount }
-
     /// A deep link aimed at *this* session opens what it asked for.
     private func consumeDeepLink() {
         switch machines.pendingDeepLink {
@@ -1491,7 +1463,7 @@ struct SessionDetailView: View {
     private var notInTheList: some View {
         VStack {
             CCEmptyState(
-                glyph: "questionmark.folder",
+                glyph: "folder-dashed",
                 title: "Not in the daemon's list",
                 message:
                     "This run may have exited, or the daemon has restarted since the link was made.",
@@ -1531,14 +1503,14 @@ struct SessionDetailView: View {
     /// changes or another attempt begins. A blocked command's explanation
     /// vanishing mid-read was a shipped defect, not a style choice.
     private func noteComposeResult(_ result: ComposeAttempt) {
-        withAnimation(CC.motion.micro) { composeResult = result }
+        composeResult = result
         composeResultClearTask?.cancel()
         switch result {
         case .sent, .alreadyApplied, .composerRecovered:
             composeResultClearTask = Task {
                 try? await Task.sleep(for: .seconds(4))
                 guard !Task.isCancelled else { return }
-                withAnimation(CC.motion.medium) { composeResult = nil }
+                composeResult = nil
             }
         case .refused, .failed, .indeterminate, .composerLost:
             break
@@ -1651,6 +1623,8 @@ struct SessionDetailView: View {
 
     private func send() {
         let text = composeText
+        let again = askingAgain
+        askingAgain = false
         // **A Codex session takes a different road entirely.** `send_text` is
         // Claude's TTY takeover and a Codex session refuses it by name; `compose`
         // is the message the app-server actually accepts, and it is not a
@@ -1681,10 +1655,18 @@ struct SessionDetailView: View {
         sending = true
         composeResult = nil
         composeResultClearTask?.cancel()
+        unansweredSend = nil
+        let generation = model.connection.generation
+        let sentAt = Date()
         Task {
             let result = await model.send(text: text, to: key)
             sending = false
-            withAnimation(CC.motion.micro) { composeResult = result }
+            composeResult = result
+            if case .indeterminate = result, !again {
+                unansweredSend = UnansweredSend(text: text, sentAt: sentAt)
+                // The link may have come back while this send waited.
+                if model.connection.generation != generation { askUnansweredAgain() }
+            }
             switch result {
             case .sent, .alreadyApplied, .composerRecovered:
                 // Never optimistic: the field clears only on a landed
@@ -1696,7 +1678,7 @@ struct SessionDetailView: View {
                 composeResultClearTask = Task {
                     try? await Task.sleep(for: .seconds(4))
                     guard !Task.isCancelled else { return }
-                    withAnimation(CC.motion.medium) { composeResult = nil }
+                    composeResult = nil
                 }
             case .refused, .failed, .indeterminate, .composerLost:
                 // The text stays — and so does the note. Four seconds is too
@@ -1708,6 +1690,24 @@ struct SessionDetailView: View {
             }
         }
     }
+
+    /// Ask the unanswered send once more (see `unansweredSend`), through `send`.
+    private func askUnansweredAgain() {
+        guard let unanswered = unansweredSend, !sending, model.connection.phase.isConnected,
+            composeText == unanswered.text,
+            Date().timeIntervalSince(unanswered.sentAt) < 60,
+            model.holdsSendIdentity(text: unanswered.text, to: key)
+        else { return }
+        unansweredSend = nil
+        askingAgain = true
+        send()
+    }
+}
+
+/// A composer send whose answer never came: what it said, and when it was sent.
+private struct UnansweredSend {
+    let text: String
+    let sentAt: Date
 }
 
 /// The session's timeline: its own view, so what the rest of the screen holds
@@ -2045,7 +2045,7 @@ private struct TailPill: View {
     var body: some View {
         Button(action: jump) {
             HStack(spacing: CC.space.xxs + 1) {
-                CCIcon("arrow.down", size: 12, weight: .semibold, relativeTo: .caption)
+                CCIcon("arrow-down", size: 12, weight: .semibold, relativeTo: .caption)
                 Text(watch.newSinceLeaving > 0 ? "\(watch.newSinceLeaving) new" : "Latest")
                     .ccType(CC.type.footnote)
             }
@@ -2069,107 +2069,7 @@ private struct TailPill: View {
     }
 }
 
-// MARK: - The four views that are allowed to read the clock
-
-/// **The age in the identity block, clocked by itself.**
-///
-/// It is one string — `21h` — and reading it from `SessionDetailView.body` put a
-/// one-second heartbeat under the entire timeline. It sleeps until its own
-/// string stops being true: a second while the run is seconds old, a minute
-/// while it is minutes old, an hour after that.
-private struct SessionFreshness: View {
-    let lastEventAt: Date?
-
-    /// Read, not merely written — see `ApprovalRow.lastTick`. A `@State` the
-    /// body never looks at does not invalidate the view, and an age that never
-    /// invalidates is an age that has quietly stopped being true.
-    @State private var lastTick = Date()
-
-    /// The wall clock, not the stored tick: a view waking from an hour's sleep
-    /// must measure against the real clock, never against the stamp it fell
-    /// asleep holding. Both rules are pinned by test in `AgeTick.renderTime`.
-    private var now: Date { AgeTick.renderTime(lastTick: lastTick) }
-
-    /// Nil when this run has no events at all. There is no age to keep true, so
-    /// there is nothing to wake for.
-    private var clock: AgeClock? {
-        lastEventAt.map { AgeClock(since: $0, scale: .age) }
-    }
-
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    /// Said with what it measures. Bare, `53s` sat above a card's `waiting 4s`:
-    /// numbers of seconds on one screen, unexplained. At accessibility sizes it is
-    /// `1m ago`: the whole phrase beside an AX5 title read `last… 1… ago`, and
-    /// moving it to a line of its own pushed the screen down a line.
-    var body: some View {
-        Group {
-            if let lastEventAt {
-                HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs) {
-                    if !dynamicTypeSize.isAccessibilitySize {
-                        Text("last event").ccType(CC.type.footnote)
-                    }
-                    Text(Format.age(since: lastEventAt, now: now)).ccType(CC.type.monoSmall)
-                    Text("ago").ccType(CC.type.footnote)
-                }
-                .lineLimit(1)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(
-                    "Last event \(Format.spokenAge(now.timeIntervalSince(lastEventAt)))")
-            } else {
-                Text("no events").ccType(CC.type.footnote)
-            }
-        }
-        .foregroundStyle(CC.text.tertiary)
-        .task(id: clock) {
-            guard let clock else { return }
-            await AgeTick.follow(clock) { lastTick = $0 }
-        }
-    }
-}
-
-/// **The computer this session is on, and whether it is answering** — the home
-/// screen's label (`CCMachineLabel`), on one line, as the button that opens the
-/// link's details. It reads the link itself, so the clock ticks this view alone.
-private struct SessionMachineLink: View {
-    @Environment(AppModel.self) private var model
-    let action: () -> Void
-
-    /// Under what a 375pt phone's bar leaves beside its margins and the back
-    /// and diff buttons: about 238pt, from those measured on a 402pt bar.
-    private static let widest: CGFloat = 220
-
-    var body: some View {
-        // Nothing at all in the sample fleet: a control reporting on a link
-        // that does not exist is worse than an empty slot however honestly it
-        // renders.
-        if !model.sampleFleetActive {
-            let health = model.linkHealth
-            Button {
-                CCHaptic.light.fire()
-                action()
-            } label: {
-                // Left to the bar, the label is measured short of its own text
-                // ("Jordan’s Mac Stu…" with the bar half empty), and an item
-                // wider than the bar's room goes behind "•••". So it sets its
-                // own width: its text, up to what the narrowest phone leaves
-                // beside the back and diff buttons, where the name gives way.
-                CCMachineLabel(name: model.machineName, level: health.level, lineLimit: 1)
-                    .frame(maxWidth: Self.widest, alignment: .trailing)
-                    .fixedSize()
-                    .frame(minHeight: CC.size.hitTarget)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Link health")
-            .accessibilityValue(
-                [model.machineName, health.spokenValue].compactMap { $0 }.joined(separator: ". "))
-            .accessibilityHint("Opens connection details")
-            .accessibilityAddTraits(.isButton)
-        }
-    }
-}
+// MARK: - The two views that are allowed to read the clock
 
 /// **The banner, clocked by itself.**
 ///
@@ -2224,7 +2124,7 @@ private struct SessionBanner: View {
             title: "From the cache, \(Format.age(since: cachedAt, now: model.now)) old",
             message: "Nothing live has arrived for this session yet.",
             tone: .warning,
-            icon: "clock.arrow.circlepath")
+            icon: "clock-counter-clockwise")
     }
 }
 
@@ -2473,7 +2373,7 @@ private struct SessionComposeBar: View {
             // Capped at half the circle, like the voice button's glyphs: a
             // fixed circle cannot grow with Dynamic Type.
             CCIcon(
-                "xmark", size: CC.size.iconSm, weight: .semibold, relativeTo: .body,
+                "x", size: CC.size.iconSm, weight: .semibold, relativeTo: .body,
                 maxSize: CC.size.controlSm / 2
             )
             .foregroundStyle(CC.text.secondary)
@@ -2502,25 +2402,25 @@ private struct SessionComposeBar: View {
             // the reader is looking after they act.
             codexStopNote(result)
         } else if summary?.isCodex == true, case .notSent(let reason) = codexControls?.stop {
-            ComposeNote(text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+            ComposeNote(text: reason, tone: .warning, glyph: "warning-circle-fill")
         } else if summary?.isCodex == true, case .sentNoAnswer(let reason) = codexControls?.stop {
-            ComposeNote(text: reason, tone: .warning, glyph: "questionmark.circle.fill")
+            ComposeNote(text: reason, tone: .warning, glyph: "question-fill")
         } else if summary?.isCodex == true, case .settled(let result) = codexControls?.compose {
             codexComposeNote(result)
         } else if summary?.isCodex == true, case .notSent(let reason) = codexControls?.compose {
             ComposeNote(
-                text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+                text: reason, tone: .warning, glyph: "warning-circle-fill")
         } else if summary?.isCodex == true,
             case .sentNoAnswer(let reason) = codexControls?.compose
         {
-            ComposeNote(text: reason, tone: .warning, glyph: "questionmark.circle.fill")
+            ComposeNote(text: reason, tone: .warning, glyph: "question-fill")
         } else if let result {
             feedbackLine(result)
         } else if case .failed(let reason, let needsSettings) = dictation.phase {
             micFailureNote(reason: reason, needsSettings: needsSettings)
         } else if let reason = sendBlockedReason {
             ComposeNote(
-                text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+                text: reason, tone: .warning, glyph: "warning-circle-fill")
         } else if isObserveOnly {
             ComposeNote(
                 text: "Observe only - answers are given at the computer.",
@@ -2581,10 +2481,10 @@ private struct SessionComposeBar: View {
     private func micFailureNote(reason: String, needsSettings: Bool) -> ComposeNote {
         guard needsSettings else {
             return ComposeNote(
-                text: reason, tone: .warning, glyph: "exclamationmark.circle.fill")
+                text: reason, tone: .warning, glyph: "warning-circle-fill")
         }
         return ComposeNote(
-            text: reason, tone: .warning, glyph: "exclamationmark.circle.fill",
+            text: reason, tone: .warning, glyph: "warning-circle-fill",
             action: (title: "Settings", perform: { openSettings() }))
     }
 
@@ -2599,24 +2499,24 @@ private struct SessionComposeBar: View {
         case .sent:
             ComposeNote(
                 text: "Typed into the session.",
-                tone: .success, glyph: "checkmark")
+                tone: .success, glyph: "check")
         case .refused(let reason):
             ComposeNote(
                 text: "Not typed: \(reason)", tone: .warning,
-                glyph: "exclamationmark.triangle.fill")
+                glyph: "warning-fill")
         case .failed(let reason):
             ComposeNote(
                 text: "Couldn’t type the message: \(reason)", tone: .danger,
-                glyph: "xmark.octagon.fill")
+                glyph: "x-circle-fill")
         case .alreadyApplied:
             ComposeNote(
                 text: "Already typed earlier — not repeated.",
-                tone: .success, glyph: "checkmark")
+                tone: .success, glyph: "check")
         case .indeterminate(let reason):
             ComposeNote(
                 text: "Not confirmed: \(reason) "
                     + "Retry is safe; the message won’t be typed twice.",
-                tone: .warning, glyph: "questionmark.circle.fill")
+                tone: .warning, glyph: "question-fill")
         case .composerRecovered(let command, _, _):
             // **Not a success.** The same daemon result on the Model and Effort
             // sheets reports that no change was confirmed, and a typed command
@@ -2628,12 +2528,12 @@ private struct SessionComposeBar: View {
                 text: "After \(command) was typed, the computer's composer disappeared. "
                     + "CodeConnect pressed Esc and confirmed it returned. "
                     + "The command's outcome was not confirmed.",
-                tone: .warning, glyph: "questionmark.circle.fill")
+                tone: .warning, glyph: "question-fill")
         case .composerLost(let command):
             ComposeNote(
                 text: "\(command) was typed, but the computer's composer did not come back. "
                     + "Open Terminal to recover.",
-                tone: .danger, glyph: "exclamationmark.triangle.fill")
+                tone: .danger, glyph: "warning-fill")
         }
     }
 
@@ -2713,7 +2613,6 @@ private struct ComposeNote: View {
             CCAdaptiveSpacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .transition(.opacity)
         .accessibilityElement(children: .combine)
     }
 }

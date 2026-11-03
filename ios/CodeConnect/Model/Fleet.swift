@@ -25,11 +25,11 @@ enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
 
     var symbol: String {
         switch self {
-        case .blocked: return "hand.raised.fill"
-        case .failed: return "exclamationmark.octagon.fill"
-        case .doneUnreviewed: return "checkmark.seal.fill"
-        case .running: return "circle.dotted"
-        case .idle: return "moon.zzz"
+        case .blocked: return "hand-palm-fill"
+        case .failed: return "warning-octagon-fill"
+        case .doneUnreviewed: return "seal-check-fill"
+        case .running: return "circle-dashed"
+        case .idle: return "moon"
         case .ended: return "power"
         }
     }
@@ -60,8 +60,8 @@ enum CapabilityBadge: Sendable, Hashable {
 
     var symbol: String {
         switch self {
-        case .control: return "circle.fill"
-        case .observe, .unknown: return "circle.lefthalf.filled"
+        case .control: return "circle-fill"
+        case .observe, .unknown: return "circle-half"
         }
     }
 
@@ -512,12 +512,12 @@ struct LinkHealth: Sendable, Equatable {
 
     var symbol: String {
         switch level {
-        case .live: return "circle.fill"
-        case .lagging: return "circle.lefthalf.filled"
-        case .stale: return "exclamationmark.triangle.fill"
-        case .connecting: return "arrow.triangle.2.circlepath"
-        case .offline: return "bolt.horizontal.circle"
-        case .rejected: return "lock.slash"
+        case .live: return "circle-fill"
+        case .lagging: return "circle-half"
+        case .stale: return "warning-fill"
+        case .connecting: return "arrows-clockwise"
+        case .offline: return "plugs"
+        case .rejected: return "lock-open"
         }
     }
 

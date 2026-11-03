@@ -2,7 +2,7 @@ import XCTest
 
 /// How a conversation reads on the session screen, on the running app: your
 /// words and Claude's on one edge, a "Turn complete" line only where nothing
-/// else ends the turn, and the computer named in the header.
+/// else ends the turn, and the project, its path and its computer in the bar.
 ///
 /// `-CC_FIXTURE timeline`: `fx-6` is "hi" and Claude's one-line answer, `fx-7`
 /// a longer exchange whose second turn ends on a tool call.
@@ -19,7 +19,7 @@ final class ConversationLayoutUITests: XCTestCase {
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]
         app.launch()
-        XCTAssertTrue(app.buttons["open-diff"].waitForExistence(timeout: 20), "the session screen")
+        XCTAssertTrue(app.buttons["session-more"].waitForExistence(timeout: 20), "the session screen")
         return app
     }
 
@@ -83,15 +83,43 @@ final class ConversationLayoutUITests: XCTestCase {
             "the turn that ended on `npm run lint` must keep its line")
     }
 
-    /// The header names the computer the session is on — the home screen's
-    /// label, as the button that opens the link's details. (Which word it adds
-    /// when the link is not live is the shared table's, pinned in
-    /// `TimelineTurnTests`.)
-    func testTheHeaderNamesTheComputer() {
+    /// The bar's "…" holds the terminal, the session's changes, and the link's
+    /// health under the name of the computer, which is a heading, not a button.
+    func testTheMenuNamesTheComputer() {
         let app = open("fx-6")
+        app.buttons["session-more"].tap()
         let link = app.buttons["Link health"].firstMatch
-        XCTAssertTrue(link.waitForExistence(timeout: 10))
-        let value = link.value as? String ?? ""
-        XCTAssertTrue(value.hasPrefix("Jordan’s Mac Studio"), "the header's link says: \(value)")
+        XCTAssertTrue(link.waitForExistence(timeout: 10), "the menu offers the link's health")
+        XCTAssertTrue(
+            app.staticTexts["On Jordan’s Mac Studio"].exists, "under the computer's name")
+        XCTAssertFalse(
+            app.buttons["On Jordan’s Mac Studio"].exists, "which is not an action")
+        XCTAssertTrue(app.buttons["Terminal"].exists, "beside the terminal")
+        XCTAssertTrue(
+            app.buttons.matching(NSPredicate(format: "label == 'Changes'")).firstMatch.exists,
+            "and the changes")
+        link.tap()
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS 'daemon last spoke'")).firstMatch
+                .waitForExistence(timeout: 10),
+            "the computer's item opens the link's details")
+    }
+
+    /// A long press on the bar's title copies the session's whole path, as one
+    /// on the header's path line did: pasted into the composer, it is the path.
+    func testALongPressOnTheTitleCopiesThePath() {
+        let app = open("fx-6")
+        let title = app.descendants(matching: .any)["session-title"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        title.press(forDuration: 1.0)
+        let field = app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.press(forDuration: 1.2)
+        let paste = app.menuItems["Paste"].firstMatch
+        XCTAssertTrue(paste.waitForExistence(timeout: 5), "the field offers Paste")
+        paste.tap()
+        let value = field.value as? String ?? ""
+        XCTAssertEqual(value, "/Users/dev/app-6", "the pasted text is the session's whole path")
     }
 }

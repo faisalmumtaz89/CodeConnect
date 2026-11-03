@@ -259,7 +259,7 @@ struct AgentMessageRow: View {
             // stopping happened.
             if isInterrupted {
                 HStack(spacing: CC.space.xxs) {
-                    CCIcon("stop.circle", size: 12, weight: .regular, relativeTo: .caption)
+                    CCIcon("stop-circle", size: 12, weight: .regular, relativeTo: .caption)
                     Text("Interrupted")
                         .ccType(CC.type.micro)
                 }
@@ -913,7 +913,7 @@ struct QuestionRow: View {
                 .foregroundStyle(CC.text.primary)
                 .overlay(alignment: .leading) {
                     CCIcon(
-                        "questionmark.bubble", size: CC.size.icon, weight: .medium,
+                        "chat-circle-text", size: CC.size.icon, weight: .medium,
                         maxSize: CCColumn.markMaxSize)
                         .foregroundStyle(approval.isPending ? CC.color.warning : CC.text.tertiary)
                         .fixedSize()

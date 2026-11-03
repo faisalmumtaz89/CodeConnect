@@ -51,30 +51,30 @@ struct CommandPalette: View {
             command: "model", subtitle: "Choose model", icon: "cpu",
             action: .nativeModel(prefillArgs: "")),
         PaletteRow(
-            command: "effort", subtitle: "Choose reasoning effort", icon: "dial.medium",
+            command: "effort", subtitle: "Choose reasoning effort", icon: "gauge",
             action: .nativeEffort),
         PaletteRow(
             command: "compact", subtitle: "Compact context",
-            icon: "arrow.down.right.and.arrow.up.left",
+            icon: "arrows-in",
             action: .nativeCompact(prefillInstructions: "")),
         PaletteRow(
             command: "clear", subtitle: "Clear Claude’s context", icon: "eraser",
             action: .nativeClear),
         PaletteRow(
             command: "diff", subtitle: "Review working-tree changes",
-            icon: "plus.forwardslash.minus",
+            icon: "plus-minus",
             action: .nativeDiff),
         PaletteRow(
-            command: "status", subtitle: "Capture the computer's status view", icon: "info.circle",
+            command: "status", subtitle: "Capture the computer's status view", icon: "info",
             action: .nativeSnapshot(.status)),
         PaletteRow(
-            command: "usage", subtitle: "Capture the computer's usage view", icon: "chart.bar",
+            command: "usage", subtitle: "Capture the computer's usage view", icon: "chart-bar",
             action: .nativeSnapshot(.usage)),
         // Kept as a row because Claude Code accepts `/cost` and a reader who
         // thinks in cost should find it — but the subtitle states the measured
         // fact instead of inventing a "cost view". See `SnapshotCommand.title`.
         PaletteRow(
-            command: "cost", subtitle: "Alias of /usage", icon: "creditcard",
+            command: "cost", subtitle: "Alias of /usage", icon: "credit-card",
             action: .nativeSnapshot(.cost)),
     ]
 
@@ -322,7 +322,7 @@ struct ModelSheet: View {
                     separator: false
                 ) {
                     CCIcon(
-                        "checkmark.circle.fill", size: 16, weight: .semibold,
+                        "check-circle-fill", size: 16, weight: .semibold,
                         relativeTo: .body
                     )
                     .foregroundStyle(CCTone.success.color)
@@ -336,7 +336,7 @@ struct ModelSheet: View {
                     showsChevron: false,
                     separator: false
                 ) {
-                    CCIcon("circle.dashed", size: 16, weight: .regular, relativeTo: .body)
+                    CCIcon("circle-dashed", size: 16, weight: .regular, relativeTo: .body)
                         .foregroundStyle(CC.text.tertiary)
                 } trailing: {
                     EmptyView()
@@ -394,7 +394,7 @@ struct ModelSheet: View {
                 CCProgressRing(.sm)
             } else {
                 CCIcon(
-                    isCurrent ? "checkmark.circle.fill" : "circle",
+                    isCurrent ? "check-circle-fill" : "circle",
                     size: 16, weight: isCurrent ? .semibold : .regular, relativeTo: .body
                 )
                 .foregroundStyle(isCurrent ? CCTone.success.color : CC.text.tertiary)

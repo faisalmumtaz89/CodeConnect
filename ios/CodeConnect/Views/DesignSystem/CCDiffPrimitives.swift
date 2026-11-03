@@ -622,9 +622,10 @@ struct CCHunkHeader<Actions: View>: View {
     /// they were sitting next to. Reachability is not what the glyph was
     /// carrying anyway; the 44pt band is.
     private var ellipsis: some View {
-        Image(systemName: "ellipsis")
-            .font(.system(size: fontSize, weight: .semibold))
-            .symbolRenderingMode(.monochrome)
+        Image(CCIcon.asset("dots-three", weight: .semibold))
+            .resizable()
+            .scaledToFit()
+            .frame(width: fontSize * CCIcon.artScale, height: fontSize * CCIcon.artScale)
             .foregroundStyle(CC.text.tertiary)
             .accessibilityHidden(true)
     }
@@ -633,17 +634,17 @@ struct CCHunkHeader<Actions: View>: View {
     private func menuItems(_ actions: CCHunkActions) -> some View {
         if let comment = actions.comment {
             Button(action: comment) {
-                Label("Comment to agent", systemImage: "text.bubble")
+                Label { Text("Comment to agent") } icon: { Image("chat-text") }
             }
         }
         if let copyHunk = actions.copyHunk {
             Button(action: copyHunk) {
-                Label("Copy hunk", systemImage: "doc.on.doc")
+                Label { Text("Copy hunk") } icon: { Image("copy") }
             }
         }
         if let copyPath = actions.copyPath {
             Button(action: copyPath) {
-                Label("Copy file path", systemImage: "doc.on.doc")
+                Label { Text("Copy file path") } icon: { Image("copy") }
             }
         }
     }

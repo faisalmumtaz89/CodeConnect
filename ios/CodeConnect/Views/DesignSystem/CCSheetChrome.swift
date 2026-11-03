@@ -163,7 +163,7 @@ struct CCSheetChrome<Content: View, Trailing: View>: View {
             CCHaptic.light.fire()
             action()
         } label: {
-            CCIcon("xmark", size: CC.size.iconSm, weight: .bold, relativeTo: .footnote)
+            CCIcon("x", size: CC.size.iconSm, weight: .bold, relativeTo: .footnote)
                 .foregroundStyle(CC.text.secondary)
                 // The circle scales on the *same* ramp as the cross inside it.
                 // Measured failure this replaces: at `accessibility-extra-large`

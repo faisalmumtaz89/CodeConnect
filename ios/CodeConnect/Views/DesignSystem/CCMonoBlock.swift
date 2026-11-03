@@ -592,7 +592,7 @@ struct CCMonoBlock: View {
 
     private var copyGlyph: some View {
         CCIcon(
-            justCopied ? "checkmark" : "doc.on.doc",
+            justCopied ? "check" : "copy",
             size: CC.size.iconSm, weight: .semibold, relativeTo: .footnote
         )
         .foregroundStyle(justCopied ? CC.color.success : CC.text.tertiary)

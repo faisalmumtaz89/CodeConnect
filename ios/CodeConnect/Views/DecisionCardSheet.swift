@@ -80,12 +80,12 @@ struct ResolutionBanner: View {
 
     private var symbol: String {
         switch attempt {
-        case .applied: return "checkmark.circle.fill"
-        case .indeterminate: return "questionmark.circle.fill"
-        case .duplicate: return "doc.on.doc"
+        case .applied: return "check-circle-fill"
+        case .indeterminate: return "question-fill"
+        case .duplicate: return "copy"
         case .answeredAtKeyboard: return "keyboard"
-        case .staleCard: return "clock.badge.exclamationmark"
-        case .rejected, .failed: return "xmark.octagon"
+        case .staleCard: return "clock-countdown"
+        case .rejected, .failed: return "x-circle"
         }
     }
 

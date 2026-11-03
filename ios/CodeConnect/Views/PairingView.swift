@@ -215,7 +215,7 @@ struct PairingView: View {
 
         if QRScannerView.isSupported {
             CCButton(
-                "Scan pairing code", icon: "qrcode.viewfinder", variant: .primary, size: .lg,
+                "Scan pairing code", icon: "qr-code", variant: .primary, size: .lg,
                 fullWidth: true
             ) {
                 scanError = nil
@@ -370,7 +370,7 @@ struct PairingView: View {
                     if let credential = PairingCredentialInput.classify(token) {
                         HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
                             CCIcon(
-                                "checkmark.circle.fill", size: 11, weight: .semibold,
+                                "check-circle-fill", size: 11, weight: .semibold,
                                 relativeTo: .caption
                             )
                             .foregroundStyle(CC.color.success)
@@ -496,7 +496,7 @@ struct PairingView: View {
                             showScanner = true
                         }
                     ) {
-                        CCIcon("qrcode.viewfinder", size: CC.size.icon, weight: .medium)
+                        CCIcon("qr-code", size: CC.size.icon, weight: .medium)
                             .foregroundStyle(CC.text.tertiary)
                     }
                 }
@@ -649,7 +649,7 @@ struct PairingScanSheet: View {
 
             if let error {
                 unavailable(
-                    glyph: "exclamationmark.triangle",
+                    glyph: "warning",
                     title: "The scanner stopped",
                     message: nil,
                     detail: error,
@@ -657,7 +657,7 @@ struct PairingScanSheet: View {
                     primary: { self.error = nil })
             } else if !QRScannerView.isSupported {
                 unavailable(
-                    glyph: "camera.metering.unknown",
+                    glyph: "camera-slash",
                     title: "No scanner on this device",
                     message:
                         "This device cannot run the code scanner. Close this and pair with an address and a `codeconnect token` instead.",
@@ -667,7 +667,7 @@ struct PairingScanSheet: View {
                     secondaryTitle: nil)
             } else if !QRScannerView.isAvailable {
                 unavailable(
-                    glyph: "camera.metering.unknown",
+                    glyph: "camera-slash",
                     title: "Camera access is off",
                     message:
                         "CodeConnect does not have camera access, so it cannot read the code. Grant it in Settings, or pair by hand.",
@@ -750,7 +750,7 @@ struct PairingScanSheet: View {
     private var torchButton: some View {
         if QRScannerView.hasTorch {
             CCButton(
-                torchOn ? "Torch on" : "Torch", icon: torchOn ? "bolt.fill" : "bolt",
+                torchOn ? "Torch on" : "Torch", icon: torchOn ? "lightning-fill" : "lightning",
                 variant: .secondary, size: .md
             ) {
                 torchOn = QRScannerView.setTorch(!torchOn)

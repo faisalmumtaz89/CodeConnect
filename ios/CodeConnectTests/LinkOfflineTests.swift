@@ -214,4 +214,21 @@ final class LinkOfflineTests: XCTestCase {
         connection.pathDidChange()
         XCTAssertEqual(connection.phase, .idle, "idle has nothing to wake")
     }
+
+    // MARK: Silence
+
+    /// A handshaken link that has sent nothing for the deadline is dead: a
+    /// vanished network leaves a socket that takes writes and delivers nothing
+    /// (B19, reproduced with a half-open proxy: pings went out for 77 s).
+    func testALinkSilentForTheDeadlineIsDeadAndOneHeardFromIsNot() {
+        let heard = Date(timeIntervalSinceReferenceDate: 1_000)
+        let deadline = DaemonConnection.silenceDeadline
+        XCTAssertFalse(DaemonConnection.silenceExpired(since: nil, now: heard))
+        XCTAssertFalse(
+            DaemonConnection.silenceExpired(since: heard, now: heard.addingTimeInterval(deadline - 1)),
+            "a slow answer holds pongs back for up to the daemon's own budget")
+        XCTAssertTrue(
+            DaemonConnection.silenceExpired(since: heard, now: heard.addingTimeInterval(deadline)))
+        XCTAssertEqual(deadline, 30, "the app's 20s request wait plus one 10s ping")
+    }
 }

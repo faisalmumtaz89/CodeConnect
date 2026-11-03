@@ -94,7 +94,7 @@ struct CCDisclosure<Content: View>: View {
                             .foregroundStyle(CC.text.tertiary)
                             .lineLimit(1)
                     }
-                    CCIcon("chevron.right", size: 12, weight: .semibold, relativeTo: .caption)
+                    CCIcon("caret-right", size: 12, weight: .semibold, relativeTo: .caption)
                         .foregroundStyle(CC.text.tertiary)
                         .rotationEffect(.degrees(isExpanded.wrappedValue ? 90 : 0))
                         // Rotation is geometry, so Reduce Motion gets the state

@@ -507,21 +507,21 @@ enum ToolSummary {
 
     static func symbol(tool: String) -> String {
         switch tool {
-        case "Bash", "BashOutput", "KillShell": return "terminal"
-        case "Read", "NotebookRead": return "doc.text"
-        case "Write": return "square.and.pencil"
-        case "Edit", "NotebookEdit": return "pencil.line"
-        case "Glob": return "folder.badge.questionmark"
-        case "Grep": return "text.magnifyingglass"
+        case "Bash", "BashOutput", "KillShell": return "terminal-window"
+        case "Read", "NotebookRead": return "file-text"
+        case "Write": return "note-pencil"
+        case "Edit", "NotebookEdit": return "pencil-line"
+        case "Glob": return "magnifying-glass"
+        case "Grep": return "magnifying-glass"
         case "WebFetch", "WebSearch": return "globe"
-        case "Task", "Agent": return "person.2"
+        case "Task", "Agent": return "users"
         // **Codex's two families.** Same glyphs as Claude's equivalents: a
         // command is a terminal and a file change is an edit, whichever agent
         // ran it, or the same act reads as two different kinds of thing.
-        case "command": return "terminal"
-        case "file change": return "pencil.line"
-        case "TodoWrite": return "checklist"
-        default: return "wrench.and.screwdriver"
+        case "command": return "terminal-window"
+        case "file change": return "pencil-line"
+        case "TodoWrite": return "list-checks"
+        default: return "wrench"
         }
     }
 

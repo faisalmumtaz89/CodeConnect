@@ -722,7 +722,7 @@ struct DeckAccessoryBar: View {
                 .fixedSize(horizontal: false, vertical: true)
             if isLargeType {
                 Spacer(minLength: CC.space.xs)
-                CCIcon("chevron.right", size: CC.size.iconSm, weight: .semibold)
+                CCIcon("caret-right", size: CC.size.iconSm, weight: .semibold)
                     .foregroundStyle(CC.text.tertiary)
                     .accessibilityHidden(true)
             }
@@ -747,7 +747,7 @@ struct DeckAccessoryBar: View {
     private func reasonLine(_ reason: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             CCIcon(
-                "exclamationmark.circle.fill", size: 11, weight: .semibold, relativeTo: .caption
+                "warning-circle-fill", size: 11, weight: .semibold, relativeTo: .caption
             )
             .foregroundStyle(CC.color.warning)
             // **A mark in the gutter takes no layout width**, the way

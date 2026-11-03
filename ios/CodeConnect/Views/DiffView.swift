@@ -112,7 +112,7 @@ struct DiffSheet: View {
             // word per state means this screen does not borrow it for a network
             // wait. It also matches the label the notice above it used.
             CCEmptyState(
-                glyph: "stop.circle",
+                glyph: "stop-circle",
                 title: "Stopped asking",
                 message: "The computer never answered, so nothing was rendered. Nothing was changed.",
                 actionTitle: "Ask again",
@@ -170,7 +170,7 @@ struct DiffSheet: View {
 
     private var notConnected: some View {
         CCEmptyState(
-            glyph: "bolt.horizontal.circle",
+            glyph: "plugs",
             title: "Not connected",
             message: "Not connected. The daemon cannot be asked for a diff.",
             tone: .warning,
@@ -197,7 +197,7 @@ struct DiffSheet: View {
     private func failed(_ reason: String) -> some View {
         ScrollView {
             CCEmptyState(
-                glyph: "exclamationmark.octagon",
+                glyph: "warning-octagon",
                 title: "The computer could not read the diff",
                 message: "No diff was produced. The daemon's own reason follows, verbatim.",
                 tone: .danger,
@@ -224,7 +224,7 @@ struct DiffSheet: View {
     private func unanswered(_ reason: String) -> some View {
         ScrollView {
             CCEmptyState(
-                glyph: "questionmark.circle",
+                glyph: "question",
                 title: "No answer from the computer",
                 message:
                     "The link is up and the request went out. Nothing came back, and the daemon "
@@ -451,7 +451,7 @@ private struct DiffRefreshButton: View {
 
     var body: some View {
         Button(action: refresh) {
-            CCIcon("arrow.clockwise", size: CC.size.icon, weight: .semibold, relativeTo: .footnote)
+            CCIcon("arrow-clockwise", size: CC.size.icon, weight: .semibold, relativeTo: .footnote)
                 .foregroundStyle(isLoading ? CC.text.disabled : CC.text.primary)
                 .ccGlyphContainer(CC.size.glyph, relativeTo: .footnote)
                 .ccHitTarget()
@@ -936,7 +936,7 @@ struct DiffDocumentView: View {
             return CCBannerItem(
                 .truncated, title: "Not all of it is drawn",
                 message: "\(drawn) Each hunk says what it is holding back.",
-                tone: .info, icon: "rectangle.compress.vertical")
+                tone: .info, icon: "arrows-in-line-vertical")
         }
     }
 
@@ -1091,7 +1091,7 @@ struct DiffDocumentView: View {
     private var emptyTree: some View {
         ScrollView {
             CCEmptyState(
-                glyph: raw.note == nil ? "checkmark" : "questionmark.folder",
+                glyph: raw.note == nil ? "check" : "folder-dashed",
                 title: raw.note == nil ? "No uncommitted changes" : "No diff to show",
                 message: raw.note == nil
                     ? "This session's worktree was clean when it was read."

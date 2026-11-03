@@ -411,11 +411,11 @@ extension CCTone {
     /// The glyph a tone reaches for when a caller does not name one.
     var defaultGlyph: String {
         switch self {
-        case .neutral: return "info.circle"
-        case .success: return "checkmark.circle"
-        case .info: return "info.circle"
-        case .warning: return "exclamationmark.triangle"
-        case .danger: return "exclamationmark.octagon"
+        case .neutral: return "info"
+        case .success: return "check-circle"
+        case .info: return "info"
+        case .warning: return "warning"
+        case .danger: return "warning-octagon"
         }
     }
 }

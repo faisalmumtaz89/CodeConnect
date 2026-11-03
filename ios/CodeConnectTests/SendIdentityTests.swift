@@ -211,4 +211,28 @@ final class SendIdempotencyTests: XCTestCase {
         let attempt = await model.send(text: "deploy", to: "u-1")
         XCTAssertEqual(attempt, .alreadyApplied(appliedAt: "2026-08-04T20:00:00Z"))
     }
+
+    /// **A send that left and was never answered is unknown, not failed** (B18):
+    /// the computer may well have typed it, so the note says "not confirmed" and the
+    /// identity is held for the retry the composer makes once the link is back.
+    /// One that never left stays a failure.
+    func testAnUnansweredSendIsIndeterminateAndHoldsItsIdentity() async {
+        var outcomes: [Result<SendTextResult, ConnectionError>] = [
+            .failure(.sentButUnanswered), .success(.sent(matched: "foragents")),
+        ]
+        let model = connectedModel { @MainActor _, _ in try outcomes.removeFirst().get() }
+        let first = await model.send(text: "deploy", to: "u-1")
+        guard case .indeterminate = first else { return XCTFail("\(first)") }
+        XCTAssertTrue(model.holdsSendIdentity(text: "deploy", to: "u-1"))
+        XCTAssertFalse(model.holdsSendIdentity(text: "roll back", to: "u-1"))
+        _ = await model.send(text: "deploy", to: "u-1")
+        let sent = identities(model)
+        XCTAssertEqual(sent[0].requestID, sent[1].requestID, "the retry is recognisable")
+        XCTAssertFalse(model.holdsSendIdentity(text: "deploy", to: "u-1"), "settled")
+
+        let offline = connectedModel { _, _ in throw ConnectionError.notConnected }
+        guard case .failed = await offline.send(text: "deploy", to: "u-1") else {
+            return XCTFail("a send that never left is a failure")
+        }
+    }
 }
