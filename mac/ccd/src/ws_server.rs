@@ -509,6 +509,9 @@ where
     // reason. Its own queue rather than the backlog's: a page moves no
     // watermark and is not a delivery the push gate may count.
     let mut history = History::default();
+    // Answers worked out off this loop (`list_projects`, `start_session`): they
+    // take seconds of shells and git, which the loop must not stand still for.
+    let (replies_tx, mut replies) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // the first tick completes immediately
 
@@ -708,6 +711,28 @@ where
                         parsed,
                     )
                     .await?;
+                    continue;
+                }
+
+                // Starting an agent carries a terminal's authority, so it is
+                // open to exactly the connections a terminal is.
+                if matches!(
+                    parsed,
+                    ClientMessage::ListProjects | ClientMessage::StartSession { .. }
+                ) {
+                    if device_id.is_none() || !private_transport {
+                        send(&mut sink, &ServerMessage::Error {
+                            code: "not_authorised".into(),
+                            message: "only a paired device on a private connection may \
+                                      start sessions".into(),
+                        }).await?;
+                        continue;
+                    }
+                    let daemon = daemon.clone();
+                    let replies = replies_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = replies.send(crate::start_session::answer(&daemon, parsed).await);
+                    });
                     continue;
                 }
 
@@ -1003,6 +1028,8 @@ where
                 }
             }
 
+            Some(reply) = replies.recv() => send(&mut sink, &reply).await?,
+
             _ = keepalive.tick() => {
                 if authed {
                     // An idle connection sends nothing, so the per-message check
@@ -1083,18 +1110,8 @@ where
         // it to do.
         ClientMessage::Hello { .. } => {}
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
-        // Not advertised yet (`start_session` is false): answered as a daemon
-        // below minor 28 answers them.
-        ClientMessage::ListProjects | ClientMessage::StartSession { .. } => {
-            send(
-                sink,
-                &ServerMessage::Error {
-                    code: "bad_request".into(),
-                    message: "this daemon does not start sessions yet".into(),
-                },
-            )
-            .await?
-        }
+        // Answered off the loop by `handle_client`, which never passes them here.
+        ClientMessage::ListProjects | ClientMessage::StartSession { .. } => {}
         ClientMessage::RegisterPush {
             token,
             environment,
@@ -8421,6 +8438,86 @@ mod tests {
             conn.opening.is_none() && conn.terminal.is_none(),
             "and nothing was spawned for it"
         );
+    }
+
+    /// **A paired device gets the project list; the bootstrap token gets a
+    /// refusal.** A folder that is gone is listed as gone, and a repository's
+    /// branch rides along.
+    #[tokio::test]
+    async fn list_projects_answers_a_paired_device_with_its_folders() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let root = std::env::temp_dir().join(format!(
+            "ccd-projects-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let repo = root.join("app");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "feature/x"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let gone = root.join("gone");
+        for (cwd, at) in [
+            (&gone, "2026-11-01T00:00:00.000Z"),
+            (&repo, "2026-11-02T00:00:00.000Z"),
+        ] {
+            let filed = server
+                .store
+                .upsert_session(&crate::store::SessionRow {
+                    session_uid: protocol::uid::new().unwrap(),
+                    session_id: "cc-1".into(),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: "codeconnect".into(),
+                    cwd: cwd.display().to_string(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Exited,
+                    created_at: at.into(),
+                    updated_at: at.into(),
+                    agent: protocol::agent::AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .unwrap();
+            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+        }
+        let list = Message::Text(r#"{"type":"list_projects"}"#.into());
+
+        let (mut bootstrap, _) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        bootstrap.send(list.clone()).await.unwrap();
+        let refused = next_json(&mut bootstrap).await.unwrap();
+        assert_eq!(refused["code"], "not_authorised", "{refused}");
+
+        let (mut phone, _) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        phone.send(list).await.unwrap();
+        let reply = match next_frame(&mut phone, Duration::from_secs(30)).await {
+            Frame::Json(reply) => reply,
+            _ => panic!("no projects reply within 30 s"),
+        };
+        assert_eq!(reply["type"], "projects", "{reply}");
+        let projects = reply["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 2, "{reply}");
+        assert_eq!(projects[0]["path"], repo.display().to_string());
+        assert_eq!(projects[0]["name"], "app");
+        assert_eq!(projects[0]["exists"], true);
+        assert_eq!(projects[0]["git_branch"], "feature/x");
+        assert_eq!(projects[1]["name"], "gone");
+        assert_eq!(projects[1]["exists"], false);
+        assert!(projects[1].get("git_branch").is_none(), "{reply}");
+        let agents: Vec<&str> = reply["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|agent| agent["agent"].as_str().unwrap())
+            .collect();
+        assert_eq!(agents, ["claude", "codex"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// The `terminal_pty` capability answers the same question the attach

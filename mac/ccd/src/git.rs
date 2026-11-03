@@ -67,6 +67,23 @@ pub async fn collect(
     }
 }
 
+/// The branch checked out in `cwd`; `None` outside a repository, on a detached
+/// head, or when git cannot answer within `timeout`.
+pub async fn branch(cwd: &str, configured_bin: Option<&str>, timeout: Duration) -> Option<String> {
+    let git = git_bin(configured_bin)?;
+    let out = run(
+        &git,
+        cwd,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()?;
+    let name = out.stdout.trim();
+    (out.ok && !name.is_empty()).then(|| name.to_string())
+}
+
 async fn collect_inner(
     cwd: &str,
     configured_bin: Option<&str>,

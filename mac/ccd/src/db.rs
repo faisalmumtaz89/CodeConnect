@@ -119,6 +119,7 @@ db_ops! {
     fn codex_generation(session_uid: String) -> Option<u64>;
     fn find_session(reference: String) -> Option<SessionRow>;
     fn list_sessions() -> Vec<SessionRow>;
+    fn projects() -> Vec<crate::store::ProjectRow>;
     fn list_pending_approvals() -> Vec<PendingApprovalRow>;
     fn upsert_pending_approval(row: PendingApprovalRow) -> bool;
     /// File one Codex approval card **and** the `ApprovalRequest` it stands
