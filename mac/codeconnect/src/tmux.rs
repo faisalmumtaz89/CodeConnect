@@ -480,7 +480,7 @@ pub fn new_session(
 /// at an argument that ends in `;` — the program got `x` for `x;` — and reads a
 /// trailing `\;` as `;`, so a `\` goes before a final `;` (tmux 3.7b, measured with
 /// runs of `;` and of `\` before it; the test below holds the shapes).
-fn pane_argument(arg: &str) -> String {
+pub(crate) fn pane_argument(arg: &str) -> String {
     match arg.strip_suffix(';') {
         Some(rest) => format!("{rest}\\;"),
         None => arg.to_string(),

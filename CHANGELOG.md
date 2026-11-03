@@ -5,8 +5,8 @@ User-facing changes, newest first. Mac releases are cut per
 
 ## Arguments keep a trailing semicolon
 
-- An argument ending in `;` given to `codeconnect claude`, such as a first prompt, now reaches
-  Claude whole; it used to lose the `;`.
+- An argument ending in `;` given to `codeconnect claude` or `codeconnect codex`, such as a first
+  prompt, now reaches the agent whole; it used to lose the `;`.
 
 ## The conversation reads at one size
 

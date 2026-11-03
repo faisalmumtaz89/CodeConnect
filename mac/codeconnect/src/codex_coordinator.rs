@@ -1079,7 +1079,9 @@ impl RealCoordinatorDeps {
 
     /// The full `tmux new-session` argv, including the pane command, which first
     /// takes on the caller's environment from `caller_env` (see
-    /// [`crate::caller_env`]).
+    /// [`crate::caller_env`]). Each argument of the pane command is spelled for
+    /// tmux's parser ([`crate::tmux::pane_argument`]), so the TUI gets its
+    /// arguments as given.
     ///
     /// Split out as a pure function of `self` so the exact argv — the one thing
     /// that decides what actually runs in the pane — is asserted in a unit test
@@ -1109,9 +1111,13 @@ impl RealCoordinatorDeps {
         argv.extend(
             crate::caller_env::pane_prefix(&self.self_exe, caller_env)
                 .iter()
-                .map(|arg| arg.to_string_lossy().into_owned()),
+                .map(|arg| crate::tmux::pane_argument(&arg.to_string_lossy())),
         );
-        argv.extend(self.host_argv());
+        argv.extend(
+            self.host_argv()
+                .iter()
+                .map(|arg| crate::tmux::pane_argument(arg)),
+        );
         argv
     }
 
