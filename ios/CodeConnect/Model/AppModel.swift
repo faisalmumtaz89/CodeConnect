@@ -1109,6 +1109,9 @@ final class AppModel {
     /// mistaken for, or written over, a real Mac's.
     private(set) var fixturesActive = false
 
+    /// This computer's projects, and the sessions this phone started on it.
+    let starter = SessionStarter()
+
     /// True while the sample fleet is on screen.
     ///
     /// Implies `fixturesActive`, and adds the two things only a shipping screen

@@ -865,6 +865,8 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// commands must not be offered: their entire safety story is that the
     /// daemon closes the view again.
     var recoversComposer: Bool { advertises(["slash_composer_recovery"]) }
+    /// `list_projects` and `start_session` are answerable.
+    var startsSessions: Bool { advertises(["start_session"]) }
     /// Approval cards carry a daemon-computed `risk` block.
     var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
     /// A live terminal can be opened over *this* connection. Connection-scoped,

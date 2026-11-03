@@ -364,7 +364,7 @@ enum Fixtures {
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,"slash_composer_recovery":true,\
         "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
-        "hook_only_approvals":true},\
+        "hook_only_approvals":true,"start_session":true},\
         "machine_name":"Jordan’s Mac Studio","machine_os":"macos",\
         "device_name":"iPhone"}
         """
@@ -486,6 +486,24 @@ enum Fixtures {
         }
     }
 
+    /// `app-N` in `/Users/dev`, or, with `-CC_FIXTURE_REAL_NAMES`, the folders
+    /// the start-a-session list holds, so a card and its project are one folder.
+    private static let realNames = ["storefront-api", "ios-app", "docs-site", "query-parser", "web-dashboard"]
+
+    private static func projectLabel(_ index: Int) -> String {
+        #if DEBUG
+            if UserDefaults.standard.bool(forKey: "CC_FIXTURE_REAL_NAMES"), index <= realNames.count {
+                return realNames[index - 1]
+            }
+        #endif
+        return "app-\(index)"
+    }
+
+    private static func cwd(_ index: Int) -> String {
+        let label = projectLabel(index)
+        return label.hasPrefix("app-") ? "/Users/dev/\(label)" : "/Users/jordan/code/\(label)"
+    }
+
     /// `blocked_on` is derived from the cards rather than stubbed with one
     /// placeholder id, so `SessionSummary.blockedOn.count` is the number of
     /// decisions that agent is really holding — which is what the fleet
@@ -504,7 +522,7 @@ enum Fixtures {
             let agent = codex ? "\"agent\":\"codex\"," : ""
             return """
                 {"session_id":"\(id)","tmux_session":"\(id)",\(agent)\
-                "cwd":"/Users/dev/app-\(index)","project_label":"app-\(index)",\
+                "cwd":"\(cwd(index))","project_label":"\(projectLabel(index))",\
                 "lifecycle":"live","link":"attached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
                 "blocked_on":[\(blocked.joined(separator: ","))]}
@@ -518,7 +536,7 @@ enum Fixtures {
             return """
                 {"session_uid":"01K1B3XQ8ZC0DE5FGH7JKMNP\(String(format: "%02d", offset))",\
                 "session_id":"fx-\(index)","tmux_session":"fx-\(index)",\
-                "cwd":"/Users/dev/app-\(index)","project_label":"app-\(index)",\
+                "cwd":"\(cwd(index))","project_label":"\(projectLabel(index))",\
                 "lifecycle":"exited","link":"detached",\
                 "last_seq":10,"created_at":"\(stamp)","updated_at":"\(stamp)",\
                 "blocked_on":[]}
