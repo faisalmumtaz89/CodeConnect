@@ -200,7 +200,7 @@ import SwiftUI
         }
 
         /// The three syntax roles, on the three backgrounds a diff line
-        /// can actually have: `bg`, the 6% row tint, and the 22% word tint. The
+        /// can actually have: `bg`, the 12% row tint, and the 22% word tint. The
         /// word tint is the dark one and it is the one that decides the values.
         private var syntaxSpecimen: some View {
             VStack(alignment: .leading, spacing: CC.space.xs) {
@@ -218,7 +218,7 @@ import SwiftUI
                 ForEach(
                     [
                         ("on bg", CC.color.bg),
-                        ("on successMuted (6%)", CC.color.successMuted),
+                        ("on successMuted (12%)", CC.color.successMuted),
                         ("on successWord (22%)", CC.color.successWord),
                         ("on dangerWord (22%)", CC.color.dangerWord),
                     ], id: \.0
@@ -1495,7 +1495,7 @@ import SwiftUI
             section("CCHunkHeader") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "a band that carries actions is a control, so it is 44pt, tap or press and hold. The gesture lives here because the hunk's own rows carry `textSelection`, which always wins the long press"
+                        "a band that carries actions is a control, so it is 44pt, tap or press and hold. The gesture lives here because a press on one of the hunk's rows is that row's own Copy line"
                     )
                     VStack(spacing: 0) {
                         CCHunkHeader(
@@ -1755,7 +1755,7 @@ import SwiftUI
             section("CCDiffRow") {
                 VStack(alignment: .leading, spacing: CC.space.sm) {
                     note(
-                        "three parts to the change signal, a 2pt bar, a marker glyph and a **6%** row tint. Not 12%: over a full-bleed mono block a 12% fill reads as a highlighter and after two screens you stop seeing it"
+                        "two parts to the change signal, as in VS Code: a marker glyph, so the kind of change never rests on colour alone, and a **12%** tint across the whole row"
                     )
                     let metrics = CCDiffMetrics(fontSize: 12, availableWidth: 340)
                     let map = CCDiffWordHighlight.map(for: Self.gridLines)
@@ -1797,9 +1797,8 @@ import SwiftUI
                 status: .renamed, hunks: [], notes: []),
         ]
 
-        /// Long enough to wrap at 340pt, so the `↳` is on screen without a drag —
-        /// it is the mark that says a break fell inside a token, and it is the
-        /// one thing on the grid that may not be dimmer than the code.
+        /// Long enough to wrap at 340pt, so a hanging continuation is on screen
+        /// without a drag.
         private static let gridLines: [UnifiedDiff.Line] = [
             .init(
                 id: 0, kind: .context, text: "    let payload = encode(text)", oldNumber: 12,
@@ -1907,9 +1906,8 @@ import SwiftUI
                 CCButton("Open sheet", size: .lg) { showing = true }
             }
             .sheet(isPresented: $showing) {
-                // Worth opening at AX5: the close cross and its ring scale
-                // together now, where the ring used to stay at 28pt and the
-                // glyph climbed straight out of it.
+                // Worth opening at AX5: the close button stays the 36pt pill,
+                // its glyph stopping at xxxLarge so it never outgrows it.
                 CCSheetChrome(
                     "Decision",
                     subtitle: "codeconnect · Bash",

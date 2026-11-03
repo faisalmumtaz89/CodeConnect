@@ -2044,8 +2044,9 @@ private struct TailPill: View {
 
     var body: some View {
         Button(action: jump) {
-            HStack(spacing: CC.space.xxs + 1) {
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 1) {
                 CCIcon("arrow-down", size: 12, weight: .semibold, relativeTo: .caption)
+                    .ccMark(beside: CC.type.footnote)
                 Text(watch.newSinceLeaving > 0 ? "\(watch.newSinceLeaving) new" : "Latest")
                     .ccType(CC.type.footnote)
             }
@@ -2625,6 +2626,7 @@ private struct ComposeNote: View {
                 if let glyph {
                     CCIcon(glyph, size: 11, weight: .semibold, relativeTo: .caption)
                         .foregroundStyle(tone == .neutral ? CC.text.tertiary : tone.color)
+                        .ccMark(beside: CC.type.footnote)
                 }
                 Text(text)
                     .ccType(CC.type.footnote)

@@ -149,6 +149,8 @@ struct CCField: View {
             if let glyph {
                 CCIcon(glyph, size: 11, weight: .semibold, relativeTo: .caption)
                     .foregroundStyle(tone.color)
+                    .ccMark(beside: CC.type.footnote)
+                    .ccMark(beside: CC.type.footnote)
             }
             // `CCProse`: a field's error and its hint are where the app names
             // the command that produces a valid value — `codeconnect pair`, `codeconnect token` —
@@ -266,9 +268,10 @@ struct CCSegmented<Value: Hashable>: View {
                 withAnimation(CC.motion.standard) { selection = option.value }
             }
         } label: {
-            HStack(spacing: CC.space.xxs + 2) {
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xxs + 2) {
                 if let icon = option.icon {
                     CCIcon(icon, size: CC.size.iconSm, weight: .semibold, relativeTo: .callout)
+                        .ccMark(beside: CC.type.callout.weight(.semibold))
                 }
                 Text(option.title)
                     // Two lines rather than a shrunk font: `minimumScaleFactor`

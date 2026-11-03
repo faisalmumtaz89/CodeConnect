@@ -272,12 +272,10 @@ struct CCBanner: View {
             horizontalSpacing: CC.space.sm, verticalSpacing: CC.space.sm,
             horizontalAlignment: .leading, verticalAlignment: .top
         ) {
-            HStack(alignment: .top, spacing: CC.space.sm) {
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
                 CCIcon(icon ?? tone.defaultGlyph, size: CC.size.icon, weight: .semibold)
                     .foregroundStyle(tone.color)
-                    // Optically centres the glyph on the title's cap height
-                    // rather than on its line box, which sits it a shade low.
-                    .padding(.top, 1)
+                    .ccMark(beside: CC.type.badgeLabel)
                     // The gutter slot: **8pt of layout, whatever the glyph's own
                     // width**, centred — the construction `CCRow`, `CCStepRow`
                     // and `CCSectionHeader`'s dot overlay all use, so a banner's

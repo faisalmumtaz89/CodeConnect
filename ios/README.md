@@ -798,7 +798,7 @@ CC.color   bg surface surfaceRaised surfaceOverlay
            accent accentPressed onAccent
            success info warning danger
            muted(_ tone:)                       // 12% semantic wash
-           successMuted dangerMuted             // diff row tints, 6%
+           successMuted dangerMuted             // diff row tints, 12%
            successWord dangerWord               // diff word tints, 22%
            syntaxKeyword syntaxString syntaxComment   // three roles, only three
 
@@ -896,7 +896,7 @@ haptic is not motion, and removing it removes information.
 | `CCScreenMark` | `CCScreenMark(glyph:tone:)` — a 32pt glyph in a 64pt bordered circle. **A component, not a modifier, because the Dynamic Type ramp is welded to the token**: `ccGlyphContainer`'s free `relativeTo:` let two marks meaning "here is the thing this screen is about" ride `.title2` and `.largeTitle`, which measured 150.33 against 108.67 at AX5 and 0.00 apart at the default `L`. Use it for any such mark |
 | `CCSheetChrome` | `CCSheetChrome("Decision", subtitle:, onClose:) { content }` (+ `trailing:` slot); pairs with `CCActionBar`. The **subtitle** resolves backtick markup, so a sheet's anchor sets its path in mono; the **title** is verbatim and bounded to two lines, because it carries a project name — arbitrary text from a filesystem, which a markup renderer would eat |
 | `CCActionPair` | `CCActionPair { deny } allow: { allow }` — **40 : 60, 12pt gap**, and no ratio parameter. A `Layout`, not a measurement: exact on the first frame, no `@State`, no `PreferenceKey`. Stacks at accessibility sizes |
-| `CCMonoBlock` | `CCMonoBlock(text, lineLimit:, tone:, showsCopy:, wraps:, truncation:, isSmall:)` — **wraps at the measured column with the diff grid's `↳`; never fades, never ellipsises, never runs under the copy button.** `lineLimit` collapses with a `SHOW ALL n LINES` disclosure rather than truncating. `wraps:` soft-wraps prose-shaped output and marks only the breaks that cut a token. `truncation:` is `CCMonoTruncation.head`/`.middle` and is for **unbounded identifiers only** — there is no `.tail`, because tail truncation cuts a command's arguments. `CCMonoBlock(inline:truncation:lines:)` is the same run with **no container**: no raised surface, no copy button, no extra height, for the three places a command appears inside something else |
+| `CCMonoBlock` | `CCMonoBlock(text, lineLimit:, tone:, showsCopy:, wraps:, truncation:, isSmall:)` — **wraps at the measured column with a `↳`; never fades, never ellipsises, never runs under the copy button.** `lineLimit` collapses with a `SHOW ALL n LINES` disclosure rather than truncating. `wraps:` soft-wraps prose-shaped output and marks only the breaks that cut a token. `truncation:` is `CCMonoTruncation.head`/`.middle` and is for **unbounded identifiers only** — there is no `.tail`, because tail truncation cuts a command's arguments. `CCMonoBlock(inline:truncation:lines:)` is the same run with **no container**: no raised surface, no copy button, no extra height, for the three places a command appears inside something else |
 | `CCSegmented` | `CCSegmented(selection:options:accessibilityLabel:)` with `CCSegmentedOption(value, title:, icon:)` |
 | `CCGapMarker` | `CCGapMarker(label:actionLabel:action:)` — inline, at its position in time |
 | `CCBanner` / `CCBannerSlot` | `CCBannerSlot([CCBannerItem(.rejected, title:…), …])` renders **exactly one**, by the ladder `rejected > offline > stale > cached > gap > truncated` |
@@ -1174,8 +1174,7 @@ caret and the keyboard show the focus.
 `AX5` (`accessibility-extra-extra-extra-large`) on iPhone 17 Pro. Nothing clips
 and nothing truncates. Six layout switches make that true: `CCRow` moves its
 trailing accessory below the text block at accessibility sizes; `CCSheetChrome`
-does the same with its toolbar circles, which are ~60pt each at AX5 and left
-`Diff · fx-1` about 150pt to wrap in; `CCBadge` stops being `fixedSize`
+does the same with its two buttons, so the title keeps the sheet's width; `CCBadge` stops being `fixedSize`
 horizontally so it wraps instead of starving the row; `CCMonoBlock` moves its
 copy button out of the text's line and into a labelled row underneath, giving
 the command the block's full width; `CCStatStrip` becomes a vertical stack; and
@@ -1190,10 +1189,9 @@ less height rather than giving up a fact:
 * the stamp's counts become **one wrapping `monoSmall` run** instead of three
   stacked `mono` lines (side by side they clipped to `+2,… −2,… 1 fi…`, which was
   the reason they were stacked);
-* the provenance line drops the constant — `Captured 0s ago`, not `Captured on
-  the Mac 0s ago · git diff HEAD` — because `git diff HEAD` is the same command
-  on every diff this product draws and the *age* is the whole point. VoiceOver
-  still gets the full sentence;
+* the stamp is one line, `+6 −3 · 2 files · 0s ago`, without `git diff HEAD`,
+  the same command on every diff this product draws; the *age* is the whole
+  point. Where the line does not fit, the age takes the next line;
 * the sticky file header drops its `+n −n` (restated on the chip directly above)
   and draws the **basename**, so the band that answers *which file am I in* stops
   head-truncating to `….swift`;
@@ -1211,19 +1209,15 @@ Measured on the render harness, `diff-sample` at AX5: the first line of code
 moved from **707pt to 574pt** down an 874pt screen, so the grid went from 167pt
 to 300pt — 80% more code, nothing dropped.
 
-The largest remaining item is measured and **not** fixed: a sheet's two toolbar
-circles are ~94pt each at AX5 (`ccGlyphContainer(28, relativeTo: .footnote)`
-× 3.4), which is 188pt of `CCSheetChrome` before any content. The kit's own answer
-exists — `CCMonoBlock` already turns its copy button into a labelled 44pt row at
-those sizes, on the reasoning that "a 60pt icon-only square is a worse target
-than a labelled 44pt row" — but applying it to `CCSheetChrome` changes every
-sheet in the product and wants its own render pass.
+A sheet's buttons no longer grow with type: they are the session header's 36pt
+pills in 44pt targets at every size, the glyph stopping at `xxxLarge` with the
+large content viewer past it, where they were ~94pt circles at AX5.
 
 **A command never breaks where the layout engine wants to.** Handed
 `git push --force origin main` at AX5, the engine breaks after the `--`, which
 reads as a bare `--` separator followed by a file called `force`.
 `CCMonoBlock` — block *and* `inline:` form — wraps at the measured column
-instead and marks every break with the diff grid's `↳`, so a break inside a
+instead and marks every break with a `↳`, so a break inside a
 token is always visible as one.
 
 **Nothing round is a fixed size.** `CCStatusDot`, every badge and chip, and every

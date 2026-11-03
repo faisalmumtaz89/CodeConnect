@@ -33,7 +33,7 @@ final class FleetTapUITests: XCTestCase {
         XCTAssertTrue(
             app.descendants(matching: .any)["session-timeline"].waitForExistence(timeout: 20),
             "the tap opens the session")
-        let diff = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Diff ·'"))
+        let diff = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Changes ·'"))
             .firstMatch
         XCTAssertFalse(diff.waitForExistence(timeout: 3), "the tap must not open the diff")
     }

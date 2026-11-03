@@ -169,6 +169,19 @@ final class DiffAndPairingTests: XCTestCase {
         XCTAssertEqual(DiffLineWrap.wrap("", columns: 40), [" "])
     }
 
+    /// A tab draws as columns to the next 4-column stop, so the changed words of
+    /// a tab-indented line are highlighted where the reader sees them: in
+    /// `\t\tdone(ctx, err)` the `, err` starts at column 16, not at character 10.
+    func testATabIndentedEditIsHighlightedAtTheColumnsItIsDrawnAt() {
+        XCTAssertEqual(DiffLineWrap.expandingTabs("\tif x {"), "    if x {")
+        XCTAssertEqual(DiffLineWrap.expandingTabs("ab\tc"), "ab  c")
+        let lines: [UnifiedDiff.Line] = [
+            .init(id: 0, kind: .deletion, text: "\t\tdone(ctx)", oldNumber: 7, newNumber: nil),
+            .init(id: 1, kind: .addition, text: "\t\tdone(ctx, err)", oldNumber: nil, newNumber: 7),
+        ]
+        XCTAssertEqual(CCDiffWordHighlight.map(for: lines)[1], [16..<21])
+    }
+
     // MARK: QR pairing
 
     func testValidQRPayloadDecodes() {

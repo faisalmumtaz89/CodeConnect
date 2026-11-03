@@ -391,10 +391,7 @@ struct CCIcon: View {
 
     var body: some View {
         let size = min(scaled, maxSize)
-        // On a text baseline the icon centres on the middle of a capital
-        // letter at its own size — half the system font's cap height above the
-        // baseline — which is where the system's own symbols sit beside words.
-        let lift = UIFont.systemFont(ofSize: size).capHeight / 2
+        // Beside text, its row gives it `.ccMark(beside:)`.
         Image(Self.asset(name, weight: weight))
             .resizable()
             .scaledToFit()
@@ -402,8 +399,6 @@ struct CCIcon: View {
             // A fixed frame keeps a column of rows aligned no matter which
             // icon each one uses.
             .frame(width: size * 1.35, alignment: .center)
-            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + lift }
-            .alignmentGuide(.lastTextBaseline) { $0[VerticalAlignment.center] + lift }
             .accessibilityHidden(true)
     }
 
@@ -630,6 +625,7 @@ private struct CCDisabledModifier: ViewModifier {
                         relativeTo: .caption
                     )
                     .foregroundStyle(CC.color.warning)
+                    .ccMark(beside: CC.type.footnote)
                     // `CCProse`, not `Text`: a blocked reason is the one string
                     // in the kit most likely to name the command that would
                     // unblock it — `codeconnect pair`, `codeconnect token` — and those

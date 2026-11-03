@@ -168,11 +168,13 @@ struct CCHoldButton: View {
     // MARK: Appearance
 
     private var label: some View {
-        HStack(spacing: CC.space.xs) {
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
             if isLoading {
                 CCProgressRing(inheritingSize: 16)
+                    .ccMark(beside: CC.type.headline)
             } else if let icon {
                 CCIcon(icon, size: CC.size.icon, weight: .semibold)
+                    .ccMark(beside: CC.type.headline)
             }
             Text(title)
                 .ccType(CC.type.headline)

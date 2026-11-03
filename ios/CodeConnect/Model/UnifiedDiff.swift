@@ -37,10 +37,10 @@ struct UnifiedDiff: Sendable, Hashable {
 
             var symbol: String {
                 switch self {
-                case .added: return "plus-circle"
-                case .deleted: return "minus-circle"
-                case .modified: return "pencil-circle"
-                case .renamed: return "arrow-circle-right"
+                case .added: return "plus"
+                case .deleted: return "minus"
+                case .modified: return "pencil-simple"
+                case .renamed: return "arrow-right"
                 case .binary: return "file-dashed"
                 }
             }

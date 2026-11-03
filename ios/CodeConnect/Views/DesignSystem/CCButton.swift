@@ -179,15 +179,17 @@ private struct CCButtonLabel: View {
     let isLoading: Bool
 
     var body: some View {
-        HStack(spacing: CC.space.xs) {
+        HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
             if isLoading {
                 // No colour passed: the ring inherits the variant's own
                 // foreground, so it is black on a primary fill and `danger` on
                 // a destructive outline without either being restated here.
                 CCProgressRing(inheritingSize: size.spinner)
+                    .ccMark(beside: size.label)
                     .transition(.opacity)
             } else if let icon {
                 CCIcon(icon, size: size.iconSize, weight: .semibold, relativeTo: .body)
+                    .ccMark(beside: size.label)
             }
             // `CCProse`, so a label that names a run — `Send to CodeConnect ·
             // \`cc-tests\`` — sets that half in mono. A button label is the last

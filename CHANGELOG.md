@@ -3,6 +3,23 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## A cleaner Changes screen on the iPhone
+
+- The screen that shows a session's uncommitted changes is called Changes, and it reads like
+  VS Code: whole lines tinted red or green with the changed words stronger, a `+` or `−` beside
+  each changed line, quiet separators between hunks, and long lines that wrap under their own
+  indent. Folded lines are one quiet "⋯ 3 unchanged lines" row; tap it to show them.
+- In tab-indented files, such as Go, the highlighted words and the wrapped lines now line up
+  with the code they belong to.
+- Press and hold a line to copy it: Copy line copies the whole line exactly as it is in the file,
+  tabs included.
+- The line above the diff is one short line, such as `+6 −3 · 2 files · 3s ago`.
+- A new or deleted file is marked with a plain plus or minus, like the pencil on an edited one.
+- At the largest text sizes the folded-lines row stays on one line and a file's chip keeps its
+  counts on screen, shortening a long name in the middle.
+- The refresh and close buttons sit 8 points apart, in the same pills as the session's header,
+  level with the title. Every other sheet's close button uses the same pill.
+
 ## A softer message box on the iPhone
 
 - The message box in a session is a little taller on one line, 52 points instead of 44, with a
@@ -29,6 +46,9 @@ User-facing changes, newest first. Mac releases are cut per
   Symbols. Every icon keeps its place and meaning; the status marks keep their filled shapes, so
   a running, finished, failed or waiting session still reads at a glance without colour.
   Phosphor's MIT licence ships with the app.
+- Every icon beside words now sits on the middle of their first line, at every text size: a
+  timeline notice, a tool call, a banner, a button, a row. Some sat up to 6 points above or below
+  it, most visibly beside "Claude is waiting for your input".
 
 ## A message sent as the connection drops no longer stays in the box
 
