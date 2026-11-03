@@ -1,6 +1,6 @@
 # CodeConnect Privacy Policy
 
-**Effective date: October 30, 2026**
+**Effective date: November 3, 2026**
 
 CodeConnect is an iOS app that connects your iPhone to the CodeConnect daemon (`ccd`) running on **your own computer**. This policy covers both halves — the app on your phone and the software on your computer, a Mac or a Linux computer — because they are one system.
 
@@ -12,7 +12,7 @@ There is no account, no login and no analytics. Your data moves between your own
 
 ## Where your data lives
 
-- **On your computer** — the daemon keeps its state under `~/.codeconnect`: the event log of your sessions (a local SQLite database), pairing records for your devices, TLS material, and configuration. None of it is transmitted anywhere except directly to your paired iPhone. Notifications are the exceptions, exactly as described under *Push notifications*: in direct mode the computer sends Apple the notification itself, whose title can be a project's folder name; relay-backed, it sends the relay only the fields listed under *The push relay*.
+- **On your computer** — the daemon keeps its state under `~/.codeconnect`: the event log of your sessions and your agents' messages to each other (a local SQLite database), pairing records for your devices, TLS material, and configuration. None of it is transmitted anywhere except directly to your paired iPhone and, for your agents' messages, to your own other computers, as listed under *Every network connection, enumerated*. Notifications are the exceptions, exactly as described under *Push notifications*: in direct mode the computer sends Apple the notification itself, whose title can be a project's folder name; relay-backed, it sends the relay only the fields listed under *The push relay*.
 - **On your iPhone** — session data is cached locally solely so the app works offline and resumes quickly. The pairing — your computer's address and the per-device token — is stored in the iOS Keychain. When relay-backed notifications are enabled, the relay credential and its generation number, the App Attest key ID, the push token and its environment, and an install identifier are stored there too. Both are `ThisDeviceOnly` items that never sync to iCloud and never migrate to another phone.
 - **On the push relay** — once a phone has enrolled for relay-backed notifications, the content-free records listed under *The push relay*, for the periods given there.
 
@@ -55,6 +55,7 @@ The **daemon and tools on your computer** connect to:
 2. **GitHub** — when `codeconnect claude` or `codeconnect codex` starts a session, a background request to GitHub's public Releases API checks for a newer release when the 24-hour cache is stale. GitHub receives your IP address and ordinary HTTP request metadata; CodeConnect sends no session, prompt, file, or project data. Set `"update_check": false` in `~/.codeconnect/config.json` to disable it. `codeconnect update`, when you run it, asks the same API and downloads that release's files from GitHub — it is only ever a thing you type. On a Mac, one more request is made without being typed, and that setting does not stop it, because sessions run on CodeConnect's own tmux even on a Mac that has another: when a release's binaries are installed without CodeConnect's tmux beside them, the next `codeconnect claude` or `codeconnect codex` asks the same API for that release and downloads its tmux from GitHub, until it is installed.
 3. **Apple** — only when your daemon holds its own Apple push key (direct mode), with the content described under *Push notifications* and nothing else.
 4. **CodeConnect's push relay** — only when relay-backed notifications are enabled, and only with the fields listed under *The push relay*. Sessions, terminals, approvals, and everything else in this system never touch it.
+5. **Your other computers running CodeConnect**: only for your agents' messages to each other, over Tailscale, and only to Mac and Linux computers of the same Tailscale user that are not tagged, on the daemon's own port. A connection carries one thing: the list of running sessions (each one's address, label, whether it is Claude Code or Codex, and its project, the last component of its working directory), one message with its text, or where a message stands. The receiving computer keeps an unread message for a day at most, and a message that is no longer waiting is deleted a week later.
 
 The **CodeConnect push relay** itself connects to:
 
