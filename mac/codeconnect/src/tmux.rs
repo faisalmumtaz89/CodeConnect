@@ -441,7 +441,7 @@ pub fn new_session(
     command.arg(&exe).arg(crate::job::SUBCOMMAND);
     command.args(claude_terminal_wrapper(std::env::var_os("TERM")));
     for arg in argv {
-        command.arg(arg);
+        command.arg(pane_argument(arg));
     }
     if let Some(copy) = copy {
         command.args([";", "pipe-pane", "-o", "-t", &target_pane(name), copy]);
@@ -474,6 +474,17 @@ pub fn new_session(
         eprintln!("codeconnect: could not hide the tmux status bar for {name}");
     }
     Ok(launched)
+}
+
+/// `arg` spelled so the pane's program receives it unchanged. tmux ends a command
+/// at an argument that ends in `;` — the program got `x` for `x;` — and reads a
+/// trailing `\;` as `;`, so a `\` goes before a final `;` (tmux 3.7b, measured with
+/// runs of `;` and of `\` before it; the test below holds the shapes).
+fn pane_argument(arg: &str) -> String {
+    match arg.strip_suffix(';') {
+        Some(rest) => format!("{rest}\\;"),
+        None => arg.to_string(),
+    }
 }
 
 /// What is read about a session in one answer from the server holding it: its
@@ -1595,6 +1606,65 @@ mod tests {
         assert!(
             !messages.contains("error") && !messages.contains("unknown"),
             "{messages}"
+        );
+    }
+
+    /// Every argument reaches the pane's program as it was given, those ending in
+    /// `;` included.
+    #[test]
+    fn a_pane_s_arguments_reach_its_program_unchanged() {
+        let Ok(tmux) = tmux_bin() else {
+            return;
+        };
+        let dir = PathBuf::from(format!("/tmp/cc-pane-args-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s");
+        let out = dir.join("out");
+        let args = [
+            "fix it;", ";", "a\\;", "a\\\\;", "e\\;;", "f;;", "x\\", "a\\;b", "plain",
+        ];
+        let mut command = Command::new(&tmux);
+        command
+            .arg("-S")
+            .arg(&socket)
+            .args([
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "--",
+                "/bin/sh",
+                "-c",
+            ])
+            .arg(format!(
+                r#"printf '%s\000' "$@" > {}; sleep 5"#,
+                out.display()
+            ))
+            .arg("sh");
+        for arg in args {
+            command.arg(pane_argument(arg));
+        }
+        let status = command.status().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !out.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let printed = std::fs::read(&out).unwrap_or_default();
+        let _ = Command::new(&tmux)
+            .arg("-S")
+            .arg(&socket)
+            .arg("kill-server")
+            .output();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(status.success());
+        let expected: Vec<u8> = args
+            .iter()
+            .flat_map(|arg| [arg.as_bytes(), b"\0"].concat())
+            .collect();
+        assert_eq!(
+            String::from_utf8_lossy(&printed),
+            String::from_utf8_lossy(&expected)
         );
     }
 
