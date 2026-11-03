@@ -8,8 +8,9 @@
 # macOS builds with `lipo`, as it does the Rust binaries; locally,
 # `arch -x86_64` runs it for Intel under Rosetta.
 #
-# Every source is the exact tarball pinned in `SOURCES`, checked against its
-# SHA-256 before it is unpacked. On macOS libevent, utf8proc and jemalloc are
+# Every source is the exact tarball pinned in `SOURCES`, fetched from its URL
+# or, when that fails, its mirror, and checked against its SHA-256 before it is
+# unpacked. On macOS libevent, utf8proc and jemalloc are
 # linked in statically; ncurses and libSystem come from the macOS SDK, so the
 # result depends only on what every Mac ships. On Linux it runs on Alpine
 # (with bash, build-base, curl, pkgconf, linux-headers and bison installed) and
@@ -44,22 +45,27 @@ prefix="$work/prefix"
 mkdir -p "$out" "$prefix/include" "$prefix/lib/pkgconfig"
 
 bundle=""
+# The first of a source's URLs that serves bytes with its pinned SHA-256.
 fetch() {
-    local name="$1" url="$2" sum="$3" file
-    file="$work/$(basename "$url")"
-    curl -fsSL --retry 3 -o "$file" "$url"
-    if [ "$($sha256 "$file" | cut -d' ' -f1)" != "$sum" ]; then
-        echo "$name: $url does not match its pinned SHA-256" >&2
-        exit 1
-    fi
-    mkdir -p "$work/src/$name"
-    tar -xf "$file" -C "$work/src/$name" --strip-components 1
+    local name="$1" sum="$2" url file
+    shift 2
+    for url in "$@"; do
+        file="$work/$(basename "$url")"
+        if curl -fsSL --connect-timeout 30 --retry 3 -o "$file" "$url" &&
+            [ "$($sha256 "$file" | cut -d' ' -f1)" = "$sum" ]; then
+            mkdir -p "$work/src/$name"
+            tar -xf "$file" -C "$work/src/$name" --strip-components 1
+            return
+        fi
+        echo "$name: $url could not be fetched or does not match its pinned SHA-256" >&2
+    done
+    exit 1
 }
-while read -r name version url sum; do
+while read -r name version url sum mirror; do
     case "$name" in
         '#'* | '') ;;
         BUNDLE) bundle="$version" ;;
-        *) case " $components " in *" $name "*) fetch "$name" "$url" "$sum" ;; esac ;;
+        *) case " $components " in *" $name "*) fetch "$name" "$sum" "$url" ${mirror:+"$mirror"} ;; esac ;;
     esac
 done <"$here/SOURCES"
 [ -n "$bundle" ] || { echo "SOURCES names no BUNDLE" >&2; exit 1; }
