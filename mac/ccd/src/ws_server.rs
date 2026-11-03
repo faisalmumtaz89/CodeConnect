@@ -3095,7 +3095,8 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         question_card: true,
         hook_only_approvals: true,
         history_pages: true,
-        start_session: false,
+        // Starting an agent is a terminal's authority, offered where one is.
+        start_session: terminal_allowed,
     }
 }
 
@@ -8486,14 +8487,16 @@ mod tests {
         }
         let list = Message::Text(r#"{"type":"list_projects"}"#.into());
 
-        let (mut bootstrap, _) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["start_session"], false, "{ack}");
         bootstrap.send(list.clone()).await.unwrap();
         let refused = next_json(&mut bootstrap).await.unwrap();
         assert_eq!(refused["code"], "not_authorised", "{refused}");
 
-        let (mut phone, _) = server
+        let (mut phone, ack) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
+        assert_eq!(ack["capabilities"]["start_session"], true, "{ack}");
         phone.send(list).await.unwrap();
         let reply = match next_frame(&mut phone, Duration::from_secs(30)).await {
             Frame::Json(reply) => reply,

@@ -2255,6 +2255,16 @@ impl Store {
         Ok(rows)
     }
 
+    /// Whether `path` is a folder [`Store::projects`] lists.
+    pub fn is_project(&self, path: &str) -> Result<bool> {
+        let conn = self.read();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE path = ?1 AND path != '')",
+            params![path],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The whole fleet, both agents, oldest first.
     ///
     /// Reads `all_sessions` — see [`create_schema`]. This daemon owns Codex runs

@@ -1008,6 +1008,22 @@ computer by the host it paired with.
 `hello_ack.machine_id`, minted once into `~/.codeconnect/machine_id` and the same
 on every handshake, so a phone that paired this daemon under two addresses (an IP,
 then its MagicDNS name) holds it as one machine.
+`>= 28` starts a session from the phone, offered (`start_session`) to the
+connections a terminal is offered to. `list_projects` is answered with
+`projects`: every folder a session has started in, most recent first, kept in
+its own table so removing a run does not remove its folder, each with its name,
+git branch and whether it still exists, and, for the computer, whether each
+agent can start (`codeconnect <agent> --version` through the user's login
+shell). `start_session {request_id, path, agent, prompt?}` takes only a listed
+folder and runs `codeconnect <agent> --no-attach [-- <prompt>]` there through
+the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
+otherwise), every value an argument of its own. The launcher writes what it
+started to the file named by `CODECONNECT_LAUNCH_RESULT`, and the daemon
+answers `start_session_result` with the session's uid, or `failed` with
+`agent_missing`, `folder_missing` or `launch_failed` and a detail, once the
+launcher has finished (a launcher still running after 80 s is killed). The same
+`request_id` again, on any connection, gets the first answer and starts
+nothing; the daemon forgets them when it restarts.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

@@ -308,6 +308,8 @@ pub struct Daemon {
     pub terminal_leases: crate::terminal::TerminalLeases,
     /// Each Claude run's mail waiter: the one hook that can wake it.
     pub(crate) waiters: crate::claude_waiter::Waiters,
+    /// The phone's session starts, by request id.
+    pub(crate) starts: crate::start_session::Starts,
 }
 
 /// **What the Claude-only gate found**, for the callers that must tell two refusals
@@ -1961,6 +1963,7 @@ impl Daemon {
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
             waiters: crate::claude_waiter::Waiters::default(),
+            starts: crate::start_session::Starts::default(),
         })
     }
 
