@@ -150,7 +150,6 @@ struct CCField: View {
                 CCIcon(glyph, size: 11, weight: .semibold, relativeTo: .caption)
                     .foregroundStyle(tone.color)
                     .ccMark(beside: CC.type.footnote)
-                    .ccMark(beside: CC.type.footnote)
             }
             // `CCProse`: a field's error and its hint are where the app names
             // the command that produces a valid value — `codeconnect pair`, `codeconnect token` —

@@ -1004,7 +1004,7 @@ struct NoticeRow: View {
             // broke mid-word in what was left: `cc-12@bui` / `ld-server-`.
             CCAdaptiveStack(
                 horizontalSpacing: TimelineSpine.gap, verticalSpacing: CC.space.xxs,
-                verticalAlignment: .top
+                verticalAlignment: .firstTextBaseline
             ) {
                 VStack(alignment: .leading, spacing: CC.space.xxs) {
                     Text(notice.title)
