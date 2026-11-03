@@ -697,15 +697,15 @@ enum RenderCatalog {
                 try driver.require(driver.text(containing: "Decision", in: app), "the sheet title")
             }),
 
-        // **A column of tool rows, which nothing else reaches.** The `deck`
+        // **A run of tool rows, which nothing else reaches.** The `deck`
         // fixture's first session has a single approval and no tool calls, so
-        // the one place tool rows stack — where their commands have to share a
-        // left edge, and where their 44pt targets are paid for — was never
-        // photographed. `stacked` puts `Bash`, `Read` and `MultiEdit` on one
-        // run precisely because their labels are three different widths.
+        // the one place tool rows stack — flush, each a line of words, and
+        // where their 44pt targets are paid for — was never photographed.
+        // `stacked` puts `Bash`, `Read` and `MultiEdit` on one run because
+        // their names are three different widths.
         RenderScenario(
             name: "session-tool-rows",
-            purpose: "a column of tool calls, with the labels at three widths",
+            purpose: "a run of tool calls, with the names at three widths",
             // Deep-linked rather than tapped. At AX5 the Running band is far
             // below the fold, so a tap-driven route reached this at reading
             // size and failed the pass at AX5 — and a scenario that only

@@ -821,6 +821,7 @@ CC.duration micro .12 · small .18 · medium .22 · exit .24 · draw .30
 CC.motion   micro small medium exit physical draw reduced standard linear(_:)
 
 CC.type    display title headline rowTitle body callout footnote
+           reading readingHeading readingMono
            micro badgeLabel fieldLabel mono monoSmall
 ```
 
@@ -830,6 +831,14 @@ its proportions from `xSmall` to `AX5`. `display` and `title` stop growing at
 `.accessibility1`; everything carrying information is uncapped, including an
 empty state's title, which is its screen's whole instruction. Mono tokens use
 `monospacedDigit()` so ticking ages do not reflow the row.
+
+**The conversation reads at one size.** `reading` (13.5, uncapped, on the Body
+ramp) sets Claude's reply and every row's own words: a tool call's name, what you
+said, a notice, an approval's or a question's title. `readingMono` (12.5) sets the
+commands beside them, so they read at the same size. A row's glyph is 12 and sits
+on the first line with `.ccMark(beside: CC.type.reading)`. Metadata (`YOU`, times,
+durations) stays smaller. A tool call is one line of words, its command right
+after its name; consecutive tool calls sit flush.
 
 `.ccType` deliberately does **not** set colour — components apply the
 documented colour explicitly, so a call site's own `.foregroundStyle` is never

@@ -244,8 +244,8 @@ final class WideToolLabelUITests: XCTestCase {
         assertInside(approval, screen, "the MCP approval row")
         assertDraws(approval, "/Users/dev/app", .head, "the MCP approval row")
 
-        // Up the turn to the tool rows that share the approval's column: the
-        // first three are the three label widths the fixture carries.
+        // Up the turn to the tool rows above it: the first three are the three
+        // name widths the fixture carries.
         for (tool, argument) in [
             ("Bash", "./soak/run.sh --pass 8"),
             ("MultiEdit", "/Users/dev/app/Sources/Router.swift"),

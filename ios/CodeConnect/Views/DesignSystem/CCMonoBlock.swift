@@ -73,6 +73,9 @@ struct CCMonoBlock: View {
     private var isInline: Bool = false
     /// How many lines the inline form may take at accessibility sizes.
     private var inlineLines: Int = 3
+    /// The inline form's face: `monoSmall`, or a caller's — the timeline's
+    /// approval row sets its command in `readingMono`, beside reading words.
+    private var inlineStyle: CCTextStyle = CC.type.monoSmall
 
     @State private var justCopied = false
     @State private var resetTask: Task<Void, Never>?
@@ -163,7 +166,8 @@ struct CCMonoBlock: View {
         inline text: String,
         truncation: CCMonoTruncation = .head,
         lines: Int = 6,
-        tone: CCTone = .neutral
+        tone: CCTone = .neutral,
+        style: CCTextStyle = CC.type.monoSmall
     ) {
         self.text = text
         self.lineLimit = nil
@@ -174,7 +178,7 @@ struct CCMonoBlock: View {
         self.isSmall = true
         self.isInline = true
         self.inlineLines = lines
-        let style = CC.type.monoSmall
+        self.inlineStyle = style
         _fontSize = ScaledMetric(wrappedValue: style.size, relativeTo: style.relativeTo)
     }
 
@@ -202,7 +206,7 @@ struct CCMonoBlock: View {
                     HStack(alignment: .firstTextBaseline, spacing: 0) {
                         if run.isContinuation {
                             Text("↳")
-                                .ccType(CC.type.monoSmall)
+                                .ccType(style)
                                 // `textTertiary`, not `textDisabled`.
                                 // `textDisabled` is reserved for genuinely
                                 // inactive text — gutter line numbers, the cwd
@@ -221,7 +225,7 @@ struct CCMonoBlock: View {
                                 .accessibilityHidden(true)
                         }
                         Text(run.text)
-                            .ccType(CC.type.monoSmall)
+                            .ccType(style)
                             .foregroundStyle(foreground)
                             .allowsTightening(false)
                     }
@@ -236,7 +240,7 @@ struct CCMonoBlock: View {
                     // so it takes `textTertiary` (4.79:1) rather than the 2.54:1
                     // `textDisabled` reserved for inactive chrome.
                     Text("… \(inlineOverflow) more line\(inlineOverflow == 1 ? "" : "s")")
-                        .ccType(CC.type.monoSmall)
+                        .ccType(style)
                         .foregroundStyle(CC.text.tertiary)
                 }
             }
@@ -246,7 +250,7 @@ struct CCMonoBlock: View {
             .accessibilityLabel(text)
         } else {
             Text(text)
-                .ccType(CC.type.monoSmall)
+                .ccType(style)
                 .foregroundStyle(foreground)
                 // Never squeezed to fit: a tightened mono run is not the text
                 // that will run.
@@ -349,7 +353,7 @@ struct CCMonoBlock: View {
         isCentred ? 0 : CCColumn.hang(from: columnInset)
     }
 
-    private var style: CCTextStyle { isSmall ? CC.type.monoSmall : CC.type.mono }
+    private var style: CCTextStyle { isInline ? inlineStyle : (isSmall ? CC.type.monoSmall : CC.type.mono) }
 
     private var uiFont: UIFont {
         .monospacedSystemFont(ofSize: fontSize, weight: .regular)
