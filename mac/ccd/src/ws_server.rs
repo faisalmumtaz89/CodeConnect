@@ -718,7 +718,9 @@ where
                 // open to exactly the connections a terminal is.
                 if matches!(
                     parsed,
-                    ClientMessage::ListProjects | ClientMessage::StartSession { .. }
+                    ClientMessage::ListProjects
+                        | ClientMessage::GetProjectGit { .. }
+                        | ClientMessage::StartSession { .. }
                 ) {
                     if device_id.is_none() || !private_transport {
                         send(&mut sink, &ServerMessage::Error {
@@ -1111,7 +1113,9 @@ where
         ClientMessage::Hello { .. } => {}
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
         // Answered off the loop by `handle_client`, which never passes them here.
-        ClientMessage::ListProjects | ClientMessage::StartSession { .. } => {}
+        ClientMessage::ListProjects
+        | ClientMessage::GetProjectGit { .. }
+        | ClientMessage::StartSession { .. } => {}
         ClientMessage::RegisterPush {
             token,
             environment,
@@ -3097,6 +3101,7 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         history_pages: true,
         // Starting an agent is a terminal's authority, offered where one is.
         start_session: terminal_allowed,
+        start_worktree: terminal_allowed,
     }
 }
 
@@ -8523,37 +8528,294 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// **The start-session wire a minor-28 daemon sends, emitted by this build.**
-    /// The phone's tests read the copy under `ios/` (byte-identical, by
-    /// `fixtures/check-duplicated-fixtures.sh`), so the phone is tested against
-    /// what this daemon writes, not against a shape written by hand.
+    /// **The start-session wire a minor-28 daemon sent, still in what this build
+    /// sends.** The fixture is what minor 28 emitted, kept as it was: the phone's
+    /// tests read its copy under `ios/` as an older Mac. This build may add a
+    /// field a minor-28 phone ignores, and nothing else, so every value the
+    /// fixture holds must be in this build's wire unchanged.
     #[tokio::test]
-    async fn the_minor_28_wire_fixture_is_what_this_build_emits() {
+    async fn the_minor_28_wire_fixture_is_still_in_what_this_build_emits() {
         const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-28-wire.json");
         let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        let emitted = derived_minor_28_wire().await;
+        if let Some(changed) = first_difference(&committed, &emitted, "$") {
+            panic!(
+                "a minor-28 phone would read this build differently at {changed}; only a \
+                 field it ignores may be added"
+            );
+        }
+    }
+
+    /// Where `wire` stops holding `fixture`: an object may carry fields the
+    /// fixture lacks, and every other value must be the same.
+    fn first_difference(
+        fixture: &serde_json::Value,
+        wire: &serde_json::Value,
+        at: &str,
+    ) -> Option<String> {
+        match (fixture, wire) {
+            (serde_json::Value::Object(fixture), serde_json::Value::Object(wire)) => {
+                fixture.iter().find_map(|(key, value)| match wire.get(key) {
+                    Some(sent) => first_difference(value, sent, &format!("{at}.{key}")),
+                    None => Some(format!("{at}.{key} (missing)")),
+                })
+            }
+            (serde_json::Value::Array(fixture), serde_json::Value::Array(wire))
+                if fixture.len() == wire.len() =>
+            {
+                fixture
+                    .iter()
+                    .zip(wire)
+                    .enumerate()
+                    .find_map(|(index, (value, sent))| {
+                        first_difference(value, sent, &format!("{at}[{index}]"))
+                    })
+            }
+            _ => (fixture != wire).then(|| format!("{at}: {fixture} became {wire}")),
+        }
+    }
+
+    /// **The branch and worktree wire a minor-29 daemon sends, emitted by this
+    /// build.** The phone's tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_minor_29_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-29-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
         assert_eq!(
-            derived_minor_28_wire().await,
+            derived_minor_29_wire().await,
             committed,
-            "the committed minor-28 wire contract no longer matches what this build emits. \
+            "the committed minor-29 wire contract no longer matches what this build emits. \
              Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
-             regenerate_the_minor_28_wire_fixture, then copy it over its copy under ios/ \
+             regenerate_the_minor_29_wire_fixture, then copy it over its copy under ios/ \
              (fixtures/check-duplicated-fixtures.sh names it)"
         );
     }
 
-    /// Rewrite `fixtures/claude/minor-28-wire.json` with what this build emits.
+    /// Rewrite `fixtures/claude/minor-29-wire.json` with what this build emits.
     #[tokio::test]
     #[ignore = "generator, not a gate"]
-    async fn regenerate_the_minor_28_wire_fixture() {
-        let wire = serde_json::to_string_pretty(&derived_minor_28_wire().await).unwrap();
+    async fn regenerate_the_minor_29_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_29_wire().await).unwrap();
         std::fs::write(
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/claude/minor-28-wire.json"
+                "/../../fixtures/claude/minor-29-wire.json"
             ),
             wire + "\n",
         )
         .unwrap();
+    }
+
+    /// A repository's worktrees and branches as a paired phone receives them over
+    /// a live socket, and a start in each kind of worktree as `start_session`
+    /// answers it, from a stub launcher.
+    ///
+    /// The repository is made afresh under `/tmp/ccd-minor-29`, and the folder
+    /// git reports (`/private/tmp/…` on a Mac) is written as that path, so the
+    /// fixture is the same on every machine. Commit dates are fixed, so the
+    /// branches come in the same order.
+    async fn derived_minor_29_wire() -> serde_json::Value {
+        use protocol::agent::AgentKind;
+        use protocol::ws::{StartSessionResult, StartWorktree};
+
+        let root = std::path::Path::new("/tmp/ccd-minor-29");
+        let _ = std::fs::remove_dir_all(root);
+        let (app, notes) = (root.join("app"), root.join("notes"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&notes).unwrap();
+        let git = |dir: &std::path::Path, date: &str, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        let commit = |dir: &std::path::Path, date: &str| {
+            git(dir, date, &["commit", "-q", "--allow-empty", "-m", date]);
+        };
+        git(&app, "2026-11-01T09:00:00Z", &["init", "-q", "-b", "main"]);
+        commit(&app, "2026-11-01T09:00:00Z");
+        for (branch, date) in [
+            ("bugfix-12", "2026-11-02T09:00:00Z"),
+            ("feature/search", "2026-11-03T09:00:00Z"),
+        ] {
+            git(&app, date, &["switch", "-q", "-c", branch]);
+            commit(&app, date);
+        }
+        git(&app, "2026-11-01T09:00:00Z", &["switch", "-q", "main"]);
+        let review = root.join("app-review");
+        let gone = root.join("app-spike");
+        for (folder, branch) in [(&review, "review/ui"), (&gone, "old-spike")] {
+            let folder = folder.display().to_string();
+            git(
+                &app,
+                "2026-11-01T09:00:00Z",
+                &["worktree", "add", "-q", "-b", branch, &folder],
+            );
+        }
+        std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::write(app.join("notes.txt"), "uncommitted\n").unwrap();
+
+        let canonical = root.canonicalize().unwrap().display().to_string();
+        let at = |folder: &std::path::Path| {
+            folder
+                .display()
+                .to_string()
+                .replacen("/tmp/ccd-minor-29", &canonical, 1)
+        };
+        let launcher = root.join("codeconnect");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\nprintf '{\"uid\":\"01K1B3XQ8ZC0DE5FGH7JKMNPQR\",\"session_name\":\"cc-4\",\"agent\":\"%s\"}\\n' \"$1\" > \"$CODECONNECT_LAUNCH_RESULT\"\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&launcher)
+            .status()
+            .unwrap();
+
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        for cwd in [at(&app), at(&notes)] {
+            let filed = server
+                .store
+                .upsert_session(&crate::store::SessionRow {
+                    session_uid: protocol::uid::new().unwrap(),
+                    session_id: "cc-1".into(),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: "codeconnect".into(),
+                    cwd,
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Exited,
+                    created_at: "2026-11-04T09:00:00.000Z".into(),
+                    updated_at: "2026-11-04T09:00:00.000Z".into(),
+                    agent: AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .unwrap();
+            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+        }
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let get_project_git =
+            |path: String| serde_json::to_value(ClientMessage::GetProjectGit { path }).unwrap();
+        let mut answers = Vec::new();
+        for path in [at(&app), at(&notes), at(&root.join("elsewhere"))] {
+            phone
+                .send(Message::Text(get_project_git(path).to_string()))
+                .await
+                .unwrap();
+            answers.push(next_json(&mut phone).await.unwrap());
+        }
+        let [project_git, project_git_not_a_repository, project_git_not_a_project] =
+            <[serde_json::Value; 3]>::try_from(answers).unwrap();
+        let get_project_git_request = get_project_git(at(&app));
+
+        let start = |path: String, agent: AgentKind, worktree: StartWorktree| {
+            let (db, launcher) = (&server.daemon.db, launcher.clone());
+            async move {
+                crate::start_session::launch(
+                    db,
+                    None,
+                    Ok(launcher),
+                    root,
+                    &path,
+                    &agent,
+                    None,
+                    Some(&worktree),
+                )
+                .await
+            }
+        };
+        let reply = |request_id: &str, result: StartSessionResult| {
+            serde_json::to_value(ServerMessage::StartSessionResult {
+                request_id: request_id.into(),
+                result,
+            })
+            .unwrap()
+        };
+        let request = |agent: AgentKind, worktree: StartWorktree| {
+            serde_json::to_value(ClientMessage::StartSession {
+                request_id: "r1".into(),
+                path: at(&app),
+                agent,
+                prompt: None,
+                worktree: Some(worktree),
+            })
+            .unwrap()
+        };
+        let existing = || StartWorktree::Existing { path: at(&review) };
+        let branch = || StartWorktree::Branch {
+            branch: "feature/search".into(),
+        };
+        let new = || StartWorktree::New {
+            name: "fix-login".into(),
+        };
+
+        let wire = serde_json::json!({
+            "hello_ack_capabilities": ack["capabilities"],
+            "get_project_git_request": get_project_git_request,
+            "project_git": project_git,
+            "project_git_not_a_repository": project_git_not_a_repository,
+            "project_git_not_a_project": project_git_not_a_project,
+            "start_session_existing_request": request(AgentKind::Claude, existing()),
+            "start_session_branch_request": request(AgentKind::Codex, branch()),
+            "start_session_new_request": request(AgentKind::Claude, new()),
+            "start_existing_started": reply(
+                "r1",
+                start(at(&app), AgentKind::Claude, existing()).await
+            ),
+            "start_branch_started": reply(
+                "r2",
+                start(at(&app), AgentKind::Codex, branch()).await
+            ),
+            "start_new_claude_started": reply(
+                "r3",
+                start(at(&app), AgentKind::Claude, new()).await
+            ),
+            "start_new_codex_started": reply(
+                "r4",
+                start(at(&app), AgentKind::Codex, new()).await
+            ),
+            "start_new_codex_failed_exists": reply(
+                "r5",
+                start(at(&app), AgentKind::Codex, new()).await
+            ),
+            "start_new_failed_invalid_name": reply(
+                "r6",
+                start(
+                    at(&app),
+                    AgentKind::Claude,
+                    StartWorktree::New {
+                        name: "fix login;".into(),
+                    }
+                )
+                .await
+            ),
+            "start_branch_failed_checked_out": reply(
+                "r7",
+                start(
+                    at(&app),
+                    AgentKind::Claude,
+                    StartWorktree::Branch {
+                        branch: "old-spike".into(),
+                    }
+                )
+                .await
+            ),
+        });
+        let _ = std::fs::remove_dir_all(root);
+        serde_json::from_str(&wire.to_string().replace(&canonical, "/tmp/ccd-minor-29")).unwrap()
     }
 
     /// The handshake and project list as a paired phone receives them over a
@@ -8649,7 +8911,17 @@ esac
             let (db, launcher) = (&server.daemon.db, launcher.clone());
             let path = path.display().to_string();
             async move {
-                crate::start_session::launch(db, Ok(launcher), root, &path, &agent, prompt).await
+                crate::start_session::launch(
+                    db,
+                    None,
+                    Ok(launcher),
+                    root,
+                    &path,
+                    &agent,
+                    prompt,
+                    None,
+                )
+                .await
             }
         };
         let reply = |request_id: &str, result: StartSessionResult| {
@@ -8675,6 +8947,7 @@ esac
                 path: app.display().to_string(),
                 agent: AgentKind::Claude,
                 prompt: Some("fix the \"login\" test; then run it\nand commit;".into()),
+                worktree: None,
             })
             .unwrap(),
             "projects": projects,

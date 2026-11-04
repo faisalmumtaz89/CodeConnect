@@ -617,7 +617,23 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///
 ///     A daemon below 28 answers both requests `bad_request`, so a client sends
 ///     them only when the capability is advertised.
-pub const PROTOCOL_MINOR: u32 = 28;
+///   * `29` — **A start picks a branch or worktree.**
+///
+///     The main folder is never switched: another branch gets a worktree of its
+///     own, in Claude Code's layout (`.claude/worktrees/<name>`). Additive, and a
+///     client written against minor 28 needs none of it:
+///       - [`ws::Capabilities::start_worktree`] — this daemon understands the rest.
+///       - [`ws::ClientMessage::GetProjectGit`] and [`ws::ServerMessage::ProjectGit`]
+///         — one folder's worktrees and its local branches, read only.
+///       - [`ws::StartWorktree`], as [`ws::ClientMessage::StartSession`]'s
+///         `worktree` — an existing worktree, a branch, or a new worktree.
+///       - `cwd` on [`ws::StartSessionResult::Started`] — the folder the session
+///         started in, when the daemon chose it.
+///
+///     A daemon below 29 answers `get_project_git` with `bad_request` and ignores
+///     `worktree`, starting in the main folder, so a client sends either only
+///     when the capability is advertised.
+pub const PROTOCOL_MINOR: u32 = 29;
 
 #[cfg(test)]
 mod ledger_tests {

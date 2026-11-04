@@ -1,4 +1,4 @@
-//! `codeconnect claude|codex --no-attach [-- <prompt>]`: start the session a
+//! `codeconnect claude|codex --no-attach [--worktree=<name>] [-- <prompt>]`: start the session a
 //! terminal start would, without showing it. The daemon runs this for a session the
 //! phone starts, through the user's login shell in the project's folder.
 //!
@@ -69,14 +69,25 @@ pub fn run(agent: AgentKind, args: &[String]) -> Result<()> {
     started.map(|_| ())
 }
 
-/// What the agent is handed: nothing, or the first prompt after `--`, so a prompt
-/// that starts with `-` is never read as a flag. Nothing else is accepted.
+/// What the agent is handed: a new worktree's name as one `--worktree=<name>`
+/// (the agent's own flag, its value attached so a name that starts with `-` stays
+/// the name), then the first prompt after `--`, so a prompt that starts with `-`
+/// is never read as a flag. Both are optional; nothing else is accepted.
 fn agent_args(args: &[String]) -> Result<Vec<String>> {
-    match args {
-        [] => Ok(Vec::new()),
-        [dashes, prompt] if dashes == "--" => Ok(vec![dashes.clone(), prompt.clone()]),
-        _ => bail!("usage: codeconnect claude|codex {FLAG} [-- <prompt>]"),
+    let (worktree, rest) = match args.split_first() {
+        Some((first, rest)) if first.starts_with("--worktree=") => (Some(first), rest),
+        _ => (None, args),
+    };
+    let prompt = match rest {
+        [] => None,
+        [dashes, prompt] if dashes == "--" => Some(prompt),
+        _ => bail!("usage: codeconnect claude|codex {FLAG} [--worktree=<name>] [-- <prompt>]"),
+    };
+    let mut passthrough: Vec<String> = worktree.into_iter().cloned().collect();
+    if let Some(prompt) = prompt {
+        passthrough.extend(["--".to_string(), prompt.clone()]);
     }
+    Ok(passthrough)
 }
 
 /// The agent's executable could not be found, which the phone reports as the agent
@@ -116,6 +127,18 @@ mod tests {
     }
 
     #[test]
+    fn a_new_worktree_name_comes_first_as_one_argument() {
+        assert_eq!(
+            agent_args(&strings(&["--worktree=fix-login"])).unwrap(),
+            strings(&["--worktree=fix-login"])
+        );
+        assert_eq!(
+            agent_args(&strings(&["--worktree=-x", "--", "-p it"])).unwrap(),
+            strings(&["--worktree=-x", "--", "-p it"])
+        );
+    }
+
+    #[test]
     fn anything_else_is_refused() {
         for args in [
             &["--model", "x"][..],
@@ -123,6 +146,9 @@ mod tests {
             &["--"],
             &["--", "a", "b"],
             &["--no-attach"],
+            &["--worktree", "x"],
+            &["--", "hi", "--worktree=x"],
+            &["--worktree=a", "--worktree=b"],
         ] {
             assert!(agent_args(&strings(args)).is_err(), "{args:?}");
         }

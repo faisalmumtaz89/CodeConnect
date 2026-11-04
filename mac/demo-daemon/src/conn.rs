@@ -272,7 +272,9 @@ where
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
         // Not advertised (`start_session` is false): answered as a daemon below
         // minor 28 answers them.
-        ClientMessage::ListProjects | ClientMessage::StartSession { .. } => {
+        ClientMessage::ListProjects
+        | ClientMessage::GetProjectGit { .. }
+        | ClientMessage::StartSession { .. } => {
             send(
                 sink,
                 &ServerMessage::Error {
@@ -535,6 +537,7 @@ fn capabilities() -> Capabilities {
         hook_only_approvals: true,
         history_pages: true,
         start_session: false,
+        start_worktree: false,
     }
 }
 

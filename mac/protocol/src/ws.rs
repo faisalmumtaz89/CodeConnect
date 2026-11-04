@@ -453,12 +453,23 @@ pub enum ClientMessage {
     ///
     /// `request_id` makes the start idempotent: the same id sent again, on this
     /// connection or a later one, gets the first answer and starts nothing new.
+    ///
+    /// `worktree` (minor 29, `start_worktree`) starts it in another worktree of
+    /// that folder's repository instead; absent, it starts in `path` itself.
     StartSession {
         request_id: String,
         path: String,
         agent: crate::agent::AgentKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<StartWorktree>,
+    },
+    /// **The git worktrees and branches of one listed folder** (minor 29,
+    /// `start_worktree`), answered with one [`ServerMessage::ProjectGit`]. Read
+    /// only: nothing is fetched, written or run.
+    GetProjectGit {
+        path: String,
     },
 
     Ping,
@@ -663,8 +674,60 @@ pub enum ServerMessage {
         request_id: String,
         result: StartSessionResult,
     },
+    /// The answer to [`ClientMessage::GetProjectGit`]; `git` is absent when
+    /// `path` is not in a git repository.
+    ProjectGit {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git: Option<ProjectGit>,
+    },
 
     Pong,
+}
+
+/// Where in a folder's repository a [`ClientMessage::StartSession`] runs. Its
+/// main folder is never switched: another branch gets a worktree of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StartWorktree {
+    /// In a worktree [`ProjectGit::worktrees`] listed, by its `path`.
+    Existing { path: String },
+    /// In a new worktree for a local branch [`ProjectGit::branches`] listed.
+    Branch { branch: String },
+    /// In a new worktree named `name`: Claude makes it (`claude --worktree <name>`,
+    /// on its branch `worktree-<name>`); for Codex it is made in the same place, on
+    /// a new branch named `name`.
+    New { name: String },
+}
+
+/// One folder's repository, as [`ClientMessage::GetProjectGit`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectGit {
+    /// `git worktree list`, in git's order: the main checkout first.
+    pub worktrees: Vec<Worktree>,
+    /// Local branches checked out in no worktree, newest commit first, at most
+    /// [`MAX_PROJECT_BRANCHES`].
+    pub branches: Vec<String>,
+    /// More branches exist than `branches` holds.
+    pub branches_truncated: bool,
+}
+
+/// The most branches one [`ProjectGit`] lists.
+pub const MAX_PROJECT_BRANCHES: usize = 100;
+
+/// One worktree of a repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Worktree {
+    pub path: String,
+    /// The repository's main checkout.
+    pub main: bool,
+    /// Absent on a detached head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// It has uncommitted changes, untracked files included.
+    pub dirty: bool,
+    /// git lists it, but its folder is gone; nothing can start there.
+    pub missing: bool,
 }
 
 /// A folder sessions have run in, from every session this computer has hosted,
@@ -703,8 +766,14 @@ pub struct AgentAvailability {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum StartSessionResult {
     /// The session exists; `session_uid` is how the fleet names it. It may reach
-    /// the fleet a moment after this answer.
-    Started { session_uid: String },
+    /// the fleet a moment after this answer. `cwd` is the folder it started in
+    /// (minor 29), absent when the agent makes that folder itself (a new Claude
+    /// worktree): the fleet shows it once the agent is there.
+    Started {
+        session_uid: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
     /// No session was started. `detail` is human text, safe to show verbatim.
     Failed {
         reason: StartFailure,
@@ -979,6 +1048,12 @@ pub struct Capabilities {
     /// a client sends them, and offers a new session, only when this is advertised.
     #[serde(default)]
     pub start_session: bool,
+    /// **A start can pick a branch or worktree** ([`ClientMessage::GetProjectGit`],
+    /// [`ClientMessage::StartSession`]'s `worktree`, minor 29). Absent decodes
+    /// `false`: an older daemon answers `get_project_git` with `bad_request` and
+    /// starts in the main folder whatever `worktree` says.
+    #[serde(default)]
+    pub start_worktree: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -1831,10 +1906,15 @@ mod tests {
             "starting a session from the phone (`list_projects`, `start_session`, \
              `start_session` capability) is minor 28"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 29,
+            "picking a branch or worktree at start (`get_project_git`, `start_session`'s \
+             `worktree`, `started.cwd`, `start_worktree` capability) is minor 29"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 28);
+        assert_eq!(crate::PROTOCOL_MINOR, 29);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2341,6 +2421,7 @@ mod tests {
             hook_only_approvals: true,
             history_pages: true,
             start_session: true,
+            start_worktree: true,
         }
     }
 
@@ -2803,6 +2884,7 @@ mod tests {
                 path: "/Users/me/src/app".into(),
                 agent: crate::agent::AgentKind::Claude,
                 prompt: Some("-fix \"it\"; $(x)\nnow;".into()),
+                worktree: None,
             },
             serde_json::json!({"type": "start_session", "request_id": "r1",
                 "path": "/Users/me/src/app", "agent": "claude",
@@ -2814,6 +2896,7 @@ mod tests {
                 path: "/srv/x".into(),
                 agent: crate::agent::AgentKind::Codex,
                 prompt: None,
+                worktree: None,
             },
             serde_json::json!({"type": "start_session", "request_id": "r2",
                 "path": "/srv/x", "agent": "codex"}),
@@ -2871,6 +2954,7 @@ mod tests {
                 request_id: "r1".into(),
                 result: StartSessionResult::Started {
                     session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+                    cwd: None,
                 },
             },
             serde_json::json!({"type": "start_session_result", "request_id": "r1",
@@ -2910,6 +2994,127 @@ mod tests {
 
         let current = serde_json::to_value(capabilities_fixture()).unwrap();
         assert_eq!(current["start_session"], true);
+    }
+
+    /// **The branch and worktree wire, pinned as the phone matches it** (minor 29).
+    #[test]
+    fn the_worktree_messages_round_trip_as_the_phone_matches_them() {
+        fn round_trip<T>(message: T, expected: serde_json::Value)
+        where
+            T: Serialize + serde::de::DeserializeOwned,
+        {
+            assert_eq!(serde_json::to_value(&message).unwrap(), expected);
+            let decoded: T = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
+
+        round_trip(
+            ClientMessage::GetProjectGit {
+                path: "/Users/me/src/app".into(),
+            },
+            serde_json::json!({"type": "get_project_git", "path": "/Users/me/src/app"}),
+        );
+        for (worktree, expected) in [
+            (
+                StartWorktree::Existing {
+                    path: "/Users/me/src/app/.claude/worktrees/fix".into(),
+                },
+                serde_json::json!({"kind": "existing",
+                    "path": "/Users/me/src/app/.claude/worktrees/fix"}),
+            ),
+            (
+                StartWorktree::Branch {
+                    branch: "feature/search".into(),
+                },
+                serde_json::json!({"kind": "branch", "branch": "feature/search"}),
+            ),
+            (
+                StartWorktree::New {
+                    name: "fix-login".into(),
+                },
+                serde_json::json!({"kind": "new", "name": "fix-login"}),
+            ),
+        ] {
+            round_trip(
+                ClientMessage::StartSession {
+                    request_id: "r1".into(),
+                    path: "/Users/me/src/app".into(),
+                    agent: crate::agent::AgentKind::Claude,
+                    prompt: None,
+                    worktree: Some(worktree),
+                },
+                serde_json::json!({"type": "start_session", "request_id": "r1",
+                    "path": "/Users/me/src/app", "agent": "claude", "worktree": expected}),
+            );
+        }
+
+        round_trip(
+            ServerMessage::ProjectGit {
+                path: "/Users/me/src/app".into(),
+                git: Some(ProjectGit {
+                    worktrees: vec![
+                        Worktree {
+                            path: "/Users/me/src/app".into(),
+                            main: true,
+                            branch: Some("main".into()),
+                            dirty: true,
+                            missing: false,
+                        },
+                        Worktree {
+                            path: "/Users/me/src/app-old".into(),
+                            main: false,
+                            branch: None,
+                            dirty: false,
+                            missing: true,
+                        },
+                    ],
+                    branches: vec!["feature/search".into()],
+                    branches_truncated: false,
+                }),
+            },
+            serde_json::json!({"type": "project_git", "path": "/Users/me/src/app", "git": {
+                "worktrees": [
+                    {"path": "/Users/me/src/app", "main": true, "branch": "main",
+                     "dirty": true, "missing": false},
+                    {"path": "/Users/me/src/app-old", "main": false,
+                     "dirty": false, "missing": true}],
+                "branches": ["feature/search"], "branches_truncated": false}}),
+        );
+        round_trip(
+            ServerMessage::ProjectGit {
+                path: "/Users/me/notes".into(),
+                git: None,
+            },
+            serde_json::json!({"type": "project_git", "path": "/Users/me/notes"}),
+        );
+        round_trip(
+            ServerMessage::StartSessionResult {
+                request_id: "r1".into(),
+                result: StartSessionResult::Started {
+                    session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+                    cwd: Some("/Users/me/src/app/.claude/worktrees/feature+search".into()),
+                },
+            },
+            serde_json::json!({"type": "start_session_result", "request_id": "r1",
+                "result": {"status": "started", "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+                           "cwd": "/Users/me/src/app/.claude/worktrees/feature+search"}}),
+        );
+    }
+
+    /// A minor-28 ack has no `start_worktree`, so a client reading it offers no
+    /// branch or worktree choice; this daemon's own ack says it.
+    #[test]
+    fn start_worktree_is_absent_from_an_older_ack_and_present_in_this_one() {
+        let old: Capabilities = serde_json::from_str(
+            r#"{"can_approve_reliably":true,"fail_mode":"fail_open",
+                "answer_path":"hook_return","hold_secs":0,"send_text":true,
+                "capture":true,"push":false,"tls":true,"start_session":true}"#,
+        )
+        .unwrap();
+        assert!(old.start_session && !old.start_worktree);
+
+        let current = serde_json::to_value(capabilities_fixture()).unwrap();
+        assert_eq!(current["start_worktree"], true);
     }
 
     #[test]

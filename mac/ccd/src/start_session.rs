@@ -16,7 +16,8 @@ use futures_util::StreamExt;
 use protocol::agent::AgentKind;
 use protocol::launch_result::{LaunchResult, ENV_LAUNCH_RESULT};
 use protocol::ws::{
-    AgentAvailability, ClientMessage, Project, ServerMessage, StartFailure, StartSessionResult,
+    AgentAvailability, ClientMessage, Project, ProjectGit, ServerMessage, StartFailure,
+    StartSessionResult, StartWorktree, Worktree,
 };
 use tokio::sync::watch;
 
@@ -32,6 +33,12 @@ const START_TIMEOUT: Duration = Duration::from_secs(80);
 /// How long one folder's git branch may take.
 const BRANCH_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long one git read for a project's worktrees and branches may take.
+const GIT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The longest worktree name, as Claude Code's `--worktree` takes it.
+const MAX_WORKTREE_NAME_BYTES: usize = 64;
+
 /// How many folders' branches are read at once.
 const BRANCH_READS_AT_ONCE: usize = 8;
 
@@ -45,27 +52,33 @@ const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
 pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
     match message {
         ClientMessage::ListProjects => list_projects(daemon).await,
+        ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,
         ClientMessage::StartSession {
             request_id,
             path,
             agent,
             prompt,
+            worktree,
         } => {
             let state_dir = protocol::root_dir();
             let launch = launch(
                 &daemon.db,
+                daemon.config.git_bin.as_deref(),
                 crate::state::codex_launcher(),
                 &state_dir,
                 &path,
                 &agent,
                 prompt.as_deref(),
+                worktree.as_ref(),
             );
             ServerMessage::StartSessionResult {
                 result: daemon.starts.once(&request_id, launch).await,
                 request_id,
             }
         }
-        _ => unreachable!("handle_client passes only list_projects and start_session here"),
+        _ => unreachable!(
+            "handle_client passes only list_projects, get_project_git and start_session here"
+        ),
     }
 }
 
@@ -147,16 +160,19 @@ fn failed(reason: StartFailure, detail: String) -> StartSessionResult {
     StartSessionResult::Failed { reason, detail }
 }
 
-/// Run `codeconnect <agent> --no-attach [-- <prompt>]` in `path` through the
-/// user's login shell, and read what it started from its result line, a file in
-/// `state_dir`.
+/// Run `codeconnect <agent> --no-attach [--worktree=<name>] [-- <prompt>]`
+/// through the user's login shell, in `path` or the worktree `worktree` names, and
+/// read what it started from its result line, a file in `state_dir`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch(
     db: &crate::db::Db,
+    git_bin: Option<&str>,
     launcher: Result<PathBuf, String>,
     state_dir: &Path,
     path: &str,
     agent: &AgentKind,
     prompt: Option<&str>,
+    worktree: Option<&StartWorktree>,
 ) -> StartSessionResult {
     if !matches!(agent, AgentKind::Claude | AgentKind::Codex) {
         return failed(
@@ -170,20 +186,8 @@ pub(crate) async fn launch(
             "the first message is longer than 8 KiB".into(),
         );
     }
-    match db.is_project(path.to_string()).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return failed(
-                StartFailure::LaunchFailed,
-                format!("{path} is not one of this computer's projects"),
-            )
-        }
-        Err(err) => {
-            return failed(
-                StartFailure::LaunchFailed,
-                format!("could not read the project list: {err}"),
-            )
-        }
+    if let Err((_, why)) = may_name(db, path).await {
+        return failed(StartFailure::LaunchFailed, why);
     }
     if !Path::new(path).is_dir() {
         return failed(
@@ -194,6 +198,17 @@ pub(crate) async fn launch(
     let launcher = match launcher {
         Ok(launcher) => launcher,
         Err(why) => return failed(StartFailure::LaunchFailed, why),
+    };
+    let place = match worktree {
+        None => Place {
+            cwd: path.to_string(),
+            known: true,
+            flag: None,
+        },
+        Some(worktree) => match place(git_bin, path, agent, worktree).await {
+            Ok(place) => place,
+            Err(why) => return failed(StartFailure::LaunchFailed, why),
+        },
     };
     let result_path = match protocol::uid::new() {
         Ok(uid) => state_dir.join(format!("launch-{uid}.json")),
@@ -209,12 +224,15 @@ pub(crate) async fn launch(
         OsStr::new(agent.as_str()),
         OsStr::new("--no-attach"),
     ];
+    if let Some(flag) = &place.flag {
+        args.push(OsStr::new(flag));
+    }
     if let Some(prompt) = prompt {
         args.extend([OsStr::new("--"), OsStr::new(prompt)]);
     }
     let mut command = login_shell_command(&args);
     command
-        .current_dir(path)
+        .current_dir(&place.cwd)
         .env(ENV_LAUNCH_RESULT, &result_path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -228,9 +246,10 @@ pub(crate) async fn launch(
     let written = LaunchResult::read_from(&result_path);
     let _ = std::fs::remove_file(&result_path);
     match (written, output) {
-        (Ok(LaunchResult::Started { uid, .. }), _) => {
-            StartSessionResult::Started { session_uid: uid }
-        }
+        (Ok(LaunchResult::Started { uid, .. }), _) => StartSessionResult::Started {
+            session_uid: uid,
+            cwd: place.known.then_some(place.cwd),
+        },
         (Ok(LaunchResult::Failed { error, detail }), _) => failed(error, detail),
         (Err(_), Err(_)) => failed(
             StartFailure::LaunchFailed,
@@ -254,6 +273,218 @@ pub(crate) async fn launch(
                     )
                 }),
         ),
+    }
+}
+
+/// Whether the phone may name `path`, for a start or a git read alike: one of this
+/// computer's projects. Refused, it gives the error code a request answers with and
+/// the reason.
+async fn may_name(db: &crate::db::Db, path: &str) -> Result<(), (&'static str, String)> {
+    match db.is_project(path.to_string()).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err((
+            "not_a_project",
+            format!("{path} is not one of this computer's projects"),
+        )),
+        Err(err) => Err((
+            "projects_unavailable",
+            format!("could not read the project list: {err}"),
+        )),
+    }
+}
+
+/// Where a start runs.
+struct Place {
+    /// The folder the launcher runs in.
+    cwd: String,
+    /// The session runs in `cwd`; false when the agent makes its own folder.
+    known: bool,
+    /// The one flag the agent is handed before the prompt.
+    flag: Option<String>,
+}
+
+/// The folder for a start in `worktree`, making the worktree first when it is
+/// new. Every check reads the repository afresh, and every refusal says why.
+async fn place(
+    git_bin: Option<&str>,
+    path: &str,
+    agent: &AgentKind,
+    worktree: &StartWorktree,
+) -> Result<Place, String> {
+    let entries = crate::git::worktrees(path, git_bin, GIT_READ_TIMEOUT)
+        .await
+        .ok_or_else(|| format!("{path} is not in a git repository"))?;
+    let main = entries
+        .first()
+        .map(|entry| entry.path.clone())
+        .ok_or_else(|| format!("git listed no worktrees for {path}"))?;
+    let made = |cwd: PathBuf| Place {
+        cwd: cwd.display().to_string(),
+        known: true,
+        flag: None,
+    };
+    match worktree {
+        StartWorktree::Existing { path: wanted } => {
+            match entries.iter().find(|entry| &entry.path == wanted) {
+                Some(entry) if entry.prunable => {
+                    Err(format!("the worktree {wanted} no longer exists"))
+                }
+                Some(_) => Ok(made(PathBuf::from(wanted))),
+                None => Err(format!("{wanted} is not a worktree of this repository")),
+            }
+        }
+        StartWorktree::Branch { branch } => {
+            if let Some(entry) = entries
+                .iter()
+                .find(|entry| entry.branch.as_deref() == Some(branch.as_str()))
+            {
+                return Err(format!("{branch} is already checked out in {}", entry.path));
+            }
+            let branches = crate::git::local_branches(path, git_bin, GIT_READ_TIMEOUT).await;
+            if !branches.is_some_and(|branches| branches.contains(branch)) {
+                return Err(format!("{branch} is not a local branch of this repository"));
+            }
+            let folder = worktree_folder(&main, branch);
+            add_worktree(
+                path,
+                &[OsStr::new("--"), folder.as_os_str(), OsStr::new(branch)],
+            )
+            .await?;
+            Ok(made(folder))
+        }
+        StartWorktree::New { name } => {
+            check_worktree_name(name)?;
+            if matches!(agent, AgentKind::Claude) {
+                return Ok(Place {
+                    cwd: path.to_string(),
+                    known: false,
+                    flag: Some(format!("--worktree={name}")),
+                });
+            }
+            // The branch is the name as typed. Claude's own `worktree-` prefix marks a
+            // branch Claude deletes on a clean exit, commits and all, should a later
+            // `claude --worktree <name>` reopen this one.
+            let folder = worktree_folder(&main, name);
+            add_worktree(
+                path,
+                &[
+                    OsStr::new("-b"),
+                    OsStr::new(name),
+                    OsStr::new("--"),
+                    folder.as_os_str(),
+                    OsStr::new("HEAD"),
+                ],
+            )
+            .await?;
+            Ok(made(folder))
+        }
+    }
+}
+
+/// Where a worktree named `name` goes: Claude Code's own layout, with each `/`
+/// written `+` as Claude writes it.
+fn worktree_folder(main: &str, name: &str) -> PathBuf {
+    Path::new(main)
+        .join(".claude")
+        .join("worktrees")
+        .join(name.replace('/', "+"))
+}
+
+/// Claude Code's rule for a `--worktree` name (2.1.317), held to for both agents.
+fn check_worktree_name(name: &str) -> Result<(), String> {
+    let refuse = |why: &str| Err(format!("\"{name}\" is not a valid worktree name: {why}"));
+    if name.len() > MAX_WORKTREE_NAME_BYTES {
+        return refuse("it is longer than 64 characters");
+    }
+    for segment in name.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return refuse("each \"/\"-separated part must be non-empty and not \".\" or \"..\"");
+        }
+        if !segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        {
+            return refuse("use only letters, digits, dots, underscores and dashes");
+        }
+    }
+    Ok(())
+}
+
+/// `git worktree add <args>` in `path`, through the user's login shell as the
+/// launcher runs: a checkout runs the repository's filters and hooks (Git LFS
+/// among them), and they need the PATH a terminal has. Git's own last line is
+/// the reason when it refuses.
+async fn add_worktree(path: &str, args: &[&OsStr]) -> Result<(), String> {
+    let mut argv: Vec<&OsStr> = vec![
+        OsStr::new("git"),
+        OsStr::new("-C"),
+        OsStr::new(path),
+        OsStr::new("worktree"),
+        OsStr::new("add"),
+    ];
+    argv.extend_from_slice(args);
+    let mut command = login_shell_command(&argv);
+    command
+        .current_dir(path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    match tokio::time::timeout(START_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => Ok(()),
+        Ok(Ok(output)) => Err(last_line(&output.stderr)
+            .unwrap_or_else(|| format!("git worktree add ended ({})", output.status))),
+        Ok(Err(err)) => Err(format!("could not run the login shell: {err}")),
+        Err(_) => Err(format!(
+            "git worktree add did not finish within {} s",
+            START_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// The answer to `get_project_git`.
+async fn project_git(daemon: &Arc<Daemon>, path: String) -> ServerMessage {
+    if let Err((code, message)) = may_name(&daemon.db, &path).await {
+        return ServerMessage::Error {
+            code: code.into(),
+            message,
+        };
+    }
+    let git_bin = daemon.config.git_bin.as_deref();
+    let Some(entries) = crate::git::worktrees(&path, git_bin, GIT_READ_TIMEOUT).await else {
+        return ServerMessage::ProjectGit { path, git: None };
+    };
+    let mut worktrees = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        worktrees.push(Worktree {
+            main: index == 0,
+            branch: entry.branch.clone(),
+            dirty: !entry.prunable
+                && crate::git::dirty(&entry.path, git_bin, GIT_READ_TIMEOUT).await,
+            missing: entry.prunable,
+            path: entry.path.clone(),
+        });
+    }
+    let mut branches: Vec<String> = crate::git::local_branches(&path, git_bin, GIT_READ_TIMEOUT)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|branch| {
+            !entries
+                .iter()
+                .any(|entry| entry.branch.as_deref() == Some(branch.as_str()))
+        })
+        .collect();
+    let branches_truncated = branches.len() > protocol::ws::MAX_PROJECT_BRANCHES;
+    branches.truncate(protocol::ws::MAX_PROJECT_BRANCHES);
+    ServerMessage::ProjectGit {
+        path,
+        git: Some(ProjectGit {
+            worktrees,
+            branches,
+            branches_truncated,
+        }),
     }
 }
 
@@ -434,18 +665,170 @@ mod tests {
         async fn start(&self, path: &str, prompt: Option<&str>) -> StartSessionResult {
             launch(
                 &self.db,
+                None,
                 Ok(self.launcher.clone()),
                 &self.root,
                 path,
                 &AgentKind::Claude,
                 prompt,
+                None,
             )
             .await
+        }
+
+        async fn start_in(
+            &self,
+            path: &str,
+            agent: AgentKind,
+            worktree: StartWorktree,
+        ) -> StartSessionResult {
+            launch(
+                &self.db,
+                None,
+                Ok(self.launcher.clone()),
+                &self.root,
+                path,
+                &agent,
+                None,
+                Some(&worktree),
+            )
+            .await
+        }
+
+        /// List `cwd` as a project, as a session that ran there would.
+        async fn list(&self, cwd: &str) {
+            let at = protocol::time::now_rfc3339();
+            let filed = self
+                .db
+                .upsert_session(crate::store::SessionRow {
+                    session_uid: protocol::uid::new().unwrap(),
+                    session_id: "cc-2".into(),
+                    tmux_session: "cc-2".into(),
+                    tmux_socket: "codeconnect".into(),
+                    cwd: cwd.into(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Exited,
+                    created_at: at.clone(),
+                    updated_at: at,
+                    agent: AgentKind::Codex,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+        }
+
+        /// The worktree on `branch`, as git lists it.
+        async fn worktree_on(&self, branch: &str) -> crate::git::WorktreeEntry {
+            crate::git::worktrees(&self.project(), None, GIT_READ_TIMEOUT)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.branch.as_deref() == Some(branch))
+                .unwrap()
+        }
+
+        /// The project as a repository: `main` at commit A, a linked worktree on
+        /// `wt/existing` one commit ahead at B, a worktree whose folder is gone, and
+        /// branches whose names a shell would read as code.
+        fn make_repository(&self) {
+            git(&self.project, &["init", "-q", "-b", "main"]);
+            git(&self.project, &["commit", "-q", "--allow-empty", "-m", "A"]);
+            for branch in BRANCHES {
+                git(&self.project, &["branch", branch]);
+            }
+            let existing = self.existing().display().to_string();
+            git(
+                &self.project,
+                &["worktree", "add", "-q", "-b", "wt/existing", &existing],
+            );
+            git(
+                &self.existing(),
+                &["commit", "-q", "--allow-empty", "-m", "B"],
+            );
+            let gone = self.root.join("gone");
+            let gone_path = gone.display().to_string();
+            git(
+                &self.project,
+                &["worktree", "add", "-q", "-b", "wt/gone", &gone_path],
+            );
+            std::fs::remove_dir_all(&gone).unwrap();
+        }
+
+        fn existing(&self) -> PathBuf {
+            self.root.join("wt existing")
+        }
+
+        /// What `git` itself calls this repository's main folder.
+        fn main(&self) -> String {
+            git(
+                &self.project,
+                &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+            )
+        }
+
+        /// Everything about the main folder a start must leave alone.
+        fn main_state(&self) -> String {
+            [
+                git(&self.project, &["rev-parse", "HEAD"]),
+                git(&self.project, &["symbolic-ref", "HEAD"]),
+                git(&self.project, &["status", "--porcelain=v2", "--branch"])
+                    .lines()
+                    .filter(|line| *line != "? .claude/")
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ]
+            .join("\n")
+        }
+
+        fn launcher_runs(&self) -> usize {
+            std::fs::read_to_string(self.root.join("codeconnect.runs"))
+                .map(|runs| runs.lines().count())
+                .unwrap_or(0)
+        }
+
+        fn launcher_cwd(&self) -> PathBuf {
+            let cwd = std::fs::read_to_string(self.root.join("codeconnect.cwd")).unwrap();
+            PathBuf::from(cwd.trim())
+        }
+
+        fn launcher_argv(&self) -> Vec<String> {
+            let argv = std::fs::read(self.root.join("codeconnect.argv")).unwrap();
+            argv.split(|byte| *byte == 0)
+                .filter(|arg| !arg.is_empty())
+                .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
+                .collect()
         }
 
         fn project(&self) -> String {
             self.project.display().to_string()
         }
+    }
+
+    /// Branches a start must hand git as they are.
+    const BRANCHES: [&str; 3] = [
+        "unicode-ünï-☕-分支",
+        "sub$(touch${IFS}PWNED)",
+        "feature/search",
+    ];
+
+    /// `git -C dir <args>` as a person would run it, its output trimmed.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
     impl Drop for Rig {
@@ -473,7 +856,8 @@ mod tests {
         assert_eq!(
             result,
             StartSessionResult::Started {
-                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into()
+                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+                cwd: Some(rig.project()),
             }
         );
         let argv = std::fs::read(rig.root.join("codeconnect.argv")).unwrap();
@@ -585,5 +969,249 @@ mod tests {
             reason(rig.start(&rig.project(), Some(&long)).await).0,
             StartFailure::LaunchFailed
         );
+    }
+
+    /// The stub launcher, keeping what it was run with, then starting.
+    fn recording(tag: &str) -> Rig {
+        let rig = Rig::new(
+            tag,
+            &format!(
+                "echo run >> \"$0.runs\"; pwd -P > \"$0.cwd\"; printf '%s\\0' \"$@\" > \"$0.argv\"; {STARTED}"
+            ),
+        );
+        rig.make_repository();
+        rig
+    }
+
+    fn started_in(result: &StartSessionResult) -> Option<String> {
+        match result {
+            StartSessionResult::Started { cwd, .. } => cwd.clone(),
+            other => panic!("expected a start, got {other:?}"),
+        }
+    }
+
+    fn refusal(result: StartSessionResult) -> String {
+        match result {
+            StartSessionResult::Failed {
+                reason: StartFailure::LaunchFailed,
+                detail,
+            } => detail,
+            other => panic!("expected launch_failed, got {other:?}"),
+        }
+    }
+
+    fn canonical(path: &str) -> PathBuf {
+        Path::new(path).canonicalize().unwrap()
+    }
+
+    /// **An existing worktree is started in as it is**: the agent runs there, the
+    /// answer names it, and git is not written to.
+    #[tokio::test]
+    async fn an_existing_worktree_is_started_in_as_it_is() {
+        let rig = recording("existing");
+        let existing = rig.worktree_on("wt/existing").await.path;
+        let listed = git(&rig.project, &["worktree", "list", "--porcelain"]);
+        let before = rig.main_state();
+
+        let result = rig
+            .start_in(
+                &rig.project(),
+                AgentKind::Codex,
+                StartWorktree::Existing {
+                    path: existing.clone(),
+                },
+            )
+            .await;
+        assert_eq!(started_in(&result).as_deref(), Some(existing.as_str()));
+        assert_eq!(rig.launcher_cwd(), canonical(&existing));
+        assert_eq!(
+            git(&rig.project, &["worktree", "list", "--porcelain"]),
+            listed
+        );
+        assert_eq!(rig.main_state(), before);
+
+        let gone = rig.worktree_on("wt/gone").await.path;
+        let elsewhere = rig.root.display().to_string();
+        for (path, says) in [
+            (gone, "no longer exists"),
+            (elsewhere, "is not a worktree of this repository"),
+        ] {
+            let detail = refusal(
+                rig.start_in(
+                    &rig.project(),
+                    AgentKind::Claude,
+                    StartWorktree::Existing { path },
+                )
+                .await,
+            );
+            assert!(detail.contains(says), "{detail}");
+        }
+        assert_eq!(rig.launcher_runs(), 1, "a refused start runs nothing");
+    }
+
+    /// **A branch gets a worktree of its own, on that branch, in Claude Code's
+    /// layout**, its name reaching git as it is, and the main folder is untouched.
+    #[tokio::test]
+    async fn a_branch_gets_its_own_worktree_and_the_main_folder_stays_as_it_was() {
+        let rig = recording("branch");
+        let main = rig.main();
+        let before = rig.main_state();
+
+        for branch in BRANCHES {
+            let result = rig
+                .start_in(
+                    &rig.project(),
+                    AgentKind::Claude,
+                    StartWorktree::Branch {
+                        branch: branch.into(),
+                    },
+                )
+                .await;
+            let folder = Path::new(&main)
+                .join(".claude/worktrees")
+                .join(branch.replace('/', "+"));
+            assert_eq!(started_in(&result), Some(folder.display().to_string()));
+            assert_eq!(git(&folder, &["symbolic-ref", "--short", "HEAD"]), branch);
+            assert_eq!(rig.launcher_cwd(), folder.canonicalize().unwrap());
+        }
+        let pwned = std::process::Command::new("find")
+            .arg(&rig.root)
+            .args(["-name", "PWNED"])
+            .output()
+            .unwrap();
+        assert!(pwned.stdout.is_empty(), "nothing in a branch name may run");
+        assert_eq!(rig.main_state(), before);
+
+        for (branch, says) in [
+            ("wt/existing", "already checked out"),
+            ("wt/gone", "already checked out"),
+            ("main", "already checked out"),
+            ("no-such-branch", "is not a local branch"),
+        ] {
+            let detail = refusal(
+                rig.start_in(
+                    &rig.project(),
+                    AgentKind::Codex,
+                    StartWorktree::Branch {
+                        branch: branch.into(),
+                    },
+                )
+                .await,
+            );
+            assert!(detail.contains(says), "{branch}: {detail}");
+        }
+        assert_eq!(rig.launcher_runs(), BRANCHES.len());
+    }
+
+    /// **A new Codex worktree is made where Claude Code makes one, on a branch named
+    /// as typed**, from the commit of the folder it was asked in: here a linked
+    /// worktree one commit ahead of main. A second one by the same name is git's to
+    /// refuse.
+    #[tokio::test]
+    async fn a_new_codex_worktree_starts_from_the_folder_it_is_asked_in() {
+        let rig = recording("new-codex");
+        let existing = rig.worktree_on("wt/existing").await.path;
+        rig.list(&existing).await;
+        let main = rig.main();
+        let ahead = git(Path::new(&existing), &["rev-parse", "HEAD"]);
+        assert_ne!(ahead, git(&rig.project, &["rev-parse", "main"]));
+
+        let new = || StartWorktree::New {
+            name: "fix/login".into(),
+        };
+        let result = rig.start_in(&existing, AgentKind::Codex, new()).await;
+        let folder = Path::new(&main).join(".claude/worktrees/fix+login");
+        assert_eq!(started_in(&result), Some(folder.display().to_string()));
+        assert_eq!(
+            git(&folder, &["symbolic-ref", "--short", "HEAD"]),
+            "fix/login"
+        );
+        assert_eq!(git(&folder, &["rev-parse", "HEAD"]), ahead);
+        assert_eq!(rig.launcher_cwd(), folder.canonicalize().unwrap());
+
+        let detail = refusal(rig.start_in(&existing, AgentKind::Codex, new()).await);
+        assert!(detail.contains("already exists"), "{detail}");
+        assert_eq!(rig.launcher_runs(), 1);
+    }
+
+    /// **A new Claude worktree is Claude's own to make**: the launcher runs in the
+    /// folder with `--worktree=<name>` as one argument, and the daemon makes nothing.
+    #[tokio::test]
+    async fn a_new_claude_worktree_is_left_to_claude() {
+        let rig = recording("new-claude");
+        let before = rig.main_state();
+        let result = rig
+            .start_in(
+                &rig.project(),
+                AgentKind::Claude,
+                StartWorktree::New {
+                    name: "-fix/login".into(),
+                },
+            )
+            .await;
+        assert_eq!(started_in(&result), None, "Claude chooses the folder");
+        assert_eq!(
+            rig.launcher_argv(),
+            ["claude", "--no-attach", "--worktree=-fix/login"]
+        );
+        assert_eq!(rig.launcher_cwd(), rig.project.canonicalize().unwrap());
+        assert!(!Path::new(&rig.main()).join(".claude").exists());
+        assert_eq!(rig.main_state(), before);
+    }
+
+    /// **A name Claude Code would refuse is refused before anything runs**, for
+    /// both agents.
+    #[tokio::test]
+    async fn a_worktree_name_claude_would_refuse_is_refused_before_anything_runs() {
+        let rig = recording("names");
+        let branches = git(&rig.project, &["branch", "--list"]);
+        let too_long = "x".repeat(MAX_WORKTREE_NAME_BYTES + 1);
+        for name in [
+            "semi;",
+            "has space",
+            "ünï",
+            "..",
+            "a//b",
+            "a/./b",
+            "",
+            "trailing/",
+            too_long.as_str(),
+        ] {
+            for agent in [AgentKind::Claude, AgentKind::Codex] {
+                let detail = refusal(
+                    rig.start_in(
+                        &rig.project(),
+                        agent,
+                        StartWorktree::New { name: name.into() },
+                    )
+                    .await,
+                );
+                assert!(
+                    detail.contains("is not a valid worktree name"),
+                    "{name:?}: {detail}"
+                );
+            }
+        }
+        assert!(check_worktree_name(&"x".repeat(MAX_WORKTREE_NAME_BYTES)).is_ok());
+        assert_eq!(rig.launcher_runs(), 0);
+        assert!(!Path::new(&rig.main()).join(".claude").exists());
+        assert_eq!(git(&rig.project, &["branch", "--list"]), branches);
+    }
+
+    /// **Outside a repository there is no worktree to pick**, and it says so.
+    #[tokio::test]
+    async fn a_folder_outside_a_repository_has_no_worktrees() {
+        let rig = Rig::new("plain", STARTED);
+        let detail = refusal(
+            rig.start_in(
+                &rig.project(),
+                AgentKind::Claude,
+                StartWorktree::Branch {
+                    branch: "main".into(),
+                },
+            )
+            .await,
+        );
+        assert!(detail.contains("is not in a git repository"), "{detail}");
     }
 }

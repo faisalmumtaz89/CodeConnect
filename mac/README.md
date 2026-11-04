@@ -1025,6 +1025,23 @@ answers `start_session_result` with the session's uid, or `failed` with
 launcher has finished (a launcher still running after 80 s is killed). The same
 `request_id` again, on any connection, gets the first answer and starts
 nothing; the daemon forgets them when it restarts.
+`>= 29` lets that start pick a branch or worktree (`start_worktree`), and never
+switches the folder's own branch. `get_project_git {path}` reads a listed
+folder's repository, without writing, fetching or running a hook:
+`git worktree list` (the main checkout first, each with its branch, whether it
+has uncommitted changes, and whether its folder is gone) and the local branches checked out nowhere, newest first, at most
+100. `start_session`'s `worktree` is one of three. `existing` starts in a
+worktree git lists. `branch` runs `git worktree add -- <main>/.claude/worktrees/<branch>
+<branch>`, with each `/` written `+`, which is Claude Code's own layout. `new`
+takes a name by Claude Code's `--worktree` rule: Claude gets `--worktree=<name>`
+and makes the worktree itself, and Codex, whose `--worktree` cannot run hosted,
+gets one in the same place on a branch named as typed (`git worktree add -b
+<name>`), from the folder's current commit. Not Claude's `worktree-` prefix:
+a later `claude --worktree <name>` that reopens a branch so named deletes it on a
+clean exit, commits and all. Git runs in the user's login shell, as the launcher
+does. `started` carries the folder the session started in, `cwd`, except for
+a new Claude worktree, whose folder the fleet shows once Claude is in it.
+CodeConnect never removes a worktree it made.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run
