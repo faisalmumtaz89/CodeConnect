@@ -24,6 +24,16 @@ extension RenderCatalog {
         steps[1], cardAction[3], messageFirst[3], searchFirst[1],
     ]
 
+    /// Option 1 alone, for its width and type-size passes: every screen at L,
+    /// and every screen plus the list scrolled under its panel at AX5.
+    static let optionOne: [RenderScenario] = recentsSheet
+    static let optionOneAX5: [RenderScenario] =
+        recentsSheet + [
+            RenderScenario(
+                name: "start1-b2-list", purpose: startOptionsAX5[0].purpose,
+                arguments: startOptionsAX5[0].arguments, reach: startOptionsAX5[0].reach)
+        ]
+
     private static let message = "Add a --strict flag that rejects trailing commas, with tests"
     private static let server = "build-server-eu-west-1"
     /// The longest path in the list, for the folder-gone failure.

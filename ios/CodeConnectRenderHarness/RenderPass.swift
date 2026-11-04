@@ -62,6 +62,14 @@ final class RenderPass: XCTestCase {
         try render(at: .ax5, RenderCatalog.startOptionsAX5)
     }
 
+    func testRendersOptionOneAtLarge() throws {
+        try render(at: .large, RenderCatalog.optionOne)
+    }
+
+    func testRendersOptionOneAtAX5() throws {
+        try render(at: .ax5, RenderCatalog.optionOneAX5)
+    }
+
     // MARK: - The pass
 
     private func render(at size: Size, _ scenarios: [RenderScenario] = RenderCatalog.all) throws {
