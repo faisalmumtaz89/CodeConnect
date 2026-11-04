@@ -1015,8 +1015,8 @@ its own table so removing a run does not remove its folder, each with its name,
 git branch and whether it still exists, and, for the computer, whether each
 agent can start (`codeconnect <agent> --version` through the user's login
 shell) as last checked: the first list after the daemon starts waits for the
-check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt?}` takes only a listed
-folder and runs `codeconnect <agent> --no-attach [-- <prompt>]` there through
+check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt?}` takes a listed
+folder (from `>= 30`, any absolute folder) and runs `codeconnect <agent> --no-attach [-- <prompt>]` there through
 the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
 otherwise), every value an argument of its own. The launcher writes what it
 started to the file named by `CODECONNECT_LAUNCH_RESULT`, and the daemon
@@ -1027,7 +1027,7 @@ launcher has finished (a launcher still running after 80 s is killed). The same
 nothing; the daemon forgets them when it restarts.
 `>= 29` lets that start pick a branch or worktree (`start_worktree`), and never
 switches the folder's own branch. `get_project_git {path}` reads a listed
-folder's repository, without writing, fetching or running a hook:
+folder's (from `>= 30`, any absolute folder's) repository, without writing, fetching or running a hook:
 `git worktree list` (the main checkout first, each with its branch, whether it
 has uncommitted changes, and whether its folder is gone) and the local branches checked out nowhere, newest first, at most
 100. `start_session`'s `worktree` is one of three. `existing` starts in a
@@ -1042,6 +1042,20 @@ clean exit, commits and all. Git runs in the user's login shell, as the launcher
 does. `started` carries the folder the session started in, `cwd`, except for
 a new Claude worktree, whose folder the fleet shows once Claude is in it.
 CodeConnect never removes a worktree it made.
+`>= 30` lets the phone browse the computer's folders, as a terminal can `cd`
+anywhere (`browse_folders`, offered where `start_session` is). `list_folder
+{request_id, path?, show_hidden?}` answers `folder_listing` with the folder's
+real path (symlinks resolved, as Finder shows it; the home folder when no path is
+given) and the names of its folders and symlinks to folders, in byte order, at
+most 2,000 (`truncated` says there were more), leaving out names that start with
+`.` unless `show_hidden`, and names that are not UTF-8; or with `error`, in the
+words `ls` prints (`Permission denied`). `create_folder {request_id, parent,
+name}` is one `mkdir`: a name holding `/` is refused, and every other refusal is
+`mkdir`'s own (`File exists`). `start_session` and `get_project_git` take any
+absolute folder; a relative path is refused, and a folder becomes a project
+when a session starts in it. On macOS a folder the privacy settings guard
+(Desktop, Downloads, iCloud Drive, other volumes) is read with ccd's own
+permission, under Privacy & Security, Files and Folders.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

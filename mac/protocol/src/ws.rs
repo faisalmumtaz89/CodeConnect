@@ -446,8 +446,9 @@ pub enum ClientMessage {
     /// if `codeconnect <agent>` had been typed there. Answered with one
     /// [`ServerMessage::StartSessionResult`] carrying the same `request_id`.
     ///
-    /// `path` must be one [`ServerMessage::Projects`] listed; anything else is
-    /// refused before anything runs. `prompt`, when present, is the agent's own
+    /// `path` is an absolute path: one [`ServerMessage::Projects`] listed, or, from
+    /// minor 30 (`browse_folders`), any folder; a relative one is refused before
+    /// anything runs. `prompt`, when present, is the agent's own
     /// first prompt, bounded by [`MAX_COMPOSE_BYTES`] and passed as one argument,
     /// never through a shell string.
     ///
@@ -465,11 +466,29 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree: Option<StartWorktree>,
     },
-    /// **The git worktrees and branches of one listed folder** (minor 29,
+    /// **The git worktrees and branches of one folder** (minor 29,
     /// `start_worktree`), answered with one [`ServerMessage::ProjectGit`]. Read
-    /// only: nothing is fetched, written or run.
+    /// only: nothing is fetched, written or run. `path` is absolute.
     GetProjectGit {
         path: String,
+    },
+    /// **The folders in one folder** (minor 30, `browse_folders`), answered with one
+    /// [`ServerMessage::FolderListing`] carrying the same `request_id`. Absent,
+    /// `path` is the home folder. Names starting with `.` are left out unless
+    /// `show_hidden`. Read only.
+    ListFolder {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        show_hidden: bool,
+    },
+    /// **Make one folder, as `mkdir` does** (minor 30, `browse_folders`): `name`
+    /// in `parent`, one level, answered with one [`ServerMessage::CreateFolderResult`].
+    CreateFolder {
+        request_id: String,
+        parent: String,
+        name: String,
     },
 
     Ping,
@@ -681,8 +700,54 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         git: Option<ProjectGit>,
     },
+    /// The answer to [`ClientMessage::ListFolder`]. `path` is the folder's real
+    /// path, symlinks resolved, as Finder shows it: the phone names its children
+    /// and its parent from it.
+    FolderListing {
+        request_id: String,
+        path: String,
+        #[serde(flatten)]
+        contents: FolderContents,
+    },
+    /// The answer to [`ClientMessage::CreateFolder`].
+    CreateFolderResult {
+        request_id: String,
+        result: CreateFolderResult,
+    },
 
     Pong,
+}
+
+/// What a [`ServerMessage::FolderListing`] found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FolderContents {
+    /// The names of its folders, and of its symlinks to folders, in byte order: at
+    /// most [`MAX_FOLDER_NAMES`], the first ones, with `truncated` saying there were
+    /// more.
+    Listed {
+        folders: Vec<String>,
+        truncated: bool,
+    },
+    /// It could not be read. `error` is the system's own words, as `ls` prints
+    /// them (`Permission denied`), safe to show verbatim.
+    Unreadable { error: String },
+}
+
+/// The most names one [`ServerMessage::FolderListing`] carries: well inside the
+/// phone's message limit even when every name is as long as a name can be.
+pub const MAX_FOLDER_NAMES: usize = 2000;
+
+/// How a [`ClientMessage::CreateFolder`] went.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CreateFolderResult {
+    Created,
+    /// No folder was made. `detail` is the system's own words (`File exists`),
+    /// safe to show verbatim.
+    Failed {
+        detail: String,
+    },
 }
 
 /// Where in a folder's repository a [`ClientMessage::StartSession`] runs. Its
@@ -1054,6 +1119,12 @@ pub struct Capabilities {
     /// starts in the main folder whatever `worktree` says.
     #[serde(default)]
     pub start_worktree: bool,
+    /// **The phone can browse this computer's folders, make one, and start in any
+    /// of them** ([`ClientMessage::ListFolder`], [`ClientMessage::CreateFolder`],
+    /// minor 30). Absent decodes `false`: an older daemon answers both with
+    /// `bad_request` and starts only in a folder [`ServerMessage::Projects`] listed.
+    #[serde(default)]
+    pub browse_folders: bool,
 }
 
 /// The most events one [`ClientMessage::History`] page carries, whatever its
@@ -1911,10 +1982,15 @@ mod tests {
             "picking a branch or worktree at start (`get_project_git`, `start_session`'s \
              `worktree`, `started.cwd`, `start_worktree` capability) is minor 29"
         );
+        const _: () = assert!(
+            crate::PROTOCOL_MINOR >= 30,
+            "browsing folders (`list_folder`, `create_folder`, `browse_folders` capability, a \
+             start in any folder) is minor 30"
+        );
         const _: () = assert!(crate::PROTOCOL_VERSION == 1, "no breaking change was made");
         // The equality is the point: every bump has to come here and say what it
         // added, so the list above stays a record rather than a guess.
-        assert_eq!(crate::PROTOCOL_MINOR, 29);
+        assert_eq!(crate::PROTOCOL_MINOR, 30);
     }
 
     /// **The tags, pinned on this side too.**
@@ -2422,6 +2498,7 @@ mod tests {
             history_pages: true,
             start_session: true,
             start_worktree: true,
+            browse_folders: true,
         }
     }
 
@@ -3115,6 +3192,104 @@ mod tests {
 
         let current = serde_json::to_value(capabilities_fixture()).unwrap();
         assert_eq!(current["start_worktree"], true);
+    }
+
+    /// **The folder wire, pinned as the phone matches it** (minor 30).
+    #[test]
+    fn the_folder_messages_round_trip_as_the_phone_matches_them() {
+        fn round_trip<T>(message: T, expected: serde_json::Value)
+        where
+            T: Serialize + serde::de::DeserializeOwned,
+        {
+            assert_eq!(serde_json::to_value(&message).unwrap(), expected);
+            let decoded: T = serde_json::from_value(expected.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
+
+        round_trip(
+            ClientMessage::ListFolder {
+                request_id: "b0".into(),
+                path: None,
+                show_hidden: false,
+            },
+            serde_json::json!({"type": "list_folder", "request_id": "b0"}),
+        );
+        round_trip(
+            ClientMessage::ListFolder {
+                request_id: "b1".into(),
+                path: Some("/Users/me/src".into()),
+                show_hidden: true,
+            },
+            serde_json::json!({"type": "list_folder", "request_id": "b1",
+                "path": "/Users/me/src", "show_hidden": true}),
+        );
+        round_trip(
+            ServerMessage::FolderListing {
+                request_id: "b1".into(),
+                path: "/Users/me/src".into(),
+                contents: FolderContents::Listed {
+                    folders: vec!["app".into(), "semi;".into()],
+                    truncated: false,
+                },
+            },
+            serde_json::json!({"type": "folder_listing", "request_id": "b1",
+                "path": "/Users/me/src", "folders": ["app", "semi;"], "truncated": false}),
+        );
+        round_trip(
+            ServerMessage::FolderListing {
+                request_id: "b2".into(),
+                path: "/Users/me/locked".into(),
+                contents: FolderContents::Unreadable {
+                    error: "Permission denied".into(),
+                },
+            },
+            serde_json::json!({"type": "folder_listing", "request_id": "b2",
+                "path": "/Users/me/locked", "error": "Permission denied"}),
+        );
+        round_trip(
+            ClientMessage::CreateFolder {
+                request_id: "c1".into(),
+                parent: "/Users/me/src".into(),
+                name: "new-app".into(),
+            },
+            serde_json::json!({"type": "create_folder", "request_id": "c1",
+                "parent": "/Users/me/src", "name": "new-app"}),
+        );
+        round_trip(
+            ServerMessage::CreateFolderResult {
+                request_id: "c1".into(),
+                result: CreateFolderResult::Created,
+            },
+            serde_json::json!({"type": "create_folder_result", "request_id": "c1",
+                "result": {"status": "created"}}),
+        );
+        round_trip(
+            ServerMessage::CreateFolderResult {
+                request_id: "c2".into(),
+                result: CreateFolderResult::Failed {
+                    detail: "File exists".into(),
+                },
+            },
+            serde_json::json!({"type": "create_folder_result", "request_id": "c2",
+                "result": {"status": "failed", "detail": "File exists"}}),
+        );
+    }
+
+    /// A minor-29 ack has no `browse_folders`, so a client reading it offers no
+    /// folder browsing; this daemon's own ack says it.
+    #[test]
+    fn browse_folders_is_absent_from_an_older_ack_and_present_in_this_one() {
+        let old: Capabilities = serde_json::from_str(
+            r#"{"can_approve_reliably":true,"fail_mode":"fail_open",
+                "answer_path":"hook_return","hold_secs":0,"send_text":true,
+                "capture":true,"push":false,"tls":true,"start_session":true,
+                "start_worktree":true}"#,
+        )
+        .unwrap();
+        assert!(old.start_worktree && !old.browse_folders);
+
+        let current = serde_json::to_value(capabilities_fixture()).unwrap();
+        assert_eq!(current["browse_folders"], true);
     }
 
     #[test]

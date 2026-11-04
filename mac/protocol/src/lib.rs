@@ -633,7 +633,22 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///     A daemon below 29 answers `get_project_git` with `bad_request` and ignores
 ///     `worktree`, starting in the main folder, so a client sends either only
 ///     when the capability is advertised.
-pub const PROTOCOL_MINOR: u32 = 29;
+///   * `30` — **The phone browses folders and starts in any of them.**
+///
+///     As a terminal can `cd` anywhere and start an agent there. Additive:
+///       - [`ws::Capabilities::browse_folders`] — this daemon understands the rest.
+///       - [`ws::ClientMessage::ListFolder`] and [`ws::ServerMessage::FolderListing`]
+///         — one folder's folders, home when no path is given, by real path.
+///       - [`ws::ClientMessage::CreateFolder`] and
+///         [`ws::ServerMessage::CreateFolderResult`] — one `mkdir`.
+///       - [`ws::ClientMessage::StartSession`] and [`ws::ClientMessage::GetProjectGit`]
+///         take any absolute folder, not only one [`ws::ServerMessage::Projects`]
+///         listed; a relative path is refused, and `not_a_project` is never sent.
+///
+///     A daemon below 30 answers `list_folder` and `create_folder` with
+///     `bad_request` and refuses an unlisted folder, so a client sends them, and
+///     offers folders outside the list, only when the capability is advertised.
+pub const PROTOCOL_MINOR: u32 = 30;
 
 #[cfg(test)]
 mod ledger_tests {

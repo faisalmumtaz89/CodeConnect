@@ -1,4 +1,5 @@
-//! Starting a session from the phone: the folders it can pick from, and the start.
+//! Starting a session from the phone: the folders it can pick from, browsing and
+//! making folders, and the start.
 //!
 //! Everything the daemon runs on the phone's behalf goes through the user's own
 //! login shell ([`login_shell_command`]), so the launcher and the agent it starts
@@ -16,8 +17,8 @@ use futures_util::StreamExt;
 use protocol::agent::AgentKind;
 use protocol::launch_result::{LaunchResult, ENV_LAUNCH_RESULT};
 use protocol::ws::{
-    AgentAvailability, ClientMessage, Project, ProjectGit, ServerMessage, StartFailure,
-    StartSessionResult, StartWorktree, Worktree,
+    AgentAvailability, ClientMessage, CreateFolderResult, FolderContents, Project, ProjectGit,
+    ServerMessage, StartFailure, StartSessionResult, StartWorktree, Worktree,
 };
 use tokio::sync::watch;
 
@@ -48,11 +49,49 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The agents the phone can start.
 const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
 
-/// The answer to a `list_projects` or `start_session`.
+/// The answer to a `list_projects`, `get_project_git`, `list_folder`,
+/// `create_folder` or `start_session`.
 pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessage {
     match message {
         ClientMessage::ListProjects => list_projects(daemon).await,
         ClientMessage::GetProjectGit { path } => project_git(daemon, path).await,
+        // Off the async workers: a read can wait on macOS asking the user.
+        ClientMessage::ListFolder {
+            request_id,
+            path,
+            show_hidden,
+        } => {
+            let asked = path.unwrap_or_else(|| protocol::home_dir().display().to_string());
+            let path = asked.clone();
+            let (path, contents) =
+                tokio::task::spawn_blocking(move || list_folder(&path, show_hidden))
+                    .await
+                    .unwrap_or_else(|err| {
+                        (
+                            asked,
+                            FolderContents::Unreadable {
+                                error: format!("the listing stopped: {err}"),
+                            },
+                        )
+                    });
+            ServerMessage::FolderListing {
+                request_id,
+                path,
+                contents,
+            }
+        }
+        ClientMessage::CreateFolder {
+            request_id,
+            parent,
+            name,
+        } => ServerMessage::CreateFolderResult {
+            result: tokio::task::spawn_blocking(move || create_folder(&parent, &name))
+                .await
+                .unwrap_or_else(|err| CreateFolderResult::Failed {
+                    detail: format!("the folder was not made: {err}"),
+                }),
+            request_id,
+        },
         ClientMessage::StartSession {
             request_id,
             path,
@@ -62,7 +101,6 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
         } => {
             let state_dir = protocol::root_dir();
             let launch = launch(
-                &daemon.db,
                 daemon.config.git_bin.as_deref(),
                 crate::state::codex_launcher(),
                 &state_dir,
@@ -77,7 +115,8 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
             }
         }
         _ => unreachable!(
-            "handle_client passes only list_projects, get_project_git and start_session here"
+            "handle_client passes only list_projects, get_project_git, list_folder, \
+             create_folder and start_session here"
         ),
     }
 }
@@ -163,9 +202,7 @@ fn failed(reason: StartFailure, detail: String) -> StartSessionResult {
 /// Run `codeconnect <agent> --no-attach [--worktree=<name>] [-- <prompt>]`
 /// through the user's login shell, in `path` or the worktree `worktree` names, and
 /// read what it started from its result line, a file in `state_dir`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch(
-    db: &crate::db::Db,
     git_bin: Option<&str>,
     launcher: Result<PathBuf, String>,
     state_dir: &Path,
@@ -186,7 +223,7 @@ pub(crate) async fn launch(
             "the first message is longer than 8 KiB".into(),
         );
     }
-    if let Err((_, why)) = may_name(db, path).await {
+    if let Err(why) = may_name(path) {
         return failed(StartFailure::LaunchFailed, why);
     }
     if !Path::new(path).is_dir() {
@@ -276,20 +313,78 @@ pub(crate) async fn launch(
     }
 }
 
-/// Whether the phone may name `path`, for a start or a git read alike: one of this
-/// computer's projects. Refused, it gives the error code a request answers with and
-/// the reason.
-async fn may_name(db: &crate::db::Db, path: &str) -> Result<(), (&'static str, String)> {
-    match db.is_project(path.to_string()).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err((
-            "not_a_project",
-            format!("{path} is not one of this computer's projects"),
-        )),
-        Err(err) => Err((
-            "projects_unavailable",
-            format!("could not read the project list: {err}"),
-        )),
+/// Whether the phone may name `path`, for a listing, a new folder, a start or a git
+/// read alike: any absolute path, as a terminal may `cd` anywhere. Every other
+/// refusal is the system's own, from the call that uses the path.
+fn may_name(path: &str) -> Result<(), String> {
+    if Path::new(path).is_absolute() {
+        Ok(())
+    } else {
+        Err(format!("\"{path}\" is not an absolute path"))
+    }
+}
+
+/// The folders in `path`, by its real path, and that path: what `ls` would list
+/// as folders, symlinks to folders included, in byte order. Names that are not
+/// UTF-8 cannot be named on the wire and are left out.
+fn list_folder(path: &str, show_hidden: bool) -> (String, FolderContents) {
+    let unreadable =
+        |path: &str, error: String| (path.to_string(), FolderContents::Unreadable { error });
+    if let Err(why) = may_name(path) {
+        return unreadable(path, why);
+    }
+    let real = match std::fs::canonicalize(path) {
+        Ok(real) => real,
+        Err(err) => return unreadable(path, system_words(&err)),
+    };
+    let Some(real_path) = real.to_str().map(str::to_string) else {
+        return unreadable(path, format!("{path} has no UTF-8 real path"));
+    };
+    let entries = match std::fs::read_dir(&real) {
+        Ok(entries) => entries,
+        Err(err) => return unreadable(&real_path, system_words(&err)),
+    };
+    let mut folders: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => entry.path().is_dir(),
+            Ok(kind) => kind.is_dir(),
+            Err(_) => false,
+        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| show_hidden || !name.starts_with('.'))
+        .collect();
+    folders.sort_unstable();
+    let truncated = folders.len() > protocol::ws::MAX_FOLDER_NAMES;
+    folders.truncate(protocol::ws::MAX_FOLDER_NAMES);
+    (real_path, FolderContents::Listed { folders, truncated })
+}
+
+/// `mkdir parent/name`: one folder, one level, its mode the umask's.
+fn create_folder(parent: &str, name: &str) -> CreateFolderResult {
+    let failed = |detail| CreateFolderResult::Failed { detail };
+    if let Err(why) = may_name(parent) {
+        return failed(why);
+    }
+    if name.contains('/') {
+        return failed(format!("\"{name}\" is not a single folder name"));
+    }
+    match std::fs::create_dir(Path::new(parent).join(name)) {
+        Ok(()) => CreateFolderResult::Created,
+        Err(err) => failed(system_words(&err)),
+    }
+}
+
+/// An error in the words `ls` and `mkdir` print for it (`Permission denied`),
+/// without the ` (os error 13)` Rust adds.
+fn system_words(err: &std::io::Error) -> String {
+    let words = err.to_string();
+    match err.raw_os_error() {
+        Some(code) => words
+            .strip_suffix(&format!(" (os error {code})"))
+            .unwrap_or(&words)
+            .to_string(),
+        None => words,
     }
 }
 
@@ -445,9 +540,9 @@ async fn add_worktree(path: &str, args: &[&OsStr]) -> Result<(), String> {
 
 /// The answer to `get_project_git`.
 async fn project_git(daemon: &Arc<Daemon>, path: String) -> ServerMessage {
-    if let Err((code, message)) = may_name(&daemon.db, &path).await {
+    if let Err(message) = may_name(&path) {
         return ServerMessage::Error {
-            code: code.into(),
+            code: "bad_request".into(),
             message,
         };
     }
@@ -607,13 +702,11 @@ fn login_shell_command(args: &[&OsStr]) -> tokio::process::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
-    /// A folder for one test: its store, a listed project folder, and a stub
-    /// launcher whose `--no-attach` runs `body`.
+    /// A folder for one test: a project folder, and a stub launcher whose
+    /// `--no-attach` runs `body`.
     struct Rig {
         root: PathBuf,
-        db: crate::db::Db,
         project: PathBuf,
         launcher: PathBuf,
     }
@@ -627,26 +720,6 @@ mod tests {
             ));
             let project = root.join("my app");
             std::fs::create_dir_all(&project).unwrap();
-            let store = Arc::new(crate::store::Store::open(&root.join("events.db")).unwrap());
-            let at = protocol::time::now_rfc3339();
-            let filed = store
-                .upsert_session(&crate::store::SessionRow {
-                    session_uid: protocol::uid::new().unwrap(),
-                    session_id: "cc-1".into(),
-                    tmux_session: "cc-1".into(),
-                    tmux_socket: "codeconnect".into(),
-                    cwd: project.display().to_string(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Exited,
-                    created_at: at.clone(),
-                    updated_at: at,
-                    agent: AgentKind::Claude,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                })
-                .unwrap();
-            assert!(matches!(filed, crate::store::SessionUpsert::Present));
             let launcher = root.join("codeconnect");
             std::fs::write(&launcher, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::process::Command::new("chmod")
@@ -655,7 +728,6 @@ mod tests {
                 .status()
                 .unwrap();
             Rig {
-                db: crate::db::Db::new(store),
                 root,
                 project,
                 launcher,
@@ -664,7 +736,6 @@ mod tests {
 
         async fn start(&self, path: &str, prompt: Option<&str>) -> StartSessionResult {
             launch(
-                &self.db,
                 None,
                 Ok(self.launcher.clone()),
                 &self.root,
@@ -693,7 +764,6 @@ mod tests {
             worktree: StartWorktree,
         ) -> StartSessionResult {
             launch(
-                &self.db,
                 None,
                 Ok(self.launcher.clone()),
                 &self.root,
@@ -703,31 +773,6 @@ mod tests {
                 Some(&worktree),
             )
             .await
-        }
-
-        /// List `cwd` as a project, as a session that ran there would.
-        async fn list(&self, cwd: &str) {
-            let at = protocol::time::now_rfc3339();
-            let filed = self
-                .db
-                .upsert_session(crate::store::SessionRow {
-                    session_uid: protocol::uid::new().unwrap(),
-                    session_id: "cc-2".into(),
-                    tmux_session: "cc-2".into(),
-                    tmux_socket: "codeconnect".into(),
-                    cwd: cwd.into(),
-                    claude_session_id: None,
-                    transcript_path: None,
-                    lifecycle: protocol::event::Lifecycle::Exited,
-                    created_at: at.clone(),
-                    updated_at: at,
-                    agent: AgentKind::Codex,
-                    codex_thread_id: None,
-                    codex_socket: None,
-                })
-                .await
-                .unwrap();
-            assert!(matches!(filed, crate::store::SessionUpsert::Present));
         }
 
         /// The worktree on `branch`, as git lists it.
@@ -939,16 +984,21 @@ mod tests {
             other => panic!("expected a failure, got {other:?}"),
         };
 
-        let rig = Rig::new("unlisted", STARTED);
-        let elsewhere = rig.root.display().to_string();
-        let (why, detail) = reason(rig.start(&elsewhere, None).await);
-        assert_eq!(why, StartFailure::LaunchFailed);
-        assert!(
-            detail.contains("not one of this computer's projects"),
-            "{detail}"
+        let rig = recording("relative");
+        assert_eq!(
+            reason(rig.start("my app", None).await),
+            (
+                StartFailure::LaunchFailed,
+                "\"my app\" is not an absolute path".into()
+            )
         );
+        let file = rig.root.join("notes.txt");
+        std::fs::write(&file, "").unwrap();
+        let (why, _) = reason(rig.start(&file.display().to_string(), None).await);
+        assert_eq!(why, StartFailure::FolderMissing);
+        assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
 
-        std::fs::remove_dir(&rig.project).unwrap();
+        std::fs::remove_dir_all(&rig.project).unwrap();
         let (why, _) = reason(rig.start(&rig.project(), None).await);
         assert_eq!(why, StartFailure::FolderMissing);
 
@@ -1121,7 +1171,6 @@ mod tests {
     async fn a_new_codex_worktree_starts_from_the_folder_it_is_asked_in() {
         let rig = recording("new-codex");
         let existing = rig.worktree_on("wt/existing").await.path;
-        rig.list(&existing).await;
         let main = rig.main();
         let ahead = git(Path::new(&existing), &["rev-parse", "HEAD"]);
         assert_ne!(ahead, git(&rig.project, &["rev-parse", "main"]));
@@ -1231,5 +1280,267 @@ mod tests {
             .await,
         );
         assert!(detail.contains("is not in a git repository"), "{detail}");
+    }
+
+    /// The folder the listing and creation tests browse, as the phone would find a
+    /// real one: folders with awkward names, a hidden one, symlinks to a folder, to
+    /// nothing and to a file, a file, a folder nobody may read, one with more
+    /// folders than a listing holds, and an empty one to make folders in.
+    struct Browse {
+        root: PathBuf,
+    }
+
+    impl Browse {
+        const FOLDERS: [&'static str; 11] = [
+            "a",
+            "B",
+            "10",
+            "2",
+            ".hidden",
+            "ünï ☕",
+            "semi;",
+            "-dash",
+            "$(touch PWNED)",
+            "new\nline",
+            "new",
+        ];
+
+        fn new(tag: &str) -> Browse {
+            let root = std::env::temp_dir().join(format!(
+                "ccd-browse-{tag}-{}-{}",
+                std::process::id(),
+                protocol::time::now_unix_ms()
+            ));
+            for folder in Self::FOLDERS {
+                std::fs::create_dir_all(root.join(folder)).unwrap();
+            }
+            std::os::unix::fs::symlink(root.join("a"), root.join("link")).unwrap();
+            std::os::unix::fs::symlink(root.join("nowhere"), root.join("dead")).unwrap();
+            std::fs::write(root.join("file.txt"), "").unwrap();
+            std::os::unix::fs::symlink(root.join("file.txt"), root.join("flink")).unwrap();
+            for index in 0..=protocol::ws::MAX_FOLDER_NAMES {
+                std::fs::create_dir_all(root.join("big").join(format!("f{index:05}"))).unwrap();
+            }
+            let locked = root.join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000))
+                .unwrap();
+            Browse {
+                root: root.canonicalize().unwrap(),
+            }
+        }
+
+        fn at(&self, name: &str) -> String {
+            self.root.join(name).display().to_string()
+        }
+    }
+
+    impl Drop for Browse {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(
+                self.root.join("locked"),
+                std::os::unix::fs::PermissionsExt::from_mode(0o700),
+            );
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn listed(contents: FolderContents) -> (Vec<String>, bool) {
+        match contents {
+            FolderContents::Listed { folders, truncated } => (folders, truncated),
+            other => panic!("expected a listing, got {other:?}"),
+        }
+    }
+
+    fn unreadable(contents: FolderContents) -> String {
+        match contents {
+            FolderContents::Unreadable { error } => error,
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    /// **A listing is the folders `ls` would show**, symlinks to folders among
+    /// them, in byte order, dot names only when asked for, at its real path; and
+    /// what cannot be read says so in the words `ls` uses.
+    #[test]
+    fn a_listing_holds_the_folders_a_terminal_would_see() {
+        let browse = Browse::new("list");
+        let (path, contents) = list_folder(&browse.at(""), false);
+        assert_eq!(path, browse.root.display().to_string());
+        let (folders, truncated) = listed(contents);
+        assert_eq!(
+            folders,
+            [
+                "$(touch PWNED)",
+                "-dash",
+                "10",
+                "2",
+                "B",
+                "a",
+                "big",
+                "link",
+                "locked",
+                "new",
+                "new\nline",
+                "semi;",
+                "ünï ☕"
+            ]
+        );
+        assert!(!truncated);
+
+        let (_, contents) = list_folder(&browse.at(""), true);
+        let (with_hidden, _) = listed(contents);
+        let mut expected = folders.clone();
+        expected.insert(2, ".hidden".into());
+        assert_eq!(with_hidden, expected);
+
+        let (_, contents) = list_folder(&browse.at("big"), false);
+        let (big, truncated) = listed(contents);
+        assert_eq!(big.len(), protocol::ws::MAX_FOLDER_NAMES);
+        assert_eq!(big.first().map(String::as_str), Some("f00000"));
+        assert_eq!(big.last().map(String::as_str), Some("f01999"));
+        assert!(truncated);
+
+        // Through a symlink, the folder is named by where it really is.
+        let (path, _) = list_folder(&browse.at("link"), false);
+        assert_eq!(path, browse.at("a"));
+
+        let (path, contents) = list_folder(&browse.at("locked"), false);
+        assert_eq!(path, browse.at("locked"));
+        assert_eq!(unreadable(contents), "Permission denied");
+        let (_, contents) = list_folder(&browse.at("nope"), false);
+        assert_eq!(unreadable(contents), "No such file or directory");
+        let (_, contents) = list_folder(&browse.at("file.txt"), false);
+        assert_eq!(unreadable(contents), "Not a directory");
+        let (path, contents) = list_folder("rel/x", false);
+        assert_eq!(path, "rel/x");
+        assert_eq!(unreadable(contents), "\"rel/x\" is not an absolute path");
+    }
+
+    /// The root has a listing of its own, and with no path the home folder is
+    /// listed (`answer` fills it in): the phone starts there.
+    #[test]
+    fn the_root_and_the_home_folder_list() {
+        let (path, contents) = list_folder("/", false);
+        assert_eq!(path, "/");
+        assert!(!listed(contents).0.is_empty());
+        let home = protocol::home_dir().display().to_string();
+        let (path, _) = list_folder(&home, false);
+        assert_eq!(
+            Path::new(&path),
+            protocol::home_dir().canonicalize().unwrap()
+        );
+    }
+
+    /// A Linux name that is not UTF-8 cannot be named on the wire, so it is left
+    /// out and the rest still list (written miss).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_is_not_utf8_is_left_out() {
+        use std::os::unix::ffi::OsStrExt;
+        let browse = Browse::new("bytes");
+        std::fs::create_dir(browse.root.join(OsStr::from_bytes(b"bad\xff"))).unwrap();
+        let (folders, _) = listed(list_folder(&browse.at(""), false).1);
+        assert_eq!(folders.len(), 13, "{folders:?}");
+    }
+
+    /// **A new folder is one `mkdir`**: the name exactly as given, the mode `mkdir`
+    /// gives, and every refusal in `mkdir`'s own words; only a `/` in the name is
+    /// refused before the call.
+    #[test]
+    fn a_new_folder_is_made_as_mkdir_makes_it() {
+        let browse = Browse::new("create");
+        let parent = browse.at("new");
+        for name in ["x", "-x", ".x", "semi;", "ünï ☕", "$(touch PWNED)"] {
+            assert_eq!(
+                create_folder(&parent, name),
+                CreateFolderResult::Created,
+                "{name}"
+            );
+            assert!(browse.root.join("new").join(name).is_dir(), "{name}");
+        }
+        let made: Vec<String> = std::fs::read_dir(browse.root.join("new"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(made.len(), 6, "{made:?}");
+        assert!(!browse.root.join("new").join("PWNED").exists());
+
+        let by_mkdir = browse.root.join("by-mkdir");
+        assert!(std::process::Command::new("mkdir")
+            .arg(&by_mkdir)
+            .status()
+            .unwrap()
+            .success());
+        let mode = |path: &Path| {
+            std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path).unwrap().permissions())
+        };
+        assert_eq!(mode(&browse.root.join("new").join("x")), mode(&by_mkdir));
+
+        let failure = |parent: &str, name: &str| match create_folder(parent, name) {
+            CreateFolderResult::Failed { detail } => detail,
+            CreateFolderResult::Created => panic!("{name} was made"),
+        };
+        assert_eq!(failure(&parent, "x"), "File exists");
+        for name in ["", ".", ".."] {
+            assert_eq!(failure(&parent, name), "File exists", "{name:?}");
+        }
+        assert_eq!(
+            failure(&parent, "a/b"),
+            "\"a/b\" is not a single folder name"
+        );
+        assert!(!browse.root.join("new").join("a").exists());
+        assert_eq!(failure(&browse.at("locked"), "y"), "Permission denied");
+        assert_eq!(
+            failure(&browse.at("nope"), "y"),
+            "No such file or directory"
+        );
+        assert_eq!(failure("rel", "y"), "\"rel\" is not an absolute path");
+    }
+
+    /// **A start runs in any folder, as a terminal can `cd` anywhere**, not only one
+    /// a session has run in, each name reaching the launcher as its folder and
+    /// nothing in it running; a relative path is refused before anything runs.
+    #[tokio::test]
+    async fn a_start_runs_in_any_folder() {
+        let rig = recording("anywhere");
+        let marker = rig.root.join("PWNED");
+        for name in ["never listed ünï ☕", "$(touch PWNED)", "new\nline"] {
+            let folder = rig.root.join(name);
+            std::fs::create_dir(&folder).unwrap();
+            let path = folder.display().to_string();
+            for agent in [AgentKind::Claude, AgentKind::Codex] {
+                let result = launch(
+                    None,
+                    Ok(rig.launcher.clone()),
+                    &rig.root,
+                    &path,
+                    &agent,
+                    Some("x; $(touch PWNED) \"q\""),
+                    None,
+                )
+                .await;
+                assert_eq!(
+                    started_in(&result).as_deref(),
+                    Some(path.as_str()),
+                    "{name}"
+                );
+                assert_eq!(rig.launcher_cwd(), folder.canonicalize().unwrap(), "{name}");
+                assert_eq!(
+                    rig.launcher_argv(),
+                    [
+                        agent.as_str(),
+                        "--no-attach",
+                        "--",
+                        "x; $(touch PWNED) \"q\""
+                    ]
+                );
+            }
+        }
+        assert!(
+            !marker.exists(),
+            "nothing in a folder name or prompt may run"
+        );
+        assert_eq!(rig.launcher_runs(), 6);
     }
 }

@@ -5,6 +5,7 @@
   },
   "hello_ack_capabilities": {
     "answer_path": "hook_return",
+    "browse_folders": true,
     "can_approve_reliably": true,
     "capture": true,
     "codex_compose": true,
@@ -65,11 +66,6 @@
     },
     "path": "/tmp/ccd-minor-29/app",
     "type": "project_git"
-  },
-  "project_git_not_a_project": {
-    "code": "not_a_project",
-    "message": "/tmp/ccd-minor-29/elsewhere is not one of this computer's projects",
-    "type": "error"
   },
   "project_git_not_a_repository": {
     "path": "/tmp/ccd-minor-29/notes",

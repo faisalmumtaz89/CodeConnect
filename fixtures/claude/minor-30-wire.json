@@ -1,0 +1,159 @@
+{
+  "create_folder_created": {
+    "request_id": "c1",
+    "result": {
+      "status": "created"
+    },
+    "type": "create_folder_result"
+  },
+  "create_folder_failed_exists": {
+    "request_id": "c1",
+    "result": {
+      "detail": "File exists",
+      "status": "failed"
+    },
+    "type": "create_folder_result"
+  },
+  "create_folder_failed_not_one_name": {
+    "request_id": "c1",
+    "result": {
+      "detail": "\"a/b\" is not a single folder name",
+      "status": "failed"
+    },
+    "type": "create_folder_result"
+  },
+  "create_folder_request": {
+    "name": "new-app",
+    "parent": "/tmp/ccd-minor-30/src",
+    "request_id": "c1",
+    "type": "create_folder"
+  },
+  "folder_listing": {
+    "folders": [
+      "app",
+      "semi;"
+    ],
+    "path": "/tmp/ccd-minor-30/src",
+    "request_id": "b1",
+    "truncated": false,
+    "type": "folder_listing"
+  },
+  "folder_listing_hidden": {
+    "folders": [
+      ".config",
+      "app",
+      "semi;"
+    ],
+    "path": "/tmp/ccd-minor-30/src",
+    "request_id": "b1",
+    "truncated": false,
+    "type": "folder_listing"
+  },
+  "folder_listing_relative": {
+    "error": "\"src\" is not an absolute path",
+    "path": "src",
+    "request_id": "b1",
+    "type": "folder_listing"
+  },
+  "folder_listing_unreadable": {
+    "error": "No such file or directory",
+    "path": "/tmp/ccd-minor-30/gone",
+    "request_id": "b1",
+    "type": "folder_listing"
+  },
+  "get_project_git_relative_refused": {
+    "code": "bad_request",
+    "message": "\"src/app\" is not an absolute path",
+    "type": "error"
+  },
+  "get_project_git_unlisted_request": {
+    "path": "/tmp/ccd-minor-30/src/app",
+    "type": "get_project_git"
+  },
+  "hello_ack_capabilities": {
+    "answer_path": "hook_return",
+    "browse_folders": true,
+    "can_approve_reliably": true,
+    "capture": true,
+    "codex_compose": true,
+    "codex_interrupt": true,
+    "command_catalog": true,
+    "delete_session": true,
+    "diff": true,
+    "fail_mode": "fail_open",
+    "history_pages": true,
+    "hold_secs": 0,
+    "hook_only_approvals": true,
+    "prompt_identity": true,
+    "push": false,
+    "push_relay": false,
+    "question_card": true,
+    "risk_class": true,
+    "send_text": true,
+    "send_text_idempotent": true,
+    "session_uid": true,
+    "slash_composer_recovery": true,
+    "start_session": true,
+    "start_worktree": true,
+    "terminal_pty": true,
+    "test_push": false,
+    "tls": false,
+    "tls_active": false
+  },
+  "list_folder_hidden_request": {
+    "path": "/tmp/ccd-minor-30/src",
+    "request_id": "b1",
+    "show_hidden": true,
+    "type": "list_folder"
+  },
+  "list_folder_home_request": {
+    "request_id": "b1",
+    "type": "list_folder"
+  },
+  "list_folder_request": {
+    "path": "/tmp/ccd-minor-30/src",
+    "request_id": "b1",
+    "type": "list_folder"
+  },
+  "project_git_unlisted": {
+    "git": {
+      "branches": [],
+      "branches_truncated": false,
+      "worktrees": [
+        {
+          "branch": "main",
+          "dirty": false,
+          "main": true,
+          "missing": false,
+          "path": "/tmp/ccd-minor-30/src/app"
+        }
+      ]
+    },
+    "path": "/tmp/ccd-minor-30/src/app",
+    "type": "project_git"
+  },
+  "start_session_relative_failed": {
+    "request_id": "r1",
+    "result": {
+      "detail": "\"src/new-app\" is not an absolute path",
+      "reason": "launch_failed",
+      "status": "failed"
+    },
+    "type": "start_session_result"
+  },
+  "start_session_unlisted_request": {
+    "agent": "claude",
+    "path": "/tmp/ccd-minor-30/src/new-app",
+    "request_id": "r1",
+    "type": "start_session"
+  },
+  "start_session_unlisted_started": {
+    "request_id": "r1",
+    "result": {
+      "cwd": "/tmp/ccd-minor-30/src/new-app",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "status": "started"
+    },
+    "type": "start_session_result"
+  }
+}

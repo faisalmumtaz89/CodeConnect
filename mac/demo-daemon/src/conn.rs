@@ -274,6 +274,8 @@ where
         // minor 28 answers them.
         ClientMessage::ListProjects
         | ClientMessage::GetProjectGit { .. }
+        | ClientMessage::ListFolder { .. }
+        | ClientMessage::CreateFolder { .. }
         | ClientMessage::StartSession { .. } => {
             send(
                 sink,
@@ -538,6 +540,7 @@ fn capabilities() -> Capabilities {
         history_pages: true,
         start_session: false,
         start_worktree: false,
+        browse_folders: false,
     }
 }
 
