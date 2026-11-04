@@ -753,6 +753,26 @@ pub fn capture_visible_pane(name: &str) -> Result<String> {
     out.ok_or_else(|| anyhow::anyhow!("capture-pane failed for {name}"))
 }
 
+/// The folder the program in session `name`'s pane is in now, on the server at
+/// `socket`: where an agent that changed directory has gone (`claude --worktree`
+/// moves into its worktree), which the folder it launched in no longer says.
+/// `None` when tmux cannot say, as for a session already over.
+pub fn pane_current_path(socket: &str, name: &str) -> Option<String> {
+    let out = run_on(
+        socket,
+        &[
+            "display",
+            "-p",
+            "-t",
+            &target_pane(name),
+            "#{pane_current_path}",
+        ],
+    )
+    .ok()??;
+    let path = out.trim_end_matches('\n');
+    (!path.is_empty()).then(|| path.to_string())
+}
+
 /// Who a pane's keystrokes reach.
 ///
 /// Three states rather than a bool, because the two ways of losing the
@@ -2014,6 +2034,45 @@ mod tests {
         assert!(live
             .iter()
             .all(|launch| launch.presence() == SessionPresence::Present));
+    }
+
+    /// **A pane's folder is where its program is now**: a program that changed
+    /// directory after it started reads at its new folder, and a session that is
+    /// over reads as nothing.
+    #[test]
+    fn a_pane_reads_at_the_folder_its_program_moved_to() {
+        let server = TestServer::new("folder");
+        let moved = server.dir.join("moved here");
+        std::fs::create_dir_all(&moved).unwrap();
+        let start = server.dir.display().to_string();
+        let script = format!("cd '{}' && exec sleep 60", moved.display());
+        let status = server
+            .command(&[
+                "new-session",
+                "-d",
+                "-s",
+                "pp",
+                "-c",
+                &start,
+                "sh",
+                "-c",
+                &script,
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let socket = server.socket();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let canonical = moved.canonicalize().unwrap().display().to_string();
+        while pane_current_path(&socket, "pp").as_deref() != Some(canonical.as_str()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pane never read at {canonical}: {:?}",
+                pane_current_path(&socket, "pp")
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(pane_current_path(&socket, "no-such-session"), None);
     }
 
     /// The status bar is hidden on a live session, and a session already over —

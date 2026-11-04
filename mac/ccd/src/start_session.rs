@@ -682,6 +682,16 @@ mod tests {
             agent: AgentKind,
             worktree: StartWorktree,
         ) -> StartSessionResult {
+            self.start_with(path, agent, None, worktree).await
+        }
+
+        async fn start_with(
+            &self,
+            path: &str,
+            agent: AgentKind,
+            prompt: Option<&str>,
+            worktree: StartWorktree,
+        ) -> StartSessionResult {
             launch(
                 &self.db,
                 None,
@@ -689,7 +699,7 @@ mod tests {
                 &self.root,
                 path,
                 &agent,
-                None,
+                prompt,
                 Some(&worktree),
             )
             .await
@@ -1135,15 +1145,17 @@ mod tests {
     }
 
     /// **A new Claude worktree is Claude's own to make**: the launcher runs in the
-    /// folder with `--worktree=<name>` as one argument, and the daemon makes nothing.
+    /// folder with `--worktree=<name>` as one argument, ahead of the first prompt the
+    /// launcher only takes after it, and the daemon makes nothing.
     #[tokio::test]
     async fn a_new_claude_worktree_is_left_to_claude() {
         let rig = recording("new-claude");
         let before = rig.main_state();
         let result = rig
-            .start_in(
+            .start_with(
                 &rig.project(),
                 AgentKind::Claude,
+                Some("-p fix it"),
                 StartWorktree::New {
                     name: "-fix/login".into(),
                 },
@@ -1152,7 +1164,13 @@ mod tests {
         assert_eq!(started_in(&result), None, "Claude chooses the folder");
         assert_eq!(
             rig.launcher_argv(),
-            ["claude", "--no-attach", "--worktree=-fix/login"]
+            [
+                "claude",
+                "--no-attach",
+                "--worktree=-fix/login",
+                "--",
+                "-p fix it"
+            ]
         );
         assert_eq!(rig.launcher_cwd(), rig.project.canonicalize().unwrap());
         assert!(!Path::new(&rig.main()).join(".claude").exists());
