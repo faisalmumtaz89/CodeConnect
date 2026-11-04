@@ -112,6 +112,15 @@ extension RenderCatalog {
             try tap(app, "start-entry", driver)
             try type(app, "start-search", "e", driver)
         },
+        RenderScenario(
+            name: "start1-c3-search-hides", purpose: "option 1: a search that hides the chosen project",
+            arguments: args(1)
+        ) { app, driver in
+            try tap(app, "start-entry", driver)
+            try type(app, "start-search", "ios\n", driver)
+            try driver.requireExists(app.buttons["start-project-ios-app"], "the result")
+            guard !app.buttons["start-go"].exists else { throw RenderFailure.unreachable("no Start") }
+        },
         RenderScenario(name: "start1-d-starting", purpose: "option 1: starting", arguments: args(1, outcome: "pending")) {
             app, driver in
             try tap(app, "start-entry", driver)

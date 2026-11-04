@@ -332,9 +332,9 @@ struct StartMessagePill: View {
             "", text: $text, prompt: Text(placeholder).foregroundStyle(CC.text.placeholder),
             axis: .vertical
         )
-        // Two lines at the accessibility sizes: a third left the project being
-        // started no room above the keyboard.
-        .lineLimit(typeSize.isAccessibilitySize ? 1...2 : 1...5)
+        // One line at the accessibility sizes: a second one grew under the
+        // keyboard, taking the line being typed and the send with it.
+        .lineLimit(typeSize.isAccessibilitySize ? 1...1 : 1...5)
         .ccType(CC.type.body)
         .foregroundStyle(CC.text.primary)
         .accessibilityIdentifier("start-message")

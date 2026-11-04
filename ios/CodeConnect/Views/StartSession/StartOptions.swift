@@ -87,8 +87,13 @@ struct StartRecentsSheet: View {
             }
             // At the accessibility sizes a bar over the keyboard left no line
             // for the message being typed; the message's own send starts it.
+            // A search that hides the chosen project hides its Start too.
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !searching, !(composing && typeSize.isAccessibilitySize) { startBar }
+                if !searching, !(composing && typeSize.isAccessibilitySize),
+                    let selected, startFilter(context.projects, query).contains(selected)
+                {
+                    startBar(selected)
+                }
             }
         }
         .onAppear {
@@ -107,21 +112,18 @@ struct StartRecentsSheet: View {
         agent = context.preferredAgent(project)
     }
 
-    @ViewBuilder
-    private var startBar: some View {
-        if let selected {
-            CCActionBar {
-                if typeSize.isAccessibilitySize {
+    private func startBar(_ selected: StartProject) -> some View {
+        CCActionBar {
+            if typeSize.isAccessibilitySize {
+                startButton(selected)
+            } else {
+                messagePill
+                if composing {
                     startButton(selected)
                 } else {
-                    messagePill
-                    if composing {
+                    HStack(spacing: CC.space.sm) {
+                        StartAgentMenu(selection: $agent, project: selected, context: context)
                         startButton(selected)
-                    } else {
-                        HStack(spacing: CC.space.sm) {
-                            StartAgentMenu(selection: $agent, project: selected, context: context)
-                            startButton(selected)
-                        }
                     }
                 }
             }

@@ -102,6 +102,10 @@ struct StartingSessionView: View {
 
     private enum StepState { case done, running, waiting }
 
+    /// The ring's own size, which does not grow: grown, the icons beside it
+    /// measured 31pt at AX5 and left the mark axis for the gutter's edge.
+    private static let markSize = CCProgressRing.Size.sm.rawValue
+
     /// A step: its mark in the gutter, centred on the mark axis beside the
     /// first line, and its words on the text column.
     private func step(_ state: StepState, _ text: String) -> some View {
@@ -109,12 +113,12 @@ struct StartingSessionView: View {
             Group {
                 switch state {
                 case .done:
-                    CCIcon("check-circle-fill", size: TimelineSpine.mark, maxSize: CCColumn.markMaxSize)
+                    CCIcon("check-circle-fill", size: Self.markSize, maxSize: Self.markSize)
                         .foregroundStyle(CC.color.success)
                 case .running:
                     CCProgressRing()
                 case .waiting:
-                    CCIcon("circle-dashed", size: TimelineSpine.mark, maxSize: CCColumn.markMaxSize)
+                    CCIcon("circle-dashed", size: Self.markSize, maxSize: Self.markSize)
                         .foregroundStyle(CC.text.tertiary)
                 }
             }
