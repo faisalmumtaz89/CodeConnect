@@ -118,6 +118,7 @@ fn main() -> Result<()> {
         }
         "claude" => {
             ask_about_mail(!claude_asks_help_or_version(rest));
+            ask_about_folders(!claude_asks_help_or_version(rest));
             start_claude(rest)
         }
         "codex" if no_attach::requested(rest) => {
@@ -125,6 +126,7 @@ fn main() -> Result<()> {
         }
         "codex" => {
             ask_about_mail(!codex::asks_help_or_version(rest));
+            ask_about_folders(!codex::asks_help_or_version(rest));
             codex::start(rest, false).map(|_| ())
         }
         "mail-trust" => mail_trust::command(rest),
@@ -223,6 +225,17 @@ fn ask_about_mail(starts_a_session: bool) {
     if starts_a_session && crate::attach::Terminal::available() {
         mail_trust::ask_once();
     }
+}
+
+/// macOS's folder question, at a start typed at this Mac's terminal, while it
+/// has never been answered.
+fn ask_about_folders(starts_a_session: bool) {
+    #[cfg(target_os = "macos")]
+    if starts_a_session && crate::attach::Terminal::available() {
+        service::ask_folders_once();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = starts_a_session;
 }
 
 /// Whether `codeconnect claude <args>` asks Claude Code only for its help or its

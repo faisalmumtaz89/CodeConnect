@@ -152,6 +152,7 @@ codeconnect attach cc-1           # re-attach after closing the tab
 codeconnect daemon install        # write the LaunchAgent and start it
 codeconnect daemon status         # plist, launchd job and live daemon, side by side
 codeconnect daemon restart        # launchctl kickstart -k
+codeconnect daemon folders        # let ccd open Desktop, Documents and Downloads
 codeconnect daemon uninstall      # stop it and remove the LaunchAgent
 
 codeconnect pair                  # QR code that pairs a phone (single use, 5 minutes)
@@ -1066,9 +1067,20 @@ words `ls` prints (`Permission denied`). `create_folder {request_id, parent,
 name}` is one `mkdir`: a name holding `/` is refused, and every other refusal is
 `mkdir`'s own (`File exists`). `start_session` and `get_project_git` take any
 absolute folder; a relative path is refused, and a folder becomes a project
-when a session starts in it. On macOS a folder the privacy settings guard
-(Desktop, Downloads, iCloud Drive, other volumes) is read with ccd's own
-permission, under Privacy & Security, Files and Folders.
+when a session starts in it; a start in a folder this daemon is not permitted to
+reach (EACCES, EPERM) is refused in the system's words, and any other folder it
+cannot open is called missing, as before. On macOS, Desktop, Documents
+and Downloads are read with ccd's own permission, asked for once while someone is
+at the Mac: `codeconnect daemon folders`, which the codeconnect.sh installer
+(1.7.7 or later) runs once the daemon is up, at a terminal and not over SSH,
+has ccd itself read each one, so a dialog names ccd and the answer is kept for
+its path, which updates keep. Until it has run once, a `codeconnect claude` or `codex`
+typed at a terminal on the Mac, not an SSH login, runs it first; ccd keeps the
+note that it has (`folders-asked`), and every later typed start is as before.
+Only CodeConnect's own launchd job answers either. An `Operation not permitted` in
+those folders adds where to change the answer (System Settings → Privacy &
+Security → Files and Folders → ccd). External drives are out of scope: the first
+visit to one can still raise a dialog on the Mac.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

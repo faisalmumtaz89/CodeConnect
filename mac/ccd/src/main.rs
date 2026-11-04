@@ -22,6 +22,7 @@ mod codex_wake;
 mod db;
 #[cfg(test)]
 mod fixture_replay;
+mod folder_access;
 mod git;
 mod ipc_server;
 mod legacy_credentials;

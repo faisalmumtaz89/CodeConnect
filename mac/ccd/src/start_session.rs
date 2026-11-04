@@ -238,11 +238,23 @@ pub(crate) async fn launch(
     if let Err(why) = may_name(path) {
         return failed(StartFailure::LaunchFailed, why);
     }
-    if !Path::new(path).is_dir() {
-        return failed(
-            StartFailure::FolderMissing,
-            format!("{path} no longer exists"),
-        );
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => {}
+        // Refused, it is there but this daemon may not reach it; every other
+        // error (gone, a file in the path, a symlink loop) is a folder no longer
+        // there, as before.
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            return failed(
+                StartFailure::LaunchFailed,
+                format!("{path}: {}", refusal_words(&err, Path::new(path))),
+            );
+        }
+        _ => {
+            return failed(
+                StartFailure::FolderMissing,
+                format!("{path} no longer exists"),
+            )
+        }
     }
     let launcher = match launcher {
         Ok(launcher) => launcher,
@@ -370,14 +382,14 @@ fn list_folder(path: &str, show_hidden: bool) -> (String, FolderContents) {
     }
     let real = match std::fs::canonicalize(path) {
         Ok(real) => real,
-        Err(err) => return unreadable(path, system_words(&err)),
+        Err(err) => return unreadable(path, refusal_words(&err, Path::new(path))),
     };
     let Some(real_path) = real.to_str().map(str::to_string) else {
         return unreadable(path, format!("{path} has no UTF-8 real path"));
     };
     let entries = match std::fs::read_dir(&real) {
         Ok(entries) => entries,
-        Err(err) => return unreadable(&real_path, system_words(&err)),
+        Err(err) => return unreadable(&real_path, refusal_words(&err, &real)),
     };
     let mut folders: Vec<String> = entries
         .filter_map(Result::ok)
@@ -404,15 +416,26 @@ fn create_folder(parent: &str, name: &str) -> CreateFolderResult {
     if name.contains('/') {
         return failed(format!("\"{name}\" is not a single folder name"));
     }
-    match std::fs::create_dir(Path::new(parent).join(name)) {
+    let folder = Path::new(parent).join(name);
+    match std::fs::create_dir(&folder) {
         Ok(()) => CreateFolderResult::Created,
-        Err(err) => failed(system_words(&err)),
+        Err(err) => failed(refusal_words(&err, &folder)),
+    }
+}
+
+/// [`system_words`], and where a macOS privacy "no" for `path` can be changed
+/// when it may be one.
+fn refusal_words(err: &std::io::Error, path: &Path) -> String {
+    let words = system_words(err);
+    match crate::folder_access::hint(err, path, &protocol::home_dir()) {
+        Some(hint) => format!("{words}. {hint}"),
+        None => words,
     }
 }
 
 /// An error in the words `ls` and `mkdir` print for it (`Permission denied`),
 /// without the ` (os error 13)` Rust adds.
-fn system_words(err: &std::io::Error) -> String {
+pub(crate) fn system_words(err: &std::io::Error) -> String {
     let words = err.to_string();
     match err.raw_os_error() {
         Some(code) => words
@@ -1230,6 +1253,35 @@ mod tests {
             reason(rig.start(&rig.project(), Some(&long)).await).0,
             StartFailure::LaunchFailed
         );
+    }
+
+    /// A folder that exists but cannot be reached is refused in the system's
+    /// words, not called missing; one behind a file is still missing.
+    #[tokio::test]
+    async fn a_start_in_a_folder_it_cannot_reach_says_why() {
+        use std::os::unix::fs::PermissionsExt;
+        let rig = recording("unreachable");
+        let locked = rig.root.join("locked");
+        let inside = locked.join("app");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::set_permissions(&locked, PermissionsExt::from_mode(0o000)).unwrap();
+        let result = rig.start(&inside.display().to_string(), None).await;
+        std::fs::set_permissions(&locked, PermissionsExt::from_mode(0o755)).unwrap();
+        assert_eq!(
+            refusal(result),
+            format!("{}: Permission denied", inside.display())
+        );
+        let file = rig.root.join("plain");
+        std::fs::write(&file, "").unwrap();
+        let behind_a_file = file.join("app").display().to_string();
+        assert!(matches!(
+            rig.start(&behind_a_file, None).await,
+            StartSessionResult::Failed {
+                reason: StartFailure::FolderMissing,
+                ..
+            }
+        ));
+        assert_eq!(rig.launcher_runs(), 0, "a refused start runs nothing");
     }
 
     /// The stub launcher, keeping what it was run with, then starting.

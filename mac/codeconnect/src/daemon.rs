@@ -160,6 +160,21 @@ pub fn request_within(frame: &ClientFrame, timeout: Duration) -> Result<DaemonFr
     request_at(&protocol::socket_path(), frame, timeout)
 }
 
+/// The same, for a request whose reply waits on a person: the daemon answers
+/// `ask_folder_access` once every macOS dialog it raised has been clicked, so
+/// the reply is read with no timeout. Writing it stays bounded.
+#[cfg(target_os = "macos")]
+pub fn request_waiting(frame: &ClientFrame) -> Result<DaemonFrame> {
+    request_waiting_at(&protocol::socket_path(), frame)
+}
+
+#[cfg(target_os = "macos")]
+fn request_waiting_at(socket: &std::path::Path, frame: &ClientFrame) -> Result<DaemonFrame> {
+    let mut link = DaemonLink::connect(socket, TIMEOUT)?;
+    link.stream.get_ref().set_read_timeout(None)?;
+    link.request(frame)
+}
+
 /// The same, to the daemon at `socket`.
 pub fn request_at(
     socket: &std::path::Path,
@@ -366,5 +381,43 @@ mod tests {
             let _ = daemon.join();
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    /// The folder question is answered once a person has clicked each dialog,
+    /// which takes longer than the round trip every other request is held to.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_folder_question_waits_for_the_person_answering_it() {
+        const FOLDERS: &str = "{\"type\":\"folders\",\"folders\":[{\"folder\":\"Desktop\",\
+                               \"outcome\":{\"status\":\"allowed\"}}]}";
+        let slow_daemon = |path: &std::path::Path| {
+            let listener = UnixListener::bind(path).expect("bind");
+            std::thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accept");
+                let mut out = stream.try_clone().expect("clone");
+                let mut line = String::new();
+                let _ = BufReader::new(stream).read_line(&mut line);
+                std::thread::sleep(TIMEOUT + Duration::from_secs(2));
+                let _ = writeln!(out, "{FOLDERS}");
+                line
+            })
+        };
+
+        let path = socket("folders-bounded");
+        let daemon = slow_daemon(&path);
+        let bounded = request_at(&path, &ClientFrame::AskFolderAccess, TIMEOUT);
+        assert!(
+            bounded.is_err(),
+            "an ordinary request gives up: {bounded:?}"
+        );
+        let _ = daemon.join();
+        let _ = std::fs::remove_file(&path);
+
+        let path = socket("folders-waiting");
+        let daemon = slow_daemon(&path);
+        let reply = request_waiting_at(&path, &ClientFrame::AskFolderAccess).expect("the reply");
+        assert!(matches!(reply, DaemonFrame::Folders { ref folders } if folders.len() == 1));
+        assert!(daemon.join().unwrap().contains("ask_folder_access"));
+        let _ = std::fs::remove_file(&path);
     }
 }

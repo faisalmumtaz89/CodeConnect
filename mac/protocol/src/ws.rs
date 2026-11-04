@@ -730,7 +730,9 @@ pub enum FolderContents {
         truncated: bool,
     },
     /// It could not be read. `error` is the system's own words, as `ls` prints
-    /// them (`Permission denied`), safe to show verbatim.
+    /// them (`Permission denied`), safe to show verbatim. On macOS an `Operation
+    /// not permitted` in Desktop, Documents or Downloads is followed by where to
+    /// change the answer.
     Unreadable { error: String },
 }
 
@@ -744,7 +746,8 @@ pub const MAX_FOLDER_NAMES: usize = 2000;
 pub enum CreateFolderResult {
     Created,
     /// No folder was made. `detail` is the system's own words (`File exists`),
-    /// safe to show verbatim.
+    /// safe to show verbatim, with the same addition as
+    /// [`FolderContents::Unreadable`].
     Failed {
         detail: String,
     },

@@ -73,6 +73,38 @@ pub async fn serve(daemon: Arc<Daemon>, socket_path: PathBuf) -> Result<()> {
     }
 }
 
+/// The guarded folders, read by this daemon only when it is CodeConnect's own
+/// job: macOS keeps an answer for whatever started the reader, so a ccd started
+/// from a terminal would have the terminal asked, and the answer kept for it.
+async fn ask_folder_access() -> DaemonFrame {
+    if let Some(refusal) = not_the_job() {
+        return refusal;
+    }
+    let (home, root) = (protocol::home_dir(), protocol::root_dir());
+    match tokio::task::spawn_blocking(move || crate::folder_access::ask_and_note(&home, &root))
+        .await
+    {
+        Ok(folders) => DaemonFrame::Folders { folders },
+        Err(err) => DaemonFrame::Error {
+            message: format!("the folders could not be read: {err}"),
+        },
+    }
+}
+
+/// The refusal for a ccd that is not CodeConnect's own job, which has no
+/// folder answers to ask for or keep.
+fn not_the_job() -> Option<DaemonFrame> {
+    (crate::state::launchd_label().as_deref() != Some(protocol::LAUNCHD_LABEL)).then(|| {
+        DaemonFrame::Error {
+            message: format!(
+                "this ccd was not started as {}, so macOS would keep the answers for \
+                 whatever started it; start it with `codeconnect daemon install` and ask again",
+                protocol::LAUNCHD_LABEL
+            ),
+        }
+    })
+}
+
 /// Remove a socket left behind by a `kill -9`, but never one a live daemon owns.
 async fn reclaim_socket(path: &Path) -> Result<()> {
     if !path.exists() {
@@ -482,6 +514,15 @@ async fn read_loop(
             ClientFrame::DaemonInfo => {
                 let _ = tx.send(DaemonFrame::Daemon(daemon.info().await)).await;
             }
+            ClientFrame::AskFolderAccess => {
+                let _ = tx.send(ask_folder_access().await).await;
+            }
+            ClientFrame::FolderAccessAsked => {
+                let frame = not_the_job().unwrap_or_else(|| DaemonFrame::FolderAccessAsked {
+                    asked: crate::folder_access::asked(&protocol::root_dir()),
+                });
+                let _ = tx.send(frame).await;
+            }
             ClientFrame::SendAgentMessage {
                 from_uid,
                 to,
@@ -686,6 +727,29 @@ mod tests {
         match frame {
             DaemonFrame::Error { message } => message,
             other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Only CodeConnect's own job reads the guarded folders; any other ccd says
+    /// why instead. (The job's own read is the owner's live check: here it
+    /// would read this machine's real Desktop.)
+    #[tokio::test]
+    async fn a_ccd_that_is_not_the_job_reads_no_folder() {
+        let env = crate::LaunchdLabelEnv::take();
+        let (_daemon, socket) = served_daemon().await;
+        for label in [None, Some("0"), Some("com.example.other")] {
+            env.set(label);
+            for frame in [
+                r#"{"type":"ask_folder_access"}"#,
+                r#"{"type":"folder_access_asked"}"#,
+            ] {
+                let message = error_message(exchange(&socket, frame).await);
+                assert!(
+                    message.contains("was not started as com.codeconnect.ccd")
+                        && message.contains("codeconnect daemon install"),
+                    "{label:?} {frame}: {message}"
+                );
+            }
         }
     }
 
