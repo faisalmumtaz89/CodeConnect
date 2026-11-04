@@ -1087,16 +1087,9 @@ impl RealCoordinatorDeps {
     fn new_session_argv(&self, caller_env: &std::path::Path) -> Vec<String> {
         let mut argv = self.server_args();
         argv.extend(
-            [
-                "new-session",
-                "-d",
-                "-s",
-                &self.session_name,
-                "-c",
-                &self.cwd,
-            ]
-            .iter()
-            .map(|s| s.to_string()),
+            ["new-session", "-d", "-s", &self.session_name]
+                .iter()
+                .map(|s| s.to_string()),
         );
         for (name, value) in self.pane_env() {
             argv.push("-e".into());
@@ -1611,7 +1604,10 @@ impl CoordinatorDeps for RealCoordinatorDeps {
         };
         let argv = self.new_session_argv(&caller_env);
         match protocol::proc::run_deadlined(
+            // The pane starts in the client's working directory; `-c` would be
+            // format-expanded (see `tmux::new_session`).
             std::process::Command::new(&bin)
+                .current_dir(&self.cwd)
                 .args(&argv)
                 .stdin(std::process::Stdio::null()),
             std::time::Duration::from_secs(5),
@@ -1632,7 +1628,10 @@ impl CoordinatorDeps for RealCoordinatorDeps {
             }
             Err(err) => {
                 let _ = std::fs::remove_file(&caller_env);
-                return NewSessionOutcome::Failed(format!("could not run tmux: {err}"));
+                return NewSessionOutcome::Failed(format!(
+                    "could not start tmux in {}: {err}",
+                    self.cwd
+                ));
             }
         }
         // Test-only durable-before-mutation window, and it has to be HERE.
@@ -4163,6 +4162,22 @@ mod tests {
         );
     }
 
+    /// **A Codex session's folder never reaches tmux's format expansion**: the
+    /// pane takes the client's working directory, so the argv names no folder at
+    /// all, and `C#` cannot be read as `C`.
+    #[test]
+    fn a_codex_sessions_folder_is_no_tmux_argument() {
+        let mut deps = real_deps("/tmp/cch.01JQXV9K7B.0123456789abcdef");
+        deps.cwd = "/work/C#/a##b/x#[y".into();
+        let argv = deps.new_session_argv(std::path::Path::new("/tmp/cch.home/environment"));
+        let command = &argv[..argv
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(argv.len())];
+        assert!(!command.contains(&"-c".to_string()), "{argv:?}");
+        assert!(!argv.iter().any(|arg| arg.contains("C#")), "{argv:?}");
+    }
+
     #[test]
     fn the_pane_runs_the_real_host_with_an_exact_argv() {
         let deps = real_deps("/tmp/cch.01JQXV9K7B.0123456789abcdef");
@@ -4181,8 +4196,6 @@ mod tests {
                 "-d",
                 "-s",
                 "cc-1",
-                "-c",
-                "/work",
                 "-e",
                 // The uid stamp is injected as an `-e` ENV VAR on the
                 // session, not an @-option.
@@ -4214,7 +4227,8 @@ mod tests {
             ]
         );
         // What the pane is told must be resolvable FROM THE PANE, and the
-        // pane's cwd is the `-c` above — not this process's. A relative root would
+        // pane's cwd is the session folder the tmux client runs in — not this
+        // process's. A relative root would
         // make the two address different records; `protocol::root_dir()` is what
         // guarantees it cannot be relative, so this asserts the property rather
         // than the string.

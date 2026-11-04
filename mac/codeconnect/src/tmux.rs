@@ -429,7 +429,11 @@ pub fn new_session(
     let mut command = Command::new(tmux_bin()?);
     command.args(server_flag(socket)).arg("-f").arg(&conf);
     command.args(["new-session", "-d", "-P", "-F", &identity_format()]);
-    command.args(["-s", name, "-c", cwd]);
+    // The client runs in the folder, and new-session starts the pane in the client's
+    // own working directory. Not `-c`: tmux format-expands that, so a folder named
+    // `C#`, `a##b` or `#{pane_id}` would name another, and the pane open in the
+    // server's home instead.
+    command.current_dir(cwd).args(["-s", name]);
     if let Some((cols, rows)) = size {
         command.args(["-x", &cols.to_string(), "-y", &rows.to_string()]);
     }
@@ -1818,6 +1822,105 @@ mod tests {
             SessionPresence::Present,
             "the pane command kept running"
         );
+    }
+
+    /// **A session starts in the folder as named**, whatever tmux's format
+    /// expansion would make of it: a `#` in a folder's name is no format.
+    #[test]
+    fn a_session_starts_in_its_folder_whatever_the_folder_is_called() {
+        if tmux_bin().is_err() {
+            return; // no tmux in this environment
+        }
+        let server = TestServer::new("hash");
+        for (n, folder) in [
+            "C#",
+            "a##b",
+            "#{pane_id}",
+            "issue#12",
+            "p%d",
+            "x#",
+            "x#[fg=red]y",
+            "a##[b",
+            "e#f#[g",
+            "m#[#",
+            "a#,b",
+            "ünï#[分",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let folder = server.dir.join(format!("f{n}")).join(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            let seen = server.dir.join(format!("pwd-{n}"));
+            let session_dir = server.dir.join(format!("session-{n}"));
+            std::fs::create_dir_all(&session_dir).unwrap();
+            let created = new_session(
+                &server.socket(),
+                &format!("hash-{n}"),
+                &folder.display().to_string(),
+                &stamp(),
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!("pwd -P > '{}'; sleep 30", seen.display()),
+                ],
+                &session_dir,
+                Some((80, 24)),
+                false,
+                50_000,
+                None,
+            );
+            let launched = created.unwrap_or_else(|err| panic!("{folder:?}: {err:#}"));
+            server.pid.set(Some(launched.pin.server_pid as i32));
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !seen.exists() {
+                assert!(std::time::Instant::now() < deadline, "{folder:?} never ran");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                std::fs::read_to_string(&seen).unwrap().trim_end(),
+                folder.canonicalize().unwrap().display().to_string(),
+                "the session did not start in {folder:?}"
+            );
+        }
+    }
+
+    /// **A folder that is gone fails the start, in the system's own words**, and
+    /// never falls back to another folder.
+    #[test]
+    fn a_session_in_a_folder_that_is_gone_fails_to_start() {
+        if tmux_bin().is_err() {
+            return; // no tmux in this environment
+        }
+        let server = TestServer::new("gone");
+        let gone = server.dir.join("gone");
+        let session_dir = server.dir.join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let created = new_session(
+            &server.socket(),
+            "gone-1",
+            &gone.display().to_string(),
+            &stamp(),
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 30".to_string(),
+            ],
+            &session_dir,
+            Some((80, 24)),
+            false,
+            50_000,
+            None,
+        );
+        let err = match created {
+            Ok(launched) => {
+                server.pid.set(Some(launched.pin.server_pid as i32));
+                panic!("a session started in a folder that does not exist");
+            }
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(err.contains("No such file or directory"), "{err}");
     }
 
     /// What a session prints before anything attaches survives it ending first —

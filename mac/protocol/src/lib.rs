@@ -778,7 +778,7 @@ pub const CODEX_SWEEP_SUBCOMMAND: &str = "internal-codex-sweep";
 /// `./.codeconnect` — and a relative root is not a root at all: it names a different
 /// directory in every process that resolves it. The launcher, the pane's host and
 /// the sweep run with **different working directories** by construction (the
-/// coordinator hands tmux an explicit `-c`), so a process-relative root has them
+/// coordinator starts tmux in the session's folder), so a process-relative root has them
 /// addressing different records for the same session. Absolutising HERE, where the
 /// root is first read, is what makes every consumer — `session_dir`, the launch
 /// lock, the `CODECONNECT_HOME` the coordinator forwards into the pane — name one
