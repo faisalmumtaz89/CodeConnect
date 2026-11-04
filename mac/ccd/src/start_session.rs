@@ -257,15 +257,16 @@ pub(crate) async fn launch(
     }
 }
 
-/// The last line of `bytes` with anything on it: where a failing program says why.
-/// The user's shell startup speaks first, so it is never the last line.
+/// The last line of `bytes` with anything on it: where a failing program says why,
+/// without the `Error: ` the launcher prints before it. The user's shell startup
+/// speaks first, so it is never the last line.
 fn last_line(bytes: &[u8]) -> Option<String> {
     String::from_utf8_lossy(bytes)
         .lines()
         .rev()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(str::to_string)
+        .map(|line| line.strip_prefix("Error: ").unwrap_or(line).to_string())
 }
 
 /// The answer to `list_projects`.
@@ -498,6 +499,21 @@ mod tests {
         assert!(left.is_empty(), "the result file is removed once read");
     }
 
+    /// **The reason a launcher gives reads the same wherever it is shown**: its
+    /// last line, after the shell's noise, without the `Error: ` it prints first.
+    #[test]
+    fn a_launcher_reason_is_its_last_line_without_the_error_prefix() {
+        let stderr =
+            b"bash: cannot set terminal process group (1): Inappropriate ioctl for device\n\
+            bash: no job control in this shell\n\
+            Error: could not find the claude binary: install Claude Code\n\n";
+        assert_eq!(
+            last_line(stderr).as_deref(),
+            Some("could not find the claude binary: install Claude Code")
+        );
+        assert_eq!(last_line(b"  \n\n"), None);
+    }
+
     /// **A double tap starts one session**: the second ask waits for the first
     /// and gets its answer.
     #[tokio::test]
@@ -560,7 +576,7 @@ mod tests {
         );
         assert_eq!(
             reason(rig.start(&rig.project(), None).await),
-            (StartFailure::LaunchFailed, "Error: tmux refused".into())
+            (StartFailure::LaunchFailed, "tmux refused".into())
         );
 
         let rig = Rig::new("long", STARTED);

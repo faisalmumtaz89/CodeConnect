@@ -89,7 +89,7 @@
   "start_failed_launch_failed": {
     "request_id": "r4",
     "result": {
-      "detail": "Error: creating tmux session cc-3",
+      "detail": "creating tmux session cc-3",
       "reason": "launch_failed",
       "status": "failed"
     },
