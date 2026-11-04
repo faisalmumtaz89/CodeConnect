@@ -837,7 +837,7 @@ struct FleetView: View {
                 context: startContext(contexts, machineID), project: project,
                 showsComputer: contexts.count > 1, onStarted: started, onClose: close
             )
-            .presentationDetents([.medium])
+            .ccResizableSheet()
         case (.all, .messageFirst):
             StartAllProjectsSheet(
                 contexts: contexts, machineID: $startMachineID,
