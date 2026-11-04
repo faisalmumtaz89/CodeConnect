@@ -1205,6 +1205,58 @@ mod tests {
         );
     }
 
+    /// **An exit report leaves a run where its agent last was.** The replay is
+    /// the registration the supervisor sent at launch, before `claude --worktree`
+    /// moved into its worktree; the hook that said so is the newer word. An ended
+    /// run stays filed under its worktree, its label and its diff alike.
+    #[tokio::test]
+    async fn an_exit_replay_leaves_the_folder_a_hook_moved_the_run_to() {
+        let (daemon, socket) = served_daemon().await;
+        let uid = protocol::uid::new().unwrap();
+        let worktree = "/tmp/.claude/worktrees/fix-login";
+
+        let a = registered(&socket, &uid, 1111, "2026-08-01T00:00:00Z").await;
+        daemon
+            .handle_hook(protocol::ipc::HookPost {
+                session_id: "cc-1".into(),
+                session_uid: Some(uid.clone()),
+                event: "SessionStart".into(),
+                payload: serde_json::json!({"hook_event_name": "SessionStart",
+                    "session_id": "uuid", "cwd": worktree}),
+                wait: false,
+                holds_questions: false,
+                holds_approvals: false,
+            })
+            .await;
+        drop(a);
+
+        let mut reporter = Supervisor::connect(&socket).await;
+        reporter
+            .send(&ClientFrame::Register(protocol::ipc::RegisterSession {
+                exit_replay: true,
+                ..registration(&uid, 1111, "2026-08-01T00:00:00Z")
+            }))
+            .await;
+        assert!(matches!(reporter.reply().await, DaemonFrame::Ack));
+        let sessions = reporter
+            .send_then_list(&ClientFrame::SessionExited {
+                session_id: "cc-1".to_string(),
+                session_uid: Some(uid.clone()),
+                exit_code: None,
+                reason: None,
+            })
+            .await;
+        let ended = sessions
+            .iter()
+            .find(|session| session.session_uid == uid)
+            .unwrap();
+        assert_eq!(ended.lifecycle, protocol::event::Lifecycle::Exited);
+        assert_eq!(
+            ended.cwd, worktree,
+            "the exit report filed the run back under the folder it launched in"
+        );
+    }
+
     /// **A held approval's hook is let go when its run ends.** cc-hook watches
     /// its parent, but its parent need not be Claude (a shell prefix that does
     /// not `exec`), so once the run is marked exited the daemon answers the
