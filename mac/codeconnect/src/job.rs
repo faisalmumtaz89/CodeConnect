@@ -318,8 +318,7 @@ fn tmux(args: &[&str]) -> Option<String> {
     let socket = std::env::var("TMUX").ok()?;
     let socket = socket.split(',').next()?;
     let output = Command::new(crate::tmux::tmux_bin().ok()?)
-        .arg("-S")
-        .arg(socket)
+        .args(crate::tmux::server_flag(socket))
         .args(args)
         .stdin(Stdio::null())
         .output()

@@ -112,7 +112,7 @@ pub fn tmux_bin() -> Result<PathBuf> {
 
 fn base() -> Result<Command> {
     let mut command = Command::new(tmux_bin()?);
-    command.arg("-L").arg(protocol::TMUX_SOCKET_NAME);
+    command.args(server_flag(protocol::TMUX_SOCKET_NAME));
     Ok(command)
 }
 
@@ -1154,8 +1154,12 @@ pub fn spawn_owned_attach(
     crate::attach::Client::spawn(terminal, argv, expected.session_id.clone(), pane, None)
 }
 
-fn server_flag(socket: &str) -> [&str; 2] {
-    [if socket.contains('/') { "-S" } else { "-L" }, socket]
+/// The server at `socket`, as the flags a tmux client opens with:
+/// [`protocol::tmux::CLIENT_FLAGS`] first, so every client declares UTF-8, then the
+/// address.
+pub(crate) fn server_flag(socket: &str) -> [&str; 3] {
+    let [utf8] = protocol::tmux::CLIENT_FLAGS;
+    [utf8, if socket.contains('/') { "-S" } else { "-L" }, socket]
 }
 
 /// The pinned attach: `commands` run only if the server, the session and its pane
@@ -1193,10 +1197,11 @@ fn owned_attach_argv(
                 .join(" "),
         );
     }
-    let [flag, socket] = server_flag(&expected.socket);
+    let [utf8, flag, socket] = server_flag(&expected.socket);
     Ok(vec![
         "-N".into(),
         "-C".into(),
+        utf8.into(),
         flag.into(),
         socket.into(),
         "if-shell".into(),
@@ -2034,6 +2039,39 @@ mod tests {
         assert!(live
             .iter()
             .all(|launch| launch.presence() == SessionPresence::Present));
+    }
+
+    /// **A folder reads back as itself from a client with no UTF-8 locale**, as
+    /// `ccd` under launchd and the launcher in a container or a bare systemd unit
+    /// are: without `-u`, tmux writes every byte outside printable ASCII as `_`.
+    #[test]
+    fn a_folder_reads_back_exactly_from_a_client_with_no_locale() {
+        let server = TestServer::new("utf8");
+        let folder = server.dir.join("unicode-ünï-☕-分支");
+        std::fs::create_dir_all(&folder).unwrap();
+        let start = folder.display().to_string();
+        let status = server
+            .command(&["new-session", "-d", "-s", "u", "-c", &start, "sleep", "60"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let socket = server.socket();
+        let read = Command::new(tmux_bin().unwrap())
+            .env_clear()
+            .args(server_flag(&socket))
+            .args([
+                "display",
+                "-p",
+                "-t",
+                &target_pane("u"),
+                "#{pane_current_path}",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&read.stdout).trim_end(),
+            folder.canonicalize().unwrap().display().to_string()
+        );
     }
 
     /// **A pane's folder is where its program is now**: a program that changed

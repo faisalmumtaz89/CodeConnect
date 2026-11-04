@@ -913,11 +913,9 @@ pub struct RealCoordinatorDeps {
 
 impl RealCoordinatorDeps {
     fn server_args(&self) -> Vec<String> {
-        if self.tmux_socket.contains('/') {
-            vec!["-S".into(), self.tmux_socket.clone()]
-        } else {
-            vec!["-L".into(), self.tmux_socket.clone()]
-        }
+        crate::tmux::server_flag(&self.tmux_socket)
+            .map(str::to_string)
+            .into()
     }
 
     /// Write down a session this launch is KNOWN to have created.
@@ -4176,6 +4174,7 @@ mod tests {
         assert_eq!(
             argv,
             vec![
+                "-u",
                 "-S",
                 "/tmp/t.sock",
                 "new-session",
@@ -4228,8 +4227,8 @@ mod tests {
         let mut labelled = real_deps("/tmp/cch.a.b");
         labelled.tmux_socket = "codeconnect".into();
         assert_eq!(
-            &labelled.new_session_argv(std::path::Path::new("/e"))[..2],
-            &["-L", "codeconnect"]
+            &labelled.new_session_argv(std::path::Path::new("/e"))[..3],
+            &["-u", "-L", "codeconnect"]
         );
     }
 
