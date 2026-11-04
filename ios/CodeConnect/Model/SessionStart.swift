@@ -45,6 +45,40 @@ struct StartAgentStatus: Hashable, Sendable {
     let agent: StartAgent
     let available: Bool
     let detail: String?
+
+    /// As it arrives: the agent's name may be one this build does not know.
+    struct Wire: Decodable {
+        let agent: String
+        let available: Bool
+        let detail: String?
+
+        var status: StartAgentStatus? {
+            StartAgent(rawValue: agent).map {
+                StartAgentStatus(agent: $0, available: available, detail: detail)
+            }
+        }
+    }
+}
+
+extension StartProject: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case path, name, exists
+        case lastUsed = "last_used"
+        case lastAgent = "last_agent"
+        case gitBranch = "git_branch"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        name = try c.decode(String.self, forKey: .name)
+        lastUsed = ISO8601.parse(try c.decode(String.self, forKey: .lastUsed)) ?? .distantPast
+        // An agent this build does not know was still last used here; it is
+        // simply not one the phone can preselect.
+        lastAgent = (try c.decodeIfPresent(String.self, forKey: .lastAgent)).flatMap(StartAgent.init)
+        gitBranch = try c.decodeIfPresent(String.self, forKey: .gitBranch)
+        exists = try c.decode(Bool.self, forKey: .exists)
+    }
 }
 
 /// `StartSessionResult.outcome.Failed.reason`.
@@ -54,10 +88,32 @@ enum StartFailure: String, Sendable {
     case launchFailed = "launch_failed"
 }
 
-/// `StartSessionResult.outcome`.
+/// `StartSessionResult.result`.
 enum StartOutcome: Hashable, Sendable {
     case started(sessionUID: String)
     case failed(StartFailure, detail: String)
+}
+
+extension StartOutcome: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case status, reason, detail
+        case sessionUID = "session_uid"
+    }
+
+    /// A reason or a status this build has never heard of is still a start that
+    /// did not happen, told in the computer's own words — never a Starting… that
+    /// waits for an answer that has already come.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let status = try c.decode(String.self, forKey: .status)
+        if status == "started" {
+            self = .started(sessionUID: try c.decode(String.self, forKey: .sessionUID))
+            return
+        }
+        let detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? status
+        let reason = (try c.decodeIfPresent(String.self, forKey: .reason)).flatMap(StartFailure.init)
+        self = .failed(status == "failed" ? reason ?? .launchFailed : .launchFailed, detail: detail)
+    }
 }
 
 /// One `StartSession` the phone sent, and what came back.
@@ -76,8 +132,8 @@ struct SessionStart: Identifiable, Hashable {
 /// The phone's side of starting a session: the computer's projects, and every
 /// start sent from this phone with its outcome.
 ///
-/// Answered from fixtures until the daemon speaks `list_projects` and
-/// `start_session`; the shapes are the protocol's, so the wire swaps in here.
+/// It holds what the computer said and nothing else: `AppModel` sends the
+/// requests and hands the replies here.
 @MainActor
 @Observable
 final class SessionStarter {
@@ -104,9 +160,23 @@ final class SessionStarter {
         ]
     }
 
-    /// What `start_session_result` said about one start.
+    /// What `projects` said.
+    func receive(projects: [StartProject], agents: [StartAgentStatus]) {
+        self.projects = projects
+        self.agents = agents
+    }
+
+    /// What `start_session_result` said about one start. The first answer is
+    /// the answer: a repeat after a resend says the same thing again.
     func resolve(_ requestID: String, _ outcome: StartOutcome) {
+        guard starts[requestID]?.outcome == nil else { return }
         starts[requestID]?.outcome = outcome
+    }
+
+    /// Starts sent and not yet answered, to send again, unchanged, after a
+    /// reconnect.
+    var unanswered: [SessionStart] {
+        starts.values.filter { $0.outcome == nil }.sorted { $0.sentAt < $1.sentAt }
     }
 
     /// Send one start. The request id is what makes a double tap or a resend

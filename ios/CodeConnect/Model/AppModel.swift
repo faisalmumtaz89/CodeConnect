@@ -1147,6 +1147,46 @@ final class AppModel {
     /// This computer's projects, and the sessions this phone started on it.
     let starter = SessionStarter()
 
+    /// Ask this computer for its projects. Only a computer that advertises
+    /// `start_session` is asked; the answer arrives as `projects`.
+    func listProjects() {
+        #if DEBUG
+            if fixturesActive {
+                if starter.projects == nil { starter.listFixtureProjects(linux: machineSystem == "Linux") }
+                return
+            }
+        #endif
+        guard connection.capabilities?.startsSessions == true else { return }
+        Task { try? await connection.send(.listProjects) }
+    }
+
+    /// Start an agent in one of this computer's projects; the answer arrives as
+    /// `start_session_result` under the returned request id.
+    func startSession(_ project: StartProject, agent: StartAgent, prompt: String) -> String {
+        let requestID = starter.start(
+            project: project, agent: agent, prompt: prompt, machineName: machineName ?? "this computer")
+        #if DEBUG
+            if fixturesActive {
+                answerFixtureStart(requestID)
+                return requestID
+            }
+        #endif
+        sendStart(requestID)
+        return requestID
+    }
+
+    /// One send of one start. A send that fails, or a link that drops before
+    /// the answer, is sent again by the next handshake under the same id.
+    private func sendStart(_ requestID: String) {
+        guard let start = starter.starts[requestID], start.outcome == nil else { return }
+        Task {
+            try? await connection.send(
+                .startSession(
+                    requestID: requestID, path: start.project.path, agent: start.agent.rawValue,
+                    prompt: start.prompt))
+        }
+    }
+
     /// True while the sample fleet is on screen.
     ///
     /// Implies `fixturesActive`, and adds the two things only a shipping screen
@@ -1912,6 +1952,13 @@ final class AppModel {
         case .testPushResult:
             // Same shape: the sheet's own request awaits the reply by id.
             break
+        case .projects(let projects, let agents):
+            starter.receive(projects: projects, agents: agents)
+        case .startSessionResult(let requestID, let outcome):
+            starter.resolve(requestID, outcome)
+            // The new session reaches the fleet on its own; asking now shortens
+            // the Starting… it waits behind.
+            if case .started = outcome { refreshFleet() }
         case .terminalAttached, .terminalOutput, .terminalCredit, .terminalClosed:
             // The terminal is a byte stream with its own flow control, delivered
             // to `TerminalCarrier` on `connection.onTerminal`. Nothing here may
@@ -2030,6 +2077,11 @@ final class AppModel {
                     ack.capabilities.tls && endpoint?.hostIsIPLiteral == true, id: machineID)
             }
             startCacheMigration()
+            // A start whose answer the link lost is asked again, unchanged: the
+            // daemon answers a repeated request id with its first outcome.
+            if ack.capabilities.startsSessions {
+                for start in starter.unanswered { sendStart(start.requestID) }
+            }
             // Last: it may find this model is another's machine, and leave it.
             onIdentified?()
         case .interruptResult, .composeResult:

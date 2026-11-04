@@ -17,18 +17,11 @@ struct StartContext {
 
     var id: String { model.machineID ?? "" }
 
-    func load() {
-        guard starter.projects == nil, model.fixturesActive else { return }
-        starter.listFixtureProjects(linux: model.machineSystem == "Linux")
-    }
+    /// Ask again each time: the list is the computer's, and it changes.
+    func load() { model.listProjects() }
 
     func start(_ project: StartProject, agent: StartAgent, prompt: String) -> String {
-        let requestID = starter.start(
-            project: project, agent: agent, prompt: prompt, machineName: machineName)
-        #if DEBUG
-            if model.fixturesActive { model.answerFixtureStart(requestID) }
-        #endif
-        return requestID
+        model.startSession(project, agent: agent, prompt: prompt)
     }
 
     /// When this computer last ran anything the phone can start again.

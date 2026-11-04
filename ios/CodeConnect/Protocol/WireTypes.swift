@@ -1826,6 +1826,13 @@ enum ClientMessage: Sendable {
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(session: String, requestID: String, text: String, payloadHash: String)
+    /// The folders sessions have run in on this computer. Minor 28, sent only
+    /// when `Capabilities.startsSessions`.
+    case listProjects
+    /// Start an agent in one of those folders. `requestID` is fresh per tap and
+    /// resent unchanged after a reconnect: the daemon answers a repeat with the
+    /// first outcome and starts nothing new. `path` is a listed path, byte for byte.
+    case startSession(requestID: String, path: String, agent: String, prompt: String?)
     case ping
 }
 
@@ -1847,6 +1854,9 @@ extension ClientMessage: Encodable {
         case requestID = "request_id"
         case payloadHash = "payload_hash"
         case decision
+        case path
+        case agent
+        case prompt
         case text
         case require
         case submit
@@ -1985,6 +1995,14 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(text, forKey: .text)
             try c.encode(payloadHash, forKey: .payloadHash)
+        case .listProjects:
+            try c.encode("list_projects", forKey: .type)
+        case .startSession(let requestID, let path, let agent, let prompt):
+            try c.encode("start_session", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(path, forKey: .path)
+            try c.encode(agent, forKey: .agent)
+            try c.encodeIfPresent(prompt, forKey: .prompt)
         case .ping:
             try c.encode("ping", forKey: .type)
         }
@@ -2238,6 +2256,10 @@ enum ServerMessage: Sendable {
     case interruptResult(sessionID: String, requestID: String, result: InterruptResult)
     /// The answer to one `compose`, same correlation.
     case composeResult(sessionID: String, requestID: String, result: ComposeResult)
+    /// The answer to `list_projects`: most recent first, and which agents the
+    /// computer has.
+    case projects(projects: [StartProject], agents: [StartAgentStatus])
+    case startSessionResult(requestID: String, outcome: StartOutcome)
     case error(code: String, message: String)
     case pong
     /// A message type this build does not know. Kept rather than thrown away so
@@ -2278,6 +2300,8 @@ extension ServerMessage: Decodable {
         case beforeSeq = "before_seq"
         case firstSeq = "first_seq"
         case error
+        case projects
+        case agents
     }
 
     init(from decoder: Decoder) throws {
@@ -2373,6 +2397,16 @@ extension ServerMessage: Decodable {
                 sessionID: try c.decode(String.self, forKey: .sessionID),
                 requestID: try c.decode(String.self, forKey: .requestID),
                 result: try c.decode(ComposeResult.self, forKey: .result))
+        case "projects":
+            self = .projects(
+                projects: try c.decode([StartProject].self, forKey: .projects),
+                // An agent this build has never heard of cannot be offered.
+                agents: try c.decode([StartAgentStatus.Wire].self, forKey: .agents)
+                    .compactMap(\.status))
+        case "start_session_result":
+            self = .startSessionResult(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                outcome: try c.decode(StartOutcome.self, forKey: .result))
         case "pong":
             self = .pong
         case let other:
