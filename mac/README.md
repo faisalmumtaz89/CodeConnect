@@ -1032,7 +1032,10 @@ own startup files run after and win. The launcher writes what it
 started to the file named by `CODECONNECT_LAUNCH_RESULT`, and the daemon
 answers `start_session_result` with the session's uid, or `failed` with
 `agent_missing`, `folder_missing` or `launch_failed` and a detail, once the
-launcher has finished (a launcher still running after 80 s is killed). The same
+launcher has finished (a launcher still running after 80 s is killed). A
+`started` is sent only once the session is in `sessions`, so the phone's next
+`sessions` lists it: within the same 80 s, or `launch_failed` saying it may
+still be running. The same
 `request_id` again, on any connection, gets the first answer and starts
 nothing; the daemon forgets them when it restarts.
 `>= 29` lets that start pick a branch or worktree (`start_worktree`), and never

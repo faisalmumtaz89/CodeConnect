@@ -32,6 +32,9 @@ use crate::state::Daemon;
 /// counts; this is only the backstop for one that never ends.
 const START_TIMEOUT: Duration = Duration::from_secs(80);
 
+/// How often a start that has run looks again for its session in the fleet.
+const LISTED_POLL: Duration = Duration::from_millis(50);
+
 /// How long one folder's git branch may take.
 const BRANCH_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -102,6 +105,7 @@ pub async fn answer(daemon: &Arc<Daemon>, message: ClientMessage) -> ServerMessa
         } => {
             let state_dir = protocol::root_dir();
             let launch = launch(
+                &daemon.db,
                 daemon.config.git_bin.as_deref(),
                 crate::state::codex_launcher(),
                 &state_dir,
@@ -203,7 +207,14 @@ fn failed(reason: StartFailure, detail: String) -> StartSessionResult {
 /// Run `codeconnect <agent> --no-attach [--worktree=<name>] [-- <prompt>]`
 /// through the user's login shell, in `path` or the worktree `worktree` names, and
 /// read what it started from its result line, a file in `state_dir`.
+///
+/// `started` is answered only once the session is in the fleet ([`listed`]): the
+/// launcher reports a Claude start as soon as it has spawned the supervisor, which
+/// registers a moment later, and the phone looks for the new session in the very
+/// next `sessions` it asks for.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch(
+    db: &crate::db::Db,
     git_bin: Option<&str>,
     launcher: Result<PathBuf, String>,
     state_dir: &Path,
@@ -276,13 +287,17 @@ pub(crate) async fn launch(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(START_TIMEOUT, command.output()).await;
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    let output = tokio::time::timeout_at(deadline, command.output()).await;
     let written = LaunchResult::read_from(&result_path);
     let _ = std::fs::remove_file(&result_path);
     match (written, output) {
-        (Ok(LaunchResult::Started { uid, .. }), _) => StartSessionResult::Started {
-            session_uid: uid,
-            cwd: place.known.then_some(place.cwd),
+        (Ok(LaunchResult::Started { uid, .. }), _) => match listed(db, &uid, deadline).await {
+            Ok(()) => StartSessionResult::Started {
+                session_uid: uid,
+                cwd: place.known.then_some(place.cwd),
+            },
+            Err(why) => failed(StartFailure::LaunchFailed, why),
         },
         (Ok(LaunchResult::Failed { error, detail }), _) => failed(error, detail),
         (Err(_), Err(_)) => failed(
@@ -308,6 +323,29 @@ pub(crate) async fn launch(
                 }),
         ),
     }
+}
+
+/// Wait until the session `uid` is one the fleet lists (its row, which `sessions`
+/// reads), or until `deadline`, the start's own: the launcher's time left over.
+async fn listed(
+    db: &crate::db::Db,
+    uid: &str,
+    deadline: tokio::time::Instant,
+) -> Result<(), String> {
+    loop {
+        match tokio::time::timeout_at(deadline, db.get_session(uid.to_string())).await {
+            Ok(Ok(Some(_))) => return Ok(()),
+            Ok(Ok(None)) => {}
+            Ok(Err(err)) => return Err(format!("could not read this computer's sessions: {err}")),
+            Err(_) => break,
+        }
+        tokio::time::sleep(LISTED_POLL).await;
+    }
+    Err(format!(
+        "the session was launched but did not reach this computer's sessions within {} s; \
+         it may still be running",
+        START_TIMEOUT.as_secs()
+    ))
 }
 
 /// Whether the phone may name `path`, for a listing, a new folder, a start or a git
@@ -836,11 +874,13 @@ fn session_environment(_own: &HashMap<OsString, OsString>) -> Option<HashMap<OsS
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// A folder for one test: a project folder, and a stub launcher whose
     /// `--no-attach` runs `body`.
     struct Rig {
         root: PathBuf,
+        db: crate::db::Db,
         project: PathBuf,
         launcher: PathBuf,
     }
@@ -854,6 +894,28 @@ mod tests {
             ));
             let project = root.join("my app");
             std::fs::create_dir_all(&project).unwrap();
+            let store = Arc::new(crate::store::Store::open(&root.join("events.db")).unwrap());
+            let at = protocol::time::now_rfc3339();
+            // The session the stub launchers report, registered as its supervisor
+            // would have done by the time the start is answered.
+            let filed = store
+                .upsert_session(&crate::store::SessionRow {
+                    session_uid: STUB_UID.into(),
+                    session_id: "cc-1".into(),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: "codeconnect".into(),
+                    cwd: project.display().to_string(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Exited,
+                    created_at: at.clone(),
+                    updated_at: at,
+                    agent: AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .unwrap();
+            assert!(matches!(filed, crate::store::SessionUpsert::Present));
             let launcher = root.join("codeconnect");
             std::fs::write(&launcher, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::process::Command::new("chmod")
@@ -862,6 +924,7 @@ mod tests {
                 .status()
                 .unwrap();
             Rig {
+                db: crate::db::Db::new(store),
                 root,
                 project,
                 launcher,
@@ -870,6 +933,7 @@ mod tests {
 
         async fn start(&self, path: &str, prompt: Option<&str>) -> StartSessionResult {
             launch(
+                &self.db,
                 None,
                 Ok(self.launcher.clone()),
                 &self.root,
@@ -898,6 +962,7 @@ mod tests {
             worktree: StartWorktree,
         ) -> StartSessionResult {
             launch(
+                &self.db,
                 None,
                 Ok(self.launcher.clone()),
                 &self.root,
@@ -1025,6 +1090,8 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+
+    const STUB_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQR";
 
     const STARTED: &str = r#"printf '{"uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_name":"cc-7","agent":"claude"}\n' > "$CODECONNECT_LAUNCH_RESULT""#;
 
@@ -1645,6 +1712,7 @@ mod tests {
             let path = folder.display().to_string();
             for agent in [AgentKind::Claude, AgentKind::Codex] {
                 let result = launch(
+                    &rig.db,
                     None,
                     Ok(rig.launcher.clone()),
                     &rig.root,
@@ -1784,5 +1852,100 @@ mod tests {
             Some(&"0".into())
         );
         assert_eq!(session.get(OsStr::new("XPC_FLAGS")), Some(&"0x0".into()));
+    }
+
+    /// A session row for `uid`, as a supervisor's registration files it.
+    async fn register(db: &crate::db::Db, uid: &str) {
+        let at = protocol::time::now_rfc3339();
+        let filed = db
+            .upsert_session(crate::store::SessionRow {
+                session_uid: uid.into(),
+                session_id: "cc-8".into(),
+                tmux_session: "cc-8".into(),
+                tmux_socket: "codeconnect".into(),
+                cwd: "/tmp".into(),
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Live,
+                created_at: at.clone(),
+                updated_at: at,
+                agent: AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(filed, crate::store::SessionUpsert::Present));
+    }
+
+    /// **A start is answered once its session is listed, not before**: a
+    /// registration that lands later is waited for, one already there is not, and
+    /// one that never lands ends the start with a reason at the start's deadline.
+    #[tokio::test]
+    async fn a_start_is_answered_once_its_session_is_listed() {
+        let rig = Rig::new("listed", STARTED);
+        let late = protocol::uid::new().unwrap();
+        let soon = tokio::time::Instant::now() + Duration::from_secs(10);
+        let begun = std::time::Instant::now();
+        let (waited, ()) = tokio::join!(super::listed(&rig.db, &late, soon), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            register(&rig.db, &late).await;
+        });
+        assert_eq!(waited, Ok(()));
+        assert!(
+            begun.elapsed() >= Duration::from_millis(300),
+            "{:?}",
+            begun.elapsed()
+        );
+
+        let begun = std::time::Instant::now();
+        assert_eq!(super::listed(&rig.db, STUB_UID, soon).await, Ok(()));
+        assert!(
+            begun.elapsed() < Duration::from_millis(200),
+            "{:?}",
+            begun.elapsed()
+        );
+
+        let never = protocol::uid::new().unwrap();
+        let short = tokio::time::Instant::now() + Duration::from_millis(400);
+        let why = super::listed(&rig.db, &never, short).await.unwrap_err();
+        assert!(
+            why.contains("did not reach this computer's sessions"),
+            "{why}"
+        );
+        assert!(tokio::time::Instant::now() <= short + Duration::from_millis(100));
+    }
+
+    /// **A Claude start is not answered before its supervisor has registered**: the
+    /// launcher reports the start as soon as it has spawned the supervisor, and the
+    /// answer waits for the registration that follows.
+    #[tokio::test]
+    async fn a_start_waits_for_its_supervisor_to_register() {
+        const LATE_UID: &str = "01K1B3XQ8ZC0DE5FGH7JKMNPQS";
+        let rig = Rig::new(
+            "late",
+            &format!(
+                r#"printf '{{"uid":"{LATE_UID}","session_name":"cc-7","agent":"claude"}}\n' > "$CODECONNECT_LAUNCH_RESULT""#
+            ),
+        );
+        let begun = std::time::Instant::now();
+        let project = rig.project();
+        let ((result, answered), ()) = tokio::join!(
+            async { (rig.start(&project, None).await, begun.elapsed()) },
+            async {
+                // Longer than the launcher itself takes (its login shell alone is
+                // about half a second), so an answer before it did not wait.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                register(&rig.db, LATE_UID).await;
+            }
+        );
+        assert!(
+            matches!(&result, StartSessionResult::Started { session_uid, .. } if session_uid == LATE_UID),
+            "{result:?}"
+        );
+        assert!(
+            answered >= Duration::from_secs(2),
+            "answered after {answered:?}, before the registration"
+        );
     }
 }

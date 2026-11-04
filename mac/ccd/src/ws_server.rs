@@ -8597,6 +8597,30 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// The session a fixture's stub launcher reports, registered in `cwd` as its
+    /// supervisor would have done by the time the start is answered. Filed long ago,
+    /// so the project list's order and dates are the fixture's own.
+    fn register_stub_session(store: &crate::store::Store, cwd: String) {
+        let filed = store
+            .upsert_session(&crate::store::SessionRow {
+                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+                session_id: "cc-9".into(),
+                tmux_session: "cc-9".into(),
+                tmux_socket: "codeconnect".into(),
+                cwd,
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Exited,
+                created_at: "2026-01-01T00:00:00.000Z".into(),
+                updated_at: "2026-01-01T00:00:00.000Z".into(),
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap();
+        assert!(matches!(filed, crate::store::SessionUpsert::Present));
+    }
+
     /// **The start-session wire a minor-28 daemon sent, still in what this build
     /// sends.** The fixture is what minor 28 emitted, kept as it was: the phone's
     /// tests read its copy under `ios/` as an older Mac. This build may add a
@@ -8760,6 +8784,7 @@ mod tests {
         };
 
         let (server, _device) = live_server(protocol::config::Config::default()).await;
+        register_stub_session(&server.store, at(&app));
         let (mut phone, ack) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
@@ -8806,9 +8831,10 @@ mod tests {
         .await;
 
         let start = |path: String| {
-            let launcher = launcher.clone();
+            let (db, launcher) = (&server.daemon.db, launcher.clone());
             async move {
                 crate::start_session::launch(
+                    db,
                     None,
                     Ok(launcher),
                     root,
@@ -8955,6 +8981,7 @@ mod tests {
             assert!(matches!(filed, crate::store::SessionUpsert::Present));
         }
 
+        register_stub_session(&server.store, at(&app));
         let (mut phone, ack) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
@@ -8973,9 +9000,10 @@ mod tests {
         let get_project_git_request = get_project_git(at(&app));
 
         let start = |path: String, agent: AgentKind, worktree: StartWorktree| {
-            let launcher = launcher.clone();
+            let (db, launcher) = (&server.daemon.db, launcher.clone());
             async move {
                 crate::start_session::launch(
+                    db,
                     None,
                     Ok(launcher),
                     root,
@@ -9146,6 +9174,7 @@ esac
             },
         ]);
 
+        register_stub_session(&server.store, app.display().to_string());
         let (mut phone, ack) = server
             .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
             .await;
@@ -9157,11 +9186,20 @@ esac
         let projects = next_json(&mut phone).await.unwrap();
 
         let start = |path: &std::path::Path, agent: AgentKind, prompt: Option<&'static str>| {
-            let launcher = launcher.clone();
+            let (db, launcher) = (&server.daemon.db, launcher.clone());
             let path = path.display().to_string();
             async move {
-                crate::start_session::launch(None, Ok(launcher), root, &path, &agent, prompt, None)
-                    .await
+                crate::start_session::launch(
+                    db,
+                    None,
+                    Ok(launcher),
+                    root,
+                    &path,
+                    &agent,
+                    prompt,
+                    None,
+                )
+                .await
             }
         };
         let reply = |request_id: &str, result: StartSessionResult| {
