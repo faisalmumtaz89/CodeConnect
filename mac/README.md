@@ -1018,7 +1018,17 @@ shell) as last checked: the first list after the daemon starts waits for the
 check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt?}` takes a listed
 folder (from `>= 30`, any absolute folder) and runs `codeconnect <agent> --no-attach [-- <prompt>]` there through
 the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
-otherwise), every value an argument of its own. The launcher writes what it
+otherwise), every value an argument of its own. The shell starts from the
+user's session environment, not the daemon's service one: on macOS launchd's,
+with its `PATH` (`launchctl setenv`'s, or launchd's default) and `XPC_SERVICE_NAME=0`,
+`XPC_FLAGS=0x0`; on Linux the systemd user manager's, read whole. Either way the
+daemon's own location (`CODECONNECT_HOME`, `CODECONNECT_TMUX`, `TMUX_TMPDIR`)
+goes with it and `CODECONNECT_LOG` and `CODECONNECT_SERVICE` do not. A daemon
+started by hand has the session's environment already and uses its own; so
+does one whose session cannot be read (`launchctl` or `busctl` failing). When nothing in
+it names an encoding (`LC_ALL`, `LC_CTYPE`, `LANG`), `LC_CTYPE` is the platform's
+UTF-8 (`UTF-8`, or `C.UTF-8` on Linux), as a UTF-8 terminal sets it; the user's
+own startup files run after and win. The launcher writes what it
 started to the file named by `CODECONNECT_LAUNCH_RESULT`, and the daemon
 answers `start_session_result` with the session's uid, or `failed` with
 `agent_missing`, `folder_missing` or `launch_failed` and a detail, once the

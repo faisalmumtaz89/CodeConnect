@@ -2,12 +2,13 @@
 //! making folders, and the start.
 //!
 //! Everything the daemon runs on the phone's behalf goes through the user's own
-//! login shell ([`login_shell_command`]), so the launcher and the agent it starts
+//! login shell ([`login_shell_command`]), started from the user's session
+//! environment ([`phone_environment`]), so the launcher and the agent it starts
 //! see the PATH, version managers and credentials a new terminal would — not the
 //! daemon's service environment.
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -275,10 +276,6 @@ pub(crate) async fn launch(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // No terminal ever told this session its type; this is the one it gets.
-    if std::env::var_os("TERM").is_none() {
-        command.env("TERM", "xterm-256color");
-    }
     let output = tokio::time::timeout(START_TIMEOUT, command.output()).await;
     let written = LaunchResult::read_from(&result_path);
     let _ = std::fs::remove_file(&result_path);
@@ -677,13 +674,18 @@ async fn agent_availability(agent: &AgentKind) -> AgentAvailability {
     unavailable(last_line(&output.stderr).unwrap_or_else(|| "the agent could not be found".into()))
 }
 
-/// `args` run through the user's login shell, as one argv each, never one string.
+/// `args` run through the user's login shell, as one argv each, never one string,
+/// from [`phone_environment`].
 ///
 /// zsh and bash run interactive and login (`-lic`), which is what reads the files
 /// a new terminal reads. Any other shell, or none in `$SHELL`, runs `/bin/sh -lc`:
 /// a written miss, so a fish user gets the system shell's environment.
 fn login_shell_command(args: &[&OsStr]) -> tokio::process::Command {
-    let shell = std::env::var_os("SHELL").unwrap_or_default();
+    let environment = phone_environment();
+    let shell = environment
+        .get(OsStr::new("SHELL"))
+        .cloned()
+        .unwrap_or_default();
     let name = Path::new(&shell).file_name().unwrap_or_default();
     let (program, flags) = if name == "zsh" || name == "bash" {
         (PathBuf::from(&shell), "-lic")
@@ -692,11 +694,143 @@ fn login_shell_command(args: &[&OsStr]) -> tokio::process::Command {
     };
     let mut command = tokio::process::Command::new(program);
     command
+        .env_clear()
+        .envs(environment)
         .arg(flags)
         .arg("exec \"$@\"")
         .arg("codeconnect-start")
         .args(args);
     command
+}
+
+/// What CodeConnect's own service definition sets for the daemon alone.
+const SERVICE_ONLY: [&str; 2] = ["CODECONNECT_LOG", "CODECONNECT_SERVICE"];
+
+/// Where this daemon keeps its state and its tmux: a phone start has to reach this
+/// daemon, so these go with it whatever the session says.
+const DAEMON_LOCATION: [&str; 3] = ["CODECONNECT_HOME", "CODECONNECT_TMUX", "TMUX_TMPDIR"];
+
+/// The character encoding a session displayed by CodeConnect, a UTF-8 terminal,
+/// is described by when nothing else names one, in the platform's own spelling.
+#[cfg(target_os = "macos")]
+const UTF8_CTYPE: &str = "UTF-8";
+#[cfg(not(target_os = "macos"))]
+const UTF8_CTYPE: &str = "C.UTF-8";
+
+/// The environment a phone-started program starts from: the user's session's, as
+/// a terminal opened in that session hands its shell, not this service's.
+///
+/// Run as CodeConnect's own service, the daemon carries what its service
+/// definition gave it; so the session is read afresh ([`session_environment`]),
+/// and when it cannot be, the daemon's own is used (a written miss). Run any other
+/// way, the daemon's environment is the session's already.
+fn phone_environment() -> HashMap<OsString, OsString> {
+    let own: HashMap<OsString, OsString> = std::env::vars_os().collect();
+    let session = (crate::state::launchd_label().as_deref() == Some(protocol::LAUNCHD_LABEL))
+        .then(|| session_environment(&own))
+        .flatten();
+    phone_environment_from(own, session)
+}
+
+/// [`phone_environment`], from the daemon's environment and, when it was read, the
+/// session's.
+fn phone_environment_from(
+    own: HashMap<OsString, OsString>,
+    session: Option<HashMap<OsString, OsString>>,
+) -> HashMap<OsString, OsString> {
+    let mut environment = match session {
+        Some(mut session) => {
+            for name in DAEMON_LOCATION {
+                if let Some(value) = own.get(OsStr::new(name)) {
+                    session.insert(name.into(), value.clone());
+                }
+            }
+            session
+        }
+        None => own,
+    };
+    for name in SERVICE_ONLY {
+        environment.remove(OsStr::new(name));
+    }
+    let names_an_encoding = ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|name| {
+        environment
+            .get(OsStr::new(name))
+            .is_some_and(|value| !value.is_empty())
+    });
+    if !names_an_encoding {
+        environment.insert("LC_CTYPE".into(), UTF8_CTYPE.into());
+    }
+    // No terminal ever told this session its type; this is the one it gets.
+    environment
+        .entry("TERM".into())
+        .or_insert_with(|| "xterm-256color".into());
+    environment
+}
+
+/// The session's environment on macOS: what launchd hands a job that is not a
+/// service. That is the daemon's own but for what names the service: the `PATH`
+/// its service definition set (the session's is the one `launchctl setenv` gave
+/// it, or launchd's default), and launchd's `XPC_SERVICE_NAME` and `XPC_FLAGS`,
+/// which carry this job's label where every other process has `0` and `0x0`.
+/// `None` when `launchctl` cannot say.
+#[cfg(target_os = "macos")]
+fn session_environment(own: &HashMap<OsString, OsString>) -> Option<HashMap<OsString, OsString>> {
+    let output = std::process::Command::new("/bin/launchctl")
+        .args(["getenv", "PATH"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let set = String::from_utf8_lossy(&output.stdout)
+        .trim_end_matches('\n')
+        .to_string();
+    let mut session = own.clone();
+    session.insert(
+        "PATH".into(),
+        if set.is_empty() {
+            "/usr/bin:/bin:/usr/sbin:/sbin".into()
+        } else {
+            set.into()
+        },
+    );
+    session.insert("XPC_SERVICE_NAME".into(), "0".into());
+    session.insert("XPC_FLAGS".into(), "0x0".into());
+    Some(session)
+}
+
+/// The session's environment on Linux: the systemd user manager's own, which a
+/// desktop terminal inherits, read as its D-Bus property so every value arrives as
+/// it is. `None` when the manager cannot be asked.
+#[cfg(not(target_os = "macos"))]
+fn session_environment(_own: &HashMap<OsString, OsString>) -> Option<HashMap<OsString, OsString>> {
+    let busctl = ["/usr/bin/busctl", "/bin/busctl"]
+        .iter()
+        .find(|path| Path::new(path).is_file())?;
+    let output = std::process::Command::new(busctl)
+        .args([
+            "--user",
+            "--json=short",
+            "get-property",
+            "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1",
+            "org.freedesktop.systemd1.Manager",
+            "Environment",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let property: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    property["data"]
+        .as_array()?
+        .iter()
+        .map(|entry| {
+            let (name, value) = entry.as_str()?.split_once('=')?;
+            Some((name.into(), value.into()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1542,5 +1676,113 @@ mod tests {
             "nothing in a folder name or prompt may run"
         );
         assert_eq!(rig.launcher_runs(), 6);
+    }
+
+    fn environment(pairs: &[(&str, &str)]) -> HashMap<OsString, OsString> {
+        pairs
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect()
+    }
+
+    /// **A phone start begins from the session's environment**: the service's own
+    /// variables and PATH are gone, the session's values (its PATH, an agent socket)
+    /// are there, and the daemon's own location goes with it.
+    #[test]
+    fn a_phone_start_begins_from_the_session_not_the_service() {
+        let own = environment(&[
+            ("PATH", "/service/bin:/usr/bin"),
+            ("HOME", "/home/me"),
+            ("CODECONNECT_LOG", "info"),
+            ("CODECONNECT_SERVICE", "com.codeconnect.ccd"),
+            ("INVOCATION_ID", "unit-only"),
+            ("CODECONNECT_HOME", "/home/me/.cc"),
+            ("TMUX_TMPDIR", "/tmp/t"),
+        ]);
+        let session = environment(&[
+            ("PATH", "/usr/local/bin:/usr/bin"),
+            ("HOME", "/home/me"),
+            ("LANG", "C.UTF-8"),
+            ("SSH_AUTH_SOCK", "/run/user/1000/agent"),
+        ]);
+        assert_eq!(
+            phone_environment_from(own.clone(), Some(session)),
+            environment(&[
+                ("PATH", "/usr/local/bin:/usr/bin"),
+                ("HOME", "/home/me"),
+                ("LANG", "C.UTF-8"),
+                ("SSH_AUTH_SOCK", "/run/user/1000/agent"),
+                ("CODECONNECT_HOME", "/home/me/.cc"),
+                ("TMUX_TMPDIR", "/tmp/t"),
+                ("TERM", "xterm-256color"),
+            ])
+        );
+
+        // When the session cannot be read, the daemon's own is used, without the
+        // service's own variables.
+        let fallback = phone_environment_from(own, None);
+        assert_eq!(
+            fallback.get(OsStr::new("PATH")),
+            Some(&"/service/bin:/usr/bin".into())
+        );
+        for name in SERVICE_ONLY {
+            assert!(!fallback.contains_key(OsStr::new(name)), "{name}");
+        }
+    }
+
+    /// **The UTF-8 ctype is set only when nothing names an encoding**; language and
+    /// region are never touched, and an existing TERM stays.
+    #[test]
+    fn the_utf8_ctype_is_set_only_when_nothing_names_an_encoding() {
+        let ctype = |pairs: &[(&str, &str)]| {
+            phone_environment_from(environment(pairs), None)
+                .get(OsStr::new("LC_CTYPE"))
+                .cloned()
+        };
+        assert_eq!(ctype(&[("HOME", "/h")]), Some(UTF8_CTYPE.into()));
+        assert_eq!(ctype(&[("LANG", "")]), Some(UTF8_CTYPE.into()));
+        assert_eq!(ctype(&[("LANG", "fr_FR.UTF-8")]), None);
+        assert_eq!(ctype(&[("LC_ALL", "C")]), None);
+        assert_eq!(
+            ctype(&[("LC_CTYPE", "en_US.UTF-8")]),
+            Some("en_US.UTF-8".into())
+        );
+        let kept = phone_environment_from(
+            environment(&[("LANG", "fr_FR.UTF-8"), ("TERM", "screen")]),
+            None,
+        );
+        assert_eq!(kept.get(OsStr::new("LANG")), Some(&"fr_FR.UTF-8".into()));
+        assert_eq!(kept.get(OsStr::new("TERM")), Some(&"screen".into()));
+    }
+
+    /// On macOS the session's PATH is launchd's: the one `launchctl setenv` gave it,
+    /// or launchd's default, never the service definition's.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_session_path_on_macos_is_launchds() {
+        let own = environment(&[
+            ("PATH", "/service/bin:/usr/bin"),
+            ("HOME", "/h"),
+            ("XPC_SERVICE_NAME", "com.codeconnect.ccd"),
+            ("XPC_FLAGS", "1"),
+        ]);
+        let session = session_environment(&own).expect("launchctl answers");
+        let set = std::process::Command::new("/bin/launchctl")
+            .args(["getenv", "PATH"])
+            .output()
+            .unwrap();
+        let set = String::from_utf8_lossy(&set.stdout).trim().to_string();
+        let want = if set.is_empty() {
+            "/usr/bin:/bin:/usr/sbin:/sbin".to_string()
+        } else {
+            set
+        };
+        assert_eq!(session.get(OsStr::new("PATH")), Some(&want.into()));
+        assert_eq!(session.get(OsStr::new("HOME")), Some(&"/h".into()));
+        assert_eq!(
+            session.get(OsStr::new("XPC_SERVICE_NAME")),
+            Some(&"0".into())
+        );
+        assert_eq!(session.get(OsStr::new("XPC_FLAGS")), Some(&"0x0".into()));
     }
 }
