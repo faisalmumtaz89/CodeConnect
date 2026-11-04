@@ -234,6 +234,24 @@ extension RenderCatalog {
             Thread.sleep(forTimeInterval: 12)
             try driver.requireExists(app.buttons["start-use-folder"], "the browser, still open")
         },
+        RenderScenario(
+            name: "start2-j2-link-drop-computer", purpose: "steps: the chosen computer's link drops, the other's holds",
+            arguments: args(twoComputers: true, linkDropMS: 45000)
+        ) { app, driver in
+            let launched = Date()
+            try tap(app, "start-entry", driver)
+            try tap(app, "start-computer-Jordan’s Mac Studio", driver)
+            try driver.requireExists(app.buttons["start-project-query-parser"], "Jordan’s folders")
+            // Jordan's link drops 45 s in and is back 5 s later; the flow
+            // stays on Jordan's folders, not the other computer's.
+            let reached = Date().timeIntervalSince(launched)
+            guard reached < 44 else { throw RenderFailure.unreachable("the folder step before the drop (\(reached) s)") }
+            Thread.sleep(forTimeInterval: 45 + 8 - reached)
+            // gpu-benchmarks is the other computer's alone; its name is on the
+            // fleet behind the sheet, so the name proves nothing.
+            guard app.buttons["start-project-query-parser"].exists, !app.buttons["start-project-gpu-benchmarks"].exists
+            else { throw RenderFailure.unreachable("Jordan’s folders after the drop, not \(server)’s") }
+        },
         RenderScenario(name: "start2-c-agent", purpose: "steps: the agent", arguments: args()) {
             app, driver in
             try toAgents(app, driver)

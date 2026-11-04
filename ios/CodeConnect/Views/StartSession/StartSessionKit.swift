@@ -56,20 +56,13 @@ struct StartContext {
     /// Why an agent cannot be started on this computer, or nil when it can.
     /// The computer's own words when it has them: its check ran the agent,
     /// and an agent can be there and still not run.
-    func missingReason(_ agent: StartAgent, in project: StartProject) -> String? {
+    func missingReason(_ agent: StartAgent) -> String? {
         guard !starter.availableAgents.contains(agent) else { return nil }
         guard let detail = starter.agents.first(where: { $0.agent == agent })?.detail else {
             return "\(agent.displayName) isn’t installed on \(machineName)."
         }
         return "\(agent.displayName) can’t start on \(machineName): \(detail)"
     }
-
-}
-
-/// The context a choice names, or the first when it names none.
-@MainActor
-func startContext(_ contexts: [StartContext], _ id: String) -> StartContext {
-    contexts.first { $0.id == id } ?? contexts[0]
 }
 
 // MARK: - Project row
@@ -85,10 +78,9 @@ func startProjectMeta(_ project: StartProject, now: Date = Date()) -> String {
 }
 
 /// A project: its name, its folder cut from the front, and its branch, age
-/// and last agent, with a trailing mark.
-struct StartProjectRow<Trailing: View>: View {
+/// and last agent, with a caret, since a tap moves on.
+struct StartProjectRow: View {
     let project: StartProject
-    @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
         HStack(alignment: .center, spacing: CC.space.sm) {
@@ -110,7 +102,7 @@ struct StartProjectRow<Trailing: View>: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            trailing()
+            CCIcon("caret-right", size: 16).foregroundStyle(CC.text.tertiary)
         }
         .padding(.horizontal, CC.space.md)
         .padding(.vertical, CC.space.sm)
@@ -132,7 +124,7 @@ struct StartRowStyle: ButtonStyle {
 /// A field that narrows a project list by name or folder.
 struct StartSearchField: View {
     @Binding var text: String
-    var placeholder = "Search projects"
+    let placeholder: String
 
     var body: some View {
         HStack(spacing: CC.space.xs) {
@@ -175,7 +167,7 @@ func startFilter(_ projects: [StartProject], _ query: String) -> [StartProject] 
 struct StartMessagePill: View {
     @Binding var text: String
     let placeholder: String
-    var focused: FocusState<Bool>.Binding?
+    var focused: FocusState<Bool>.Binding
     /// Drawn in the circle once text exists; nil keeps the mic.
     var onSend: (() -> Void)?
 
@@ -216,9 +208,8 @@ struct StartMessagePill: View {
         .onDisappear { dictation.cancel() }
     }
 
-    @ViewBuilder
     private var field: some View {
-        let base = TextField(
+        TextField(
             "", text: $text, prompt: Text(placeholder).foregroundStyle(CC.text.placeholder),
             axis: .vertical
         )
@@ -228,7 +219,7 @@ struct StartMessagePill: View {
         .ccType(CC.type.body)
         .foregroundStyle(CC.text.primary)
         .accessibilityIdentifier("start-message")
-        if let focused { base.focused(focused) } else { base }
+        .focused(focused)
     }
 
     private var phase: CCVoiceButtonPhase {

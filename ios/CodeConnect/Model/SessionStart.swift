@@ -15,7 +15,6 @@ enum StartAgent: String, CaseIterable, Identifiable, Sendable {
 /// main checkout first, then its linked worktrees.
 struct StartWorktree: Hashable, Sendable {
     let path: String
-    let main: Bool
     /// Nil on a detached HEAD.
     let branch: String?
     let dirty: Bool
@@ -445,16 +444,14 @@ extension SessionStarter {
         else { return nil }
         let path = project.path
         let trees = "\(path)/.claude/worktrees"
-        func checkout(_ path: String, _ branch: String?, main: Bool = false, dirty: Bool = false, missing: Bool = false)
-            -> StartWorktree
-        {
-            StartWorktree(path: path, main: main, branch: branch, dirty: dirty, missing: missing)
+        func checkout(_ path: String, _ branch: String?, dirty: Bool = false, missing: Bool = false) -> StartWorktree {
+            StartWorktree(path: path, branch: branch, dirty: dirty, missing: missing)
         }
         switch project.name {
         case "query-parser":
             return StartGit(
                 worktrees: [
-                    checkout(path, branch, main: true, dirty: true),
+                    checkout(path, branch, dirty: true),
                     checkout("\(trees)/strict-mode", "feature/strict-mode"),
                     checkout("\(trees)/fix+unicode-escapes", "fix/unicode-escapes", dirty: true),
                     checkout("\(path)-old", "wt/gone", missing: true),
@@ -463,11 +460,11 @@ extension SessionStarter {
                 branchesTruncated: true)
         case "payments-reconciliation-worker":
             return StartGit(
-                worktrees: [checkout(path, branch, main: true)], branches: ["release/2026.11", "main"],
+                worktrees: [checkout(path, branch)], branches: ["release/2026.11", "main"],
                 branchesTruncated: false)
         default:
             return StartGit(
-                worktrees: [checkout(path, branch, main: true)], branches: branch == "main" ? ["develop"] : ["main"],
+                worktrees: [checkout(path, branch)], branches: branch == "main" ? ["develop"] : ["main"],
                 branchesTruncated: false)
         }
     }

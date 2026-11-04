@@ -1179,7 +1179,9 @@ final class AppModel {
                 return
             }
         #endif
-        guard connection.capabilities?.startsInWorktrees == true else { return }
+        // Asked while a redial has no capabilities yet: the next handshake
+        // asks again. Only a computer that says it cannot is never asked.
+        guard connection.capabilities?.startsInWorktrees != false else { return }
         starter.askedGit(path)
         Task { try? await connection.send(.getProjectGit(path: path)) }
     }
@@ -1195,7 +1197,8 @@ final class AppModel {
                 return
             }
         #endif
-        guard connection.capabilities?.browsesFolders == true else { return }
+        // As with git: asked during a redial, asked again after it.
+        guard connection.capabilities?.browsesFolders != false else { return }
         let requestID = UUID().uuidString.lowercased()
         starter.ask(request, as: requestID)
         Task {

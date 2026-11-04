@@ -90,7 +90,7 @@ final class StartFlowWireTests: XCTestCase {
         XCTAssertEqual(
             try encoded(.getProjectGit(path: "/tmp/ccd-minor-29/app")), root["get_project_git_request"])
         let checkout = StartWorktree(
-            path: "/tmp/ccd-minor-29/app-review", main: false, branch: "review/ui", dirty: false, missing: false)
+            path: "/tmp/ccd-minor-29/app-review", branch: "review/ui", dirty: false, missing: false)
         let cases: [(String, String, StartPlace)] = [
             ("start_session_existing_request", "claude", .existing(checkout)),
             ("start_session_branch_request", "codex", .branch("feature/search")),
@@ -110,7 +110,6 @@ final class StartFlowWireTests: XCTestCase {
             return XCTFail("not a repository's answer")
         }
         XCTAssertEqual(path, "/tmp/ccd-minor-29/app")
-        XCTAssertEqual(git.worktrees.first?.main, true)
         XCTAssertEqual(git.worktrees.first?.path, path)
         XCTAssertEqual(git.worktrees.first?.dirty, true)
         XCTAssertTrue(git.worktrees.contains { $0.missing })
@@ -264,6 +263,31 @@ final class StartFlowWireTests: XCTestCase {
             return path
         }
         XCTAssertEqual(asked, ["/tmp/ccd-minor-29/app", "/tmp/ccd-minor-29/notes", "/tmp/ccd-minor-29/app"])
+    }
+
+    /// A folder or a repository asked for while a redial has no capabilities
+    /// yet is asked for once the handshake is back.
+    func testWhatIsAskedDuringARedialIsAskedAfterIt() async throws {
+        let (model, sent) = try model()
+        model.connection.stop()
+        model.listFolder(StartFolderRequest(path: "/tmp/ccd-minor-30/src", showHidden: false))
+        model.projectGit("/tmp/ccd-minor-29/app")
+        await settle()
+        let before = sent.sent.count
+        let hello = """
+            {"type":"hello_ack","protocol_version":\(Wire.protocolVersion),"protocol_minor":30,\
+            "server_time":"2026-11-04T03:00:00.000Z","capabilities":\(try wire(30)["hello_ack_capabilities"]!.canonicalJSONString)}
+            """
+        model.connection.injectForTesting(try JSONDecoder().decode(ServerMessage.self, from: Data(hello.utf8)))
+        await settle()
+        let after = sent.sent.dropFirst(before)
+        XCTAssertTrue(
+            after.contains {
+                if case .listFolder(_, "/tmp/ccd-minor-30/src"?, false) = $0 { return true } else { return false }
+            }, "the folder is listed once the link is back")
+        XCTAssertTrue(
+            after.contains { if case .getProjectGit("/tmp/ccd-minor-29/app") = $0 { return true } else { return false } },
+            "the repository is read once the link is back")
     }
 
     /// A start keeps its place through a resend.

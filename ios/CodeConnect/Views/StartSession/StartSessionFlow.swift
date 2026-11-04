@@ -7,8 +7,9 @@ import SwiftUI
 /// which branch; then Start, with an optional first message. A tap on an
 /// answer moves on; back returns one screen, and in the browser one folder.
 struct StartStepsSheet: View {
+    /// The paired computers that can start a session now: the first step's
+    /// list, live.
     let contexts: [StartContext]
-    @Binding var machineID: String
     let onStarted: (String) -> Void
     let onClose: () -> Void
 
@@ -37,7 +38,16 @@ struct StartStepsSheet: View {
     @FocusState private var composing: Bool
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    private var context: StartContext { startContext(contexts, machineID) }
+    /// The computer tapped on the first step, held from then on: a link that
+    /// drops later neither takes it away nor hands its choices to another.
+    @State private var chosen: StartContext?
+
+    /// The chosen computer. Every step after the first is drawn only once one
+    /// is chosen (`content`), so it is always there when read.
+    private var context: StartContext {
+        guard let chosen else { preconditionFailure("a step after the computer, before one was chosen") }
+        return chosen
+    }
     private var screen: Screen { trail.last ?? .computer }
 
     /// The chosen folder's repository; nil outside one, or until the computer
@@ -84,7 +94,7 @@ struct StartStepsSheet: View {
         case .computer: return "Which computer?"
         case .folder: return "Which folder?"
         case .browse(let path):
-            let shown = context.listing(StartFolderRequest(path: path, showHidden: showsHidden))?.path ?? path
+            let shown = chosen?.listing(StartFolderRequest(path: path, showHidden: showsHidden))?.path ?? path
             guard let shown else { return "Home" }
             return shown == "/" ? "/" : String(shown.split(separator: "/").last ?? "")
         case .agent: return "Which agent?"
@@ -99,7 +109,7 @@ struct StartStepsSheet: View {
     private var subtitle: String? {
         switch screen {
         case .computer, .start: return nil
-        case .folder, .browse: return context.machineName
+        case .folder, .browse: return chosen?.machineName
         case .agent, .branch, .newWorktree: return project?.name
         }
     }
@@ -108,6 +118,7 @@ struct StartStepsSheet: View {
     private var content: some View {
         switch screen {
         case .computer: computerStep
+        case _ where chosen == nil: EmptyView()
         case .folder: folderStep
         case .browse(let path): browseStep(path)
         case .agent: agentStep
@@ -134,7 +145,7 @@ struct StartStepsSheet: View {
             LazyVStack(spacing: 0) {
                 ForEach(contexts, id: \.id) { candidate in
                     Button {
-                        machineID = candidate.id
+                        chosen = candidate
                         candidate.load()
                         go(.folder)
                     } label: {
@@ -167,9 +178,7 @@ struct StartStepsSheet: View {
                         Button {
                             choose(candidate)
                         } label: {
-                            StartProjectRow(project: candidate) {
-                                CCIcon("caret-right", size: 16).foregroundStyle(CC.text.tertiary)
-                            }
+                            StartProjectRow(project: candidate)
                         }
                         .buttonStyle(StartRowStyle())
                         .accessibilityIdentifier("start-project-\(candidate.name)")
@@ -350,7 +359,7 @@ struct StartStepsSheet: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(StartAgent.allCases) { candidate in
-                        let missing = context.missingReason(candidate, in: project)
+                        let missing = context.missingReason(candidate)
                         Button {
                             agent = candidate
                             go(branchAhead ? .branch : .start)

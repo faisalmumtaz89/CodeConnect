@@ -122,13 +122,7 @@ struct FleetView: View {
     /// Whether the start flow is open, and the start it sent (opened once the
     /// flow has gone).
     @State private var startOpen = false
-    /// The computers the open flow offers: those that could start a session
-    /// when it opened. A link that drops meanwhile leaves its computer there,
-    /// and a start sent in the gap goes when the link is back.
-    @State private var openContexts: [StartContext] = []
     @State private var startedRequest: String?
-    /// The computer a start goes to; the one last used until one is chosen.
-    @State private var startMachineID = ""
     /// Every paired computer that can start a session.
     private var startContexts: [StartContext] {
         machines.models.filter { $0.connection.capabilities?.startsSessions == true }
@@ -321,10 +315,7 @@ struct FleetView: View {
                 }
             }
             .sheet(isPresented: $startOpen, onDismiss: openStarted) {
-                StartStepsSheet(
-                    contexts: openContexts, machineID: $startMachineID, onStarted: started,
-                    onClose: { startOpen = false }
-                )
+                StartStepsSheet(contexts: startContexts, onStarted: started, onClose: { startOpen = false })
                 .ccTallSheet()
             }
             .onChange(of: startContexts.map(\.id), initial: true) { _, _ in loadStart() }
@@ -696,7 +687,6 @@ struct FleetView: View {
 
     private func openStart() {
         guard canStart else { return }
-        openContexts = startContexts
         startOpen = true
     }
 
@@ -712,15 +702,10 @@ struct FleetView: View {
         path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
     }
 
-    /// Ask every computer for its projects, and choose the one last used.
+    /// Ask every computer for its projects. The computer is chosen in the
+    /// flow, by a tap, and held there.
     private func loadStart() {
-        let contexts = startContexts
-        for context in contexts { context.load() }
-        guard !contexts.isEmpty else { return }
-        if !contexts.contains(where: { $0.id == startMachineID }) {
-            startMachineID =
-                contexts.max { ($0.lastUsed ?? .distantPast) < ($1.lastUsed ?? .distantPast) }?.id ?? ""
-        }
+        for context in startContexts { context.load() }
     }
 
     // MARK: Bands

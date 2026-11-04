@@ -243,7 +243,7 @@ final class SessionStartTests: XCTestCase {
     /// folder; `/x/app-old` does not hold `/x/app`'s files.
     func testAFolderIsInTheCheckoutThatHoldsIt() {
         func checkout(_ path: String, _ branch: String) -> StartWorktree {
-            StartWorktree(path: path, main: path == "/x/app", branch: branch, dirty: false, missing: false)
+            StartWorktree(path: path, branch: branch, dirty: false, missing: false)
         }
         let git = StartGit(
             worktrees: [
