@@ -199,7 +199,9 @@ fn server_args(socket: &str) -> Option<[String; 3]> {
 /// 3.7b and 3.7c-cc1 with an `env -i` client, `#{pane_current_path}` of
 /// `…/unicode-ünï-☕-分支` read `…/unicode-_n_-__-____`, and `-u` read it exactly. What
 /// a client sends is the same either way (`send-keys -l`, `new-session -c`, measured
-/// byte for byte), and a control client is never sanitised.
+/// byte for byte). A control client needs it too: its `%output` and `capture-pane`
+/// are passed through, but its format replies are sanitised (a pane title `✳ Claude
+/// Code` read `_ Claude Code` without it).
 pub const CLIENT_FLAGS: [&str; 1] = ["-u"];
 
 /// The complete argv for "does this session exist?", or `None` when the server
