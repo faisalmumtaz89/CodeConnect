@@ -10,8 +10,7 @@ import SwiftUI
 /// One sheet: the computer, the recent projects with the last-used one already
 /// chosen, and the first message, the agent and Start pinned under them. While
 /// the search has the keyboard the bar steps aside for the results; while the
-/// first message has it, the bar keeps only the message and Start, and the
-/// chosen project scrolls into view above them.
+/// first message has it, the chosen project scrolls into view above the bar.
 ///
 /// At the accessibility sizes only Start stays pinned: the message and the
 /// agent open under the chosen project's row, on its fill, and scroll with
@@ -23,7 +22,10 @@ struct StartRecentsSheet: View {
     let onClose: () -> Void
 
     @State private var query = ""
-    @State private var selected: StartProject?
+    /// The chosen project by its path: the computer's list is asked for
+    /// again on every open, and the record it sends for the project last
+    /// started has moved on (its last use, perhaps its branch).
+    @State private var selectedID: String?
     @State private var agent: StartAgent?
     @State private var message = ""
     @FocusState private var searching: Bool
@@ -31,6 +33,7 @@ struct StartRecentsSheet: View {
     @Environment(\.dynamicTypeSize) private var typeSize
 
     private var context: StartContext { startContext(contexts, machineID) }
+    private var selected: StartProject? { context.projects.first { $0.id == selectedID } }
 
     var body: some View {
         // With several computers the filled chip says which; the subtitle
@@ -59,14 +62,14 @@ struct StartRecentsSheet: View {
                                     choose(project)
                                     searching = false
                                 } label: {
-                                    StartProjectRow(project: project, isSelected: project == selected) {
-                                        StartCheck(on: project == selected)
+                                    StartProjectRow(project: project, isSelected: project.id == selectedID) {
+                                        StartCheck(on: project.id == selectedID)
                                     }
                                 }
                                 .buttonStyle(StartRowStyle())
                                 .id(project.id)
                                 .accessibilityIdentifier("start-project-\(project.name)")
-                                if typeSize.isAccessibilitySize, project == selected {
+                                if typeSize.isAccessibilitySize, project.id == selectedID {
                                     VStack(alignment: .leading, spacing: CC.space.sm) {
                                         messagePill
                                         StartAgentMenu(selection: $agent, project: project, context: context)
@@ -78,8 +81,9 @@ struct StartRecentsSheet: View {
                             }
                         }
                     }
+                    .scrollDismissesKeyboard(.interactively)
                     .onChange(of: composing) { _, now in
-                        guard now, !typeSize.isAccessibilitySize, let id = selected?.id else { return }
+                        guard now, !typeSize.isAccessibilitySize, let id = selectedID else { return }
                         withAnimation(CC.motion.medium) { list.scrollTo(id, anchor: .bottom) }
                     }
                 }
@@ -90,7 +94,7 @@ struct StartRecentsSheet: View {
             // A search that hides the chosen project hides its Start too.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !searching, !(composing && typeSize.isAccessibilitySize),
-                    let selected, startFilter(context.projects, query).contains(selected)
+                    let selected, startFilter(context.projects, query).contains(where: { $0.id == selectedID })
                 {
                     startBar(selected)
                 }
@@ -98,17 +102,17 @@ struct StartRecentsSheet: View {
         }
         .onAppear {
             context.load()
-            if selected == nil, let first = context.projects.first { choose(first) }
+            if selectedID == nil, let first = context.projects.first { choose(first) }
         }
         .onChange(of: machineID) { _, _ in
             context.load()
-            selected = nil
+            selectedID = nil
             if let first = context.projects.first { choose(first) }
         }
     }
 
     private func choose(_ project: StartProject) {
-        selected = project
+        selectedID = project.id
         agent = context.preferredAgent(project)
     }
 
@@ -118,13 +122,9 @@ struct StartRecentsSheet: View {
                 startButton(selected)
             } else {
                 messagePill
-                if composing {
+                HStack(spacing: CC.space.sm) {
+                    StartAgentMenu(selection: $agent, project: selected, context: context)
                     startButton(selected)
-                } else {
-                    HStack(spacing: CC.space.sm) {
-                        StartAgentMenu(selection: $agent, project: selected, context: context)
-                        startButton(selected)
-                    }
                 }
             }
         }
