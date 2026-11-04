@@ -1045,7 +1045,9 @@ struct SessionDetailView: View {
                         SessionTimeline(
                             key: key, tailWatch: tailWatch,
                             openApproval: $openApproval, showLinkDetail: $showLinkDetail,
-                            composerFocused: $composerFocused
+                            composerFocused: $composerFocused,
+                            // The sample fleet has no terminal to open.
+                            openTerminal: model.sampleFleetActive ? nil : { surfaceBinding.wrappedValue = .terminal }
                         )
                         .onAppear { openWantedApproval() }
                     } else {
@@ -1728,6 +1730,8 @@ private struct SessionTimeline: View {
     @Binding var openApproval: ApprovalItem?
     @Binding var showLinkDetail: Bool
     var composerFocused: FocusState<Bool>.Binding
+    /// Nil where there is no terminal to open.
+    var openTerminal: (() -> Void)?
 
     @Environment(AppModel.self) private var model
     /// Every tool label's width in this timeline, so every command beside one
@@ -1991,11 +1995,17 @@ private struct SessionTimeline: View {
 
     private var emptyTimeline: some View {
         // Anchored rather than centred, so the compose bar stays reachable —
-        // you can always talk to an agent.
+        // you can always talk to an agent. An agent's own first screen (sign
+        // in, trust this folder) records nothing; it is answered in the
+        // terminal, which is offered here rather than two taps away.
         CCEmptyState(
             glyph: "clock",
             title: "Nothing recorded yet",
-            message: "Events appear here as the agent works.")
+            message: openTerminal == nil
+                ? "Events appear here as the agent works."
+                : "Events appear here as the agent works. If it is asking something first, answer it in the terminal.",
+            actionTitle: openTerminal == nil ? nil : "Open the terminal",
+            action: openTerminal)
             // 96pt from the top of the list, counting the empty state's own
             // 32pt of vertical padding.
             .padding(.top, CC.space.xxxl + CC.space.md)

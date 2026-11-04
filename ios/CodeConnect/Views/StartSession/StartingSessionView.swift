@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Where a start lands the moment it is sent: the new session's own screen,
-/// saying what it is waiting for until the session's first event arrives, or
-/// why it did not start and what to do about it.
+/// saying what it is waiting for until the fleet lists the session, or why it
+/// did not start and what to do about it.
 struct StartingSessionView: View {
     let requestID: String
     /// The session is live: show its real screen, ready to type into when
@@ -33,15 +33,15 @@ struct StartingSessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if let start {
-                ToolbarItem(placement: .principal) { StartBarTitle(project: start.project) }
+                ToolbarItem(placement: .principal) { StartBarTitle(start: start) }
             }
         }
         .onChange(of: liveKey) { _, key in if let key { onLive(key, start?.prompt == nil) } }
     }
 
-    /// The new session's key once it is in the fleet with its first event.
+    /// The new session's key once the fleet lists it.
     private var liveKey: String? {
-        guard case .started(let uid) = start?.outcome ?? .failed(.launchFailed, detail: ""),
+        guard case .started(let uid, _) = start?.outcome ?? .failed(.launchFailed, detail: ""),
             model.shown(for: uid) != nil
         else { return nil }
         return uid

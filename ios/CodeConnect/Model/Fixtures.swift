@@ -364,7 +364,7 @@ enum Fixtures {
         "tls_active":false,"diff":true,"risk_class":true,"session_uid":true,\
         "send_text_idempotent":true,"slash_composer_recovery":true,\
         "prompt_identity":true,"command_catalog":true,"terminal_pty":true,\
-        "hook_only_approvals":true,"start_session":true},\
+        "hook_only_approvals":true,"start_session":true,"start_worktree":true,"browse_folders":true},\
         "machine_name":"Jordan’s Mac Studio","machine_os":"macos",\
         "device_name":"iPhone"}
         """
@@ -520,6 +520,17 @@ enum Fixtures {
         return frames.compactMap(decode)
     }
 
+    /// Where a new worktree lands: under the repository's `.claude/worktrees`,
+    /// a branch's or a name's slashes as pluses, as Claude Code puts its own.
+    private static func newWorktreeFolder(_ start: SessionStart) -> String {
+        let leaf: String
+        switch start.place {
+        case .branch(let name), .new(let name): leaf = name.replacingOccurrences(of: "/", with: "+")
+        case .folder, .existing: return start.project.path
+        }
+        return "\(start.project.path)/.claude/worktrees/\(leaf)"
+    }
+
     /// A started session as the computer reports it: listed beside the ones
     /// already there, then its start and, when one was given, its first message.
     static func startedSessionFrames(_ start: SessionStart, uid: String, listed: [SessionSummary])
@@ -528,9 +539,10 @@ enum Fixtures {
         let stamp = rfc3339(Date())
         let id = "cc-\(listed.count + 1)"
         let agent = start.agent == .codex ? "\"agent\":\"codex\"," : ""
+        let cwd = start.folder ?? Self.newWorktreeFolder(start)
         let summary = """
             {"session_uid":"\(uid)","session_id":"\(id)","tmux_session":"\(id)",\(agent)\
-            "cwd":\(quoted(start.project.path)),"project_label":\(quoted(start.project.name)),\
+            "cwd":\(quoted(cwd)),"project_label":\(quoted(start.project.name)),\
             "lifecycle":"live","link":"attached","last_seq":\(start.prompt == nil ? 1 : 2),\
             "created_at":"\(stamp)","updated_at":"\(stamp)","blocked_on":[]}
             """

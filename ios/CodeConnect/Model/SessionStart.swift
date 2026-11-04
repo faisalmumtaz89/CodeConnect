@@ -11,6 +11,101 @@ enum StartAgent: String, CaseIterable, Identifiable, Sendable {
     var displayName: String { self == .claude ? "Claude Code" : "Codex" }
 }
 
+/// One checkout of a repository, as `project_git` lists it (minor 29): the
+/// main checkout first, then its linked worktrees.
+struct StartWorktree: Hashable, Sendable {
+    let path: String
+    let main: Bool
+    /// Nil on a detached HEAD.
+    let branch: String?
+    let dirty: Bool
+    /// Listed by git, its folder gone: shown, never started in.
+    let missing: Bool
+}
+
+extension StartWorktree: Decodable {}
+
+/// `project_git.git`: a repository's checkouts, and the local branches none of
+/// them has, newest commit first. The computer lists at most a hundred.
+struct StartGit: Hashable, Sendable {
+    let worktrees: [StartWorktree]
+    let branches: [String]
+    let branchesTruncated: Bool
+
+    /// The checkout a folder is in: the one at its path, else the one at its
+    /// nearest enclosing folder, whole path segments compared. A project can
+    /// be a repository's subfolder, where a session once started.
+    func checkout(at path: String) -> StartWorktree? {
+        worktrees
+            .filter { $0.path == path || path.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") }
+            .max { $0.path.count < $1.path.count }
+    }
+
+    func others(than path: String) -> [StartWorktree] {
+        let here = checkout(at: path)
+        return worktrees.filter { $0 != here }
+    }
+}
+
+extension StartGit: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case worktrees, branches
+        case branchesTruncated = "branches_truncated"
+    }
+}
+
+/// Where in its repository a start runs (`start_session.worktree`). The
+/// project's folder is never switched.
+enum StartPlace: Hashable, Sendable {
+    /// The folder as it is.
+    case folder
+    /// A worktree the repository has.
+    case existing(StartWorktree)
+    /// A new worktree for a branch no checkout has.
+    case branch(String)
+    /// A new worktree, made by name.
+    case new(String)
+
+    /// The branch a new worktree of this name gets: Claude Code's own
+    /// `worktree-<name>`, Codex's the name as typed.
+    static func newBranch(_ name: String, for agent: StartAgent) -> String {
+        agent == .claude ? "worktree-\(name)" : name
+    }
+
+    /// Claude Code's rule for a worktree's name, which both agents' follow:
+    /// `/`-separated parts of letters, digits, `.`, `_` and `-`, none of them
+    /// empty, `.` or `..`, at most 64 bytes in all.
+    static func isValidName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.utf8.count <= 64 else { return false }
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        return name.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { part in
+            !part.isEmpty && part != "." && part != ".." && part.allSatisfy(allowed.contains)
+        }
+    }
+}
+
+/// A `list_folder` (minor 30): a folder, or none for the home folder, with or
+/// without its dot folders.
+struct StartFolderRequest: Hashable, Sendable {
+    let path: String?
+    let showHidden: Bool
+}
+
+/// `folder_listing`: the folder listed, as an absolute path, and its
+/// subfolders, or the computer's own words for why it could not be read.
+struct StartFolderListing: Hashable, Sendable {
+    let path: String
+    let folders: [String]
+    let truncated: Bool
+    let error: String?
+}
+
+/// `create_folder_result.result` as it arrives.
+struct StartCreateFolderResult: Decodable {
+    let status: String
+    let detail: String?
+}
+
 /// One entry of `ServerMessage::Projects`: a folder an agent has run in on
 /// one computer, from that computer's session history.
 struct StartProject: Identifiable, Hashable, Sendable {
@@ -90,7 +185,10 @@ enum StartFailure: String, Sendable {
 
 /// `StartSessionResult.result`.
 enum StartOutcome: Hashable, Sendable {
-    case started(sessionUID: String)
+    /// `cwd` is the folder the agent started in (minor 29), absent when the
+    /// agent makes it: a new Claude Code worktree, whose folder the fleet
+    /// shows once the session's first hook names it.
+    case started(sessionUID: String, cwd: String? = nil)
     case failed(StartFailure, detail: String)
 }
 
@@ -98,6 +196,7 @@ extension StartOutcome: Decodable {
     private enum CodingKeys: String, CodingKey {
         case status, reason, detail
         case sessionUID = "session_uid"
+        case cwd
     }
 
     /// A reason or a status this build has never heard of is still a start that
@@ -107,7 +206,9 @@ extension StartOutcome: Decodable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let status = try c.decode(String.self, forKey: .status)
         if status == "started" {
-            self = .started(sessionUID: try c.decode(String.self, forKey: .sessionUID))
+            self = .started(
+                sessionUID: try c.decode(String.self, forKey: .sessionUID),
+                cwd: try c.decodeIfPresent(String.self, forKey: .cwd))
             return
         }
         let detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? status
@@ -120,6 +221,7 @@ extension StartOutcome: Decodable {
 struct SessionStart: Identifiable, Hashable {
     let requestID: String
     let project: StartProject
+    let place: StartPlace
     let agent: StartAgent
     let prompt: String?
     let machineName: String
@@ -127,6 +229,18 @@ struct SessionStart: Identifiable, Hashable {
     var outcome: StartOutcome?
 
     var id: String { requestID }
+
+    /// The folder the session runs in: the computer's word once it has
+    /// started, else what is known before: a new worktree's is made by the
+    /// computer or by the agent.
+    var folder: String? {
+        if case .started(_, let cwd?) = outcome { return cwd }
+        switch place {
+        case .folder: return project.path
+        case .existing(let worktree): return worktree.path
+        case .branch, .new: return nil
+        }
+    }
 }
 
 /// The phone's side of starting a session: the computer's projects, and every
@@ -144,6 +258,41 @@ final class SessionStarter {
 
     var availableAgents: Set<StartAgent> { Set(agents.filter(\.available).map(\.agent)) }
     private(set) var starts: [String: SessionStart] = [:]
+    /// `project_git` by project path; nil inside once answered for a folder
+    /// that is not a repository.
+    private(set) var git: [String: StartGit?] = [:]
+    /// `folder_listing` replies (minor 30), by what was asked: the folder (nil
+    /// for the home folder) and whether dot folders were shown.
+    private(set) var listings: [StartFolderRequest: StartFolderListing] = [:]
+
+    /// The latest `list_folder` sent for each ask, by request id.
+    private var asked: [String: StartFolderRequest] = [:]
+    /// `create_folder_result` by request id: nil inside once made, else the
+    /// computer's words.
+    private(set) var creates: [String: String?] = [:]
+
+    func receive(git: StartGit?, for path: String) { self.git[path] = .some(git) }
+    func receive(_ listing: StartFolderListing, for request: StartFolderRequest) { listings[request] = listing }
+
+    /// A `list_folder` sent; any earlier ask for the same folder is now stale.
+    func ask(_ request: StartFolderRequest, as requestID: String) {
+        asked = asked.filter { $0.value != request }
+        asked[requestID] = request
+    }
+
+    /// The answer to the latest ask is shown; an earlier one's is not.
+    func receive(_ listing: StartFolderListing, answering requestID: String) {
+        guard let request = asked.removeValue(forKey: requestID) else { return }
+        listings[request] = listing
+    }
+
+    /// Asks sent and not yet answered, to ask again after a reconnect.
+    var unansweredListings: [StartFolderRequest] { Array(Set(asked.values)) }
+
+    func resolveCreate(_ requestID: String, refusal: String?) {
+        guard creates[requestID] == nil else { return }
+        creates[requestID] = .some(refusal)
+    }
 
     /// The fixture answer to `list_projects`: a Mac's forty folders, or a
     /// Linux server's few. `-CC_START_AGENTS claude` leaves Codex uninstalled.
@@ -183,12 +332,13 @@ final class SessionStarter {
     /// after a reconnect one session rather than two.
     @discardableResult
     func start(
-        project: StartProject, agent: StartAgent, prompt: String, machineName: String
+        project: StartProject, place: StartPlace = .folder, agent: StartAgent, prompt: String,
+        machineName: String
     ) -> String {
         let requestID = UUID().uuidString.lowercased()
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         starts[requestID] = SessionStart(
-            requestID: requestID, project: project, agent: agent,
+            requestID: requestID, project: project, place: place, agent: agent,
             prompt: trimmed.isEmpty ? nil : trimmed, machineName: machineName, sentAt: Date())
         return requestID
     }
@@ -239,6 +389,85 @@ final class SessionStarter {
 }
 
 extension SessionStarter {
+    /// `folder_listing` for a fixture folder, as minor 30 answers it: the
+    /// home folder for none, names in byte order, dot folders only when asked,
+    /// and `/private` unreadable.
+    static func fixtureListing(_ request: StartFolderRequest, projects: [StartProject], made: [String: [String]])
+        -> StartFolderListing
+    {
+        let home = projects.first.map { "/" + $0.path.split(separator: "/").prefix(2).joined(separator: "/") } ?? "/"
+        let path = request.path ?? home
+        if path == "/private" {
+            return StartFolderListing(path: path, folders: [], truncated: false, error: "Permission denied")
+        }
+        let names = (fixtureFolders(projects: projects)[path] ?? []) + (made[path] ?? [])
+        return StartFolderListing(
+            path: path, folders: names.filter { request.showHidden || !$0.hasPrefix(".") }.sorted(),
+            truncated: false, error: nil)
+    }
+
+    /// The fixture computer's folders, each with its subfolders: every
+    /// project's folder up to `/`, the home folder's usual others, and dot
+    /// folders.
+    static func fixtureFolders(projects: [StartProject]) -> [String: [String]] {
+        var tree: [String: Set<String>] = [:]
+        func add(_ path: String) {
+            var parts = path.split(separator: "/").map(String.init)
+            while let child = parts.popLast() {
+                tree["/" + parts.joined(separator: "/"), default: []].insert(child)
+            }
+        }
+        projects.forEach { add($0.path) }
+        let home = projects.first.map { "/" + $0.path.split(separator: "/").prefix(2).joined(separator: "/") }
+        ["/Applications", "/Library", "/System", "/opt/homebrew", "/private", "/usr/local", "/Users/Shared", "/.vol"]
+            .forEach(add)
+        if let home {
+            ["Desktop", "Documents/notes", "Downloads", "Library", "Movies", "Music", "Pictures", ".config/git",
+             ".ssh", ".cache", "code/.archive", "code/query-parser/src", "code/query-parser/docs"]
+                .forEach { add("\(home)/\($0)") }
+        }
+        return tree.mapValues { $0.sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
+    }
+
+    /// `project_git` for a fixture folder, or any folder inside one, as git
+    /// answers from anywhere in a repository: query-parser with uncommitted
+    /// changes, two worktrees (one with changes), one whose folder is gone and
+    /// more branches than the computer lists; the payments worker on its long
+    /// branch; the rest on their one branch. Nil outside a repository.
+    static func fixtureGit(_ folder: String, projects: [StartProject]) -> StartGit? {
+        guard
+            let project = projects.first(where: { folder == $0.path || folder.hasPrefix($0.path + "/") }),
+            let branch = project.gitBranch
+        else { return nil }
+        let path = project.path
+        let trees = "\(path)/.claude/worktrees"
+        func checkout(_ path: String, _ branch: String?, main: Bool = false, dirty: Bool = false, missing: Bool = false)
+            -> StartWorktree
+        {
+            StartWorktree(path: path, main: main, branch: branch, dirty: dirty, missing: missing)
+        }
+        switch project.name {
+        case "query-parser":
+            return StartGit(
+                worktrees: [
+                    checkout(path, branch, main: true, dirty: true),
+                    checkout("\(trees)/strict-mode", "feature/strict-mode"),
+                    checkout("\(trees)/fix+unicode-escapes", "fix/unicode-escapes", dirty: true),
+                    checkout("\(path)-old", "wt/gone", missing: true),
+                ],
+                branches: ["perf/arena-allocator", "docs/grammar-reference", "spike/wasm-target"],
+                branchesTruncated: true)
+        case "payments-reconciliation-worker":
+            return StartGit(
+                worktrees: [checkout(path, branch, main: true)], branches: ["release/2026.11", "main"],
+                branchesTruncated: false)
+        default:
+            return StartGit(
+                worktrees: [checkout(path, branch, main: true)], branches: branch == "main" ? ["develop"] : ["main"],
+                branchesTruncated: false)
+        }
+    }
+
     /// A Linux build server's few projects, in the home folder.
     static func fixtureLinuxProjects(now: Date) -> [StartProject] {
         let rows: [(String, String?, TimeInterval, StartAgent?)] = [
@@ -261,7 +490,8 @@ extension SessionStarter {
 enum StartOption: Int, CaseIterable {
     /// A "New session" word in the bar; one sheet with recents, agent, message.
     case recentsSheet = 1
-    /// A round + over the fleet; project, agent and message as three steps.
+    /// A round + over the fleet; a screen a question: computer, folder (recent
+    /// or browsed), agent, branch in a repository, then ready to start.
     case steps
     /// "New session" on every project card, and recent projects under them.
     case cardAction

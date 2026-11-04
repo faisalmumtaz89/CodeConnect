@@ -20,9 +20,33 @@ struct StartContext {
     /// Ask again each time: the list is the computer's, and it changes.
     func load() { model.listProjects() }
 
-    func start(_ project: StartProject, agent: StartAgent, prompt: String) -> String {
-        model.startSession(project, agent: agent, prompt: prompt)
+    func start(
+        _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, prompt: String
+    ) -> String {
+        model.startSession(project, place: place, agent: agent, prompt: prompt)
     }
+
+    /// The folder's repository, once the computer has said: `.some(nil)` for
+    /// a folder that is not one.
+    func git(_ path: String) -> StartGit?? { starter.git[path] }
+    func askGit(_ path: String) { model.projectGit(path) }
+
+    /// A folder's listing, once the computer has answered.
+    func listing(_ request: StartFolderRequest) -> StartFolderListing? { starter.listings[request] }
+    func listFolder(_ request: StartFolderRequest) { model.listFolder(request) }
+    func createFolder(named name: String, in parent: String) -> String {
+        model.createFolder(named: name, in: parent)
+    }
+
+    /// What came of a `create_folder`: nil until answered, `.some(nil)` once
+    /// made, else the computer's words.
+    func created(_ requestID: String?) -> String?? { requestID.flatMap { starter.creates[$0] } }
+
+    /// Whether this computer can browse and make folders (minor 30).
+    var browses: Bool { model.connection.capabilities?.browsesFolders == true }
+
+    /// The folders a live session of this computer's is running in.
+    var runningFolders: Set<String> { model.liveFolders }
 
     /// When this computer last ran anything the phone can start again.
     var lastUsed: Date? { projects.first?.lastUsed }
@@ -364,7 +388,9 @@ struct StartMessagePill: View {
 /// the project over its folder, set as the session's own bar sets them, so
 /// nothing moves when the session takes over.
 struct StartBarTitle: View {
-    let project: StartProject
+    let start: SessionStart
+
+    private var project: StartProject { start.project }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -373,7 +399,7 @@ struct StartBarTitle: View {
                 .foregroundStyle(CC.text.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Text(verbatim: project.path)
+            Text(verbatim: start.folder ?? "\(project.path) · new worktree")
                 .ccType(CC.type.monoSmall)
                 .foregroundStyle(CC.text.tertiary)
                 .lineLimit(1)

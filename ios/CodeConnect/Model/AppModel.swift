@@ -166,6 +166,10 @@ final class AppModel {
     /// The Mac's list of runs, as it last said. The truth: what is on screen is
     /// `shownSummaries`.
     private(set) var summaries: [SessionSummary] = []
+    #if DEBUG
+        /// Folders made on the fixture computer, by parent.
+        private var madeFolders: [String: [String]] = [:]
+    #endif
     /// Per-run state, keyed by `SessionSummary.sessionKey` — the `session_uid`
     /// where the daemon mints them, the tmux name on an older one. Never by the
     /// display name on a uid-capable daemon: `cc-1` is handed to the next
@@ -1160,11 +1164,75 @@ final class AppModel {
         Task { try? await connection.send(.listProjects) }
     }
 
+    /// The folders this computer's live sessions run in, so a start can say
+    /// it would share one (minor 29 has no such fact of its own).
+    var liveFolders: Set<String> { Set(summaries.filter { $0.lifecycle == .live }.map(\.cwd)) }
+
+    /// Ask this computer about one folder's repository: its checkouts and
+    /// free branches (`get_project_git`, minor 29). Only a computer that
+    /// advertises `start_worktree` is asked; the answer arrives as
+    /// `project_git`.
+    func projectGit(_ path: String) {
+        #if DEBUG
+            if fixturesActive {
+                starter.receive(git: SessionStarter.fixtureGit(path, projects: starter.projects ?? []), for: path)
+                return
+            }
+        #endif
+        guard connection.capabilities?.startsInWorktrees == true else { return }
+        Task { try? await connection.send(.getProjectGit(path: path)) }
+    }
+
+    /// Ask this computer for one folder's subfolders (`list_folder`, minor 30),
+    /// under a fresh request id: only the answer to the latest ask is shown.
+    func listFolder(_ request: StartFolderRequest) {
+        #if DEBUG
+            if fixturesActive {
+                starter.receive(
+                    SessionStarter.fixtureListing(request, projects: starter.projects ?? [], made: madeFolders),
+                    for: request)
+                return
+            }
+        #endif
+        guard connection.capabilities?.browsesFolders == true else { return }
+        let requestID = UUID().uuidString.lowercased()
+        starter.ask(request, as: requestID)
+        Task {
+            try? await connection.send(
+                .listFolder(requestID: requestID, path: request.path, showHidden: request.showHidden))
+        }
+    }
+
+    /// Make a folder, as `mkdir` would (`create_folder`, minor 30); the answer
+    /// arrives as `create_folder_result` under the returned request id. Never
+    /// sent again after a reconnect: a repeat is a second `mkdir`.
+    func createFolder(named name: String, in parent: String) -> String {
+        let requestID = UUID().uuidString.lowercased()
+        #if DEBUG
+            if fixturesActive {
+                let listed = SessionStarter.fixtureFolders(projects: starter.projects ?? [])[parent] ?? []
+                let refusal: String? =
+                    name.contains("/")
+                    ? "\"\(name)\" is not a single folder name"
+                    : ([".", "..", ""] + listed + (madeFolders[parent] ?? [])).contains(name) ? "File exists" : nil
+                if refusal == nil { madeFolders[parent, default: []].append(name) }
+                starter.resolveCreate(requestID, refusal: refusal)
+                return requestID
+            }
+        #endif
+        guard connection.capabilities?.browsesFolders == true else { return requestID }
+        Task { try? await connection.send(.createFolder(requestID: requestID, parent: parent, name: name)) }
+        return requestID
+    }
+
     /// Start an agent in one of this computer's projects; the answer arrives as
     /// `start_session_result` under the returned request id.
-    func startSession(_ project: StartProject, agent: StartAgent, prompt: String) -> String {
+    func startSession(
+        _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, prompt: String
+    ) -> String {
         let requestID = starter.start(
-            project: project, agent: agent, prompt: prompt, machineName: machineName ?? "this computer")
+            project: project, place: place, agent: agent, prompt: prompt,
+            machineName: machineName ?? "this computer")
         #if DEBUG
             if fixturesActive {
                 answerFixtureStart(requestID)
@@ -1183,7 +1251,7 @@ final class AppModel {
             try? await connection.send(
                 .startSession(
                     requestID: requestID, path: start.project.path, agent: start.agent.rawValue,
-                    prompt: start.prompt))
+                    prompt: start.prompt, worktree: start.place))
         }
     }
 
@@ -1954,6 +2022,12 @@ final class AppModel {
             break
         case .projects(let projects, let agents):
             starter.receive(projects: projects, agents: agents)
+        case .projectGit(let path, let git):
+            starter.receive(git: git, for: path)
+        case .folderListing(let requestID, let listing):
+            starter.receive(listing, answering: requestID)
+        case .createFolderResult(let requestID, let refusal):
+            starter.resolveCreate(requestID, refusal: refusal)
         case .startSessionResult(let requestID, let outcome):
             starter.resolve(requestID, outcome)
             // The new session reaches the fleet on its own; asking now shortens
@@ -2081,6 +2155,10 @@ final class AppModel {
             // daemon answers a repeated request id with its first outcome.
             if ack.capabilities.startsSessions {
                 for start in starter.unanswered { sendStart(start.requestID) }
+            }
+            // A listing the link lost is asked for again, under a fresh id.
+            if ack.capabilities.browsesFolders {
+                for request in starter.unansweredListings { listFolder(request) }
             }
             // Last: it may find this model is another's machine, and leave it.
             onIdentified?()

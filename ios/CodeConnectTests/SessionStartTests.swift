@@ -30,7 +30,7 @@ final class SessionStartTests: XCTestCase {
 
         var starts: [(requestID: String, path: String, agent: String, prompt: String?)] {
             sent.compactMap {
-                guard case .startSession(let id, let path, let agent, let prompt) = $0 else { return nil }
+                guard case .startSession(let id, let path, let agent, let prompt, _) = $0 else { return nil }
                 return (id, path, agent, prompt)
             }
         }
@@ -112,7 +112,7 @@ final class SessionStartTests: XCTestCase {
     }
 
     func testEachResultDecodesToItsOutcome() throws {
-        guard case .startSessionResult(_, .started(let uid)) = try frame("start_started") else {
+        guard case .startSessionResult(_, .started(let uid, _)) = try frame("start_started") else {
             return XCTFail("started")
         }
         XCTAssertFalse(uid.isEmpty)
@@ -237,6 +237,38 @@ final class SessionStartTests: XCTestCase {
         model.connection.injectForTesting(
             .startSessionResult(requestID: "not-ours", outcome: .started(sessionUID: "01KX")))
         XCTAssertTrue(model.starter.starts.isEmpty)
+    }
+
+    /// A folder is in the checkout at its path, else at its nearest enclosing
+    /// folder; `/x/app-old` does not hold `/x/app`'s files.
+    func testAFolderIsInTheCheckoutThatHoldsIt() {
+        func checkout(_ path: String, _ branch: String) -> StartWorktree {
+            StartWorktree(path: path, main: path == "/x/app", branch: branch, dirty: false, missing: false)
+        }
+        let git = StartGit(
+            worktrees: [
+                checkout("/x/app", "main"), checkout("/x/app-old", "old"),
+                checkout("/x/app/.claude/worktrees/a", "worktree-a"),
+            ],
+            branches: [], branchesTruncated: false)
+        XCTAssertEqual(git.checkout(at: "/x/app")?.branch, "main")
+        XCTAssertEqual(git.checkout(at: "/x/app/web")?.branch, "main")
+        XCTAssertEqual(git.checkout(at: "/x/app-old/web")?.branch, "old")
+        XCTAssertEqual(git.checkout(at: "/x/app/.claude/worktrees/a/src")?.branch, "worktree-a")
+        XCTAssertNil(git.checkout(at: "/x/ap"))
+        XCTAssertEqual(git.others(than: "/x/app/web").map(\.branch), ["old", "worktree-a"])
+    }
+
+    /// Claude Code's worktree name rule, and the branch each agent makes.
+    func testANewWorktreeNameFollowsClaudesRule() {
+        for good in ["fix-login", "a/b", "v1.2_x", String(repeating: "a", count: 64)] {
+            XCTAssertTrue(StartPlace.isValidName(good), good)
+        }
+        for bad in ["", "has space", "ünï", "..", "a/../b", "a//b", "/a", "a/", "semi;", String(repeating: "a", count: 65)] {
+            XCTAssertFalse(StartPlace.isValidName(bad), bad)
+        }
+        XCTAssertEqual(StartPlace.newBranch("fix/login", for: .claude), "worktree-fix/login")
+        XCTAssertEqual(StartPlace.newBranch("fix/login", for: .codex), "fix/login")
     }
 
     /// The last-used agent is offered only while it is installed.
