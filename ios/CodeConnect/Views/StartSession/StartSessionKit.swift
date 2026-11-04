@@ -45,39 +45,51 @@ func startContext(_ contexts: [StartContext], _ id: String) -> StartContext {
 }
 
 /// The paired computers that can start a session, as chips: the chosen one
-/// filled, each with its link's dot.
+/// filled, each with its link's dot. In a row while every name fits whole,
+/// else one under another, where a long name wraps rather than losing the
+/// part that tells two computers apart.
 struct StartComputerPicker: View {
     let contexts: [StartContext]
     @Binding var selection: String
 
     var body: some View {
-        CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
-            ForEach(contexts, id: \.id) { context in
-                let on = context.id == selection
-                Button {
-                    selection = context.id
-                } label: {
-                    HStack(spacing: CC.space.xs) {
-                        Circle().fill(CC.color.success).frame(width: 6, height: 6)
-                        Text(context.machineName)
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(on ? CC.text.onAccent : CC.text.primary)
-                            .lineLimit(1)
-                    }
-                    .padding(.horizontal, CC.space.sm)
-                    .frame(minHeight: CC.size.controlSm)
-                    .background(on ? CC.color.accent : CC.color.surfaceRaised, in: Capsule())
-                    .overlay {
-                        Capsule().strokeBorder(on ? Color.clear : CC.color.border, lineWidth: CC.stroke.hairline)
-                    }
-                    .ccHitTarget()
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(on ? .isSelected : [])
-                .accessibilityIdentifier("start-computer-\(context.machineName)")
-            }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: CC.space.xs) { chips(wrapping: false) }
+            VStack(alignment: .leading, spacing: CC.space.xs) { chips(wrapping: true) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func chips(wrapping: Bool) -> some View {
+        ForEach(contexts, id: \.id) { context in
+            let on = context.id == selection
+            Button {
+                selection = context.id
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
+                    Circle().fill(CC.color.success).frame(width: 6, height: 6)
+                        .ccMark(beside: CC.type.footnote)
+                    Text(context.machineName)
+                        .ccType(CC.type.footnote)
+                        .foregroundStyle(on ? CC.text.onAccent : CC.text.primary)
+                        .fixedSize(horizontal: !wrapping, vertical: true)
+                }
+                .padding(.horizontal, CC.space.sm)
+                .padding(.vertical, CC.space.xxs)
+                .frame(minHeight: CC.size.controlSm)
+                .background(
+                    on ? CC.color.accent : CC.color.surfaceRaised,
+                    in: RoundedRectangle(cornerRadius: CC.size.controlSm / 2))
+                .overlay {
+                    RoundedRectangle(cornerRadius: CC.size.controlSm / 2)
+                        .strokeBorder(on ? Color.clear : CC.color.border, lineWidth: CC.stroke.hairline)
+                }
+                .ccHitTarget()
+            }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(on ? .isSelected : [])
+            .accessibilityIdentifier("start-computer-\(context.machineName)")
+        }
     }
 }
 
@@ -112,10 +124,12 @@ struct StartProjectRow<Trailing: View>: View {
                     .ccType(CC.type.rowTitle)
                     .foregroundStyle(CC.text.primary)
                     .fixedSize(horizontal: false, vertical: true)
+                // One line at every size: the name above already says the
+                // tail, and wrapped at AX5 the path made a row half a screen.
                 Text(verbatim: project.shownPath)
                     .ccType(CC.type.monoSmall)
                     .foregroundStyle(CC.text.tertiary)
-                    .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                    .lineLimit(1)
                     .truncationMode(.head)
                 Text(startProjectMeta(project))
                     .ccType(CC.type.footnote)
@@ -212,50 +226,55 @@ func startFilter(_ projects: [StartProject], _ query: String) -> [StartProject] 
 
 // MARK: - Agent choice
 
-/// Claude Code and Codex side by side, the one that is not installed dimmed
-/// with the reason under the pair.
-struct StartAgentPicker: View {
+/// The agent a start runs, named once, on the control that changes it. Its
+/// menu lists both agents: the chosen one checked, one that is not installed
+/// disabled and saying so.
+struct StartAgentMenu: View {
     @Binding var selection: StartAgent?
     let project: StartProject
     let context: StartContext
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: CC.space.xs) {
-            CCAdaptiveStack(horizontalSpacing: CC.space.xs, verticalSpacing: CC.space.xs) {
-                ForEach(StartAgent.allCases) { agent in segment(agent) }
-            }
-            ForEach(StartAgent.allCases.filter { context.missingReason($0, in: project) != nil }) {
-                agent in
-                Text(context.missingReason(agent, in: project) ?? "")
-                    .ccType(CC.type.footnote)
-                    .foregroundStyle(CC.text.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
+    @Environment(\.dynamicTypeSize) private var typeSize
 
-    private func segment(_ agent: StartAgent) -> some View {
-        let available = context.missingReason(agent, in: project) == nil
-        let on = selection == agent
-        return Button {
-            selection = agent
-        } label: {
-            Text(agent.displayName)
-                .ccType(CC.type.body)
-                .foregroundStyle(
-                    on ? CC.text.onAccent : (available ? CC.text.primary : CC.text.disabled))
-                .frame(maxWidth: .infinity, minHeight: CC.size.controlMd)
-                .background(
-                    on ? CC.color.accent : CC.color.surfaceRaised,
-                    in: RoundedRectangle(cornerRadius: CC.radius.lg))
-                .overlay {
-                    RoundedRectangle(cornerRadius: CC.radius.lg)
-                        .strokeBorder(on ? Color.clear : CC.color.border, lineWidth: CC.stroke.hairline)
+    var body: some View {
+        Menu {
+            ForEach(StartAgent.allCases) { agent in
+                if context.missingReason(agent, in: project) != nil {
+                    Button("\(agent.displayName) — not installed") {}
+                        .disabled(true)
+                } else if agent == selection {
+                    Button { selection = agent } label: { Label(agent.displayName, image: "check") }
+                } else {
+                    Button(agent.displayName) { selection = agent }
                 }
+            }
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
+                // Whole beside Start, whose label gives way first; on its own
+                // line at the accessibility sizes, free to wrap.
+                Text(selection?.displayName ?? "No agent")
+                    .ccType(CC.type.headline)
+                    .fixedSize(horizontal: !typeSize.isAccessibilitySize, vertical: true)
+                CCIcon("caret-down", size: 14, weight: .semibold)
+                    .foregroundStyle(CC.text.tertiary)
+                    .ccMark(beside: CC.type.headline)
+            }
+            .foregroundStyle(CC.text.primary)
+            .padding(.horizontal, CC.space.md)
+            .padding(.vertical, CC.space.xs)
+            // The whole line at the accessibility sizes, where it stands
+            // alone: offered only its ideal width, the name broke in two.
+            .frame(
+                maxWidth: typeSize.isAccessibilitySize ? .infinity : nil, minHeight: CC.size.controlLg,
+                alignment: .leading
+            )
+            .ccSurface(fill: .clear, radius: CC.radius.lg, border: CC.color.border)
+            .contentShape(Rectangle())
         }
+        .menuStyle(.button)
         .buttonStyle(.plain)
-        .disabled(!available)
-        .accessibilityAddTraits(on ? .isSelected : [])
+        .accessibilityLabel("Agent, \(selection?.displayName ?? "none")")
+        .accessibilityIdentifier("start-agent")
     }
 }
 
@@ -313,7 +332,9 @@ struct StartMessagePill: View {
             "", text: $text, prompt: Text(placeholder).foregroundStyle(CC.text.placeholder),
             axis: .vertical
         )
-        .lineLimit(typeSize.isAccessibilitySize ? 1...3 : 1...5)
+        // Two lines at the accessibility sizes: a third left the project being
+        // started no room above the keyboard.
+        .lineLimit(typeSize.isAccessibilitySize ? 1...2 : 1...5)
         .ccType(CC.type.body)
         .foregroundStyle(CC.text.primary)
         .accessibilityIdentifier("start-message")
@@ -340,22 +361,24 @@ struct StartMessagePill: View {
 // MARK: - Bar title
 
 /// The session screen's bar title, for a session that does not exist yet:
-/// the project over its folder.
+/// the project over its folder, set as the session's own bar sets them, so
+/// nothing moves when the session takes over.
 struct StartBarTitle: View {
     let project: StartProject
 
     var body: some View {
-        VStack(spacing: 0) {
-            Text(project.name)
+        VStack(alignment: .leading, spacing: 0) {
+            Text(verbatim: project.name)
                 .ccType(CC.type.headline)
                 .foregroundStyle(CC.text.primary)
                 .lineLimit(1)
-            Text(verbatim: project.shownPath)
+                .truncationMode(.tail)
+            Text(verbatim: project.path)
                 .ccType(CC.type.monoSmall)
                 .foregroundStyle(CC.text.tertiary)
                 .lineLimit(1)
                 .truncationMode(.head)
         }
-        .frame(maxWidth: 240)
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
     }
 }

@@ -63,6 +63,13 @@ extension RenderCatalog {
         field.typeText(text)
     }
 
+    /// Start with a first message typed: Start, or at the accessibility sizes,
+    /// where the bar steps aside for the keyboard, the message's own send.
+    private static func startTyped(_ app: XCUIApplication, _ driver: RenderDriver) throws {
+        let go = app.buttons["start-go"]
+        try tap(app, go.exists ? "start-go" : "start-message-button", driver)
+    }
+
     private static func starting(_ app: XCUIApplication, _ driver: RenderDriver) throws {
         try driver.requireExists(driver.text(containing: "Starting", in: app), "the starting screen")
     }
@@ -100,19 +107,38 @@ extension RenderCatalog {
             try tap(app, "start-entry", driver)
             try type(app, "start-message", message, driver)
         },
+        RenderScenario(name: "start1-c2-search", purpose: "option 1: searching, keyboard up", arguments: args(1)) {
+            app, driver in
+            try tap(app, "start-entry", driver)
+            try type(app, "start-search", "e", driver)
+        },
         RenderScenario(name: "start1-d-starting", purpose: "option 1: starting", arguments: args(1, outcome: "pending")) {
             app, driver in
             try tap(app, "start-entry", driver)
             try type(app, "start-message", message, driver)
-            try tap(app, "start-go", driver)
+            try startTyped(app, driver)
             try starting(app, driver)
         },
         RenderScenario(name: "start1-e-live", purpose: "option 1: live, first message sent", arguments: args(1)) {
             app, driver in
             try tap(app, "start-entry", driver)
             try type(app, "start-message", message, driver)
-            try tap(app, "start-go", driver)
+            try startTyped(app, driver)
             try live(app, driver, withMessage: true)
+        },
+        RenderScenario(name: "start1-e2-live-typing", purpose: "option 1: live, no first message", arguments: args(1)) {
+            app, driver in
+            try tap(app, "start-entry", driver)
+            try tap(app, "start-go", driver)
+            try live(app, driver, withMessage: false)
+        },
+        RenderScenario(
+            name: "start1-f2-agent-missing", purpose: "option 1: the agent is not installed",
+            arguments: args(1, outcome: "agent_missing")
+        ) { app, driver in
+            try tap(app, "start-entry", driver)
+            try tap(app, "start-go", driver)
+            try failed(app, driver, "isn’t installed")
         },
         RenderScenario(
             name: "start1-f-failed", purpose: "option 1: the folder is gone",
@@ -127,8 +153,19 @@ extension RenderCatalog {
         RenderScenario(name: "start1-g-no-codex", purpose: "option 1: Codex not installed", arguments: args(1, noCodex: true)) {
             app, driver in
             try tap(app, "start-entry", driver)
-            try tap(app, "start-project-ios-app", driver)
+            // Third in the list: below the fold at AX5, scrolled to as a thumb would.
+            let row = app.buttons["start-project-ios-app"]
+            let list = try driver.requireExists(
+                app.descendants(matching: .any)["start-list"].firstMatch, "the list")
+            for _ in 0..<10 where !(row.exists && row.isHittable) { driver.dragUp(within: list) }
+            try driver.requireExists(row, "ios-app").tap()
             try driver.requireExists(app.buttons["start-go"], "Start")
+        },
+        RenderScenario(name: "start1-g2-agent-menu", purpose: "option 1: the agent menu, Codex not installed", arguments: args(1, noCodex: true)) {
+            app, driver in
+            try tap(app, "start-entry", driver)
+            try tap(app, "start-agent", driver)
+            try driver.requireExists(driver.element(containing: "not installed", in: app), "the agent menu")
         },
         RenderScenario(name: "start1-h-two-computers", purpose: "option 1: two computers", arguments: args(1, twoComputers: true)) {
             app, driver in

@@ -8,7 +8,14 @@ import SwiftUI
 // MARK: - 1 · Recents sheet
 
 /// One sheet: the computer, the recent projects with the last-used one already
-/// chosen, and the agent, the first message and Start pinned under them.
+/// chosen, and the first message, the agent and Start pinned under them. While
+/// the search has the keyboard the bar steps aside for the results; while the
+/// first message has it, the bar keeps only the message and Start, and the
+/// chosen project scrolls into view above them.
+///
+/// At the accessibility sizes only Start stays pinned: the message and the
+/// agent open under the chosen project's row, on its fill, and scroll with
+/// it. Pinned, the three filled an SE's sheet and left the list no height.
 struct StartRecentsSheet: View {
     let contexts: [StartContext]
     @Binding var machineID: String
@@ -19,46 +26,69 @@ struct StartRecentsSheet: View {
     @State private var selected: StartProject?
     @State private var agent: StartAgent?
     @State private var message = ""
+    @FocusState private var searching: Bool
+    @FocusState private var composing: Bool
     @Environment(\.dynamicTypeSize) private var typeSize
 
     private var context: StartContext { startContext(contexts, machineID) }
 
     var body: some View {
-        CCSheetChrome("New session", subtitle: context.machineName, onClose: onClose) {
+        // With several computers the filled chip says which; the subtitle
+        // would say it twice.
+        CCSheetChrome(
+            "New session", subtitle: contexts.count > 1 ? nil : context.machineName, onClose: onClose
+        ) {
             VStack(spacing: 0) {
                 if contexts.count > 1 {
+                    // Its full height: squeezed by the list, a wrapped name
+                    // ran out of its chip.
                     StartComputerPicker(contexts: contexts, selection: $machineID)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, CC.space.md)
                         .padding(.top, CC.space.sm)
                 }
-                StartSearchField(text: $query)
+                StartSearchField(text: $query, focused: $searching)
+                    .onSubmit { searching = false }
                     .padding(.horizontal, CC.space.md)
                     .padding(.vertical, CC.space.sm)
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        // At the accessibility sizes a pinned panel would leave
-                        // no row in view, so it scrolls at the top of the list.
-                        if typeSize.isAccessibilitySize, selected != nil {
-                            startPanel
-                        }
-                        ForEach(startFilter(context.projects, query)) { project in
-                            Button {
-                                choose(project)
-                            } label: {
-                                StartProjectRow(project: project, isSelected: project == selected) {
-                                    StartCheck(on: project == selected)
+                ScrollViewReader { list in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(startFilter(context.projects, query)) { project in
+                                Button {
+                                    choose(project)
+                                    searching = false
+                                } label: {
+                                    StartProjectRow(project: project, isSelected: project == selected) {
+                                        StartCheck(on: project == selected)
+                                    }
                                 }
+                                .buttonStyle(StartRowStyle())
+                                .id(project.id)
+                                .accessibilityIdentifier("start-project-\(project.name)")
+                                if typeSize.isAccessibilitySize, project == selected {
+                                    VStack(alignment: .leading, spacing: CC.space.sm) {
+                                        messagePill
+                                        StartAgentMenu(selection: $agent, project: project, context: context)
+                                    }
+                                    .padding([.horizontal, .bottom], CC.space.md)
+                                    .background(CC.color.surfaceOverlay)
+                                }
+                                CCHairline().padding(.leading, CC.space.md)
                             }
-                            .buttonStyle(StartRowStyle())
-                            .accessibilityIdentifier("start-project-\(project.name)")
-                            CCHairline().padding(.leading, CC.space.md)
                         }
+                    }
+                    .onChange(of: composing) { _, now in
+                        guard now, !typeSize.isAccessibilitySize, let id = selected?.id else { return }
+                        withAnimation(CC.motion.medium) { list.scrollTo(id, anchor: .bottom) }
                     }
                 }
                 .accessibilityIdentifier("start-list")
             }
+            // At the accessibility sizes a bar over the keyboard left no line
+            // for the message being typed; the message's own send starts it.
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !typeSize.isAccessibilitySize { startPanel }
+                if !searching, !(composing && typeSize.isAccessibilitySize) { startBar }
             }
         }
         .onAppear {
@@ -78,21 +108,45 @@ struct StartRecentsSheet: View {
     }
 
     @ViewBuilder
-    private var startPanel: some View {
+    private var startBar: some View {
         if let selected {
             CCActionBar {
-                StartAgentPicker(selection: $agent, project: selected, context: context)
-                StartMessagePill(text: $message, placeholder: "First message (optional)")
-                CCButton(
-                    "Start \(agent?.displayName ?? "")", fullWidth: true,
-                    disabledReason: agent == nil ? CCDisabledReason("Choose an agent.") : nil
-                ) {
-                    guard let agent else { return }
-                    onStarted(context.start(selected, agent: agent, prompt: message))
+                if typeSize.isAccessibilitySize {
+                    startButton(selected)
+                } else {
+                    messagePill
+                    if composing {
+                        startButton(selected)
+                    } else {
+                        HStack(spacing: CC.space.sm) {
+                            StartAgentMenu(selection: $agent, project: selected, context: context)
+                            startButton(selected)
+                        }
+                    }
                 }
-                .accessibilityIdentifier("start-go")
             }
         }
+    }
+
+    private var messagePill: some View {
+        StartMessagePill(
+            text: $message, placeholder: "First message", focused: $composing,
+            onSend: typeSize.isAccessibilitySize ? { start(selected) } : nil)
+    }
+
+    private func start(_ project: StartProject?) {
+        guard let project, let agent else { return }
+        onStarted(context.start(project, agent: agent, prompt: message))
+    }
+
+    private func startButton(_ project: StartProject) -> some View {
+        CCButton(
+            "Start", size: .lg, fullWidth: true,
+            disabledReason: agent == nil ? CCDisabledReason("Choose an agent.") : nil
+        ) {
+            start(project)
+        }
+        .accessibilityIdentifier("start-go")
     }
 }
 
@@ -358,10 +412,10 @@ struct StartProjectSheet: View {
                 .ccType(CC.type.footnote)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-                StartAgentPicker(selection: $agent, project: project, context: context)
+                StartAgentMenu(selection: $agent, project: project, context: context)
                 StartMessagePill(text: $message, placeholder: "First message (optional)")
                 CCButton(
-                    "Start \(agent?.displayName ?? "")", fullWidth: true,
+                    "Start", fullWidth: true,
                     disabledReason: agent == nil ? CCDisabledReason("Choose an agent.") : nil
                 ) {
                     guard let agent else { return }

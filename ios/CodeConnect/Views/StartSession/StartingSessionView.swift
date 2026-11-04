@@ -49,35 +49,38 @@ struct StartingSessionView: View {
 
     // MARK: Starting
 
+    /// The screen's title grows with the steps under it, as `CCEmptyState`'s
+    /// does: capped, the heading measured smaller than its own steps at AX5.
+    private static var titleStyle: CCTextStyle {
+        var style = CC.type.title
+        style.maxSize = nil
+        return style
+    }
+
+    /// The session screen's own two columns (`TimelineSpine`), since this is
+    /// that screen before its first event: every line of text on 52, the
+    /// steps' marks centred on the one mark axis, 36.
     private func starting(_ start: SessionStart) -> some View {
-        ScrollView {
+        let answered = start.outcome != nil
+        return ScrollView {
             VStack(alignment: .leading, spacing: CC.space.lg) {
-                HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
-                    ProgressView()
-                        .tint(CC.text.secondary)
-                    Text("Starting \(start.agent.displayName)…")
-                        .ccType(CC.type.title)
-                        .foregroundStyle(CC.text.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text("Starting \(start.agent.displayName)…")
+                    .ccType(Self.titleStyle)
+                    .foregroundStyle(CC.text.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, TimelineSpine.content)
                 TimelineView(.periodic(from: start.sentAt, by: 1)) { context in
                     VStack(alignment: .leading, spacing: CC.space.sm) {
                         step(
-                            done: start.outcome != nil,
-                            start.outcome == nil
-                                ? "Asking \(start.machineName) to start it"
-                                : "\(start.machineName) started it")
+                            answered ? .done : .running,
+                            answered
+                                ? "\(start.machineName) started it"
+                                : "Asking \(start.machineName) to start it")
                         step(
-                            done: false,
+                            answered ? .running : .waiting,
                             "Waiting for \(start.agent.displayName)’s first words · "
                                 + Format.age(context.date.timeIntervalSince(start.sentAt)))
                     }
-                }
-                if let branch = start.project.gitBranch {
-                    Text("In \(start.project.name) on \(branch)")
-                        .ccType(CC.type.callout)
-                        .foregroundStyle(CC.text.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let prompt = start.prompt {
                     VStack(alignment: .leading, spacing: CC.space.xs) {
@@ -87,28 +90,39 @@ struct StartingSessionView: View {
                             .ccType(CC.type.reading)
                             .foregroundStyle(CC.text.primary)
                             .fixedSize(horizontal: false, vertical: true)
-                            .padding(CC.space.sm)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                CC.color.surfaceRaised, in: RoundedRectangle(cornerRadius: CC.radius.lg))
-                        Text("\(start.agent.displayName) reads it as soon as it starts.")
-                            .ccType(CC.type.footnote)
-                            .foregroundStyle(CC.text.tertiary)
                     }
+                    .padding(.leading, TimelineSpine.content)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, CC.space.md)
             .padding(.top, CC.space.xl)
         }
     }
 
-    private func step(done: Bool, _ text: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: CC.space.sm) {
-            CCIcon(done ? "check-circle-fill" : "circle-dashed", size: 18)
-                .foregroundStyle(done ? CC.color.success : CC.text.tertiary)
+    private enum StepState { case done, running, waiting }
+
+    /// A step: its mark in the gutter, centred on the mark axis beside the
+    /// first line, and its words on the text column.
+    private func step(_ state: StepState, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: TimelineSpine.gap) {
+            Group {
+                switch state {
+                case .done:
+                    CCIcon("check-circle-fill", size: TimelineSpine.mark, maxSize: CCColumn.markMaxSize)
+                        .foregroundStyle(CC.color.success)
+                case .running:
+                    CCProgressRing()
+                case .waiting:
+                    CCIcon("circle-dashed", size: TimelineSpine.mark, maxSize: CCColumn.markMaxSize)
+                        .foregroundStyle(CC.text.tertiary)
+                }
+            }
+            .ccMark(beside: CC.type.body)
+            .ccGutterMark()
             Text(text)
                 .ccType(CC.type.body)
-                .foregroundStyle(done ? CC.text.secondary : CC.text.primary)
+                .foregroundStyle(state == .done ? CC.text.secondary : CC.text.primary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -143,7 +157,7 @@ struct StartingSessionView: View {
         case .folderMissing:
             return (
                 "folder-dashed", "That folder isn’t there any more",
-                "\(start.project.shownPath) is gone from \(start.machineName): moved, renamed or deleted. Nothing was started.",
+                "It was moved, renamed or deleted on \(start.machineName). Nothing was started.",
                 "Choose another project")
         case .agentMissing:
             return (
