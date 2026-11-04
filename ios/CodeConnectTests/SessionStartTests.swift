@@ -270,13 +270,4 @@ final class SessionStartTests: XCTestCase {
         XCTAssertEqual(StartPlace.newBranch("fix/login", for: .claude), "worktree-fix/login")
         XCTAssertEqual(StartPlace.newBranch("fix/login", for: .codex), "fix/login")
     }
-
-    /// The last-used agent is offered only while it is installed.
-    func testThePreferredAgentIsTheLastUsedOneWhileInstalled() {
-        let project = StartProject(
-            path: "/p", name: "p", lastUsed: Date(), lastAgent: .codex, gitBranch: nil, exists: true)
-        XCTAssertEqual(project.preferredAgent(among: [.claude, .codex]), .codex)
-        XCTAssertEqual(project.preferredAgent(among: [.claude]), .claude)
-        XCTAssertNil(project.preferredAgent(among: []))
-    }
 }

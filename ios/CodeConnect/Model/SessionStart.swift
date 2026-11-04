@@ -125,13 +125,6 @@ struct StartProject: Identifiable, Hashable, Sendable {
         else { return path }
         return (["~"] + parts.dropFirst(3)).joined(separator: "/")
     }
-
-    /// The agent to offer first: the one last used here, when it is still
-    /// installed, else the first one that is.
-    func preferredAgent(among available: Set<StartAgent>) -> StartAgent? {
-        if let lastAgent, available.contains(lastAgent) { return lastAgent }
-        return StartAgent.allCases.first { available.contains($0) }
-    }
 }
 
 /// One entry of `ServerMessage::Projects.agents`: whether an agent is
@@ -482,30 +475,5 @@ extension SessionStarter {
                 path: "/home/jordan/\(name)", name: name, lastUsed: now.addingTimeInterval(-age),
                 lastAgent: agent, gitBranch: branch, exists: true)
         }
-    }
-}
-
-/// The five ways of starting a session the prototype offers, one of which the
-/// owner keeps. Chosen with `-CC_START_OPTION 1…5` in a debug build.
-enum StartOption: Int, CaseIterable {
-    /// A "New session" word in the bar; one sheet with recents, agent, message.
-    case recentsSheet = 1
-    /// A round + over the fleet; a screen a question: computer, folder (recent
-    /// or browsed), agent, branch in a repository, then ready to start.
-    case steps
-    /// "New session" on every project card, and recent projects under them.
-    case cardAction
-    /// A composer at the foot of the fleet: the first message starts it.
-    case messageFirst
-    /// A search field under the title; each result starts an agent directly.
-    case searchFirst
-
-    static var current: StartOption {
-        #if DEBUG
-            if let option = StartOption(rawValue: UserDefaults.standard.integer(forKey: "CC_START_OPTION")) {
-                return option
-            }
-        #endif
-        return .recentsSheet
     }
 }

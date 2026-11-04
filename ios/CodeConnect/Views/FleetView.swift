@@ -16,21 +16,6 @@ struct SessionRoute: Hashable {
     var focusComposer = false
 }
 
-/// What a start flow on the fleet is showing.
-private enum StartFlow: Identifiable {
-    case new
-    case project(StartProject, machineID: String)
-    case all
-
-    var id: String {
-        switch self {
-        case .new: return "new"
-        case .project(let project, let machineID): return "project:\(machineID):\(project.path)"
-        case .all: return "all"
-        }
-    }
-}
-
 /// What the removal question says, and what confirming it does.
 ///
 /// Removal deletes CodeConnect's own record only; the agent's transcript on the
@@ -134,13 +119,10 @@ struct FleetView: View {
     /// AX5, which is a third vertical edge — the screen gets exactly two —
     /// arriving by accident at exactly the size they are hardest to hold.
     @ScaledMetric(relativeTo: .footnote) private var gutterDot: CGFloat = CC.size.dot
-    /// The start flow on screen, the start it sent (opened once the flow has
-    /// gone), the full-screen search, and the composer's project.
-    @State private var startFlow: StartFlow?
+    /// Whether the start flow is open, and the start it sent (opened once the
+    /// flow has gone).
+    @State private var startOpen = false
     @State private var startedRequest: String?
-    @State private var showStartSearch = false
-    @State private var composerProject: StartProject?
-    private let startOption = StartOption.current
     /// The computer a start goes to; the one last used until one is chosen.
     @State private var startMachineID = ""
     /// Every paired computer that can start a session.
@@ -278,7 +260,7 @@ struct FleetView: View {
                 }
             }
             .toolbar {
-                if canStart, startOption == .recentsSheet {
+                if canStart {
                     ToolbarItem(placement: .topBarLeading) {
                         Button {
                             CCHaptic.light.fire()
@@ -325,54 +307,21 @@ struct FleetView: View {
                 }
                 .ccPlainToolbarItem()
             }
-            .overlay(alignment: .bottomTrailing) {
-                if canStart, startOption == .steps, !selecting {
-                    Button {
-                        CCHaptic.light.fire()
-                        openStart()
-                    } label: {
-                        CCIcon("plus", size: 24, weight: .semibold)
-                            .foregroundStyle(CC.text.onAccent)
-                            .frame(width: 56, height: 56)
-                            .background(CC.color.accent, in: Circle())
-                            .shadow(color: .black.opacity(0.5), radius: 12, y: 4)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("New session")
-                    .accessibilityIdentifier("start-entry")
-                    .padding(.trailing, CC.space.md)
-                    .padding(.bottom, CC.space.md)
-                }
-            }
             // The bar prints the header's own number, not its own count of the
             // cards it happens to hold — see `FleetCount`.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if selecting {
                     selectionBar(screen.selectable)
                 } else {
-                    VStack(spacing: 0) {
-                        deckBar(screen)
-                        // One panel with the Deck bar: the composer continues its
-                        // surface under it, and stands alone when nothing waits.
-                        if canStart, startOption == .messageFirst {
-                            if screen.risks.isEmpty { CCHairline() }
-                            StartComposerBar(
-                                contexts: startContexts, machineID: $startMachineID,
-                                project: $composerProject,
-                                onPickProject: { startFlow = .all },
-                                onStarted: { id in
-                                    path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
-                                }
-                            )
-                            .background(CC.color.surfaceRaised, ignoresSafeAreaEdges: .bottom)
-                        }
-                    }
+                    deckBar(screen)
                 }
             }
-            .sheet(item: $startFlow, onDismiss: openStarted) { flow in startSheet(flow) }
-            .fullScreenCover(isPresented: $showStartSearch, onDismiss: openStarted) {
-                StartSearchScreen(
-                    contexts: startContexts, onStarted: started, onClose: { showStartSearch = false })
+            .sheet(isPresented: $startOpen, onDismiss: openStarted) {
+                StartStepsSheet(
+                    contexts: startContexts, machineID: $startMachineID, onStarted: started,
+                    onClose: { startOpen = false }
+                )
+                .ccTallSheet()
             }
             .onChange(of: startContexts.map(\.id), initial: true) { _, _ in loadStart() }
             // A row that leaves the fleet, or stops being removable, leaves the
@@ -558,10 +507,6 @@ struct FleetView: View {
                 .ccType(CC.type.callout)
                 .foregroundStyle(CC.text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if canStart, startOption == .searchFirst {
-                StartSearchDoor { showStartSearch = true }
-                    .padding(.top, CC.space.sm)
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, CC.space.md)
@@ -627,24 +572,6 @@ struct FleetView: View {
                 }
             }
             ForEach(others, id: \.id) { projectCard($0) }
-            if canStart, startOption == .cardAction {
-                let live = Set(screen.projects.map(\.id.folder))
-                let contexts = startContexts
-                StartRecentSection(
-                    projects: Array(
-                        contexts.flatMap { context in
-                            context.projects.filter { !live.contains($0.path) }.map { ($0, context) }
-                        }
-                        .sorted { $0.0.lastUsed > $1.0.lastUsed }
-                        .prefix(5)
-                    ).map { (project: $0.0, context: $0.1) },
-                    total: contexts.reduce(0) { $0 + $1.projects.count },
-                    showsComputer: contexts.count > 1,
-                    onPick: { startFlow = .project($0, machineID: $1.id) },
-                    onAll: { startFlow = .all }
-                )
-                .padding(.top, CC.space.md)
-            }
             if let ended = screen.ended {
                 if showEnded {
                     bandView(ended).padding(.top, CC.space.lg)
@@ -755,25 +682,6 @@ struct FleetView: View {
                 .accessibilityAddTraits(.isHeader)
                 CCHairline()
                 ForEach(project.cells, id: \.row.id) { rowCell($0) }
-                if canStart, startOption == .cardAction {
-                    CCHairline()
-                    Button {
-                        CCHaptic.light.fire()
-                        let context = startContexts.first { $0.id == project.id.machineID } ?? startContexts[0]
-                        startFlow = .project(startProject(for: project, in: context), machineID: context.id)
-                    } label: {
-                        HStack(spacing: CC.space.xs) {
-                            CCIcon("plus", size: 16)
-                            Text("New session")
-                                .ccType(CC.type.body)
-                        }
-                        .foregroundStyle(CC.text.primary)
-                        .frame(maxWidth: .infinity, minHeight: CC.size.controlLg)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(StartRowStyle())
-                    .accessibilityIdentifier("start-card-\(project.name)")
-                }
             }
         }
         .padding(.horizontal, CC.space.md)
@@ -782,19 +690,12 @@ struct FleetView: View {
 
     // MARK: Start
 
-    private func openStart() {
-        switch startOption {
-        case .recentsSheet, .steps: startFlow = .new
-        case .cardAction, .messageFirst: startFlow = .all
-        case .searchFirst: showStartSearch = true
-        }
-    }
+    private func openStart() { startOpen = true }
 
     /// A flow sent a start: close it, and open the new session as it goes.
     private func started(_ requestID: String) {
         startedRequest = requestID
-        startFlow = nil
-        showStartSearch = false
+        startOpen = false
     }
 
     private func openStarted() {
@@ -812,57 +713,6 @@ struct FleetView: View {
             startMachineID =
                 contexts.max { ($0.lastUsed ?? .distantPast) < ($1.lastUsed ?? .distantPast) }?.id ?? ""
         }
-        if composerProject == nil {
-            composerProject = startContext(contexts, startMachineID).projects.first
-        }
-    }
-
-    @ViewBuilder
-    private func startSheet(_ flow: StartFlow) -> some View {
-        let close = { startFlow = nil }
-        let contexts = startContexts
-        switch (flow, startOption) {
-        case (.new, .steps):
-            StartStepsSheet(
-                contexts: contexts, machineID: $startMachineID, onStarted: started, onClose: close
-            )
-            .ccTallSheet()
-        case (.new, _):
-            StartRecentsSheet(
-                contexts: contexts, machineID: $startMachineID, onStarted: started, onClose: close
-            )
-            .ccTallSheet()
-        case (.project(let project, let machineID), _):
-            StartProjectSheet(
-                context: startContext(contexts, machineID), project: project,
-                showsComputer: contexts.count > 1, onStarted: started, onClose: close
-            )
-            .ccResizableSheet()
-        case (.all, .messageFirst):
-            StartAllProjectsSheet(
-                contexts: contexts, machineID: $startMachineID,
-                onPick: { project, _ in
-                    composerProject = project
-                    startFlow = nil
-                },
-                onClose: close
-            )
-            .ccTallSheet()
-        case (.all, _):
-            StartAllProjectsSheet(
-                contexts: contexts, machineID: $startMachineID,
-                onPick: { startFlow = .project($0, machineID: $1.id) }, onClose: close
-            )
-            .ccTallSheet()
-        }
-    }
-
-    /// The card's project as its computer lists it, or as the card knows it.
-    private func startProject(for project: Project, in context: StartContext) -> StartProject {
-        context.projects.first { $0.path == project.id.folder }
-            ?? StartProject(
-                path: project.id.folder, name: project.name, lastUsed: Date(), lastAgent: nil,
-                gitBranch: nil, exists: true)
     }
 
     // MARK: Bands

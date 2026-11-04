@@ -1,8 +1,8 @@
 import SwiftUI
 
-// The pieces every way of starting a session shares: a project's row, the
-// agent choice, the first-message pill, the search field and the screen a
-// start lands on.
+// What the New session steps are built from: what a start knows about its
+// computer, a recent folder's row, the search field, the first-message pill
+// and the title of the screen a start lands on.
 
 /// What a start needs to know about the computer it runs on.
 @MainActor
@@ -57,64 +57,12 @@ struct StartContext {
             ? nil : "\(agent.displayName) isn’t installed on \(machineName)."
     }
 
-    func preferredAgent(_ project: StartProject) -> StartAgent? {
-        project.preferredAgent(among: starter.availableAgents)
-    }
 }
 
 /// The context a choice names, or the first when it names none.
 @MainActor
 func startContext(_ contexts: [StartContext], _ id: String) -> StartContext {
     contexts.first { $0.id == id } ?? contexts[0]
-}
-
-/// The paired computers that can start a session, as chips: the chosen one
-/// filled, each with its link's dot. In a row while every name fits whole,
-/// else one under another, where a long name wraps rather than losing the
-/// part that tells two computers apart.
-struct StartComputerPicker: View {
-    let contexts: [StartContext]
-    @Binding var selection: String
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: CC.space.xs) { chips(wrapping: false) }
-            VStack(alignment: .leading, spacing: CC.space.xs) { chips(wrapping: true) }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func chips(wrapping: Bool) -> some View {
-        ForEach(contexts, id: \.id) { context in
-            let on = context.id == selection
-            Button {
-                selection = context.id
-            } label: {
-                HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-                    Circle().fill(CC.color.success).frame(width: 6, height: 6)
-                        .ccMark(beside: CC.type.footnote)
-                    Text(context.machineName)
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(on ? CC.text.onAccent : CC.text.primary)
-                        .fixedSize(horizontal: !wrapping, vertical: true)
-                }
-                .padding(.horizontal, CC.space.sm)
-                .padding(.vertical, CC.space.xxs)
-                .frame(minHeight: CC.size.controlSm)
-                .background(
-                    on ? CC.color.accent : CC.color.surfaceRaised,
-                    in: RoundedRectangle(cornerRadius: CC.size.controlSm / 2))
-                .overlay {
-                    RoundedRectangle(cornerRadius: CC.size.controlSm / 2)
-                        .strokeBorder(on ? Color.clear : CC.color.border, lineWidth: CC.stroke.hairline)
-                }
-                .ccHitTarget()
-            }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(on ? .isSelected : [])
-            .accessibilityIdentifier("start-computer-\(context.machineName)")
-        }
-    }
 }
 
 // MARK: - Project row
@@ -130,13 +78,9 @@ func startProjectMeta(_ project: StartProject, now: Date = Date()) -> String {
 }
 
 /// A project: its name, its folder cut from the front, and its branch, age
-/// and last agent. The trailing slot is the option's own: a check, a chevron,
-/// or the agents themselves.
+/// and last agent, with a trailing mark.
 struct StartProjectRow<Trailing: View>: View {
     let project: StartProject
-    var isSelected = false
-    /// The computer it is on, where rows from several are mixed.
-    var computer: String?
     @ViewBuilder var trailing: () -> Trailing
 
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -160,12 +104,6 @@ struct StartProjectRow<Trailing: View>: View {
                     .foregroundStyle(CC.text.secondary)
                     .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
                     .truncationMode(.middle)
-                if let computer {
-                    Text("On \(computer)")
-                        .ccType(CC.type.footnote)
-                        .foregroundStyle(CC.text.tertiary)
-                        .lineLimit(1)
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             trailing()
@@ -173,24 +111,7 @@ struct StartProjectRow<Trailing: View>: View {
         .padding(.horizontal, CC.space.md)
         .padding(.vertical, CC.space.sm)
         .frame(minHeight: CC.size.rowMin)
-        .background(isSelected ? CC.color.surfaceOverlay : Color.clear)
         .contentShape(Rectangle())
-    }
-}
-
-extension StartProjectRow where Trailing == EmptyView {
-    init(project: StartProject, isSelected: Bool = false) {
-        self.init(project: project, isSelected: isSelected, computer: nil) { EmptyView() }
-    }
-}
-
-/// A selected row's mark: the same check the model chooser uses.
-struct StartCheck: View {
-    let on: Bool
-    var body: some View {
-        CCIcon(on ? "check-circle-fill" : "circle", size: 22, weight: on ? .regular : .light)
-            .foregroundStyle(on ? CC.color.success : CC.text.disabled)
-            .accessibilityHidden(true)
     }
 }
 
@@ -208,7 +129,6 @@ struct StartRowStyle: ButtonStyle {
 struct StartSearchField: View {
     @Binding var text: String
     var placeholder = "Search projects"
-    var focused: FocusState<Bool>.Binding?
 
     var body: some View {
         HStack(spacing: CC.space.xs) {
@@ -230,13 +150,9 @@ struct StartSearchField: View {
         }
     }
 
-    @ViewBuilder
     private var field: some View {
-        let base = TextField(
-            "", text: $text, prompt: Text(placeholder).foregroundStyle(CC.text.placeholder)
-        )
-        .accessibilityIdentifier("start-search")
-        if let focused { base.focused(focused) } else { base }
+        TextField("", text: $text, prompt: Text(placeholder).foregroundStyle(CC.text.placeholder))
+            .accessibilityIdentifier("start-search")
     }
 }
 
@@ -245,60 +161,6 @@ func startFilter(_ projects: [StartProject], _ query: String) -> [StartProject] 
     guard !needle.isEmpty else { return projects }
     return projects.filter {
         $0.name.lowercased().contains(needle) || $0.path.lowercased().contains(needle)
-    }
-}
-
-// MARK: - Agent choice
-
-/// The agent a start runs, named once, on the control that changes it. Its
-/// menu lists both agents: the chosen one checked, one that is not installed
-/// disabled and saying so.
-struct StartAgentMenu: View {
-    @Binding var selection: StartAgent?
-    let project: StartProject
-    let context: StartContext
-
-    @Environment(\.dynamicTypeSize) private var typeSize
-
-    var body: some View {
-        Menu {
-            ForEach(StartAgent.allCases) { agent in
-                if context.missingReason(agent, in: project) != nil {
-                    Button("\(agent.displayName) — not installed") {}
-                        .disabled(true)
-                } else if agent == selection {
-                    Button { selection = agent } label: { Label(agent.displayName, image: "check") }
-                } else {
-                    Button(agent.displayName) { selection = agent }
-                }
-            }
-        } label: {
-            HStack(alignment: .firstTextBaseline, spacing: CC.space.xs) {
-                // Whole beside Start, whose label gives way first; on its own
-                // line at the accessibility sizes, free to wrap.
-                Text(selection?.displayName ?? "No agent")
-                    .ccType(CC.type.headline)
-                    .fixedSize(horizontal: !typeSize.isAccessibilitySize, vertical: true)
-                CCIcon("caret-down", size: 14, weight: .semibold)
-                    .foregroundStyle(CC.text.tertiary)
-                    .ccMark(beside: CC.type.headline)
-            }
-            .foregroundStyle(CC.text.primary)
-            .padding(.horizontal, CC.space.md)
-            .padding(.vertical, CC.space.xs)
-            // The whole line at the accessibility sizes, where it stands
-            // alone: offered only its ideal width, the name broke in two.
-            .frame(
-                maxWidth: typeSize.isAccessibilitySize ? .infinity : nil, minHeight: CC.size.controlLg,
-                alignment: .leading
-            )
-            .ccSurface(fill: .clear, radius: CC.radius.lg, border: CC.color.border)
-            .contentShape(Rectangle())
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .accessibilityLabel("Agent, \(selection?.displayName ?? "none")")
-        .accessibilityIdentifier("start-agent")
     }
 }
 
