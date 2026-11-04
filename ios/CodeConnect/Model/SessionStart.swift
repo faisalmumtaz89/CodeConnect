@@ -264,7 +264,14 @@ final class SessionStarter {
     /// computer's words.
     private(set) var creates: [String: String?] = [:]
 
-    func receive(git: StartGit?, for path: String) { self.git[path] = .some(git) }
+    /// Folders whose repository was asked about and not yet answered.
+    private(set) var gitAsked: Set<String> = []
+
+    func askedGit(_ path: String) { gitAsked.insert(path) }
+    func receive(git: StartGit?, for path: String) {
+        gitAsked.remove(path)
+        self.git[path] = .some(git)
+    }
     func receive(_ listing: StartFolderListing, for request: StartFolderRequest) { listings[request] = listing }
 
     /// A `list_folder` sent; any earlier ask for the same folder is now stale.

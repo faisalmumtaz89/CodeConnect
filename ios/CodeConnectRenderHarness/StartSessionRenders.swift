@@ -85,7 +85,9 @@ extension RenderCatalog {
             let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
             start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: above ? 100 : -100)))
         }
-        return try driver.requireExists(element, id)
+        // A render must show what it is named for, not the nearest screen.
+        guard clear() else { throw RenderFailure.unreachable("\(id), whole above the bar") }
+        return element
     }
 
     private static func step(_ app: XCUIApplication, _ id: String, _ driver: RenderDriver) throws {
@@ -176,7 +178,7 @@ extension RenderCatalog {
             // The switch itself: a toggle's label does not flip it.
             try driver.requireExists(app.switches.firstMatch, "the hidden toggle")
                 .coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
-            try driver.requireExists(app.buttons["start-folder-.config"], "a dot folder")
+            try reveal(app, "start-folder-.config", driver)
         },
         RenderScenario(name: "start2-b4-root", purpose: "steps: browsing, up to /", arguments: args()) {
             app, driver in
@@ -240,6 +242,7 @@ extension RenderCatalog {
         RenderScenario(name: "start2-d3-long-branch", purpose: "steps: the branch, a long one", arguments: args()) {
             app, driver in
             try toBranches(app, driver, longProject)
+            try reveal(app, "start-place-fix/idempotent-ledger-replay-after-partial-failure", driver)
         },
         RenderScenario(name: "start2-d4-new-worktree", purpose: "steps: naming a new worktree", arguments: args()) {
             app, driver in

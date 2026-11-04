@@ -245,6 +245,27 @@ final class StartFlowWireTests: XCTestCase {
         XCTAssertEqual(model.starter.listings[request]?.folders, ["app", "semi;"])
     }
 
+    /// A repository read the link lost is asked for again after a reconnect;
+    /// an answered one is not.
+    func testALostRepositoryReadIsAskedAgain() async throws {
+        let (model, sent) = try model()
+        model.projectGit("/tmp/ccd-minor-29/app")
+        model.projectGit("/tmp/ccd-minor-29/notes")
+        await settle()
+        model.connection.injectForTesting(try frame(29, "project_git_not_a_repository"))
+        let hello = """
+            {"type":"hello_ack","protocol_version":\(Wire.protocolVersion),"protocol_minor":30,\
+            "server_time":"2026-11-04T03:00:00.000Z","capabilities":\(try wire(30)["hello_ack_capabilities"]!.canonicalJSONString)}
+            """
+        model.connection.injectForTesting(try JSONDecoder().decode(ServerMessage.self, from: Data(hello.utf8)))
+        await settle()
+        let asked = sent.sent.compactMap { message -> String? in
+            guard case .getProjectGit(let path) = message else { return nil }
+            return path
+        }
+        XCTAssertEqual(asked, ["/tmp/ccd-minor-29/app", "/tmp/ccd-minor-29/notes", "/tmp/ccd-minor-29/app"])
+    }
+
     /// A start keeps its place through a resend.
     func testAStartKeepsItsPlaceThroughAResend() async throws {
         let (model, sent) = try model()

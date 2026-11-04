@@ -47,6 +47,13 @@ struct StartStepsSheet: View {
         return answer
     }
 
+    /// Whether the branch step comes next: the computer can say, and has not
+    /// yet said the folder is outside a repository.
+    private var branchAhead: Bool {
+        guard let project, context.asksGit else { return false }
+        return context.git(project.path).map { $0 != nil } ?? true
+    }
+
     var body: some View {
         Group {
             if trail.count > 1 {
@@ -225,7 +232,7 @@ struct StartStepsSheet: View {
                                 folderName = ""
                                 namingFolder = true
                             } label: {
-                                StartStepRow(title: "New folder…", detail: "Made in \(listing.path)")
+                                StartStepRow(title: "New folder…")
                             }
                             .buttonStyle(StartRowStyle())
                             .accessibilityIdentifier("start-new-folder")
@@ -236,7 +243,7 @@ struct StartStepsSheet: View {
                             Button {
                                 go(.browse(parent))
                             } label: {
-                                StartStepRow(title: "..", mono: true, detail: "Up to \(parent)")
+                                StartStepRow(title: "..", mono: true)
                             }
                             .buttonStyle(StartRowStyle())
                             .accessibilityIdentifier("start-up")
@@ -346,7 +353,7 @@ struct StartStepsSheet: View {
                         let missing = context.missingReason(candidate, in: project)
                         Button {
                             agent = candidate
-                            go(git == nil ? .start : .branch)
+                            go(branchAhead ? .branch : .start)
                         } label: {
                             StartStepRow(
                                 title: candidate.displayName,
@@ -366,9 +373,31 @@ struct StartStepsSheet: View {
 
     // MARK: Branch
 
-    @ViewBuilder
+    /// Until the computer has read the folder's repository, a ring says so;
+    /// if it says the folder is outside one, the step gives way to Ready.
     private var branchStep: some View {
-        if let project, let git {
+        let waiting = project.map { context.git($0.path) == nil } ?? false
+        return Group { branchContent }
+            .onChange(of: waiting) { _, still in
+                guard !still, git == nil else { return }
+                trail.removeLast()
+                trail.append(.start)
+            }
+    }
+
+    @ViewBuilder
+    private var branchContent: some View {
+        if let project, context.git(project.path) == nil {
+            HStack(spacing: CC.space.sm) {
+                CCProgressRing()
+                Text("Reading \(project.name)’s branches…")
+                    .ccType(CC.type.body)
+                    .foregroundStyle(CC.text.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(CC.space.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if let project, let git {
             let running = context.runningFolders
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -469,7 +498,7 @@ struct StartStepsSheet: View {
                                 ? "Claude Code’s own default base"
                                 : "the current commit of \(here?.branch ?? "this folder")")
                         if here?.dirty == true {
-                            fact("Changes", "Uncommitted changes stay in \(project.name)")
+                            fact("Changes", "Uncommitted changes stay where they are")
                         }
                     }
                     // At the accessibility sizes a pinned bar left the field no
@@ -524,7 +553,7 @@ struct StartStepsSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     summary("Computer", context.machineName, .computer)
-                    summary("Folder", project.shownPath, .folder, mono: true)
+                    summary("Folder", project.shownPath, .folder, mono: true, oneLine: true)
                     summary("Agent", agent.displayName, .agent)
                     if git != nil { summary("Branch", placeSummary(agent), .branch, mono: true) }
                     if typeSize.isAccessibilitySize { messagePill(project, agent).padding(CC.space.md) }
@@ -569,7 +598,10 @@ struct StartStepsSheet: View {
     }
 
     /// One choice made, named, and a tap back to the screen that made it.
-    private func summary(_ label: String, _ value: String, _ step: Screen, mono: Bool = false) -> some View {
+    /// `oneLine` for a path, cut from the front; every other value wraps.
+    private func summary(
+        _ label: String, _ value: String, _ step: Screen, mono: Bool = false, oneLine: Bool = false
+    ) -> some View {
         VStack(spacing: 0) {
             Button {
                 revisit(step)
@@ -582,8 +614,9 @@ struct StartStepsSheet: View {
                         Text(verbatim: value)
                             .ccType(mono ? CC.type.monoSmall : CC.type.body)
                             .foregroundStyle(CC.text.primary)
-                            .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                            .lineLimit(oneLine && !typeSize.isAccessibilitySize ? 1 : nil)
                             .truncationMode(.head)
+                            .fixedSize(horizontal: false, vertical: !oneLine)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     Text("Change")

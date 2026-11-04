@@ -162,17 +162,17 @@ struct StartingSessionView: View {
             return (
                 "folder-dashed", "That folder isn’t there any more",
                 "It was moved, renamed or deleted on \(start.machineName). Nothing was started.",
-                "Choose another project")
+                "Start again")
         case .agentMissing:
             return (
                 "terminal-window", "\(agent) isn’t installed",
                 "\(start.machineName) has no \(agent). Install it there, then start again from here.",
-                "Choose another agent")
+                "Start again")
         case .launchFailed:
             return (
                 "warning", "\(agent) didn’t start",
-                "\(start.machineName) tried and the shell stopped. Its own words are below.",
-                "Try again")
+                "\(start.machineName) could not start it. Its own words are below.",
+                "Start again")
         }
     }
 }

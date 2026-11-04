@@ -1180,6 +1180,7 @@ final class AppModel {
             }
         #endif
         guard connection.capabilities?.startsInWorktrees == true else { return }
+        starter.askedGit(path)
         Task { try? await connection.send(.getProjectGit(path: path)) }
     }
 
@@ -2156,9 +2157,12 @@ final class AppModel {
             if ack.capabilities.startsSessions {
                 for start in starter.unanswered { sendStart(start.requestID) }
             }
-            // A listing the link lost is asked for again, under a fresh id.
+            // A listing or a repository the link lost is asked for again.
             if ack.capabilities.browsesFolders {
                 for request in starter.unansweredListings { listFolder(request) }
+            }
+            if ack.capabilities.startsInWorktrees {
+                for path in starter.gitAsked { projectGit(path) }
             }
             // Last: it may find this model is another's machine, and leave it.
             onIdentified?()

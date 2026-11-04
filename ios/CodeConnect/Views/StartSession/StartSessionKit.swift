@@ -30,6 +30,8 @@ struct StartContext {
     /// a folder that is not one.
     func git(_ path: String) -> StartGit?? { starter.git[path] }
     func askGit(_ path: String) { model.projectGit(path) }
+    /// Whether this computer can say what a folder's repository holds (minor 29).
+    var asksGit: Bool { model.connection.capabilities?.startsInWorktrees == true }
 
     /// A folder's listing, once the computer has answered.
     func listing(_ request: StartFolderRequest) -> StartFolderListing? { starter.listings[request] }
@@ -52,9 +54,14 @@ struct StartContext {
     var lastUsed: Date? { projects.first?.lastUsed }
 
     /// Why an agent cannot be started on this computer, or nil when it can.
+    /// The computer's own words when it has them: its check ran the agent,
+    /// and an agent can be there and still not run.
     func missingReason(_ agent: StartAgent, in project: StartProject) -> String? {
-        starter.availableAgents.contains(agent)
-            ? nil : "\(agent.displayName) isn’t installed on \(machineName)."
+        guard !starter.availableAgents.contains(agent) else { return nil }
+        guard let detail = starter.agents.first(where: { $0.agent == agent })?.detail else {
+            return "\(agent.displayName) isn’t installed on \(machineName)."
+        }
+        return "\(agent.displayName) can’t start on \(machineName): \(detail)"
     }
 
 }
