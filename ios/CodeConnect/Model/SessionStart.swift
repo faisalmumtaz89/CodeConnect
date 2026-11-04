@@ -267,7 +267,11 @@ final class SessionStarter {
     /// Folders whose repository was asked about and not yet answered.
     private(set) var gitAsked: Set<String> = []
 
-    func askedGit(_ path: String) { gitAsked.insert(path) }
+    /// A fresh read: what the computer said before is no longer the answer.
+    func askedGit(_ path: String) {
+        gitAsked.insert(path)
+        git[path] = nil
+    }
     func receive(git: StartGit?, for path: String) {
         gitAsked.remove(path)
         self.git[path] = .some(git)

@@ -14,9 +14,11 @@ extension RenderCatalog {
     private static let longProject = "payments-reconciliation-worker"
 
     private static func args(
-        fixture: String = "deck", outcome: String? = nil, noCodex: Bool = false, twoComputers: Bool = false
+        fixture: String = "deck", outcome: String? = nil, noCodex: Bool = false, twoComputers: Bool = false,
+        linkDropMS: Int? = nil
     ) -> [String] {
         ["-CC_FIXTURE", fixture, "-CC_FIXTURE_REAL_NAMES", "YES"]
+            + (linkDropMS.map { ["-CC_FIXTURE_LINK_DROP_MS", "\($0)"] } ?? [])
             + (outcome.map { ["-CC_START_OUTCOME", $0] } ?? [])
             + (noCodex ? ["-CC_START_AGENTS", "claude"] : [])
             + (twoComputers
@@ -74,16 +76,17 @@ extension RenderCatalog {
         let element = app.descendants(matching: .any)[id].firstMatch
         let list = try driver.requireExists(app.descendants(matching: .any)["start-list"].firstMatch, "the list")
         func clear() -> Bool {
-            guard element.exists, element.isHittable else { return false }
+            guard element.exists, element.isHittable, element.frame.minY >= list.frame.minY else { return false }
             let bar = ["start-go", "start-browse", "start-use-folder", "start-continue"]
                 .map { app.buttons[$0] }.filter(\.exists).map(\.frame.minY).min()
             return element.frame.maxY <= (bar ?? list.frame.maxY)
         }
-        for _ in 0..<40 where !clear() {
-            // Back down when the row has passed above the window.
+        for _ in 0..<90 where !clear() {
+            // Back down when the row has passed above the window; steps short
+            // enough that a row in a two-row window is never jumped over.
             let above = element.exists && element.frame.minY < list.frame.minY
             let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
-            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: above ? 100 : -100)))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: above ? 40 : -40)))
         }
         // A render must show what it is named for, not the nearest screen.
         guard clear() else { throw RenderFailure.unreachable("\(id), whole above the bar") }
@@ -221,6 +224,16 @@ extension RenderCatalog {
             app.textFields.firstMatch.typeText(newWorktree)
             try driver.requireExists(driver.text(containing: "current commit", in: app), "Codex's base")
         },
+        RenderScenario(
+            name: "start2-j-link-drop", purpose: "steps: the link drops while browsing",
+            arguments: args(linkDropMS: 9000)
+        ) { app, driver in
+            try toBrowse(app, driver)
+            // The fixture drops the link 9 s in and brings it back 5 s later;
+            // the flow stays open on its folder across both.
+            Thread.sleep(forTimeInterval: 12)
+            try driver.requireExists(app.buttons["start-use-folder"], "the browser, still open")
+        },
         RenderScenario(name: "start2-c-agent", purpose: "steps: the agent", arguments: args()) {
             app, driver in
             try toAgents(app, driver)
@@ -228,7 +241,7 @@ extension RenderCatalog {
         RenderScenario(name: "start2-c2-no-codex", purpose: "steps: the agent, Codex not installed", arguments: args(noCodex: true)) {
             app, driver in
             try toAgents(app, driver)
-            try driver.requireExists(driver.text(containing: "isn’t installed", in: app), "the reason")
+            try driver.requireExists(driver.text(containing: "can’t start on", in: app), "the computer's reason")
         },
         RenderScenario(name: "start2-d-branch", purpose: "steps: the branch", arguments: args()) {
             app, driver in
@@ -267,7 +280,7 @@ extension RenderCatalog {
             app, driver in
             try toBranches(app, driver)
             try step(app, "start-place-fix/unicode-escapes", driver)
-            try driver.requireExists(app.buttons["start-go"], "Start")
+            try reveal(app, "start-summary-Branch", driver)
         },
         RenderScenario(name: "start2-e3-message", purpose: "steps: ready, a first message typed", arguments: args()) {
             app, driver in

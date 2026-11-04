@@ -122,6 +122,10 @@ struct FleetView: View {
     /// Whether the start flow is open, and the start it sent (opened once the
     /// flow has gone).
     @State private var startOpen = false
+    /// The computers the open flow offers: those that could start a session
+    /// when it opened. A link that drops meanwhile leaves its computer there,
+    /// and a start sent in the gap goes when the link is back.
+    @State private var openContexts: [StartContext] = []
     @State private var startedRequest: String?
     /// The computer a start goes to; the one last used until one is chosen.
     @State private var startMachineID = ""
@@ -318,7 +322,7 @@ struct FleetView: View {
             }
             .sheet(isPresented: $startOpen, onDismiss: openStarted) {
                 StartStepsSheet(
-                    contexts: startContexts, machineID: $startMachineID, onStarted: started,
+                    contexts: openContexts, machineID: $startMachineID, onStarted: started,
                     onClose: { startOpen = false }
                 )
                 .ccTallSheet()
@@ -690,7 +694,11 @@ struct FleetView: View {
 
     // MARK: Start
 
-    private func openStart() { startOpen = true }
+    private func openStart() {
+        guard canStart else { return }
+        openContexts = startContexts
+        startOpen = true
+    }
 
     /// A flow sent a start: close it, and open the new session as it goes.
     private func started(_ requestID: String) {

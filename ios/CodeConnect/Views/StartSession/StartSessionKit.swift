@@ -90,8 +90,6 @@ struct StartProjectRow<Trailing: View>: View {
     let project: StartProject
     @ViewBuilder var trailing: () -> Trailing
 
-    @Environment(\.dynamicTypeSize) private var typeSize
-
     var body: some View {
         HStack(alignment: .center, spacing: CC.space.sm) {
             VStack(alignment: .leading, spacing: CC.space.xxs) {
@@ -109,8 +107,7 @@ struct StartProjectRow<Trailing: View>: View {
                 Text(startProjectMeta(project))
                     .ccType(CC.type.footnote)
                     .foregroundStyle(CC.text.secondary)
-                    .lineLimit(typeSize.isAccessibilitySize ? nil : 1)
-                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             trailing()
