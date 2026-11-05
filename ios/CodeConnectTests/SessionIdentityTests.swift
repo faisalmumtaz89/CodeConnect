@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Protocol minor 2: a session has an identity (`session_uid`) as well as a name
 /// (`session_id`), and the app keys everything by the identity.

@@ -19,7 +19,7 @@ import Foundation
 /// integer `<duration_ms>`, string content — which is every one of 14,163
 /// reports in the owner's transcripts; the TUI's reader is more forgiving of
 /// forms it never writes.
-struct TaskNotification: Equatable {
+public struct TaskNotification: Equatable {
     /// `<summary>`, decoded. Nil when the report carries none.
     let summary: String?
     /// `<status>`: `completed`, `failed`, `killed`, `stopped`, or absent.
@@ -46,14 +46,14 @@ struct TaskNotification: Equatable {
 
     /// The Mac's row: the summary, then ` · ` and the running time when it is
     /// above zero.
-    var line: String? {
+    public var line: String? {
         guard let summary, !summary.isEmpty else { return nil }
         guard let durationMS, durationMS > 0 else { return summary }
         return "\(summary) · \(Self.elapsed(ms: durationMS))"
     }
 
     /// The TUI colours the row's dot by status and nothing else.
-    var severity: NoticeSeverity {
+    public var severity: NoticeSeverity {
         switch status {
         case "completed": return .success
         case "failed": return .failure

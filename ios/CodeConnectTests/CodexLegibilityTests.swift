@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **A message this build cannot read is never swallowed.**
 ///

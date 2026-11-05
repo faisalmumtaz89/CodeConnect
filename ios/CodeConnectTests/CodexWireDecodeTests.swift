@@ -2,6 +2,7 @@ import CryptoKit
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **Tier 1.1 — the Codex wire, decoded through the app's own `Codable` types.**
 ///

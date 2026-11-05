@@ -2,6 +2,7 @@ import UserNotifications
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Each paired computer's model gets a push registrar of its own from the
 /// app's factory, asks it once, and hears only its own answers: the

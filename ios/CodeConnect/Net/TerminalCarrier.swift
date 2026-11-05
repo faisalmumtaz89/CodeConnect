@@ -1,3 +1,4 @@
+import CodeConnectKit
 import Foundation
 
 /// The live terminal half of the product: the phone's end of a tmux pane

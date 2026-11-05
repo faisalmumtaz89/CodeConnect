@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// One phone, several machines: what the Keychain and the cache hold for each.
 ///

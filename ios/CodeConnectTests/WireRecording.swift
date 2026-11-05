@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// A daemon-emitted wire recording (`ios/CodeConnectTests/Resources/<name>.json`,
 /// re-derived by `ccd/src/fixture_replay.rs`), replayed into one session the way

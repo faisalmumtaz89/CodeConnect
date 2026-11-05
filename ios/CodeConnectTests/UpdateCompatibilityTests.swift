@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The two client-side rules that make an App-Store phone honest against a
 /// Mac helper of any age.

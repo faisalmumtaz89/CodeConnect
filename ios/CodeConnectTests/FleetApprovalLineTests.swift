@@ -3,6 +3,7 @@ import SwiftUI
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The fleet's line for a run held on an approval carries the first line of
 /// its command, drawn and spoken, as the chat's approval row and the fleet's

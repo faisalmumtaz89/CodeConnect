@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Claude's `AskUserQuestion`, against the bytes a minor-21 daemon sends.
 ///

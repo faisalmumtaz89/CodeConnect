@@ -3,6 +3,7 @@ import SwiftUI
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// An approval's agent text is drawn with every character that makes a screen
 /// show something other than what runs replaced by U+FFFD.

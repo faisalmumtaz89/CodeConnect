@@ -2,6 +2,7 @@ import SwiftUI
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// What VoiceOver says on the chat's approval row: the label of the one
 /// combined element the row is, read straight off the row, and once from the

@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **Tier 2 — the copy decisions, as pure functions.**
 ///

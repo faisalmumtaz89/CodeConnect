@@ -8,14 +8,14 @@ import Foundation
 ///   * `JSONDecoder.keyDecodingStrategy` also rewrites the keys of
 ///     `[String: JSONValue]`, which would silently mangle every event payload —
 ///     so every key is spelled out instead.
-enum Wire {
-    static let protocolVersion: UInt32 = 1
+public enum Wire {
+    public static let protocolVersion: UInt32 = 1
     /// Matches `MAX_CLIENT_MESSAGE_BYTES`; the daemon closes anything larger.
-    static let maxClientMessageBytes = 1024 * 1024
+    public static let maxClientMessageBytes = 1024 * 1024
     /// `MAX_COMPOSE_BYTES` (`ws.rs`), enforced at the Mac on `text.len()` —
     /// **bytes, not characters**. Mirrored here so the composer can refuse
     /// before sending rather than learning it from a round trip.
-    static let maxComposeBytes = 8192
+    public static let maxComposeBytes = 8192
 
     /// The live terminal's flow control, mirroring `protocol/src/ws.rs`. Bytes
     /// ride as base64 inside the JSON frames and each direction is governed by a
@@ -38,23 +38,23 @@ enum Wire {
     /// older daemon: the Mac makes both fields required, and a daemon too old
     /// to carry them is one that never sends `terminal_attached` at all,
     /// because it does not advertise the capability the phone attaches on.
-    enum Terminal {
+    public enum Terminal {
         /// The largest decoded chunk one `terminal_input` may carry.
-        static let maxChunkBytes = 16 * 1024
+        public static let maxChunkBytes = 16 * 1024
         /// What this phone grants the daemon at attach, and the ceiling it will
         /// let outstanding credit reach in either direction.
-        static let initialOutputCredit: UInt32 = 64 * 1024
+        public static let initialOutputCredit: UInt32 = 64 * 1024
         /// What the daemon grants *this phone* at attach. Not this side's to
         /// choose — it arrives in `terminal_attached` — but pinned here so a
         /// test can drive a carrier with the window a real daemon opens rather
         /// than one that happens to be to hand.
         static let initialInputCredit: UInt32 = 32 * 1024
-        static let maxOutstandingCredit: UInt32 = 256 * 1024
+        public static let maxOutstandingCredit: UInt32 = 256 * 1024
         /// Geometry the daemon accepts; anything outside is refused.
-        static let minCols = 2
-        static let maxCols = 512
-        static let minRows = 2
-        static let maxRows = 256
+        public static let minCols = 2
+        public static let maxCols = 512
+        public static let minRows = 2
+        public static let maxRows = 256
     }
 }
 
@@ -71,7 +71,7 @@ enum Wire {
 ///   App Attest-enrolled credential bound to this phone's `(token, environment)`.
 /// - `none`: this connection does not send push (off, or a bootstrap/static
 ///   connection that has no device row).
-enum PushMode: Equatable, Sendable {
+public enum PushMode: Equatable, Sendable {
     case none
     case direct
     case relay
@@ -82,7 +82,7 @@ enum PushMode: Equatable, Sendable {
 /// fallback, which meant a newer daemon's source this build had never heard of
 /// was silently attributed to the daemon itself. Modelled on `AnswerPath`: a
 /// tagged single-value string with the unknown retained in its own case.
-enum EventSource: Sendable, Hashable {
+public enum EventSource: Sendable, Hashable {
     case hook, transcript, daemon, pty
     /// The Codex control link: every timeline event the adapter emits for a
     /// Codex session carries it (`event.rs`). Named rather than left to
@@ -107,7 +107,7 @@ enum EventSource: Sendable, Hashable {
 }
 
 extension EventSource: Codable {
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         switch try decoder.singleValueContainer().decode(String.self) {
         case "hook": self = .hook
         case "transcript": self = .transcript
@@ -118,16 +118,16 @@ extension EventSource: Codable {
         }
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }
 }
 
-enum Lifecycle: String, Codable, Sendable, Hashable {
+public enum Lifecycle: String, Codable, Sendable, Hashable {
     case spawning, live, exited, unknown
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = Lifecycle(rawValue: raw) ?? .unknown
     }
@@ -136,22 +136,22 @@ enum Lifecycle: String, Codable, Sendable, Hashable {
 /// Freshness of *our observation*, never the agent's state: `detached` means
 /// this app has lost sight of the session, not that the agent stopped working.
 /// The two must never be conflated on any surface.
-enum Link: String, Codable, Sendable, Hashable {
+public enum Link: String, Codable, Sendable, Hashable {
     case attached, degraded, detached, stale
 
     /// An unrecognised link word from a newer daemon degrades rather than
     /// pretending to be attached — claiming liveness we cannot justify is the
     /// one thing this enum exists to prevent.
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = Link(rawValue: raw) ?? .degraded
     }
 }
 
-enum ResolvedBy: String, Codable, Sendable, Hashable {
+public enum ResolvedBy: String, Codable, Sendable, Hashable {
     case phone, local, timeout, superseded
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = ResolvedBy(rawValue: raw) ?? .superseded
     }
@@ -169,7 +169,7 @@ enum ResolvedBy: String, Codable, Sendable, Hashable {
 ///     `"gemini"` as Claude would offer a Claude session's whole vocabulary —
 ///     `send_text`, the slash palette, Allow/Deny — to an agent that answers
 ///     none of it.
-enum AgentKind: Sendable, Hashable {
+public enum AgentKind: Sendable, Hashable {
     case claude
     case codex
     /// An agent a newer daemon hosts and this build does not know how to drive.
@@ -185,7 +185,7 @@ enum AgentKind: Sendable, Hashable {
 
     /// What to call it on screen. An unsupported agent is named verbatim: the
     /// daemon's own word is the only true thing the phone can say about it.
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .claude: return "Claude"
         case .codex: return "Codex"
@@ -203,11 +203,11 @@ enum AgentKind: Sendable, Hashable {
 }
 
 extension AgentKind: Codable {
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         self.init(wire: try decoder.singleValueContainer().decode(String.self))
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }
@@ -242,7 +242,7 @@ extension AgentKind: Codable {
 /// An unrecognised word is retained rather than read as `subscribed`: this enum
 /// gates two mutations, and the only safe direction for a value this build
 /// cannot interpret is "not offered".
-enum CodexLinkState: Sendable, Hashable {
+public enum CodexLinkState: Sendable, Hashable {
     /// Watching this session's thread. The only state that can actuate.
     case subscribed
     /// Connected to the session, not yet watching its thread.
@@ -287,7 +287,7 @@ enum CodexLinkState: Sendable, Hashable {
     /// which stopped having one answer the moment `boundNotStarted` existed:
     /// a first turn can be *started* on a thread that has never run one, and
     /// there is nothing there to *stop*.
-    enum Ask: Sendable, Hashable {
+    public enum Ask: Sendable, Hashable {
         /// Say something — the daemon decides at the write whether the words
         /// start a turn or join one.
         case compose
@@ -310,7 +310,7 @@ enum CodexLinkState: Sendable, Hashable {
     /// has been sent, and the daemon's own sentences are what a *refusal* says
     /// afterwards. Both are shown, in that order, and neither pretends to be
     /// the other.
-    func blockedReason(for ask: Ask) -> String? {
+    public func blockedReason(for ask: Ask) -> String? {
         switch self {
         case .subscribed: return nil
         // **The honest half of the new state.** It can be spoken to, and it
@@ -341,11 +341,11 @@ enum CodexLinkState: Sendable, Hashable {
 }
 
 extension CodexLinkState: Codable {
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         self.init(wire: try decoder.singleValueContainer().decode(String.self))
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }
@@ -357,7 +357,7 @@ extension CodexLinkState: Codable {
 /// this build had never heard of was silently reported as keystrokes it never
 /// sent. Modelled on `AnswerDecision`: a tagged single-value string, with the
 /// unknown retained in its own case rather than folded into a known one.
-enum AnswerPath: Sendable, Hashable {
+public enum AnswerPath: Sendable, Hashable {
     case hookReturn
     case sendKeys
     /// The Codex path (minor 16): the answer was written back as the response to
@@ -394,11 +394,11 @@ enum AnswerPath: Sendable, Hashable {
 }
 
 extension AnswerPath: Codable {
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         self.init(wire: try decoder.singleValueContainer().decode(String.self))
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }
@@ -406,7 +406,7 @@ extension AnswerPath: Codable {
 
 /// `EventKind::Other` is load-bearing: an unknown kind from a newer daemon has
 /// to survive a round-trip rather than being dropped.
-enum EventKind: Sendable, Hashable {
+public enum EventKind: Sendable, Hashable {
     case sessionStart, sessionEnd
     /// A feature-level-1 daemon's end of a turn: the *turn* finished, the
     /// session lives on. Older daemons sent the same fact as `session_end`
@@ -471,11 +471,11 @@ enum EventKind: Sendable, Hashable {
 }
 
 extension EventKind: Codable {
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         self.init(rawValue: try decoder.singleValueContainer().decode(String.self))
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
     }
@@ -483,20 +483,20 @@ extension EventKind: Codable {
 
 // MARK: - Event
 
-struct Event: Codable, Sendable, Hashable, Identifiable {
-    let seq: UInt64
+public struct Event: Codable, Sendable, Hashable, Identifiable {
+    public let seq: UInt64
     /// The run's identity — a ULID minted at spawn and never reused. Empty from
     /// a daemon older than protocol minor 2, which had no such concept.
     let sessionUID: String
     /// The tmux name (`cc-1`). Display and `tmux attach` only: it is handed to
     /// the *next* session when this one exits, so it is not an identity.
-    let sessionID: String
+    public let sessionID: String
     let ts: String
-    let kind: EventKind
-    let payload: JSONValue
-    let source: EventSource
-    let sourceEventID: String?
-    let turnID: String?
+    public let kind: EventKind
+    public let payload: JSONValue
+    public let source: EventSource
+    public let sourceEventID: String?
+    public let turnID: String?
     let itemID: String?
 
     enum CodingKeys: String, CodingKey {
@@ -516,7 +516,7 @@ struct Event: Codable, Sendable, Hashable, Identifiable {
     /// *default* rather than fail: `protocol/src/event.rs` marks it
     /// `#[serde(default)]`, an event logged before uids existed carries none,
     /// and a strict decode here would drop that event entirely.
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         seq = try c.decode(UInt64.self, forKey: .seq)
         sessionUID = try c.decodeIfPresent(String.self, forKey: .sessionUID) ?? ""
@@ -537,37 +537,37 @@ struct Event: Codable, Sendable, Hashable, Identifiable {
     /// than the next, whatever the connection believes about the daemon. A
     /// daemon that mints uids puts one on every event, so the fallback is only
     /// ever taken for a whole daemon at a time, never for one event in a stream.
-    var sessionKey: String { sessionUID.isEmpty ? sessionID : sessionUID }
+    public var sessionKey: String { sessionUID.isEmpty ? sessionID : sessionUID }
 
     /// `seq` alone is not unique for the daemon's `Resync` marker, which is sent
     /// with `seq: 0` precisely so it cannot be mistaken for a logged fact. The
     /// *key* rather than the name, so two runs that shared `cc-1` cannot produce
     /// two different events with one id.
-    var id: String { "\(sessionKey)#\(seq)#\(ts)#\(kind.rawValue)" }
+    public var id: String { "\(sessionKey)#\(seq)#\(ts)#\(kind.rawValue)" }
 
-    var date: Date { ISO8601.parse(ts) ?? .distantPast }
+    public var date: Date { ISO8601.parse(ts) ?? .distantPast }
 }
 
 // MARK: - Session summary
 
-struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
+public struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// The run's identity, minted once at spawn. Empty on a daemon older than
     /// protocol minor 2. Two entries in one `sessions` list can share a
     /// `sessionID` when a tmux name has been reused, and only this tells them
     /// apart — see the "Session identity" section of `mac/README.md`.
-    let sessionUID: String
+    public let sessionUID: String
     /// The tmux name. Display and `tmux attach` only.
-    let sessionID: String
-    let tmuxSession: String
-    let cwd: String
-    let lifecycle: Lifecycle
-    let link: Link
-    let claudeSessionID: String?
+    public let sessionID: String
+    public let tmuxSession: String
+    public let cwd: String
+    public let lifecycle: Lifecycle
+    public let link: Link
+    public let claudeSessionID: String?
     let transcriptPath: String?
-    let lastSeq: UInt64
-    let createdAt: String
+    public let lastSeq: UInt64
+    public let createdAt: String
     let updatedAt: String
-    let blockedOn: [String]
+    public let blockedOn: [String]
     /// **What to call this run out loud**, resolved by the daemon (minor 11).
     ///
     /// The final component of the run's working directory — the project someone
@@ -580,7 +580,7 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// derives a second one from `cwd`: two rules produce two names for one
     /// run, and a notification cannot derive anything at all, since the phone
     /// may not be running when it is composed.
-    let projectLabel: String
+    public let projectLabel: String
     /// **Which agent is running here** (minor 15). Absent ⇒ `.claude`, which is
     /// what every daemon below minor 15 means by sending nothing.
     ///
@@ -589,7 +589,7 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// Claude's vocabulary to a Codex session is refused by name at the Mac, and
     /// the reverse likewise — so this field, not a capability flag, is what
     /// decides which controls a session gets.
-    let agent: AgentKind
+    public let agent: AgentKind
     /// The Codex thread this run is bound to. **Opaque** — for correlation and
     /// for rendering, never parsed. Absent for a Claude session.
     ///
@@ -598,18 +598,18 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     let codexThreadID: String?
     /// Whether this Mac can stop or speak to this Codex session **right now**.
     /// Defaulted to `.none` so a daemon predating the field still parses.
-    let codexLink: CodexLinkState
+    public let codexLink: CodexLinkState
     /// Every card in this run still waiting on a human, by reference (minor
     /// 23): the seq of each one's `approval_request`, so a phone holding only
     /// the newest events can fetch the event that carries the card. Empty from
     /// an older daemon and on a run with nothing open.
-    let pending: [PendingRef]
+    public let pending: [PendingRef]
     /// The model this run last confirmed, with the event that confirmed it
     /// (minor 23). `nil` until something has said.
-    let model: ModelFact?
+    public let model: ModelFact?
     /// The permission mode the main agent last reported, with the event that
     /// reported it (minor 23). `nil` until something has said.
-    let permissionMode: SessionFact?
+    public let permissionMode: SessionFact?
 
     enum CodingKeys: String, CodingKey {
         case sessionUID = "session_uid"
@@ -633,7 +633,7 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
         case permissionMode = "permission_mode"
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sessionUID = try c.decodeIfPresent(String.self, forKey: .sessionUID) ?? ""
         sessionID = try c.decode(String.self, forKey: .sessionID)
@@ -658,12 +658,12 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
 
     /// Whether the Codex vocabulary applies here. The one place the question is
     /// asked, so a future agent cannot accidentally inherit it.
-    var isCodex: Bool { agent == .codex }
+    public var isCodex: Bool { agent == .codex }
 
     /// What this app files the run's events, subscriptions and marks under, and
     /// what it sends when it has to name the run on the wire. See
     /// `Event.sessionKey` for why it is read off the data rather than off a flag.
-    var sessionKey: String { sessionUID.isEmpty ? sessionID : sessionUID }
+    public var sessionKey: String { sessionUID.isEmpty ? sessionID : sessionUID }
 
     /// Whether the phone may offer to remove this run.
     ///
@@ -673,21 +673,21 @@ struct SessionSummary: Codable, Sendable, Hashable, Identifiable {
     /// ever put it in tmux — is removable at any lifecycle, because no probe
     /// can ever prove it ended and a row awaiting an unobtainable proof would
     /// be immortal.
-    var isRemovable: Bool { lifecycle == .exited || tmuxSession.isEmpty }
+    public var isRemovable: Bool { lifecycle == .exited || tmuxSession.isEmpty }
 
-    var id: String { sessionKey }
-    var updatedDate: Date { ISO8601.parse(updatedAt) ?? .distantPast }
-    var createdDate: Date { ISO8601.parse(createdAt) ?? .distantPast }
+    public var id: String { sessionKey }
+    public var updatedDate: Date { ISO8601.parse(updatedAt) ?? .distantPast }
+    public var createdDate: Date { ISO8601.parse(createdAt) ?? .distantPast }
 }
 
 /// One open card, named without its body (`SessionSummary.pending`).
-struct PendingRef: Codable, Sendable, Hashable {
-    let requestID: String
+public struct PendingRef: Codable, Sendable, Hashable {
+    public let requestID: String
     /// The seq of the card's `approval_request` event.
-    let seq: UInt64
+    public let seq: UInt64
     /// The card's hold as it stands now. Absent on a card that has none, which
     /// is every Codex card.
-    let hold: QuestionHold?
+    public let hold: QuestionHold?
     /// The turn a Codex card belongs to. Absent on a Claude card.
     let turnID: String?
 
@@ -701,22 +701,22 @@ struct PendingRef: Codable, Sendable, Hashable {
 
 /// A fact and the seq of the event that decided it, so the phone can keep
 /// whichever of this and its own events is newer.
-struct SessionFact: Codable, Sendable, Hashable {
-    let value: String
-    let seq: UInt64
+public struct SessionFact: Codable, Sendable, Hashable {
+    public let value: String
+    public let seq: UInt64
 }
 
 /// The model fact, with which kind of event said it and when.
-struct ModelFact: Codable, Sendable, Hashable {
-    let value: String
-    let seq: UInt64
-    let source: ModelSource
+public struct ModelFact: Codable, Sendable, Hashable {
+    public let value: String
+    public let seq: UInt64
+    public let source: ModelSource
     /// The deciding event's `ts`.
-    let at: String
+    public let at: String
 }
 
 /// Which kind of event said what the model is.
-enum ModelSource: Sendable, Hashable {
+public enum ModelSource: Sendable, Hashable {
     /// The `model` of a `session_start`.
     case sessionStart
     /// Claude Code's own `/model` receipt.
@@ -742,11 +742,11 @@ enum ModelSource: Sendable, Hashable {
 }
 
 extension ModelSource: Codable {
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         self.init(wire: try decoder.singleValueContainer().decode(String.self))
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(wire)
     }
@@ -771,13 +771,13 @@ extension ModelSource: Codable {
 ///
 /// Every default is "not available", so an unreadable field can only ever hide
 /// an affordance, never invent one.
-struct Capabilities: Codable, Sendable, Hashable {
-    let canApproveReliably: Bool
+public struct Capabilities: Codable, Sendable, Hashable {
+    public let canApproveReliably: Bool
     let failMode: String
     let answerPath: AnswerPath
     let holdSecs: UInt64
-    let sendText: Bool
-    let capture: Bool
+    public let sendText: Bool
+    public let capture: Bool
     let push: Bool
     /// A minor-14 relay daemon advertises this instead of `push`: it sends
     /// through the CodeConnect relay, which needs an enrolled credential the
@@ -785,11 +785,11 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// false` on purpose so an older app never prompts and registers a
     /// credential-less token. See `pushMode`.
     let pushRelay: Bool
-    let tls: Bool
+    public let tls: Bool
     /// Exactly what arrived, unknown keys included.
     let advertised: [String: JSONValue]
 
-    init(
+    public init(
         canApproveReliably: Bool = false,
         failMode: String = "unknown",
         answerPath: AnswerPath = .sendKeys,
@@ -823,7 +823,7 @@ struct Capabilities: Codable, Sendable, Hashable {
         advertised = map
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode([String: JSONValue].self)
         advertised = raw
         canApproveReliably = raw["can_approve_reliably"]?.boolValue ?? false
@@ -838,7 +838,7 @@ struct Capabilities: Codable, Sendable, Hashable {
         tls = raw["tls"]?.boolValue ?? false
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(advertised)
     }
@@ -854,7 +854,7 @@ struct Capabilities: Codable, Sendable, Hashable {
     }
 
     /// `get_diff` is answerable.
-    var servesDiff: Bool { advertises(["diff", "get_diff", "diffs"]) }
+    public var servesDiff: Bool { advertises(["diff", "get_diff", "diffs"]) }
     /// `send_text` accepts `request_id` + `payload_hash` and replays a retry's
     /// original outcome instead of typing twice.
     var sendTextIdempotent: Bool { advertises(["send_text_idempotent"]) }
@@ -864,43 +864,43 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// `composer_recovered` / `composer_lost`. False means the snapshot
     /// commands must not be offered: their entire safety story is that the
     /// daemon closes the view again.
-    var recoversComposer: Bool { advertises(["slash_composer_recovery"]) }
+    public var recoversComposer: Bool { advertises(["slash_composer_recovery"]) }
     /// `list_projects` and `start_session` are answerable.
-    var startsSessions: Bool { advertises(["start_session"]) }
+    public var startsSessions: Bool { advertises(["start_session"]) }
     /// `get_project_git` is answerable, and `start_session` takes a
     /// `worktree` (minor 29). Without it a `worktree` is ignored and the start
     /// runs in the folder, so none is sent.
-    var startsInWorktrees: Bool { advertises(["start_worktree"]) }
+    public var startsInWorktrees: Bool { advertises(["start_worktree"]) }
     /// `list_folder` and `create_folder` are answerable, and `start_session`
     /// takes any absolute folder (minor 30).
-    var browsesFolders: Bool { advertises(["browse_folders"]) }
+    public var browsesFolders: Bool { advertises(["browse_folders"]) }
     /// Approval cards carry a daemon-computed `risk` block.
-    var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
+    public var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
     /// A live terminal can be opened over *this* connection. Connection-scoped,
     /// not a build fact: a terminal is shell-equivalent authority, so the daemon
     /// answers false for the static bootstrap token. False means the Terminal
     /// tab must say what to fix rather than offer a session it cannot open.
-    var servesTerminal: Bool { advertises(["terminal_pty"]) }
+    public var servesTerminal: Bool { advertises(["terminal_pty"]) }
     /// The daemon said no for *this* connection, rather than not saying at all
     /// as a daemon from before the terminal does. To a paired phone that no
     /// means the connection is not private — neither TLS, nor the daemon's
     /// tailnet address, nor loopback — since pairing is the only other thing
     /// the daemon gates the terminal on.
-    var withholdsTerminal: Bool { advertised["terminal_pty"]?.boolValue == false }
+    public var withholdsTerminal: Bool { advertised["terminal_pty"]?.boolValue == false }
     /// The daemon accepts `delete_session`. Absent before minor 7, and unknown is
     /// false, so an older Mac simply does not offer the swipe rather than offering
     /// one that silently does nothing.
-    var deletesSessions: Bool { advertises(["delete_session"]) }
+    public var deletesSessions: Bool { advertises(["delete_session"]) }
     /// `test_push` is answerable — distinct from `push`, which a minor-6 daemon
     /// advertises without understanding the test request.
-    var testsPush: Bool { advertises(["test_push"]) }
+    public var testsPush: Bool { advertises(["test_push"]) }
     /// The one push decision the rest of the app reads, normalized from the two
     /// raw flags with **direct precedence**: a daemon that somehow advertised
     /// both is a direct-key daemon, and the direct path needs no relay
     /// credential. Every push gate — eligibility, registration, the test button,
     /// the trust-screen row — keys off this, never off `push` or `pushRelay`
     /// alone, so the two flags cannot disagree anywhere downstream.
-    var pushMode: PushMode {
+    public var pushMode: PushMode {
         if push { return .direct }
         if pushRelay { return .relay }
         return .none
@@ -909,40 +909,40 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// which only says the listener *holds* a certificate. The daemon accepts
     /// both schemes on one port during the migration, so the phone is entitled
     /// to both facts and must not conflate them.
-    var tlsActive: Bool { advertises(["tls_active"]) }
+    public var tlsActive: Bool { advertises(["tls_active"]) }
     /// Sessions and events carry a `session_uid`, and every message that names a
     /// session accepts one. False means a reused tmux name is the only identity
     /// there is, and two runs under one name will read as a single spliced
     /// timeline — which is exactly what this flag being true fixes.
-    var scopesSessionsByUID: Bool { advertises(["session_uid", "session_uids"]) }
+    public var scopesSessionsByUID: Bool { advertises(["session_uid", "session_uids"]) }
     /// This daemon **honours** a stop for a Codex session whose control link is
     /// subscribed (minor 17). A minor-15/16 daemon decodes `interrupt` and
     /// answers a well-formed `Rejected` to every ask — legible, but guaranteed
     /// — so an unflagged daemon gets the button offered-and-silently-broken,
     /// which is why this gates the send and not only the control.
-    var codexInterrupt: Bool { advertises(["codex_interrupt"]) }
+    public var codexInterrupt: Bool { advertises(["codex_interrupt"]) }
     /// This daemon **understands `compose` at all** (minor 18).
     ///
     /// **The load-bearing one.** A minor-17 daemon cannot decode the message and
     /// answers `Error{code:"bad_request"}` rather than a `ComposeResult`, so a
     /// phone that sent one would wait on a typed reply that is never coming.
     /// Hiding the button is not the same thing as not transmitting.
-    var codexCompose: Bool { advertises(["codex_compose"]) }
+    public var codexCompose: Bool { advertises(["codex_compose"]) }
     /// This daemon answers Claude's `AskUserQuestion` from the phone (minor
     /// 21): its question cards carry `question_hold` and it takes the
     /// `answers` and `decline` decisions. Absent is false — an older daemon
     /// shows the question as an ordinary approval.
-    var questionCard: Bool { advertises(["question_card"]) }
+    public var questionCard: Bool { advertises(["question_card"]) }
     /// This daemon answers every Claude card only through the hook Claude holds
     /// for that card's own call, and never types (minor 22). Absent is false:
     /// an older daemon types an approval's answer into whatever prompt is on
     /// screen, which can be another agent's, so its Claude approvals are shown
     /// read-only.
-    var hookOnlyApprovals: Bool { advertises(["hook_only_approvals"]) }
+    public var hookOnlyApprovals: Bool { advertises(["hook_only_approvals"]) }
     /// This daemon serves earlier pages of a run's log (`history`) and puts each
     /// run's open cards, model and mode on its summary (minor 23). Absent is
     /// false: an older daemon answers `history` with `bad_request`.
-    var historyPages: Bool { advertises(["history_pages"]) }
+    public var historyPages: Bool { advertises(["history_pages"]) }
     /// Which agents this daemon hosts. **Omitted entirely while it would only
     /// name Claude** (`ws.rs`), so empty and absent both read as `["claude"]`.
     var supportedAgents: [String] {
@@ -957,7 +957,7 @@ struct Capabilities: Codable, Sendable, Hashable {
 
     /// Everything advertised, sorted, for the trust screen. Boolean-valued keys
     /// come back as `(name, isOn)`; anything else is rendered as its value.
-    var advertisedRows: [(name: String, value: String, isFlag: Bool, isOn: Bool)] {
+    public var advertisedRows: [(name: String, value: String, isFlag: Bool, isOn: Bool)] {
         advertised.keys.sorted().map { key in
             let value = advertised[key] ?? .null
             if let flag = value.boolValue {
@@ -970,7 +970,7 @@ struct Capabilities: Codable, Sendable, Hashable {
 
 // MARK: - Answers
 
-enum AnswerDecision: Sendable, Hashable {
+public enum AnswerDecision: Sendable, Hashable {
     case allow
     case deny
     /// Pick the nth option exactly as Claude numbered it (1-based).
@@ -1003,7 +1003,7 @@ extension AnswerDecision: Codable {
         case optionId = "option_id"
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .type) {
         case "allow": self = .allow
@@ -1017,7 +1017,7 @@ extension AnswerDecision: Codable {
         }
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .allow:
@@ -1043,7 +1043,7 @@ extension AnswerDecision: Codable {
         }
     }
 
-    var label: String {
+    public var label: String {
         switch self {
         case .allow: return "Allowed"
         case .deny: return "Denied"
@@ -1063,27 +1063,27 @@ extension AnswerDecision: Codable {
 /// is omitted when empty, as the daemon writes it. Single-select: exactly one of
 /// one index or `other`. Multi-select: indices plus at most one `other`. `notes`
 /// only on a single-select question whose options carry a preview.
-struct QuestionAnswer: Codable, Sendable, Hashable {
-    var selected: [UInt32] = []
-    var other: String?
-    var notes: String?
+public struct QuestionAnswer: Codable, Sendable, Hashable {
+    public var selected: [UInt32] = []
+    public var other: String?
+    public var notes: String?
 
     private enum CodingKeys: String, CodingKey { case selected, other, notes }
 
-    init(selected: [UInt32] = [], other: String? = nil, notes: String? = nil) {
+    public init(selected: [UInt32] = [], other: String? = nil, notes: String? = nil) {
         self.selected = selected
         self.other = other
         self.notes = notes
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         selected = try c.decodeIfPresent([UInt32].self, forKey: .selected) ?? []
         other = try c.decodeIfPresent(String.self, forKey: .other)
         notes = try c.decodeIfPresent(String.self, forKey: .notes)
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         if !selected.isEmpty { try c.encode(selected, forKey: .selected) }
         try c.encodeIfPresent(other, forKey: .other)
@@ -1093,7 +1093,7 @@ struct QuestionAnswer: Codable, Sendable, Hashable {
 
 /// Whether the phone can answer an `AskUserQuestion` card now (minor 21) —
 /// `protocol::ws::QuestionHold`.
-enum QuestionHold: Sendable, Hashable {
+public enum QuestionHold: Sendable, Hashable {
     /// Claude is waiting on the daemon: the phone can answer. For the main
     /// conversation the Mac shows the same question, and the first complete
     /// answer wins.
@@ -1125,36 +1125,36 @@ enum QuestionHold: Sendable, Hashable {
 }
 
 extension QuestionHold: Codable {
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         self.init(wire: try decoder.singleValueContainer().decode(String.self))
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(wire)
     }
 }
 
-struct AnswerOutcome: Codable, Sendable, Hashable {
-    let requestID: String
+public struct AnswerOutcome: Codable, Sendable, Hashable {
+    public let requestID: String
     /// The tmux *name* of the run that was answered — `ccd/src/state.rs` fills
     /// this from `session.name`, not from the uid. Display only; never key
     /// anything by it.
     let sessionID: String
-    let decision: AnswerDecision
-    let resolvedBy: ResolvedBy
-    let appliedVia: AnswerPath
-    let resolvedAt: String
-    let detail: String?
+    public let decision: AnswerDecision
+    public let resolvedBy: ResolvedBy
+    public let appliedVia: AnswerPath
+    public let resolvedAt: String
+    public let detail: String?
     /// True when `decision` is the daemon's *inference* rather than an observed
     /// answer — the local-resolution path, where all it truly knows is that the
     /// prompt is gone. The UI must not state an inferred decision as fact.
-    let inferred: Bool
+    public let inferred: Bool
     /// True when the daemon could not establish whether the answer landed at
     /// all — the agent-seam case, parallel to `inferred` but weaker: `inferred`
     /// still asserts the prompt is gone, this asserts nothing about the write.
     /// Absent ⇒ false, mirroring the Rust `#[serde(default)]` bool.
-    let indeterminate: Bool
+    public let indeterminate: Bool
 
     enum CodingKeys: String, CodingKey {
         case requestID = "request_id"
@@ -1168,7 +1168,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         case indeterminate
     }
 
-    init(
+    public init(
         requestID: String, sessionID: String, decision: AnswerDecision, resolvedBy: ResolvedBy,
         appliedVia: AnswerPath, resolvedAt: String, detail: String?, inferred: Bool,
         indeterminate: Bool = false
@@ -1184,7 +1184,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         self.indeterminate = indeterminate
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         requestID = try c.decode(String.self, forKey: .requestID)
         sessionID = try c.decode(String.self, forKey: .sessionID)
@@ -1197,12 +1197,12 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
         indeterminate = try c.decodeIfPresent(Bool.self, forKey: .indeterminate) ?? false
     }
 
-    var resolvedDate: Date { ISO8601.parse(resolvedAt) ?? .distantPast }
+    public var resolvedDate: Date { ISO8601.parse(resolvedAt) ?? .distantPast }
 
     /// How to describe this outcome without overclaiming. An inferred decision
     /// is the daemon seeing the prompt leave the Mac, not an answer, so it is
     /// "Closed" — never "Allowed", and never "Answered".
-    var decisionLabel: String {
+    public var decisionLabel: String {
         inferred ? "Closed" : decision.label
     }
 
@@ -1210,11 +1210,11 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
     /// handed to the call's own hook, which is all that is known. Claude takes
     /// the first answer and may not use this one, so it is shown as sent, never
     /// as confirmed and never as an answer that went missing.
-    var wasSentToClaude: Bool { indeterminate && detail?.hasPrefix(Self.sentToClaude) == true }
+    public var wasSentToClaude: Bool { indeterminate && detail?.hasPrefix(Self.sentToClaude) == true }
 
     /// The daemon's own words for that record (`SENT_TO_CLAUDE` in ccd), which
     /// it follows with a note when the record could not be written.
-    static let sentToClaude = "Sent to Claude from a phone"
+    public static let sentToClaude = "Sent to Claude from a phone"
 
     /// The daemon's words (`RUN_ENDED` in ccd) for a card closed because the
     /// session that asked it ended, which it records as a `timeout`.
@@ -1222,7 +1222,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
 
     /// Where the answer came from, as far as the record proves it: `phone`
     /// names a paired phone, not this one, so "a phone"; `local` is the Mac.
-    var provenance: String {
+    public var provenance: String {
         switch resolvedBy {
         case .phone: return "from a phone"
         case .local: return "at the computer"
@@ -1233,7 +1233,7 @@ struct AnswerOutcome: Codable, Sendable, Hashable {
     }
 }
 
-enum AnswerResult: Sendable, Hashable {
+public enum AnswerResult: Sendable, Hashable {
     case applied(outcome: AnswerOutcome)
     /// Already resolved; carries the *original* outcome so a retried tap can
     /// never double-apply. Answering is idempotent: a repeat of a request that
@@ -1249,7 +1249,7 @@ extension AnswerResult: Codable {
         case stalePayloadHash = "stale_payload_hash"
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .status) {
         case "applied":
@@ -1266,7 +1266,7 @@ extension AnswerResult: Codable {
         }
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .applied(let outcome):
@@ -1287,12 +1287,12 @@ extension AnswerResult: Codable {
 
 /// Who a Codex prompt was resolved by. Decode-only, and an unrecognised actor
 /// is retained rather than coerced: nothing here may guess who acted.
-enum ResolutionActor: Decodable, Sendable, Hashable {
+public enum ResolutionActor: Decodable, Sendable, Hashable {
     case phone, local
     /// An actor a newer daemon names and this build does not.
     case unknown(String)
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         switch try decoder.singleValueContainer().decode(String.self) {
         case "phone": self = .phone
         case "local": self = .local
@@ -1304,7 +1304,7 @@ enum ResolutionActor: Decodable, Sendable, Hashable {
 /// Why a Codex prompt was cleared without an answer. `turnAborted` is
 /// load-bearing — it is how the app learns the turn itself went away — so it
 /// must decode and be retained, never folded into the unknown fallback.
-enum ClearCause: Decodable, Sendable, Hashable {
+public enum ClearCause: Decodable, Sendable, Hashable {
     case turnAborted, turnCompleted, superseded
     /// **The item finished, and the turn is still running.** Deliberately not
     /// `turnCompleted` (`ws.rs`) — the two say opposite things about whether
@@ -1314,7 +1314,7 @@ enum ClearCause: Decodable, Sendable, Hashable {
     /// A cause a newer daemon names and this build does not.
     case unknown(String)
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         switch try decoder.singleValueContainer().decode(String.self) {
         case "turn_aborted": self = .turnAborted
         case "turn_completed": self = .turnCompleted
@@ -1329,12 +1329,12 @@ enum ClearCause: Decodable, Sendable, Hashable {
 /// `status:"unknown"` path. Each value is a strictly weaker claim than the
 /// last, and an unrecognised stage is retained rather than assumed to be any
 /// of them.
-enum WriteStage: Decodable, Sendable, Hashable {
+public enum WriteStage: Decodable, Sendable, Hashable {
     case claimedNotEnqueued, brokerIngressAccepted, upstreamWriteUnconfirmed
     /// A stage a newer daemon names and this build does not.
     case unknown(String)
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         switch try decoder.singleValueContainer().decode(String.self) {
         case "claimed_not_enqueued": self = .claimedNotEnqueued
         case "broker_ingress_accepted": self = .brokerIngressAccepted
@@ -1349,7 +1349,7 @@ enum WriteStage: Decodable, Sendable, Hashable {
 /// unrecognised status is kept in its own `unrecognisedStatus` case so a daemon
 /// ahead of this build never collapses into `timeout` or any other real
 /// outcome. Nothing renders these yet; they only need to decode and retain.
-enum CodexResolution: Decodable, Sendable, Hashable {
+public enum CodexResolution: Decodable, Sendable, Hashable {
     /// The prompt was answered. `decision` is omitted when the daemon recorded
     /// no decision alongside the actor.
     case answered(by: ResolutionActor, decision: AnswerDecision?)
@@ -1373,7 +1373,7 @@ enum CodexResolution: Decodable, Sendable, Hashable {
         case writeStage = "write_stage"
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .status) {
         case "answered":
@@ -1408,7 +1408,7 @@ enum CodexResolution: Decodable, Sendable, Hashable {
 /// told. Tagged on **`status`**, like every other result on this wire.
 ///
 /// **Decode-only.** Nothing in the app constructs one to send.
-enum InterruptResult: Decodable, Sendable, Hashable {
+public enum InterruptResult: Decodable, Sendable, Hashable {
     /// The turn reached its aborted boundary. `turnID` is the one the phone
     /// itself named, so returning it discloses nothing.
     case aborted(turnID: String)
@@ -1455,7 +1455,7 @@ enum InterruptResult: Decodable, Sendable, Hashable {
         }
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .status) {
         case "aborted": self = .aborted(turnID: try c.decode(String.self, forKey: .turnID))
@@ -1475,7 +1475,7 @@ enum InterruptResult: Decodable, Sendable, Hashable {
 /// the daemon wrote, not by anything the phone could predict when it tapped.
 ///
 /// **Decode-only.** Tagged on `status`.
-enum ComposeResult: Decodable, Sendable, Hashable {
+public enum ComposeResult: Decodable, Sendable, Hashable {
     /// Codex was idle: the words began the turn it is running now.
     case started(turnID: String)
     /// Codex was mid-turn: the words joined it. **The same turn**, not a new
@@ -1514,7 +1514,7 @@ enum ComposeResult: Decodable, Sendable, Hashable {
         }
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .status) {
         case "started": self = .started(turnID: try c.decode(String.self, forKey: .turnID))
@@ -1533,7 +1533,7 @@ enum ComposeResult: Decodable, Sendable, Hashable {
     }
 }
 
-enum SendTextResult: Sendable, Hashable {
+public enum SendTextResult: Sendable, Hashable {
     /// `matched` is the prompt-presence needle that authorised the keystrokes.
     case sent(matched: String)
     case refused(reason: String)
@@ -1563,7 +1563,7 @@ extension SendTextResult: Codable {
         case capturedAt = "captured_at"
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .status) {
         case "sent": self = .sent(matched: try c.decode(String.self, forKey: .matched))
@@ -1590,7 +1590,7 @@ extension SendTextResult: Codable {
         }
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .sent(let matched):
@@ -1620,7 +1620,7 @@ extension SendTextResult: Codable {
 
 /// What must be on screen before keys are injected. The daemon substitutes
 /// operator-configured needles for the named modes.
-enum PromptPresence: Sendable, Hashable {
+public enum PromptPresence: Sendable, Hashable {
     case inputBox
     case permissionPrompt
     case anyOf(needles: [String])
@@ -1629,7 +1629,7 @@ enum PromptPresence: Sendable, Hashable {
 extension PromptPresence: Codable {
     private enum CodingKeys: String, CodingKey { case mode, needles }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .mode) {
         case "input_box": self = .inputBox
@@ -1641,7 +1641,7 @@ extension PromptPresence: Codable {
         }
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .inputBox: try c.encode("input_box", forKey: .mode)
@@ -1656,26 +1656,26 @@ extension PromptPresence: Codable {
 // MARK: - Approval card
 
 /// Payload of an `approval_request` event, under the `card` key.
-struct ApprovalCard: Codable, Sendable, Hashable {
-    let requestID: String
-    let payloadHash: String
-    let toolName: String
-    let toolInput: JSONValue
+public struct ApprovalCard: Codable, Sendable, Hashable {
+    public let requestID: String
+    public let payloadHash: String
+    public let toolName: String
+    public let toolInput: JSONValue
     /// The exact text hashed into `payloadHash`.
-    let displayText: String
+    public let displayText: String
     let permissionSuggestions: JSONValue?
-    let promptID: String?
-    let permissionMode: String?
+    public let promptID: String?
+    public let permissionMode: String?
     /// The daemon's own classification, decided at the Mac where the repo, the
     /// worktree and the operator's rules are actually visible. Sent only from
     /// feature level 1; absent on older daemons. Interpreting it is
     /// `RiskAssessment`'s job, not this type's.
-    let risk: WireRisk?
+    public let risk: WireRisk?
     /// Whether the phone can answer it as the card was raised: on an
     /// `AskUserQuestion` card from a minor-21 daemon, and on every Claude card
     /// from minor 22. A later `question_hold` event overrides it — see
     /// `ApprovalItem.questionHold`.
-    var questionHold: QuestionHold? = nil
+    public var questionHold: QuestionHold? = nil
 
     enum CodingKeys: String, CodingKey {
         case requestID = "request_id"
@@ -1696,9 +1696,9 @@ struct ApprovalCard: Codable, Sendable, Hashable {
 /// `matchedPattern` is present on `high` and absent otherwise, by design at the
 /// Mac: a classification you cannot see the reason for is a badge nobody trusts
 /// twice, and the cases where it matters are the destructive ones.
-struct WireRisk: Codable, Sendable, Hashable {
-    let cls: String
-    let matchedPattern: String?
+public struct WireRisk: Codable, Sendable, Hashable {
+    public let cls: String
+    public let matchedPattern: String?
 
     enum CodingKeys: String, CodingKey {
         case cls = "class"
@@ -1710,22 +1710,30 @@ struct WireRisk: Codable, Sendable, Hashable {
 
 /// Answer to `get_diff`. On-demand only: a diff is a thing you ask for when you
 /// are about to read it, never a thing that streams at you.
-struct SessionDiff: Sendable, Hashable {
-    let sessionID: String
+public struct SessionDiff: Sendable, Hashable {
+    public let sessionID: String
     /// `git -C <cwd> diff HEAD` plus untracked names, exactly as the daemon
     /// captured it.
-    let unified: String
+    public let unified: String
     /// The daemon hit its 512KB cap. Rendering a truncated diff as if it were
     /// whole is precisely the class of lie this flag exists to prevent.
-    let truncated: Bool
+    public let truncated: Bool
     let capturedAt: String
     /// Why the diff is empty when it is. `unified` is blank both for a clean
     /// tree and for a directory that was never a git repository, and the
     /// daemon's note is the only thing that tells those apart — rendering "no
     /// changes" for the second would be a claim the app cannot support.
-    let note: String?
+    public let note: String?
 
-    var capturedDate: Date? { ISO8601.parse(capturedAt) }
+    public init(sessionID: String, unified: String, truncated: Bool, capturedAt: String, note: String?) {
+        self.sessionID = sessionID
+        self.unified = unified
+        self.truncated = truncated
+        self.capturedAt = capturedAt
+        self.note = note
+    }
+
+    public var capturedDate: Date? { ISO8601.parse(capturedAt) }
 }
 
 extension SessionDiff: Decodable {
@@ -1737,7 +1745,7 @@ extension SessionDiff: Decodable {
         case note
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         sessionID = try c.decode(String.self, forKey: .sessionID)
         unified = try c.decodeIfPresent(String.self, forKey: .unified) ?? ""
@@ -1750,7 +1758,7 @@ extension SessionDiff: Decodable {
 // MARK: - Client -> server
 
 /// How the phone proves it may talk to this daemon.
-enum HelloCredential: Sendable, Hashable {
+public enum HelloCredential: Sendable, Hashable {
     /// A device token from a previous pairing, or the static `codeconnect token`.
     case token(String)
     /// Single-use, 5-minute code straight off the QR. The daemon answers with a
@@ -1766,7 +1774,7 @@ enum HelloCredential: Sendable, Hashable {
 /// name). The app sends the uid whenever the daemon mints them, because a name
 /// can resolve to a *different run* than the one the screen is showing — and for
 /// `sendText` that would type into the wrong agent's TTY.
-enum ClientMessage: Sendable {
+public enum ClientMessage: Sendable {
     case hello(credential: HelloCredential, clientID: String?, clientName: String?)
     case sessions
     case subscribe(session: String, afterSeq: UInt64)
@@ -1893,7 +1901,7 @@ extension ClientMessage: Encodable {
         case turnID = "turn_id"
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .hello(let credential, let clientID, let clientName):
@@ -2057,22 +2065,22 @@ extension ClientMessage: Encodable {
 
 /// Everything `hello_ack` carries. A struct rather than eight associated values:
 /// the ack has already grown by four fields once and will grow again.
-struct HelloAck: Sendable, Hashable {
-    var protocolVersion: UInt32
+public struct HelloAck: Sendable, Hashable {
+    public var protocolVersion: UInt32
     /// Additive feature level. `1` advertises `turn_complete`, `get_diff`,
     /// pairing codes and daemon-side risk classification; `protocolVersion`
     /// stays at 1 because those additions break nothing, so this is the field
     /// that actually distinguishes a newer daemon from an older one.
-    var protocolMinor: UInt32
-    var serverTime: String
-    var capabilities: Capabilities
+    public var protocolMinor: UInt32
+    public var serverTime: String
+    public var capabilities: Capabilities
     /// Present exactly once: in the ack for a `pairing_code` hello. The durable
     /// credential; the code that bought it is spent.
-    var deviceToken: String?
-    var deviceID: String?
+    public var deviceToken: String?
+    public var deviceID: String?
     /// What `codeconnect devices` lists this phone as, and what `codeconnect revoke` takes. May
     /// differ from the requested name when that one was taken.
-    var deviceName: String?
+    public var deviceName: String?
     /// The daemon's current authoritative APNs environment for this device's
     /// registered token, absent when no token is registered. Minor 14. The relay
     /// binding is the single authority for a token's environment (§4); a relay
@@ -2080,15 +2088,34 @@ struct HelloAck: Sendable, Hashable {
     /// the daemon CAS-persists the truth, then reports it here. The app compares
     /// this to its cached tuple on every handshake and **persists a difference
     /// rather than resending its stale value** — the daemon→app correction path.
-    var pushEnvironment: String?
+    public var pushEnvironment: String?
     /// What the owner calls the computer the daemon runs on (a Mac's computer
     /// name). Minor 25; absent from an older daemon, or when it could not be read.
-    var machineName: String?
+    public var machineName: String?
     /// `"macos"` or `"linux"`. Minor 25; absent when the daemon does not say.
-    var machineOS: String?
+    public var machineOS: String?
     /// Which daemon this is, the same whatever address reached it. Minor 26;
     /// absent from an older daemon, which is told apart by address instead.
-    var machineID: String?
+    public var machineID: String?
+
+    public init(
+        protocolVersion: UInt32, protocolMinor: UInt32, serverTime: String, capabilities: Capabilities,
+        deviceToken: String? = nil, deviceID: String? = nil, deviceName: String? = nil,
+        pushEnvironment: String? = nil, machineName: String? = nil, machineOS: String? = nil,
+        machineID: String? = nil
+    ) {
+        self.protocolVersion = protocolVersion
+        self.protocolMinor = protocolMinor
+        self.serverTime = serverTime
+        self.capabilities = capabilities
+        self.deviceToken = deviceToken
+        self.deviceID = deviceID
+        self.deviceName = deviceName
+        self.pushEnvironment = pushEnvironment
+        self.machineName = machineName
+        self.machineOS = machineOS
+        self.machineID = machineID
+    }
 }
 
 /// What became of a `delete_session`.
@@ -2102,7 +2129,7 @@ struct HelloAck: Sendable, Hashable {
 /// cannot round-trip, because `.unknown(status: "deleted")` would encode as
 /// `{"status":"deleted"}` and decode back as `.deleted` — collapsing the exact
 /// distinction the `unknown` case exists to hold.
-enum DeleteSessionResult: Decodable, Sendable, Hashable {
+public enum DeleteSessionResult: Decodable, Sendable, Hashable {
     case deleted(events: UInt64)
     /// The daemon refused because the run is alive, or because it is still
     /// holding live state for it. Its rule, not ours.
@@ -2129,14 +2156,14 @@ enum DeleteSessionResult: Decodable, Sendable, Hashable {
 
     /// True only for the two answers that mean the Mac does not have this run.
     /// The one place the destructive reading is decided, so it cannot drift.
-    var meansItIsGone: Bool {
+    public var meansItIsGone: Bool {
         switch self {
         case .deleted, .notFound: true
         case .stillRunning, .notExited, .failed, .unknown: false
         }
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let status = try c.decode(String.self, forKey: .status)
         switch status {
@@ -2159,7 +2186,7 @@ enum DeleteSessionResult: Decodable, Sendable, Hashable {
 /// What became of a `test_push`. Decode-only, like every reply; `accepted`
 /// claims exactly what Apple's 200 proves — accepted for delivery, with the
 /// banner as the device's own final word. An unknown status stays inert.
-enum TestPushResult: Decodable, Sendable, Hashable {
+public enum TestPushResult: Decodable, Sendable, Hashable {
     case accepted(apnsID: String?)
     case pushUnconfigured
     case notPairedDevice
@@ -2181,7 +2208,7 @@ enum TestPushResult: Decodable, Sendable, Hashable {
         case reason
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let status = try c.decode(String.self, forKey: .status)
         switch status {
@@ -2204,7 +2231,7 @@ enum TestPushResult: Decodable, Sendable, Hashable {
 }
 
 /// What the Mac knows about its Claude Code's slash commands.
-enum CommandCatalogResult: Sendable, Hashable {
+public enum CommandCatalogResult: Sendable, Hashable {
     /// The binary's own inventory — names without the leading slash, exactly
     /// as it emitted them. `probedAt` is when the list was actually read; a
     /// cache hit keeps the original stamp because the age of a fact is part
@@ -2222,7 +2249,7 @@ extension CommandCatalogResult: Codable {
         case probedAt = "probed_at"
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .status) {
         case "available":
@@ -2237,7 +2264,7 @@ extension CommandCatalogResult: Codable {
         }
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .available(let commands, let claudeVersion, let probedAt):
@@ -2252,7 +2279,7 @@ extension CommandCatalogResult: Codable {
     }
 }
 
-enum ServerMessage: Sendable {
+public enum ServerMessage: Sendable {
     case helloAck(HelloAck)
     case sessions([SessionSummary])
     case event(Event)
@@ -2359,7 +2386,7 @@ extension ServerMessage: Decodable {
         case truncated
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .type) {
         case "hello_ack":
@@ -2489,7 +2516,7 @@ extension ServerMessage: Decodable {
 
 // MARK: - Timestamps
 
-enum ISO8601 {
+public enum ISO8601 {
     /// The daemon emits RFC3339 UTC with millisecond precision, but a strategy
     /// that assumes fractional seconds fails on a whole-second timestamp, so
     /// both are tried. `ISO8601FormatStyle` is a value type — unlike
@@ -2497,7 +2524,7 @@ enum ISO8601 {
     private static let withFraction = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
     private static let plain = Date.ISO8601FormatStyle()
 
-    static func parse(_ string: String) -> Date? {
+    public static func parse(_ string: String) -> Date? {
         (try? withFraction.parse(string)) ?? (try? plain.parse(string))
     }
 }

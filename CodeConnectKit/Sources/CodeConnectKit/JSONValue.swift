@@ -6,7 +6,7 @@ import Foundation
 /// "the untouched original is always kept as the event payload"), so the client
 /// must be able to hold, re-render and re-serialise arbitrary JSON without
 /// losing anything a newer daemon might add.
-enum JSONValue: Sendable, Hashable {
+public enum JSONValue: Sendable, Hashable {
     case null
     case bool(Bool)
     case int(Int64)
@@ -19,7 +19,7 @@ enum JSONValue: Sendable, Hashable {
 // MARK: - Codable
 
 extension JSONValue: Codable {
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self = .null
@@ -43,7 +43,7 @@ extension JSONValue: Codable {
         }
     }
 
-    func encode(to encoder: Encoder) throws {
+    public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
         case .null: try container.encodeNil()
@@ -60,22 +60,22 @@ extension JSONValue: Codable {
 // MARK: - Reading
 
 extension JSONValue {
-    subscript(key: String) -> JSONValue? {
+    public subscript(key: String) -> JSONValue? {
         guard case .object(let map) = self else { return nil }
         return map[key]
     }
 
-    subscript(index: Int) -> JSONValue? {
+    public subscript(index: Int) -> JSONValue? {
         guard case .array(let items) = self, items.indices.contains(index) else { return nil }
         return items[index]
     }
 
-    var stringValue: String? {
+    public var stringValue: String? {
         if case .string(let value) = self { return value }
         return nil
     }
 
-    var intValue: Int? {
+    public var intValue: Int? {
         switch self {
         case .int(let value): return Int(exactly: value)
         case .double(let value): return Int(exactly: value.rounded())
@@ -83,28 +83,28 @@ extension JSONValue {
         }
     }
 
-    var boolValue: Bool? {
+    public var boolValue: Bool? {
         if case .bool(let value) = self { return value }
         return nil
     }
 
-    var arrayValue: [JSONValue]? {
+    public var arrayValue: [JSONValue]? {
         if case .array(let items) = self { return items }
         return nil
     }
 
-    var objectValue: [String: JSONValue]? {
+    public var objectValue: [String: JSONValue]? {
         if case .object(let map) = self { return map }
         return nil
     }
 
-    var isNull: Bool {
+    public var isNull: Bool {
         if case .null = self { return true }
         return false
     }
 
     /// The first non-empty string found at any of `keys`, in order.
-    func firstString(_ keys: String...) -> String? {
+    public func firstString(_ keys: String...) -> String? {
         for key in keys {
             if let value = self[key]?.stringValue, !value.isEmpty { return value }
         }
@@ -137,7 +137,7 @@ extension JSONValue {
     /// check that actually gates the UI runs against `display_text` — the exact
     /// hashed string, carried on the wire — so this can only ever cost a
     /// "showing the daemon's text instead" note, never a wrong verdict.
-    var canonicalJSONString: String {
+    public var canonicalJSONString: String {
         var out = ""
         writeCanonical(into: &out)
         return out
@@ -216,7 +216,7 @@ extension JSONValue {
     /// and `displaySafe`: it is only ever drawn. Mapped once the rendering is
     /// finished, never in the escaper it shares with `canonicalJSONString`,
     /// which the render check compares byte for byte.
-    var prettyJSONString: String {
+    public var prettyJSONString: String {
         var out = ""
         writePretty(indent: 0, into: &out)
         return out.displaySafe

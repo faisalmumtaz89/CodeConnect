@@ -13,7 +13,7 @@ import Foundation
 /// opening with either tag as a command. Rendered literally they read as
 /// markup soup under a "YOU" label — so the timeline parses them into what
 /// they are: the command you ran, and what Claude Code said back.
-enum LocalCommandLine: Equatable {
+public enum LocalCommandLine: Equatable {
     /// `/model sonnet` — the command as the user issued it.
     case invocation(command: String, args: String)
     /// Claude Code's own one-liner back, ANSI stripped.
@@ -47,7 +47,7 @@ enum LocalCommandLine: Equatable {
     }
 
     /// The invocation as one line: `/model sonnet`, or just `/model`.
-    var invocationText: String? {
+    public var invocationText: String? {
         guard case .invocation(let command, let args) = self else { return nil }
         return args.isEmpty ? command : "\(command) \(args)"
     }

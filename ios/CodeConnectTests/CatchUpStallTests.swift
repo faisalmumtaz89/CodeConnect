@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **No progress on a connected link means retry, never release.** A catch-up
 /// that stops advancing asks for the list again if it has none, and otherwise

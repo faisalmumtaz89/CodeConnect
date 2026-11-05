@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// How one Claude turn reads on the timeline: the reply's text, the notices
 /// around it, and what the session's status says about it. The events are in the

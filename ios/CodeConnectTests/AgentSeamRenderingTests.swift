@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The agent-seam **rendering** half of decode-safety:
 /// decoding the new shapes safely is only half the job — the copy the reader

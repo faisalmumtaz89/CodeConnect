@@ -1,6 +1,6 @@
 import Foundation
 
-enum ToolStatus: Sendable, Hashable {
+public enum ToolStatus: Sendable, Hashable {
     case running
     case succeeded
     case failed
@@ -11,7 +11,7 @@ enum ToolStatus: Sendable, Hashable {
     /// here would be a lie with a very long tail.
     case unresolved
 
-    var label: String {
+    public var label: String {
         switch self {
         case .running: return "running"
         case .succeeded: return "done"
@@ -22,7 +22,7 @@ enum ToolStatus: Sendable, Hashable {
         }
     }
 
-    var symbol: String {
+    public var symbol: String {
         switch self {
         case .running: return "circle-dashed"
         case .succeeded: return "check-circle-fill"

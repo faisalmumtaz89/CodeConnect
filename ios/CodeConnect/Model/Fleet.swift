@@ -1,3 +1,4 @@
+import CodeConnectKit
 import Foundation
 
 /// The fixed fleet ordering. Not user-sortable on purpose: at 2am the list must

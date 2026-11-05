@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Which `type:"user"` lines are the person's words, and how a background
 /// task's report draws.

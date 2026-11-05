@@ -1,3 +1,4 @@
+import CodeConnectKit
 import Foundation
 
 /// The Mac views the phone may capture: one Settings dialog on the Mac, three

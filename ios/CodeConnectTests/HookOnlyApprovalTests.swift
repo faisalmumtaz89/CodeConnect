@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Claude's approvals, against the bytes a minor-22 daemon sends.
 ///

@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// What an approval's ending says about who answered and where — only as far
 /// as the record proves it. `resolved_by: phone` names a paired phone, not

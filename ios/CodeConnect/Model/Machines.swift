@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 /// Every paired machine, each with a model of its own, and the one fleet they

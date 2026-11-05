@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **A Codex `approval_resolved` must resolve its card.**
 ///

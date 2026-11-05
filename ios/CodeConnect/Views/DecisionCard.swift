@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 /// An approval is a document, not a dialog.

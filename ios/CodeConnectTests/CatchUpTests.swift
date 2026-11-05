@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **A catch-up changes the screen once.** While the phone replays what the Mac
 /// did while it was away — a return, a redial, the launch's first link — what

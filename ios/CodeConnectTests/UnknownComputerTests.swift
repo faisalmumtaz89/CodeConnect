@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// A computer whose link is down has said nothing about itself: its
 /// capabilities went with the link. Unknown is not old — every surface that

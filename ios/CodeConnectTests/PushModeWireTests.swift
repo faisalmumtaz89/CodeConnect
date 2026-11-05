@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 // =============================================================================
 //  Minor 14 on the app side: the normalized push mode, the new wire fields, and

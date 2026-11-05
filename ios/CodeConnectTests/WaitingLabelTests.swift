@@ -2,6 +2,7 @@ import SwiftUI
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// How long something has waited is spoken as a duration — "waiting 1
 /// minute" — and when something last happened as an age — "last activity 1

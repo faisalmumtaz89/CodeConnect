@@ -1,3 +1,4 @@
+import CodeConnectKit
 import Foundation
 
 /// A pipe table, parsed — headers, per-column alignment, and rows that are

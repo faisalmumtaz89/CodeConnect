@@ -12,8 +12,8 @@ import Foundation
 /// a way to make one mutation answer for another. The middle field is the
 /// word `submit` or `stage`, never a boolean rendering, for the same
 /// cross-language reason.
-enum SendTextIdentity {
-    static func payloadHash(session: String, text: String, submit: Bool) -> String {
+public enum SendTextIdentity {
+    public static func payloadHash(session: String, text: String, submit: Bool) -> String {
         var material = "codeconnect.send_text.v1"
         for field in [session, submit ? "submit" : "stage", text] {
             material += "\n\(field.utf8.count):\(field)"

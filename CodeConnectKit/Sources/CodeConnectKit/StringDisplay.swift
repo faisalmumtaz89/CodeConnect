@@ -10,7 +10,7 @@ extension String {
     /// `Text` draws as nothing and runs on through (measured: one line, as wide
     /// as without it), so a cut there hid the rest of a command the screen
     /// would have shown — `printf 'a<VT>b' | rm -rf ~/work` as `printf 'a`.
-    var firstLine: String {
+    public var firstLine: String {
         String(prefix { !$0.isNewline || $0 == "\u{0B}" })
             .trimmingCharacters(in: .whitespaces)
     }
@@ -25,7 +25,7 @@ extension String {
     /// "Verified", and a NUL is drawn as nothing. Claude Code's own renderer
     /// draws the same bidi characters as U+FFFD (2.1.308). For display only —
     /// the wire, the hash and the answer keep the bytes.
-    var displaySafe: String {
+    public var displaySafe: String {
         var scalars = String.UnicodeScalarView()
         for scalar in unicodeScalars {
             switch scalar.value {

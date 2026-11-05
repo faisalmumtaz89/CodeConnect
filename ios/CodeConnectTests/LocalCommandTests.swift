@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// The transcript's local-command grammar, tested against the verbatim
 /// content strings a live Claude Code 2.1.221 wrote while `/model sonnet`,

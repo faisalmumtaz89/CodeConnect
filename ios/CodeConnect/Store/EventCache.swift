@@ -1,3 +1,4 @@
+import CodeConnectKit
 import Foundation
 
 /// On-disk last-known state, so a cold open shows something real immediately —

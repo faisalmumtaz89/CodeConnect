@@ -1,6 +1,7 @@
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// What the reader acts on is checked against the truth, and what the reader is
 /// credited with having seen is what was drawn — never the other way round.
