@@ -9,5 +9,5 @@ build/
 # Render-harness output. `scripts/render-screens.sh` writes
 # `.artifacts/ui-renders/<timestamp>/` — dozens of PNGs per pass, regenerable
 # from the catalog in one command. The *catalog* is the committed artefact; the
-# pixels are evidence for one review, and CI uploads them.
+# pixels are evidence for one review.
 .artifacts/
