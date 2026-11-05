@@ -1242,12 +1242,6 @@ final class TerminalPaneView: TerminalView {
     }
 }
 
-/// A pane's size in cells, as the daemon states it.
-struct PaneSize: Equatable {
-    let cols: Int
-    let rows: Int
-}
-
 /// The terminal pane, and the view onto it once it is drawn at its own size.
 ///
 /// While a Mac viewer is attached the tmux window keeps the viewer's size — the
