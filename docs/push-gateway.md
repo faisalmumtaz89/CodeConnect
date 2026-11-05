@@ -611,7 +611,7 @@ The container build context is `mac/` so workspace manifests and path dependenci
 
 #### Scope
 
-- Extend `ios/CodeConnect/Protocol/WireTypes.swift`.
+- Extend `CodeConnectKit/Sources/CodeConnectKit/WireTypes.swift`.
 - Keep APNs permission/token responsibilities in `PushRegistration.swift`.
 - Add a separate relay-enrollment actor/client.
 - Update `AppModel.swift` orchestration.

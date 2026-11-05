@@ -302,7 +302,7 @@ impl Family {
     /// **Measured, not chosen for effect.** The app has no mapping table for
     /// `tool_name`: it renders the string raw as the card's title and switches
     /// on Claude's exact tool names only for the icon, the risk floor and the
-    /// deny-consequence sentence (`ios/CodeConnect/Protocol/PayloadViews.swift`,
+    /// deny-consequence sentence (`CodeConnectKit/Sources/CodeConnectKit/PayloadViews.swift`,
     /// `Views/DecisionCard.swift`). Borrowing `"Bash"` would buy a terminal
     /// glyph at the price of a title that names a tool Codex does not have, so
     /// these say what the request is. What the app makes of them is the app's.
@@ -2553,7 +2553,7 @@ mod tests {
 
     /// **The contract with the app that this repository does not compile.**
     ///
-    /// `ios/CodeConnect/Protocol/WireTypes.swift`'s `ApprovalCard` decodes five
+    /// `CodeConnectKit/Sources/CodeConnectKit/WireTypes.swift`'s `ApprovalCard` decodes five
     /// keys non-optionally — `request_id`, `payload_hash`, `tool_name`,
     /// `tool_input`, `display_text` — and a card missing any one of them is not
     /// a degraded card: the decode fails and `Timeline.swift` prints "Approval

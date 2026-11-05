@@ -87,7 +87,7 @@ pairing and opens no socket, and nothing in it reports a link
 
 | Path | What it is |
 |---|---|
-| `CodeConnect/Protocol/` | `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, and typed reads over raw hook/transcript payloads. |
+| `../CodeConnectKit/` | The shared Swift package (iOS and macOS) the app depends on: the `Codable` mirror of the Rust wire types, a `serde_json`-compatible canonical serialiser, typed reads over raw hook/transcript payloads, and the session-start model. |
 | `CodeConnect/Net/` | `DaemonConnection` (one supervised `URLSessionWebSocketTask`) and `TerminalCarrier`, which streams tmux over that same socket. |
 | `CodeConnect/Store/` | Keychain pairing, this device's identity, preferences, the on-disk event cache. |
 | `CodeConnect/Model/` | Event ingest with gap detection, the timeline builder, fleet ordering, link health, payload-hash verification, risk reconciliation, the Deck queue, the unified-diff parser. |
@@ -578,7 +578,7 @@ one. A Codex card shows no raw wire: the `tool_input` / `request_id` / `payload_
 disclosure is Claude-only.
 
 **Stop and the composer are gated by one rule, computed in one place.**
-`CodexLinkState.canActuate(_:)` in `Protocol/WireTypes.swift` is the single gate and
+`CodexLinkState.canActuate(_:)` in `CodeConnectKit/Sources/CodeConnectKit/WireTypes.swift` is the single gate and
 nothing else in the app re-derives it; `CodexProse.stopUnavailable` and
 `CodexProse.composeUnavailable` turn a refusal into the sentence shown under the
 control. Both verbs require the daemon to have advertised the capability
