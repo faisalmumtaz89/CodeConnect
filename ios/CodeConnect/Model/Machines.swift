@@ -22,6 +22,8 @@ final class Machines {
     private let cache: EventCache
     private let relayEnrollment: RelayEnrollment
     private let codexSpentLedger: CodexSpentLedger
+    /// Makes each model its own push registrar. Nil: no model registers for push.
+    private let makePushRegistrar: (@MainActor () -> any PushRegistrar)?
 
     /// One per paired machine, oldest first, or the one with no machine.
     private(set) var models: [AppModel] = []
@@ -35,7 +37,8 @@ final class Machines {
         pairing: PairingStore = PairingStore(), cache: EventCache = EventCache(),
         settings: AppSettings = AppSettings(),
         relayEnrollment: RelayEnrollment = RelayEnrollment(),
-        codexSpentLedger: CodexSpentLedger = CodexSpentLedger()
+        codexSpentLedger: CodexSpentLedger = CodexSpentLedger(),
+        makePushRegistrar: (@MainActor () -> any PushRegistrar)? = nil
     ) {
         // Startup housekeeping, on the one object the app builds exactly once.
         LegacyCredentials.purge()
@@ -44,6 +47,7 @@ final class Machines {
         self.settings = settings
         self.relayEnrollment = relayEnrollment
         self.codexSpentLedger = codexSpentLedger
+        self.makePushRegistrar = makePushRegistrar
         // What an earlier build cached for its one Mac is the first machine's.
         if let first = pairing.machines.first { cache.moveUnfiledFiles(toMachine: first.id) }
         models = modelsForPairing()
@@ -59,6 +63,7 @@ final class Machines {
             settings = model.settings
             relayEnrollment = RelayEnrollment()
             codexSpentLedger = model.codexSpentLedger
+            makePushRegistrar = nil
             models = [model]
         }
     #endif
@@ -66,7 +71,8 @@ final class Machines {
     private func makeModel(_ machineID: String?) -> AppModel {
         let model = AppModel(
             machineID: machineID, pairing: pairing, cache: cache, settings: settings,
-            relayEnrollment: relayEnrollment, codexSpentLedger: codexSpentLedger)
+            relayEnrollment: relayEnrollment, codexSpentLedger: codexSpentLedger,
+            pushRegistrar: makePushRegistrar?())
         model.onIdentified = { [weak self, weak model] in
             guard let self, let model else { return }
             self.identified(model)
@@ -452,7 +458,8 @@ final class Machines {
             store.noteMachine(name: name, os: "linux", daemonID: nil, id: id)
             let second = AppModel(
                 machineID: id, pairing: store, cache: cache, settings: settings,
-                relayEnrollment: relayEnrollment, codexSpentLedger: codexSpentLedger)
+                relayEnrollment: relayEnrollment, codexSpentLedger: codexSpentLedger,
+                pushRegistrar: makePushRegistrar?())
             models.append(second)
             // `-CC_FIXTURE_SECOND_LIVE` puts it online with its own fleet.
             if UserDefaults.standard.bool(forKey: "CC_FIXTURE_SECOND_LIVE") {

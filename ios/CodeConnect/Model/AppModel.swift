@@ -334,7 +334,8 @@ final class AppModel {
         machineID: String? = nil, pairing: PairingStore = PairingStore(),
         cache: EventCache = EventCache(), settings: AppSettings = AppSettings(),
         relayEnrollment: RelayEnrollment = RelayEnrollment(),
-        codexSpentLedger: CodexSpentLedger = CodexSpentLedger()
+        codexSpentLedger: CodexSpentLedger = CodexSpentLedger(),
+        pushRegistrar: (any PushRegistrar)? = nil
     ) {
         self.machineID = machineID
         self.pairing = pairing
@@ -343,6 +344,7 @@ final class AppModel {
         self.cache = machineID.map { cache.machine($0) } ?? cache
         self.relayEnrollment = relayEnrollment
         self.codexSpentLedger = codexSpentLedger
+        self.pushRegistrar = pushRegistrar
         // Owned here, not by the Terminal tab: the terminal rides the paired
         // connection, and a view that owns it would drop the session every time
         // SwiftUI rebuilt the tab. One carrier per connection is also what makes
@@ -388,7 +390,7 @@ final class AppModel {
 
     /// Asking iOS for notification permission, and telling the daemon where to
     /// push once Apple issues a token.
-    private let pushRegistrar = PushRegistration()
+    private let pushRegistrar: (any PushRegistrar)?
     #if DEBUG
         /// Test seams: observe that registration was *requested* and that a
         /// token delivery was *attempted* — the two separate decisions the
@@ -437,7 +439,7 @@ final class AppModel {
     /// The live iOS permission state, re-read on every ask — the stored
     /// `pushAuthorized` goes stale the moment the user visits Settings.
     func pushAuthorizationStatus() async -> UNAuthorizationStatus {
-        await pushRegistrar.authorizationStatus()
+        await pushRegistrar?.authorizationStatus() ?? .notDetermined
     }
 
     /// Whether this launch has already asked iOS for permission and an APNs
@@ -475,10 +477,10 @@ final class AppModel {
     /// handshake — every reconnect stacked another observer and another
     /// pair of closures.
     private func installPushWiring() {
-        pushRegistrar.onAuthorization = { [weak self] granted in
+        pushRegistrar?.onAuthorization = { [weak self] granted in
             self?.pushAuthorized = granted
         }
-        pushRegistrar.onToken = { [weak self] token, environment in
+        pushRegistrar?.onToken = { [weak self] token, environment in
             self?.acceptPushToken(token, environment: environment)
         }
         NotificationCenter.default.addObserver(
@@ -627,7 +629,7 @@ final class AppModel {
             // one; the fresh token enrolls itself when it arrives.
             relayPushState = .idle
             latestPushToken = nil
-            pushRegistrar.registerForRemoteNotifications()
+            pushRegistrar?.registerForRemoteNotifications()
         case .failed(let reason):
             relayPushState = .failed(reason)
         case .superseded:
@@ -654,7 +656,7 @@ final class AppModel {
             #if DEBUG
                 onPushRegistrationRequested?()
             #endif
-            pushRegistrar.requestAndRegister()
+            pushRegistrar?.requestAndRegister()
         }
         deliverPushToken()
     }
@@ -677,7 +679,7 @@ final class AppModel {
         Task {
             guard await pushAuthorizationStatus() == .authorized else { return }
             pushRequestedThisLaunch = true
-            pushRegistrar.registerForRemoteNotifications()
+            pushRegistrar?.registerForRemoteNotifications()
         }
     }
 

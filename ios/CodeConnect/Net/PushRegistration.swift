@@ -19,7 +19,7 @@ import UserNotifications
 /// on its way to Apple cannot be recalled; it carries no session, request or
 /// device identifier, and the app it would reach is no longer paired.
 @MainActor
-final class PushRegistration: NSObject {
+final class PushRegistration: NSObject, PushRegistrar {
     /// Called with the token, lowercase hex, once Apple issues one.
     var onToken: ((String, String) -> Void)?
     /// Called with what the user actually decided, so the UI can say so.
