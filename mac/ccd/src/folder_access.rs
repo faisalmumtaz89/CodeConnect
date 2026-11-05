@@ -159,30 +159,31 @@ mod tests {
         let home = Path::new("/Users/me");
         let eperm = std::io::Error::from_raw_os_error(libc::EPERM);
         let eacces = std::io::Error::from_raw_os_error(libc::EACCES);
-        let hint_for = |err: &std::io::Error, path: &str| hint(err, Path::new(path), home);
+        let hint_for = |err: &std::io::Error, path: &Path| hint(err, path, home);
 
         for (path, folder) in [
-            ("/Users/me/Desktop", "Desktop"),
-            ("/Users/me/Documents/app/src", "Documents"),
-            ("/Users/me/Downloads/x", "Downloads"),
+            (home.join("Desktop"), "Desktop"),
+            (home.join("Documents/app/src"), "Documents"),
+            (home.join("Downloads/x"), "Downloads"),
         ] {
             assert_eq!(
-                hint_for(&eperm, path),
+                hint_for(&eperm, &path),
                 Some(format!(
                     "If CodeConnect's access to {folder} is off, allow it in System Settings \
                      \u{2192} Privacy & Security \u{2192} Files and Folders \u{2192} ccd."
                 )),
-                "{path}"
+                "{}",
+                path.display()
             );
         }
         for path in [
-            "/Users/me/Desktopx",
-            "/Users/me",
-            "/Volumes/Desktop",
-            "/Users/other/Desktop",
+            home.join("Desktopx"),
+            home.to_path_buf(),
+            Path::new("/Volumes/Desktop").to_path_buf(),
+            Path::new("/Users/other").join("Desktop"),
         ] {
-            assert_eq!(hint_for(&eperm, path), None, "{path}");
+            assert_eq!(hint_for(&eperm, &path), None, "{}", path.display());
         }
-        assert_eq!(hint_for(&eacces, "/Users/me/Desktop"), None);
+        assert_eq!(hint_for(&eacces, &home.join("Desktop")), None);
     }
 }
