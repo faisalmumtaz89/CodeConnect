@@ -22,6 +22,7 @@ mod codex_wake;
 mod db;
 #[cfg(test)]
 mod fixture_replay;
+mod folder_access;
 mod git;
 mod ipc_server;
 mod legacy_credentials;
@@ -37,6 +38,7 @@ mod push_queue;
 mod question;
 mod relay_sender;
 mod secret;
+mod start_session;
 mod state;
 mod store;
 mod tailer;

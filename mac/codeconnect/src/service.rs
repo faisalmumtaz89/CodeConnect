@@ -97,6 +97,10 @@ pub fn command(args: &[String]) -> Result<()> {
         Some("status") => {
             crate::no_arguments(&args[1..], "codeconnect daemon status").and_then(|()| status())
         }
+        #[cfg(target_os = "macos")]
+        Some("folders") => {
+            crate::no_arguments(&args[1..], "codeconnect daemon folders").and_then(|()| folders())
+        }
         Some("restart") => {
             crate::no_arguments(&args[1..], "codeconnect daemon restart").and_then(|()| {
                 let info = restart()?;
@@ -127,6 +131,7 @@ codeconnect daemon — the ccd LaunchAgent
   codeconnect daemon install [--no-takeover]   write the LaunchAgent and start it
   codeconnect daemon status                    plist, launchd job and live daemon
   codeconnect daemon restart                   restart the managed daemon
+  codeconnect daemon folders                   let it open Desktop, Documents, Downloads
   codeconnect daemon uninstall                 stop it and remove the LaunchAgent
 
 Installing stops whatever ccd is running — its own job included, because the
@@ -397,6 +402,53 @@ fn restart() -> Result<DaemonInfo> {
             READY_TIMEOUT.as_secs(),
             protocol::daemon_stderr_log().display()
         ),
+    }
+}
+
+/// Has the daemon read Desktop, Documents and Downloads once, while someone is
+/// at this Mac to answer the dialog macOS shows for each it has no answer for.
+#[cfg(target_os = "macos")]
+fn folders() -> Result<()> {
+    use protocol::ipc::FolderOutcome;
+    println!(
+        "macOS asks once whether CodeConnect's daemon, named \"ccd\", may open your Desktop, \
+         Documents and Downloads folders. Your phone lists folders and starts sessions with \
+         that permission. Answer each dialog on this Mac's screen."
+    );
+    let reply = crate::daemon::request_waiting(&ClientFrame::AskFolderAccess)?;
+    let DaemonFrame::Folders { folders } = reply else {
+        bail!("ccd answered {reply:?} to the folder question");
+    };
+    for access in &folders {
+        let said = match &access.outcome {
+            FolderOutcome::Allowed => "allowed".to_string(),
+            FolderOutcome::Refused { error } => format!("not allowed ({error})"),
+            FolderOutcome::Absent => "no such folder".to_string(),
+        };
+        println!("  {}: {said}", access.folder);
+    }
+    println!(
+        "To change an answer: System Settings \u{2192} Privacy & Security \u{2192} Files and \
+         Folders \u{2192} ccd."
+    );
+    Ok(())
+}
+
+/// At a start typed at a terminal on this Mac, the folder question, once: only
+/// while the daemon says it has never been answered. Silent otherwise, a daemon
+/// that cannot say included, so the start is as it always was.
+#[cfg(target_os = "macos")]
+pub fn ask_folders_once() {
+    if std::env::var_os("SSH_CONNECTION").is_some() {
+        return;
+    }
+    let Ok(DaemonFrame::FolderAccessAsked { asked: false }) =
+        crate::daemon::request(&ClientFrame::FolderAccessAsked)
+    else {
+        return;
+    };
+    if let Err(why) = folders() {
+        eprintln!("codeconnect: the folders were not asked about: {why:#}");
     }
 }
 

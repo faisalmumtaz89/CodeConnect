@@ -172,17 +172,37 @@ pub fn target_session(name: &str) -> String {
 /// and the caller must treat that as [`SessionPresence::Unknown`] rather than
 /// guessing. A relative path in particular would resolve to *somewhere*, and
 /// "no such file" at the wrong place would look exactly like proof of an exit.
-fn server_args(socket: &str) -> Option<[String; 2]> {
+///
+/// The address follows [`CLIENT_FLAGS`], so every client this builds declares UTF-8.
+fn server_args(socket: &str) -> Option<[String; 3]> {
+    let [utf8] = CLIENT_FLAGS.map(str::to_string);
     if socket.is_empty() {
         return None;
     }
     if !socket.contains('/') {
-        return Some(["-L".to_string(), socket.to_string()]);
+        return Some([utf8, "-L".to_string(), socket.to_string()]);
     }
     Path::new(socket)
         .is_absolute()
-        .then(|| ["-S".to_string(), socket.to_string()])
+        .then(|| [utf8, "-S".to_string(), socket.to_string()])
 }
+
+/// The flags every tmux client CodeConnect starts opens with, ahead of the server's
+/// address. Both crates' address builders put them first, so no client is without
+/// them.
+///
+/// `-u`: the client declares UTF-8. tmux prints a non-control client's command
+/// output through `utf8_sanitize` when that client's own environment names no UTF-8
+/// locale, rewriting every byte outside printable ASCII to `_`. launchd gives `ccd`
+/// no `LANG`, and a container or a bare systemd unit gives the launcher none, so a
+/// folder or a name read back would come back as a different one: measured on tmux
+/// 3.7b and 3.7c-cc1 with an `env -i` client, `#{pane_current_path}` of
+/// `…/unicode-ünï-☕-分支` read `…/unicode-_n_-__-____`, and `-u` read it exactly. What
+/// a client sends is the same either way (`send-keys -l`, `new-session -c`, measured
+/// byte for byte). A control client needs it too: its `%output` and `capture-pane`
+/// are passed through, but its format replies are sanitised (a pane title `✳ Claude
+/// Code` read `_ Claude Code` without it).
+pub const CLIENT_FLAGS: [&str; 1] = ["-u"];
 
 /// The complete argv for "does this session exist?", or `None` when the server
 /// cannot be addressed at all.
@@ -195,8 +215,9 @@ pub fn has_session_argv(socket: &str, name: &str) -> Option<Vec<String>> {
     if name.is_empty() {
         return None;
     }
-    let [flag, value] = server_args(socket)?;
+    let [utf8, flag, value] = server_args(socket)?;
     Some(vec![
+        utf8,
         flag,
         value,
         "has-session".to_string(),
@@ -224,8 +245,9 @@ pub fn session_owner_argv(socket: &str, name: &str) -> Option<Vec<String>> {
     if name.is_empty() {
         return None;
     }
-    let [flag, value] = server_args(socket)?;
+    let [utf8, flag, value] = server_args(socket)?;
     Some(vec![
+        utf8,
         flag,
         value,
         "show-environment".to_string(),
@@ -524,8 +546,9 @@ fn epoch_fmt() -> String {
 }
 
 fn list_sessions_epoch_argv(socket: &str) -> Option<Vec<String>> {
-    let [flag, value] = server_args(socket)?;
+    let [utf8, flag, value] = server_args(socket)?;
     Some(vec![
+        utf8,
         flag,
         value,
         "list-sessions".to_string(),
@@ -630,10 +653,11 @@ pub fn daemon_attach_argv(socket: &str, session_id: &str) -> Option<Vec<String>>
     if session_id.is_empty() {
         return None;
     }
-    let [flag, value] = server_args(socket)?;
+    let [utf8, flag, value] = server_args(socket)?;
     Some(vec![
         "-N".to_string(),
         "-C".to_string(),
+        utf8,
         flag,
         value,
         "attach-session".to_string(),
@@ -928,8 +952,9 @@ pub const DETACH_LINE: &str = "detach-client\n";
 pub const CLIENTS_FMT: &str = "#{client_pid} #{session_id}";
 
 fn list_clients_argv(socket: &str) -> Option<Vec<String>> {
-    let [flag, value] = server_args(socket)?;
+    let [utf8, flag, value] = server_args(socket)?;
     Some(vec![
+        utf8,
         flag,
         value,
         "list-clients".to_string(),
@@ -1436,8 +1461,9 @@ fn census_from_probe(
 /// absent afterwards). That is exactly the distinction [`Census`] needs and the one
 /// `list-sessions` alone cannot make.
 fn server_pid_argv(socket: &str) -> Option<Vec<String>> {
-    let [flag, value] = server_args(socket)?;
+    let [utf8, flag, value] = server_args(socket)?;
     Some(vec![
+        utf8,
         flag,
         value,
         "display-message".to_string(),
@@ -1680,8 +1706,9 @@ pub fn reverify_owned_client(client_pid: i32, expected: &OwnedSession) -> Result
 /// [`is_session_id`]-checked before it reaches here, so interpolating it into
 /// the `=`-anchored target is safe by construction.
 fn kill_session_id_argv(socket: &str, session_id: &str) -> Option<Vec<String>> {
-    let [flag, value] = server_args(socket)?;
+    let [utf8, flag, value] = server_args(socket)?;
     Some(vec![
+        utf8,
         flag,
         value,
         "kill-session".to_string(),
@@ -2312,7 +2339,10 @@ mod tests {
         // a daemon that *creates* the tmux server it is asking about would
         // resurrect a dead fleet on every sweep, and would do it silently.
         let argv = has_session_argv("codeconnect", "cc-1").unwrap();
-        assert_eq!(argv, ["-L", "codeconnect", "has-session", "-t", "=cc-1"]);
+        assert_eq!(
+            argv,
+            ["-u", "-L", "codeconnect", "has-session", "-t", "=cc-1"]
+        );
         for starts_a_server in [
             "new-session",
             "new",
@@ -2338,10 +2368,17 @@ mod tests {
         // with a message that is not about the session at all.
         assert_eq!(
             has_session_argv("/private/tmp/cc.sock", "soak-1").unwrap(),
-            ["-S", "/private/tmp/cc.sock", "has-session", "-t", "=soak-1"]
+            [
+                "-u",
+                "-S",
+                "/private/tmp/cc.sock",
+                "has-session",
+                "-t",
+                "=soak-1"
+            ]
         );
         assert_eq!(
-            has_session_argv("codeconnect", "soak-1").unwrap()[0],
+            has_session_argv("codeconnect", "soak-1").unwrap()[1],
             "-L".to_string()
         );
     }
@@ -2486,7 +2523,7 @@ mod tests {
     #[test]
     fn the_owner_probe_addresses_a_server_and_never_starts_one() {
         let argv = session_owner_argv("codeconnect", "cc-1").expect("addressable");
-        assert_eq!(argv[0], "-L");
+        assert_eq!(argv[..2], ["-u", "-L"]);
         assert!(argv.contains(&"show-environment".to_string()));
         // Anchored, or `cc-1` would prefix-match `cc-12`.
         assert!(argv.contains(&"=cc-1".to_string()));
@@ -3316,6 +3353,7 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
         assert_eq!(
             remain_on_exit_off_argv("/private/tmp/cc.sock", "$3", 4242, 1787855360).unwrap(),
             [
+                "-u",
                 "-S",
                 "/private/tmp/cc.sock",
                 "if-shell",
@@ -3328,8 +3366,12 @@ $0 01JQXV9K7B8N4M2P6R3T5W9YQD 1786459620 9445 1786459620";
             ]
         );
         assert_eq!(
-            &remain_on_exit_off_argv("codeconnect", "$0", 7, 1).unwrap()[..2],
-            &["-L".to_string(), "codeconnect".to_string()]
+            &remain_on_exit_off_argv("codeconnect", "$0", 7, 1).unwrap()[..3],
+            &[
+                "-u".to_string(),
+                "-L".to_string(),
+                "codeconnect".to_string()
+            ]
         );
         // A NAME is not an id. Addressing `cc-1` would be exactly the reuse bug the
         // rest of this module exists to avoid, so it is refused at the builder.

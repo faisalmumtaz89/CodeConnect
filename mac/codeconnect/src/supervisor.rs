@@ -196,8 +196,8 @@ pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
     // Built once and held for the life of the supervisor, because it has to
     // outlive the daemon: a session that starts and ends while `ccd` is down
     // has never been registered, and this is what introduces it before the exit
-    // is reported. See `report_exit`.
-    let registration = registration_frame(&args, &started_at);
+    // is reported. See `report_exit`. Only its folder moves (see below).
+    let mut registration = registration_frame(&args, &started_at);
 
     // Liveness is watched independently of the daemon connection, so a session
     // that ends while ccd is down is still reported the moment ccd returns.
@@ -280,6 +280,15 @@ pub fn run(args: SupervisorArgs, config: &Config) -> Result<()> {
             return Ok(());
         }
 
+        // A Claude run registers where it is now, not where it launched: `claude
+        // --worktree` moves into its worktree, and a daemon restarted since must
+        // hear that folder. The last one read is what the exit report carries.
+        // A Codex run's folder is the coordinator's one canonical answer.
+        if args.codex.is_none() {
+            if let Some(cwd) = tmux::pane_current_path(&args.tmux_socket, &args.tmux_session) {
+                registration.cwd = cwd;
+            }
+        }
         match serve_once(&socket, &args, &registration, config, &session_gone, &link) {
             Ok(()) => backoff = RECONNECT_MIN,
             Err(err) => {

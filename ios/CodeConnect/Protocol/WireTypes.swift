@@ -865,6 +865,15 @@ struct Capabilities: Codable, Sendable, Hashable {
     /// commands must not be offered: their entire safety story is that the
     /// daemon closes the view again.
     var recoversComposer: Bool { advertises(["slash_composer_recovery"]) }
+    /// `list_projects` and `start_session` are answerable.
+    var startsSessions: Bool { advertises(["start_session"]) }
+    /// `get_project_git` is answerable, and `start_session` takes a
+    /// `worktree` (minor 29). Without it a `worktree` is ignored and the start
+    /// runs in the folder, so none is sent.
+    var startsInWorktrees: Bool { advertises(["start_worktree"]) }
+    /// `list_folder` and `create_folder` are answerable, and `start_session`
+    /// takes any absolute folder (minor 30).
+    var browsesFolders: Bool { advertises(["browse_folders"]) }
     /// Approval cards carry a daemon-computed `risk` block.
     var classifiesRisk: Bool { advertises(["risk_class", "risk", "risk_classes"]) }
     /// A live terminal can be opened over *this* connection. Connection-scoped,
@@ -1824,6 +1833,24 @@ enum ClientMessage: Sendable {
     /// **Say something to a Codex session.** Minor 18, and the one message an
     /// older daemon cannot decode at all — see `Capabilities.codexCompose`.
     case compose(session: String, requestID: String, text: String, payloadHash: String)
+    /// The folders sessions have run in on this computer. Minor 28, sent only
+    /// when `Capabilities.startsSessions`.
+    case listProjects
+    /// Start an agent in one of those folders. `requestID` is fresh per tap and
+    /// resent unchanged after a reconnect: the daemon answers a repeat with the
+    /// first outcome and starts nothing new. `path` is a listed path, byte for byte.
+    /// `worktree` (minor 29) starts in one of its repository's worktrees, existing
+    /// or new; `.folder` sends none, and the folder is never switched.
+    case startSession(
+        requestID: String, path: String, agent: String, prompt: String?, worktree: StartPlace = .folder)
+    /// One folder's repository: its checkouts and free branches. Minor 29,
+    /// sent only when `Capabilities.startsInWorktrees`.
+    case getProjectGit(path: String)
+    /// One folder's subfolders; nil asks for the home folder. Minor 30, sent
+    /// only when `Capabilities.browsesFolders`.
+    case listFolder(requestID: String, path: String?, showHidden: Bool)
+    /// Make one folder, as `mkdir` does. Minor 30.
+    case createFolder(requestID: String, parent: String, name: String)
     case ping
 }
 
@@ -1845,6 +1872,13 @@ extension ClientMessage: Encodable {
         case requestID = "request_id"
         case payloadHash = "payload_hash"
         case decision
+        case path
+        case agent
+        case prompt
+        case worktree
+        case showHidden = "show_hidden"
+        case parent
+        case name
         case text
         case require
         case submit
@@ -1983,6 +2017,36 @@ extension ClientMessage: Encodable {
             try c.encode(requestID, forKey: .requestID)
             try c.encode(text, forKey: .text)
             try c.encode(payloadHash, forKey: .payloadHash)
+        case .listProjects:
+            try c.encode("list_projects", forKey: .type)
+        case .startSession(let requestID, let path, let agent, let prompt, let worktree):
+            try c.encode("start_session", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(path, forKey: .path)
+            try c.encode(agent, forKey: .agent)
+            try c.encodeIfPresent(prompt, forKey: .prompt)
+            let request: [String: String]? =
+                switch worktree {
+                case .folder: nil
+                case .existing(let checkout): ["kind": "existing", "path": checkout.path]
+                case .branch(let branch): ["kind": "branch", "branch": branch]
+                case .new(let name): ["kind": "new", "name": name]
+                }
+            try c.encodeIfPresent(request, forKey: .worktree)
+        case .getProjectGit(let path):
+            try c.encode("get_project_git", forKey: .type)
+            try c.encode(path, forKey: .path)
+        case .listFolder(let requestID, let path, let showHidden):
+            try c.encode("list_folder", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encodeIfPresent(path, forKey: .path)
+            // Absent means false, as the daemon reads it.
+            if showHidden { try c.encode(true, forKey: .showHidden) }
+        case .createFolder(let requestID, let parent, let name):
+            try c.encode("create_folder", forKey: .type)
+            try c.encode(requestID, forKey: .requestID)
+            try c.encode(parent, forKey: .parent)
+            try c.encode(name, forKey: .name)
         case .ping:
             try c.encode("ping", forKey: .type)
         }
@@ -2236,6 +2300,17 @@ enum ServerMessage: Sendable {
     case interruptResult(sessionID: String, requestID: String, result: InterruptResult)
     /// The answer to one `compose`, same correlation.
     case composeResult(sessionID: String, requestID: String, result: ComposeResult)
+    /// The answer to `list_projects`: most recent first, and which agents the
+    /// computer has.
+    case projects(projects: [StartProject], agents: [StartAgentStatus])
+    case startSessionResult(requestID: String, outcome: StartOutcome)
+    /// The answer to `get_project_git`: nil when the folder is not a repository.
+    case projectGit(path: String, git: StartGit?)
+    /// The answer to `list_folder`.
+    case folderListing(requestID: String, listing: StartFolderListing)
+    /// The answer to `create_folder`: nil once made, else the computer's own
+    /// words.
+    case createFolderResult(requestID: String, refusal: String?)
     case error(code: String, message: String)
     case pong
     /// A message type this build does not know. Kept rather than thrown away so
@@ -2276,6 +2351,12 @@ extension ServerMessage: Decodable {
         case beforeSeq = "before_seq"
         case firstSeq = "first_seq"
         case error
+        case projects
+        case agents
+        case path
+        case git
+        case folders
+        case truncated
     }
 
     init(from decoder: Decoder) throws {
@@ -2371,6 +2452,33 @@ extension ServerMessage: Decodable {
                 sessionID: try c.decode(String.self, forKey: .sessionID),
                 requestID: try c.decode(String.self, forKey: .requestID),
                 result: try c.decode(ComposeResult.self, forKey: .result))
+        case "projects":
+            self = .projects(
+                projects: try c.decode([StartProject].self, forKey: .projects),
+                // An agent this build has never heard of cannot be offered.
+                agents: try c.decode([StartAgentStatus.Wire].self, forKey: .agents)
+                    .compactMap(\.status))
+        case "start_session_result":
+            self = .startSessionResult(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                outcome: try c.decode(StartOutcome.self, forKey: .result))
+        case "project_git":
+            self = .projectGit(
+                path: try c.decode(String.self, forKey: .path),
+                git: try c.decodeIfPresent(StartGit.self, forKey: .git))
+        case "folder_listing":
+            self = .folderListing(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                listing: StartFolderListing(
+                    path: try c.decode(String.self, forKey: .path),
+                    folders: try c.decodeIfPresent([String].self, forKey: .folders) ?? [],
+                    truncated: try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false,
+                    error: try c.decodeIfPresent(String.self, forKey: .error)))
+        case "create_folder_result":
+            let result = try c.decode(StartCreateFolderResult.self, forKey: .result)
+            self = .createFolderResult(
+                requestID: try c.decode(String.self, forKey: .requestID),
+                refusal: result.status == "created" ? nil : result.detail ?? result.status)
         case "pong":
             self = .pong
         case let other:

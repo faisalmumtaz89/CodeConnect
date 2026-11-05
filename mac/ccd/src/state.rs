@@ -308,6 +308,10 @@ pub struct Daemon {
     pub terminal_leases: crate::terminal::TerminalLeases,
     /// Each Claude run's mail waiter: the one hook that can wake it.
     pub(crate) waiters: crate::claude_waiter::Waiters,
+    /// The phone's session starts, by request id.
+    pub(crate) starts: crate::start_session::Starts,
+    /// Which agents could start, as last checked.
+    pub(crate) agents: crate::start_session::KnownAgents,
 }
 
 /// **What the Claude-only gate found**, for the callers that must tell two refusals
@@ -1961,6 +1965,8 @@ impl Daemon {
             transcript_tx,
             terminal_leases: crate::terminal::TerminalLeases::new(),
             waiters: crate::claude_waiter::Waiters::default(),
+            starts: crate::start_session::Starts::default(),
+            agents: crate::start_session::KnownAgents::default(),
         })
     }
 
@@ -8157,6 +8163,14 @@ impl Daemon {
         // frame carrying a generation is refused outright — and `COALESCE` in
         // the statement means every other writer of this row (hook, heartbeat,
         // tailer) leaves the high-water alone rather than blanking it.
+        // An exit replay repeats the registration its supervisor sent at launch,
+        // so it is never news about where the run is: a row a hook has since moved
+        // (`claude --worktree` moves into its worktree) keeps that folder. A run
+        // that lived and ended while `ccd` was down has no row, and takes it.
+        let cwd = match &existing {
+            Some(row) if info.exit_replay && !row.cwd.is_empty() => row.cwd.clone(),
+            _ => info.cwd.clone(),
+        };
         let wrote = self
             .db
             .upsert_session_at_generation(
@@ -8165,7 +8179,7 @@ impl Daemon {
                     session_id: info.session_id.clone(),
                     tmux_session: info.tmux_session.clone(),
                     tmux_socket: info.tmux_socket.clone(),
-                    cwd: info.cwd.clone(),
+                    cwd: cwd.clone(),
                     claude_session_id: None,
                     transcript_path: None,
                     lifecycle: Lifecycle::Live,
@@ -8201,7 +8215,7 @@ impl Daemon {
         // **The supervisor is a cwd writer too.** A run that reconnects from a
         // different directory moves, and any card it is holding has to move
         // with it — see `relabel_open_cards`.
-        self.relabel_open_cards(&uid, &info.cwd).await;
+        self.relabel_open_cards(&uid, &cwd).await;
         if wrote == crate::store::SessionUpsert::Tombstoned {
             // The uid was deleted while this registration was in flight.
             // Installing the in-memory supervisor anyway would leave the daemon

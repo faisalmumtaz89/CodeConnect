@@ -112,7 +112,7 @@ pub fn tmux_bin() -> Result<PathBuf> {
 
 fn base() -> Result<Command> {
     let mut command = Command::new(tmux_bin()?);
-    command.arg("-L").arg(protocol::TMUX_SOCKET_NAME);
+    command.args(server_flag(protocol::TMUX_SOCKET_NAME));
     Ok(command)
 }
 
@@ -429,7 +429,11 @@ pub fn new_session(
     let mut command = Command::new(tmux_bin()?);
     command.args(server_flag(socket)).arg("-f").arg(&conf);
     command.args(["new-session", "-d", "-P", "-F", &identity_format()]);
-    command.args(["-s", name, "-c", cwd]);
+    // The client runs in the folder, and new-session starts the pane in the client's
+    // own working directory. Not `-c`: tmux format-expands that, so a folder named
+    // `C#`, `a##b` or `#{pane_id}` would name another, and the pane open in the
+    // server's home instead.
+    command.current_dir(cwd).args(["-s", name]);
     if let Some((cols, rows)) = size {
         command.args(["-x", &cols.to_string(), "-y", &rows.to_string()]);
     }
@@ -441,7 +445,7 @@ pub fn new_session(
     command.arg(&exe).arg(crate::job::SUBCOMMAND);
     command.args(claude_terminal_wrapper(std::env::var_os("TERM")));
     for arg in argv {
-        command.arg(arg);
+        command.arg(pane_argument(arg));
     }
     if let Some(copy) = copy {
         command.args([";", "pipe-pane", "-o", "-t", &target_pane(name), copy]);
@@ -474,6 +478,17 @@ pub fn new_session(
         eprintln!("codeconnect: could not hide the tmux status bar for {name}");
     }
     Ok(launched)
+}
+
+/// `arg` spelled so the pane's program receives it unchanged. tmux ends a command
+/// at an argument that ends in `;` — the program got `x` for `x;` — and reads a
+/// trailing `\;` as `;`, so a `\` goes before a final `;` (tmux 3.7b, measured with
+/// runs of `;` and of `\` before it; the test below holds the shapes).
+pub(crate) fn pane_argument(arg: &str) -> String {
+    match arg.strip_suffix(';') {
+        Some(rest) => format!("{rest}\\;"),
+        None => arg.to_string(),
+    }
 }
 
 /// What is read about a session in one answer from the server holding it: its
@@ -740,6 +755,26 @@ pub fn capture_pane(name: &str, lines: u32) -> Result<String> {
 pub fn capture_visible_pane(name: &str) -> Result<String> {
     let out = run(&["capture-pane", "-p", "-J", "-t", &target_pane(name)])?;
     out.ok_or_else(|| anyhow::anyhow!("capture-pane failed for {name}"))
+}
+
+/// The folder the program in session `name`'s pane is in now, on the server at
+/// `socket`: where an agent that changed directory has gone (`claude --worktree`
+/// moves into its worktree), which the folder it launched in no longer says.
+/// `None` when tmux cannot say, as for a session already over.
+pub fn pane_current_path(socket: &str, name: &str) -> Option<String> {
+    let out = run_on(
+        socket,
+        &[
+            "display",
+            "-p",
+            "-t",
+            &target_pane(name),
+            "#{pane_current_path}",
+        ],
+    )
+    .ok()??;
+    let path = out.trim_end_matches('\n');
+    (!path.is_empty()).then(|| path.to_string())
 }
 
 /// Who a pane's keystrokes reach.
@@ -1123,8 +1158,12 @@ pub fn spawn_owned_attach(
     crate::attach::Client::spawn(terminal, argv, expected.session_id.clone(), pane, None)
 }
 
-fn server_flag(socket: &str) -> [&str; 2] {
-    [if socket.contains('/') { "-S" } else { "-L" }, socket]
+/// The server at `socket`, as the flags a tmux client opens with:
+/// [`protocol::tmux::CLIENT_FLAGS`] first, so every client declares UTF-8, then the
+/// address.
+pub(crate) fn server_flag(socket: &str) -> [&str; 3] {
+    let [utf8] = protocol::tmux::CLIENT_FLAGS;
+    [utf8, if socket.contains('/') { "-S" } else { "-L" }, socket]
 }
 
 /// The pinned attach: `commands` run only if the server, the session and its pane
@@ -1162,10 +1201,11 @@ fn owned_attach_argv(
                 .join(" "),
         );
     }
-    let [flag, socket] = server_flag(&expected.socket);
+    let [utf8, flag, socket] = server_flag(&expected.socket);
     Ok(vec![
         "-N".into(),
         "-C".into(),
+        utf8.into(),
         flag.into(),
         socket.into(),
         "if-shell".into(),
@@ -1598,6 +1638,65 @@ mod tests {
         );
     }
 
+    /// Every argument reaches the pane's program as it was given, those ending in
+    /// `;` included.
+    #[test]
+    fn a_pane_s_arguments_reach_its_program_unchanged() {
+        let Ok(tmux) = tmux_bin() else {
+            return;
+        };
+        let dir = PathBuf::from(format!("/tmp/cc-pane-args-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s");
+        let out = dir.join("out");
+        let args = [
+            "fix it;", ";", "a\\;", "a\\\\;", "e\\;;", "f;;", "x\\", "a\\;b", "plain",
+        ];
+        let mut command = Command::new(&tmux);
+        command
+            .arg("-S")
+            .arg(&socket)
+            .args([
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "--",
+                "/bin/sh",
+                "-c",
+            ])
+            .arg(format!(
+                r#"printf '%s\000' "$@" > {}; sleep 5"#,
+                out.display()
+            ))
+            .arg("sh");
+        for arg in args {
+            command.arg(pane_argument(arg));
+        }
+        let status = command.status().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !out.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let printed = std::fs::read(&out).unwrap_or_default();
+        let _ = Command::new(&tmux)
+            .arg("-S")
+            .arg(&socket)
+            .arg("kill-server")
+            .output();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(status.success());
+        let expected: Vec<u8> = args
+            .iter()
+            .flat_map(|arg| [arg.as_bytes(), b"\0"].concat())
+            .collect();
+        assert_eq!(
+            String::from_utf8_lossy(&printed),
+            String::from_utf8_lossy(&expected)
+        );
+    }
+
     #[test]
     fn claude_gets_the_caller_s_term_and_not_the_pane_s_tmux() {
         use std::os::unix::ffi::OsStringExt;
@@ -1723,6 +1822,105 @@ mod tests {
             SessionPresence::Present,
             "the pane command kept running"
         );
+    }
+
+    /// **A session starts in the folder as named**, whatever tmux's format
+    /// expansion would make of it: a `#` in a folder's name is no format.
+    #[test]
+    fn a_session_starts_in_its_folder_whatever_the_folder_is_called() {
+        if tmux_bin().is_err() {
+            return; // no tmux in this environment
+        }
+        let server = TestServer::new("hash");
+        for (n, folder) in [
+            "C#",
+            "a##b",
+            "#{pane_id}",
+            "issue#12",
+            "p%d",
+            "x#",
+            "x#[fg=red]y",
+            "a##[b",
+            "e#f#[g",
+            "m#[#",
+            "a#,b",
+            "ünï#[分",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let folder = server.dir.join(format!("f{n}")).join(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            let seen = server.dir.join(format!("pwd-{n}"));
+            let session_dir = server.dir.join(format!("session-{n}"));
+            std::fs::create_dir_all(&session_dir).unwrap();
+            let created = new_session(
+                &server.socket(),
+                &format!("hash-{n}"),
+                &folder.display().to_string(),
+                &stamp(),
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!("pwd -P > '{}'; sleep 30", seen.display()),
+                ],
+                &session_dir,
+                Some((80, 24)),
+                false,
+                50_000,
+                None,
+            );
+            let launched = created.unwrap_or_else(|err| panic!("{folder:?}: {err:#}"));
+            server.pid.set(Some(launched.pin.server_pid as i32));
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !seen.exists() {
+                assert!(std::time::Instant::now() < deadline, "{folder:?} never ran");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                std::fs::read_to_string(&seen).unwrap().trim_end(),
+                folder.canonicalize().unwrap().display().to_string(),
+                "the session did not start in {folder:?}"
+            );
+        }
+    }
+
+    /// **A folder that is gone fails the start, in the system's own words**, and
+    /// never falls back to another folder.
+    #[test]
+    fn a_session_in_a_folder_that_is_gone_fails_to_start() {
+        if tmux_bin().is_err() {
+            return; // no tmux in this environment
+        }
+        let server = TestServer::new("gone");
+        let gone = server.dir.join("gone");
+        let session_dir = server.dir.join("session");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let created = new_session(
+            &server.socket(),
+            "gone-1",
+            &gone.display().to_string(),
+            &stamp(),
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 30".to_string(),
+            ],
+            &session_dir,
+            Some((80, 24)),
+            false,
+            50_000,
+            None,
+        );
+        let err = match created {
+            Ok(launched) => {
+                server.pid.set(Some(launched.pin.server_pid as i32));
+                panic!("a session started in a folder that does not exist");
+            }
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(err.contains("No such file or directory"), "{err}");
     }
 
     /// What a session prints before anything attaches survives it ending first —
@@ -1944,6 +2142,78 @@ mod tests {
         assert!(live
             .iter()
             .all(|launch| launch.presence() == SessionPresence::Present));
+    }
+
+    /// **A folder reads back as itself from a client with no UTF-8 locale**, as
+    /// `ccd` under launchd and the launcher in a container or a bare systemd unit
+    /// are: without `-u`, tmux writes every byte outside printable ASCII as `_`.
+    #[test]
+    fn a_folder_reads_back_exactly_from_a_client_with_no_locale() {
+        let server = TestServer::new("utf8");
+        let folder = server.dir.join("unicode-ünï-☕-分支");
+        std::fs::create_dir_all(&folder).unwrap();
+        let start = folder.display().to_string();
+        let status = server
+            .command(&["new-session", "-d", "-s", "u", "-c", &start, "sleep", "60"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let socket = server.socket();
+        let read = Command::new(tmux_bin().unwrap())
+            .env_clear()
+            .args(server_flag(&socket))
+            .args([
+                "display",
+                "-p",
+                "-t",
+                &target_pane("u"),
+                "#{pane_current_path}",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&read.stdout).trim_end(),
+            folder.canonicalize().unwrap().display().to_string()
+        );
+    }
+
+    /// **A pane's folder is where its program is now**: a program that changed
+    /// directory after it started reads at its new folder, and a session that is
+    /// over reads as nothing.
+    #[test]
+    fn a_pane_reads_at_the_folder_its_program_moved_to() {
+        let server = TestServer::new("folder");
+        let moved = server.dir.join("moved here");
+        std::fs::create_dir_all(&moved).unwrap();
+        let start = server.dir.display().to_string();
+        let script = format!("cd '{}' && exec sleep 60", moved.display());
+        let status = server
+            .command(&[
+                "new-session",
+                "-d",
+                "-s",
+                "pp",
+                "-c",
+                &start,
+                "sh",
+                "-c",
+                &script,
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let socket = server.socket();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let canonical = moved.canonicalize().unwrap().display().to_string();
+        while pane_current_path(&socket, "pp").as_deref() != Some(canonical.as_str()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pane never read at {canonical}: {:?}",
+                pane_current_path(&socket, "pp")
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(pane_current_path(&socket, "no-such-session"), None);
     }
 
     /// The status bar is hidden on a live session, and a session already over —

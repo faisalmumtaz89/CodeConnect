@@ -3,6 +3,56 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Start a session from the phone
+
+- From the iPhone, start Claude Code or Codex on a paired computer, in a folder a session has run
+  in, with an optional first message. The computer starts it as `codeconnect claude` or `codeconnect
+  codex` typed in that folder would, through your login shell. The first message is handed over as
+  the agent's own first prompt.
+- The folder list is the computer's own, most recent first: every folder a session has started in,
+  including sessions you have since removed. Each folder shows its git branch, a folder that no
+  longer exists is left out, and an agent the computer cannot start is shown as not installed.
+- The phone hears "started" once the session is in the fleet, so it opens the session straight away.
+  If the start fails, it says why: the agent is not installed, the folder is gone, or the launcher's
+  own reason. A start the phone sends again after a reconnect mid-start starts one session.
+- A session started from the phone sees the environment a terminal opened in your session would:
+  PATH, your shell's startup files, and a UTF-8 encoding when nothing else names one.
+- Starting is offered only to a paired iPhone on a private connection, the same as the terminal. It
+  needs both CodeConnect 0.17.0 (protocol minor 28) and the matching iPhone app; with an older Mac
+  the app does not offer it.
+
+## Start in a branch, a worktree, or any folder
+
+- The computer can now start a session in another branch without switching the folder you work in.
+  It can use a worktree git already lists, make a worktree for a local branch, or make a new one.
+  New ones go where Claude Code puts its own, `.claude/worktrees/<name>`. A new Claude worktree is
+  made by Claude itself; a new Codex one is made in the same place, on a branch named as you typed
+  it. CodeConnect never removes a worktree it made.
+- The computer can also list any folder's folders for the phone to browse, starting at your home
+  folder, and make a new folder. A start can then begin in any folder, not only one a session has
+  run in.
+- Branches, worktrees, folder browsing and new folders need CodeConnect 0.17.0 (protocol minors 29
+  and 30), and the iPhone app offers them as it adds them.
+- On macOS, Desktop, Documents and Downloads are asked about while you are at the Mac, so a phone
+  never waits on a permission dialog nobody can see: `codeconnect daemon folders` asks, as does your
+  first `codeconnect claude` or `codeconnect codex` typed at the Mac itself (not over SSH). A folder
+  macOS keeps from CodeConnect says where to change that: System Settings > Privacy & Security >
+  Files and Folders > ccd.
+
+## A session starts in its folder, whatever the folder is called
+
+- A folder with `#` in its name, such as `C#` or `a##b`, started Claude Code or Codex in your home
+  folder instead. A folder whose name ends in `;` could not be started at all. Both now start in the
+  folder as named.
+- A Claude session in a worktree, typed as `codeconnect claude --worktree <name>`, was filed under
+  the main folder after the daemon restarted (for example after `codeconnect update`) and again once
+  it ended, with the main folder's name and changes. It now stays under its worktree.
+
+## Arguments keep a trailing semicolon
+
+- An argument ending in `;` given to `codeconnect claude` or `codeconnect codex`, such as a first
+  prompt, now reaches the agent whole; it used to lose the `;`.
+
 ## The conversation reads at one size
 
 - On the iPhone, everything in a conversation is now the size of Claude's own reply: a tool call

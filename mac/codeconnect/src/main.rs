@@ -29,6 +29,7 @@ mod home_guard;
 mod job;
 mod mail_trust;
 mod mcp;
+mod no_attach;
 mod pair;
 mod service;
 mod session_name;
@@ -111,13 +112,22 @@ fn main() -> Result<()> {
     }
 
     match command {
+        // Hidden: run by the daemon for a session the phone starts.
+        "claude" if no_attach::requested(rest) => {
+            no_attach::run(protocol::agent::AgentKind::Claude, rest)
+        }
         "claude" => {
             ask_about_mail(!claude_asks_help_or_version(rest));
+            ask_about_folders(!claude_asks_help_or_version(rest));
             start_claude(rest)
+        }
+        "codex" if no_attach::requested(rest) => {
+            no_attach::run(protocol::agent::AgentKind::Codex, rest)
         }
         "codex" => {
             ask_about_mail(!codex::asks_help_or_version(rest));
-            codex::start(rest)
+            ask_about_folders(!codex::asks_help_or_version(rest));
+            codex::start(rest, false).map(|_| ())
         }
         "mail-trust" => mail_trust::command(rest),
         "attach" => attach(rest),
@@ -215,6 +225,17 @@ fn ask_about_mail(starts_a_session: bool) {
     if starts_a_session && crate::attach::Terminal::available() {
         mail_trust::ask_once();
     }
+}
+
+/// macOS's folder question, at a start typed at this Mac's terminal, while it
+/// has never been answered.
+fn ask_about_folders(starts_a_session: bool) {
+    #[cfg(target_os = "macos")]
+    if starts_a_session && crate::attach::Terminal::available() {
+        service::ask_folders_once();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = starts_a_session;
 }
 
 /// Whether `codeconnect claude <args>` asks Claude Code only for its help or its
@@ -567,7 +588,13 @@ fn plan_claude_launch(
 }
 
 fn start_claude(passthrough: &[String]) -> Result<()> {
-    start_agent(protocol::agent::AgentKind::Claude, passthrough)
+    start_agent(protocol::agent::AgentKind::Claude, passthrough, false).map(|_| ())
+}
+
+/// `codeconnect claude --no-attach`: the session a terminal start creates, left
+/// running unshown (see [`no_attach`]).
+fn start_detached(passthrough: &[String]) -> Result<no_attach::Started> {
+    start_agent(protocol::agent::AgentKind::Claude, passthrough, true)
 }
 
 /// Launch an agent session: mint the identity, plan the agent-varying pieces,
@@ -575,7 +602,15 @@ fn start_claude(passthrough: &[String]) -> Result<()> {
 /// outside the plan — the identity, the tmux session, the advisories, the
 /// attach — is agent-agnostic; the plan is where an agent differs. Only Claude
 /// has a planner today; any other agent is refused before anything is spawned.
-fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Result<()> {
+///
+/// `detached` creates the same session without showing it: at
+/// [`no_attach::SIZE`], with no early-output copy (nothing attaches here to stop
+/// it), and returning once the supervisor runs.
+fn start_agent(
+    agent: protocol::agent::AgentKind,
+    passthrough: &[String],
+    detached: bool,
+) -> Result<no_attach::Started> {
     let config = Config::load();
 
     // **Binary first.** Resolving the agent's executable is the first thing that
@@ -585,6 +620,9 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     // binary-resolution step; a non-Claude agent is refused here, before any
     // state exists.
     let binary = match &agent {
+        protocol::agent::AgentKind::Claude if detached => {
+            resolve_claude_bin(&config).map_err(no_attach::agent_missing)?
+        }
         protocol::agent::AgentKind::Claude => resolve_claude_bin(&config)?,
         other => bail!("{} sessions cannot be launched yet", other.as_str()),
     };
@@ -595,7 +633,7 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     // A session is shown in a terminal. With none to show it in — a script, a pipe,
     // `ssh` without `-t` — there is nothing to host into, and the agent runs as it
     // would run directly, rather than as a session nothing can show.
-    if !crate::attach::Terminal::available() {
+    if !detached && !crate::attach::Terminal::available() {
         use std::os::unix::process::CommandExt;
         let err = Command::new(&binary).args(passthrough).exec();
         return Err(err).with_context(|| format!("running {}", binary.display()));
@@ -621,7 +659,20 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
 
     // What the agent prints before the attach paints it, kept in case it ends
     // first — see [`early_output`].
-    let early = early_output::EarlyOutput::create(&plan.session_dir)?;
+    let early = if detached {
+        None
+    } else {
+        Some(early_output::EarlyOutput::create(&plan.session_dir)?)
+    };
+    let copy = early
+        .as_ref()
+        .map(|early| early.pipe_command())
+        .transpose()?;
+    let size = if detached {
+        Some(no_attach::SIZE)
+    } else {
+        tmux::terminal_size()
+    };
     let launched = tmux::new_session(
         protocol::TMUX_SOCKET_NAME,
         &session_id,
@@ -629,15 +680,22 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
         &plan.env,
         &plan.argv,
         &plan.session_dir,
-        tmux::terminal_size(),
+        size,
         config.tmux_status,
         config.tmux_history_limit,
-        Some(&early.pipe_command()?),
+        copy.as_deref(),
     )
     .with_context(|| format!("creating tmux session {session_id}"))?;
     drop(name_claim);
 
     spawn_supervisor(&session_id, &session_uid, &cwd, &plan.binary, &launched)?;
+    let started = no_attach::Started {
+        uid: session_uid,
+        session_name: session_id,
+    };
+    let Some(early) = early else {
+        return Ok(started);
+    };
 
     // After the session and supervisor exist, before the attach: Claude is
     // already running while the advisories are read.
@@ -647,7 +705,8 @@ fn start_agent(agent: protocol::agent::AgentKind, passthrough: &[String]) -> Res
     // command whose whole promise is that the session is unchanged.
     // `codeconnect --help` carries `attach`, which is where a durable answer
     // belongs.
-    tmux::attach_launched(&launched, early)
+    tmux::attach_launched(&launched, early)?;
+    Ok(started)
 }
 
 /// The launch advisories, then the once-a-day update check: what

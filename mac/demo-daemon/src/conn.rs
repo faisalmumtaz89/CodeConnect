@@ -270,6 +270,22 @@ where
             .await?
         }
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
+        // Not advertised (`start_session` is false): answered as a daemon below
+        // minor 28 answers them.
+        ClientMessage::ListProjects
+        | ClientMessage::GetProjectGit { .. }
+        | ClientMessage::ListFolder { .. }
+        | ClientMessage::CreateFolder { .. }
+        | ClientMessage::StartSession { .. } => {
+            send(
+                sink,
+                &ServerMessage::Error {
+                    code: "bad_request".into(),
+                    message: "the demo daemon does not start sessions".into(),
+                },
+            )
+            .await?
+        }
         ClientMessage::Sessions => {
             send(
                 sink,
@@ -522,6 +538,9 @@ fn capabilities() -> Capabilities {
         // screen to type into.
         hook_only_approvals: true,
         history_pages: true,
+        start_session: false,
+        start_worktree: false,
+        browse_folders: false,
     }
 }
 

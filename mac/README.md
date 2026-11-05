@@ -152,6 +152,7 @@ codeconnect attach cc-1           # re-attach after closing the tab
 codeconnect daemon install        # write the LaunchAgent and start it
 codeconnect daemon status         # plist, launchd job and live daemon, side by side
 codeconnect daemon restart        # launchctl kickstart -k
+codeconnect daemon folders        # let ccd open Desktop, Documents and Downloads
 codeconnect daemon uninstall      # stop it and remove the LaunchAgent
 
 codeconnect pair                  # QR code that pairs a phone (single use, 5 minutes)
@@ -1008,6 +1009,78 @@ computer by the host it paired with.
 `hello_ack.machine_id`, minted once into `~/.codeconnect/machine_id` and the same
 on every handshake, so a phone that paired this daemon under two addresses (an IP,
 then its MagicDNS name) holds it as one machine.
+`>= 28` starts a session from the phone, offered (`start_session`) to the
+connections a terminal is offered to. `list_projects` is answered with
+`projects`: every folder a session has started in, most recent first, kept in
+its own table so removing a run does not remove its folder, each with its name,
+git branch and whether it still exists, and, for the computer, whether each
+agent can start (`codeconnect <agent> --version` through the user's login
+shell) as last checked: the first list after the daemon starts waits for the
+check, and every later one answers from the last check and checks again. `start_session {request_id, path, agent, prompt?}` takes a listed
+folder (from `>= 30`, any absolute folder) and runs `codeconnect <agent> --no-attach [-- <prompt>]` there through
+the user's login shell (`$SHELL -lic` for zsh and bash, `/bin/sh -lc`
+otherwise), every value an argument of its own. The shell starts from the
+user's session environment, not the daemon's service one: on macOS launchd's,
+with its `PATH` (`launchctl setenv`'s, or launchd's default) and `XPC_SERVICE_NAME=0`,
+`XPC_FLAGS=0x0`; on Linux the systemd user manager's, read whole. Either way the
+daemon's own location (`CODECONNECT_HOME`, `CODECONNECT_TMUX`, `TMUX_TMPDIR`)
+goes with it and `CODECONNECT_LOG` and `CODECONNECT_SERVICE` do not. A daemon
+started by hand has the session's environment already and uses its own; so
+does one whose session cannot be read (`launchctl` or `busctl` failing). When nothing in
+it names an encoding (`LC_ALL`, `LC_CTYPE`, `LANG`), `LC_CTYPE` is the platform's
+UTF-8 (`UTF-8`, or `C.UTF-8` on Linux), as a UTF-8 terminal sets it; the user's
+own startup files run after and win. The launcher writes what it
+started to the file named by `CODECONNECT_LAUNCH_RESULT`, and the daemon
+answers `start_session_result` with the session's uid, or `failed` with
+`agent_missing`, `folder_missing` or `launch_failed` and a detail, once the
+launcher has finished (a launcher still running after 80 s is killed). A
+`started` is sent only once the session is in `sessions`, so the phone's next
+`sessions` lists it: within the same 80 s, or `launch_failed` saying it may
+still be running. The same
+`request_id` again, on any connection, gets the first answer and starts
+nothing; the daemon forgets them when it restarts.
+`>= 29` lets that start pick a branch or worktree (`start_worktree`), and never
+switches the folder's own branch. `get_project_git {path}` reads a listed
+folder's (from `>= 30`, any absolute folder's) repository, without writing, fetching or running a hook:
+`git worktree list` (the main checkout first, each with its branch, whether it
+has uncommitted changes, and whether its folder is gone) and the local branches checked out nowhere, newest first, at most
+100. `start_session`'s `worktree` is one of three. `existing` starts in a
+worktree git lists. `branch` runs `git worktree add -- <main>/.claude/worktrees/<branch>
+<branch>`, with each `/` written `+`, which is Claude Code's own layout. `new`
+takes a name by Claude Code's `--worktree` rule: Claude gets `--worktree=<name>`
+and makes the worktree itself, and Codex, whose `--worktree` cannot run hosted,
+gets one in the same place on a branch named as typed (`git worktree add -b
+<name>`), from the folder's current commit. Not Claude's `worktree-` prefix:
+a later `claude --worktree <name>` that reopens a branch so named deletes it on a
+clean exit, commits and all. Git runs in the user's login shell, as the launcher
+does. `started` carries the folder the session started in, `cwd`, except for
+a new Claude worktree, whose folder the fleet shows once Claude is in it.
+CodeConnect never removes a worktree it made.
+`>= 30` lets the phone browse the computer's folders, as a terminal can `cd`
+anywhere (`browse_folders`, offered where `start_session` is). `list_folder
+{request_id, path?, show_hidden?}` answers `folder_listing` with the folder's
+real path (symlinks resolved, as Finder shows it; the home folder when no path is
+given) and the names of its folders and symlinks to folders, in byte order, at
+most 2,000 (`truncated` says there were more), leaving out names that start with
+`.` unless `show_hidden`, and names that are not UTF-8; or with `error`, in the
+words `ls` prints (`Permission denied`). `create_folder {request_id, parent,
+name}` is one `mkdir`: a name holding `/` is refused, and every other refusal is
+`mkdir`'s own (`File exists`). `start_session` and `get_project_git` take any
+absolute folder; a relative path is refused, and a folder becomes a project
+when a session starts in it; a start in a folder this daemon is not permitted to
+reach (EACCES, EPERM) is refused in the system's words, and any other folder it
+cannot open is called missing, as before. On macOS, Desktop, Documents
+and Downloads are read with ccd's own permission, asked for once while someone is
+at the Mac: `codeconnect daemon folders`, which the codeconnect.sh installer
+(1.7.7 or later) runs once the daemon is up, at a terminal and not over SSH,
+has ccd itself read each one, so a dialog names ccd and the answer is kept for
+its path, which updates keep. Until it has run once, a `codeconnect claude` or `codex`
+typed at a terminal on the Mac, not an SSH login, runs it first; ccd keeps the
+note that it has (`folders-asked`), and every later typed start is as before.
+Only CodeConnect's own launchd job answers either. An `Operation not permitted` in
+those folders adds where to change the answer (System Settings → Privacy &
+Security → Files and Folders → ccd). External drives are out of scope: the first
+visit to one can still raise a dialog on the Mac.
 See `protocol/src/lib.rs` for the authoritative ledger.
 
 **`delete_session` is the only destructive verb a phone has.** It names the run

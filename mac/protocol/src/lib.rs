@@ -28,6 +28,7 @@ pub mod fsperm;
 pub mod hash;
 pub mod hook;
 pub mod ipc;
+pub mod launch_result;
 pub mod pairing;
 pub mod peer;
 pub mod proc;
@@ -599,7 +600,55 @@ pub const PROTOCOL_VERSION: u32 = 1;
 ///         message, before any phone hello, may be a [`peer::PeerRequest`], answered by one
 ///         [`peer::PeerReply`] and the connection closed. A daemon below 27
 ///         answers `bad_request`, which the sender reads as "older CodeConnect".
-pub const PROTOCOL_MINOR: u32 = 27;
+///   * `28` — **A session started from the phone.**
+///
+///     A phone picks a folder sessions have run in and starts Claude Code or
+///     Codex there, as if `codeconnect <agent>` had been typed in it. Additive,
+///     and a client written against minor 27 needs none of it:
+///       - [`ws::Capabilities::start_session`] — this daemon understands the rest.
+///       - [`ws::ClientMessage::ListProjects`] and [`ws::ServerMessage::Projects`]
+///         — the folders, most recent first, and which agents this computer can
+///         start.
+///       - [`ws::ClientMessage::StartSession`] and
+///         [`ws::ServerMessage::StartSessionResult`] — one start, idempotent by
+///         `request_id`, answered with the new session's uid or why it failed.
+///       - [`launch_result`] — between this computer's own processes: how
+///         `codeconnect <agent> --no-attach` tells the daemon what it started.
+///
+///     A daemon below 28 answers both requests `bad_request`, so a client sends
+///     them only when the capability is advertised.
+///   * `29` — **A start picks a branch or worktree.**
+///
+///     The main folder is never switched: another branch gets a worktree of its
+///     own, in Claude Code's layout (`.claude/worktrees/<name>`). Additive, and a
+///     client written against minor 28 needs none of it:
+///       - [`ws::Capabilities::start_worktree`] — this daemon understands the rest.
+///       - [`ws::ClientMessage::GetProjectGit`] and [`ws::ServerMessage::ProjectGit`]
+///         — one folder's worktrees and its local branches, read only.
+///       - [`ws::StartWorktree`], as [`ws::ClientMessage::StartSession`]'s
+///         `worktree` — an existing worktree, a branch, or a new worktree.
+///       - `cwd` on [`ws::StartSessionResult::Started`] — the folder the session
+///         started in, when the daemon chose it.
+///
+///     A daemon below 29 answers `get_project_git` with `bad_request` and ignores
+///     `worktree`, starting in the main folder, so a client sends either only
+///     when the capability is advertised.
+///   * `30` — **The phone browses folders and starts in any of them.**
+///
+///     As a terminal can `cd` anywhere and start an agent there. Additive:
+///       - [`ws::Capabilities::browse_folders`] — this daemon understands the rest.
+///       - [`ws::ClientMessage::ListFolder`] and [`ws::ServerMessage::FolderListing`]
+///         — one folder's folders, home when no path is given, by real path.
+///       - [`ws::ClientMessage::CreateFolder`] and
+///         [`ws::ServerMessage::CreateFolderResult`] — one `mkdir`.
+///       - [`ws::ClientMessage::StartSession`] and [`ws::ClientMessage::GetProjectGit`]
+///         take any absolute folder, not only one [`ws::ServerMessage::Projects`]
+///         listed; a relative path is refused, and `not_a_project` is never sent.
+///
+///     A daemon below 30 answers `list_folder` and `create_folder` with
+///     `bad_request` and refuses an unlisted folder, so a client sends them, and
+///     offers folders outside the list, only when the capability is advertised.
+pub const PROTOCOL_MINOR: u32 = 30;
 
 #[cfg(test)]
 mod ledger_tests {
@@ -729,7 +778,7 @@ pub const CODEX_SWEEP_SUBCOMMAND: &str = "internal-codex-sweep";
 /// `./.codeconnect` — and a relative root is not a root at all: it names a different
 /// directory in every process that resolves it. The launcher, the pane's host and
 /// the sweep run with **different working directories** by construction (the
-/// coordinator hands tmux an explicit `-c`), so a process-relative root has them
+/// coordinator starts tmux in the session's folder), so a process-relative root has them
 /// addressing different records for the same session. Absolutising HERE, where the
 /// root is first read, is what makes every consumer — `session_dir`, the launch
 /// lock, the `CODECONNECT_HOME` the coordinator forwards into the pane — name one

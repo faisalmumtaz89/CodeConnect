@@ -509,6 +509,9 @@ where
     // reason. Its own queue rather than the backlog's: a page moves no
     // watermark and is not a delivery the push gate may count.
     let mut history = History::default();
+    // Answers worked out off this loop (`list_projects`, `start_session`): they
+    // take seconds of shells and git, which the loop must not stand still for.
+    let (replies_tx, mut replies) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
     let mut keepalive = tokio::time::interval(KEEPALIVE);
     keepalive.tick().await; // the first tick completes immediately
 
@@ -708,6 +711,32 @@ where
                         parsed,
                     )
                     .await?;
+                    continue;
+                }
+
+                // Starting an agent carries a terminal's authority, so it is
+                // open to exactly the connections a terminal is.
+                if matches!(
+                    parsed,
+                    ClientMessage::ListProjects
+                        | ClientMessage::GetProjectGit { .. }
+                        | ClientMessage::ListFolder { .. }
+                        | ClientMessage::CreateFolder { .. }
+                        | ClientMessage::StartSession { .. }
+                ) {
+                    if device_id.is_none() || !private_transport {
+                        send(&mut sink, &ServerMessage::Error {
+                            code: "not_authorised".into(),
+                            message: "only a paired device on a private connection may \
+                                      start sessions".into(),
+                        }).await?;
+                        continue;
+                    }
+                    let daemon = daemon.clone();
+                    let replies = replies_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = replies.send(crate::start_session::answer(&daemon, parsed).await);
+                    });
                     continue;
                 }
 
@@ -1003,6 +1032,8 @@ where
                 }
             }
 
+            Some(reply) = replies.recv() => send(&mut sink, &reply).await?,
+
             _ = keepalive.tick() => {
                 if authed {
                     // An idle connection sends nothing, so the per-message check
@@ -1083,6 +1114,12 @@ where
         // it to do.
         ClientMessage::Hello { .. } => {}
         ClientMessage::Ping => send(sink, &ServerMessage::Pong).await?,
+        // Answered off the loop by `handle_client`, which never passes them here.
+        ClientMessage::ListProjects
+        | ClientMessage::GetProjectGit { .. }
+        | ClientMessage::ListFolder { .. }
+        | ClientMessage::CreateFolder { .. }
+        | ClientMessage::StartSession { .. } => {}
         ClientMessage::RegisterPush {
             token,
             environment,
@@ -3066,6 +3103,10 @@ fn capabilities(daemon: &Arc<Daemon>, tls_active: bool, terminal_allowed: bool) 
         question_card: true,
         hook_only_approvals: true,
         history_pages: true,
+        // Starting an agent is a terminal's authority, offered where one is.
+        start_session: terminal_allowed,
+        start_worktree: terminal_allowed,
+        browse_folders: terminal_allowed,
     }
 }
 
@@ -8410,6 +8451,804 @@ mod tests {
         );
     }
 
+    /// **A paired device gets the project list; the bootstrap token gets a
+    /// refusal.** A folder that is gone is listed as gone, and a repository's
+    /// branch rides along.
+    #[tokio::test]
+    async fn list_projects_answers_a_paired_device_with_its_folders() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let root = std::env::temp_dir().join(format!(
+            "ccd-projects-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        let repo = root.join("app");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "feature/x"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let gone = root.join("gone");
+        for (cwd, at) in [
+            (&gone, "2026-11-01T00:00:00.000Z"),
+            (&repo, "2026-11-02T00:00:00.000Z"),
+        ] {
+            let filed = server
+                .store
+                .upsert_session(&crate::store::SessionRow {
+                    session_uid: protocol::uid::new().unwrap(),
+                    session_id: "cc-1".into(),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: "codeconnect".into(),
+                    cwd: cwd.display().to_string(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Exited,
+                    created_at: at.into(),
+                    updated_at: at.into(),
+                    agent: protocol::agent::AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .unwrap();
+            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+        }
+        let list = Message::Text(r#"{"type":"list_projects"}"#.into());
+
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["start_session"], false, "{ack}");
+        bootstrap.send(list.clone()).await.unwrap();
+        let refused = next_json(&mut bootstrap).await.unwrap();
+        assert_eq!(refused["code"], "not_authorised", "{refused}");
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["start_session"], true, "{ack}");
+        phone.send(list).await.unwrap();
+        let reply = match next_frame(&mut phone, Duration::from_secs(30)).await {
+            Frame::Json(reply) => reply,
+            _ => panic!("no projects reply within 30 s"),
+        };
+        assert_eq!(reply["type"], "projects", "{reply}");
+        let projects = reply["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 2, "{reply}");
+        assert_eq!(projects[0]["path"], repo.display().to_string());
+        assert_eq!(projects[0]["name"], "app");
+        assert_eq!(projects[0]["exists"], true);
+        assert_eq!(projects[0]["git_branch"], "feature/x");
+        assert_eq!(projects[1]["name"], "gone");
+        assert_eq!(projects[1]["exists"], false);
+        assert!(projects[1].get("git_branch").is_none(), "{reply}");
+        let agents: Vec<&str> = reply["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|agent| agent["agent"].as_str().unwrap())
+            .collect();
+        assert_eq!(agents, ["claude", "codex"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// **Browsing and making folders answer only a paired device**, as starting
+    /// does: the bootstrap token is refused, and a paired phone gets its listing and
+    /// its new folder.
+    #[tokio::test]
+    async fn list_folder_and_create_folder_answer_only_a_paired_device() {
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        let root = std::env::temp_dir().join(format!(
+            "ccd-browse-ws-{}-{}",
+            std::process::id(),
+            protocol::time::now_unix_ms()
+        ));
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let path = root.display().to_string();
+        let list = Message::Text(
+            serde_json::to_string(&ClientMessage::ListFolder {
+                request_id: "b1".into(),
+                path: Some(path.clone()),
+                show_hidden: false,
+            })
+            .unwrap(),
+        );
+        let create = Message::Text(
+            serde_json::to_string(&ClientMessage::CreateFolder {
+                request_id: "c1".into(),
+                parent: path.clone(),
+                name: "made".into(),
+            })
+            .unwrap(),
+        );
+
+        let (mut bootstrap, ack) = server.hello(protocol::PROTOCOL_VERSION, None).await;
+        assert_eq!(ack["capabilities"]["browse_folders"], false, "{ack}");
+        for request in [list.clone(), create.clone()] {
+            bootstrap.send(request).await.unwrap();
+            let refused = next_json(&mut bootstrap).await.unwrap();
+            assert_eq!(refused["code"], "not_authorised", "{refused}");
+        }
+        assert!(
+            !root.join("made").exists(),
+            "a refused create makes nothing"
+        );
+
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        assert_eq!(ack["capabilities"]["browse_folders"], true, "{ack}");
+        phone.send(list).await.unwrap();
+        assert_eq!(
+            next_json(&mut phone).await.unwrap(),
+            serde_json::json!({"type": "folder_listing", "request_id": "b1", "path": path,
+                "folders": ["app"], "truncated": false})
+        );
+        phone.send(create).await.unwrap();
+        assert_eq!(
+            next_json(&mut phone).await.unwrap(),
+            serde_json::json!({"type": "create_folder_result", "request_id": "c1",
+                "result": {"status": "created"}})
+        );
+        assert!(root.join("made").is_dir());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The session a fixture's stub launcher reports, registered in `cwd` as its
+    /// supervisor would have done by the time the start is answered. Filed long ago,
+    /// so the project list's order and dates are the fixture's own.
+    fn register_stub_session(store: &crate::store::Store, cwd: String) {
+        let filed = store
+            .upsert_session(&crate::store::SessionRow {
+                session_uid: "01K1B3XQ8ZC0DE5FGH7JKMNPQR".into(),
+                session_id: "cc-9".into(),
+                tmux_session: "cc-9".into(),
+                tmux_socket: "codeconnect".into(),
+                cwd,
+                claude_session_id: None,
+                transcript_path: None,
+                lifecycle: protocol::event::Lifecycle::Exited,
+                created_at: "2026-01-01T00:00:00.000Z".into(),
+                updated_at: "2026-01-01T00:00:00.000Z".into(),
+                agent: protocol::agent::AgentKind::Claude,
+                codex_thread_id: None,
+                codex_socket: None,
+            })
+            .unwrap();
+        assert!(matches!(filed, crate::store::SessionUpsert::Present));
+    }
+
+    /// **The start-session wire a minor-28 daemon sent, still in what this build
+    /// sends.** The fixture is what minor 28 emitted, kept as it was: the phone's
+    /// tests read its copy under `ios/` as an older Mac. This build may add a
+    /// field a minor-28 phone ignores, and nothing else, so every value the
+    /// fixture holds must be in this build's wire unchanged.
+    #[tokio::test]
+    async fn the_minor_28_wire_fixture_is_still_in_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-28-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        let emitted = derived_minor_28_wire().await;
+        if let Some(changed) = first_difference(&committed, &emitted, "$") {
+            panic!(
+                "a minor-28 phone would read this build differently at {changed}; only a \
+                 field it ignores may be added"
+            );
+        }
+    }
+
+    /// Where `wire` stops holding `fixture`: an object may carry fields the
+    /// fixture lacks, and every other value must be the same.
+    fn first_difference(
+        fixture: &serde_json::Value,
+        wire: &serde_json::Value,
+        at: &str,
+    ) -> Option<String> {
+        match (fixture, wire) {
+            (serde_json::Value::Object(fixture), serde_json::Value::Object(wire)) => {
+                fixture.iter().find_map(|(key, value)| match wire.get(key) {
+                    Some(sent) => first_difference(value, sent, &format!("{at}.{key}")),
+                    None => Some(format!("{at}.{key} (missing)")),
+                })
+            }
+            (serde_json::Value::Array(fixture), serde_json::Value::Array(wire))
+                if fixture.len() == wire.len() =>
+            {
+                fixture
+                    .iter()
+                    .zip(wire)
+                    .enumerate()
+                    .find_map(|(index, (value, sent))| {
+                        first_difference(value, sent, &format!("{at}[{index}]"))
+                    })
+            }
+            _ => (fixture != wire).then(|| format!("{at}: {fixture} became {wire}")),
+        }
+    }
+
+    /// **The branch and worktree wire a minor-29 daemon sends, emitted by this
+    /// build.** The phone's tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_minor_29_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-29-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_29_wire().await,
+            committed,
+            "the committed minor-29 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_29_wire_fixture, then copy it over its copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-29-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_29_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_29_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-29-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// **The folder wire a minor-30 daemon sends, emitted by this build.** The
+    /// phone's tests read the copy under `ios/` (byte-identical, by
+    /// `fixtures/check-duplicated-fixtures.sh`).
+    #[tokio::test]
+    async fn the_minor_30_wire_fixture_is_what_this_build_emits() {
+        const FIXTURE: &str = include_str!("../../../fixtures/claude/minor-30-wire.json");
+        let committed: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            derived_minor_30_wire().await,
+            committed,
+            "the committed minor-30 wire contract no longer matches what this build emits. \
+             Regenerate it with cargo test -p ccd --bin ccd -- --ignored \
+             regenerate_the_minor_30_wire_fixture, then copy it over its copy under ios/ \
+             (fixtures/check-duplicated-fixtures.sh names it)"
+        );
+    }
+
+    /// Rewrite `fixtures/claude/minor-30-wire.json` with what this build emits.
+    #[tokio::test]
+    #[ignore = "generator, not a gate"]
+    async fn regenerate_the_minor_30_wire_fixture() {
+        let wire = serde_json::to_string_pretty(&derived_minor_30_wire().await).unwrap();
+        std::fs::write(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/claude/minor-30-wire.json"
+            ),
+            wire + "\n",
+        )
+        .unwrap();
+    }
+
+    /// A folder's folders, a new folder, a start in a folder no session has run in,
+    /// and that folder's repository, as a paired phone receives them over a live
+    /// socket; and each refusal of a relative path.
+    ///
+    /// Made afresh under `/tmp/ccd-minor-30`, written as that path wherever it
+    /// really is (`/private/tmp/…` on a Mac), so the fixture is the same on every
+    /// machine.
+    async fn derived_minor_30_wire() -> serde_json::Value {
+        use protocol::agent::AgentKind;
+
+        let root = std::path::Path::new("/tmp/ccd-minor-30");
+        let _ = std::fs::remove_dir_all(root);
+        let src = root.join("src");
+        for folder in ["app", ".config", "semi;"] {
+            std::fs::create_dir_all(src.join(folder)).unwrap();
+        }
+        std::fs::write(src.join("README"), "").unwrap();
+        let app = src.join("app");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&app)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_AUTHOR_DATE", "2026-11-04T09:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2026-11-04T09:00:00Z")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+        let launcher = root.join("codeconnect");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\nprintf '{\"uid\":\"01K1B3XQ8ZC0DE5FGH7JKMNPQR\",\"session_name\":\"cc-1\",\"agent\":\"%s\"}\\n' \"$1\" > \"$CODECONNECT_LAUNCH_RESULT\"\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&launcher)
+            .status()
+            .unwrap();
+        let canonical = root.canonicalize().unwrap().display().to_string();
+        let at = |folder: &std::path::Path| {
+            folder
+                .display()
+                .to_string()
+                .replacen("/tmp/ccd-minor-30", &canonical, 1)
+        };
+
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        register_stub_session(&server.store, at(&app));
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        async fn ask(
+            phone: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
+            message: ClientMessage,
+        ) -> (serde_json::Value, serde_json::Value) {
+            let request = serde_json::to_value(&message).unwrap();
+            phone
+                .send(Message::Text(request.to_string()))
+                .await
+                .unwrap();
+            (request, next_json(phone).await.unwrap())
+        }
+        let list = |path: Option<String>, show_hidden: bool| ClientMessage::ListFolder {
+            request_id: "b1".into(),
+            path,
+            show_hidden,
+        };
+        let (list_folder_request, folder_listing) =
+            ask(&mut phone, list(Some(at(&src)), false)).await;
+        let (list_folder_hidden_request, folder_listing_hidden) =
+            ask(&mut phone, list(Some(at(&src)), true)).await;
+        let (_, folder_listing_unreadable) =
+            ask(&mut phone, list(Some(at(&root.join("gone"))), false)).await;
+        let (_, folder_listing_relative) = ask(&mut phone, list(Some("src".into()), false)).await;
+        let create = |name: &str| ClientMessage::CreateFolder {
+            request_id: "c1".into(),
+            parent: at(&src),
+            name: name.into(),
+        };
+        let (create_folder_request, create_folder_created) =
+            ask(&mut phone, create("new-app")).await;
+        let (_, create_folder_failed_exists) = ask(&mut phone, create("new-app")).await;
+        let (_, create_folder_failed_not_one_name) = ask(&mut phone, create("a/b")).await;
+        let (get_project_git_unlisted_request, project_git_unlisted) =
+            ask(&mut phone, ClientMessage::GetProjectGit { path: at(&app) }).await;
+        let (_, get_project_git_relative_refused) = ask(
+            &mut phone,
+            ClientMessage::GetProjectGit {
+                path: "src/app".into(),
+            },
+        )
+        .await;
+
+        let start = |path: String| {
+            let (db, launcher) = (&server.daemon.db, launcher.clone());
+            async move {
+                crate::start_session::launch(
+                    db,
+                    None,
+                    Ok(launcher),
+                    root,
+                    &path,
+                    &AgentKind::Claude,
+                    None,
+                    None,
+                )
+                .await
+            }
+        };
+        let reply = |result: protocol::ws::StartSessionResult| {
+            serde_json::to_value(ServerMessage::StartSessionResult {
+                request_id: "r1".into(),
+                result,
+            })
+            .unwrap()
+        };
+        let wire = serde_json::json!({
+            "hello_ack_capabilities": ack["capabilities"],
+            "list_folder_home_request": serde_json::to_value(list(None, false)).unwrap(),
+            "list_folder_request": list_folder_request,
+            "folder_listing": folder_listing,
+            "list_folder_hidden_request": list_folder_hidden_request,
+            "folder_listing_hidden": folder_listing_hidden,
+            "folder_listing_unreadable": folder_listing_unreadable,
+            "folder_listing_relative": folder_listing_relative,
+            "create_folder_request": create_folder_request,
+            "create_folder_created": create_folder_created,
+            "create_folder_failed_exists": create_folder_failed_exists,
+            "create_folder_failed_not_one_name": create_folder_failed_not_one_name,
+            "start_session_unlisted_request": serde_json::to_value(ClientMessage::StartSession {
+                request_id: "r1".into(),
+                path: at(&src.join("new-app")),
+                agent: AgentKind::Claude,
+                prompt: None,
+                worktree: None,
+            })
+            .unwrap(),
+            "start_session_unlisted_started": reply(start(at(&src.join("new-app"))).await),
+            "start_session_relative_failed": reply(start("src/new-app".into()).await),
+            "get_project_git_unlisted_request": get_project_git_unlisted_request,
+            "project_git_unlisted": project_git_unlisted,
+            "get_project_git_relative_refused": get_project_git_relative_refused,
+        });
+        let _ = std::fs::remove_dir_all(root);
+        serde_json::from_str(&wire.to_string().replace(&canonical, "/tmp/ccd-minor-30")).unwrap()
+    }
+
+    /// A repository's worktrees and branches as a paired phone receives them over
+    /// a live socket, and a start in each kind of worktree as `start_session`
+    /// answers it, from a stub launcher.
+    ///
+    /// The repository is made afresh under `/tmp/ccd-minor-29`, and the folder
+    /// git reports (`/private/tmp/…` on a Mac) is written as that path, so the
+    /// fixture is the same on every machine. Commit dates are fixed, so the
+    /// branches come in the same order.
+    async fn derived_minor_29_wire() -> serde_json::Value {
+        use protocol::agent::AgentKind;
+        use protocol::ws::{StartSessionResult, StartWorktree};
+
+        let root = std::path::Path::new("/tmp/ccd-minor-29");
+        let _ = std::fs::remove_dir_all(root);
+        let (app, notes) = (root.join("app"), root.join("notes"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&notes).unwrap();
+        let git = |dir: &std::path::Path, date: &str, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        let commit = |dir: &std::path::Path, date: &str| {
+            git(dir, date, &["commit", "-q", "--allow-empty", "-m", date]);
+        };
+        git(&app, "2026-11-01T09:00:00Z", &["init", "-q", "-b", "main"]);
+        commit(&app, "2026-11-01T09:00:00Z");
+        for (branch, date) in [
+            ("bugfix-12", "2026-11-02T09:00:00Z"),
+            ("feature/search", "2026-11-03T09:00:00Z"),
+        ] {
+            git(&app, date, &["switch", "-q", "-c", branch]);
+            commit(&app, date);
+        }
+        git(&app, "2026-11-01T09:00:00Z", &["switch", "-q", "main"]);
+        let review = root.join("app-review");
+        let gone = root.join("app-spike");
+        for (folder, branch) in [(&review, "review/ui"), (&gone, "old-spike")] {
+            let folder = folder.display().to_string();
+            git(
+                &app,
+                "2026-11-01T09:00:00Z",
+                &["worktree", "add", "-q", "-b", branch, &folder],
+            );
+        }
+        std::fs::remove_dir_all(&gone).unwrap();
+        std::fs::write(app.join("notes.txt"), "uncommitted\n").unwrap();
+
+        let canonical = root.canonicalize().unwrap().display().to_string();
+        let at = |folder: &std::path::Path| {
+            folder
+                .display()
+                .to_string()
+                .replacen("/tmp/ccd-minor-29", &canonical, 1)
+        };
+        let launcher = root.join("codeconnect");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\nprintf '{\"uid\":\"01K1B3XQ8ZC0DE5FGH7JKMNPQR\",\"session_name\":\"cc-4\",\"agent\":\"%s\"}\\n' \"$1\" > \"$CODECONNECT_LAUNCH_RESULT\"\n",
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&launcher)
+            .status()
+            .unwrap();
+
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        for cwd in [at(&app), at(&notes)] {
+            let filed = server
+                .store
+                .upsert_session(&crate::store::SessionRow {
+                    session_uid: protocol::uid::new().unwrap(),
+                    session_id: "cc-1".into(),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: "codeconnect".into(),
+                    cwd,
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Exited,
+                    created_at: "2026-11-04T09:00:00.000Z".into(),
+                    updated_at: "2026-11-04T09:00:00.000Z".into(),
+                    agent: AgentKind::Claude,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .unwrap();
+            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+        }
+
+        register_stub_session(&server.store, at(&app));
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let get_project_git =
+            |path: String| serde_json::to_value(ClientMessage::GetProjectGit { path }).unwrap();
+        let mut answers = Vec::new();
+        for path in [at(&app), at(&notes)] {
+            phone
+                .send(Message::Text(get_project_git(path).to_string()))
+                .await
+                .unwrap();
+            answers.push(next_json(&mut phone).await.unwrap());
+        }
+        let [project_git, project_git_not_a_repository] =
+            <[serde_json::Value; 2]>::try_from(answers).unwrap();
+        let get_project_git_request = get_project_git(at(&app));
+
+        let start = |path: String, agent: AgentKind, worktree: StartWorktree| {
+            let (db, launcher) = (&server.daemon.db, launcher.clone());
+            async move {
+                crate::start_session::launch(
+                    db,
+                    None,
+                    Ok(launcher),
+                    root,
+                    &path,
+                    &agent,
+                    None,
+                    Some(&worktree),
+                )
+                .await
+            }
+        };
+        let reply = |request_id: &str, result: StartSessionResult| {
+            serde_json::to_value(ServerMessage::StartSessionResult {
+                request_id: request_id.into(),
+                result,
+            })
+            .unwrap()
+        };
+        let request = |agent: AgentKind, worktree: StartWorktree| {
+            serde_json::to_value(ClientMessage::StartSession {
+                request_id: "r1".into(),
+                path: at(&app),
+                agent,
+                prompt: None,
+                worktree: Some(worktree),
+            })
+            .unwrap()
+        };
+        let existing = || StartWorktree::Existing { path: at(&review) };
+        let branch = || StartWorktree::Branch {
+            branch: "feature/search".into(),
+        };
+        let new = || StartWorktree::New {
+            name: "fix-login".into(),
+        };
+
+        let wire = serde_json::json!({
+            "hello_ack_capabilities": ack["capabilities"],
+            "get_project_git_request": get_project_git_request,
+            "project_git": project_git,
+            "project_git_not_a_repository": project_git_not_a_repository,
+            "start_session_existing_request": request(AgentKind::Claude, existing()),
+            "start_session_branch_request": request(AgentKind::Codex, branch()),
+            "start_session_new_request": request(AgentKind::Claude, new()),
+            "start_existing_started": reply(
+                "r1",
+                start(at(&app), AgentKind::Claude, existing()).await
+            ),
+            "start_branch_started": reply(
+                "r2",
+                start(at(&app), AgentKind::Codex, branch()).await
+            ),
+            "start_new_claude_started": reply(
+                "r3",
+                start(at(&app), AgentKind::Claude, new()).await
+            ),
+            "start_new_codex_started": reply(
+                "r4",
+                start(at(&app), AgentKind::Codex, new()).await
+            ),
+            "start_new_codex_failed_exists": reply(
+                "r5",
+                start(at(&app), AgentKind::Codex, new()).await
+            ),
+            "start_new_failed_invalid_name": reply(
+                "r6",
+                start(
+                    at(&app),
+                    AgentKind::Claude,
+                    StartWorktree::New {
+                        name: "fix login;".into(),
+                    }
+                )
+                .await
+            ),
+            "start_branch_failed_checked_out": reply(
+                "r7",
+                start(
+                    at(&app),
+                    AgentKind::Claude,
+                    StartWorktree::Branch {
+                        branch: "old-spike".into(),
+                    }
+                )
+                .await
+            ),
+        });
+        let _ = std::fs::remove_dir_all(root);
+        serde_json::from_str(&wire.to_string().replace(&canonical, "/tmp/ccd-minor-29")).unwrap()
+    }
+
+    /// The handshake and project list as a paired phone receives them over a
+    /// live socket, and each start outcome as `start_session` answers it, from
+    /// a stub launcher standing in for `codeconnect <agent> --no-attach`.
+    ///
+    /// Fixed paths under `/tmp/ccd-minor-28`, so the fixture is the same on every
+    /// machine. Which agents can start is set rather than checked: a check asks
+    /// this machine's launcher, and the fixture would say what it found.
+    async fn derived_minor_28_wire() -> serde_json::Value {
+        use protocol::agent::AgentKind;
+        use protocol::ws::{AgentAvailability, StartSessionResult};
+
+        let root = std::path::Path::new("/tmp/ccd-minor-28");
+        let (app, notes, gone) = (root.join("app"), root.join("notes"), root.join("gone"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&notes).unwrap();
+        assert!(!gone.exists(), "{} must not exist", gone.display());
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&app)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let launcher = root.join("codeconnect");
+        std::fs::write(
+            &launcher,
+            r#"#!/bin/sh
+case "$1:$4" in
+claude:fail) echo 'Error: creating tmux session cc-3' >&2; exit 1 ;;
+claude:*) printf '{"uid":"01K1B3XQ8ZC0DE5FGH7JKMNPQR","session_name":"cc-3","agent":"claude"}\n' > "$CODECONNECT_LAUNCH_RESULT" ;;
+codex:*) printf '{"error":"agent_missing","detail":"could not find the codex binary: install Codex"}\n' > "$CODECONNECT_LAUNCH_RESULT"; exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("755")
+            .arg(&launcher)
+            .status()
+            .unwrap();
+
+        let (server, _device) = live_server(protocol::config::Config::default()).await;
+        for (cwd, at, agent) in [
+            (&app, "2026-11-04T09:00:00.000Z", AgentKind::Codex),
+            (&notes, "2026-11-03T18:30:00.000Z", AgentKind::Claude),
+            (&gone, "2026-10-01T08:00:00.000Z", AgentKind::Claude),
+        ] {
+            let filed = server
+                .store
+                .upsert_session(&crate::store::SessionRow {
+                    session_uid: protocol::uid::new().unwrap(),
+                    session_id: "cc-1".into(),
+                    tmux_session: "cc-1".into(),
+                    tmux_socket: "codeconnect".into(),
+                    cwd: cwd.display().to_string(),
+                    claude_session_id: None,
+                    transcript_path: None,
+                    lifecycle: protocol::event::Lifecycle::Exited,
+                    created_at: at.into(),
+                    updated_at: at.into(),
+                    agent,
+                    codex_thread_id: None,
+                    codex_socket: None,
+                })
+                .unwrap();
+            assert!(matches!(filed, crate::store::SessionUpsert::Present));
+        }
+        server.daemon.agents.set(vec![
+            AgentAvailability {
+                agent: AgentKind::Claude,
+                available: true,
+                detail: None,
+            },
+            AgentAvailability {
+                agent: AgentKind::Codex,
+                available: false,
+                detail: Some("could not find the codex binary: install Codex".into()),
+            },
+        ]);
+
+        register_stub_session(&server.store, app.display().to_string());
+        let (mut phone, ack) = server
+            .hello(protocol::PROTOCOL_VERSION, Some("device-token-for-tests"))
+            .await;
+        let list_projects_request = serde_json::to_value(ClientMessage::ListProjects).unwrap();
+        phone
+            .send(Message::Text(list_projects_request.to_string()))
+            .await
+            .unwrap();
+        let projects = next_json(&mut phone).await.unwrap();
+
+        let start = |path: &std::path::Path, agent: AgentKind, prompt: Option<&'static str>| {
+            let (db, launcher) = (&server.daemon.db, launcher.clone());
+            let path = path.display().to_string();
+            async move {
+                crate::start_session::launch(
+                    db,
+                    None,
+                    Ok(launcher),
+                    root,
+                    &path,
+                    &agent,
+                    prompt,
+                    None,
+                )
+                .await
+            }
+        };
+        let reply = |request_id: &str, result: StartSessionResult| {
+            serde_json::to_value(ServerMessage::StartSessionResult {
+                request_id: request_id.into(),
+                result,
+            })
+            .unwrap()
+        };
+        let starts = crate::start_session::Starts::default();
+        let first = starts
+            .once("r-repeat", start(&app, AgentKind::Claude, None))
+            .await;
+        let again = starts
+            .once("r-repeat", start(&app, AgentKind::Claude, None))
+            .await;
+
+        serde_json::json!({
+            "hello_ack_capabilities": ack["capabilities"],
+            "list_projects_request": list_projects_request,
+            "start_session_request": serde_json::to_value(ClientMessage::StartSession {
+                request_id: "r1".into(),
+                path: app.display().to_string(),
+                agent: AgentKind::Claude,
+                prompt: Some("fix the \"login\" test; then run it\nand commit;".into()),
+                worktree: None,
+            })
+            .unwrap(),
+            "projects": projects,
+            "start_started": reply(
+                "r1",
+                start(&app, AgentKind::Claude, Some("fix the tests")).await
+            ),
+            "start_failed_folder_missing": reply(
+                "r2",
+                start(&gone, AgentKind::Claude, None).await
+            ),
+            "start_failed_agent_missing": reply(
+                "r3",
+                start(&notes, AgentKind::Codex, None).await
+            ),
+            "start_failed_launch_failed": reply(
+                "r4",
+                start(&notes, AgentKind::Claude, Some("fail")).await
+            ),
+            "start_repeat": [reply("r-repeat", first), reply("r-repeat", again)],
+        })
+    }
+
     /// The `terminal_pty` capability answers the same question the attach
     /// handler does, over every transport the daemon serves.
     ///
@@ -8442,7 +9281,12 @@ mod tests {
                 .await
                 .expect("this device reads cleanly, so the ack builds")
                 {
-                    ServerMessage::HelloAck { capabilities, .. } => capabilities.terminal_pty,
+                    ServerMessage::HelloAck { capabilities, .. } => {
+                        // Browsing folders and starting in them carries the same
+                        // authority, so it is offered to exactly the same connections.
+                        assert_eq!(capabilities.browse_folders, capabilities.terminal_pty);
+                        capabilities.terminal_pty
+                    }
                     other => panic!("hello_ack must answer an ack, got {other:?}"),
                 }
             }

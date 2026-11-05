@@ -1,0 +1,166 @@
+{
+  "get_project_git_request": {
+    "path": "/tmp/ccd-minor-29/app",
+    "type": "get_project_git"
+  },
+  "hello_ack_capabilities": {
+    "answer_path": "hook_return",
+    "browse_folders": true,
+    "can_approve_reliably": true,
+    "capture": true,
+    "codex_compose": true,
+    "codex_interrupt": true,
+    "command_catalog": true,
+    "delete_session": true,
+    "diff": true,
+    "fail_mode": "fail_open",
+    "history_pages": true,
+    "hold_secs": 0,
+    "hook_only_approvals": true,
+    "prompt_identity": true,
+    "push": false,
+    "push_relay": false,
+    "question_card": true,
+    "risk_class": true,
+    "send_text": true,
+    "send_text_idempotent": true,
+    "session_uid": true,
+    "slash_composer_recovery": true,
+    "start_session": true,
+    "start_worktree": true,
+    "terminal_pty": true,
+    "test_push": false,
+    "tls": false,
+    "tls_active": false
+  },
+  "project_git": {
+    "git": {
+      "branches": [
+        "feature/search",
+        "bugfix-12"
+      ],
+      "branches_truncated": false,
+      "worktrees": [
+        {
+          "branch": "main",
+          "dirty": true,
+          "main": true,
+          "missing": false,
+          "path": "/tmp/ccd-minor-29/app"
+        },
+        {
+          "branch": "review/ui",
+          "dirty": false,
+          "main": false,
+          "missing": false,
+          "path": "/tmp/ccd-minor-29/app-review"
+        },
+        {
+          "branch": "old-spike",
+          "dirty": false,
+          "main": false,
+          "missing": true,
+          "path": "/tmp/ccd-minor-29/app-spike"
+        }
+      ]
+    },
+    "path": "/tmp/ccd-minor-29/app",
+    "type": "project_git"
+  },
+  "project_git_not_a_repository": {
+    "path": "/tmp/ccd-minor-29/notes",
+    "type": "project_git"
+  },
+  "start_branch_failed_checked_out": {
+    "request_id": "r7",
+    "result": {
+      "detail": "old-spike is already checked out in /tmp/ccd-minor-29/app-spike",
+      "reason": "launch_failed",
+      "status": "failed"
+    },
+    "type": "start_session_result"
+  },
+  "start_branch_started": {
+    "request_id": "r2",
+    "result": {
+      "cwd": "/tmp/ccd-minor-29/app/.claude/worktrees/feature+search",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "status": "started"
+    },
+    "type": "start_session_result"
+  },
+  "start_existing_started": {
+    "request_id": "r1",
+    "result": {
+      "cwd": "/tmp/ccd-minor-29/app-review",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "status": "started"
+    },
+    "type": "start_session_result"
+  },
+  "start_new_claude_started": {
+    "request_id": "r3",
+    "result": {
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "status": "started"
+    },
+    "type": "start_session_result"
+  },
+  "start_new_codex_failed_exists": {
+    "request_id": "r5",
+    "result": {
+      "detail": "fatal: a branch named 'fix-login' already exists",
+      "reason": "launch_failed",
+      "status": "failed"
+    },
+    "type": "start_session_result"
+  },
+  "start_new_codex_started": {
+    "request_id": "r4",
+    "result": {
+      "cwd": "/tmp/ccd-minor-29/app/.claude/worktrees/fix-login",
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "status": "started"
+    },
+    "type": "start_session_result"
+  },
+  "start_new_failed_invalid_name": {
+    "request_id": "r6",
+    "result": {
+      "detail": "\"fix login;\" is not a valid worktree name: use only letters, digits, dots, underscores and dashes",
+      "reason": "launch_failed",
+      "status": "failed"
+    },
+    "type": "start_session_result"
+  },
+  "start_session_branch_request": {
+    "agent": "codex",
+    "path": "/tmp/ccd-minor-29/app",
+    "request_id": "r1",
+    "type": "start_session",
+    "worktree": {
+      "branch": "feature/search",
+      "kind": "branch"
+    }
+  },
+  "start_session_existing_request": {
+    "agent": "claude",
+    "path": "/tmp/ccd-minor-29/app",
+    "request_id": "r1",
+    "type": "start_session",
+    "worktree": {
+      "kind": "existing",
+      "path": "/tmp/ccd-minor-29/app-review"
+    }
+  },
+  "start_session_new_request": {
+    "agent": "claude",
+    "path": "/tmp/ccd-minor-29/app",
+    "request_id": "r1",
+    "type": "start_session",
+    "worktree": {
+      "kind": "new",
+      "name": "fix-login"
+    }
+  }
+}

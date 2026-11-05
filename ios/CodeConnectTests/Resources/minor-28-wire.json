@@ -1,0 +1,131 @@
+{
+  "hello_ack_capabilities": {
+    "answer_path": "hook_return",
+    "can_approve_reliably": true,
+    "capture": true,
+    "codex_compose": true,
+    "codex_interrupt": true,
+    "command_catalog": true,
+    "delete_session": true,
+    "diff": true,
+    "fail_mode": "fail_open",
+    "history_pages": true,
+    "hold_secs": 0,
+    "hook_only_approvals": true,
+    "prompt_identity": true,
+    "push": false,
+    "push_relay": false,
+    "question_card": true,
+    "risk_class": true,
+    "send_text": true,
+    "send_text_idempotent": true,
+    "session_uid": true,
+    "slash_composer_recovery": true,
+    "start_session": true,
+    "terminal_pty": true,
+    "test_push": false,
+    "tls": false,
+    "tls_active": false
+  },
+  "list_projects_request": {
+    "type": "list_projects"
+  },
+  "projects": {
+    "agents": [
+      {
+        "agent": "claude",
+        "available": true
+      },
+      {
+        "agent": "codex",
+        "available": false,
+        "detail": "could not find the codex binary: install Codex"
+      }
+    ],
+    "projects": [
+      {
+        "exists": true,
+        "git_branch": "main",
+        "last_agent": "codex",
+        "last_used": "2026-11-04T09:00:00.000Z",
+        "name": "app",
+        "path": "/tmp/ccd-minor-28/app"
+      },
+      {
+        "exists": true,
+        "last_agent": "claude",
+        "last_used": "2026-11-03T18:30:00.000Z",
+        "name": "notes",
+        "path": "/tmp/ccd-minor-28/notes"
+      },
+      {
+        "exists": false,
+        "last_agent": "claude",
+        "last_used": "2026-10-01T08:00:00.000Z",
+        "name": "gone",
+        "path": "/tmp/ccd-minor-28/gone"
+      }
+    ],
+    "type": "projects"
+  },
+  "start_failed_agent_missing": {
+    "request_id": "r3",
+    "result": {
+      "detail": "could not find the codex binary: install Codex",
+      "reason": "agent_missing",
+      "status": "failed"
+    },
+    "type": "start_session_result"
+  },
+  "start_failed_folder_missing": {
+    "request_id": "r2",
+    "result": {
+      "detail": "/tmp/ccd-minor-28/gone no longer exists",
+      "reason": "folder_missing",
+      "status": "failed"
+    },
+    "type": "start_session_result"
+  },
+  "start_failed_launch_failed": {
+    "request_id": "r4",
+    "result": {
+      "detail": "creating tmux session cc-3",
+      "reason": "launch_failed",
+      "status": "failed"
+    },
+    "type": "start_session_result"
+  },
+  "start_repeat": [
+    {
+      "request_id": "r-repeat",
+      "result": {
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "status": "started"
+      },
+      "type": "start_session_result"
+    },
+    {
+      "request_id": "r-repeat",
+      "result": {
+        "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+        "status": "started"
+      },
+      "type": "start_session_result"
+    }
+  ],
+  "start_session_request": {
+    "agent": "claude",
+    "path": "/tmp/ccd-minor-28/app",
+    "prompt": "fix the \"login\" test; then run it\nand commit;",
+    "request_id": "r1",
+    "type": "start_session"
+  },
+  "start_started": {
+    "request_id": "r1",
+    "result": {
+      "session_uid": "01K1B3XQ8ZC0DE5FGH7JKMNPQR",
+      "status": "started"
+    },
+    "type": "start_session_result"
+  }
+}

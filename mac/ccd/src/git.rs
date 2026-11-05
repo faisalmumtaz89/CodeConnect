@@ -67,6 +67,127 @@ pub async fn collect(
     }
 }
 
+/// The branch checked out in `cwd`; `None` outside a repository, on a detached
+/// head, or when git cannot answer within `timeout`.
+pub async fn branch(cwd: &str, configured_bin: Option<&str>, timeout: Duration) -> Option<String> {
+    let git = git_bin(configured_bin)?;
+    let out = run(
+        &git,
+        cwd,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        timeout,
+        PROBE_CAP,
+    )
+    .await
+    .ok()?;
+    let name = out.stdout.trim();
+    (out.ok && !name.is_empty()).then(|| name.to_string())
+}
+
+/// Ceiling for a listing of worktrees or branch names.
+const LISTING_CAP: usize = 1024 * 1024;
+
+/// One worktree, as `git worktree list --porcelain` names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: String,
+    /// Absent on a detached head.
+    pub branch: Option<String>,
+    /// git still lists it, but its folder is gone.
+    pub prunable: bool,
+}
+
+/// The worktrees of the repository `cwd` is in, the main checkout first; `None`
+/// outside a repository or when git cannot answer.
+pub async fn worktrees(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    timeout: Duration,
+) -> Option<Vec<WorktreeEntry>> {
+    let git = git_bin(configured_bin)?;
+    let out = run(
+        &git,
+        cwd,
+        &["worktree", "list", "--porcelain", "-z"],
+        timeout,
+        LISTING_CAP,
+    )
+    .await
+    .ok()?;
+    (out.ok && !out.stdout_truncated).then(|| parse_worktrees(&out.stdout))
+}
+
+/// `git worktree list --porcelain -z`: one NUL per attribute, an empty one
+/// between worktrees.
+fn parse_worktrees(listing: &str) -> Vec<WorktreeEntry> {
+    let mut entries: Vec<WorktreeEntry> = Vec::new();
+    for field in listing.split('\0') {
+        if let Some(path) = field.strip_prefix("worktree ") {
+            entries.push(WorktreeEntry {
+                path: path.to_string(),
+                branch: None,
+                prunable: false,
+            });
+        } else if let Some(entry) = entries.last_mut() {
+            if let Some(branch) = field.strip_prefix("branch refs/heads/") {
+                entry.branch = Some(branch.to_string());
+            } else if field == "prunable" || field.starts_with("prunable ") {
+                entry.prunable = true;
+            }
+        }
+    }
+    entries
+}
+
+/// The local branches of the repository `cwd` is in, newest commit first.
+pub async fn local_branches(
+    cwd: &str,
+    configured_bin: Option<&str>,
+    timeout: Duration,
+) -> Option<Vec<String>> {
+    let git = git_bin(configured_bin)?;
+    let out = run(
+        &git,
+        cwd,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname)",
+            "refs/heads/",
+        ],
+        timeout,
+        LISTING_CAP,
+    )
+    .await
+    .ok()?;
+    (out.ok && !out.stdout_truncated).then(|| {
+        out.stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("refs/heads/"))
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+/// Whether the worktree at `cwd` has uncommitted changes, untracked files
+/// included. Reading the status never writes the index (`GIT_OPTIONAL_LOCKS=0`)
+/// and runs no fsmonitor hook; a status git cannot give reads as clean.
+pub async fn dirty(cwd: &str, configured_bin: Option<&str>, timeout: Duration) -> bool {
+    let Some(git) = git_bin(configured_bin) else {
+        return false;
+    };
+    // One byte is all the answer needs.
+    run(
+        &git,
+        cwd,
+        &["-c", "core.fsmonitor=false", "status", "--porcelain"],
+        timeout,
+        1,
+    )
+    .await
+    .is_ok_and(|out| out.ok && !out.stdout.is_empty())
+}
+
 async fn collect_inner(
     cwd: &str,
     configured_bin: Option<&str>,
@@ -391,6 +512,35 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **`git worktree list --porcelain -z`, read as git writes it**: the main
+    /// checkout first, a detached head with no branch, a folder git calls
+    /// prunable, and a path with a space and a newline kept whole.
+    #[test]
+    fn a_worktree_listing_reads_as_git_writes_it() {
+        let listing = "worktree /r/app\0HEAD 1111\0branch refs/heads/main\0\0\
+            worktree /r/app/.claude/worktrees/fix+login\0HEAD 2222\0branch refs/heads/worktree-fix+login\0locked\0\0\
+            worktree /r/old\0HEAD 3333\0detached\0prunable gitdir file points to non-existent location\0\0\
+            worktree /r/a b\nc\0HEAD 4444\0branch refs/heads/feature/x\0\0";
+        assert_eq!(
+            parse_worktrees(listing),
+            [
+                ("/r/app", Some("main"), false),
+                (
+                    "/r/app/.claude/worktrees/fix+login",
+                    Some("worktree-fix+login"),
+                    false
+                ),
+                ("/r/old", None, true),
+                ("/r/a b\nc", Some("feature/x"), false),
+            ]
+            .map(|(path, branch, prunable)| WorktreeEntry {
+                path: path.into(),
+                branch: branch.map(str::to_string),
+                prunable,
+            })
+        );
+    }
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);

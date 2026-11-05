@@ -2337,7 +2337,8 @@ async fn terminal_tmux(binary: &Path, socket: &str, argv: &[&str]) -> Result<Str
     let output = tokio::time::timeout(
         Duration::from_secs(1),
         Command::new(binary)
-            .args(["-N", if socket.contains('/') { "-S" } else { "-L" }, socket])
+            .arg("-N")
+            .args(crate::tmux::server_flag(socket))
             .args(argv)
             .stdin(Stdio::null())
             .kill_on_drop(true)

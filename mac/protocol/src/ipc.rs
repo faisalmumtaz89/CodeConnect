@@ -125,6 +125,16 @@ pub enum ClientFrame {
     /// outlive its process and name a pid that now belongs to something else,
     /// and `codeconnect daemon install` uses this answer to send a signal.
     DaemonInfo,
+    /// "May ccd open the folders macOS guards?" — asked by `codeconnect daemon
+    /// folders` while someone is at the Mac. The daemon reads each folder once,
+    /// so a dialog macOS shows names ccd and the answer is kept for ccd; one
+    /// already answered is not asked again. Answered with
+    /// [`DaemonFrame::Folders`] once every dialog has been answered.
+    AskFolderAccess,
+    /// "Has [`ClientFrame::AskFolderAccess`] been answered on this computer?" —
+    /// asked by a start typed at the Mac, which asks the folders once if not.
+    /// Answered with [`DaemonFrame::FolderAccessAsked`].
+    FolderAccessAsked,
     /// One hosted agent's message to another, `to` being the receiving run's
     /// address, `<run uid>@<computer>`.
     /// `from_uid` is the sending run, which the daemon names as the sender.
@@ -311,6 +321,12 @@ pub enum DaemonFrame {
         ssh_key_removed: AlwaysFalse,
     },
     Daemon(DaemonInfo),
+    Folders {
+        folders: Vec<FolderAccess>,
+    },
+    FolderAccessAsked {
+        asked: bool,
+    },
     AgentMessageResult {
         status: MailStatus,
     },
@@ -496,6 +512,26 @@ pub struct PrunedSummary {
     /// Facts deleted along with the run. The number an operator would want
     /// before agreeing to this, which is why `--dry-run` reports it too.
     pub events: u64,
+}
+
+/// What macOS lets ccd do with one of the folders it guards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderAccess {
+    /// The folder's name in the home folder: `Desktop`, `Documents`, `Downloads`.
+    pub folder: String,
+    pub outcome: FolderOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum FolderOutcome {
+    Allowed,
+    /// `error` is the system's words, `Operation not permitted` for a "no".
+    Refused {
+        error: String,
+    },
+    /// There is no such folder; nothing is created.
+    Absent,
 }
 
 /// The daemon's own account of itself.

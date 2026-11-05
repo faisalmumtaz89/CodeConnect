@@ -9,6 +9,11 @@ struct SessionRoute: Hashable {
     let key: String
     /// Set when arriving from the Deck, so the card opens without a second tap.
     var openRequestID: String?
+    /// Set for a session this phone just asked a computer to start: the
+    /// route shows it starting until it is in the fleet.
+    var startRequestID: String?
+    /// Opens with the keyboard up in the composer.
+    var focusComposer = false
 }
 
 /// What the removal question says, and what confirming it does.
@@ -114,6 +119,16 @@ struct FleetView: View {
     /// AX5, which is a third vertical edge — the screen gets exactly two —
     /// arriving by accident at exactly the size they are hardest to hold.
     @ScaledMetric(relativeTo: .footnote) private var gutterDot: CGFloat = CC.size.dot
+    /// Whether the start flow is open, and the start it sent (opened once the
+    /// flow has gone).
+    @State private var startOpen = false
+    @State private var startedRequest: String?
+    /// Every paired computer that can start a session.
+    private var startContexts: [StartContext] {
+        machines.models.filter { $0.connection.capabilities?.startsSessions == true }
+            .map { StartContext(model: $0) }
+    }
+    private var canStart: Bool { !startContexts.isEmpty }
 
     /// Where every line of text on this screen starts: 52 at reading sizes.
     private var textColumn: CGFloat { ContentColumn.text(dot: gutterDot) }
@@ -222,11 +237,48 @@ struct FleetView: View {
                 // SwiftUI would otherwise keep the old chat's view — its draft,
                 // its open sheets, its timeline wiring — under the new key, and
                 // never show it appearing, so the link it came by stays unread.
-                SessionDetailView(route: route)
-                    .environment(owner(route.key))
-                    .id(route.key)
+                if let requestID = route.startRequestID {
+                    StartingSessionView(
+                        requestID: requestID,
+                        onLive: { path = [SessionRoute(key: $0, focusComposer: $1)] },
+                        onChooseAgain: {
+                            path = []
+                            Task {
+                                try? await Task.sleep(for: .milliseconds(450))
+                                openStart()
+                            }
+                        }
+                    )
+                    .environment(
+                        machines.models.first { $0.starter.starts[requestID] != nil } ?? model)
+                } else {
+                    SessionDetailView(route: route)
+                        .environment(owner(route.key))
+                        .id(route.key)
+                }
             }
             .toolbar {
+                if canStart {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            CCHaptic.light.fire()
+                            openStart()
+                        } label: {
+                            HStack(spacing: CC.space.xxs) {
+                                CCIcon("plus", size: 16)
+                                Text("New")
+                                    .ccType(CC.type.body)
+                            }
+                            .foregroundStyle(CC.text.primary)
+                            .fixedSize()
+                            .ccHitTarget()
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("New session")
+                        .accessibilityIdentifier("start-entry")
+                    }
+                    .ccPlainToolbarItem()
+                }
                 ToolbarItem(placement: .principal) {
                     // The same word the scroll header carries, arriving only as
                     // that header leaves. Two titles at once is the bug this
@@ -262,6 +314,11 @@ struct FleetView: View {
                     deckBar(screen)
                 }
             }
+            .sheet(isPresented: $startOpen, onDismiss: openStarted) {
+                StartStepsSheet(contexts: startContexts, onStarted: started, onClose: { startOpen = false })
+                .ccTallSheet()
+            }
+            .onChange(of: startContexts.map(\.id), initial: true) { _, _ in loadStart() }
             // A row that leaves the fleet, or stops being removable, leaves the
             // selection with it; with nothing left to choose, choosing ends. The
             // note about a batch stays: it is what says what was not removed.
@@ -624,6 +681,31 @@ struct FleetView: View {
         }
         .padding(.horizontal, CC.space.md)
         .padding(.bottom, CC.space.sm)
+    }
+
+    // MARK: Start
+
+    private func openStart() {
+        guard canStart else { return }
+        startOpen = true
+    }
+
+    /// A flow sent a start: close it, and open the new session as it goes.
+    private func started(_ requestID: String) {
+        startedRequest = requestID
+        startOpen = false
+    }
+
+    private func openStarted() {
+        guard let id = startedRequest else { return }
+        startedRequest = nil
+        path = [SessionRoute(key: "start-\(id)", startRequestID: id)]
+    }
+
+    /// Ask every computer for its projects. The computer is chosen in the
+    /// flow, by a tap, and held there.
+    private func loadStart() {
+        for context in startContexts { context.load() }
     }
 
     // MARK: Bands

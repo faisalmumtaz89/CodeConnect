@@ -450,10 +450,14 @@ final class Machines {
                 DaemonEndpoint(host: "100.64.0.2", port: 8787, credential: .token("fixture"), useTLS: false),
                 id: id)
             store.noteMachine(name: name, os: "linux", daemonID: nil, id: id)
-            models.append(
-                AppModel(
-                    machineID: id, pairing: store, cache: cache, settings: settings,
-                    relayEnrollment: relayEnrollment, codexSpentLedger: codexSpentLedger))
+            let second = AppModel(
+                machineID: id, pairing: store, cache: cache, settings: settings,
+                relayEnrollment: relayEnrollment, codexSpentLedger: codexSpentLedger)
+            models.append(second)
+            // `-CC_FIXTURE_SECOND_LIVE` puts it online with its own fleet.
+            if UserDefaults.standard.bool(forKey: "CC_FIXTURE_SECOND_LIVE") {
+                second.applySecondMachineFixtures()
+            }
         }
     #endif
 }

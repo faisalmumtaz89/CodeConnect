@@ -134,6 +134,16 @@ pub struct Store {
     next_reader: std::sync::atomic::AtomicUsize,
 }
 
+/// A folder sessions have started in, from the `projects` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRow {
+    pub path: String,
+    /// The newest start there.
+    pub last_used: String,
+    /// The agent of that start.
+    pub last_agent: AgentKind,
+}
+
 /// A session as persisted. Presentation-level fields (`link`, `blocked_on`) live
 /// in memory because they describe the daemon's current observation, not a fact
 /// about the past.
@@ -1122,6 +1132,16 @@ impl Store {
                  going through a sessions row"
             );
         }
+        // Every start, not once: a run filed by a build without the projects
+        // table, before an upgrade or after a rollback, is folded in here. It
+        // follows `add_missing_columns` because it reads `agent`.
+        tx.execute(
+            &format!(
+                "{RECORD_PROJECTS} SELECT cwd, created_at, agent FROM all_sessions
+                  WHERE true {RECORD_PROJECTS_NEWEST}"
+            ),
+            [],
+        )?;
         tx.commit()?;
         // Ordered after `create_schema` so a database that never had these
         // tables gets them in the current shape and finds nothing to do here.
@@ -2076,6 +2096,12 @@ impl Store {
                 codex_generation,
             ],
         )?;
+        if changed > 0 {
+            tx.execute(
+                &format!("{RECORD_PROJECTS} VALUES (?1, ?2, ?3) {RECORD_PROJECTS_NEWEST}"),
+                params![row.cwd, row.created_at, row.agent.as_str()],
+            )?;
+        }
         tx.commit()?;
         // `INSERT ... SELECT ... WHERE NOT EXISTS` writes zero rows exactly when
         // the tombstone matched; `ON CONFLICT` paths always write one.
@@ -2205,6 +2231,28 @@ impl Store {
             )
             .optional()?;
         Ok(row)
+    }
+
+    /// The folders sessions have started in, most recent first, at most
+    /// [`MAX_PROJECTS`].
+    pub fn projects(&self) -> Result<Vec<ProjectRow>> {
+        let conn = self.read();
+        let mut stmt = conn.prepare(
+            "SELECT path, last_used, last_agent FROM projects
+              WHERE path != ''
+              ORDER BY last_used DESC, path
+              LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![MAX_PROJECTS], |row| {
+                Ok(ProjectRow {
+                    path: row.get(0)?,
+                    last_used: row.get(1)?,
+                    last_agent: AgentKind::from_str_lossy(&row.get::<_, String>(2)?),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// The whole fleet, both agents, oldest first.
@@ -5445,6 +5493,15 @@ codex_pending_approvals; refusing to file one in the shared pending_approvals ta
             deleted_at TEXT NOT NULL
         );
 
+        -- Every folder a session has started in, with its newest start: the
+        -- phone's project list. Its own table because session rows go when a
+        -- run is removed or pruned, and the folder must not go with them.
+        CREATE TABLE IF NOT EXISTS projects(
+            path       TEXT PRIMARY KEY,
+            last_used  TEXT NOT NULL,
+            last_agent TEXT NOT NULL
+        );
+
         -- Pairing codes are stored hashed. The code is a bearer capability
         -- for five minutes; a database file or a backup that leaked one in
         -- the clear would hand over that capability, and hashing costs
@@ -5853,6 +5910,16 @@ fn move_codex_pending_approvals(tx: &Connection) -> Result<usize> {
     }
     Ok(removed)
 }
+
+/// The most folders [`Store::projects`] returns.
+const MAX_PROJECTS: u32 = 200;
+
+/// Files `(path, last_used, last_agent)` rows into `projects`, each row followed
+/// by [`RECORD_PROJECTS_NEWEST`]: a folder keeps the newest start it has seen.
+const RECORD_PROJECTS: &str = "INSERT INTO projects(path, last_used, last_agent)";
+const RECORD_PROJECTS_NEWEST: &str = "ON CONFLICT(path) DO UPDATE SET
+    last_used = excluded.last_used, last_agent = excluded.last_agent
+    WHERE excluded.last_used > projects.last_used";
 
 /// Columns added to an existing table after the fact.
 ///
@@ -7456,6 +7523,97 @@ mod tests {
             codex_thread_id: None,
             codex_socket: None,
         }
+    }
+
+    /// **A folder stays on the project list after its runs are removed and the
+    /// daemon restarts**, it covers both agents' tables, keeps the newest start,
+    /// and a run filed by a build without the table is folded in on open.
+    #[test]
+    fn projects_outlive_their_sessions_and_a_restart() {
+        let (store, path) = temp_store();
+        let file = |cwd: &str, at: &str, agent: AgentKind, lifecycle: Lifecycle| {
+            let session = SessionKey::new(protocol::uid::new().unwrap(), "cc-1");
+            let mut row = session_row(&session);
+            row.cwd = cwd.into();
+            row.created_at = at.into();
+            row.agent = agent;
+            row.lifecycle = lifecycle;
+            assert!(matches!(
+                store.upsert_session(&row).unwrap(),
+                SessionUpsert::Present
+            ));
+            session.uid
+        };
+        let old = file(
+            "/w/app",
+            "2026-11-01T00:00:00.000Z",
+            AgentKind::Claude,
+            Lifecycle::Exited,
+        );
+        file(
+            "/w/api",
+            "2026-11-02T00:00:00.000Z",
+            AgentKind::Codex,
+            Lifecycle::Live,
+        );
+        file(
+            "/w/app",
+            "2026-11-03T00:00:00.000Z",
+            AgentKind::Codex,
+            Lifecycle::Live,
+        );
+        // An older start written later must not move the folder back in time.
+        file(
+            "/w/app",
+            "2026-10-01T00:00:00.000Z",
+            AgentKind::Claude,
+            Lifecycle::Live,
+        );
+        file(
+            "",
+            "2026-11-04T00:00:00.000Z",
+            AgentKind::Claude,
+            Lifecycle::Live,
+        );
+
+        let expected = vec![
+            ProjectRow {
+                path: "/w/app".into(),
+                last_used: "2026-11-03T00:00:00.000Z".into(),
+                last_agent: AgentKind::Codex,
+            },
+            ProjectRow {
+                path: "/w/api".into(),
+                last_used: "2026-11-02T00:00:00.000Z".into(),
+                last_agent: AgentKind::Codex,
+            },
+        ];
+        assert_eq!(store.projects().unwrap(), expected);
+
+        assert!(matches!(
+            store.delete_exited_session(&old).unwrap(),
+            DeleteOutcome::Deleted { .. }
+        ));
+        drop(store);
+        // A build without the table filed this run.
+        let raw = Connection::open(&path).unwrap();
+        raw.execute(
+            "INSERT INTO sessions(session_uid, session_id, tmux_session, tmux_socket, cwd,
+                                  lifecycle, created_at, updated_at, agent)
+             VALUES (?1, 'cc-9', 'cc-9', 'codeconnect', '/w/new', 'live', ?2, ?2, 'claude')",
+            params![protocol::uid::new().unwrap(), "2026-11-05T00:00:00.000Z"],
+        )
+        .unwrap();
+        drop(raw);
+
+        let store = Store::open(&path).unwrap();
+        let paths: Vec<String> = store
+            .projects()
+            .unwrap()
+            .into_iter()
+            .map(|project| project.path)
+            .collect();
+        assert_eq!(paths, ["/w/new", "/w/app", "/w/api"]);
     }
 
     /// **The link's thread survives a daemon restart, and a relaunch clears it.**

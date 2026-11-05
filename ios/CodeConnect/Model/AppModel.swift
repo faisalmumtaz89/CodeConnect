@@ -166,6 +166,10 @@ final class AppModel {
     /// The Mac's list of runs, as it last said. The truth: what is on screen is
     /// `shownSummaries`.
     private(set) var summaries: [SessionSummary] = []
+    #if DEBUG
+        /// Folders made on the fixture computer, by parent.
+        private var madeFolders: [String: [String]] = [:]
+    #endif
     /// Per-run state, keyed by `SessionSummary.sessionKey` — the `session_uid`
     /// where the daemon mints them, the tmux name on an older one. Never by the
     /// display name on a uid-capable daemon: `cc-1` is handed to the next
@@ -856,6 +860,41 @@ final class AppModel {
             keepFixtureLinkFresh()
         }
 
+        /// Test seam: the second fixture machine online, with its own
+        /// sessions and projects, so a start can choose between two computers.
+        func applySecondMachineFixtures() {
+            fixturesActive = true
+            connection.fixtureAnswers = true
+            connection.simulateConnectedForTesting()
+            for message in Fixtures.secondMachineFrames() { connection.injectForTesting(message) }
+            keepFixtureLinkFresh()
+        }
+
+        /// The fixture answer to `start_session`. `-CC_START_OUTCOME` names a
+        /// failure to end in, or `pending` to stay starting; otherwise the start
+        /// succeeds and the new session arrives as a real one does: listed,
+        /// then its first events.
+        func answerFixtureStart(_ requestID: String) {
+            guard let start = starter.starts[requestID] else { return }
+            let wanted = UserDefaults.standard.string(forKey: "CC_START_OUTCOME")
+            if wanted == "pending" { return }
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(wanted == nil ? 1500 : 600))
+                guard let self else { return }
+                if let wanted, let reason = StartFailure(rawValue: wanted) {
+                    self.starter.resolve(
+                        requestID, .failed(reason, detail: Fixtures.startFailureDetail(reason, start)))
+                    return
+                }
+                let uid = "01K1START" + String(requestID.prefix(8)).uppercased()
+                self.starter.resolve(requestID, .started(sessionUID: uid))
+                try? await Task.sleep(for: .milliseconds(400))
+                for message in Fixtures.startedSessionFrames(start, uid: uid, listed: self.summaries) {
+                    self.connection.injectForTesting(message)
+                }
+            }
+        }
+
         /// Link health is measured from when a frame last *arrived*, so a
         /// fixture run needs frames to keep arriving or the link correctly goes
         /// stale mid-render and disables every action.
@@ -1108,6 +1147,117 @@ final class AppModel {
     /// migrates, and nothing reaches the cache — so no part of it can be
     /// mistaken for, or written over, a real Mac's.
     private(set) var fixturesActive = false
+
+    /// This computer's projects, and the sessions this phone started on it.
+    let starter = SessionStarter()
+
+    /// Ask this computer for its projects. Only a computer that advertises
+    /// `start_session` is asked; the answer arrives as `projects`.
+    func listProjects() {
+        #if DEBUG
+            if fixturesActive {
+                if starter.projects == nil { starter.listFixtureProjects(linux: machineSystem == "Linux") }
+                return
+            }
+        #endif
+        guard connection.capabilities?.startsSessions == true else { return }
+        Task { try? await connection.send(.listProjects) }
+    }
+
+    /// The folders this computer's live sessions run in, so a start can say
+    /// it would share one (minor 29 has no such fact of its own).
+    var liveFolders: Set<String> { Set(summaries.filter { $0.lifecycle == .live }.map(\.cwd)) }
+
+    /// Ask this computer about one folder's repository: its checkouts and
+    /// free branches (`get_project_git`, minor 29). Only a computer that
+    /// advertises `start_worktree` is asked; the answer arrives as
+    /// `project_git`.
+    func projectGit(_ path: String) {
+        #if DEBUG
+            if fixturesActive {
+                starter.receive(git: SessionStarter.fixtureGit(path, projects: starter.projects ?? []), for: path)
+                return
+            }
+        #endif
+        // Asked while a redial has no capabilities yet: the next handshake
+        // asks again. Only a computer that says it cannot is never asked.
+        guard connection.capabilities?.startsInWorktrees != false else { return }
+        starter.askedGit(path)
+        Task { try? await connection.send(.getProjectGit(path: path)) }
+    }
+
+    /// Ask this computer for one folder's subfolders (`list_folder`, minor 30),
+    /// under a fresh request id: only the answer to the latest ask is shown.
+    func listFolder(_ request: StartFolderRequest) {
+        #if DEBUG
+            if fixturesActive {
+                starter.receive(
+                    SessionStarter.fixtureListing(request, projects: starter.projects ?? [], made: madeFolders),
+                    for: request)
+                return
+            }
+        #endif
+        // As with git: asked during a redial, asked again after it.
+        guard connection.capabilities?.browsesFolders != false else { return }
+        let requestID = UUID().uuidString.lowercased()
+        starter.ask(request, as: requestID)
+        Task {
+            try? await connection.send(
+                .listFolder(requestID: requestID, path: request.path, showHidden: request.showHidden))
+        }
+    }
+
+    /// Make a folder, as `mkdir` would (`create_folder`, minor 30); the answer
+    /// arrives as `create_folder_result` under the returned request id. Never
+    /// sent again after a reconnect: a repeat is a second `mkdir`.
+    func createFolder(named name: String, in parent: String) -> String {
+        let requestID = UUID().uuidString.lowercased()
+        #if DEBUG
+            if fixturesActive {
+                let listed = SessionStarter.fixtureFolders(projects: starter.projects ?? [])[parent] ?? []
+                let refusal: String? =
+                    name.contains("/")
+                    ? "\"\(name)\" is not a single folder name"
+                    : ([".", "..", ""] + listed + (madeFolders[parent] ?? [])).contains(name) ? "File exists" : nil
+                if refusal == nil { madeFolders[parent, default: []].append(name) }
+                starter.resolveCreate(requestID, refusal: refusal)
+                return requestID
+            }
+        #endif
+        guard connection.capabilities?.browsesFolders == true else { return requestID }
+        Task { try? await connection.send(.createFolder(requestID: requestID, parent: parent, name: name)) }
+        return requestID
+    }
+
+    /// Start an agent in one of this computer's projects; the answer arrives as
+    /// `start_session_result` under the returned request id.
+    func startSession(
+        _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, prompt: String
+    ) -> String {
+        let requestID = starter.start(
+            project: project, place: place, agent: agent, prompt: prompt,
+            machineName: machineName ?? "this computer")
+        #if DEBUG
+            if fixturesActive {
+                answerFixtureStart(requestID)
+                return requestID
+            }
+        #endif
+        sendStart(requestID)
+        return requestID
+    }
+
+    /// One send of one start. A send that fails, or a link that drops before
+    /// the answer, is sent again by the next handshake under the same id.
+    private func sendStart(_ requestID: String) {
+        guard let start = starter.starts[requestID], start.outcome == nil else { return }
+        Task {
+            try? await connection.send(
+                .startSession(
+                    requestID: requestID, path: start.project.path, agent: start.agent.rawValue,
+                    prompt: start.prompt, worktree: start.place))
+        }
+    }
 
     /// True while the sample fleet is on screen.
     ///
@@ -1874,6 +2024,19 @@ final class AppModel {
         case .testPushResult:
             // Same shape: the sheet's own request awaits the reply by id.
             break
+        case .projects(let projects, let agents):
+            starter.receive(projects: projects, agents: agents)
+        case .projectGit(let path, let git):
+            starter.receive(git: git, for: path)
+        case .folderListing(let requestID, let listing):
+            starter.receive(listing, answering: requestID)
+        case .createFolderResult(let requestID, let refusal):
+            starter.resolveCreate(requestID, refusal: refusal)
+        case .startSessionResult(let requestID, let outcome):
+            starter.resolve(requestID, outcome)
+            // The new session reaches the fleet on its own; asking now shortens
+            // the Starting… it waits behind.
+            if case .started = outcome { refreshFleet() }
         case .terminalAttached, .terminalOutput, .terminalCredit, .terminalClosed:
             // The terminal is a byte stream with its own flow control, delivered
             // to `TerminalCarrier` on `connection.onTerminal`. Nothing here may
@@ -1992,6 +2155,18 @@ final class AppModel {
                     ack.capabilities.tls && endpoint?.hostIsIPLiteral == true, id: machineID)
             }
             startCacheMigration()
+            // A start whose answer the link lost is asked again, unchanged: the
+            // daemon answers a repeated request id with its first outcome.
+            if ack.capabilities.startsSessions {
+                for start in starter.unanswered { sendStart(start.requestID) }
+            }
+            // A listing or a repository the link lost is asked for again.
+            if ack.capabilities.browsesFolders {
+                for request in starter.unansweredListings { listFolder(request) }
+            }
+            if ack.capabilities.startsInWorktrees {
+                for path in starter.gitAsked { projectGit(path) }
+            }
             // Last: it may find this model is another's machine, and leave it.
             onIdentified?()
         case .interruptResult, .composeResult:
