@@ -206,6 +206,8 @@ Every catalogued screen, at **`L` and AX5**, into
 `ios/.artifacts/ui-renders/<timestamp>/{L,ax5}/<scenario>.png` with a
 `report.txt` beside them. Gitignored; CI uploads them. `--size L` or `--size ax5`
 renders one; `--keep-simulator` leaves the throwaway device behind for poking at.
+The status bar is pinned (9:41, full battery, full signal), so two passes draw
+the same status bar over an unchanged screen.
 
 It is an **inspection instrument, not an assertion test**. It makes no pixel
 assertions. It reaches a state, proves the process is at the size the pass

@@ -113,6 +113,10 @@ trap cleanup EXIT
 
 xcrun simctl boot "$SIM_ID" >/dev/null 2>&1 || true
 xcrun simctl bootstatus "$SIM_ID" -b >/dev/null
+# A fixed status bar: the clock otherwise shows the moment of capture, and no
+# two passes of the same screen would match.
+xcrun simctl status_bar "$SIM_ID" override --time 9:41 --batteryState charged \
+    --batteryLevel 100 --wifiBars 3 --cellularBars 4
 
 say "CodeConnect render pass $STAMP"
 say "  device    $DEVICE_TYPE ($SIM_ID)"
