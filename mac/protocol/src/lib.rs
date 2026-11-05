@@ -24,6 +24,7 @@ pub mod composite_id;
 pub mod config;
 pub mod event;
 pub mod facts;
+pub mod fdlimit;
 pub mod fsperm;
 pub mod hash;
 pub mod hook;

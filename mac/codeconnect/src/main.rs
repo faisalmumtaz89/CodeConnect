@@ -48,6 +48,10 @@ use anyhow::{bail, Context, Result};
 use protocol::config::Config;
 
 fn main() -> Result<()> {
+    // First, so the tmux server this launch may fork, and every pane under it,
+    // inherits the raised limit. Best effort: a launch at the old limit still
+    // works, it only holds fewer sessions.
+    let _ = protocol::fdlimit::raise();
     // Hidden: the pane-command prefix that gives an agent the caller's
     // environment. Dispatched before the UTF-8 argument read below, because the
     // pane command it execs carries the caller's raw bytes. Machinery.

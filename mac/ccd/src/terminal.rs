@@ -74,10 +74,10 @@ use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 
 /// The most terminals that may be open at once, across every connection.
 ///
-/// Each attachment costs a child process and its two pipes. The daemon's
-/// descriptor budget already earmarks 64 WebSocket + 128 IPC sockets under
-/// macOS's 256 soft limit, so this is deliberately small; the bound is
-/// confirmed against a measured descriptor delta in the tests.
+/// Each attachment costs a child process and its two pipes, outside both
+/// connection caps; the daemon's own descriptor overhead counts them, so this
+/// is deliberately small. The bound is confirmed against a measured descriptor
+/// delta in the tests.
 pub const MAX_TERMINAL_ATTACHMENTS: usize = 8;
 
 /// The most pane bytes one `send-keys` command may carry. Each byte is one
