@@ -76,17 +76,20 @@ extension RenderCatalog {
         let element = app.descendants(matching: .any)[id].firstMatch
         let list = try driver.requireExists(app.descendants(matching: .any)["start-list"].firstMatch, "the list")
         func clear() -> Bool {
-            guard element.exists, element.isHittable, element.frame.minY >= list.frame.minY else { return false }
+            guard element.exists, element.isHittable, element.frame.minY >= list.frame.minY - 1 else { return false }
             let bar = ["start-go", "start-browse", "start-use-folder", "start-continue"]
                 .map { app.buttons[$0] }.filter(\.exists).map(\.frame.minY).min()
             return element.frame.maxY <= (bar ?? list.frame.maxY)
         }
         for _ in 0..<90 where !clear() {
             // Back down when the row has passed above the window; steps short
-            // enough that a row in a two-row window is never jumped over.
-            let above = element.exists && element.frame.minY < list.frame.minY
+            // enough that a row in a two-row window is never jumped over, slow
+            // and held at the end so the list carries no momentum past them.
+            let above = element.exists && element.frame.minY < list.frame.minY - 1
             let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
-            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: above ? 40 : -40)))
+            start.press(
+                forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: above ? 40 : -40)),
+                withVelocity: .slow, thenHoldForDuration: 0.3)
         }
         // A render must show what it is named for, not the nearest screen.
         guard clear() else { throw RenderFailure.unreachable("\(id), whole above the bar") }
