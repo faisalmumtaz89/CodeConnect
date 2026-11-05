@@ -66,12 +66,16 @@ extension RenderCatalog {
 
     // MARK: The steps
 
+    /// A tap target's height: the part of a row a step needs in the window.
+    private static let hitTarget: CGFloat = 44
+
     /// Scroll a step's list until the element sits whole above the pinned
-    /// bar, in short drags: at AX5 the list's window is a row or two, and a
-    /// long drag carries a row past it between two looks.
+    /// bar, or for a tap only its top `hitTarget`, in short drags: at AX5 the
+    /// list's window is a row or two, and a long drag carries a row past it
+    /// between two looks.
     @discardableResult
-    private static func reveal(_ app: XCUIApplication, _ id: String, _ driver: RenderDriver) throws
-        -> XCUIElement
+    private static func reveal(_ app: XCUIApplication, _ id: String, _ driver: RenderDriver, whole: Bool = true)
+        throws -> XCUIElement
     {
         let element = app.descendants(matching: .any)[id].firstMatch
         let list = try driver.requireExists(app.descendants(matching: .any)["start-list"].firstMatch, "the list")
@@ -79,9 +83,10 @@ extension RenderCatalog {
             guard element.exists, element.isHittable, element.frame.minY >= list.frame.minY - 1 else { return false }
             let bar = ["start-go", "start-browse", "start-use-folder", "start-continue"]
                 .map { app.buttons[$0] }.filter(\.exists).map(\.frame.minY).min()
-            return element.frame.maxY <= (bar ?? list.frame.maxY)
+            return (whole ? element.frame.maxY : element.frame.minY + hitTarget) <= (bar ?? list.frame.maxY)
         }
-        for _ in 0..<90 where !clear() {
+        for _ in 0..<90 {
+            if clear() { break }
             // Back down when the row has passed above the window; steps short
             // enough that a row in a two-row window is never jumped over, slow
             // and held at the end so the list carries no momentum past them.
@@ -92,12 +97,16 @@ extension RenderCatalog {
                 withVelocity: .slow, thenHoldForDuration: 0.3)
         }
         // A render must show what it is named for, not the nearest screen.
-        guard clear() else { throw RenderFailure.unreachable("\(id), whole above the bar") }
+        guard clear() else { throw RenderFailure.unreachable("\(id), \(whole ? "whole" : "its top") above the bar") }
         return element
     }
 
+    /// Tap a row by its top: at AX5 on the smallest phone a row can be as
+    /// tall as the list's window, and its middle under the bar.
     private static func step(_ app: XCUIApplication, _ id: String, _ driver: RenderDriver) throws {
-        try reveal(app, id, driver).tap()
+        let element = try reveal(app, id, driver, whole: false)
+        element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0))
+            .withOffset(CGVector(dx: 0, dy: min(hitTarget, element.frame.height) / 2)).tap()
     }
 
     /// New session, then the first computer.
@@ -197,7 +206,7 @@ extension RenderCatalog {
             app, driver in
             try toBrowse(app, driver)
             try step(app, "start-folder-code", driver)
-            try reveal(app, "start-folder-query-parser", driver)
+            try reveal(app, "start-folder-sdk-swift", driver)
         },
         RenderScenario(name: "start2-b6-new-folder", purpose: "steps: naming a new folder", arguments: args()) {
             app, driver in
