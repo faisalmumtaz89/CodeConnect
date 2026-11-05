@@ -72,6 +72,16 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    // Before anything is opened, and so before any child: every socket a
+    // session holds draws on this limit, and the tmux server ccd starts for a
+    // phone start inherits it.
+    match protocol::fdlimit::raise() {
+        Ok((before, after)) if after > before => {
+            crate::log_info!("file limit raised from {before} to {after}")
+        }
+        Ok((before, _)) => crate::log_info!("file limit {before}"),
+        Err(err) => crate::log_warn!("file limit not raised: {err}"),
+    }
 
     let root = protocol::root_dir();
     // Before anything is opened or written. The database, the token and the

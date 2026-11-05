@@ -3,6 +3,17 @@
 User-facing changes, newest first. Mac releases are cut per
 [`RELEASING.md`](RELEASING.md); the iPhone app ships on its own App Store track.
 
+## Many more sessions on one computer
+
+- One computer was limited to 128 connections to CodeConnect, and an idle Claude session holds two
+  (its supervisor and its mail waiter), so about 64 Claude sessions. Past that, a new session never
+  appeared in the fleet, and a start from the phone failed after 80 seconds. The limit is now 4,096
+  connections, about two thousand sessions. On a Mac the system's 511 terminals come first: about
+  500 sessions started from the phone, or about 250 typed in a terminal, which takes two.
+- CodeConnect and its daemon raise their open-file limit as they start, from macOS's 256 to 10,240,
+  so the daemon and the tmux server holding the sessions both have room. A tmux server already
+  running keeps its old limit until it next starts.
+
 ## Start a session from the phone
 
 - From the iPhone, start Claude Code or Codex on a paired computer, in a folder a session has run

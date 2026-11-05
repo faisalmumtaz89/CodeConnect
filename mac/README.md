@@ -1343,7 +1343,7 @@ that is not valid JSON, whose every setting falls back to its default.
 | `log_rotate_secs` | `300` | How often the cap is checked. |
 | `ws_max_connections` | `64` | Live tailnet WebSocket connections. See [Bounds](#bounds). |
 | `ws_max_per_peer` | `32` | How many of those one remote address may hold. |
-| `ipc_max_connections` | `128` | Live connections on the local unix socket. |
+| `ipc_max_connections` | `4096` | Live connections on the local unix socket. |
 | `ipc_write_queue` | `1024` | Frames one IPC connection may have queued for writing before the read loop feels backpressure. |
 | `pairing_max_attempts` | `20` | Failed pairing attempts allowed per window. `0` disables the limiter. |
 | `pairing_window_secs` | `300` | The window those attempts are counted over. |
@@ -1412,15 +1412,27 @@ long commit must still fire on time. Against the old code it fired 548ms late.
 Everything that accepts work from outside has a ceiling, and the ceilings are
 derived from one shared resource rather than chosen individually.
 
-**File descriptors.** macOS gives a launchd job a soft `RLIMIT_NOFILE` of 256.
-The daemon needs roughly 20 for itself — five SQLite connections plus their WAL
-and SHM handles, the listeners, the log files, the FSEvents watcher — so about
-230 are left to divide. `ws_max_connections` (64) and `ipc_max_connections`
-(128) total 192 and leave headroom. The split is deliberately lopsided: the
-local socket carries every hook and every supervisor, and a hook that cannot
-reach the daemon is an agent that stops being observable, so the *remote* side
-gets the smaller share. A test asserts the arithmetic, so raising one of these
-is a decision rather than an accident.
+**File descriptors.** macOS gives a launchd job a soft `RLIMIT_NOFILE` of 256
+under an unlimited hard limit, and a soft limit is a fleet size: every live
+session holds a socket to ccd for its supervisor, a Claude session one more for
+its mail waiter while it waits for you, and the tmux server one per pane. So ccd
+raises its soft limit to 10,240 (macOS's `OPEN_MAX`, or the hard limit if lower)
+before it opens anything, and `codeconnect` does the same as it starts, so the
+tmux server a launch forks, typed or from the phone, and every pane under it,
+inherit it. ccd logs the limit it got. On Linux a systemd user service and an
+ssh login both allow far more than 10,240.
+
+The daemon needs a few dozen descriptors for itself — five SQLite connections
+plus their WAL and SHM handles, the listeners, the log files, the FSEvents
+watcher, the pipes of up to eight terminal attachments. `ws_max_connections`
+(64, on each of the tailnet and loopback listeners) and `ipc_max_connections`
+(4,096, about two thousand sessions) fit inside the raised limit with room to
+spare. The split is deliberately lopsided: the local socket carries every hook
+and every supervisor, and a hook that cannot reach the daemon is an agent that
+stops being observable, so the *remote* side gets the smaller share. A test
+asserts the arithmetic, so raising one of these is a decision rather than an
+accident. Where the limit cannot be raised, a connection past it fails to be
+accepted and the accept loop backs off and tries again.
 
 **Per peer.** The global cap alone would let one misbehaving client refuse every
 other device, so no single remote address may hold more than `ws_max_per_peer`.
@@ -1533,12 +1545,15 @@ fails the suite instead of failing silently in production.
   degrades to the behaviour before risk classes existed — the full command on an
   ordinary card. The boundary is pinned by a test so moving it is a visible
   decision.
-* **The descriptor budget is assumed, not measured.** [Bounds](#bounds) derives
-  the connection caps from macOS's default soft `RLIMIT_NOFILE` of 256 for a
-  launchd job. Nothing reads the actual limit at startup, so a plist that raised
-  or lowered it would leave the caps conservative or optimistic; the arithmetic
-  is pinned by a test, but the 256 in it is a constant rather than an
-  observation.
+* **The connection caps assume the raised file limit.** [Bounds](#bounds) sizes
+  them for the 10,240 descriptors ccd raises itself to. Where the hard limit is
+  lower — an administrator's `LimitNOFILE`, a systemd older than 240 (hard
+  4,096), a container — the caps are not lowered to match: past the real limit
+  `accept` fails for want of a descriptor, and the accept loop backs off.
+  A tmux server keeps the limit it started with, so one started before this
+  release, or by hand outside CodeConnect, holds its old ceiling until it next
+  starts. And whatever the limits, a Mac has `kern.tty.ptmx_max` (511)
+  pseudo-terminals: a typed session takes two and a phone start one.
 * **The migration cannot un-splice history that was already spliced.** Facts
   recorded before session uids existed are keyed by name, so a name that held
   two runs becomes *one* migrated run — the log never recorded where one stopped

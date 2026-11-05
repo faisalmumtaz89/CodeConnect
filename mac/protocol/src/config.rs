@@ -95,7 +95,7 @@ fn default_ws_max_per_peer() -> usize {
     32
 }
 fn default_ipc_max_connections() -> usize {
-    128
+    4_096
 }
 fn default_ipc_write_queue() -> usize {
     1_024
@@ -423,14 +423,16 @@ pub struct Config {
     /// budget open — and the *local* IPC socket, which carries the hook path and
     /// every supervisor link, lives on that same budget.
     ///
-    /// The numbers come from that budget rather than from taste. macOS gives a
-    /// launchd job a soft `RLIMIT_NOFILE` of 256. The daemon needs roughly 20
-    /// for itself (five SQLite connections plus their WAL and SHM handles, two
-    /// or three listeners, the log files, the FSEvents watcher), which leaves
-    /// about 230 to divide. `64` here and `128` for IPC totals 192 and keeps
-    /// headroom, where a larger WebSocket cap would let a remote peer squeeze
-    /// out the hooks — and a hook that cannot reach the daemon is an agent that
-    /// stops being observable.
+    /// The numbers come from that budget rather than from taste. ccd raises its
+    /// soft `RLIMIT_NOFILE` to [`crate::fdlimit::TARGET`] as it starts, where
+    /// launchd hands it 256. The daemon needs a few dozen for itself (five
+    /// SQLite connections plus their WAL and SHM handles, the listeners, the log
+    /// files, the FSEvents watcher, the pipes of up to eight terminal
+    /// attachments), and the rest is the local IPC socket's. `64` here, on each
+    /// of the tailnet and loopback listeners, keeps the network side a small
+    /// share, where a larger WebSocket cap would let a remote peer squeeze out
+    /// the hooks — and a hook that cannot reach the daemon is an agent that stops
+    /// being observable.
     #[serde(default = "default_ws_max_connections")]
     pub ws_max_connections: usize,
     /// How many of those one peer address may hold.
@@ -456,6 +458,12 @@ pub struct Config {
     /// must never starve: every `cc` invocation, every hook and every supervisor
     /// is one of these. The socket is `0600`, so reaching it already means being
     /// the owner of this account — this bounds a runaway, not an attacker.
+    ///
+    /// It is also the fleet size. Every live session holds one for its
+    /// supervisor, and a Claude session one more for its mail waiter while it
+    /// waits for you, so `4096` admits about two thousand sessions on one
+    /// computer, inside the raised file limit, while a runaway still holds a
+    /// small fraction of the machine's open files.
     #[serde(default = "default_ipc_max_connections")]
     pub ipc_max_connections: usize,
     /// Frames one IPC connection may have queued for writing.
@@ -736,14 +744,15 @@ mod tests {
         );
     }
 
-    /// macOS's soft `RLIMIT_NOFILE` for a launchd job.
-    const LAUNCHD_NOFILE: usize = 256;
+    /// The WebSocket listeners, each with its own `ws_max_connections`: the
+    /// tailnet address and loopback.
+    const WS_LISTENERS: usize = 2;
     /// Descriptors the daemon needs for itself: five SQLite connections plus
-    /// their WAL and SHM handles, two or three listeners, the log files, the
-    /// FSEvents watcher. Rounded up generously — being wrong in this direction
-    /// costs a refused connection, and being wrong in the other costs the hook
-    /// path.
-    const DAEMON_OVERHEAD: usize = 32;
+    /// their WAL and SHM handles, the listeners, the log files, the FSEvents
+    /// watcher, and two pipes for each of up to eight terminal attachments.
+    /// Rounded up generously — being wrong in this direction costs a refused
+    /// connection, and being wrong in the other costs the hook path.
+    const DAEMON_OVERHEAD: usize = 64;
 
     #[test]
     fn the_connection_caps_fit_inside_the_descriptor_budget() {
@@ -755,11 +764,13 @@ mod tests {
         // them a bound, written down so raising one is a decision rather than
         // an accident.
         let config = Config::default();
-        let total = config.ws_max_connections + config.ipc_max_connections + DAEMON_OVERHEAD;
+        let budget = crate::fdlimit::TARGET as usize;
+        let total =
+            WS_LISTENERS * config.ws_max_connections + config.ipc_max_connections + DAEMON_OVERHEAD;
         assert!(
-            total <= LAUNCHD_NOFILE,
-            "ws {} + ipc {} + {DAEMON_OVERHEAD} overhead = {total}, past the {LAUNCHD_NOFILE} \
-             descriptors launchd gives us",
+            total <= budget,
+            "{WS_LISTENERS} × ws {} + ipc {} + {DAEMON_OVERHEAD} overhead = {total}, past the \
+             {budget} descriptors ccd raises its limit to",
             config.ws_max_connections,
             config.ipc_max_connections,
         );
