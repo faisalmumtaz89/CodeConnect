@@ -290,6 +290,22 @@ final class StartFlowWireTests: XCTestCase {
             "the repository is read once the link is back")
     }
 
+    /// A redial does not say the computer cannot read repositories: its
+    /// capabilities are unknown until the handshake, so the branch step still
+    /// follows an agent. A computer that says it cannot is believed.
+    func testARedialDoesNotSkipTheBranchStep() throws {
+        let (model, _) = try model()
+        XCTAssertTrue(StartContext(model: model).asksGit)
+        model.connection.stop()
+        XCTAssertTrue(StartContext(model: model).asksGit, "a redial is not a no")
+        var older = try XCTUnwrap(try wire(30)["hello_ack_capabilities"]?.objectValue)
+        older["start_worktree"] = .bool(false)
+        model.connection.simulateCapabilitiesForTesting(
+            try JSONDecoder().decode(Capabilities.self, from: Data(JSONValue.object(older).canonicalJSONString.utf8)),
+            minor: 28)
+        XCTAssertFalse(StartContext(model: model).asksGit, "a computer that says no is believed")
+    }
+
     /// A start keeps its place through a resend.
     func testAStartKeepsItsPlaceThroughAResend() async throws {
         let (model, sent) = try model()

@@ -30,8 +30,10 @@ struct StartContext {
     /// a folder that is not one.
     func git(_ path: String) -> StartGit?? { starter.git[path] }
     func askGit(_ path: String) { model.projectGit(path) }
-    /// Whether this computer can say what a folder's repository holds (minor 29).
-    var asksGit: Bool { model.connection.capabilities?.startsInWorktrees == true }
+    /// Whether this computer can say what a folder's repository holds (minor
+    /// 29). A redial, which has no capabilities yet, is not a no: the read is
+    /// asked again after the handshake, as `AppModel.projectGit` does.
+    var asksGit: Bool { model.connection.capabilities?.startsInWorktrees != false }
 
     /// A folder's listing, once the computer has answered.
     func listing(_ request: StartFolderRequest) -> StartFolderListing? { starter.listings[request] }
