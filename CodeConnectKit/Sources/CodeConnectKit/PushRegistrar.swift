@@ -8,7 +8,7 @@ import UserNotifications
 /// models would hand every token to the last one wired. The app supplies a
 /// factory, and `Machines` makes one registrar from it for each model.
 @MainActor
-protocol PushRegistrar: AnyObject {
+public protocol PushRegistrar: AnyObject {
     /// Called with the token, lowercase hex, and its APNs environment.
     var onToken: ((String, String) -> Void)? { get set }
     /// Called with what the user actually decided.

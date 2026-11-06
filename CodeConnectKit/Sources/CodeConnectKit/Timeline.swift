@@ -1,30 +1,29 @@
-import CodeConnectKit
 import Foundation
 
 // MARK: - Items
 
-struct ToolItem: Sendable, Hashable {
-    var toolUseID: String?
-    var name: String
-    var argument: String?
-    var status: ToolStatus
-    var durationMS: Int?
-    var input: JSONValue?
-    var output: String?
-    var isTruncated: Bool
+public struct ToolItem: Sendable, Hashable {
+    public var toolUseID: String?
+    public var name: String
+    public var argument: String?
+    public var status: ToolStatus
+    public var durationMS: Int?
+    public var input: JSONValue?
+    public var output: String?
+    public var isTruncated: Bool
 }
 
-struct ApprovalItem: Sendable, Hashable, Identifiable {
-    var card: ApprovalCard
-    var requestedAt: Date
+public struct ApprovalItem: Sendable, Hashable, Identifiable {
+    public var card: ApprovalCard
+    public var requestedAt: Date
     /// Which *run* this card belongs to. Carried on the item because the Deck
     /// mixes cards from the whole fleet, where "the session you are looking at"
     /// is not a thing that exists — and because the answer has to name the run
     /// it came from, or a daemon holding two cards with one `request_id` cannot
     /// tell which of them was tapped.
-    var sessionKey: String
+    public var sessionKey: String
     /// `nil` while nobody has answered. Silence is never consent.
-    var outcome: AnswerOutcome?
+    public var outcome: AnswerOutcome?
     /// What became of a **Codex** card, which the wire reports in an entirely
     /// different shape — a bare `CodexResolution` carrying no decision, no
     /// actor's transport and no timestamp on most arms.
@@ -35,32 +34,32 @@ struct ApprovalItem: Sendable, Hashable, Identifiable {
     /// no decision at all, and `AnswerOutcome` has no way to express either
     /// without claiming something. Both make the card non-actionable; only this
     /// one is allowed to describe a Codex ending.
-    var codexResolution: CodexResolution?
+    public var codexResolution: CodexResolution?
     /// `capture-pane` text taken when Claude said the prompt was up — the only
     /// source for the exact option list.
-    var paneSnapshot: String?
+    public var paneSnapshot: String?
     /// The daemon's own classification, or nil on a daemon too old to send one.
-    var risk: WireRisk?
+    public var risk: WireRisk?
     /// Whether the phone can answer this `AskUserQuestion` card now: the latest
     /// of the card's own `question_hold` and the `question_hold` events after
     /// it. Nil on every other card and from a daemon below minor 21.
-    var questionHold: QuestionHold? = nil
+    public var questionHold: QuestionHold? = nil
 
     /// Whether this card is still waiting on a human. **Either** ending
     /// retires it: a card the Mac already answered is not pending just because
     /// the ending arrived in Codex's shape rather than Claude's.
-    var isPending: Bool { outcome == nil && codexResolution == nil }
+    public var isPending: Bool { outcome == nil && codexResolution == nil }
 
     /// The run *and* the request, because a `request_id` is only unique within
     /// one run. Two runs of the same project can raise the same id — the daemon
     /// says so in `ccd/src/state.rs`, where an unscoped answer to a shared id is
     /// refused rather than guessed at — and the Deck mixes the whole fleet into
     /// one list.
-    var id: String { "\(sessionKey)#\(card.requestID)" }
+    public var id: String { "\(sessionKey)#\(card.requestID)" }
 
     /// The gate this card actually gets. See `RiskAssessment` for why the two
     /// classifiers are combined by taking the stricter one.
-    func assessment(profile: DaemonProfile) -> RiskAssessment {
+    public func assessment(profile: DaemonProfile) -> RiskAssessment {
         RiskAssessment.resolve(
             wire: risk, tool: card.toolName, input: card.toolInput, profile: profile)
     }
@@ -69,7 +68,7 @@ struct ApprovalItem: Sendable, Hashable, Identifiable {
 /// What a notice *means*, separate from what it says. Fleet status is derived
 /// from this, never from the display copy — rewording a string must not be able
 /// to change which band a session sorts into.
-enum NoticeKind: Sendable, Hashable {
+public enum NoticeKind: Sendable, Hashable {
     /// A `Stop` hook: the turn finished, the session is still alive.
     case turnComplete
     /// The person stopped the turn at the Mac. A boundary, like `turnComplete`:
@@ -100,12 +99,12 @@ enum NoticeKind: Sendable, Hashable {
 /// One notice, as the timeline draws it. Its title and detail are often
 /// someone else's words — a notification's message, a background task's
 /// summary, an error, a command's output — so both are held `displaySafe`.
-struct NoticeItem: Sendable, Hashable {
-    var kind: NoticeKind
-    var symbol: String
-    var title: String
-    var detail: String?
-    var severity: NoticeSeverity
+public struct NoticeItem: Sendable, Hashable {
+    public var kind: NoticeKind
+    public var symbol: String
+    public var title: String
+    public var detail: String?
+    public var severity: NoticeSeverity
 
     init(kind: NoticeKind, symbol: String, title: String, detail: String?, severity: NoticeSeverity) {
         self.kind = kind
@@ -116,8 +115,8 @@ struct NoticeItem: Sendable, Hashable {
     }
 }
 
-struct TimelineItem: Sendable, Hashable, Identifiable {
-    enum Content: Sendable, Hashable {
+public struct TimelineItem: Sendable, Hashable, Identifiable {
+    public enum Content: Sendable, Hashable {
         case userMessage(String, isCommand: Bool = false)
         /// `isInterrupted` is the wire's own `interrupted` flag on a Codex
         /// message item: the reply was cut short by an abort, and a row that
@@ -128,10 +127,10 @@ struct TimelineItem: Sendable, Hashable, Identifiable {
         case notice(NoticeItem)
     }
 
-    let id: String
-    let seq: UInt64
-    let date: Date
-    let content: Content
+    public let id: String
+    public let seq: UInt64
+    public let date: Date
+    public let content: Content
 
     var pendingApproval: ApprovalItem? {
         if case .approval(let item) = content, item.isPending { return item }
@@ -149,7 +148,7 @@ struct TimelineItem: Sendable, Hashable, Identifiable {
 ///     would be worse than showing nothing;
 ///   * an event log is append-only, so the builder is a pure function of the
 ///     events — no incremental state to get out of sync.
-enum TimelineBuilder {
+public enum TimelineBuilder {
     /// The seq of the newest prompt handed to the agent (`Event.startsTurn`),
     /// drawn or not, or 0 when there is none. A prompt Claude Code annulled is
     /// none: resuming a session whose last prompt went unanswered, it writes
@@ -213,7 +212,7 @@ enum TimelineBuilder {
     /// screen until Claude Code's `idle_prompt` — a minute later — so its line
     /// stays. Only the row goes: the item stays in the timeline, where fleet
     /// status reads it.
-    static func drawn(_ items: [TimelineItem]) -> [TimelineItem] {
+    public static func drawn(_ items: [TimelineItem]) -> [TimelineItem] {
         items.enumerated().compactMap { index, item in
             guard case .notice(let notice) = item.content, notice.kind == .turnComplete,
                 index > 0, case .agentMessage = items[index - 1].content

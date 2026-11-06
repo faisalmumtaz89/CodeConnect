@@ -8,7 +8,7 @@ import Foundation
 /// cannot take responsibility for. A daemon-supplied id with a space in it
 /// silently resumes the wrong session; one with a `;` or a backtick runs
 /// whatever follows.
-enum Shell {
+public enum Shell {
 
     /// POSIX single-quoting: everything inside is literal, and the one character
     /// that cannot appear is the quote itself, which is closed, escaped and
@@ -17,7 +17,7 @@ enum Shell {
     /// Applied unconditionally rather than only to values that look dangerous.
     /// "Quote it if it needs quoting" needs a definition of dangerous that is
     /// right for every shell, and quoting a UUID costs two characters.
-    static func quoted(_ value: String) -> String {
+    public static func quoted(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
     }
 }

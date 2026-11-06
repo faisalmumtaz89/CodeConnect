@@ -1742,7 +1742,7 @@ private struct SessionTimeline: View {
 
     /// What is on screen for this run, read here so a publication re-runs this
     /// body and not the screen around it.
-    private var state: SessionState.Shown { model.shown(for: key) ?? SessionState.Shown() }
+    private var state: SessionState.Shown { model.shown(for: key) ?? .empty }
 
     var body: some View {
         ScrollViewReader { proxy in

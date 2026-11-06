@@ -1,4 +1,3 @@
-import CodeConnectKit
 import CryptoKit
 import Foundation
 
@@ -16,11 +15,11 @@ extension ApprovalCard {
     ///     are the hashed ones; if it fails we fall back to showing
     ///     `display_text` itself rather than a prettier version we cannot
     ///     vouch for.
-    struct Verification: Sendable, Hashable {
-        var hashMatchesDisplayText: Bool
-        var renderMatchesDisplayText: Bool
+    public struct Verification: Sendable, Hashable {
+        public var hashMatchesDisplayText: Bool
+        public var renderMatchesDisplayText: Bool
 
-        var summary: String {
+        public var summary: String {
             hashMatchesDisplayText
                 ? "Verified against the daemon's hash."
                 : "This card's text does not match its hash."
@@ -34,7 +33,7 @@ extension ApprovalCard {
         SHA256.hash(data: Data(displayText.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    var verification: Verification {
+    public var verification: Verification {
         let hex = sha256OfDisplayText
         return Verification(
             hashMatchesDisplayText: hex == payloadHash,
@@ -53,14 +52,14 @@ extension ApprovalCard {
     ///
     /// A function rather than a `let`, so the condition is stated once, next to
     /// the words, and can be asserted without standing up a `View`.
-    static func pendingPromise(isAnswerable: Bool) -> String? {
+    public static func pendingPromise(isAnswerable: Bool) -> String? {
         guard isAnswerable else { return nil }
         return "Nothing decides this but you. There is no timer on this card."
     }
 
     /// What a Codex card says when the phone cannot vouch for its rendering.
     /// One sentence, and never the daemon's `tool\n{JSON}`.
-    static let unverifiableCodexLine =
+    public static let unverifiableCodexLine =
         "This card could not be verified on the phone. Answer it at the computer."
 
     /// The single line that identifies what will run.
@@ -76,7 +75,7 @@ extension ApprovalCard {
     /// must never show it. Those get one sentence instead, and the card is
     /// not answerable (see `DecisionCardView.answerSurface`) — a rendering
     /// nobody can vouch for is not a question anybody should answer from here.
-    func primaryText(verification: Verification, agent: AgentKind?) -> String {
+    public func primaryText(verification: Verification, agent: AgentKind?) -> String {
         guard verification.renderMatchesDisplayText,
             let argument = ToolSummary.principalArgument(tool: toolName, input: toolInput)
         else { return agent == .claude ? displayText.displaySafe : Self.unverifiableCodexLine }
@@ -84,7 +83,7 @@ extension ApprovalCard {
     }
 
     /// The card's "Full tool input": every field the tool was called with.
-    var shownToolInput: String {
+    public var shownToolInput: String {
         toolInput.prettyJSONString
     }
 }

@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 
 /// **What to call a run, everywhere it is named.**
@@ -12,22 +11,22 @@ import Foundation
 /// The project is the daemon's, not this app's. `SessionSummary.projectLabel` is
 /// resolved on the Mac and is the only authority; deriving a second one here is
 /// how the names come apart.
-struct RunLabel: Sendable, Hashable {
+public struct RunLabel: Sendable, Hashable {
     /// The project the run is working in, or the honest admission that nobody
     /// has said. Never a working directory, a tmux counter, or a uid.
-    let project: String
+    public let project: String
     /// Shown only when it actually tells two runs apart — see `labels(for:)`.
-    let qualifier: String?
+    public let qualifier: String?
 
     /// The whole label on one line, for the places that have exactly one.
-    var inline: String {
+    public var inline: String {
         guard let qualifier else { return project }
         return "\(project) · \(qualifier)"
     }
 
     /// What a screen reader hears: the same words, without the separator, which
     /// is punctuation for the eye and a stumble for the ear.
-    var spoken: String {
+    public var spoken: String {
         guard let qualifier else { return project }
         return "\(project), \(qualifier)"
     }
@@ -111,5 +110,5 @@ extension RunLabel {
 extension SessionSummary {
     /// The run's working directory as the screen draws it. `cwd` keeps the
     /// daemon's bytes, for copying.
-    var shownCwd: String { cwd.displaySafe }
+    public var shownCwd: String { cwd.displaySafe }
 }

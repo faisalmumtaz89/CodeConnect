@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 
 /// Credentials earlier releases stored, deleted at startup.

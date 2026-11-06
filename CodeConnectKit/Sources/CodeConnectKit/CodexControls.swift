@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 import Observation
 
@@ -18,10 +17,10 @@ import Observation
 /// at all.
 @MainActor
 @Observable
-final class CodexControls {
+public final class CodexControls {
 
     /// What a mutation is doing right now.
-    enum Activity<Result: Sendable & Hashable>: Sendable, Hashable {
+    public enum Activity<Result: Sendable & Hashable>: Sendable, Hashable {
         case idle
         /// Sent, no answer yet. The control shows this rather than spinning
         /// silently, so a slow Mac is legible rather than looking dead.
@@ -59,8 +58,8 @@ final class CodexControls {
         self.ledger = ledger
     }
 
-    private(set) var stop: Activity<InterruptResult> = .idle
-    private(set) var compose: Activity<ComposeResult> = .idle
+    public private(set) var stop: Activity<InterruptResult> = .idle
+    public private(set) var compose: Activity<ComposeResult> = .idle
 
     /// Until when Stop is greyed after a link-state refusal.
     ///
@@ -321,7 +320,7 @@ final class CodexControls {
     /// **The clock is read only while a grey stands.** The fleet asks for every
     /// row on every pass, passing `model.now`, which ticks every second;
     /// evaluated up front, it made an idle fleet redraw every row once a second.
-    func isStopGreyed(now: @autoclosure () -> Date) -> Bool {
+    public func isStopGreyed(now: @autoclosure () -> Date) -> Bool {
         guard let stopGreyedUntil else { return false }
         return now() < stopGreyedUntil
     }

@@ -1,9 +1,8 @@
-import CodeConnectKit
 import Foundation
 
 /// The fixed fleet ordering. Not user-sortable on purpose: at 2am the list must
 /// be in the same order it was last time.
-enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
+public enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
     case blocked = 0
     case failed = 1
     case doneUnreviewed = 2
@@ -11,9 +10,9 @@ enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
     case idle = 4
     case ended = 5
 
-    static func < (lhs: FleetStatus, rhs: FleetStatus) -> Bool { lhs.rawValue < rhs.rawValue }
+    public static func < (lhs: FleetStatus, rhs: FleetStatus) -> Bool { lhs.rawValue < rhs.rawValue }
 
-    var label: String {
+    public var label: String {
         switch self {
         case .blocked: return "Blocked"
         case .failed: return "Failed"
@@ -39,7 +38,7 @@ enum FleetStatus: Int, Sendable, Comparable, CaseIterable {
 /// Whether an answer typed here can actually reach the agent — reported, never
 /// assumed. The daemon is Claude-only today, so the distinction that matters is
 /// whether a supervisor is attached to type into.
-enum CapabilityBadge: Sendable, Hashable {
+public enum CapabilityBadge: Sendable, Hashable {
     case control
     case observe(reason: String)
     /// The handshake has not answered yet. **Neither claim is made**: unknown
@@ -50,7 +49,7 @@ enum CapabilityBadge: Sendable, Hashable {
     /// is not a capability verdict.
     case unknown(reason: String)
 
-    var label: String {
+    public var label: String {
         switch self {
         case .control: return "control"
         case .observe: return "observe"
@@ -69,14 +68,14 @@ enum CapabilityBadge: Sendable, Hashable {
     /// The reason actions stay disabled. Carried by `unknown` too: the fleet
     /// stays silent about an unanswered handshake, but a button someone taps
     /// still owes them the sentence.
-    var reason: String? {
+    public var reason: String? {
         switch self {
         case .observe(let reason), .unknown(let reason): return reason
         case .control: return nil
         }
     }
 
-    var canAct: Bool {
+    public var canAct: Bool {
         if case .control = self { return true }
         return false
     }
@@ -85,7 +84,7 @@ enum CapabilityBadge: Sendable, Hashable {
     /// exactly like observe (`canAct == false`) but renders as nothing —
     /// asserting a limitation the daemon never stated is the flash this case
     /// exists to kill.
-    var isSettled: Bool {
+    public var isSettled: Bool {
         if case .unknown = self { return false }
         return true
     }
@@ -95,7 +94,7 @@ enum CapabilityBadge: Sendable, Hashable {
     /// earns the words — control is the promise and says nothing, and unknown
     /// is a handshake still in flight, which printing "Observe only" over
     /// every band at launch briefly and falsely announced.
-    var bandNote: String? {
+    public var bandNote: String? {
         if case .observe = self { return "Observe only" }
         return nil
     }
@@ -121,42 +120,47 @@ enum CapabilityBadge: Sendable, Hashable {
 /// Nil where the row's last item is not a tool call: a user message, an agent
 /// sentence and a notice are prose all the way through, and forcing a split on
 /// them would be the same error pointing the other way.
-struct FleetActivity: Sendable, Hashable {
+public struct FleetActivity: Sendable, Hashable {
     /// The tool's name. Prose.
-    let tool: String
+    public let tool: String
     /// The argument that identifies the call. Code, and set as code.
-    let argument: String?
+    public let argument: String?
+
+    public init(tool: String, argument: String?) {
+        self.tool = tool
+        self.argument = argument
+    }
 }
 
-struct FleetRow: Sendable, Identifiable, Hashable {
-    var summary: SessionSummary
-    var status: FleetStatus
+public struct FleetRow: Sendable, Identifiable, Hashable {
+    public var summary: SessionSummary
+    public var status: FleetStatus
     /// The daemon's own sentence, for a row whose last item is not a tool call —
     /// and what a screen reader hears either way. Empty when the run has said
     /// nothing yet: a row that repeats its own title in place of a sentence
     /// spends a line saying nothing.
-    var subtitle: String
+    public var subtitle: String
     /// The tool call this row is on, when it is on one.
-    var activity: FleetActivity?
+    public var activity: FleetActivity?
     /// What this run is called — see `RunLabel`. The same words the card, the
     /// session header and the lock screen use.
-    var label: RunLabel
-    var capability: CapabilityBadge
-    var blockedCount: Int
-    var lastEventAt: Date?
+    public var label: RunLabel
+    public var capability: CapabilityBadge
+    public var blockedCount: Int
+    public var lastEventAt: Date?
     /// Non-nil when nothing live has arrived for this session this launch.
-    var cachedAt: Date?
+    public var cachedAt: Date?
     /// The machine the run is on (`PairedMachine.id`; nil in the sample fleet
     /// and a fixture run), and what that machine is called. Its link is not
     /// the row's: a row is held as it was while a catch-up runs, and the link
     /// is live — `Machines.model(for: machineID)?.linkHealth`.
-    var machineID: String?
-    var machineName: String?
+    public var machineID: String?
+    public var machineName: String?
 
     /// The run, not the name: two rows can share `cc-1` and a `ForEach` that
     /// cannot tell them apart renders one of them. A run's uid is minted once,
     /// for it alone, so two machines' runs never share one either.
-    var id: String { summary.sessionKey }
+    public var id: String { summary.sessionKey }
 }
 
 // MARK: - The one number, and the one sentence that carries it
@@ -176,7 +180,7 @@ struct FleetRow: Sendable, Identifiable, Hashable {
 /// Both now count what the Deck behind the bar is a queue of — each thing you
 /// have to answer — in one sentence, and the arithmetic lives here, once, so
 /// the two call sites cannot drift apart again.
-enum FleetCount {
+public enum FleetCount {
     /// Every decision the fleet is waiting on a human for.
     ///
     /// Counted from the rows rather than from the Deck on purpose. `blocked_on`
@@ -185,7 +189,7 @@ enum FleetCount {
     /// event stream — so a Deck-derived count reads zero for the beat between a
     /// row turning amber and its card landing, and no count would stand under
     /// the fleet's title over a visibly blocked run.
-    static func decisions(in rows: [FleetRow]) -> Int {
+    public static func decisions(in rows: [FleetRow]) -> Int {
         rows.filter { $0.status == .blocked }
             // A blocked row is holding at least one, by the definition of
             // blocked; `max` says so rather than trusting the two sources to
@@ -197,7 +201,7 @@ enum FleetCount {
     /// fleet's display line, the accessory bar's aggregate, and what a screen
     /// reader hears from either. It names no noun, because what waits is
     /// sometimes a command, sometimes a file, sometimes a question.
-    static func waitingForYou(_ count: Int) -> String {
+    public static func waitingForYou(_ count: Int) -> String {
         "\(count) waiting for you"
     }
 }
@@ -222,14 +226,14 @@ enum FleetCount {
 /// compound state is still one state. Kept here, out of the view, so the
 /// property that matters — *if the fleet is cached, its age is in the banner, no
 /// matter which level won* — is a function that can be asserted.
-enum FleetFreshness {
+public enum FleetFreshness {
     /// How long a launch may quietly work before the screen says anything
     /// about it. One constant for both banners: the link banner has held this
     /// grace while `connecting` since it was written — "a banner that flashes
     /// on every ordinary reconnect is noise" — and the cached banner flashing
     /// amber for the half-second before the first live frame was the same
     /// noise through a gap in the same rule.
-    static let launchGrace: TimeInterval = 2
+    public static let launchGrace: TimeInterval = 2
 
     /// Whether a standalone cached banner has earned its place.
     ///
@@ -243,7 +247,7 @@ enum FleetFreshness {
     /// amber banner would fill the fresh dial's own grace window — the launch
     /// flash reappearing at every reconnect. While a dial is running, its
     /// grace must pass too; the banner waits out whichever clock ends later.
-    static func cachedBannerEarned(
+    public static func cachedBannerEarned(
         restoredAt: Date?, connectingSince: Date?, now: Date
     ) -> Bool {
         guard let restoredAt else { return false }
@@ -256,7 +260,7 @@ enum FleetFreshness {
 
     /// Which banner the fleet's slot shows, decided as a value so the rule is
     /// testable apart from the view that renders it.
-    enum BannerChoice: Equatable {
+    public enum BannerChoice: Equatable {
         /// The link banner alone (no cached content behind it).
         case link
         /// One banner carrying both facts: the link's classification, led by
@@ -272,7 +276,7 @@ enum FleetFreshness {
     /// banner ("one banner, ever"), and the standalone cached notice exists
     /// only for the case where the link has nothing to say and the cache has
     /// earned the right to speak.
-    static func bannerChoice(hasLink: Bool, hasStamp: Bool, earned: Bool) -> BannerChoice {
+    public static func bannerChoice(hasLink: Bool, hasStamp: Bool, earned: Bool) -> BannerChoice {
         switch (hasLink, hasStamp) {
         case (true, true): return .compound
         case (true, false): return .link
@@ -281,7 +285,7 @@ enum FleetFreshness {
     }
 
     /// How old the fleet on screen is, or `nil` when it came off the wire.
-    static func stamp(cachedAt: Date?, hasLiveFleet: Bool, now: Date) -> String? {
+    public static func stamp(cachedAt: Date?, hasLiveFleet: Bool, now: Date) -> String? {
         guard let cachedAt, !hasLiveFleet else { return nil }
         return "Showing the last known state, \(Format.age(since: cachedAt, now: now)) old."
     }
@@ -291,7 +295,7 @@ enum FleetFreshness {
     ///
     /// The clocks are deliberately left alone. The age of the *card* is still
     /// true; it was the age of the *observation* that was missing.
-    static func message(stamp: String?, linkDetail: String?) -> String? {
+    public static func message(stamp: String?, linkDetail: String?) -> String? {
         let parts = [stamp, linkDetail].compactMap { $0 }.filter { !$0.isEmpty }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
@@ -316,11 +320,11 @@ enum FleetOrdering {
 // MARK: - Status derivation
 
 @MainActor
-enum FleetStatusRule {
+public enum FleetStatusRule {
     /// `blockedOn` from the daemon is authoritative for "needs you"; the local
     /// timeline is consulted too so a card that arrived on the stream counts
     /// even before the next `sessions` refresh.
-    static func status(
+    public static func status(
         summary: SessionSummary, shown: SessionState.Shown?, reviewedSeq: UInt64
     ) -> FleetStatus {
         let pending = shown?.pendingApprovals.count ?? 0
@@ -423,7 +427,7 @@ enum FleetStatusRule {
         }
     }
 
-    static func capability(summary: SessionSummary, capabilities: Capabilities?) -> CapabilityBadge {
+    public static func capability(summary: SessionSummary, capabilities: Capabilities?) -> CapabilityBadge {
         guard let capabilities else {
             return .unknown(reason: "Not connected. The daemon has not told us what it can do.")
         }
@@ -454,8 +458,8 @@ enum FleetStatusRule {
 
 /// Link health, expressed so that no number is ever shown without its age and
 /// no button is ever enabled on a link that cannot carry it.
-struct LinkHealth: Sendable, Equatable {
-    enum Level: Sendable, Equatable {
+public struct LinkHealth: Sendable, Equatable {
+    public enum Level: Sendable, Equatable {
         case live
         case lagging
         case stale
@@ -469,23 +473,23 @@ struct LinkHealth: Sendable, Equatable {
     /// recovery guidance points at Tailscale, though the measured fact is only
     /// that DNS did not answer. Any other unresolvable name gets the generic
     /// case and a pointer at Settings.
-    enum Cause: Sendable, Equatable {
+    public enum Cause: Sendable, Equatable {
         case tailnetHostUnresolvable(host: String)
         case hostUnresolvable(host: String)
     }
 
-    var level: Level
-    var age: TimeInterval?
-    var detail: String
-    var cause: Cause?
+    public var level: Level
+    public var age: TimeInterval?
+    public var detail: String
+    public var cause: Cause?
 
     /// Beyond this, a "connected" socket is not evidence of anything.
     private static let lagAfter: TimeInterval = 15
     private static let staleAfter: TimeInterval = 45
 
-    var actionsEnabled: Bool { level == .live || level == .lagging }
+    public var actionsEnabled: Bool { level == .live || level == .lagging }
 
-    var disabledReason: String? {
+    public var disabledReason: String? {
         guard !actionsEnabled else { return nil }
         switch level {
         case .stale: return "Link stale - \(ageText) since the daemon last spoke. \(detail)"
@@ -496,11 +500,11 @@ struct LinkHealth: Sendable, Equatable {
         }
     }
 
-    var ageText: String { age.map(Format.age) ?? "-" }
+    public var ageText: String { age.map(Format.age) ?? "-" }
 
     /// The level in words, as the link's spoken value and each machine's row in
     /// Settings say it.
-    var word: String {
+    public var word: String {
         switch level {
         case .live: return "Live"
         case .lagging: return "Lagging"
@@ -522,7 +526,7 @@ struct LinkHealth: Sendable, Equatable {
         }
     }
 
-    var shortText: String {
+    public var shortText: String {
         switch level {
         case .live, .lagging, .stale: return ageText
         case .connecting: return "connecting"
@@ -623,7 +627,7 @@ struct LinkHealth: Sendable, Equatable {
 
 // MARK: - Formatting
 
-enum Format {
+public enum Format {
     /// Compact ages, because every fact on screen carries one.
     ///
     /// A sub-second age is `0s`, never `0.0s`. The decimal was false precision
@@ -631,7 +635,7 @@ enum Format {
     /// app measures tenths, and a reader who sees `0.4s` is entitled to believe
     /// something did. `CCWaitClock` has always truncated to whole seconds; this
     /// is the same rule, applied at the source so every consumer inherits it.
-    static func age(_ interval: TimeInterval) -> String {
+    public static func age(_ interval: TimeInterval) -> String {
         let seconds = max(0, interval)
         if seconds < 1 { return "0s" }
         if seconds < 60 { return "\(Int(seconds))s" }
@@ -640,19 +644,19 @@ enum Format {
         return "\(Int(seconds / 86400))d"
     }
 
-    static func age(since date: Date?, now: Date = Date()) -> String {
+    public static func age(since date: Date?, now: Date = Date()) -> String {
         guard let date else { return "never" }
         return age(now.timeIntervalSince(date))
     }
 
-    static func duration(ms: Int) -> String {
+    public static func duration(ms: Int) -> String {
         if ms < 1000 { return "\(ms)ms" }
         if ms < 60000 { return String(format: "%.1fs", Double(ms) / 1000) }
         return "\(ms / 60000)m \((ms % 60000) / 1000)s"
     }
 
     /// When something happened, out loud: "1 minute ago".
-    static func spokenAge(_ interval: TimeInterval) -> String {
+    public static func spokenAge(_ interval: TimeInterval) -> String {
         "\(spokenDuration(interval)) ago"
     }
 
@@ -660,7 +664,7 @@ enum Format {
     /// is still going — "waiting 1 minute ago" is not a sentence.
     ///
     /// VoiceOver reads "14s" as "fourteen ess"; spell it out for the label.
-    static func spokenDuration(_ interval: TimeInterval) -> String {
+    public static func spokenDuration(_ interval: TimeInterval) -> String {
         let seconds = Int(max(0, interval))
         if seconds < 60 { return "\(seconds) second\(seconds == 1 ? "" : "s")" }
         if seconds < 3600 {

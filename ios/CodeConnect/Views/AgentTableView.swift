@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 /// A recognized pipe table, rendered as the two-dimensional artifact it is.

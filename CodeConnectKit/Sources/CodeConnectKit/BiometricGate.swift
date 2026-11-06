@@ -12,8 +12,8 @@ import LocalAuthentication
 /// flag that *invalidates when the enrolled set changes*. Adding a face or a
 /// finger after the phone is taken must not silently inherit the ability to
 /// approve `rm -rf`; with this flag it falls through to the passcode instead.
-enum BiometricGate {
-    enum Outcome: Sendable, Equatable {
+public enum BiometricGate {
+    public enum Outcome: Sendable, Equatable {
         case authenticated
         /// The user dismissed the prompt. Not a failure, and never an approval.
         case cancelled
@@ -22,10 +22,10 @@ enum BiometricGate {
         /// This device cannot perform the check at all.
         case unavailable(String)
 
-        var isAuthenticated: Bool { self == .authenticated }
+        public var isAuthenticated: Bool { self == .authenticated }
 
         /// What to put on screen. Nil when there is nothing to explain.
-        var message: String? {
+        public var message: String? {
             switch self {
             case .authenticated: return nil
             case .cancelled: return "Not approved - the check was cancelled."
@@ -38,11 +38,11 @@ enum BiometricGate {
     /// The description shown in the system sheet. Deliberately names the command
     /// class: an authentication prompt that does not say what it authorises is a
     /// prompt people learn to clear reflexively.
-    static func reason(for toolName: String) -> String {
+    public static func reason(for toolName: String) -> String {
         "Approve a high-risk \(toolName) on your computer"
     }
 
-    static func confirm(reason: String) async -> Outcome {
+    public static func confirm(reason: String) async -> Outcome {
         #if DEBUG
             if let forced = forcedOutcome() { return forced }
         #endif

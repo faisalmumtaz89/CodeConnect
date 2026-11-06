@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Apple's token callback arrives on the app delegate outside any actor, so the
 /// pure helpers it needs live here rather than on the `@MainActor` type.
-enum PushWire {
+public enum PushWire {
     #if DEBUG
         /// Whether XCTest launched this process to host a test bundle.
         ///
@@ -17,15 +17,15 @@ enum PushWire {
         /// separately — so the UI tests and the render harness continue to drive
         /// a shipping-identical app. The whole property is `DEBUG`-only, so in a
         /// Release build the branch it guards is not merely false but absent.
-        static var isTestHostProcess: Bool {
+        public static var isTestHostProcess: Bool {
             ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         }
     #endif
 
-    static let tokenNotification = Notification.Name("cc.push.token")
-    static let failureNotification = Notification.Name("cc.push.failed")
+    public static let tokenNotification = Notification.Name("cc.push.token")
+    public static let failureNotification = Notification.Name("cc.push.failed")
     /// A notification was tapped.
-    static let tapNotification = Notification.Name("cc.push.tapped")
+    public static let tapNotification = Notification.Name("cc.push.tapped")
 
     /// **A buffer, not just a broadcast.** A cold-started tap can arrive during
     /// scene connection, before any SwiftUI view — and therefore any observer —
@@ -57,7 +57,7 @@ enum PushWire {
     /// — so the work lives here, where the tests that matter can reach it: the
     /// UI tests deliver a warm tap through this exact function, so emptying it
     /// stops a tapped notification navigating anywhere and they say so.
-    static func deliverTap(userInfo: [AnyHashable: Any]) {
+    public static func deliverTap(userInfo: [AnyHashable: Any]) {
         recordTap(kind: kind(fromUserInfo: userInfo))
     }
 
@@ -80,7 +80,7 @@ enum PushWire {
         /// running during unit tests — its own observer would drain the buffer
         /// before the test could. This seeds the buffer alone, which is the half
         /// that has to survive a cold launch.
-        static func seedTapForTesting(kind: String?) {
+        public static func seedTapForTesting(kind: String?) {
             pending.lock()
             pendingTap = Tap(kind: kind)
             pending.unlock()
@@ -92,7 +92,7 @@ enum PushWire {
         /// `codeconnect://test-notification-tap/<kind>`. A URL rather than a
         /// launch argument because a launch argument can only fire on a timer,
         /// and a timer cannot know whether the app has finished navigating.
-        static func testTapKind(from url: URL) -> String? {
+        public static func testTapKind(from url: URL) -> String? {
             guard url.scheme == "codeconnect", url.host == "test-notification-tap" else {
                 return nil
             }
@@ -114,7 +114,7 @@ enum PushWire {
 
     /// Lowercase hex, which is the only form Apple's `/3/device/<token>` path
     /// accepts. `Data.description` produces `<a1b2 …>` and would 400.
-    static func hex(_ data: Data) -> String {
+    public static func hex(_ data: Data) -> String {
         data.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -124,7 +124,7 @@ enum PushWire {
     /// what decides the token's validity is how the binary was *signed*, and a
     /// debug build signed for distribution — or a release build signed for
     /// development — would take the wrong branch every time.
-    static var environment: String {
+    public static var environment: String {
         #if targetEnvironment(simulator)
             // A simulator has no APNs token worth sending anywhere.
             return "sandbox"

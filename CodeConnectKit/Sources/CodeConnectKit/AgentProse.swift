@@ -1,25 +1,24 @@
-import CodeConnectKit
 import Foundation
 
 /// A pipe table, parsed — headers, per-column alignment, and rows that are
 /// all exactly `headers.count` wide, because the parser refuses ragged rows
 /// rather than padding or silently discarding a cell the agent wrote.
-struct MarkdownTable: Equatable {
+public struct MarkdownTable: Equatable {
     /// From the delimiter row's colons. `.leading` is also the no-colon
     /// default; on a phone there is no distinct "default" rendering to keep.
-    enum Alignment: Equatable {
+    public enum Alignment: Equatable {
         case leading
         case center
         case trailing
     }
 
     /// Raw inline markdown — a renderer parses these like any prose.
-    let headers: [String]
+    public let headers: [String]
     /// One per column; count always equals `headers.count`.
-    let alignments: [Alignment]
+    public let alignments: [Alignment]
     /// Body rows, each exactly `headers.count` cells. Empty for a table that
     /// is only a header and its delimiter.
-    let rows: [[String]]
+    public let rows: [[String]]
     /// The source lines, verbatim, for anything that needs what was written
     /// rather than what was parsed.
     let raw: String
@@ -34,9 +33,9 @@ struct MarkdownTable: Equatable {
 /// geometry — `| pass | 3 |` reflowed into prose stops saying which number
 /// belongs to which word. Anything else stays readable as the literal text
 /// the agent wrote.
-enum AgentProse {
+public enum AgentProse {
 
-    enum Segment: Equatable {
+    public enum Segment: Equatable {
         case prose(String)
         /// A fenced block's body, exactly as written; the fence lines and the
         /// optional language tag are the wrapper, not the content.
@@ -55,7 +54,7 @@ enum AgentProse {
     /// fence at all — the remainder renders as the literal text it is, because
     /// guessing at what an unterminated block "meant" is how content vanishes.
     /// Precedence outside a fence: heading, then table candidate, then prose.
-    static func segments(_ text: String) -> [Segment] {
+    public static func segments(_ text: String) -> [Segment] {
         // CRLF is one grapheme to Swift: split on "\n" alone never divides a
         // CRLF message, and the whole text used to sail through as one prose
         // lump — measured, not theorized. Both terminators divide lines.
@@ -293,7 +292,7 @@ enum AgentProse {
     /// useful" and not "## How it's useful" — the artifact, smaller. A table
     /// becomes its one semantic line for the same reason: four lines of pipe
     /// art say nothing, "Table: Command, Status — 4 rows" says what arrived.
-    static func previewSource(_ text: String) -> String {
+    public static func previewSource(_ text: String) -> String {
         segments(text)
             .map { segment in
                 switch segment {
@@ -340,19 +339,19 @@ enum AgentProse {
     }
 
     /// `Table, 3 columns, 4 rows.` — the VoiceOver container label.
-    static func tableSummary(_ table: MarkdownTable) -> String {
+    public static func tableSummary(_ table: MarkdownTable) -> String {
         "Table, \(table.headers.count) columns, \(rowCountPhrase(table.rows.count))."
     }
 
     /// `Columns: Command, Description, Status.` — the VoiceOver header stop.
-    static func tableColumnsLabel(_ table: MarkdownTable) -> String {
+    public static func tableColumnsLabel(_ table: MarkdownTable) -> String {
         "Columns: " + table.headers.map(plainCell).joined(separator: ", ") + "."
     }
 
     /// `Row 1. Command: git status. Description: Lists changed files.` — one
     /// VoiceOver stop per row, each cell paired with its column so a wide row
     /// stays comprehensible without sight of the grid.
-    static func tableRowLabel(_ table: MarkdownTable, row: Int) -> String {
+    public static func tableRowLabel(_ table: MarkdownTable, row: Int) -> String {
         let pairs = zip(table.headers, table.rows[row]).map { header, cell in
             "\(plainCell(header)): \(plainCell(cell))."
         }
@@ -380,7 +379,7 @@ enum AgentProse {
     /// `displaySafe` on what the markdown *reads as*, run by run with each
     /// run's attributes kept: `&#x202e;` holds no override until it is parsed,
     /// and then it is one.
-    static func inline(_ text: String) -> AttributedString {
+    public static func inline(_ text: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace)
         let safe = neutralizeLoneTildes(text)

@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 
 /// How risky this decision is, and — just as important — who says so.
@@ -24,7 +23,7 @@ import Foundation
 /// to classify: on an older daemon nothing is absent, because nothing was ever
 /// offered, and forcing every `Read` to MEDIUM would be a regression dressed up
 /// as caution.
-struct RiskAssessment: Sendable, Hashable {
+public struct RiskAssessment: Sendable, Hashable {
     /// Where the class this build is acting on came from.
     enum Source: Sendable, Hashable {
         /// The daemon named a class and this build agreed, or was less strict.
@@ -37,13 +36,13 @@ struct RiskAssessment: Sendable, Hashable {
     }
 
     /// The class the UI gates on.
-    var effective: RiskClass
+    public var effective: RiskClass
     /// What the daemon said, parsed. Nil when it said nothing.
     var declared: RiskClass?
     /// What this build makes of the command on its own.
     var heuristic: RiskClass
     /// The daemon's rule, when it named one.
-    var matchedPattern: String?
+    public var matchedPattern: String?
     var source: Source
 
     /// True when the phone's own reading was stricter than the daemon's.
@@ -88,7 +87,7 @@ struct RiskAssessment: Sendable, Hashable {
     /// One line saying where this class came from. Shown under the badge,
     /// because a risk class whose provenance is invisible is a risk class the
     /// user has to take on faith.
-    var provenance: String {
+    public var provenance: String {
         switch source {
         case .daemon:
             if escalatedLocally {

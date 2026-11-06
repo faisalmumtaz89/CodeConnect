@@ -1,5 +1,4 @@
 #if DEBUG
-    import CodeConnectKit
     import CryptoKit
     import Foundation
 

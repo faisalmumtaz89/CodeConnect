@@ -1,4 +1,3 @@
-import CodeConnectKit
 import SwiftUI
 
 /// Every paired machine, each with a model of its own, and the one fleet they
@@ -17,7 +16,7 @@ import SwiftUI
 /// screen's, the sample fleet's and a fixture run's.
 @MainActor
 @Observable
-final class Machines {
+public final class Machines {
     let pairing: PairingStore
     let settings: AppSettings
     private let cache: EventCache
@@ -27,14 +26,14 @@ final class Machines {
     private let makePushRegistrar: (@MainActor () -> any PushRegistrar)?
 
     /// One per paired machine, oldest first, or the one with no machine.
-    private(set) var models: [AppModel] = []
+    public private(set) var models: [AppModel] = []
     /// A pairing with an address no machine has, until its daemon answers it.
     private(set) var candidate: AppModel?
     /// Where a deep link (a `codeconnect://` URL, or a tapped notification)
     /// wants the UI to go. Cleared by whichever surface consumes it.
-    var pendingDeepLink: DeepLink?
+    public var pendingDeepLink: DeepLink?
 
-    init(
+    public init(
         pairing: PairingStore = PairingStore(), cache: EventCache = EventCache(),
         settings: AppSettings = AppSettings(),
         relayEnrollment: RelayEnrollment = RelayEnrollment(),
@@ -58,7 +57,7 @@ final class Machines {
         /// Test seam: the app holding one model a test has built and staged, so
         /// a screen hosted over it finds the fleet, the Deck and the deep-link
         /// slot where the app keeps them.
-        init(holding model: AppModel) {
+        public init(holding model: AppModel) {
             pairing = model.pairing
             cache = EventCache()
             settings = model.settings
@@ -85,7 +84,7 @@ final class Machines {
         pairing.isPaired ? pairing.machines.map { makeModel($0.id) } : [makeModel(nil)]
     }
 
-    func bootstrap() {
+    public func bootstrap() {
         #if DEBUG
             applyAutomationPairing()
             applyAutomationPairingCode()
@@ -108,17 +107,17 @@ final class Machines {
     // MARK: - The fleet
 
     /// The fleet is the root once there is something to show it from.
-    var showsFleet: Bool { models.contains(where: \.showsFleet) }
+    public var showsFleet: Bool { models.contains(where: \.showsFleet) }
 
     /// Whether the fleet may be shown: every machine has caught up with its Mac,
     /// or waited long enough for one that is not answering.
-    var launchSettled: Bool { models.allSatisfy(\.launchSettled) }
+    public var launchSettled: Bool { models.allSatisfy(\.launchSettled) }
 
     /// Every machine waits out its own launch, all at once: one Mac that is not
     /// answering costs the wait it costs alone. Waited for again while any is
     /// still unsettled, so the machines this ends on are the ones there are —
     /// the loader can start before the launch seams have replaced them.
-    func waitOutLaunch() async {
+    public func waitOutLaunch() async {
         while !launchSettled, !Task.isCancelled {
             await withTaskGroup(of: Void.self) { group in
                 for model in models where !model.launchSettled {
@@ -131,64 +130,64 @@ final class Machines {
     /// Every machine's sessions, in the fleet's one order. Each row names its
     /// machine (`FleetRow.machineID`, `machineName`); that machine's link is
     /// `model(for: row.machineID)?.linkHealth`.
-    var fleet: [FleetRow] { FleetOrdering.sort(models.flatMap(\.fleet)) }
+    public var fleet: [FleetRow] { FleetOrdering.sort(models.flatMap(\.fleet)) }
 
     /// Every machine's open cards in one queue, each ranked by what its own
     /// daemon says about it.
-    var deck: [ApprovalItem] {
+    public var deck: [ApprovalItem] {
         DeckOrdering.sort(models.flatMap(\.deck)) { self.profile(forSession: $0.sessionKey) }
     }
 
-    var hasLiveFleet: Bool { models.contains(where: \.hasLiveFleet) }
-    var isCatchingUp: Bool { models.contains(where: \.isCatchingUp) }
+    public var hasLiveFleet: Bool { models.contains(where: \.hasLiveFleet) }
+    public var isCatchingUp: Bool { models.contains(where: \.isCatchingUp) }
 
     /// How many catch-ups have changed the screen, on every machine.
-    var catchUpReleases: Int { models.reduce(0) { $0 + $1.catchUpReleases } }
+    public var catchUpReleases: Int { models.reduce(0) { $0 + $1.catchUpReleases } }
 
     /// The Deck a notification opened waits for each machine catching up on a
     /// live link. One that cannot be reached is not waited for, unless none can:
     /// then the Deck waits, and says why, as it does for one machine.
-    var deckAwaitsCatchUp: Bool {
+    public var deckAwaitsCatchUp: Bool {
         let waiting = models.filter(\.deckAwaitsCatchUp)
         guard !waiting.isEmpty else { return false }
         return waiting.contains { $0.connection.phase.isConnected }
             || !models.contains { $0.connection.phase.isConnected }
     }
 
-    func deckClosed() {
+    public func deckClosed() {
         for model in models { model.deckClosed() }
     }
 
-    func refreshFleet() {
+    public func refreshFleet() {
         for model in models { model.refreshFleet() }
     }
 
     /// Dial every machine whose link is down now, rather than at its next
     /// backoff.
-    func retryNow() {
+    public func retryNow() {
         for model in models { model.connection.retryNow() }
     }
 
-    func scenePhaseChanged(to phase: ScenePhase) {
+    public func scenePhaseChanged(to phase: ScenePhase) {
         for model in models + [candidate].compactMap({ $0 }) { model.scenePhaseChanged(to: phase) }
     }
 
     /// The model of the machine this session is on.
-    func model(forSession key: String) -> AppModel? {
+    public func model(forSession key: String) -> AppModel? {
         models.first { $0.shownSummary(for: key) != nil || $0.summary(for: key) != nil }
     }
 
-    func model(for machineID: String?) -> AppModel? {
+    public func model(for machineID: String?) -> AppModel? {
         models.first { $0.machineID == machineID }
     }
 
     /// What the daemon a session is on can do.
-    func profile(forSession key: String) -> DaemonProfile {
+    public func profile(forSession key: String) -> DaemonProfile {
         (model(forSession: key) ?? linkModel).daemonProfile
     }
 
     /// The machine paired most recently, whose model Settings speaks for.
-    var current: AppModel {
+    public var current: AppModel {
         pairing.current.flatMap { model(for: $0.id) } ?? models[models.count - 1]
     }
 
@@ -196,7 +195,7 @@ final class Machines {
     /// speak for: the best connected, so they report trouble only when every
     /// machine has it. Each machine's own link is on its project cards and its
     /// sessions. With one machine, that machine.
-    var linkModel: AppModel {
+    public var linkModel: AppModel {
         models.min { Self.reach($0.linkHealth.level) < Self.reach($1.linkHealth.level) }
             ?? models[0]
     }
@@ -213,14 +212,14 @@ final class Machines {
     }
 
     /// A link's session reference, resolved on whichever machine holds it.
-    func resolveSessionKey(reference: String) -> String? {
+    public func resolveSessionKey(reference: String) -> String? {
         models.lazy.compactMap { $0.resolveSessionKey(reference: reference) }.first
     }
 
     /// Removes each session on its own machine, and returns why each one still
     /// in the fleet was not removed, by key. A machine whose link has gone stops
     /// asking for its own sessions only.
-    func removeSessions(keys: [String]) async -> [String: String] {
+    public func removeSessions(keys: [String]) async -> [String: String] {
         var refused: [String: String] = [:]
         for model in models {
             let own = keys.filter { self.model(forSession: $0) === model }
@@ -233,22 +232,22 @@ final class Machines {
     // MARK: - Pairing
 
     /// Pair from a scanned QR code. See `AppModel.pair(withQR:)`.
-    func pair(withQR payload: PairingQRPayload) {
+    public func pair(withQR payload: PairingQRPayload) {
         pairingModel(for: payload.endpoint).pair(withQR: payload)
     }
 
     /// Pair from a host and a token typed by hand. See `AppModel.pair(with:)`.
-    func pair(with endpoint: DaemonEndpoint) {
+    public func pair(with endpoint: DaemonEndpoint) {
         pairingModel(for: endpoint).pair(with: endpoint)
     }
 
-    var isPairing: Bool { candidate != nil || models.contains(where: \.isPairing) }
+    public var isPairing: Bool { candidate != nil || models.contains(where: \.isPairing) }
 
-    var pairingError: String? {
+    public var pairingError: String? {
         (candidate ?? models.first(where: \.isPairing))?.pairingError
     }
 
-    func cancelPairing() {
+    public func cancelPairing() {
         dropCandidate()
         for model in models where model.isPairing { model.cancelPairing() }
     }
@@ -320,7 +319,7 @@ final class Machines {
 
     /// Remove the machine this model is for: the one the screen asking shows.
     /// With nothing paired, that is leaving the sample fleet.
-    func unpair(_ model: AppModel) {
+    public func unpair(_ model: AppModel) {
         guard let id = model.machineID else {
             for model in models { model.stopSampleFleet() }
             return
@@ -349,13 +348,13 @@ final class Machines {
     /// notification takes a different route in — it names nothing, so it has no
     /// URL — and the two meet at `pendingDeepLink`, which is why the target is a
     /// value held here rather than navigation done inline.
-    func open(url: URL) -> Bool {
+    public func open(url: URL) -> Bool {
         guard let link = DeepLink(url: url) else { return false }
         pendingDeepLink = link
         return true
     }
 
-    func consumeDeepLink() -> DeepLink? {
+    public func consumeDeepLink() -> DeepLink? {
         defer { pendingDeepLink = nil }
         return pendingDeepLink
     }
@@ -382,7 +381,7 @@ final class Machines {
     }
 
     /// Drain a tap that arrived before anything was listening.
-    func consumePendingTap() {
+    public func consumePendingTap() {
         if let tap = PushWire.consumeTap() { openFromNotification(kind: tap.kind) }
     }
 

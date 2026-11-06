@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 
 /// On-disk last-known state, so a cold open shows something real immediately —
@@ -7,7 +6,7 @@ import Foundation
 /// Plain files rather than SwiftData: the cache is an append-only tail of an
 /// already-durable log on the Mac. It has no queries, no relations and no
 /// migrations worth the name, and a corrupt cache must be cheap to discard.
-actor EventCache {
+public actor EventCache {
     struct CachedEvents: Sendable {
         var events: [Event]
         var cachedAt: Date
@@ -45,7 +44,7 @@ actor EventCache {
 
     private let root: URL
 
-    init(root: URL? = nil) {
+    public init(root: URL? = nil) {
         if let root {
             self.root = root
         } else {

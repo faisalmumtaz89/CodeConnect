@@ -17,7 +17,7 @@ import Foundation
 ///   * `codeconnect://session/<session-id>?request=<request-id>` — that
 ///     session's timeline with the decision card already open.
 ///   * `codeconnect://session/<session-id>/diff` — straight to the diff.
-enum DeepLink: Sendable, Hashable {
+public enum DeepLink: Sendable, Hashable {
     /// The fleet, with whatever was on top of it cleared.
     ///
     /// No URL form — nothing types this — and it exists because a tapped

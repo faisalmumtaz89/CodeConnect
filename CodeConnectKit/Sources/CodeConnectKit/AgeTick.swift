@@ -7,7 +7,7 @@ import Foundation
 /// is constant for a stretch that is knowable in advance — a row reading `21h`
 /// cannot say anything else for the next hour — and that is the fact this type
 /// exists to make computable.
-struct AgeScale: Hashable, Sendable {
+public struct AgeScale: Hashable, Sendable {
     /// While the age is below `below` seconds, the printed value changes every
     /// `step` seconds.
     struct Step: Hashable, Sendable {
@@ -26,7 +26,7 @@ struct AgeScale: Hashable, Sendable {
     /// spoken form never coarsens past hours, so it is still moving. The scale
     /// follows the finer of the two, because a row must not tell the eye and
     /// VoiceOver different things about the same fact.
-    static let age = AgeScale(
+    public static let age = AgeScale(
         steps: [
             Step(below: 60, step: 1),
             Step(below: 3600, step: 60),
@@ -37,7 +37,7 @@ struct AgeScale: Hashable, Sendable {
     /// rather than one, so the seconds place survives all the way to an hour —
     /// which is why a row that is *waiting on a human* is the one row that
     /// genuinely earns a tick every second.
-    static let clock = AgeScale(
+    public static let clock = AgeScale(
         steps: [
             Step(below: 3600, step: 1),
             Step(below: 86400, step: 60),
@@ -60,9 +60,14 @@ struct AgeScale: Hashable, Sendable {
 /// a row whose newest event arrives, or one that goes from counting a wait in
 /// seconds to reporting an age in hours. Restarting on the timestamp alone
 /// would leave a row that had changed bands sleeping against its old deadline.
-struct AgeClock: Hashable, Sendable {
+public struct AgeClock: Hashable, Sendable {
     let since: Date
     let scale: AgeScale
+
+    public init(since: Date, scale: AgeScale) {
+        self.since = since
+        self.scale = scale
+    }
 }
 
 /// **When a rendered age stops being true.**
@@ -81,7 +86,7 @@ struct AgeClock: Hashable, Sendable {
 /// at the instant *its own* string changes, and not before. A row showing `21h`
 /// sleeps for an hour; a row counting a wait still ticks every second, because
 /// that one really is changing.
-enum AgeTick {
+public enum AgeTick {
     /// The next instant at which an age of `date`, printed on `scale`, reads
     /// differently.
     ///
@@ -121,7 +126,7 @@ enum AgeTick {
     /// stamp and print `0s` — the app claiming something is newer than it is,
     /// which is the one failure this screen exists to prevent. `max` keeps the
     /// clock monotonic if the device's own time steps backwards.
-    static func renderTime(lastTick: Date, wallClock: Date = Date()) -> Date {
+    public static func renderTime(lastTick: Date, wallClock: Date = Date()) -> Date {
         max(lastTick, wallClock)
     }
 
@@ -134,7 +139,7 @@ enum AgeTick {
     /// minute an age changes once a minute at most (a waiting row's clock
     /// excepted), which on a real fleet is almost every age.
     @MainActor
-    static func follow(_ clock: AgeClock, update: @MainActor (Date) -> Void) async {
+    public static func follow(_ clock: AgeClock, update: @MainActor (Date) -> Void) async {
         while !Task.isCancelled {
             let now = Date()
             let due = nextChange(since: clock.since, now: now, scale: clock.scale)

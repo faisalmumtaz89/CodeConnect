@@ -1,10 +1,10 @@
-import CodeConnectKit
 import Foundation
 import Observation
 import SwiftUI
+import UserNotifications
 
 /// What happened to an answer, in terms the UI can be honest about.
-enum AnswerAttempt: Sendable {
+public enum AnswerAttempt: Sendable {
     case applied(AnswerOutcome)
     /// The daemon accepted the answer but **cannot confirm it landed** —
     /// `AnswerOutcome.indeterminate`. Kept apart from `.applied` so nothing ever
@@ -20,7 +20,7 @@ enum AnswerAttempt: Sendable {
     case rejected(String)
     case failed(String)
 
-    var isTerminal: Bool {
+    public var isTerminal: Bool {
         switch self {
         case .applied, .indeterminate, .duplicate, .answeredAtKeyboard: return true
         case .staleCard, .rejected, .failed: return false
@@ -56,7 +56,7 @@ enum AnswerAttempt: Sendable {
     }
 }
 
-enum ComposeAttempt: Sendable, Equatable {
+public enum ComposeAttempt: Sendable, Equatable {
     case sent(matched: String)
     case refused(String)
     case failed(String)
@@ -83,7 +83,7 @@ enum ComposeAttempt: Sendable, Equatable {
 /// `codeconnect://session/<uid>/diff` raced the socket, `loadDiff` failed with
 /// `LinkHealth`'s own sentence, and the sheet rendered
 /// `Connecting to the daemon…` as a quotation from the Mac.
-enum DiffFailure: Sendable, Equatable {
+public enum DiffFailure: Sendable, Equatable {
     /// A string the daemon put on the wire. The only kind that may be quoted.
     case daemon(String)
     /// The app's own account of itself — the link's health, a local timeout, a
@@ -104,13 +104,13 @@ enum DiffFailure: Sendable, Equatable {
 }
 
 /// The state of one session's on-demand diff.
-enum DiffState: Sendable {
+public enum DiffState: Sendable {
     case idle
     case loading
     case loaded(SessionDiff, parsed: UnifiedDiff, fetchedAt: Date)
     case failed(DiffFailure)
 
-    var isLoading: Bool {
+    public var isLoading: Bool {
         if case .loading = self { return true }
         return false
     }
@@ -118,7 +118,7 @@ enum DiffState: Sendable {
     /// A request that ended in the app's own account of the link, rather than
     /// in anything the daemon said. The screen has a state of its own for this
     /// and must not fall through to the failure state.
-    var failedOnTheLink: Bool {
+    public var failedOnTheLink: Bool {
         if case .failed(.app) = self { return true }
         return false
     }
@@ -126,7 +126,7 @@ enum DiffState: Sendable {
 
 /// What the relay enrollment path is doing, folded into the push test-button
 /// explanation. Only a relay daemon drives this; direct and off stay `.idle`.
-enum RelayPushState: Equatable, Sendable {
+public enum RelayPushState: Equatable, Sendable {
     /// No relay work in flight — direct mode, off, or before the first handshake.
     case idle
     /// Attesting and minting the credential.
@@ -145,17 +145,17 @@ enum RelayPushState: Equatable, Sendable {
 /// holds one per paired machine and makes their fleet.
 @MainActor
 @Observable
-final class AppModel {
+public final class AppModel {
     /// The machine this model is for, by `PairedMachine.id`. Nil only for the one
     /// model there is with nothing paired — the welcome screen's, the sample
     /// fleet's, a fixture run's. A pairing that has not finished has its id
     /// already, so every frame of its link reaches its own cache.
-    let machineID: String?
-    let pairing: PairingStore
-    let connection: DaemonConnection
-    let settings: AppSettings
+    public let machineID: String?
+    public let pairing: PairingStore
+    public let connection: DaemonConnection
+    public let settings: AppSettings
     /// The live terminal, riding the same paired connection as everything else.
-    let terminal: TerminalCarrier
+    public let terminal: TerminalCarrier
     /// This machine's folder of the event cache.
     private let cache: EventCache
     /// Called once this machine's pairing is saved: its daemon has answered it.
@@ -225,9 +225,9 @@ final class AppModel {
     private var fleetSource = FleetSource()
     /// Where the list on screen came from: published with it.
     private var shownFleetSource = FleetSource()
-    var hasLiveFleet: Bool { shownFleetSource.isLive }
-    var fleetCachedAt: Date? { shownFleetSource.cachedAt }
-    var fleetCacheRestoredAt: Date? { shownFleetSource.restoredAt }
+    public var hasLiveFleet: Bool { shownFleetSource.isLive }
+    public var fleetCachedAt: Date? { shownFleetSource.cachedAt }
+    public var fleetCacheRestoredAt: Date? { shownFleetSource.restoredAt }
     /// Whether the fleet may be shown. Until then the app shows its loader, so
     /// the cached list, the live list and each session's backlog replay are
     /// never painted one after another. True once every session in the first
@@ -242,7 +242,7 @@ final class AppModel {
     private var preparedForLaunch: Set<String> = []
     /// Ticks once a second so every age on screen stays true without each view
     /// owning a timer.
-    private(set) var now = Date()
+    public private(set) var now = Date()
     /// One diff per session, keyed like `states`, fetched only when asked for.
     private(set) var diffs: [String: DiffState] = [:]
 
@@ -287,7 +287,7 @@ final class AppModel {
     @ObservationIgnored private var catchUpEpochs = 0
     /// Whether the screen is held for a catch-up. Observed, unlike `catchUp`,
     /// whose progress changes with every event.
-    private(set) var isCatchingUp = false
+    public private(set) var isCatchingUp = false
     @ObservationIgnored private var releasing = false
     @ObservationIgnored private var stallWatch: Task<Void, Never>?
     /// `sessions` requests written and replies taken on the link
@@ -439,7 +439,7 @@ final class AppModel {
 
     /// The live iOS permission state, re-read on every ask — the stored
     /// `pushAuthorized` goes stale the moment the user visits Settings.
-    func pushAuthorizationStatus() async -> UNAuthorizationStatus {
+    public func pushAuthorizationStatus() async -> UNAuthorizationStatus {
         await pushRegistrar?.authorizationStatus() ?? .notDetermined
     }
 
@@ -464,7 +464,7 @@ final class AppModel {
     private let relayEnrollment: RelayEnrollment
     /// What the relay path is doing, for the test-button explanation. Relay mode
     /// only; a direct-key daemon never leaves `.idle`.
-    private(set) var relayPushState: RelayPushState = .idle
+    public private(set) var relayPushState: RelayPushState = .idle
     /// Earliest the next foreground status check may run. Success caps it to
     /// daily; a failure backs off a few minutes so a flaky relay does not pin the
     /// foreground. `distantPast` so the first foreground after launch checks.
@@ -719,7 +719,7 @@ final class AppModel {
     /// re-drives the flow from scratch on the current connection: a fresh key, a
     /// fresh attestation, a fresh credential. The stored App Attest key is
     /// discarded, so this is the in-app equivalent of the plan's `reenroll`.
-    func resetNotificationRegistration() {
+    public func resetNotificationRegistration() {
         Task {
             await relayEnrollment.reset()
             relayPushState = .idle
@@ -800,7 +800,7 @@ final class AppModel {
         /// How many of `-CC_FIXTURE_LATE_EVENT_MS`'s held-back frames have been
         /// delivered, so a test can see an event land behind a screen that
         /// does not draw it. Not observed: reading it redraws nothing.
-        static var lateFramesDelivered = 0
+        public static var lateFramesDelivered = 0
 
         /// Test seam: `-CC_RESET_CACHE` starts an automation launch with this
         /// machine's saved history gone.
@@ -1149,14 +1149,14 @@ final class AppModel {
     /// It is what keeps a replay hermetic — nothing subscribes, nothing
     /// migrates, and nothing reaches the cache — so no part of it can be
     /// mistaken for, or written over, a real Mac's.
-    private(set) var fixturesActive = false
+    public private(set) var fixturesActive = false
 
     /// This computer's projects, and the sessions this phone started on it.
-    let starter = SessionStarter()
+    public let starter = SessionStarter()
 
     /// Ask this computer for its projects. Only a computer that advertises
     /// `start_session` is asked; the answer arrives as `projects`.
-    func listProjects() {
+    public func listProjects() {
         #if DEBUG
             if fixturesActive {
                 if starter.projects == nil { starter.listFixtureProjects(linux: machineSystem == "Linux") }
@@ -1169,13 +1169,13 @@ final class AppModel {
 
     /// The folders this computer's live sessions run in, so a start can say
     /// it would share one (minor 29 has no such fact of its own).
-    var liveFolders: Set<String> { Set(summaries.filter { $0.lifecycle == .live }.map(\.cwd)) }
+    public var liveFolders: Set<String> { Set(summaries.filter { $0.lifecycle == .live }.map(\.cwd)) }
 
     /// Ask this computer about one folder's repository: its checkouts and
     /// free branches (`get_project_git`, minor 29). Only a computer that
     /// advertises `start_worktree` is asked; the answer arrives as
     /// `project_git`.
-    func projectGit(_ path: String) {
+    public func projectGit(_ path: String) {
         #if DEBUG
             if fixturesActive {
                 starter.receive(git: SessionStarter.fixtureGit(path, projects: starter.projects ?? []), for: path)
@@ -1191,7 +1191,7 @@ final class AppModel {
 
     /// Ask this computer for one folder's subfolders (`list_folder`, minor 30),
     /// under a fresh request id: only the answer to the latest ask is shown.
-    func listFolder(_ request: StartFolderRequest) {
+    public func listFolder(_ request: StartFolderRequest) {
         #if DEBUG
             if fixturesActive {
                 starter.receive(
@@ -1213,7 +1213,7 @@ final class AppModel {
     /// Make a folder, as `mkdir` would (`create_folder`, minor 30); the answer
     /// arrives as `create_folder_result` under the returned request id. Never
     /// sent again after a reconnect: a repeat is a second `mkdir`.
-    func createFolder(named name: String, in parent: String) -> String {
+    public func createFolder(named name: String, in parent: String) -> String {
         let requestID = UUID().uuidString.lowercased()
         #if DEBUG
             if fixturesActive {
@@ -1234,7 +1234,7 @@ final class AppModel {
 
     /// Start an agent in one of this computer's projects; the answer arrives as
     /// `start_session_result` under the returned request id.
-    func startSession(
+    public func startSession(
         _ project: StartProject, place: StartPlace = .folder, agent: StartAgent, prompt: String
     ) -> String {
         let requestID = starter.start(
@@ -1268,7 +1268,7 @@ final class AppModel {
     /// needs: the banner that says what this is, and an answer path that says
     /// what it would have done instead of reaching for a Mac. The launch
     /// argument is a test seam and never sets it.
-    private(set) var sampleFleetActive = false
+    public private(set) var sampleFleetActive = false
 
     /// Show the sample fleet. The only way in, and it takes an explicit tap.
     ///
@@ -1280,7 +1280,7 @@ final class AppModel {
     /// still holds: a release build has no way to be *paired* except by a person
     /// with a Mac. Entry is refused from anywhere but the unpaired state, which
     /// is what keeps sample and live state from ever being on screen together.
-    func startSampleFleet() {
+    public func startSampleFleet() {
         // `pendingPairing == nil` is load-bearing: the replayed ack reaches
         // `commitPendingPairing`, and a pending typed-token endpoint would be
         // saved to the Keychain on the strength of a frame no daemon sent.
@@ -1314,7 +1314,7 @@ final class AppModel {
     /// sample fleet is reachable while its own Settings sheet is open, so
     /// "sample and live never mix" has to be enforced where a live link begins,
     /// not only where the sample one ends.
-    func stopSampleFleet() {
+    public func stopSampleFleet() {
         guard sampleFleetActive else { return }
         sampleFleetActive = false
         fixturesActive = false
@@ -1347,7 +1347,7 @@ final class AppModel {
     /// and is awaited, so a caller that reports success is reporting something
     /// that has actually been written.
     @discardableResult
-    func removeSession(_ summary: SessionSummary) async -> DeleteSessionResult? {
+    public func removeSession(_ summary: SessionSummary) async -> DeleteSessionResult? {
         guard summary.isRemovable, daemonProfile.removesSessions else { return nil }
         let key = summary.sessionKey
         let result = try? await connection.deleteSession(sessionUID: summary.sessionUID)
@@ -1616,7 +1616,7 @@ final class AppModel {
         }
     }
 
-    func refreshFleet() {
+    public func refreshFleet() {
         requestSessions()
     }
 
@@ -1658,7 +1658,7 @@ final class AppModel {
 
     // MARK: - Derived state
 
-    var linkHealth: LinkHealth {
+    public var linkHealth: LinkHealth {
         LinkHealth.evaluate(
             phase: connection.phase, lastContactAt: connection.lastContactAt,
             dialFailure: connection.dialFailure, isRedial: connection.isRedial, now: now)
@@ -1670,34 +1670,34 @@ final class AppModel {
     /// link precisely because it has none, and would therefore disable every
     /// control on the one screen somebody came here to read. Those controls
     /// answer inline instead; see `DecisionCardView.submit`.
-    var actionsBlockedReason: String? {
+    public var actionsBlockedReason: String? {
         sampleFleetActive ? nil : linkHealth.disabledReason
     }
 
     /// Which daemon build this is, and therefore which of the newer surfaces
     /// are real here.
-    var daemonProfile: DaemonProfile { connection.profile }
+    public var daemonProfile: DaemonProfile { connection.profile }
 
     /// This model's machine as the phone keeps it. Nil with nothing paired, and
     /// for a new machine until its pairing is saved.
     var machine: PairedMachine? { machineID.flatMap(pairing.machine(id:)) }
 
     /// Where this machine is reached.
-    var endpoint: DaemonEndpoint? { machine?.endpoint }
+    public var endpoint: DaemonEndpoint? { machine?.endpoint }
 
     /// Why this machine's encrypted connection cannot be used, when it cannot.
-    var tlsUnavailableReason: String? { machineID.flatMap(pairing.tlsUnavailableReason(for:)) }
+    public var tlsUnavailableReason: String? { machineID.flatMap(pairing.tlsUnavailableReason(for:)) }
 
     /// The computer as its owner names it: the name its daemon reports, or what
     /// it last reported while it is not connected, or — from a daemon that has
     /// never said (older than minor 25) — the host this phone paired with. Nil
     /// when nothing is paired.
-    var machineName: String? {
+    public var machineName: String? {
         daemonProfile.machineName ?? machine?.name ?? endpoint?.host
     }
 
     /// The computer's system, by the same rule as its name.
-    var machineSystem: String? {
+    public var machineSystem: String? {
         DaemonProfile.system(forOS: daemonProfile.machineOS ?? machine?.os)
     }
 
@@ -1732,7 +1732,7 @@ final class AppModel {
     /// `sessionKey` (the id's own prefix) so it is one timeline scan, not a
     /// fleet-wide one. What may actually be sent is `answer`'s to decide, from
     /// the truth.
-    func shownApproval(sessionKey: String, id: String) -> ApprovalItem? {
+    public func shownApproval(sessionKey: String, id: String) -> ApprovalItem? {
         shownSessions[sessionKey]?.shown.approval(id: id)
     }
 
@@ -1767,7 +1767,7 @@ final class AppModel {
             })
     }
 
-    var blockedCount: Int { fleet.filter { $0.status == .blocked }.count }
+    public var blockedCount: Int { fleet.filter { $0.status == .blocked }.count }
 
     /// Creates on demand. Only ever called from event handling — a view that
     /// called it during `body` would be mutating state mid-render, so views read
@@ -1844,28 +1844,28 @@ final class AppModel {
     }
 
     /// The run as the list on screen has it.
-    func shownSummary(for key: String) -> SessionSummary? {
+    public func shownSummary(for key: String) -> SessionSummary? {
         shownSummaries.first { $0.sessionKey == key }
     }
 
     /// What is on screen for this run, or nil when the screen has no such run.
-    func shown(for key: String) -> SessionState.Shown? {
+    public func shown(for key: String) -> SessionState.Shown? {
         shownSessions[key]?.shown
     }
 
     /// The reader has seen this run through what is drawn.
-    func markReviewed(_ key: String) {
+    public func markReviewed(_ key: String) {
         shownSessions[key]?.markReviewed()
     }
 
     /// The reader acknowledged this run's gap notice.
-    func dismissGap(_ key: String) {
+    public func dismissGap(_ key: String) {
         shownSessions[key]?.dismissGap()
     }
 
     /// The screen showing this chat is told as the rows above its reader are
     /// replaced. See `SessionState.onWindowChange`.
-    func onWindowChange(
+    public func onWindowChange(
         of key: String,
         _ observer: ((_ shown: [TimelineItem], _ next: [TimelineItem], _ change: SessionState.WindowChange) -> Void)?
     ) {
@@ -1874,7 +1874,7 @@ final class AppModel {
 
     /// The screen showing this chat is told as a catch-up's one change lands.
     /// See `SessionState.onCatchUpLanding`.
-    func onCatchUpLanding(
+    public func onCatchUpLanding(
         of key: String, _ observer: ((_ shown: SessionState.Shown, _ next: SessionState.Shown) -> Void)?
     ) {
         shownSessions[key]?.onCatchUpLanding = observer
@@ -1883,13 +1883,13 @@ final class AppModel {
     /// What the command sheets watch for: the run's newest receipts as they
     /// arrive, never as drawn — a receipt is the answer to a send, and the sheet
     /// fences it against `eventHighWater`, which is the truth too.
-    func receipts(for key: String) -> SessionState.Receipts? {
+    public func receipts(for key: String) -> SessionState.Receipts? {
         states[key]?.receipts
     }
 
     /// What the diagnostics sheet reports of the sessions this phone holds, as
     /// they are now.
-    var sessionDiagnostics: SessionDiagnostics {
+    public var sessionDiagnostics: SessionDiagnostics {
         SessionDiagnostics(
             known: summaries.count,
             gaps: states.values.filter { $0.gap != nil }.count,
@@ -1897,18 +1897,18 @@ final class AppModel {
             fromCache: states.values.filter { $0.loadedFromCacheAt != nil && !$0.hasLiveData }.count)
     }
 
-    struct SessionDiagnostics {
-        let known: Int
+    public struct SessionDiagnostics {
+        public let known: Int
         /// Sessions whose event log has a discontinuity the app has not seen filled.
-        let gaps: Int
-        let highestSeq: UInt64?
-        let fromCache: Int
+        public let gaps: Int
+        public let highestSeq: UInt64?
+        public let fromCache: Int
     }
 
     /// The run's permission mode as drawn: what its held events last said, or
     /// the Mac's own account where that rests on a newer event — the event that
     /// set the mode can be older than the window.
-    func permissionMode(for key: String) -> String? {
+    public func permissionMode(for key: String) -> String? {
         let shown = shown(for: key)
         if let fact = shownSummary(for: key)?.permissionMode, fact.seq > shown?.permissionModeSeq ?? 0 {
             return fact.value
@@ -1917,7 +1917,7 @@ final class AppModel {
     }
 
     /// The run's model, likewise.
-    func confirmedModel(for key: String) -> ConfirmedModel? {
+    public func confirmedModel(for key: String) -> ConfirmedModel? {
         let shown = shown(for: key)
         if let fact = shownSummary(for: key)?.model, fact.seq > shown?.confirmedModelSeq ?? 0 {
             return ConfirmedModel(
@@ -1936,7 +1936,7 @@ final class AppModel {
     /// a fence built on the lower of the two would admit exactly the historical
     /// receipt it exists to exclude. The lookup lives here so a sheet never has
     /// to reach into fleet presentation to correlate its own send.
-    func eventHighWater(for key: String) -> UInt64 {
+    public func eventHighWater(for key: String) -> UInt64 {
         max(states[key]?.lastSeq ?? 0, summary(for: key)?.lastSeq ?? 0)
     }
 
@@ -1945,7 +1945,7 @@ final class AppModel {
     /// Computed across the whole fleet because the answer depends on it: a
     /// second run in the same project is what earns a qualifier, and no run can
     /// know that alone.
-    func runLabel(for key: String) -> RunLabel {
+    public func runLabel(for key: String) -> RunLabel {
         RunLabel.labels(for: shownSummaries)[key] ?? .unknown
     }
 
@@ -1956,7 +1956,7 @@ final class AppModel {
     /// route: `tmux attach -t =<uid>` cannot work — tmux has never heard of a
     /// uid — and the name is only safe to use while the daemon still vouches
     /// that it belongs to this run.
-    func tmuxName(for key: String) -> String? {
+    public func tmuxName(for key: String) -> String? {
         guard let summary = shownSummary(for: key) else { return nil }
         // Empty is the daemon saying "no known location": an adopted run whose
         // hooks arrived but which nothing ever put in tmux. Falling back to the
@@ -2222,7 +2222,7 @@ final class AppModel {
     ///
     /// During a catch-up a name waits — nil — for the list the catch-up ends
     /// on: until then the name may still belong to a run that has gone.
-    func resolveSessionKey(reference: String) -> String? {
+    public func resolveSessionKey(reference: String) -> String? {
         if summary(for: reference) != nil { return reference }
         guard !isCatchingUp else { return nil }
         let named = summaries.filter { $0.sessionID == reference }
@@ -2649,7 +2649,7 @@ final class AppModel {
     ///
     /// The reader's ask waits out a catch-up: the page belongs above rows the
     /// screen is not showing yet. `isReadyToPage` turning true asks again.
-    func loadEarlier(key: String) {
+    public func loadEarlier(key: String) {
         guard connection.phase.isConnected else { return }
         if daemonProfile.pagesHistory {
             guard !isCatchingUp else { return }
@@ -2707,7 +2707,7 @@ final class AppModel {
 
     /// The reader reached the top of a chat a Mac that serves pages windowed.
     /// Theirs to ask, so it asks again after a page that failed.
-    func reachedTop(key: String) {
+    public func reachedTop(key: String) {
         guard states[key]?.windowStart != nil, daemonProfile.pagesHistory else { return }
         loadEarlier(key: key)
     }
@@ -2716,7 +2716,7 @@ final class AppModel {
     /// fill its screen, or a page added nothing and the reader is still at its
     /// top. Like the fill, it waits until the window has caught up with what the
     /// Mac listed, and stops at a page that failed.
-    func pageBackOnItsOwn(key: String) {
+    public func pageBackOnItsOwn(key: String) {
         guard isReadyToPage(key), states[key]?.pagesBackOnItsOwn == true else { return }
         loadEarlier(key: key)
     }
@@ -2728,7 +2728,7 @@ final class AppModel {
     /// needs the page below, with nothing on screen having moved — and only
     /// once the caught-up rows are the ones on screen, since whether the chat
     /// is short is read off them.
-    func isReadyToPage(_ key: String) -> Bool {
+    public func isReadyToPage(_ key: String) -> Bool {
         guard connection.phase.isConnected, !isCatchingUp, daemonProfile.pagesHistory,
             let state = states[key], let windowStart = state.windowStart, windowStart > 1,
             state.pinRequest == nil, let summary = summary(for: key)
@@ -2736,7 +2736,7 @@ final class AppModel {
         return state.drawnThrough >= summary.lastSeq
     }
 
-    func isLoadingEarlier(_ key: String) -> Bool {
+    public func isLoadingEarlier(_ key: String) -> Bool {
         daemonProfile.pagesHistory ? states[key]?.pageRequest != nil : loadingEarlier.contains(key)
     }
 
@@ -2893,11 +2893,11 @@ final class AppModel {
     /// fresh `@State`, which would otherwise let the same card be answered twice
     /// concurrently — and concurrent answers are exactly what makes an outcome
     /// attributable to the wrong tap.
-    func isAnswering(_ item: ApprovalItem) -> Bool { answersInFlight.contains(item.id) }
+    public func isAnswering(_ item: ApprovalItem) -> Bool { answersInFlight.contains(item.id) }
 
     /// The last thing the daemon said about this card, kept so re-opening it
     /// shows the confirmed outcome instead of an innocent-looking pending state.
-    func lastAttempt(for item: ApprovalItem) -> AnswerAttempt? { answerAttempts[item.id] }
+    public func lastAttempt(for item: ApprovalItem) -> AnswerAttempt? { answerAttempts[item.id] }
 
     // MARK: - Codex: stop the turn, say something
 
@@ -2905,7 +2905,7 @@ final class AppModel {
     /// view so an in-flight stop survives the sheet being dismissed — and so the
     /// bounded grey after a link-state refusal is not reset by scrolling the
     /// fleet.
-    func codexControls(for key: String) -> CodexControls {
+    public func codexControls(for key: String) -> CodexControls {
         if let existing = codexControlsByKey[key] { return existing }
         // **A fixture run writes nothing durable.** The render harness presses
         // Stop and Compose for real, and two of the staged answers are
@@ -2951,7 +2951,7 @@ final class AppModel {
     }
 
     /// Why Stop is not offered on this session as drawn, or nil when it is.
-    func stopUnavailable(for key: String) -> String? {
+    public func stopUnavailable(for key: String) -> String? {
         guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return CodexProse.stopUnavailable(
@@ -2973,7 +2973,7 @@ final class AppModel {
     }
 
     /// Why the Codex composer cannot send as drawn, or nil when it can.
-    func composeUnavailable(for key: String) -> String? {
+    public func composeUnavailable(for key: String) -> String? {
         guard let summary = shownSummary(for: key) else { return "This run is not in the fleet." }
         if let reason = unknownDaemonReason(summary) { return reason }
         return Self.composeUnavailable(summary, profile: daemonProfile)
@@ -3007,7 +3007,7 @@ final class AppModel {
     /// rules is how the link state came to be enforced when drawing a button
     /// and not when sending a frame.
     @discardableResult
-    func stopCodexTurn(sessionKey key: String) async -> InterruptResult? {
+    public func stopCodexTurn(sessionKey key: String) async -> InterruptResult? {
         let controls = codexControls(for: key)
         guard let summary = summary(for: key) else {
             controls.stopNotSent("This run is not in the fleet.")
@@ -3066,7 +3066,7 @@ final class AppModel {
 
     /// **Say something to this Codex session.**
     @discardableResult
-    func composeToCodex(sessionKey key: String, text: String) async -> ComposeResult? {
+    public func composeToCodex(sessionKey key: String, text: String) async -> ComposeResult? {
         let controls = codexControls(for: key)
         guard let summary = summary(for: key) else {
             controls.composeNotSent("This run is not in the fleet.")
@@ -3156,7 +3156,7 @@ final class AppModel {
 
     /// Answers are idempotent by `(session, request_id)` on the daemon side, so
     /// a retry after any failure here is always safe.
-    func answer(item: ApprovalItem, decision: AnswerDecision) async -> AnswerAttempt {
+    public func answer(item: ApprovalItem, decision: AnswerDecision) async -> AnswerAttempt {
         // **The decision must match the agent, checked on the send path.**
         //
         // The two vocabularies are mutually exclusive and the Mac refuses each
@@ -3300,7 +3300,7 @@ final class AppModel {
     /// wherever there is one, because a name resolves to whichever run holds it
     /// *now* — and typing into the wrong agent's TTY is not a mistake that can
     /// be taken back.
-    func send(text: String, to key: String, submit: Bool = true) async -> ComposeAttempt {
+    public func send(text: String, to key: String, submit: Bool = true) async -> ComposeAttempt {
         // The policy stands between EVERY caller and the wire — the composer,
         // a denial reason, a diff comment. A deny reason that happens to
         // start with `/config` would otherwise recreate the measured Mac
@@ -3337,7 +3337,7 @@ final class AppModel {
     /// consequences — the new default, and the history re-read — above the rows
     /// it is tapped from, so the tap is the consent that key needs. Nothing
     /// else sets it, and the daemon still decides which commands it applies to.
-    func sendModelCommand(_ argument: String, to key: String) async -> ComposeAttempt {
+    public func sendModelCommand(_ argument: String, to key: String) async -> ComposeAttempt {
         await sendUnchecked(
             text: "/model \(argument)", to: key, submit: true,
             completeNativeConfirmation: true)
@@ -3348,26 +3348,26 @@ final class AppModel {
     /// states the cost above the rows it is tapped from. A *typed*
     /// `/effort <value>` passes through instead and never sets this, so it gets
     /// the ordinary rescue — there is no disclosure behind it to point at.
-    func sendEffortCommand(_ value: String, to key: String) async -> ComposeAttempt {
+    public func sendEffortCommand(_ value: String, to key: String) async -> ComposeAttempt {
         await sendUnchecked(
             text: "/effort \(value)", to: key, submit: true,
             completeNativeConfirmation: true)
     }
 
-    func sendCompactCommand(instructions: String, to key: String) async -> ComposeAttempt {
+    public func sendCompactCommand(instructions: String, to key: String) async -> ComposeAttempt {
         let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = trimmed.isEmpty ? "/compact" : "/compact \(trimmed)"
         return await sendUnchecked(text: text, to: key, submit: true)
     }
 
-    func sendClearCommand(to key: String) async -> ComposeAttempt {
+    public func sendClearCommand(to key: String) async -> ComposeAttempt {
         await sendUnchecked(text: "/clear", to: key, submit: true)
     }
 
     /// `/status`, `/usage`, `/cost` — the send whose *result* is the point:
     /// on `.composerRecovered` the daemon returns the pane it saved while
     /// the Mac view was open, and the snapshot sheet renders exactly that.
-    func sendSnapshotCommand(_ command: SnapshotCommand, to key: String) async -> ComposeAttempt {
+    public func sendSnapshotCommand(_ command: SnapshotCommand, to key: String) async -> ComposeAttempt {
         await sendUnchecked(text: "/\(command.rawValue)", to: key, submit: true)
     }
 
@@ -3451,7 +3451,7 @@ final class AppModel {
 
     /// Whether this exact text to `key` still has the identity of an attempt whose
     /// outcome is unknown, so sending it again is a retry and not a second typing.
-    func holdsSendIdentity(text: String, to key: String) -> Bool {
+    public func holdsSendIdentity(text: String, to key: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return pendingSendIdentities[SendMutationKey(key: key, text: trimmed, submit: true)] != nil
     }
@@ -3484,7 +3484,7 @@ final class AppModel {
 
     // MARK: - Diff
 
-    func diffState(for key: String) -> DiffState { diffs[key] ?? .idle }
+    public func diffState(for key: String) -> DiffState { diffs[key] ?? .idle }
 
     /// Ask the daemon for this run's working-tree diff.
     ///
@@ -3492,7 +3492,7 @@ final class AppModel {
     /// ask for when you are about to read it. The result is stamped with the
     /// daemon's own `captured_at` so the view can say how old what you are
     /// reading is, rather than implying it is live.
-    func loadDiff(key: String, force: Bool = false) {
+    public func loadDiff(key: String, force: Bool = false) {
         // The sample fleet's diff is preloaded by `startSampleFleet` and is
         // the only diff its sessions will ever have: a refresh has no daemon
         // to ask, and falling through would overwrite the loaded diff with a
@@ -3537,7 +3537,7 @@ final class AppModel {
         }
     }
 
-    func clearDiff(key: String) { diffs[key] = nil }
+    public func clearDiff(key: String) { diffs[key] = nil }
 
     /// The daemon reports refusals in prose; these are the two that mean
     /// something specific to the user rather than "try again".
@@ -3575,7 +3575,7 @@ extension Optional where Wrapped == DeleteSessionResult {
     ///
     /// Short because it is rendered inside the revealed button, which is as wide
     /// as the word "Remove" and cannot grow.
-    var refusal: String? {
+    public var refusal: String? {
         switch self {
         case .deleted, .notFound: nil
         case .stillRunning: "Still running"

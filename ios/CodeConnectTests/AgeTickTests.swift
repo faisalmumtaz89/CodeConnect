@@ -3,6 +3,7 @@ import UIKit
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// **The clock the whole app reads ages from.**
 ///

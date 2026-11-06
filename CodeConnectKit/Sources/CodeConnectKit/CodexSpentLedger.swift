@@ -21,7 +21,7 @@ import Foundation
 /// hex digest of the preimage (`CodexHash`), so nothing here is a command, a
 /// message, or a path — the store holds no content a reader could recover.
 @MainActor
-final class CodexSpentLedger {
+public final class CodexSpentLedger {
 
     enum Kind: String, Sendable {
         case stop
@@ -40,7 +40,7 @@ final class CodexSpentLedger {
     /// is by age, and 48 linear scans cost nothing next to a socket round trip.
     private var entries: [String]
 
-    init(defaults: UserDefaults = .standard) {
+    public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         entries = defaults.stringArray(forKey: Self.defaultsKey) ?? []
         if entries.count > Self.capacity {

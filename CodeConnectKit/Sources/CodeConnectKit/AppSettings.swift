@@ -8,7 +8,7 @@ import Observation
 /// change.
 @MainActor
 @Observable
-final class AppSettings {
+public final class AppSettings {
     private enum Key {
         static let terminalFontSize = "codeconnect.terminal.fontSize"
         static let diffFontSize = "codeconnect.diff.fontSize"
@@ -18,17 +18,17 @@ final class AppSettings {
 
     /// Terminal type size, in points. Persisted so a pinch survives the tab
     /// being closed.
-    var terminalFontSize: Double {
+    public var terminalFontSize: Double {
         didSet { defaults.set(terminalFontSize, forKey: Key.terminalFontSize) }
     }
-    var diffFontSize: Double {
+    public var diffFontSize: Double {
         didSet { defaults.set(diffFontSize, forKey: Key.diffFontSize) }
     }
 
-    static let terminalFontRange: ClosedRange<Double> = 8...22
-    static let diffFontRange: ClosedRange<Double> = 9...24
+    public static let terminalFontRange: ClosedRange<Double> = 8...22
+    public static let diffFontRange: ClosedRange<Double> = 9...24
 
-    init(defaults: UserDefaults = .standard) {
+    public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedTerminal = defaults.double(forKey: Key.terminalFontSize)
         terminalFontSize =

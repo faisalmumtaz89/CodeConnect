@@ -1,9 +1,8 @@
-import CodeConnectKit
 import Foundation
 import Observation
 
 /// Why the client cannot claim to have shown everything.
-struct GapNotice: Sendable, Hashable {
+public struct GapNotice: Sendable, Hashable {
     enum Cause: Sendable, Hashable {
         /// The daemon told us it could not replay gap-free.
         case daemonResync(skipped: Int?)
@@ -23,9 +22,9 @@ struct GapNotice: Sendable, Hashable {
     }
 
     var cause: Cause
-    var at: Date
+    public var at: Date
 
-    var message: String {
+    public var message: String {
         switch cause {
         case .daemonResync(let skipped):
             if let skipped {
@@ -46,7 +45,7 @@ struct GapNotice: Sendable, Hashable {
 /// Everything the app knows about one session, and how old it is.
 @MainActor
 @Observable
-final class SessionState {
+public final class SessionState {
     /// What this run is filed under: its `session_uid` where the daemon mints
     /// one, its tmux name otherwise. Never the display name — see
     /// `SessionSummary.sessionKey`.
@@ -145,7 +144,7 @@ final class SessionState {
     /// sets its "N new" once.
     @ObservationIgnored var onCatchUpLanding: ((_ shown: Shown, _ next: Shown) -> Void)?
 
-    enum WindowChange {
+    public enum WindowChange {
         /// An earlier page was drawn above.
         case page
         /// The window was set afresh: trimmed to the newest events, or
@@ -230,12 +229,12 @@ final class SessionState {
     /// The newest command receipts as they arrived, for the sheets that wait on
     /// one. Never from `shown`: a receipt answers a send, and the sheet fences
     /// it against the stream position it captured.
-    struct Receipts {
-        let modelSignal: ModelCommandSignal?
-        let effort: EffortConfirmation?
-        let effortSeq: UInt64
-        let compact: CompactConfirmation?
-        let compactSeq: UInt64
+    public struct Receipts {
+        public let modelSignal: ModelCommandSignal?
+        public let effort: EffortConfirmation?
+        public let effortSeq: UInt64
+        public let compact: CompactConfirmation?
+        public let compactSeq: UInt64
     }
 
     var receipts: Receipts {
@@ -261,7 +260,7 @@ final class SessionState {
     /// that the session is degraded.
     var silentBecauseOfPermissions: String? { Self.silentNotice(permissionMode: permissionMode) }
 
-    static func silentNotice(permissionMode: String?) -> String? {
+    public static func silentNotice(permissionMode: String?) -> String? {
         permissionMode == "bypassPermissions"
             ? "Permissions bypassed - this run decides for itself and will not ask you"
             : nil
@@ -385,31 +384,33 @@ final class SessionState {
     /// request reads them, and they change as events arrive. What is on screen
     /// changes only when `shown` is published, so a catch-up can bring the
     /// truth level with the Mac and put the result on screen in one change.
-    struct Shown: Equatable {
+    public struct Shown: Equatable {
         // The cheap fields come first: comparing two presentations stops at the
         // first difference, and the timeline is the costly one.
-        var drawnThrough: UInt64 = 0
+        public var drawnThrough: UInt64 = 0
         var lastPromptSeq: UInt64 = 0
         var lastEventAt: Date?
-        var gap: GapNotice?
-        var windowStart: UInt64?
-        var headTruncated = false
+        public var gap: GapNotice?
+        public var windowStart: UInt64?
+        public var headTruncated = false
         /// An earlier page is on its way.
-        var loadingPage = false
+        public var loadingPage = false
         var permissionMode: String?
         var permissionModeSeq: UInt64 = 0
         var confirmedModel: ConfirmedModel?
         var confirmedModelSeq: UInt64 = 0
-        var hasLiveData = false
-        var loadedFromCacheAt: Date?
-        var cacheRestoredAt: Date?
+        public var hasLiveData = false
+        public var loadedFromCacheAt: Date?
+        public var cacheRestoredAt: Date?
         /// The Codex turn Stop would name, or nil.
         var runningTurn: String?
         /// The newest event the reader has seen this run through to.
-        var reviewedSeq: UInt64 = 0
-        var pendingApprovals: [ApprovalItem] = []
+        public var reviewedSeq: UInt64 = 0
+        public var pendingApprovals: [ApprovalItem] = []
         var pinnedItems: [TimelineItem] = []
-        var timeline: [TimelineItem] = []
+        public var timeline: [TimelineItem] = []
+
+        public static var empty: Shown { Shown() }
 
         /// The card with this id as drawn, pending or resolved — what an open
         /// decision sheet renders from. See `SessionState.approval(id:)`.

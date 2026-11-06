@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 
 /// The cross-fleet decision queue.
@@ -13,7 +12,7 @@ import Foundation
 ///   * **No gesture ever decides anything.** There is no swipe in this app. An
 ///     accidental swipe approving `rm -rf` is the one bug that ends the product,
 ///     so advancing is a tap and answering is a button.
-enum DeckOrdering {
+public enum DeckOrdering {
     /// Every pending card across the fleet, **urgency-ranked**: HIGH → MEDIUM →
     /// LOW, then oldest first inside each tier.
     ///
@@ -34,13 +33,13 @@ enum DeckOrdering {
     /// reads "absent means medium" only on a daemon that classifies, and a
     /// ranking that guessed differently would put a card in a tier its own
     /// badge disagrees with.
-    static func sort(_ items: [ApprovalItem], profile: DaemonProfile) -> [ApprovalItem] {
+    public static func sort(_ items: [ApprovalItem], profile: DaemonProfile) -> [ApprovalItem] {
         sort(items) { _ in profile }
     }
 
     /// Cards from several machines, each assessed by the profile of the daemon
     /// that raised it.
-    static func sort(
+    public static func sort(
         _ items: [ApprovalItem], profile: (ApprovalItem) -> DaemonProfile
     ) -> [ApprovalItem] {
         // One assessment per card rather than one per comparison: `resolve`
@@ -68,7 +67,7 @@ enum DeckOrdering {
 /// Cards are tracked by `ApprovalItem.id` — the run *and* the request — rather
 /// than by request id alone, because two runs can hold a card with the same
 /// `request_id` and settling one of them must not silently settle the other.
-struct DeckPass: Sendable, Equatable {
+public struct DeckPass: Sendable, Equatable {
     /// Cards answered (or confirmed already-answered) during this pass.
     private(set) var settled: Set<String> = []
     /// Cards pushed to the back of this pass without being answered.
@@ -76,12 +75,14 @@ struct DeckPass: Sendable, Equatable {
     /// queue.
     private(set) var deferred: [String] = []
 
-    mutating func settle(_ cardID: String) {
+    public init() {}
+
+    public mutating func settle(_ cardID: String) {
         settled.insert(cardID)
         deferred.removeAll { $0 == cardID }
     }
 
-    mutating func postpone(_ cardID: String) {
+    public mutating func postpone(_ cardID: String) {
         guard !deferred.contains(cardID) else { return }
         deferred.append(cardID)
     }
@@ -99,11 +100,11 @@ struct DeckPass: Sendable, Equatable {
     /// has confirmed is answered stays `pending` in the log until the matching
     /// `approval_resolved` event arrives, and leaving it on top of the stack for
     /// that beat would invite a second answer to a decision already made.
-    func arrange(_ pending: [ApprovalItem], profile: DaemonProfile) -> [ApprovalItem] {
+    public func arrange(_ pending: [ApprovalItem], profile: DaemonProfile) -> [ApprovalItem] {
         arrange(pending) { _ in profile }
     }
 
-    func arrange(
+    public func arrange(
         _ pending: [ApprovalItem], profile: (ApprovalItem) -> DaemonProfile
     ) -> [ApprovalItem] {
         let ordered = DeckOrdering.sort(
@@ -120,5 +121,5 @@ struct DeckPass: Sendable, Equatable {
 
     /// How many decisions this pass has actually resolved. Drives the "you
     /// cleared N" line on the finish state.
-    var settledCount: Int { settled.count }
+    public var settledCount: Int { settled.count }
 }

@@ -1,12 +1,11 @@
-import CodeConnectKit
 import Foundation
 
 /// The Mac views the phone may capture: one Settings dialog on the Mac, three
 /// commands that open it. Each opens the reusable snapshot sheet.
-enum SnapshotCommand: String, CaseIterable, Identifiable {
+public enum SnapshotCommand: String, CaseIterable, Identifiable {
     case status, usage, cost
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
     /// The sheet's title — naming the phone's promise (a Mac capture), not
     /// Claude's internal tab names.
@@ -18,7 +17,7 @@ enum SnapshotCommand: String, CaseIterable, Identifiable {
     /// that does not exist. The sheet prints the command actually typed
     /// beneath this title, so it reads "Usage · /cost" — the view you got, and
     /// how you got there.
-    var title: String {
+    public var title: String {
         switch self {
         case .status: return "Computer status"
         case .usage, .cost: return "Usage"
@@ -28,7 +27,7 @@ enum SnapshotCommand: String, CaseIterable, Identifiable {
 
 /// What the composer should do with one piece of typed text, decided before
 /// anything reaches the Mac.
-enum CommandAction: Equatable {
+public enum CommandAction: Equatable {
     /// `/model` — anything after the name prefills the sheet's custom
     /// field; nothing is typed until the sheet says so.
     case nativeModel(prefillArgs: String)
@@ -73,7 +72,7 @@ enum CommandAction: Equatable {
 /// daemon injects it, with the composer-presence needle sampled on a timing
 /// ladder afterwards. None of it is a guess about what a command is, and none
 /// of it is the binary's own inventory: see `action(for:recoversComposer:)`.
-enum ClaudeCommandPolicy {
+public enum ClaudeCommandPolicy {
 
     /// Commands **measured** to take the Mac's composer away — every one of
     /// these was injected exactly as the daemon injects, sampling the
@@ -140,7 +139,7 @@ enum ClaudeCommandPolicy {
     /// supervisor's post-injection recovery. Taking the argument away is
     /// stronger than a test forbidding its use: the mistake cannot be
     /// written here again.
-    static func action(for text: String, recoversComposer: Bool) -> CommandAction {
+    public static func action(for text: String, recoversComposer: Bool) -> CommandAction {
         guard let command = firstToken(text) else { return .passThrough }
         let args = arguments(of: text, command: command)
         if command == "model" {
@@ -236,15 +235,15 @@ enum ClaudeCommandPolicy {
 /// "Sonnet 5", a custom id) passes through verbatim, and `isRawFallback`
 /// tells the view which strings stayed machine-shaped and must wear
 /// `monoSmall`, byte-for-byte.
-struct ModelDisplay: Equatable {
-    var name: String
+public struct ModelDisplay: Equatable {
+    public var name: String
     /// A variant worth its own quiet line — today only "1M context".
-    var meta: String?
+    public var meta: String?
     /// True when the string stayed machine-shaped (an id this mapper does
     /// not recognise) and the view should render it in `monoSmall`,
     /// byte-for-byte. Claude's own display words ("Sonnet 5") are human
     /// already and are NOT a raw fallback.
-    var isRawFallback: Bool
+    public var isRawFallback: Bool
 
     /// The four shipped families and their current display versions — also
     /// the alias table, because `/model sonnet` and `claude-sonnet-5` are
@@ -256,7 +255,7 @@ struct ModelDisplay: Equatable {
         "haiku": "Haiku 4.5",
     ]
 
-    static func from(_ raw: String) -> ModelDisplay {
+    public static func from(_ raw: String) -> ModelDisplay {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowered = trimmed.lowercased()
         if let known = families[lowered] {
@@ -300,7 +299,7 @@ struct ModelDisplay: Equatable {
 
 /// Where a model fact came from. Typed rather than the display string it is
 /// rendered as, so nothing decides anything by comparing prose.
-enum ModelProvenance: Sendable, Hashable {
+public enum ModelProvenance: Sendable, Hashable {
     /// The SessionStart hook's `model` field.
     case sessionStart
     /// Claude Code's own `/model` output, whichever verb it used. Which verb
@@ -320,12 +319,12 @@ enum ModelProvenance: Sendable, Hashable {
 }
 
 /// A model fact and its provenance — see `SessionState.lastConfirmedModel`.
-struct ConfirmedModel: Sendable, Hashable {
-    var name: String
+public struct ConfirmedModel: Sendable, Hashable {
+    public var name: String
     /// Rendered next to the age, because a fact without its origin reads as
     /// more certain than it is.
-    var provenance: ModelProvenance
-    var at: Date
+    public var provenance: ModelProvenance
+    public var at: Date
 }
 
 /// Everything Claude Code's `/model` command is measured to say back.
@@ -335,7 +334,7 @@ struct ConfirmedModel: Sendable, Hashable {
 /// guaranteed outcome for a value Claude Code does not know. Left unread it
 /// would leave the sheet waiting for a confirmation already on screen in the
 /// timeline behind it.
-enum ModelCommandOutcome: Sendable, Hashable {
+public enum ModelCommandOutcome: Sendable, Hashable {
     case receipt(ModelConfirmation)
     /// `Model 'bananas' not found`, verbatim. Terminal, and never a fact about
     /// the session's model.
@@ -353,7 +352,7 @@ enum ModelCommandOutcome: Sendable, Hashable {
 /// A `/model` outcome and **the event that carried it** — see
 /// `SessionState.lastModelCommandSignal`. The sequence is the point: see
 /// `ModelChangeWatch`.
-struct ModelCommandSignal: Sendable, Hashable {
+public struct ModelCommandSignal: Sendable, Hashable {
     var outcome: ModelCommandOutcome
     var seq: UInt64
 }
@@ -377,8 +376,8 @@ struct ModelCommandSignal: Sendable, Hashable {
 /// What survives is still only ever *Claude Code's own report* — the sheet
 /// never claims to know which actor caused it, only that what it is showing
 /// answers the value this sheet asked for.
-enum ModelChangeWatch {
-    static func outcome(
+public enum ModelChangeWatch {
+    public static func outcome(
         after baselineSeq: UInt64, requested: String, signal: ModelCommandSignal?
     ) -> ModelCommandOutcome? {
         guard let signal, signal.seq > baselineSeq else { return nil }
@@ -431,7 +430,7 @@ enum ModelChangeWatch {
 /// after somebody cancels a confirmation at the Mac. Collapsing the two into one
 /// bare name is what lets a cancellation report success, so the verb lives in
 /// the type, where it cannot be dropped.
-enum ModelConfirmation: Sendable, Hashable {
+public enum ModelConfirmation: Sendable, Hashable {
     case set(String)
     case kept(String)
 
@@ -443,7 +442,7 @@ enum ModelConfirmation: Sendable, Hashable {
     }
 
     /// True only for `Set model to …`.
-    var isChange: Bool {
+    public var isChange: Bool {
         if case .set = self { return true }
         return false
     }
@@ -456,7 +455,7 @@ enum ModelConfirmation: Sendable, Hashable {
     /// `kept` wording states what Claude Code reported and offers no theory
     /// about who caused it — the same line is printed when a confirmation is
     /// declined at the Mac and when the model asked for is already in force.
-    var sheetStatus: String {
+    public var sheetStatus: String {
         let display = ModelDisplay.from(name).name
         switch self {
         case .set: return "Model set to \(display)."
@@ -503,7 +502,7 @@ enum ModelConfirmation: Sendable, Hashable {
 /// sessions"; `max` says "this session only". A build that hardcoded either
 /// would be wrong for the other, so the bracketed text is carried verbatim and
 /// a shape this build has not seen yields no scope at all rather than a guess.
-enum EffortConfirmation: Sendable, Hashable {
+public enum EffortConfirmation: Sendable, Hashable {
     case set(value: String, scope: String?)
     case kept(value: String)
 
@@ -513,14 +512,14 @@ enum EffortConfirmation: Sendable, Hashable {
         }
     }
 
-    var isChange: Bool {
+    public var isChange: Bool {
         if case .set = self { return true }
         return false
     }
 
     /// The sentence the Effort sheet shows. Here rather than in the view for
     /// the same reasons as `ModelConfirmation.sheetStatus`.
-    var sheetStatus: String {
+    public var sheetStatus: String {
         let label = EffortConfirmation.label(for: value)
         guard case .set(_, let scope) = self else {
             return "Claude Code kept \(label) effort. The level was not changed."
@@ -577,7 +576,7 @@ enum EffortConfirmation: Sendable, Hashable {
 /// are measured verbatim: success is `Compacted (ctrl+o to see full
 /// summary)` — prefix-matched, the parenthetical is a Mac keyboard hint —
 /// and the refusal on a near-empty context is exact.
-enum CompactConfirmation: Hashable, Sendable {
+public enum CompactConfirmation: Hashable, Sendable {
     case compacted
     case notEnoughMessages
 

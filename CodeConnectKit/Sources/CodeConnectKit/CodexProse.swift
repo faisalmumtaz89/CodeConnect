@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 
 /// **Everything a Codex outcome is allowed to say, as pure functions.**
@@ -21,18 +20,18 @@ import Foundation
 ///   3. **No raw JSON on a product screen.** The status words,
 ///      the write stage and the option ids are wire vocabulary; what the reader
 ///      sees is a sentence.
-enum CodexProse {
+public enum CodexProse {
 
     /// A banner's three parts. A struct rather than a tuple because five call
     /// sites read it and a positional tuple is where copy drifts.
-    struct Banner: Sendable, Hashable {
+    public struct Banner: Sendable, Hashable {
         /// The classification, in a word or three. `CCBanner` uppercases it.
-        let title: String
+        public let title: String
         /// The sentence a human reads and a test looks for by name. Never
         /// uppercased, never abbreviated.
-        let message: String
-        let icon: String
-        let tone: CodexTone
+        public let message: String
+        public let icon: String
+        public let tone: CodexTone
         /// **Whether `message` is the daemon's own sentence, verbatim.**
         ///
         /// The daemon writes its refusals as clauses: they begin lowercase and
@@ -51,14 +50,14 @@ enum CodexProse {
         /// with a lowercase letter, on the surface whose whole job is to be
         /// read. The rejection titles had the same seam; it is ruled here once
         /// for every arm.
-        var oneLine: String {
+        public var oneLine: String {
             messageIsVerbatim ? "\(title): \(message)" : "\(title). \(message)"
         }
     }
 
     /// The tones a Codex outcome uses, kept free of SwiftUI so this file — and
     /// its tests — need no view layer.
-    enum CodexTone: Sendable, Hashable {
+    public enum CodexTone: Sendable, Hashable {
         case info, success, warning, danger
     }
 
@@ -70,7 +69,7 @@ enum CodexProse {
     /// or its log was reset"). That sentence is about the phone losing sight of
     /// a run; every sentence here is about the *question* ending, which is a
     /// different fact and usually a completely ordinary one.
-    static func resolution(_ resolution: CodexResolution) -> Banner {
+    public static func resolution(_ resolution: CodexResolution) -> Banner {
         switch resolution {
         case .answered(let by, let decision):
             return answered(by: by, decision: decision)
@@ -175,7 +174,7 @@ enum CodexProse {
     /// so it is what is shown. Rendering the label instead would mean matching
     /// an id against the card's own table and quietly showing nothing when the
     /// card is gone — a caption that disappears is worse than one that is exact.
-    static func whatWasChosen(_ resolution: CodexResolution) -> String {
+    public static func whatWasChosen(_ resolution: CodexResolution) -> String {
         switch resolution {
         case .answered(_, .some(.optionId(let id))):
             return "The option “\(id)”."
@@ -216,7 +215,7 @@ enum CodexProse {
     /// The four `InterruptResult` arms. **Refusals verbatim** — a daemon
     /// sentence is the only thing on this screen that knows which of eleven
     /// conditions failed, and paraphrasing it would throw that away.
-    static func interrupt(_ result: InterruptResult) -> Banner {
+    public static func interrupt(_ result: InterruptResult) -> Banner {
         switch result {
         case .aborted:
             return Banner(
@@ -272,7 +271,7 @@ enum CodexProse {
     /// arrived is the whole answer to "what did my words do", and it was decided
     /// by what the session was doing at the instant the daemon wrote — not by
     /// anything the reader could have predicted when they tapped.
-    static func compose(_ result: ComposeResult) -> Banner {
+    public static func compose(_ result: ComposeResult) -> Banner {
         switch result {
         case .started:
             return Banner(

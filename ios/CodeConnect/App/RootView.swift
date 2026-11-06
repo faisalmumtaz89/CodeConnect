@@ -1,3 +1,4 @@
+import CodeConnectKit
 import SwiftUI
 
 /// One root (Fleet), one detail stack (Session), sheets for everything else — a

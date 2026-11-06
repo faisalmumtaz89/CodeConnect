@@ -2,6 +2,7 @@ import SwiftUI
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Geometry claims about the table renderer, measured through a real window —
 /// "wide tables scroll" and "one cell cannot drag the grid a thousand points

@@ -1,4 +1,3 @@
-import CodeConnectKit
 import Foundation
 
 /// Claude's `AskUserQuestion`, read from the card's verified `tool_input`.
@@ -12,40 +11,40 @@ import Foundation
 /// through Claude's own hook: the phone sends the choices as option indices and
 /// the daemon builds Claude's answer from the question it stored
 /// (`mac/ccd/src/question.rs`). Nothing is typed, and this card has no Allow.
-struct QuestionCard: Sendable, Hashable {
-    static let toolName = "AskUserQuestion"
+public struct QuestionCard: Sendable, Hashable {
+    public static let toolName = "AskUserQuestion"
 
-    struct Option: Sendable, Hashable {
-        let label: String
-        let description: String?
+    public struct Option: Sendable, Hashable {
+        public let label: String
+        public let description: String?
         /// What the option would look like, drawn monospace under it. Nil when
         /// absent or blank, which is how the daemon reads it too.
-        let preview: String?
+        public let preview: String?
     }
 
-    struct Question: Sendable, Hashable {
+    public struct Question: Sendable, Hashable {
         /// The short chip Claude puts above the question.
-        let header: String?
-        let text: String
-        let multiSelect: Bool
-        let options: [Option]
+        public let header: String?
+        public let text: String
+        public let multiSelect: Bool
+        public let options: [Option]
 
         /// Notes are taken on a single choice whose options carry a preview,
         /// and nowhere else — the terminal's `n to add notes`, and the only
         /// questions the daemon accepts notes on.
-        var takesNotes: Bool { !multiSelect && options.contains { $0.preview != nil } }
+        public var takesNotes: Bool { !multiSelect && options.contains { $0.preview != nil } }
 
         /// "Other" is offered wherever the terminal offers "Type something":
         /// everywhere but the preview layout, which has none, so the daemon
         /// refuses an "Other" there.
-        var takesOther: Bool { !takesNotes }
+        public var takesOther: Bool { !takesNotes }
     }
 
-    let questions: [Question]
+    public let questions: [Question]
 
     /// Nil for any other card, and for a question whose shape this build cannot
     /// read — which is then shown read-only, never guessed at.
-    init?(card: ApprovalCard) {
+    public init?(card: ApprovalCard) {
         guard card.toolName == Self.toolName,
             let list = card.toolInput["questions"]?.arrayValue, !list.isEmpty
         else { return nil }
@@ -78,7 +77,7 @@ struct QuestionCard: Sendable, Hashable {
     /// What was chosen for one question — the chosen labels in the order they
     /// were chosen, then the "Other" text — each on its own, for the reader to
     /// check. Claude gets them joined into one string, which the daemon builds.
-    func choices(of answer: QuestionAnswer, for index: Int) -> [String] {
+    public func choices(of answer: QuestionAnswer, for index: Int) -> [String] {
         let options = questions[index].options
         var items = answer.selected.compactMap { selected in
             Int(selected) < options.count ? options[Int(selected)].label : nil
@@ -94,23 +93,23 @@ struct QuestionCard: Sendable, Hashable {
 /// option or "Other"; several choices keep the order they were tapped in, plus
 /// at most one "Other"; an "Other" with nothing typed is not an answer; notes
 /// only where the question takes them.
-struct QuestionDraft: Sendable, Hashable {
-    struct Entry: Sendable, Hashable {
+public struct QuestionDraft: Sendable, Hashable {
+    public struct Entry: Sendable, Hashable {
         /// Option indices, in the order they were tapped.
-        var selected: [Int] = []
-        var otherChosen = false
-        var otherText = ""
-        var notes = ""
+        public var selected: [Int] = []
+        public var otherChosen = false
+        public var otherText = ""
+        public var notes = ""
     }
 
-    var entries: [Entry]
+    public var entries: [Entry]
 
-    init(card: QuestionCard) {
+    public init(card: QuestionCard) {
         entries = Array(repeating: Entry(), count: card.questions.count)
     }
 
     /// A tap on option `option` of question `question`.
-    mutating func tap(option: Int, of question: Int, in card: QuestionCard) {
+    public mutating func tap(option: Int, of question: Int, in card: QuestionCard) {
         if card.questions[question].multiSelect {
             if let at = entries[question].selected.firstIndex(of: option) {
                 entries[question].selected.remove(at: at)
@@ -124,7 +123,7 @@ struct QuestionDraft: Sendable, Hashable {
     }
 
     /// A tap on the "Other" row of question `question`.
-    mutating func tapOther(of question: Int, in card: QuestionCard) {
+    public mutating func tapOther(of question: Int, in card: QuestionCard) {
         guard card.questions[question].takesOther else { return }
         if card.questions[question].multiSelect {
             entries[question].otherChosen.toggle()
@@ -135,7 +134,7 @@ struct QuestionDraft: Sendable, Hashable {
     }
 
     /// This question's answer as the wire carries it, or nil while it has none.
-    func answer(for question: Int, in card: QuestionCard) -> QuestionAnswer? {
+    public func answer(for question: Int, in card: QuestionCard) -> QuestionAnswer? {
         let entry = entries[question]
         if entry.otherChosen,
             entry.otherText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -152,7 +151,7 @@ struct QuestionDraft: Sendable, Hashable {
 
     /// Every question's answer, in card order — or nil until all of them have
     /// one. Submit is offered on exactly this.
-    func answers(in card: QuestionCard) -> [QuestionAnswer]? {
+    public func answers(in card: QuestionCard) -> [QuestionAnswer]? {
         var all: [QuestionAnswer] = []
         for index in card.questions.indices {
             guard let answer = answer(for: index, in: card) else { return nil }
@@ -163,7 +162,7 @@ struct QuestionDraft: Sendable, Hashable {
 }
 
 /// Where a question card stands, and so what it may offer.
-enum QuestionCardStatus: Sendable, Hashable {
+public enum QuestionCardStatus: Sendable, Hashable {
     /// Claude is waiting on the daemon, and the phone may answer.
     case answerable
     /// The question is on the Mac and only the Mac can answer it.
@@ -191,7 +190,7 @@ enum QuestionCardStatus: Sendable, Hashable {
     /// No live state backs this card any more.
     case unavailable
 
-    var isAnswerable: Bool { self == .answerable }
+    public var isAnswerable: Bool { self == .answerable }
 
     /// One decision for the whole card, so no control can be offered that the
     /// status withholds. A recorded ending outranks everything; a card nothing
@@ -200,7 +199,7 @@ enum QuestionCardStatus: Sendable, Hashable {
     /// `answersQuestions` is nil while nothing is known of the Mac. Unknown is
     /// not old: the card says what is known, the link (`linkReason`), and with
     /// no reason to give it is as it is once the hold ended.
-    static func resolve(
+    public static func resolve(
         outcome: AnswerOutcome?, attempt: AnswerAttempt?, isBacked: Bool,
         hold: QuestionHold?, answersQuestions: Bool?, linkReason: String?
     ) -> QuestionCardStatus {
@@ -231,7 +230,7 @@ enum QuestionCardStatus: Sendable, Hashable {
     /// The timeline's item is the live one, so it is backed; no answer attempt
     /// is consulted, because the row states what was recorded and the card owns
     /// what this phone is in the middle of sending.
-    static func recorded(
+    public static func recorded(
         _ approval: ApprovalItem, answersQuestions: Bool?, linkReason: String?
     ) -> QuestionCardStatus {
         resolve(
@@ -242,7 +241,7 @@ enum QuestionCardStatus: Sendable, Hashable {
     /// The one line a timeline row says about where the question stands, in the
     /// card's own words, or nil while the phone can answer it. An answer from
     /// the phone is the answer itself: what was chosen, question by question.
-    func summary(of card: QuestionCard) -> String? {
+    public func summary(of card: QuestionCard) -> String? {
         switch self {
         case .answerable:
             return nil
@@ -271,7 +270,7 @@ enum QuestionCardStatus: Sendable, Hashable {
     }
 
     /// The banner a card in this status carries, or nil when it needs none.
-    var banner: (title: String, message: String, tone: CodexProse.CodexTone, icon: String)? {
+    public var banner: (title: String, message: String, tone: CodexProse.CodexTone, icon: String)? {
         switch self {
         case .answerable:
             return nil

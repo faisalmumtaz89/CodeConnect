@@ -3,6 +3,7 @@ import UserNotifications
 import XCTest
 
 @testable import CodeConnect
+@testable import CodeConnectKit
 
 /// Where a tapped notification lands, and how it survives a cold launch.
 ///
