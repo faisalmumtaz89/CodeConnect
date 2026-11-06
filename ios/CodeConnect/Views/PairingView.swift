@@ -396,13 +396,7 @@ struct PairingView: View {
     }
 
     private var manualEntryBlockedReason: CCDisabledReason? {
-        if address.trimmingCharacters(in: .whitespaces).isEmpty {
-            return CCDisabledReason("An address is needed - the one `codeconnect pair` printed.")
-        }
-        if token.trimmingCharacters(in: .whitespaces).isEmpty {
-            return CCDisabledReason("A pairing code or a `codeconnect token` is needed.")
-        }
-        return nil
+        PairingCredentialInput.blockedReason(address: address, code: token).map { CCDisabledReason($0) }
     }
 
     // MARK: - Settings
@@ -603,26 +597,17 @@ struct PairingView: View {
     }
 
     private func save() {
-        guard let credential = PairingCredentialInput.classify(token) else {
-            validationError =
-                "That is neither an eight-character pairing code nor a `codeconnect token`."
-            return
-        }
-        guard let endpoint = DaemonEndpoint.parse(address: address, credential: credential) else {
-            validationError = "That address could not be parsed. Try 100.x.y.z or ws://host:8787."
-            return
-        }
-        validationError = nil
-        switch credential {
-        case .token:
+        switch PairingCredentialInput.submission(address: address, code: token) {
+        case .refused(let reason):
+            validationError = reason
+        case .token(let endpoint):
+            validationError = nil
             machines.pair(with: endpoint)
             if !isOnboarding { showManualEntry = false }
-        case .pairingCode(let code):
-            // A typed code is the same one-shot exchange the QR performs; it
-            // must not be stored, so it goes through the pairing path.
+        case .pairingCode(let payload):
+            validationError = nil
             pairingStartedAt = Date()
-            machines.pair(
-                withQR: PairingQRPayload(host: endpoint.host, port: endpoint.port, code: code))
+            machines.pair(withQR: payload)
             if !isOnboarding { showManualEntry = false }
         }
     }

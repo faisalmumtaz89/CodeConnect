@@ -330,6 +330,44 @@ public enum PairingCredentialInput {
         case .pairingCode(let code): return "Read as the single-use pairing code \(code)."
         }
     }
+
+    /// What a typed address and code amount to once the user submits them.
+    public enum Submission: Sendable, Hashable {
+        /// A device token: the pairing is stored and connects with it.
+        case token(DaemonEndpoint)
+        /// A single-use code: exchanged for a device token, never stored.
+        case pairingCode(PairingQRPayload)
+        /// Neither; the words say what is wrong with what was typed.
+        case refused(String)
+    }
+
+    /// Why the form cannot be submitted yet: nil once both fields hold something.
+    public static func blockedReason(address: String, code: String) -> String? {
+        if address.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "An address is needed - the one `codeconnect pair` printed."
+        }
+        if code.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "A pairing code or a `codeconnect token` is needed."
+        }
+        return nil
+    }
+
+    public static func submission(address: String, code: String) -> Submission {
+        guard let credential = classify(code) else {
+            return .refused("That is neither an eight-character pairing code nor a `codeconnect token`.")
+        }
+        guard let endpoint = DaemonEndpoint.parse(address: address, credential: credential) else {
+            return .refused("That address could not be parsed. Try 100.x.y.z or ws://host:8787.")
+        }
+        switch credential {
+        case .token:
+            return .token(endpoint)
+        case .pairingCode(let code):
+            // A typed code is the same one-shot exchange the QR performs; it
+            // must not be stored, so it goes through the pairing path.
+            return .pairingCode(PairingQRPayload(host: endpoint.host, port: endpoint.port, code: code))
+        }
+    }
 }
 
 // MARK: - Store
