@@ -773,17 +773,19 @@ kind is the only thing a notification says about itself.
 # Design system
 
 Dark-only — no light variant and no `@Environment(\.colorScheme)` branching
-anywhere. Tokens live in `CodeConnect/Views/DesignKit.swift`; components live in
-`CodeConnect/Views/DesignSystem/`.
+anywhere. Tokens live in `../CodeConnectKit/Sources/CodeConnectKit/DesignTokens.swift`, in the
+shared package; the modifiers that apply them live in `CodeConnect/Views/DesignKit.swift`, and
+components in `CodeConnect/Views/DesignSystem/`.
 
 Four principles the rest of this section is downstream of: colour appears only to
 carry state, never decoration; separation comes from hairlines and spacing rather
 than fills; identifiers, commands, diffs and durations are monospace and prose
 never is; and motion is confirmation, not decoration.
 
-**Raw hex appears exactly once**, in the private `Hex` enum in `DesignKit.swift`.
-Every colour elsewhere is a semantic token. If you type a hex value or `.blue`
-outside that file, it is a bug.
+**Raw hex appears exactly once**, in the private `Hex` enum in `DesignTokens.swift`, apart
+from the three logo-band colours in `CodeConnect/Views/DesignSystem/CCMark.swift`. Every colour
+elsewhere is a semantic token. If you type a hex value or `.blue` outside those two files, it
+is a bug.
 
 ## Force-dark
 
